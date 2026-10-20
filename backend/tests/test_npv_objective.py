@@ -68,12 +68,7 @@ def _hand_npv() -> float:
     base = ENERGY_YEAR + VAROM_YEAR + VAROM2_YEAR + FIXED_YEAR + EXPORT_YEAR
     cf2 = -base - (1200.50 + 300.0)
     cf3 = -base - 500.0
-    return (
-        cf0
-        + cf1 / (1 + RATE)
-        + cf2 / (1 + RATE) ** 2
-        + cf3 / (1 + RATE) ** 3
-    )
+    return cf0 + cf1 / (1 + RATE) + cf2 / (1 + RATE) ** 2 + cf3 / (1 + RATE) ** 3
 
 
 def _hand_const() -> float:
@@ -107,20 +102,14 @@ def _finance_payload() -> dict:
         "tax_rules": {},
         "finance_types": {
             "sys1": {
-                "upfront_capex": {
-                    "linear": {"cap": {"unit_cost": {"value": "1000", "unit": "CNY/kW"}}}
-                },
-                "annual_fixed_om": {
-                    "linear": {"cap": {"unit_cost": {"value": "35", "unit": "CNY/kW/a"}}}
-                },
+                "upfront_capex": {"linear": {"cap": {"unit_cost": {"value": "1000", "unit": "CNY/kW"}}}},
+                "annual_fixed_om": {"linear": {"cap": {"unit_cost": {"value": "35", "unit": "CNY/kW/a"}}}},
                 "period_variable_om": {
                     "linear": {"thr": {"unit_cost": {"value": "0.01", "unit": "CNY/kWh"}}}
                 },
             },
             "sys_var": {
-                "period_variable_om": {
-                    "linear": {"e": {"unit_cost": {"value": "0.02", "unit": "CNY/kWh"}}}
-                },
+                "period_variable_om": {"linear": {"e": {"unit_cost": {"value": "0.02", "unit": "CNY/kWh"}}}},
             },
         },
         "energy_prices": {
@@ -236,7 +225,9 @@ def _doc(
         "schema_version": "3.0.0",
         "assembly": {"id": "npv-mini", "name": "NPV 手算装配"},
         "project_baseline": {
-            "resolution": "1h", "start_year": start_year, "scenario_mode": "single",
+            "resolution": "1h",
+            "start_year": start_year,
+            "scenario_mode": "single",
         },
         "devices": {
             "heater1": {
@@ -260,9 +251,7 @@ def _doc(
                 "definition": {"id": "acme.device.load"},
                 "asset_origin": "existing",
                 "properties": {},
-                "predefined_interfaces": {
-                    "heat_demand": {"mode": "constant", "value": 7}
-                },
+                "predefined_interfaces": {"heat_demand": {"mode": "constant", "value": 7}},
             },
             "grid1": {
                 "definition": {"id": "acme.device.grid"},
@@ -345,9 +334,7 @@ def _evaluation(*, rate: float = RATE, payments=((0, "0.6"), (1, "0.4"))):
         construction_period=1,
         operation_years=2,
         discount_rate=rate,
-        construction_payments=tuple(
-            ConstructionPayment(t=t, ratio=ratio) for t, ratio in payments
-        ),
+        construction_payments=tuple(ConstructionPayment(t=t, ratio=ratio) for t, ratio in payments),
         maintenance_expenses=(
             MaintenanceExpense(year=2, amount="1200.50", currency="CNY"),
             MaintenanceExpense(year=2, amount="300", currency="CNY"),
@@ -399,7 +386,8 @@ def _inputs(**overrides):
     }
     finance = merge_effective(FinanceProfile.from_dict(_finance_payload()), None)
     artifact = _issued_artifact(
-        doc, finance,
+        doc,
+        finance,
         ("acme.device.heater", "acme.device.tank", "acme.device.load", "acme.device.grid"),
     )
     materialized = materialize_non_predictive_series(artifact, {}, operation_years=2)
@@ -439,9 +427,7 @@ def _validate_campus(text: str):
 
 
 def _strip_year_offset(text: str) -> str:
-    return text.replace("      year_offset: 0\n", "").replace(
-        "      year_offset: 1\n", ""
-    )
+    return text.replace("      year_offset: 0\n", "").replace("      year_offset: 1\n", "")
 
 
 _CAMPUS_OBJECTIVE = (
@@ -469,18 +455,14 @@ def test_gate_rejects_npv_marker_with_minimize() -> None:
     result = _validate_campus(_campus_with_objective("minimize", NPV_MARKER))
     assert result.artifact is None
     assert any(
-        d.code == "ASM-PLAN-003"
-        and d.params.get("reason") == "objective_invalid"
-        and d.blocking
+        d.code == "ASM-PLAN-003" and d.params.get("reason") == "objective_invalid" and d.blocking
         for d in result.diagnostics
     )
 
 
 def test_gate_rejects_dotted_marker_variant() -> None:
     """伪点分属性不是完整目标，不放行。"""
-    result = _validate_campus(
-        _campus_with_objective("maximize", NPV_MARKER + ".x")
-    )
+    result = _validate_campus(_campus_with_objective("maximize", NPV_MARKER + ".x"))
     assert result.artifact is None
     assert any(d.blocking for d in result.diagnostics)
 
@@ -528,9 +510,7 @@ def test_npv_objective_affine_matches_hand_cashflows() -> None:
     # 同列两项合并：可变 OM -0.02/1000，负价售电记账为 +0.05 系数（成本向），
     # NPV 取能源净收益（相反数），合计 -0.07/1000 按年折现。
     assert coeffs["heater1__electricity_in__t0"] == pytest.approx(-0.00007 / df2, rel=1e-9)
-    assert coeffs["heater1__electricity_in__t8760"] == pytest.approx(
-        -0.00007 / df3, rel=1e-9
-    )
+    assert coeffs["heater1__electricity_in__t8760"] == pytest.approx(-0.00007 / df3, rel=1e-9)
     # 负价售电：符号反转为正分量（与变量可变 OM 同列合并，见下）。
     # 常数项只含常数现金流（建设/固定/预定义可变/维护）；能量与倒送
     # 为变量项，在解处求值（见真实求解对照），此处不断言。
@@ -540,15 +520,11 @@ def test_npv_objective_affine_matches_hand_cashflows() -> None:
 def test_npv_zero_discount_equals_undiscounted_sum() -> None:
     """r=0 时折现因子全为 1，目标退化为无折现合计。"""
     artifact, models, materialized, finance, config, evaluation = _inputs(rate=0.0)
-    model, _, _ = build_project_model(
-        artifact, models, materialized, finance, config, evaluation
-    )
+    model, _, _ = build_project_model(artifact, models, materialized, finance, config, evaluation)
     coeffs = _coeffs(model.objective)
     assert coeffs["heater1__heat_out__t0"] == pytest.approx(-0.0007, rel=1e-9)
     assert coeffs["heater1__heat_out__t8760"] == pytest.approx(-0.0007, rel=1e-9)
-    expected = (
-        -CONSTRUCTION - 2 * FIXED_YEAR - 2 * VAROM_YEAR - 2000.50
-    )
+    expected = -CONSTRUCTION - 2 * FIXED_YEAR - 2 * VAROM_YEAR - 2000.50
     assert model.objective.constant == pytest.approx(expected, rel=1e-9)
 
 
@@ -572,15 +548,13 @@ def test_npv_payment_timing_moves_value() -> None:
 
 
 def test_generate_rejects_unsupported_tax_relations() -> None:
-    """未知税则类型在生成器能力边界明确拒绝，不按税前生成。"""
-    from iesplan.computation.errors import ComputationUnavailableError
+    """未知税则类型在唯一建模能力边界明确拒绝，不按税前生成。"""
+    from iesplan.computation.generators.linear import LoweringUnsupportedError
 
     artifact, models, materialized, finance, config, evaluation = _inputs()
     taxed = replace(finance, tax_rules={"rule1": object()})
-    with pytest.raises(ComputationUnavailableError):
-        HIGHS_MILP_PROVIDER.generate(
-            artifact, models, materialized, taxed, config, evaluation
-        )
+    with pytest.raises(LoweringUnsupportedError, match="超出 3.2.0 已实现关系"):
+        HIGHS_MILP_PROVIDER.generate(artifact, models, materialized, taxed, config, evaluation)
 
 
 def test_generate_accepts_pool_without_rules() -> None:
@@ -596,9 +570,7 @@ def test_generate_accepts_pool_without_rules() -> None:
         }
     )
     credited = replace(finance, credit_pools={"pool1": pool})
-    bundle = HIGHS_MILP_PROVIDER.generate(
-        artifact, models, materialized, credited, config, evaluation
-    )
+    bundle = HIGHS_MILP_PROVIDER.generate(artifact, models, materialized, credited, config, evaluation)
     assert bundle.manifest.bundle["generator"] == GENERATOR_REF
 
 
@@ -622,9 +594,14 @@ def _solve_mps(mps_text: str, tmp_path) -> float:
     (tmp_path / "input" / "problem.mps").write_text(mps_text, encoding="utf-8")
     completed = subprocess.run(
         [
-            HIGHS_ADAPTER_PATH, "input/problem.mps",
-            "--solution_file", "output/solution.sol",
-            "--time_limit", "300", "--random_seed", "0",
+            HIGHS_ADAPTER_PATH,
+            "input/problem.mps",
+            "--solution_file",
+            "output/solution.sol",
+            "--time_limit",
+            "300",
+            "--random_seed",
+            "0",
         ],
         capture_output=True,
         text=True,
@@ -641,15 +618,11 @@ def _solve_mps(mps_text: str, tmp_path) -> float:
 def test_static_npv_real_solve_matches_hand(tmp_path) -> None:
     """静态容量真实求解：目标值 + 偏移 == 手算 NPV。"""
     artifact, models, materialized, finance, config, evaluation = _inputs()
-    bundle = HIGHS_MILP_PROVIDER.generate(
-        artifact, models, materialized, finance, config, evaluation
-    )
+    bundle = HIGHS_MILP_PROVIDER.generate(artifact, models, materialized, finance, config, evaluation)
     assert bundle.manifest.bundle["generator"] == GENERATOR_REF
     metadata = json.loads(bundle.files["input/parameters.json"].decode("utf-8"))
     solved = _solve_mps(bundle.files["input/problem.mps"].decode("utf-8"), tmp_path)
-    assert solved + metadata["objective_offset"] == pytest.approx(
-        _hand_npv(), rel=1e-6
-    )
+    assert solved + metadata["objective_offset"] == pytest.approx(_hand_npv(), rel=1e-6)
 
 
 # ---------------------------------------------------------------------------
@@ -703,12 +676,8 @@ def _choice_finance_payload() -> dict:
         "tax_rules": {},
         "finance_types": {
             "gen_sys": {
-                "upfront_capex": {
-                    "linear": {"cap": {"unit_cost": {"value": "1000", "unit": "CNY/kW"}}}
-                },
-                "annual_fixed_om": {
-                    "linear": {"cap": {"unit_cost": {"value": "10", "unit": "CNY/kW/a"}}}
-                },
+                "upfront_capex": {"linear": {"cap": {"unit_cost": {"value": "1000", "unit": "CNY/kW"}}}},
+                "annual_fixed_om": {"linear": {"cap": {"unit_cost": {"value": "10", "unit": "CNY/kW/a"}}}},
             }
         },
         "energy_prices": {
@@ -733,7 +702,9 @@ def _choice_doc(objective: dict, *, cap_bounds: tuple[str, str] = ("0", "10")) -
         "schema_version": "3.0.0",
         "assembly": {"id": "npv-choice", "name": "NPV 选择算例"},
         "project_baseline": {
-            "resolution": "1h", "start_year": 2026, "scenario_mode": "single",
+            "resolution": "1h",
+            "start_year": 2026,
+            "scenario_mode": "single",
         },
         "devices": {
             "gen1": {
@@ -890,9 +861,14 @@ def _solve_bundle(bundle, tmp_path) -> tuple[float, float]:
     (tmp_path / "input" / "problem.mps").write_text(mps_text, encoding="utf-8")
     completed = subprocess.run(
         [
-            HIGHS_ADAPTER_PATH, "input/problem.mps",
-            "--solution_file", "output/solution.sol",
-            "--time_limit", "300", "--random_seed", "0",
+            HIGHS_ADAPTER_PATH,
+            "input/problem.mps",
+            "--solution_file",
+            "output/solution.sol",
+            "--time_limit",
+            "300",
+            "--random_seed",
+            "0",
         ],
         capture_output=True,
         text=True,
@@ -923,13 +899,14 @@ def test_npv_selects_zero_build_where_total_sum_selects_max(tmp_path) -> None:
     assert npv_cap == pytest.approx(0.0, abs=1e-3)
     # 旧记账口径对照：成本为正、售电记账为负，minimize 下应建满。
     sum_bundle = HIGHS_MILP_PROVIDER.generate(
-        *_choice_inputs({
-            "sense": "minimize",
-            "expression": (
-                "gen1__upfront_capex + 2 year * gen1__annual_fixed_om"
-                " + meter__period_energy_sale"
-            ),
-        })
+        *_choice_inputs(
+            {
+                "sense": "minimize",
+                "expression": (
+                    "gen1__upfront_capex + 2 year * gen1__annual_fixed_om + meter__period_energy_sale"
+                ),
+            }
+        )
     )
     sum_value, sum_cap = _solve_bundle(sum_bundle, tmp_path / "sum")
     assert sum_value == pytest.approx(-total, rel=1e-6)

@@ -12,7 +12,8 @@ import subprocess
 from decimal import Decimal
 
 import pytest
-from test_npv_objective import _mps_column_order, _solution_primals
+from test_highs_result_adapter import SOLUTION_PATH, _receipt
+from test_highs_result_adapter import _bundle as _wrap_bundle
 
 from iesplan.assembly import validate_assembly_doc
 from iesplan.computation import (
@@ -26,6 +27,7 @@ from iesplan.computation import (
 )
 from iesplan.computation.generators.highs_milp import GENERATOR_REF
 from iesplan.computation.generators.linear import LoweringUnsupportedError
+from iesplan.computation.result_adapters.highs import HIGHS_ADAPTER
 from iesplan.core.yamlmini import load as yaml_load
 from iesplan.devices import init_registry
 from iesplan.devices.parser2 import parse_device_model_v2
@@ -54,8 +56,8 @@ EFFICIENCY = 0.9
 ELEC_KW = LOAD_KW / EFFICIENCY
 
 
-def _finance_payload(*, refunds=(), opening="0"):
-    return {
+def _finance_payload(*, refunds=(), opening="0", basis="tax_inclusive", rules="all"):
+    payload = {
         "schema": "ies.finance-profile",
         "schema_version": "3.0.0",
         "profile": {
@@ -63,7 +65,7 @@ def _finance_payload(*, refunds=(), opening="0"):
             "region": "CN-North",
             "currency": "CNY",
             "base_year": 2025,
-            "price_basis": "tax_inclusive",
+            "price_basis": basis,
             "cost_method": "fixed_plus_linear",
         },
         "taxes": {
@@ -180,6 +182,11 @@ def _finance_payload(*, refunds=(), opening="0"):
             },
         },
     }
+    if rules == "construction_only":
+        payload["tax_rules"] = {"con_vat": payload["tax_rules"]["con_vat"]}
+    elif rules != "all":
+        raise ValueError(f"未知规则子集: {rules!r}")
+    return payload
 
 
 HEATER_YAML = """
@@ -270,7 +277,7 @@ equations:
 """
 
 
-def _doc(*, variables: dict | None = None):
+def _doc(*, variables: dict | None = None, tank_origin: str = "new"):
     return {
         "schema": "ies.assembly",
         "schema_version": "3.0.0",
@@ -289,7 +296,7 @@ def _doc(*, variables: dict | None = None):
             },
             "tank1": {
                 "definition": {"id": "acme.device.tank"},
-                "asset_origin": "new",
+                "asset_origin": tank_origin,
                 "properties": {
                     "rated_kw": {"value": 60, "unit": "kW"},
                     "step_c": {"value": 0, "unit": "1"},
@@ -421,8 +428,17 @@ def _price_values() -> tuple:
     return (-0.05,) * 8760 + (2.0,) * 8760
 
 
-def _inputs(*, refunds=(), opening="0", objective=None, heater_yaml=HEATER_YAML):
-    doc = _doc()
+def _inputs(
+    *,
+    refunds=(),
+    opening="0",
+    objective=None,
+    heater_yaml=HEATER_YAML,
+    basis="tax_inclusive",
+    rules="all",
+    tank_origin="new",
+):
+    doc = _doc(tank_origin=tank_origin)
     if objective is not None:
         doc["planning"]["objective"] = objective
     models = {
@@ -432,7 +448,9 @@ def _inputs(*, refunds=(), opening="0", objective=None, heater_yaml=HEATER_YAML)
         "grid1": _contribution(GRID_YAML),
     }
     finance = merge_effective(
-        FinanceProfile.from_dict(_finance_payload(refunds=refunds, opening=opening)),
+        FinanceProfile.from_dict(
+            _finance_payload(refunds=refunds, opening=opening, basis=basis, rules=rules)
+        ),
         None,
     )
     init_registry()
@@ -474,28 +492,33 @@ def _inputs(*, refunds=(), opening="0", objective=None, heater_yaml=HEATER_YAML)
 # ---------------------------------------------------------------------------
 
 
-def _hand_monthly():
-    """36 个月 (out, in) 手算（业务 Decimal，与实现公式独立书写）。"""
+def _hand_monthly(*, tax_factor=GROSS_FACTOR, upfront=Decimal("6000"), fixed_om=Decimal("2100")):
+    """36 个月 (out, in) 手算（业务 Decimal，与实现公式独立书写）。
+
+    ``tax_factor`` 为税额系数（含税 ``r/(1+r)``，不含税 ``r``）；
+    ``upfront``/``fixed_om`` 为建设总额/年固定 OM（既有沉没时取 0，
+    对应无建设进项、无固定 OM 进项）。
+    """
     out = [Decimal("0")] * 36
     inp = [Decimal("0")] * 36
-    deductible_total = Decimal("6000") * GROSS_FACTOR
+    deductible_total = upfront * tax_factor
     inp[0] += Decimal("0.6") * deductible_total
     inp[12] += Decimal("0.4") * deductible_total
     for index, hours in enumerate(HOURS_2026):
         month = 13 + index
         energy = Decimal("7") * Decimal(str(hours))
-        inp[month - 1] += energy * Decimal("0.7") * GROSS_FACTOR
-        inp[month - 1] += Decimal("5") * Decimal(str(hours)) * Decimal("0.01") * GROSS_FACTOR
-        out[month - 1] += Decimal(str(ELEC_KW)) * Decimal(str(hours)) * Decimal("-0.05") * GROSS_FACTOR
+        inp[month - 1] += energy * Decimal("0.7") * tax_factor
+        inp[month - 1] += Decimal("5") * Decimal(str(hours)) * Decimal("0.01") * tax_factor
+        out[month - 1] += Decimal(str(ELEC_KW)) * Decimal(str(hours)) * Decimal("-0.05") * tax_factor
     for index, hours in enumerate(HOURS_2027):
         month = 25 + index
         energy = Decimal("7") * Decimal(str(hours))
-        inp[month - 1] += energy * Decimal("0.7") * GROSS_FACTOR
-        inp[month - 1] += Decimal("5") * Decimal(str(hours)) * Decimal("0.01") * GROSS_FACTOR
-        out[month - 1] += Decimal(str(ELEC_KW)) * Decimal(str(hours)) * Decimal("2.0") * GROSS_FACTOR
-    inp[23] += Decimal("2100") * GROSS_FACTOR * Decimal("0.5")
-    inp[35] += Decimal("2100") * GROSS_FACTOR * Decimal("0.5")
-    inp[23] += Decimal("1200.50") * GROSS_FACTOR
+        inp[month - 1] += energy * Decimal("0.7") * tax_factor
+        inp[month - 1] += Decimal("5") * Decimal(str(hours)) * Decimal("0.01") * tax_factor
+        out[month - 1] += Decimal(str(ELEC_KW)) * Decimal(str(hours)) * Decimal("2.0") * tax_factor
+    inp[23] += fixed_om * tax_factor * Decimal("0.5")
+    inp[35] += fixed_om * tax_factor * Decimal("0.5")
+    inp[23] += Decimal("1200.50") * tax_factor
     return out, inp
 
 
@@ -516,18 +539,24 @@ def _hand_chain(out, inp, *, opening=Decimal("0"), claims=None):
     return paids, carries
 
 
-def _hand_npv_with_vat(paids, arrivals=None):
-    """手算 NPV：C1b 现金结构 + 月实缴/到账退款按年折现。"""
+def _hand_npv_with_vat(
+    paids, arrivals=None, *, cash=Decimal("1"), upfront=Decimal("6000"), fixed_om=Decimal("2100")
+):
+    """手算 NPV：C1b 现金结构 + 月实缴/到账退款按年折现。
+
+    ``cash`` 为不含税口径下已声明税率部分的价税合计系数（1.13）；
+    未声明税率的 sys_var 可变 OM 与明确金额口径的维护不加成。
+    """
     arrivals = arrivals or {}
-    energy2 = Decimal("7") * Decimal("8760") * Decimal("0.7")
-    export2 = Decimal(str(ELEC_KW)) * Decimal("8760") * Decimal("-0.05")
+    energy2 = Decimal("7") * Decimal("8760") * Decimal("0.7") * cash
+    export2 = Decimal(str(ELEC_KW)) * Decimal("8760") * Decimal("-0.05") * cash
     energy3 = energy2
-    export3 = Decimal(str(ELEC_KW)) * Decimal("8760") * Decimal("2.0")
-    varom = Decimal("5") * Decimal("8760") * Decimal("0.01")
+    export3 = Decimal(str(ELEC_KW)) * Decimal("8760") * Decimal("2.0") * cash
+    varom = Decimal("5") * Decimal("8760") * Decimal("0.01") * cash
     varom2 = Decimal(str(ELEC_KW)) * Decimal("8760") * Decimal("0.02")
-    fixed = Decimal("2100")
-    cf0 = -Decimal("3600")
-    cf1 = -Decimal("2400")
+    fixed = fixed_om * cash
+    cf0 = -Decimal("0.6") * upfront * cash
+    cf1 = -Decimal("0.4") * upfront * cash
     cf2 = -(energy2 - export2) - varom - varom2 - fixed - Decimal("1500.50")
     cf3 = -(energy3 - export3) - varom - varom2 - fixed - Decimal("500")
     total = cf0 + cf1 / Decimal("1.08") + cf2 / Decimal("1.08") ** 2 + cf3 / Decimal("1.08") ** 3
@@ -545,29 +574,21 @@ def _hand_npv_with_vat(paids, arrivals=None):
 # ---------------------------------------------------------------------------
 
 
-def _mps_bound_order(mps_text: str) -> list[str]:
-    """MPS BOUNDS 段变量名顺序（writer 与 COLUMNS 同序，可作补列对齐）。"""
-    names: list[str] = []
-    section = None
-    for line in mps_text.splitlines():
-        tag = line.strip()
-        if tag in ("NAME", "ROWS", "COLUMNS", "RHS", "BOUNDS", "RANGES", "ENDATA"):
-            section = tag
-            continue
-        if section != "BOUNDS":
-            continue
-        parts = line.split()
-        if len(parts) >= 3 and parts[2] not in names:
-            names.append(parts[2])
-    return names
-
-
 def _solve_internal(bundle, tmp_path):
-    """真实求解：返回（目标值 + 偏移，列名 → 取值）。"""
-    mps_text = bundle.files["input/problem.mps"].decode("utf-8")
+    """真实求解：返回（目标值 + 偏移，列名 → 取值，解字节）。
+
+    列顺序与解映射走生产读取（``_mps_column_names`` / ``_parse_solution``）；
+    无系数固定变量（soc_pin）在生产 writer 显式占列，交接严格等长。
+    """
+    from iesplan.computation.result_adapters.highs import (
+        _mps_column_names,
+        _parse_solution,
+    )
+
+    mps_raw = bundle.files["input/problem.mps"]
     (tmp_path / "input").mkdir(parents=True, exist_ok=True)
     (tmp_path / "output").mkdir(parents=True, exist_ok=True)
-    (tmp_path / "input" / "problem.mps").write_text(mps_text, encoding="utf-8")
+    (tmp_path / "input" / "problem.mps").write_bytes(mps_raw)
     completed = subprocess.run(
         [
             HIGHS_ADAPTER_PATH,
@@ -586,22 +607,16 @@ def _solve_internal(bundle, tmp_path):
         check=False,
     )
     assert completed.returncode == 0, completed.stderr
-    content = (tmp_path / "output" / "solution.sol").read_text(encoding="utf-8")
-    facts, primals = _solution_primals(content)
-    assert facts.get("model_status") == "HighsModelStatus.kOptimal"
-    order = _mps_column_order(mps_text)
-    # 无条目变量（如固定 soc_pin）在 COLUMNS 被省略、仅 BOUNDS 留 FX 界；
-    # HiGHS 按 BOUNDS 补列并附于解末尾，此处按 BOUNDS 显式对齐，不猜顺序。
-    bound_names = _mps_bound_order(mps_text)
-    extra = [name for name in bound_names if name not in set(order)]
-    assert len(primals) == len(order) + len(extra)
-    values = dict(zip(order, primals[: len(order)], strict=True))
-    for name, val in zip(extra, primals[len(order) :], strict=True):
-        values[name] = val
-    if extra:
-        assert values.get("soc_pin") == pytest.approx(0.5)
+    solution_raw = (tmp_path / "output" / "solution.sol").read_bytes()
+    solution = _parse_solution(solution_raw)
+    assert solution["model_status"] == "HighsModelStatus.kOptimal"
+    order = _mps_column_names(mps_raw)
+    primals = solution["primals"]
+    assert len(primals) == len(order)
+    values = dict(zip(order, primals, strict=True))
+    assert values.get("soc_pin") == pytest.approx(0.5)
     metadata = json.loads(bundle.files["input/parameters.json"].decode("utf-8"))
-    return float(facts["objective_value"]) + metadata["objective_offset"], values
+    return float(solution["objective"]) + metadata["objective_offset"], values, solution_raw
 
 
 def test_vat_chain_matches_hand_and_npv(tmp_path) -> None:
@@ -614,7 +629,7 @@ def test_vat_chain_matches_hand_and_npv(tmp_path) -> None:
     # 建设期留抵跨到首运营月逐月消耗：m1 留抵 > 0，m13 仍有留抵无实缴。
     assert paids[0] == Decimal("0") and carries[0] > Decimal("0")
     assert paids[12] == Decimal("0") and carries[12] > carries[0]
-    value, solved = _solve_internal(bundle, tmp_path)
+    value, solved, solution_raw = _solve_internal(bundle, tmp_path)
     for month in range(1, 37):
         paid = solved[f"vat__main_pool__paid__m{month}"]
         carry = solved[f"vat__main_pool__carry__m{month}"]
@@ -623,6 +638,23 @@ def test_vat_chain_matches_hand_and_npv(tmp_path) -> None:
         # 互斥精确：正负分段不靠目标压紧（本用例 NPV 下亦须互斥）。
         assert min(paid, carry) == pytest.approx(0.0, abs=1e-6)
     assert value == pytest.approx(float(_hand_npv_with_vat(paids)), rel=1e-6)
+    # 生产 Adapter 交接：同一 Bundle 与同一次真实解，无列数/映射失败，
+    # 目标值与固定变量恢复同源（税列不提前发布，不在此断言）。
+    adapted = HIGHS_ADAPTER.adapt(
+        _wrap_bundle(
+            {
+                "input/problem.mps": bundle.files["input/problem.mps"],
+                "input/parameters.json": bundle.files["input/parameters.json"],
+            }
+        ),
+        _receipt(),
+        {SOLUTION_PATH: solution_raw},
+    )
+    assert adapted.execution_status == "completed"
+    published = adapted.outputs["solution"]
+    assert published["objective_value"] == pytest.approx(float(_hand_npv_with_vat(paids)), rel=1e-6)
+    by_name = {entry["name"]: entry["value"] for entry in published["variables"]}
+    assert by_name["soc_pin"] == pytest.approx(0.5)
 
 
 def test_vat_non_npv_objective_keeps_exact_balances(tmp_path) -> None:
@@ -639,7 +671,7 @@ def test_vat_non_npv_objective_keeps_exact_balances(tmp_path) -> None:
     }
     artifact, models, materialized, finance, config, evaluation = _inputs(objective=ordinary)
     bundle = HIGHS_MILP_PROVIDER.generate(artifact, models, materialized, finance, config, evaluation)
-    _, solved = _solve_internal(bundle, tmp_path)
+    _, solved, _ = _solve_internal(bundle, tmp_path)
     out, inp = _hand_monthly()
     paids, carries = _hand_chain(out, inp)
     for month in range(1, 37):
@@ -676,7 +708,7 @@ def test_vat_refund_arrival_separate_from_confirmation(tmp_path) -> None:
     bundle = HIGHS_MILP_PROVIDER.generate(artifact, models, materialized, finance, config, evaluation)
     claims = {claim_month: claim_amount, late_month: late_amount}
     paids, carries = _hand_chain(out, inp, claims=claims)
-    value, solved = _solve_internal(bundle, tmp_path)
+    value, solved, _ = _solve_internal(bundle, tmp_path)
     for month in range(1, 37):
         assert solved[f"vat__main_pool__paid__m{month}"] == pytest.approx(float(paids[month - 1]), rel=1e-6)
         assert solved[f"vat__main_pool__carry__m{month}"] == pytest.approx(
@@ -729,6 +761,82 @@ def test_vat_overclaimed_refund_is_infeasible(tmp_path) -> None:
     )
 
 
+def test_vat_exclusive_basis_gross_cash_matches_hand(tmp_path) -> None:
+    """不含税口径：同值陈述视作净额，基础收付按价税合计出现金。
+
+    建设/价格/已声明 OM 加成 1.13，可抵比例不缩小付款；税基按净额
+    计税；维护按明确金额口径不变。36 月链与 NPV 与独立 gross 手算一致。
+    """
+    artifact, models, materialized, finance, config, evaluation = _inputs(basis="tax_exclusive")
+    assert finance.price_basis == "tax_exclusive"
+    bundle = HIGHS_MILP_PROVIDER.generate(artifact, models, materialized, finance, config, evaluation)
+    out, inp = _hand_monthly(tax_factor=Decimal("0.13"))
+    paids, carries = _hand_chain(out, inp)
+    value, solved, _ = _solve_internal(bundle, tmp_path)
+    for month in range(1, 37):
+        assert solved[f"vat__main_pool__paid__m{month}"] == pytest.approx(float(paids[month - 1]), rel=1e-6)
+        assert solved[f"vat__main_pool__carry__m{month}"] == pytest.approx(
+            float(carries[month - 1]), rel=1e-6
+        )
+    expected = _hand_npv_with_vat(paids, cash=Decimal("1.13"))
+    assert value == pytest.approx(float(expected), rel=1e-6)
+
+
+def test_vat_construction_only_exclusive_pays_declared_tax(tmp_path) -> None:
+    """仅建设 VAT 时，不含税口径相对含税多付 6000×13% 的现值。
+
+    同值陈述 6000、付款 0.6/0.4：NPV 差 = -(3600×0.13 + 2400×0.13/1.08)，
+    与独立手算基线一致（无销项，实缴恒零，无 VAT 现金干扰）。
+    """
+    from iesplan.computation.generators.project import build_project_model
+
+    artifact, models, materialized, finance, config, evaluation = _inputs(rules="construction_only")
+    model, _, _ = build_project_model(artifact, models, materialized, finance, config, evaluation)
+    inclusive_const = model.objective.constant
+    artifact, models, materialized, finance, config, evaluation = _inputs(
+        rules="construction_only", basis="tax_exclusive"
+    )
+    bundle = HIGHS_MILP_PROVIDER.generate(artifact, models, materialized, finance, config, evaluation)
+    model, _, _ = build_project_model(artifact, models, materialized, finance, config, evaluation)
+    delta_const = -(Decimal("0.6") * Decimal("6000") * Decimal("0.13")) - (
+        Decimal("0.4") * Decimal("6000") * Decimal("0.13") / Decimal("1.08")
+    )
+    assert model.objective.constant == pytest.approx(
+        float(Decimal(str(inclusive_const)) + delta_const),
+        abs=1e-6,
+    )
+    value, solved, _ = _solve_internal(bundle, tmp_path)
+    for month in range(1, 37):
+        assert solved[f"vat__main_pool__paid__m{month}"] == pytest.approx(0.0, abs=1e-6)
+    base = _hand_npv_with_vat([Decimal("0")] * 36)
+    delta = -(Decimal("0.6") * Decimal("6000") * Decimal("0.13")) - (
+        Decimal("0.4") * Decimal("6000") * Decimal("0.13") / Decimal("1.08")
+    )
+    assert value == pytest.approx(float(base + delta), rel=1e-6)
+
+
+def test_vat_existing_fixed_om_not_credited(tmp_path) -> None:
+    """既有设备沉没固定 OM：基础现金不消费，进项亦不抵扣。
+
+    tank1 改 existing 后，建设总额与年固定 OM 同时沉没；可变 OM 仍
+    真实消费。全链与 NPV 与剔除两项的独立手算一致（m24 留抵同步
+    减少约 120.80，即 0.5×2100×0.13/1.13 的幽灵抵扣不再出现）。
+    """
+    artifact, models, materialized, finance, config, evaluation = _inputs(tank_origin="existing")
+    bundle = HIGHS_MILP_PROVIDER.generate(artifact, models, materialized, finance, config, evaluation)
+    out, inp = _hand_monthly(upfront=Decimal("0"), fixed_om=Decimal("0"))
+    paids, carries = _hand_chain(out, inp)
+    assert carries[0] == Decimal("0")
+    value, solved, _ = _solve_internal(bundle, tmp_path)
+    for month in range(1, 37):
+        assert solved[f"vat__main_pool__paid__m{month}"] == pytest.approx(float(paids[month - 1]), rel=1e-6)
+        assert solved[f"vat__main_pool__carry__m{month}"] == pytest.approx(
+            float(carries[month - 1]), rel=1e-6
+        )
+    expected = _hand_npv_with_vat(paids, upfront=Decimal("0"), fixed_om=Decimal("0"))
+    assert value == pytest.approx(float(expected), rel=1e-6)
+
+
 HEATER_UNBOUNDED_YAML = """
 schema: ies.device-model
 schema_version: "2.0.0"
@@ -762,15 +870,29 @@ def test_vat_unbounded_flow_is_unsupported() -> None:
 
 
 def test_generate_rejects_income_tax() -> None:
-    """所得税关系明确拒绝，不与 VAT 混合半生成。"""
-    from test_config_revisions import _tax_profile_payload
+    """所得税关系在唯一建模能力边界明确拒绝，不与 VAT 混合半生成。
 
-    from iesplan.computation.errors import ComputationUnavailableError
-
+    所得税规则引用本夹具真实价格/分量（公开入口完整通过），拒绝只
+    发生在建模能力边界，不伪装成输入非法。
+    """
+    payload = _finance_payload()
+    payload["tax_rules"]["income_tax"] = {
+        "kind": "income_tax",
+        "label_ref": "vat_demo",
+        "rate": {"value": "0.25", "unit": "1"},
+        "revenue": ["export_ts"],
+        "energy_cost": ["heat_import"],
+        "annual_om": ["sys1.annual_fixed_om"],
+        "variable_om": ["sys1.period_variable_om"],
+        "deductible_maintenance": {"mode": "explicit_items", "items": []},
+        "depreciation": [],
+        "loss_carryforward_years": 5,
+        "opening_losses": [],
+    }
     artifact, models, materialized, _, config, evaluation = _inputs()
-    finance = merge_effective(FinanceProfile.from_dict(_tax_profile_payload()), None)
+    finance = merge_effective(FinanceProfile.from_dict(payload), None)
     from iesplan.finance import IncomeTaxRule
 
     assert any(isinstance(rule, IncomeTaxRule) for rule in finance.tax_rules.values())
-    with pytest.raises(ComputationUnavailableError):
+    with pytest.raises(LoweringUnsupportedError, match="超出 3.2.0 已实现关系"):
         HIGHS_MILP_PROVIDER.generate(artifact, models, materialized, finance, config, evaluation)

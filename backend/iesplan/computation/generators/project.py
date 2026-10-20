@@ -995,11 +995,14 @@ class _ProjectBuilder:
             }
         return MappingProxyType(out)
 
-    def _construction_affine(self) -> _AffineAcc:
+    def _construction_affine(
+        self, markup: Mapping[str, float] | None = None
+    ) -> _AffineAcc:
         """建设总额仿射式（新建 costed 实例 upfront 分量之和，既有沉没不计）。
 
         与 ``finance_components`` 同一新增/既有增量语义：existing 只计
-        周期可变分量，建设沉没成本不进入前瞻现金流。
+        周期可变分量，建设沉没成本不进入前瞻现金流。``markup`` 按
+        finance_type 给出不含税口径的价税合计系数（无则为 1）。
         """
         out = _AffineAcc()
         instances = (self.doc.get("finance_binding") or {}).get("instances") or {}
@@ -1008,11 +1011,41 @@ class _ProjectBuilder:
                 continue
             if self.devices[inst].get("asset_origin") != "new":
                 continue
-            ft_entry = self.finance.finance_types[instances[inst]["finance_type"]]
+            finance_type = instances[inst]["finance_type"]
+            ft_entry = self.finance.finance_types[finance_type]
             if ft_entry.upfront_capex is None:
                 continue
-            out.add_scaled(self._cost_affine(inst, "upfront_capex"), 1.0)
+            factor = markup.get(finance_type, 1.0) if markup else 1.0
+            out.add_scaled(self._cost_affine(inst, "upfront_capex"), factor)
         return out
+
+    def _vat_gross_markups(self) -> tuple[dict[str, float], dict[str, float], dict[str, float]]:
+        """不含税口径下已声明税率对应的收付加成（价税合计出现金）。
+
+        返回（价格加成，运维分量加成，建设加成），键分别为价格 ID、
+        ``for`` 路径、finance_type，值为 ``1 + 税率``。含税口径基础
+        金额已为全额、无规则无池时均返回空（系数恒 1）。可抵比例只
+        影响抵扣资格，不缩小实际付款，加成恒用全额税率；维护按明确
+        金额口径不加成；未声明税率不推断。
+        """
+        grouped = self._vat_grouped_rules()
+        if grouped is None or self.finance.price_basis != "tax_exclusive":
+            return {}, {}, {}
+        prices: dict[str, float] = {}
+        oms: dict[str, float] = {}
+        construction: dict[str, float] = {}
+        for pool_rules in grouped.values():
+            for rule in pool_rules["vat"]:
+                for entry in rule.in_tax:
+                    prices[entry.price] = 1.0 + float(entry.rate.value)
+                for entry in rule.out_tax:
+                    prices[entry.price] = 1.0 + float(entry.rate.value)
+                for entry in rule.om_input_tax:
+                    oms[entry.for_path] = 1.0 + float(entry.rate.value)
+            for rule in pool_rules["construction"]:
+                finance_type, _, _ = rule.for_path.partition(".")
+                construction[finance_type] = 1.0 + float(rule.rate.value)
+        return prices, oms, construction
 
     def _annual_fixed_om_annual(self, inst: str) -> _AffineAcc:
         """单个实例年固定 O&M 的年金额仿射式（每年全额）。
@@ -1033,17 +1066,19 @@ class _ProjectBuilder:
         return out
 
     def _npv_objective(self) -> _AffineAcc:
-        """显式全周期 NPV 目标仿射式（空税则现金流基础，同次解内表达）。
+        """显式全周期 NPV 目标仿射式（gross 现金流基础，同次解内表达）。
 
         ``CF[t]`` 评价年口径（``t = 0..E``，``E = K + N``）：建设总额按
         冻结付款比例落款；第 j 个运营年净额（能源净收益 − 可变 O&M −
         固定 O&M − 当年维护）计入 ``CF[K+j]``；再按冻结折现率折现求和。
         能源按区间内实际步归集（公历年界与求解域同源）；固定 O&M 按年值
-        口径每年全额；维护按清单年一次扣除。税额关系由后续切片接入，
-        本路径只消费空税则（非空在生成器能力边界明确拒绝）。
+        口径每年全额；维护按清单年一次扣除。不含税口径下，已声明税率
+        对应的建设/价格/实际消费 OM 按价税合计出现金（含税口径基础金额
+        已为全额，不重复加税）；维护按明确金额口径不变。
         """
         evaluation = self.evaluation
-        construction = self._construction_affine()
+        price_markup, om_markup, construction_markup = self._vat_gross_markups()
+        construction = self._construction_affine(construction_markup or None)
         maintenance = self._maintenance_by_year()
         baseline = self.doc["project_baseline"]
         bounds = annual_boundaries(
@@ -1064,25 +1099,34 @@ class _ProjectBuilder:
             year_no = evaluation.construction_period + index + 1
             annual = _AffineAcc()
             for binding_id in sorted(bindings):
-                annual.add_scaled(self._tariff_affine(binding_id, start, end), -1.0)
+                price_id = bindings[binding_id]["price"]
+                annual.add_scaled(
+                    self._tariff_affine(binding_id, start, end),
+                    -price_markup.get(price_id, 1.0),
+                )
             for inst in sorted(self.devices):
                 if inst not in instances or instances[inst].get("type") != "costed":
                     continue
                 origin = self.devices[inst].get("asset_origin")
                 produced = _COMPONENTS_NEW if origin == "new" else _COMPONENTS_EXISTING
-                ft_entry = self.finance.finance_types[instances[inst]["finance_type"]]
+                finance_type = instances[inst]["finance_type"]
+                ft_entry = self.finance.finance_types[finance_type]
                 if (
                     "period_variable_om" in produced
                     and ft_entry.period_variable_om is not None
                 ):
                     annual.add_scaled(
-                        self._cost_affine(inst, "period_variable_om", start, end), -1.0
+                        self._cost_affine(inst, "period_variable_om", start, end),
+                        -om_markup.get(f"{finance_type}.period_variable_om", 1.0),
                     )
                 if (
                     "annual_fixed_om" in produced
                     and ft_entry.annual_fixed_om is not None
                 ):
-                    annual.add_scaled(self._annual_fixed_om_annual(inst), -1.0)
+                    annual.add_scaled(
+                        self._annual_fixed_om_annual(inst),
+                        -om_markup.get(f"{finance_type}.annual_fixed_om", 1.0),
+                    )
             annual.add_const(-maintenance.get(year_no, 0.0))
             npv.add_scaled(annual, 1.0 / discount(year_no))
         return npv
@@ -1093,14 +1137,13 @@ class _ProjectBuilder:
         """税务月 → 求解步半开区间（仅经营月有步，公历月界，含闰年）。
 
         步按运行起始年/分辨率映射公历月，再平移建设期（首运营月为
-        ``12K+1``）；经营步必落在 ``12K+1..12E``，之外即交接不一致，
-        明确拒绝。
+        ``12K+1``）。步数由已确认运营年限生成，映射恒落
+        ``12K+1..12E``，此处不重复核对时域。
         """
         baseline = self.doc["project_baseline"]
         start_year = baseline["start_year"]
         step_hours = self.step_s / 3600.0
         construction = self.evaluation.construction_period
-        last_month = 12 * self.evaluation.evaluation_years
         origin = datetime(start_year, 1, 1)
         spans: dict[int, list[int]] = {}
         for step in range(self.point_count):
@@ -1110,10 +1153,6 @@ class _ProjectBuilder:
                 + (moment.year - start_year) * 12
                 + moment.month
             )
-            if month < 1 or month > last_month:
-                raise LoweringUnsupportedError(
-                    f"求解步 {step} 映射税务月 {month} 超出 1..{last_month}"
-                )
             slot = spans.setdefault(month, [step, step])
             slot[1] = step
         return [
@@ -1122,11 +1161,12 @@ class _ProjectBuilder:
         ]
 
     def _vat_grouped_rules(self) -> dict[str, dict[str, list]] | None:
-        """已支持税则按池分组；无规则无池返回 None；未支持形态明确拒绝。
+        """已支持税则按池分组；无规则无池返回 None；未支持类型明确拒绝。
 
-        3.2.0 仅实现 ``vat``（monthly/same_period）与
-        ``construction_input_vat``；所得税及未知 kind 不忽略、不半生成。
-        规则引用的池必须已声明（公开入口已核对，此处缺席即交接不一致）。
+        结算口径/确认方式/池存在/分量口径已由公开财务入口核对，此处
+        信任类型化交接。3.2.0 仅实现 ``vat`` 与
+        ``construction_input_vat`` 的建模，其余类型不忽略、不半生成，
+        在此唯一能力边界拒绝（provider 不再复制该判断）。
         """
         rules = self.finance.tax_rules
         pools = self.finance.credit_pools
@@ -1136,10 +1176,6 @@ class _ProjectBuilder:
         for rule_id in sorted(rules):
             rule = rules[rule_id]
             if isinstance(rule, VatRule):
-                if rule.settlement != "monthly" or rule.confirmation != "same_period":
-                    raise LoweringUnsupportedError(
-                        f"VAT 规则 {rule_id!r} 仅支持 monthly/same_period"
-                    )
                 grouped.setdefault(
                     rule.credit_pool, {"vat": [], "construction": []}
                 )["vat"].append(rule)
@@ -1153,11 +1189,6 @@ class _ProjectBuilder:
                 )
         for pool_id in sorted(pools):
             grouped.setdefault(pool_id, {"vat": [], "construction": []})
-        for pool_id in grouped:
-            if pool_id not in pools:
-                raise LoweringUnsupportedError(
-                    f"税务规则引用未声明的抵扣池 {pool_id!r}"
-                )
         return grouped
 
     def _vat_gross_factor(self, rate: Any) -> float:
@@ -1187,11 +1218,6 @@ class _ProjectBuilder:
         instances = (self.doc.get("finance_binding") or {}).get("instances") or {}
         for rule in pool_rules["vat"]:
             for entry in rule.in_tax:
-                price = self.finance.energy_prices[entry.price]
-                if price.direction != "purchase":
-                    raise LoweringUnsupportedError(
-                        f"进项规则价格 {entry.price!r} 须为 purchase"
-                    )
                 factor = self._vat_gross_factor(entry.rate) * float(
                     entry.deductible_ratio.value
                 )
@@ -1203,11 +1229,6 @@ class _ProjectBuilder:
                             self._tariff_affine(binding_id, start, end), factor
                         )
             for entry in rule.out_tax:
-                price = self.finance.energy_prices[entry.price]
-                if price.direction != "sale":
-                    raise LoweringUnsupportedError(
-                        f"销项规则价格 {entry.price!r} 须为 sale"
-                    )
                 factor = self._vat_gross_factor(entry.rate)
                 for binding_id, binding in bindings.items():
                     if binding.get("price") != entry.price:
@@ -1219,10 +1240,6 @@ class _ProjectBuilder:
                         )
             for entry in rule.om_input_tax:
                 finance_type, _, component = entry.for_path.partition(".")
-                if component not in ("annual_fixed_om", "period_variable_om"):
-                    raise LoweringUnsupportedError(
-                        f"运维进项 for {entry.for_path!r} 只支持年固/可变分量"
-                    )
                 factor = self._vat_gross_factor(entry.rate) * float(
                     entry.deductible_ratio.value
                 )
@@ -1230,6 +1247,15 @@ class _ProjectBuilder:
                     if inst not in instances or instances[inst].get("type") != "costed":
                         continue
                     if instances[inst].get("finance_type") != finance_type:
+                        continue
+                    # 与基础现金同一增量语义：既有沉没固定 OM 不消费，
+                    # 不产生进项；真实消费的可变分量保留。
+                    produced = (
+                        _COMPONENTS_NEW
+                        if self.devices[inst].get("asset_origin") == "new"
+                        else _COMPONENTS_EXISTING
+                    )
+                    if component not in produced:
                         continue
                     ft_entry = self.finance.finance_types[finance_type]
                     if getattr(ft_entry, component) is None:
@@ -1244,19 +1270,13 @@ class _ProjectBuilder:
                                 self._cost_affine(inst, component, start, end), factor
                             )
             for entry in rule.maintenance_input_tax:
-                if entry.year < 1 or entry.year > self.evaluation.evaluation_years:
-                    raise LoweringUnsupportedError(
-                        f"维护进项引用评价年 {entry.year} 超出税务月 1..{months}"
-                    )
+                # 引用存在性与跨输入对应已由提交边界核对，此处按冻结
+                # 清单顺序取数，不复制金额。
                 year_amounts = [
                     float(item.amount)
                     for item in self.evaluation.maintenance_expenses
                     if item.year == entry.year
                 ]
-                if entry.position < 1 or entry.position > len(year_amounts):
-                    raise LoweringUnsupportedError(
-                        f"维护进项引用 ({entry.year}, {entry.position}) 无对应清单金额"
-                    )
                 factor = self._vat_gross_factor(entry.rate) * float(
                     entry.deductible_ratio.value
                 )
@@ -1264,15 +1284,9 @@ class _ProjectBuilder:
                     year_amounts[entry.position - 1] * factor
                 )
         for rule in pool_rules["construction"]:
-            finance_type, _, component = rule.for_path.partition(".")
-            if component != "upfront_capex":
-                raise LoweringUnsupportedError(
-                    f"建设进项 for {rule.for_path!r} 只支持 upfront_capex"
-                )
-            if finance_type not in self.finance.finance_types:
-                raise LoweringUnsupportedError(
-                    f"建设进项引用未知 finance_type {finance_type!r}"
-                )
+            # 分量口径（仅 upfront_capex）与引用存在性已由公开财务入口
+            # 核对；新建范围与基础建设总额同一增量语义。
+            finance_type, _, _ = rule.for_path.partition(".")
             total = _AffineAcc()
             for inst in sorted(self.devices):
                 if inst not in instances or instances[inst].get("type") != "costed":
@@ -1294,18 +1308,11 @@ class _ProjectBuilder:
             if method == "payment_period":
                 for payment in self.evaluation.construction_payments:
                     inp[12 * payment.t].add_scaled(deductible, float(payment.ratio))
-            elif method == "explicit_schedule":
-                # 比例直接作用于派生总额，不再次乘付款比例。
-                for item in rule.confirmation.schedule:
-                    if item.period < 1 or item.period > months:
-                        raise LoweringUnsupportedError(
-                            f"建设确认 period {item.period} 超出税务月 1..{months}"
-                        )
-                    inp[item.period - 1].add_scaled(deductible, float(item.ratio))
             else:
-                raise LoweringUnsupportedError(
-                    f"建设确认方法 {method!r} 超出已实现范围"
-                )
+                # explicit_schedule：比例直接作用于派生总额，不再次乘
+                # 付款比例。方法枚举与确认期上界已在入口/提交边界核对。
+                for item in rule.confirmation.schedule:
+                    inp[item.period - 1].add_scaled(deductible, float(item.ratio))
         return out, inp
 
     @staticmethod
@@ -1478,8 +1485,9 @@ class _ProjectBuilder:
             and raw["expression"].strip() == SYSTEM_AFTER_TAX_NPV
         ):
             # 显式全周期 NPV 目标：方向已由装配输入边界核对，此处信任
-            # 类型化交接，不重复拒绝。VAT 现金（实缴流出、到账退税流入）
-            # 只入本目标；税额状态约束与目标选择无关，已在建模段落实。
+            # 类型化交接，不重复拒绝。基础 gross 现金与 VAT 现金（实缴
+            # 流出、到账退税流入）只入本目标；税额状态约束与目标选择
+            # 无关，已在建模段落实。
             npv = self._npv_objective()
             if self._vat_cash is not None:
                 npv.add_scaled(self._vat_cash, 1.0)

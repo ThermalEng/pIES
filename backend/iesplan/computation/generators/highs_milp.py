@@ -197,21 +197,9 @@ class HighsMilpProvider:
         计费价格限制只看装配实际绑定的价格：快照中未被绑定的价格条目
         不进入数学，不触发拒绝；``constant`` 与 ``time_series`` 均支持
         （时变价格由第三项价格区逐点计价），未知类型明确拒绝。
-        仅支持 VAT 月度关系（vat/construction_input_vat + 共享池）；
-        所得税及未知类型不忽略、不半生成，明确拒绝（提交边界 007 先行，
-        本处为生成器能力边界自身语义）。
+        税务关系能力判断唯一在建模边界（未知类型不忽略、不半生成，
+        提交边界 007 先行），此处不复制。
         """
-        from iesplan.finance import ConstructionVatRule, VatRule
-
-        for rule_id in sorted(finance.tax_rules):
-            rule = finance.tax_rules[rule_id]
-            if isinstance(rule, (VatRule, ConstructionVatRule)):
-                continue
-            raise ComputationUnavailableError(
-                f"本 provider 尚未实现税务关系 {rule_id!r}"
-                f"（类型 {type(rule).__name__}）：不忽略税务按税前计算",
-                reason="unsupported-tax-relation",
-            )
         for name in config.outputs:
             if name not in SUPPORTED_OUTPUTS:
                 raise ValueError(

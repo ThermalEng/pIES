@@ -50,6 +50,10 @@ def write_mps(model: LinearModel) -> tuple[str, float]:
                 columns[key[0]].append((row.name, value))
     in_integer = False
     for var in model.variables:
+        if not columns[var.name]:
+            # 无系数变量仍需占列：COLUMNS 缺列会导致解列数与
+            # unit_map 交接不一致。显式零元数学等价，目标行恒存在。
+            columns[var.name].append((_OBJECTIVE_ROW, 0.0))
         general_integer = var.kind == "binary" and not (
             var.lower == 0.0 and var.upper == 1.0
         )
