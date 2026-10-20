@@ -1007,24 +1007,12 @@ class _ProjectBuilder:
     def _annual_fixed_om_annual(self, inst: str) -> _AffineAcc:
         """单个实例年固定 O&M 的年金额仿射式（每年全额）。
 
-        分量声明口径为年率（线性费率×数量）：年金额 = 年率 × 年秒数
-        （与适配器 ``from_si`` 年值折算同源）；固定金额（公开入口已禁
-        止非 upfront 带 fixed，此处按年金额直通）不乘年秒数。
+        复用既有年费仿射表达：分量声明口径为年率，年金额 = 年率 ×
+        年秒数（与适配器 ``from_si`` 年值折算同源）。调用方已确保该
+        分量存在，不为缺席兜空。
         """
         out = _AffineAcc()
-        instances = (self.doc.get("finance_binding") or {}).get("instances") or {}
-        entry = instances[inst]
-        ft_entry = self.finance.finance_types[entry["finance_type"]]
-        comp = ft_entry.annual_fixed_om
-        if comp is None:
-            return out
-        if comp.fixed is not None:
-            out.add_const(_money_to_internal(comp.fixed))
-        for driver, cost in (comp.linear or {}).items():
-            coeff = _to_internal(float(cost.unit_cost.value), cost.unit_cost.unit)
-            out.add_scaled(
-                self._driver_affine(inst, driver), coeff * _YEAR_SECONDS
-            )
+        out.add_scaled(self._cost_affine(inst, "annual_fixed_om"), _YEAR_SECONDS)
         return out
 
     def _maintenance_by_year(self) -> dict[int, float]:
@@ -1096,12 +1084,8 @@ class _ProjectBuilder:
             isinstance(raw.get("expression"), str)
             and raw["expression"].strip() == SYSTEM_AFTER_TAX_NPV
         ):
-            # 显式全周期 NPV 目标：方向与空税则能力由本边界落实（装配闸门
-            # 已在输入边界核对，此处不复核装配内容，只做能力自身语义）。
-            if raw.get("sense") != "maximize":
-                raise LoweringUnsupportedError(
-                    f"{SYSTEM_AFTER_TAX_NPV} 目标方向须为 maximize"
-                )
+            # 显式全周期 NPV 目标：方向已由装配输入边界核对，此处信任
+            # 类型化交接，不重复拒绝。
             return self._npv_objective(), self.finance.currency
         symbols, placeholders = self._planning_symbols()
         compiled = compile_planning_expression(

@@ -825,22 +825,32 @@ def _check_tax_evaluation_refs(
 
 
 def _reject_unsupported_tax_rules(generator_ref: object, effective: EffectiveFinanceConfig) -> None:
-    """税务规则提交能力闸门(B1a)：有效快照含非空 ``tax_rules`` 即 400。
+    """税务规则提交能力闸门(B1a/C1b)：非空 ``tax_rules``/``credit_pools`` 即 400。
 
-    求解链尚未表达税务关系(C批接通后解除)；空规则不影响现有计算。
+    求解链尚未表达税务关系(C批接通后解除)；两者皆空不影响现有计算。
+    与生成器能力边界同范围：已明确不支持的输入不在提交后失败。
     复用提交边界生成器能力诊断码 TASK-REQ-007，不建临时注册表/开关。
     """
-    if not effective.tax_rules:
-        return
-    raise InvalidRequestError(
-        "有效财务配置含税务计算规则，当前求解链尚不支持，不按税前执行",
-        code="TASK-REQ-007",
-        params={
-            "generator": generator_ref,
-            "tax_rules": sorted(effective.tax_rules),
-        },
-        location={"object_type": "task", "field": "effective_finance.tax_rules"},
-    )
+    if effective.tax_rules:
+        raise InvalidRequestError(
+            "有效财务配置含税务计算规则，当前求解链尚不支持，不按税前执行",
+            code="TASK-REQ-007",
+            params={
+                "generator": generator_ref,
+                "tax_rules": sorted(effective.tax_rules),
+            },
+            location={"object_type": "task", "field": "effective_finance.tax_rules"},
+        )
+    if effective.credit_pools:
+        raise InvalidRequestError(
+            "有效财务配置含税务抵扣池，当前求解链尚不支持，不按税前执行",
+            code="TASK-REQ-007",
+            params={
+                "generator": generator_ref,
+                "credit_pools": sorted(effective.credit_pools),
+            },
+            location={"object_type": "task", "field": "effective_finance.credit_pools"},
+        )
 
 
 def _used_price_oids(artifact: Any, effective: EffectiveFinanceConfig) -> list[str]:

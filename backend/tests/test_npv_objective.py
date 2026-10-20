@@ -14,10 +14,6 @@ from pathlib import Path
 import pytest
 
 from iesplan.assembly import parse_assembly_doc, validate_assembly_doc
-from iesplan.assembly.contracts import (
-    ValidatedAssemblyArtifact,
-    ValidationReceipt,
-)
 from iesplan.computation import (
     HIGHS_ADAPTER_PATH,
     HIGHS_MILP_PROVIDER,
@@ -26,7 +22,6 @@ from iesplan.computation import (
     materialize_non_predictive_series,
 )
 from iesplan.computation.generators.highs_milp import GENERATOR_REF
-from iesplan.computation.generators.linear import LoweringUnsupportedError
 from iesplan.core.yamlmini import load as yaml_load
 from iesplan.devices import init_registry
 from iesplan.devices.parser2 import parse_device_model_v2
@@ -204,19 +199,20 @@ equations:
       expression: "heat_in[t] = heat_demand[t]"
 """
 
-HUB_YAML = """
+GRID_YAML = """
 schema: ies.device-model
 schema_version: "2.0.0"
-device: {id: acme.device.hub, names: {zh-CN: 枢纽, en-US: Hub}}
+device: {id: acme.device.grid, names: {zh-CN: 电网, en-US: Grid}}
 properties: {}
 interfaces:
-  charge: {type: in, carrier: electricity, unit: kW, valid_range: {minimum: 0, maximum: 100}}
-  discharge: {type: in, carrier: electricity, unit: kW, valid_range: {minimum: 0, maximum: 100}}
+  supply:
+    type: out
+    carrier: electricity
+    unit: kW
+    valid_range: {minimum: 0, maximum: null}
 equations:
   variables: {}
-  relations:
-    - id: exclusivity
-      expression: "charge[t] * discharge[t] = 0"
+  relations: []
 """
 
 
@@ -262,8 +258,8 @@ def _doc(*, sense: str = "maximize", expression: str = NPV_MARKER, variables: di
                     "heat_demand": {"mode": "constant", "value": 7}
                 },
             },
-            "hub1": {
-                "definition": {"id": "acme.device.hub"},
+            "grid1": {
+                "definition": {"id": "acme.device.grid"},
                 "asset_origin": "existing",
                 "properties": {},
                 "predefined_interfaces": {},
@@ -271,6 +267,7 @@ def _doc(*, sense: str = "maximize", expression: str = NPV_MARKER, variables: di
         },
         "connections": {
             "link1": {"from": "heater1.heat_out", "to": "load1.heat_in"},
+            "link2": {"from": "grid1.supply", "to": "heater1.electricity_in"},
         },
         "finance": {
             "ref": {"kind": "object", "object_id": "obj-finance", "media_type": "application/yaml"},
@@ -294,14 +291,15 @@ def _doc(*, sense: str = "maximize", expression: str = NPV_MARKER, variables: di
                     },
                 },
                 "load1": {"type": "none"},
-                "hub1": {"type": "none"},
+                "grid1": {"type": "none"},
             }
         },
         "tariff_bindings": {
+            # 计量边界：purchase 对 out 口，sale 对 in 口。
             "import_meter": {
                 "price": "heat_import",
-                "instance": "load1",
-                "interface": "heat_in",
+                "instance": "heater1",
+                "interface": "heat_out",
                 "aggregation": "integrate_positive",
             },
             "export_meter": {
@@ -313,10 +311,25 @@ def _doc(*, sense: str = "maximize", expression: str = NPV_MARKER, variables: di
         },
         "planning": {
             "objective": {"sense": sense, "expression": expression},
-            "variables": {} if variables is None else variables,
+            # 产品要求至少一个规划变量：销钉 soc 初值（仅状态初值引用，
+            # 不进入方程相乘），不影响财务与物理。
+            "variables": (
+                {
+                    "soc_pin": {
+                        "device_ref": "tank1",
+                        "parameter": "soc0",
+                        "lower_bound": "0.5",
+                        "upper_bound": "0.5",
+                        "unit": "1",
+                    },
+                }
+                if variables is None
+                else variables
+            ),
             "constraints": {},
         },
-        "outputs": {"series": []},
+        "outputs": {"series": [], "metrics": []},
+        "extensions": {},
     }
 
 
@@ -337,22 +350,52 @@ def _evaluation(*, rate: float = RATE, payments=((0, "0.6"), (1, "0.4"))):
     )
 
 
+def _device_documents():
+    """合成设备显式文档（公开装配入口的设备参数，公开建模入口已校验）。"""
+    docs = {}
+    for device_id, yaml_text in (
+        ("acme.device.heater", HEATER_YAML),
+        ("acme.device.tank", TANK_YAML),
+        ("acme.device.load", LOAD_YAML),
+        ("acme.device.grid", GRID_YAML),
+        ("acme.device.gen", GEN_YAML),
+    ):
+        result = parse_device_model_v2(yaml_load(yaml_text), file="test.yaml")
+        assert result.ok, result.diagnostics
+        docs[device_id] = result.document
+    return docs
+
+
+def _issued_artifact(doc: dict, finance, device_ids: tuple[str, ...]):
+    """公开装配入口签发产物（不断言之外的手工装配不再使用）。"""
+    init_registry()
+    documents = _device_documents()
+    result = validate_assembly_doc(
+        doc,
+        finance_snapshots={"obj-finance": finance},
+        device_documents={key: documents[key] for key in device_ids},
+    )
+    assert result.artifact is not None, [d.to_dict() for d in result.diagnostics]
+    return result.artifact
+
+
 def _inputs(**overrides):
     doc = _doc(
         sense=overrides.get("sense", "maximize"),
         expression=overrides.get("expression", NPV_MARKER),
         variables=overrides.get("variables"),
     )
-    artifact = ValidatedAssemblyArtifact(
-        canonical_text=json.dumps(doc), receipt=ValidationReceipt(),
-    )
     models = {
         "heater1": _contribution(HEATER_YAML),
         "tank1": _contribution(TANK_YAML),
         "load1": _contribution(LOAD_YAML),
-        "hub1": _contribution(HUB_YAML),
+        "grid1": _contribution(GRID_YAML),
     }
     finance = merge_effective(FinanceProfile.from_dict(_finance_payload()), None)
+    artifact = _issued_artifact(
+        doc, finance,
+        ("acme.device.heater", "acme.device.tank", "acme.device.load", "acme.device.grid"),
+    )
     materialized = materialize_non_predictive_series(artifact, {}, operation_years=2)
     config = CalculationConfig(
         mode="planning",
@@ -468,11 +511,12 @@ def test_npv_objective_affine_matches_hand_cashflows() -> None:
     coeffs = _coeffs(model.objective)
     df2 = (1 + RATE) ** 2
     df3 = (1 + RATE) ** 3
-    # 购电：-0.7/1000 按年折现（两年系数不同，证明未均摊）。
-    assert coeffs["load1__heat_in__t0"] == pytest.approx(-0.0007 / df2, rel=1e-9)
-    assert coeffs["load1__heat_in__t8759"] == pytest.approx(-0.0007 / df2, rel=1e-9)
-    assert coeffs["load1__heat_in__t8760"] == pytest.approx(-0.0007 / df3, rel=1e-9)
-    assert coeffs["load1__heat_in__t17519"] == pytest.approx(-0.0007 / df3, rel=1e-9)
+    # 购电（计量在 heater 出水口，与负荷需求同值）：-0.7/1000 按年折现
+    # （两年系数不同，证明未均摊）。
+    assert coeffs["heater1__heat_out__t0"] == pytest.approx(-0.0007 / df2, rel=1e-9)
+    assert coeffs["heater1__heat_out__t8759"] == pytest.approx(-0.0007 / df2, rel=1e-9)
+    assert coeffs["heater1__heat_out__t8760"] == pytest.approx(-0.0007 / df3, rel=1e-9)
+    assert coeffs["heater1__heat_out__t17519"] == pytest.approx(-0.0007 / df3, rel=1e-9)
     # 可变 OM：预定义流量为常数（无变量项），年金额进常数项（已对手算）。
     assert not any(name.startswith("tank1__flow__t") for name in coeffs)
     # 同列两项合并：可变 OM -0.02/1000，负价售电记账为 +0.05 系数（成本向），
@@ -494,8 +538,8 @@ def test_npv_zero_discount_equals_undiscounted_sum() -> None:
         artifact, models, materialized, finance, config, evaluation
     )
     coeffs = _coeffs(model.objective)
-    assert coeffs["load1__heat_in__t0"] == pytest.approx(-0.0007, rel=1e-9)
-    assert coeffs["load1__heat_in__t8760"] == pytest.approx(-0.0007, rel=1e-9)
+    assert coeffs["heater1__heat_out__t0"] == pytest.approx(-0.0007, rel=1e-9)
+    assert coeffs["heater1__heat_out__t8760"] == pytest.approx(-0.0007, rel=1e-9)
     expected = (
         -CONSTRUCTION - 2 * FIXED_YEAR - 2 * VAROM_YEAR - 2000.50
     )
@@ -536,15 +580,6 @@ def test_generate_rejects_nonempty_tax_relations() -> None:
         HIGHS_MILP_PROVIDER.generate(
             artifact, models, materialized, credited, config, evaluation
         )
-
-
-def test_npv_wrong_sense_rejected_at_generator() -> None:
-    """生成器同源支持方向语义：保留目标配 minimize 即拒绝。"""
-    artifact, models, materialized, finance, config, evaluation = _inputs(
-        sense="minimize"
-    )
-    with pytest.raises(LoweringUnsupportedError):
-        build_project_model(artifact, models, materialized, finance, config, evaluation)
 
 
 # ---------------------------------------------------------------------------
@@ -620,6 +655,11 @@ interfaces:
     carrier: electricity
     unit: kW
     valid_range: {minimum: 0, maximum: {property_ref: cap_kw}}
+  meter_in:
+    type: in
+    carrier: electricity
+    unit: kW
+    valid_range: {minimum: 0, maximum: null}
 equations:
   variables: {}
   relations: []
@@ -667,7 +707,7 @@ def _choice_finance_payload() -> dict:
     }
 
 
-def _choice_doc(objective: dict) -> dict:
+def _choice_doc(objective: dict, *, cap_bounds: tuple[str, str] = ("0", "10")) -> dict:
     return {
         "schema": "ies.assembly",
         "schema_version": "3.0.0",
@@ -683,7 +723,10 @@ def _choice_doc(objective: dict) -> dict:
                 "predefined_interfaces": {},
             },
         },
-        "connections": {},
+        "connections": {
+            # 计量分接边：母线守恒即出力等于计量值，无需设备内关系。
+            "link1": {"from": "gen1.power_out", "to": "gen1.meter_in"},
+        },
         "finance": {
             "ref": {"kind": "object", "object_id": "obj-finance", "media_type": "application/yaml"},
             "profile_id": "npv-choice",
@@ -698,10 +741,11 @@ def _choice_doc(objective: dict) -> dict:
             }
         },
         "tariff_bindings": {
+            # 计量边界：sale 对 in 口（计量分接与出力同值）。
             "meter": {
                 "price": "gen_sale",
                 "instance": "gen1",
-                "interface": "power_out",
+                "interface": "meter_in",
                 "aggregation": "integrate_positive",
             },
         },
@@ -711,26 +755,25 @@ def _choice_doc(objective: dict) -> dict:
                 "gen_cap": {
                     "device_ref": "gen1",
                     "parameter": "cap_kw",
-                    "lower_bound": "0",
-                    "upper_bound": "10",
+                    "lower_bound": cap_bounds[0],
+                    "upper_bound": cap_bounds[1],
                     "unit": "kW",
                 },
             },
             "constraints": {},
         },
-        "outputs": {"series": []},
+        "outputs": {"series": [], "metrics": []},
+        "extensions": {},
     }
 
 
-def _choice_inputs(objective: dict):
+def _choice_inputs(objective: dict, *, cap_bounds: tuple[str, str] = ("0", "10")):
     from iesplan.computation import MaterializedPriceSeries, MaterializedSet
 
-    doc = _choice_doc(objective)
-    artifact = ValidatedAssemblyArtifact(
-        canonical_text=json.dumps(doc), receipt=ValidationReceipt(),
-    )
+    doc = _choice_doc(objective, cap_bounds=cap_bounds)
     models = {"gen1": _contribution(GEN_YAML)}
     finance = merge_effective(FinanceProfile.from_dict(_choice_finance_payload()), None)
+    artifact = _issued_artifact(doc, finance, ("acme.device.gen",))
     materialized = materialize_non_predictive_series(artifact, {}, operation_years=2)
     prices = (
         MaterializedPriceSeries(
@@ -768,12 +811,15 @@ def _choice_inputs(objective: dict):
 
 
 def _choice_hand_sums() -> tuple[float, float]:
-    """手算（无折现合计, 折现 NPV）每 kW 系数：合计为正，NPV 为负。"""
+    """手算（无折现合计, 折现 NPV）：合计为正，NPV 为负。
+
+    首运营年在 t=2：固定 OM 按 t=2、t=3 折现，不在 t=1。
+    """
     revenue = CHOICE_PRICE * CHOICE_CAP_MAX * HOURS
     total = revenue - CHOICE_UPFRONT * CHOICE_CAP_MAX - 2 * CHOICE_FIXED * CHOICE_CAP_MAX
     npv = (
         -CHOICE_UPFRONT * CHOICE_CAP_MAX
-        - CHOICE_FIXED * CHOICE_CAP_MAX / (1 + RATE)
+        - CHOICE_FIXED * CHOICE_CAP_MAX / (1 + RATE) ** 2
         + (revenue - CHOICE_FIXED * CHOICE_CAP_MAX) / (1 + RATE) ** 3
     )
     return total, npv
@@ -868,3 +914,18 @@ def test_npv_selects_zero_build_where_total_sum_selects_max(tmp_path) -> None:
     sum_value, sum_cap = _solve_bundle(sum_bundle, tmp_path / "sum")
     assert sum_value == pytest.approx(-total, rel=1e-6)
     assert sum_cap == pytest.approx(10000.0, rel=1e-6)
+
+
+def test_npv_fixed_build_matches_discounted_cashflows(tmp_path) -> None:
+    """非零对照：容量固定 10kW 时真实目标 == 独立 CF 折现手算。"""
+    _, npv = _choice_hand_sums()
+    assert npv == pytest.approx(-1124.9555453945031, rel=1e-9)
+    bundle = HIGHS_MILP_PROVIDER.generate(
+        *_choice_inputs(
+            {"sense": "maximize", "expression": NPV_MARKER},
+            cap_bounds=("10", "10"),
+        )
+    )
+    value, cap = _solve_bundle(bundle, tmp_path / "fixed")
+    assert cap == pytest.approx(10000.0, rel=1e-6)
+    assert value == pytest.approx(npv, rel=1e-6)

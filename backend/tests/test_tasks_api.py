@@ -590,6 +590,52 @@ def test_submit_rejects_nonempty_tax_rules_without_creating_task(
     assert body["task"]["status"] == "queued"
 
 
+def test_submit_rejects_nonempty_credit_pools_without_creating_task(
+    client: TestClient, db: Session
+) -> None:
+    """真实提交入口：tax_rules 为空但 credit_pools 非空即 400，不建任务/快照。
+
+    与生成器能力边界同范围（两者任一非空即不支持），已明确不支持的
+    输入不在提交后失败。
+    """
+    from assembly_fixture import save_compute_planning
+    from test_config_revisions import _tax_profile_payload
+
+    from iesplan.application import configuration as config_cases
+
+    owner = make_user(db, "owner_poolgate")
+    pid = _create_project(client, owner, "任务测试项目")
+    _declare_finance(db, owner, pid)
+    device_ref, revision = _declare_device_and_planning(client, db, owner, pid)
+    revision = _set_explicit_calc(client, pid, owner, revision)
+    revision = _declare_assembly_sections(
+        client, pid, owner, revision, {device_ref: {"type": "none"}}
+    )
+    _bind_and_freeze(client, pid, owner, None, revision=revision)
+    pool_payload = _tax_profile_payload()
+    pool_payload["profile"] = {
+        **pool_payload["profile"], "id": "cn-pool-demo", "region": "CN-Pool",
+    }
+    pool_payload["tax_rules"] = {}
+    pool_payload["credit_pools"] = {
+        "main_pool": {
+            "opening_credit": {"value": "100", "unit": "CNY"},
+            "receivable_policy": "end_receivable",
+            "refunds": [],
+        },
+    }
+    config_cases.register_finance_profile(db, dict(pool_payload), owner.id)
+    config_cases.set_project_finance_profile(db, pid, "cn-pool-demo", owner.id)
+    save_compute_planning(db, pid, owner.id, device_ref)
+    rev = _save_config(client, pid, owner)
+    status, body = _submit_task(
+        client, pid, owner, config={"config_revision": rev}, idempotency_key="op-pool-001")
+    assert status == 400, body
+    assert body["error"]["code"] == "TASK-REQ-007"
+    assert db.execute(select(func.count(Task.id))).scalar() == 0
+    assert db.execute(select(func.count(CalcSnapshot.id))).scalar() == 0
+
+
 def _prepare_taxref_project(client: TestClient, db: Session, owner, profile_payload: dict) -> tuple:
     """建项目 + 登记/引用税则画像 + 保存覆盖 + 规划/计算/装配/固化(返回 pid 与 device_ref)。"""
     pid = _create_project(client, owner, "税则跨输入项目")
