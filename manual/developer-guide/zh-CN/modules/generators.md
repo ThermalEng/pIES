@@ -39,6 +39,12 @@
 
 各项输入均来自可信上游，生成器不重复验证已签发的装配、设备贡献、财务快照、序列或评价确认，不做内容摘要。Generator 只接收已完成物化的集合（`pending_predict` 为空，由上游在预测产物合并后构成，此处信任类型化交接，不复核）；完整运营时域由装配基线起始年/分辨率与评价确认的 `operation_years` 推导，`series` 为空的项目仍得完整时域，不回退单年。付款计划与维护费用按财务时点消费，不放进物化集合，不建立外层输入包装。
 
+### 税务提交能力
+
+税务支持复用 `GeneratorDescriptor.capabilities`，不另建生成器白名单或注册表。`finance.vat`、`finance.construction_input_vat`、`finance.income_tax` 分别声明对应已定义税则种类，`finance.credit_pools` 声明抵扣池，`finance.financial_facts` 声明同次解财务事实输出。采用税则或抵扣池的任务还要求财务事实输出能力；空税则且空池不因缺少税务能力标记而拒绝。
+
+任务提交用已解析的所选生成器描述符核对所需能力，缺失时返回 `TASK-REQ-007` 并标明缺失项，不静默按税前执行，也不按provider名称或版本字符串猜测支持。维护引用、评价期间及财务规则自身约束仍在原公开入口核对一次。类别支持不承诺每个数学实例均可降级；具体表达式、有限界和正残值等建模能力限制仍由生成器实际构模时报告，不在API生成计算包或复制模型预校验。
+
 ## 输出
 
 成功输出 [Solver Bundle](../formats/solver-bundle.md)，包含：
@@ -84,7 +90,7 @@ Bundle 规范化与原子发布
 
 ## 首个内置 provider 与完整 Bundle 聚合
 
-首个内置 provider 为 `ies.generator.highs_milp@3.0.0`（见“首个内置链”裁定目标）：mode 只要 `planning`、精度只要 `medium`、solver 只要 `ies.solver.highs@1.7.2`；options 只接受空对象；输出请求支持 `solution` 与 `metrics`（`metrics` 为 ResultAdapter 后处理请求，不对应求解器第二个原始文件，未知输出明确拒绝）；只消费装配实际绑定的 constant/time_series 计费价格（快照中未绑定的价格条目不触发拒绝），未知价格类型明确拒绝；`seed` 为 null 时使用固定种子 `0`，种子同时固定进求解命令与元数据，不读取随机全局状态。
+首个内置 provider 为 `ies.generator.highs_milp@3.4.0`（见“首个内置链”裁定目标）：mode 只要 `planning`、精度只要 `medium`、solver 只要 `ies.solver.highs@1.7.2`；options 只接受空对象；输出请求支持 `solution` 与 `metrics`（`metrics` 为 ResultAdapter 后处理请求，不对应求解器第二个原始文件，未知输出明确拒绝）；只消费装配实际绑定的 constant/time_series 计费价格（快照中未绑定的价格条目不触发拒绝），未知价格类型明确拒绝；`seed` 为 null 时使用固定种子 `0`，种子同时固定进求解命令与元数据，不读取随机全局状态。
 
 `generate` 返回唯一完整聚合：manifest（即 `bundle.yaml` 内容）加按规范相对路径索引的只读输入文件字节映射（`input/problem.mps` 与 `input/parameters.json`）。`input/parameters.json` 为最小规范 JSON 元数据，只保存 ResultAdapter 后续必需的 `unit_map`、`objective_offset`、`objective_unit`（目标业务单位，按编译期根量纲确定：金额取财务币种，无量纲取 `"1"`，单一物理量纲取 SI 基准单位）、财务分量求值声明 `components`（分量 ident → `{unit, caliber, constant, terms}`，与目标同一分量展开路径，不依赖目标写法）、请求 outputs、固定 seed、precision 与装配/引用追溯，不复制完整装配、模型与财务，不写 hash。结构化命令按真实 HiGHS CLI 语法逐项存储（非 shell），`time_limit_seconds` 同时进入硬资源声明与求解器选项且语义一致；同一组直接输入与 provider 版本逐字节相同，不写临时目录，不启动 solver。
 
@@ -154,7 +160,7 @@ Bundle 以规范 manifest 与全部输入文件作为身份，不另放随机 ID
 
 ## 首个内置链（已裁定目标）
 
-首个内置 provider 为 `ies.generator.highs_milp@3.3.0`，兼容求解器 `ies.solver.highs@1.7.2`，结构化命令执行器前向引用 `ies.executor.local_process@1.0.0`，结果适配器前向引用 `ies.result-adapter.highs@2.0.0`。技术模型支持可证明的仿射关系，以及有限非负上下界下 `x*y=0` 的确定性二进制 Big-M 转换；设备状态仅允许 `t` 与 `t-1`；公开规划变量为连续变量。生成器可为受支持的互斥关系及[财务税务关系](finance.md#求解能力边界)引入必要的内部离散变量，所需界由业务参数和变量边界推导。电池“规划容量参与 SOC 分母”一类双线性明确不支持。
+首个内置 provider 为 `ies.generator.highs_milp@3.4.0`，兼容求解器 `ies.solver.highs@1.7.2`，结构化命令执行器前向引用 `ies.executor.local_process@1.0.0`，结果适配器前向引用 `ies.result-adapter.highs@3.0.0`。技术模型支持可证明的仿射关系，以及有限非负上下界下 `x*y=0` 的确定性二进制 Big-M 转换；设备状态仅允许 `t` 与 `t-1`；公开规划变量为连续变量。生成器可为受支持的互斥关系及[财务税务关系](finance.md#求解能力边界)引入必要的内部离散变量，所需界由业务参数和变量边界推导。电池“规划容量参与 SOC 分母”一类双线性明确不支持。
 
 生成器 `3.0.0` 将独立评价确认列为必需生成输入，不保留旧调用签名或默认评价值。通用 Bundle manifest 未变；结果适配协议按实际输出变化独立版本化，不因生成器输入变化而同步升版。
 
