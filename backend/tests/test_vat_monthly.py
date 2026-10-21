@@ -441,6 +441,7 @@ def _inputs(
     tank_origin="new",
     maintenance_tax=True,
     payload=None,
+    export_values=None,
 ):
     doc = _doc(tank_origin=tank_origin)
     if objective is not None:
@@ -478,7 +479,7 @@ def _inputs(
                 point_count=17520,
                 resolution="1h",
                 unit="CNY/kWh",
-                values=_price_values(),
+                values=_price_values() if export_values is None else export_values,
                 source={"kind": "price_series", "object_id": "d" * 64},
             ),
         ),
@@ -506,13 +507,15 @@ def _hand_monthly(
     fixed_om=Decimal("2100"),
     maintenance_tax=True,
     con_ratio=Decimal("1"),
+    energy_ratio=Decimal("1"),
 ):
     """36 个月 (out, in) 手算（业务 Decimal，与实现公式独立书写）。
 
     ``tax_factor`` 为税额系数（含税 ``r/(1+r)``，不含税 ``r``），仅用于
     建设/价格/OM；维护金额为实际含税付款，恒按含税拆价计税，不随文件
     ``price_basis`` 改变。``upfront``/``fixed_om`` 为建设总额/年固定 OM
-    （既有沉没时取 0，对应无建设进项、无固定 OM 进项）。
+    （既有沉没时取 0，对应无建设进项、无固定 OM 进项）。``energy_ratio``
+    为购能可抵比例（仅购能进项行）。
     """
     out = [Decimal("0")] * 36
     inp = [Decimal("0")] * 36
@@ -522,13 +525,13 @@ def _hand_monthly(
     for index, hours in enumerate(HOURS_2026):
         month = 13 + index
         energy = Decimal("7") * Decimal(str(hours))
-        inp[month - 1] += energy * Decimal("0.7") * tax_factor
+        inp[month - 1] += energy * Decimal("0.7") * tax_factor * energy_ratio
         inp[month - 1] += Decimal("5") * Decimal(str(hours)) * Decimal("0.01") * tax_factor
         out[month - 1] += Decimal(str(ELEC_KW)) * Decimal(str(hours)) * Decimal("-0.05") * tax_factor
     for index, hours in enumerate(HOURS_2027):
         month = 25 + index
         energy = Decimal("7") * Decimal(str(hours))
-        inp[month - 1] += energy * Decimal("0.7") * tax_factor
+        inp[month - 1] += energy * Decimal("0.7") * tax_factor * energy_ratio
         inp[month - 1] += Decimal("5") * Decimal(str(hours)) * Decimal("0.01") * tax_factor
         out[month - 1] += Decimal(str(ELEC_KW)) * Decimal(str(hours)) * Decimal("2.0") * tax_factor
     inp[23] += fixed_om * tax_factor * Decimal("0.5")

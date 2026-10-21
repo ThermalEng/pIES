@@ -21,6 +21,7 @@ from test_vat_monthly import (
     _hand_monthly,
     _hand_npv_with_vat,
     _inputs,
+    _price_values,
     _solve_internal,
 )
 
@@ -490,14 +491,13 @@ VAT_RATE = Decimal("0.13")
 VAT_UNIT = Decimal("1") + VAT_RATE
 
 
-def _mix_bases():
+def _mix_bases(*, energy_credit=Decimal("1")):
     """混合夹具评价年 1..3 应税基础手算（含税；建设可抵 50%）。
 
     计税收入 = 实际销售收款 − 已声明销项税；可扣购能 = 实际含税付款 −
-    已声明可抵进项（heat 全抵，不可抵部分无）；年固定 OM 可抵半、
-    tank 可变全抵、sys_var 可变无声明（按陈述）；维护 (2,1) 可扣净额、
-    (2,2) 不可扣但现金不变；折旧基础 = 6000 − 建设可抵半，20 年。
-    负价保留符号。
+    已声明可抵进项（不可抵部分保留）；年固定 OM 可抵半、tank 可变全抵、
+    sys_var 可变无声明（按陈述）；维护 (2,1) 可扣净额、(2,2) 不可扣但
+    现金不变；折旧基础 = 6000 − 建设可抵半，20 年。负价保留符号。
     """
     energy_kwh = Decimal(str(ELEC_KW)) * Decimal("8760")
     heat_kwh = Decimal("7") * Decimal("8760")
@@ -506,7 +506,7 @@ def _mix_bases():
     gross_y3 = Decimal("2.0") * energy_kwh
     rev_y3 = gross_y3 - gross_y3 * VAT_RATE / VAT_UNIT
     gross_heat = Decimal("0.7") * heat_kwh
-    energy = gross_heat - gross_heat * GROSS_FACTOR
+    energy = gross_heat - gross_heat * GROSS_FACTOR * energy_credit
     om_fixed = Decimal("2100") * (Decimal("1") - GROSS_FACTOR * Decimal("0.5"))
     var_thr = Decimal("5") * Decimal("8760") * Decimal("0.01") * (Decimal("1") - GROSS_FACTOR)
     var_e = energy_kwh * Decimal("0.02")
@@ -671,3 +671,94 @@ def test_income_vat_mix_exclusive_matches_hand_and_b0(tmp_path) -> None:
     assert solved[f"{prefix}__use__y3__v0"] == pytest.approx(float(-base_y2), rel=1e-6)
     expected = _hand_npv_with_vat(paids, cash=Decimal("1.13")) - tax / Decimal(str(1.0 + RATE)) ** 3
     assert value == pytest.approx(float(expected), rel=1e-6)
+
+
+def _equiv_payloads():
+    """等价陈述对：同一实际交易，含税总额 vs 不含税净额（÷1.13）。
+
+    购能可抵比例两边同取 50%；仅已声明税率的陈述值（购能价、建设/
+    年固定/使用 OM 单价、倒送序列）按净额缩放，无声明的 sys_var 单价
+    与维护实际金额两边相同。
+    """
+    half = {"value": "0.5", "unit": "1"}
+    incl = _mix_payload()
+    incl["tax_rules"]["vat_op"]["in_tax"][0]["deductible_ratio"] = dict(half)
+    excl = _mix_payload()
+    excl["tax_rules"]["vat_op"]["in_tax"][0]["deductible_ratio"] = dict(half)
+    excl["profile"]["price_basis"] = "tax_exclusive"
+
+    def as_net(stated: str) -> str:
+        # 净额保留 10 位小数（公开金额精度门禁要求；引入相对误差约
+        # 1e-12，不影响 1e-6 对照）。
+        return str((Decimal(stated) / VAT_UNIT).quantize(Decimal("0.0000000001")))
+
+    heat = excl["energy_prices"]["heat_import"]["value"]
+    heat["value"] = as_net(heat["value"])
+    sys1 = excl["finance_types"]["sys1"]
+    sys1["upfront_capex"]["linear"]["cap"]["unit_cost"]["value"] = as_net(
+        sys1["upfront_capex"]["linear"]["cap"]["unit_cost"]["value"]
+    )
+    sys1["annual_fixed_om"]["linear"]["cap"]["unit_cost"]["value"] = as_net(
+        sys1["annual_fixed_om"]["linear"]["cap"]["unit_cost"]["value"]
+    )
+    sys1["period_variable_om"]["linear"]["thr"]["unit_cost"]["value"] = as_net(
+        sys1["period_variable_om"]["linear"]["thr"]["unit_cost"]["value"]
+    )
+    export_values = tuple(float(Decimal(str(v)) / VAT_UNIT) for v in _price_values())
+    return incl, excl, export_values
+
+
+def test_income_equivalent_gross_net_statement_matches(tmp_path) -> None:
+    """等价含税/不含税陈述：计税基础与税后 NPV 一致。
+
+    两边独立手算期望（销售 gross−销项、购能半抵、年度/使用 OM、
+    维护、折旧），再断言两求解的税基变量、月税链与目标值互相一致。
+    """
+    incl_payload, excl_payload, export_values = _equiv_payloads()
+    base_y1, base_y2, base_y3 = _mix_bases(energy_credit=Decimal("0.5"))
+    year2 = use_losses(taxable_base=base_y2, balances=(), year=2, carryforward_years=INC_CARRY_YEARS)
+    year3 = use_losses(
+        taxable_base=base_y3,
+        balances=year2.remaining,
+        year=3,
+        carryforward_years=INC_CARRY_YEARS,
+    )
+    assert year3.uses == (-base_y2,)
+    tax = income_tax_payable(taxable_base=base_y3, loss_used=-base_y2, rate=INC_RATE)
+    prefix = "inc__income_demo"
+    wanted = {
+        f"{prefix}__gen__y2": float(-base_y2),
+        f"{prefix}__profit__y3": float(base_y3),
+        f"{prefix}__use__y3__v0": float(-base_y2),
+    }
+    out, inp = _hand_monthly(con_ratio=Decimal("0.5"), energy_ratio=Decimal("0.5"))
+    paids, carries = _hand_chain(out, inp)
+    # 同一实际交易按绝对值应得同一月链：不含税净额 × 税率恒等于含税
+    # 总额 × 含税拆价，故双方共用同一份手算期望。
+    expected = _hand_npv_with_vat(paids) - tax / Decimal(str(1.0 + RATE)) ** 3
+
+    artifact, models, materialized, finance, config, evaluation = _inputs(payload=incl_payload)
+    bundle = HIGHS_MILP_PROVIDER.generate(artifact, models, materialized, finance, config, evaluation)
+    value_incl, solved_incl, _ = _solve_internal(bundle, tmp_path)
+    artifact, models, materialized, finance, config, evaluation = _inputs(
+        payload=excl_payload, export_values=export_values
+    )
+    assert finance.price_basis == "tax_exclusive"
+    bundle = HIGHS_MILP_PROVIDER.generate(artifact, models, materialized, finance, config, evaluation)
+    value_excl, solved_excl, _ = _solve_internal(bundle, tmp_path)
+    for month in range(1, 37):
+        assert solved_incl[f"vat__main_pool__paid__m{month}"] == pytest.approx(
+            float(paids[month - 1]), rel=1e-6
+        )
+        assert solved_excl[f"vat__main_pool__paid__m{month}"] == pytest.approx(
+            float(paids[month - 1]), rel=1e-6
+        )
+    for name, want in wanted.items():
+        assert solved_incl[name] == pytest.approx(want, rel=1e-6)
+        assert solved_excl[name] == pytest.approx(want, rel=1e-6)
+        assert solved_excl[name] == pytest.approx(solved_incl[name], rel=1e-6)
+    assert solved_incl[f"{prefix}__profit__y2"] == pytest.approx(0.0, abs=1e-6)
+    assert solved_excl[f"{prefix}__profit__y2"] == pytest.approx(0.0, abs=1e-6)
+    assert value_incl == pytest.approx(float(expected), rel=1e-6)
+    assert value_excl == pytest.approx(float(expected), rel=1e-6)
+    assert value_excl == pytest.approx(value_incl, rel=1e-6)
