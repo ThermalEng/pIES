@@ -17,7 +17,7 @@
 
 - 计算模式：文本，例如 `planning`；
 - 生成器精确引用 / 求解器：文本，形如 `<稳定ID>@<语义化版本>`，
-  例如 `ies.generator.highs_milp@3.3.0`；
+  例如 `ies.generator.highs_milp@3.4.0`；
 - 计算精度：`low`、`medium`、`high` 三选一，必填；
 - 时间限制(秒)：正整数，必填；
 - 随机种子：可空，空表示不指定；
