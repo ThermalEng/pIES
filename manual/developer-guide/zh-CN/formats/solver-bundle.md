@@ -109,6 +109,29 @@ extensions: {}
 
 禁止 `sh -c`、`bash -c`、管道、重定向、命令替换、通配符展开和由参数触发的任意插件加载。命令参数中的路径同样必须在 Bundle 内，不能含绝对路径或 `..`。
 
+## 同次解财务事实映射
+
+配套生成器在 `parameters.json` 的 `financial_facts` 声明结构化财务事实映射，ResultAdapter 使用同一次主解恢复为 `ComputeResult.outputs.financial_facts`。声明复用既有仿射求值方式，包含明确字段、业务身份、期间、单位与求解列引用；消费者不拆解分量键、序列 ID 或列名。现金流声明与规划目标中的现金表达式同源，不重新建立税务模型。声明不复制完整财务配置，也不是新的用户公式语言。
+
+以下为配套生成器 `ies.generator.highs_milp@3.4.0` 与适配器 `ies.result-adapter.highs@3.0.0` 的目标业务输出：
+
+| 字段 | 语义 |
+| --- | --- |
+| `currency` | 冻结财务币种，所有金额使用该单位和十进制字符串，不作展示舍入 |
+| `construction_total`、`annual_fixed_om` | 实际含税建设总额与年度固定运维金额，按本课题增量范围计取 |
+| `payments_applied` | `[{t, ratio, amount}]`，明确建设付款时点、比例与实际含税付款；不合并或丢失同一时点的多笔付款 |
+| `annual_operation` | `[{financial_year, energy_net, variable_om, fixed_om, maintenance, net}]`，实际含税收付；`net` 为扣除所列费用后的税款结算前运行净额，不重复扣税或折旧 |
+| `tax_cash.vat` | `[{pool, month, paid, refund_claimed, refund_arrived, carry}]`，每池每评价月一行；`carry` 为扣除当月确认退款后的期末可结转留抵，实缴与到账退款才影响现金 |
+| `tax_cash.refunds` | `[{pool, period, arrival_period, amount}]`，明确确认和到账期间；保留评价期后到账的已确认款项，期后款不计入期内现金 |
+| `tax_cash.income` | `[{rule, year, taxable_base, loss_used, loss_generated, loss_expired, tax}]`，每所得税规则每评价年一行，基础为当年抵扣亏损前的应税基础 |
+| `tax_cash.depreciation` | `[{rule, asset, year, amount}]`，该年计税折旧；只解释税基，不作为额外现金支出 |
+| `tax_cash.loss_balances` | `[{rule, vintage_id, year, last_usable_year, amount}]`，按规则及不透明亏损批次标识记录年末余额，批次标识不得由消费者拆解 |
+| `annual_net_flows` | 按 `t=0..evaluation_years` 排列的完整税后现金流；包含明确建设付款、运行收支、VAT实缴／退款到账与所得税，余额及折旧不额外计入现金 |
+
+`t`、`month`、`year`、`period`、`arrival_period`、`last_usable_year` 均为整数；`ratio` 与金额均为十进制字符串。期间映射以财务契约为准，池与规则保持显式身份，共享池不得按规则重复计入。没有适用规则时对应数组为空，含义为不适用；适用规则的零税额、零余额显式发布，不省略为未知。无税则的完整现金流仍须声明并恢复，不以缺映射冒充零税。
+
+该块随已请求的 `solution` 且存在可用数学解时发布；未请求solution或无可用解时缺席。它不增加 CalculationConfig 输出词汇，不改变 ComputeResult 顶层身份与状态或通用 Bundle manifest。适配器只恢复业务事实，不重算税务、猜列名或改写期间；内部可信声明不增加重复结构、摘要或完整性复核。
+
 ## 运行时职责
 
 SolverRuntime 是求解器无关的受控执行层，只负责：
