@@ -91,7 +91,7 @@ test.describe('空值门禁(非画布 GUI)', () => {
     await page.getByRole('navigation', { name: /工作台|Workspace/i }).getByText('计算配置').click()
     await expect(page).toHaveURL(/\/config$/)
     await page.locator('#calc-mode').fill('planning')
-    await page.locator('#calc-generator').fill('ies.generator.highs_milp@3.3.0')
+    await page.locator('#calc-generator').fill('ies.generator.highs_milp@3.4.0')
     await page.locator('#calc-solver').fill('ies.solver.highs@1.7.2')
     await page.locator('#calc-precision').selectOption('medium')
     await page.locator('#calc-time-limit').fill('600')

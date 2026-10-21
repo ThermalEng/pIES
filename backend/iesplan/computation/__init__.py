@@ -100,6 +100,7 @@ from iesplan.computation.protocols import (
     StopProbe,
     check_provider_ref,
     read_stop_reason,
+    thaw_json_value,
 )
 from iesplan.computation.registry import (
     DEFAULT_ALGORITHM,
@@ -220,6 +221,7 @@ __all__ = [
     "normalize_bundle",
     "prediction_delta",
     "split_predictions_by_dependency",
+    "thaw_json_value",
     "read_stop_reason",
     "validate_bundle",
     "validate_calculation_config",

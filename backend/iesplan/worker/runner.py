@@ -428,12 +428,10 @@ def _execute_compute(ctx: RunContext) -> tuple[dict, dict]:
     hourly_files = worker_app.build_hourly_files(result.outputs)
     if hourly_files:
         output_files["hourly"] = hourly_files
-    # 评价时间轴现金流与指标(0.12-T2): 只对最终轮已求解结果计算, 随
+    # 同次解财务事实投影与封存评价: 只对最终轮已求解结果投影, 随
     # payload 进同一证据封存/提交单元；未求解或缺 solution 输出返回
-    # None（不写财务块，不伪造）；冻结缺件即实际错误可见失败。
-    financial = worker_app.build_financial_evaluation(
-        snapshot, finance, artifact, models, completed, result
-    )
+    # None（不写财务块，不伪造）；配套事实缺件即实际错误可见失败。
+    financial = worker_app.build_financial_evaluation(snapshot, finance, result)
     if financial is not None:
         payload["financial_evaluation"] = financial
     return payload, output_files

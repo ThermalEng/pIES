@@ -1118,13 +1118,33 @@ class _ProjectBuilder:
     def _npv_objective(self) -> _AffineAcc:
         """显式全周期 NPV 目标仿射式（gross 现金流基础，同次解内表达）。
 
+        现金表达式由 ``_retain_operating_facts`` 与声明同源构建，本方法
+        只按冻结折现率折现求和（``CF[t]`` 口径见该方法）。
+        """
+        self._retain_operating_facts()
+        evaluation = self.evaluation
+        npv = _AffineAcc()
+
+        def discount(year: int) -> float:
+            return (1.0 + evaluation.discount_rate) ** year
+
+        for t, ratio, acc in self._fact_payments:
+            npv.add_scaled(acc, -1.0 / discount(t))
+        for year_no in sorted(self._fact_annual):
+            npv.add_scaled(self._fact_annual[year_no]["net"], 1.0 / discount(year_no))
+        return npv
+
+    def _retain_operating_facts(self) -> None:
+        """实际 gross 经营/建设现金表达式（目标与声明同源，见方法文档）。
+
         ``CF[t]`` 评价年口径（``t = 0..E``，``E = K + N``）：建设总额按
         冻结付款比例落款；第 j 个运营年净额（能源净收益 − 可变 O&M −
-        固定 O&M − 当年维护）计入 ``CF[K+j]``；再按冻结折现率折现求和。
-        能源按区间内实际步归集（公历年界与求解域同源）；固定 O&M 按年值
-        口径每年全额；维护按清单年一次扣除。不含税口径下，已声明税率
-        对应的建设/价格/实际消费 OM 按价税合计出现金（含税口径基础金额
-        已为全额，不重复加税）；维护按明确金额口径不变。
+        固定 O&M − 当年维护）计入 ``CF[K+j]``。能源按区间内实际步归集
+        （公历年界与求解域同源）；固定 O&M 按年值口径每年全额；维护按
+        清单年一次扣除。不含税口径下，已声明税率对应的建设/价格/实际
+        消费 OM 按价税合计出现金（含税口径基础金额已为全额，不重复加
+        税）；维护按明确金额口径不变。与规划目标选择无关，恒执行一次
+        （构造器单次建模；重复调用会重复累积，调用方保证单次）。
         """
         evaluation = self.evaluation
         price_markup, om_markup, construction_markup = self._vat_gross_markups()
@@ -1136,16 +1156,9 @@ class _ProjectBuilder:
         )
         instances = (self.doc.get("finance_binding") or {}).get("instances") or {}
         bindings = self.doc.get("tariff_bindings") or {}
-        npv = _AffineAcc()
-
-        def discount(year: int) -> float:
-            return (1.0 + evaluation.discount_rate) ** year
 
         self._fact_construction.add_scaled(construction, 1.0)
         for payment in evaluation.construction_payments:
-            npv.add_scaled(
-                construction, -float(payment.ratio) / discount(payment.t)
-            )
             amount = _AffineAcc()
             amount.add_scaled(construction, float(payment.ratio))
             self._year_cash(payment.t).add_scaled(construction, -float(payment.ratio))
@@ -1189,7 +1202,6 @@ class _ProjectBuilder:
             annual.add_scaled(variable, 1.0)
             annual.add_scaled(fixed, 1.0)
             annual.add_const(-maintenance.get(year_no, 0.0))
-            npv.add_scaled(annual, 1.0 / discount(year_no))
             self._year_cash(year_no).add_scaled(annual, 1.0)
             self._fact_annual[year_no] = {
                 "energy": energy.snapshot(),
@@ -1198,8 +1210,8 @@ class _ProjectBuilder:
                 "net": annual.snapshot(),
             }
             if index == 0:
-                self._fact_fixed_om.add_scaled(fixed, 1.0)
-        return npv
+                # 总量沿既有封存口径记正数（分量累积带负号，此处取反）。
+                self._fact_fixed_om.add_scaled(fixed, -1.0)
 
     # -- VAT 月度精确关系（3.2.0；无规则无池时整段跳过）--
 
@@ -2075,6 +2087,8 @@ class _ProjectBuilder:
             if self._income_cash is not None:
                 npv.add_scaled(self._income_cash, 1.0)
             return npv, self.finance.currency
+        # 普通目标不消费经营现金，但同次解财务事实仍须声明（与目标无关）。
+        self._retain_operating_facts()
         symbols, placeholders = self._planning_symbols()
         compiled = compile_planning_expression(
             raw["expression"], symbols, currency=None,
@@ -2177,6 +2191,13 @@ class _ProjectBuilder:
         """已知常量声明节点（与求值路径统一，适配器同口径恢复）。"""
         return {"constant": value, "terms": {}}
 
+    @staticmethod
+    def _decl_negated(acc: _AffineAcc) -> dict[str, object]:
+        """同源仿射的相反数声明（费用类沿既有封存口径记正数）。"""
+        negated = _AffineAcc()
+        negated.add_scaled(acc, -1.0)
+        return _ProjectBuilder._decl_affine(negated)
+
     def financial_facts(self) -> Mapping[str, object]:
         """同次解结构化财务事实声明（格式页映射表为唯一正文）。
 
@@ -2197,8 +2218,8 @@ class _ProjectBuilder:
                 {
                     "financial_year": year_no,
                     "energy_net": self._decl_affine(fields["energy"]),
-                    "variable_om": self._decl_affine(fields["variable"]),
-                    "fixed_om": self._decl_affine(fields["fixed"]),
+                    "variable_om": self._decl_negated(fields["variable"]),
+                    "fixed_om": self._decl_negated(fields["fixed"]),
                     "maintenance": str(maint.get(year_no, Decimal("0"))),
                     "net": self._decl_affine(fields["net"]),
                 }
@@ -2224,9 +2245,10 @@ class _ProjectBuilder:
             for _, _, acc in row["expired"]:
                 expired.add_scaled(acc, 1.0)
             tax = _AffineAcc()
-            tax.add_term(row["profit"], -row["rate"])
+            # 税额为正（现金贡献为其相反数，已在 _year_cash 并行累积）。
+            tax.add_term(row["profit"], row["rate"])
             for name in row["used"]:
-                tax.add_term(name, row["rate"])
+                tax.add_term(name, -row["rate"])
             gen = _AffineAcc()
             gen.add_term(row["gen"], 1.0)
             income.append(

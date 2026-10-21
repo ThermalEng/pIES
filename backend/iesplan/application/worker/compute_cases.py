@@ -18,9 +18,9 @@
   猜测；媒体类型取 manifest/回执声明）。
 - ``build_attempt_context`` / ``business_outcome_for``：回执身份派生与
   任务业务结局映射（只做 contract 允许的显式映射）。
-- ``build_financial_evaluation``：已求解时间轴现金流与指标（只处理已求解
-  且含 solution 输出的结果，其余返回 None；只组装冻结事实并调用 finance
-  纯算法，不解释财务业务）。
+- ``build_financial_evaluation``：同次解财务事实投影与封存评价（只处理
+  已求解且含 solution 输出的结果，其余返回 None；只投影适配器恢复的
+  同次解财务事实并调用 finance 既有评价纯函数，不重建税基/VAT/亏损算法）。
 
 本模块只 flush-free：只读 DB 与纯内存转换，不拥有事务、不 commit/
 rollback（对象封存的提交由调用方短会话负责）。预测需求
@@ -65,6 +65,7 @@ from iesplan.computation import (
     materialize_predicted_series,
     prediction_delta,
     split_predictions_by_dependency,
+    thaw_json_value,
 )
 from iesplan.computation.result_adapter import ResultAdapterRegistry
 from iesplan.core.contracts import horizon_point_count
@@ -633,70 +634,23 @@ def attach_evidence_objects(
         )
 
 
-def _solution_variables(result: ComputeResult) -> dict[str, tuple[float, str]]:
-    """适配输出变量 → {LP 名: (业务值, 业务单位)}。
-
-    适配器是求解输出进入结果模型的权威校验入口, 此处信任其类型化
-    输出, 残缺即自然错误可见, 不做形状重复校验。
-    """
-    solution = result.outputs["solution"]
-    return {item["name"]: (float(item["value"]), item["unit"]) for item in solution["variables"]}
-
-
-def _step_values(
-    variables: Mapping[str, tuple[float, str]],
-    series_map: Mapping[tuple[str, str], tuple[tuple[float, ...], str]],
-    inst: str,
-    iface: str,
-    total_steps: int,
-) -> tuple[tuple[float, ...], str]:
-    """接口逐 step 业务值(预定义取物化序列, 否则取求解变量; 残缺自然可见)。"""
-    if (inst, iface) in series_map:
-        values, unit = series_map[(inst, iface)]
-        return tuple(values[:total_steps]), unit
-    prefix = f"{inst}__{iface}__t"
-    found: dict[int, tuple[float, str]] = {}
-    for name, (value, unit) in variables.items():
-        if not name.startswith(prefix):
-            continue
-        try:
-            step = int(name[len(prefix) :])
-        except ValueError:
-            continue
-        found[step] = (value, unit)
-    return tuple(found[step][0] for step in range(total_steps)), found[0][1]
-
-
 def build_financial_evaluation(
     snapshot: Any,
     finance: EffectiveFinanceConfig,
-    artifact: ValidatedAssemblyArtifact,
-    models: Mapping[str, DeviceMathContribution],
-    materialized: MaterializedSet,
     result: ComputeResult,
 ) -> dict[str, object] | None:
-    """同一次全期解 → 评价时间轴现金流与指标(0.12-T2 接通点)。
+    """同次解财务事实 → 封存评价(ies.financial-evaluation@1.0.0)。
 
     只处理已求解且含 solution 输出的结果; 其余状态返回 None(调用方
-    不写财务块, 不把不可行/缺证据结果伪装为有现金流的方案)。本函数只
-    组装已冻结事实并调用 finance 纯算法, 不解释财务业务(符号/口径/
-    归集规则全在 finance.timeline), 不读 DB/最新配置, 不重跑提交校验:
-    冻结缺件即实际结构错误直接可见失败。
+    不写财务块, 不把不可行/缺证据结果伪装为有现金流的方案, 缺块语义
+    沿既有 ``financial_absence``)。本函数只投影适配器恢复的同次解财务
+    事实并调用 finance 既有评价纯函数, 不重建税基/VAT/亏损算法, 不读
+    DB/最新配置, 不重跑提交校验: 配套 3.0.0 事实缺件即实际结构错误
+    直接可见失败, 不补空、不回退。
     """
-    from iesplan.core.contracts import ProjectBaseline
-    from iesplan.finance import (
-        InterfaceDriverFacts,
-        TariffYearFacts,
-        TimelineInputs,
-        annual_boundaries,
-        annual_energy_nets,
-        annual_fixed_om_total,
-        annual_variable_om,
-        assemble_cashflows,
-        combine_annual_nets,
-        construction_total,
-        evaluate_project_investment,
-    )
+    from decimal import Decimal
+
+    from iesplan.finance import evaluate_project_investment
 
     if result.math_status != "solved":
         return None
@@ -704,134 +658,27 @@ def build_financial_evaluation(
     # 发布选项(metrics-only 无 solution 即不评价, 不伪装)。
     if "solution" not in result.outputs:
         return None
+    # financial_facts 由配套适配器用同一次主解恢复并保证; 缺件即自然
+    # KeyError 可见, 不补空、不复核。
+    facts = result.outputs["financial_facts"]
     evaluation = snapshot.evaluation
     period = int(evaluation["construction_period"])
     operation = int(evaluation["operation_years"])
     years = int(evaluation["evaluation_years"])
     rate = float(evaluation["discount_rate"])
 
-    doc = json.loads(artifact.canonical_text)
-    baseline = doc["project_baseline"]
-    frozen_baseline = ProjectBaseline(resolution=baseline["resolution"], start_year=baseline["start_year"])
-    step_seconds = frozen_baseline.step_duration * 3600.0
-    boundaries = annual_boundaries(baseline["resolution"], baseline["start_year"], operation)
-    # operation_years ≥ 1 由提交边界保证, 年度边界恒非空, 不设空回退。
-    total_steps = boundaries[-1][1]
-
-    series_map: dict[tuple[str, str], tuple[tuple[float, ...], str]] = {}
-    for entry in materialized.series:
-        unit = models[entry.device].interfaces[entry.interface].unit
-        series_map[(entry.device, entry.interface)] = (tuple(entry.values), str(unit))
-
-    price_map: dict[str, tuple[tuple[float, ...], str]] = {}
-    for entry in materialized.prices:
-        price_map[entry.price_id] = (tuple(entry.values), entry.unit)
-
-    variables = _solution_variables(result)
-    # solution 含 components 由适配器保证(请求 solution 时必写); 缺件即
-    # 自然 KeyError 可见, 不补空、不复核。
-    components = result.outputs["solution"]["components"]
-
-    tariffs: list[TariffYearFacts] = []
-    for binding_id in sorted(doc["tariff_bindings"]):
-        binding = doc["tariff_bindings"][binding_id]
-        price = finance.energy_prices[binding["price"]]
-        if price.kind == "constant":
-            value = price.value
-            price_values = (float(value.value),) * total_steps
-            price_unit = value.unit
-        else:
-            price_values, price_unit = price_map[binding["price"]]
-        energy_values, energy_unit = _step_values(
-            variables, series_map, binding["instance"], binding["interface"], total_steps
-        )
-        tariffs.append(
-            TariffYearFacts(
-                binding_id=binding_id,
-                direction=price.direction,
-                aggregation=binding["aggregation"],
-                energy_values=energy_values,
-                energy_unit=energy_unit,
-                price_values=tuple(price_values[:total_steps]),
-                price_unit=price_unit,
-            )
-        )
-
-    instances = doc["finance_binding"]["instances"]
-    devices = doc["devices"]
-
-    interface_drivers: list[InterfaceDriverFacts] = []
-    fixed_values: list[float] = []
-    upfront_values: list[float] = []
-    for inst in sorted(instances):
-        entry = instances[inst]
-        if entry["type"] != "costed":
-            continue
-        ft_entry = finance.finance_types[entry["finance_type"]]
-        is_new = devices[inst]["asset_origin"] == "new"
-        # 公开资产口径: 只有 new 计建设及新增固定 O&M; existing 不计沉没
-        # 建设及决策无关固定 O&M(生成器现行增量口径只为其产出可变分量),
-        # 但仍计可变费与能源。
-        if is_new and ft_entry.annual_fixed_om is not None:
-            fixed_values.append(float(components[f"{inst}__annual_fixed_om"]["value"]))
-        variable = ft_entry.period_variable_om
-        if variable is not None:
-            # period_variable_om 只有 linear(triplet 禁止非 upfront 带 fixed);
-            # 标量存量组合在装配公开输入边界已阻断, 此处只有接口型可达,
-            # 按年真实运行结果归集, 不均摊。
-            for driver, cost in (variable.linear or {}).items():
-                target = entry["drivers"][driver]
-                values, unit = _step_values(variables, series_map, inst, target["interface"], total_steps)
-                interface_drivers.append(
-                    InterfaceDriverFacts(
-                        inst=inst,
-                        driver=driver,
-                        values=values,
-                        unit=unit,
-                        aggregation=target["aggregation"],
-                        unit_cost=cost.unit_cost.value,
-                        unit_cost_unit=cost.unit_cost.unit,
-                    )
-                )
-        if is_new and ft_entry.upfront_capex is not None:
-            upfront_values.append(float(components[f"{inst}__upfront_capex"]["value"]))
-
-    from decimal import Decimal
-
     currency = finance.currency
-    energy_nets = annual_energy_nets(
-        step_seconds=step_seconds, boundaries=boundaries, tariffs=tariffs, currency=currency
+    # 适配输出为协议冻结值（tuple/MappingProxy）；封存载荷面向 JSON，
+    # 用协议层互逆函数解冻为普通结构，金额字符串本身不改写。
+    tax_cash = thaw_json_value(
+        {
+            key: facts[key]
+            for key in ("vat", "refunds", "income", "depreciation", "loss_balances")
+        }
     )
-    variable_nets = annual_variable_om(
-        step_seconds=step_seconds,
-        boundaries=boundaries,
-        interface_drivers=interface_drivers,
-        currency=currency,
-    )
-    fixed_total = annual_fixed_om_total(fixed_values)
-    total = construction_total(upfront_values)
-
-    # 同年多项维护按年累加扣除, 不限制年份唯一, 不丢项。
-    maintenance_by_year: dict[int, Decimal] = {}
-    for item in evaluation["maintenance_expenses"]:
-        year = int(item["year"])
-        maintenance_by_year[year] = maintenance_by_year.get(year, Decimal("0")) + Decimal(str(item["amount"]))
-    annual = combine_annual_nets(energy_nets, variable_nets, fixed_total, maintenance_by_year, period)
-    payments = tuple(
-        (int(item["t"]), Decimal(str(item["ratio"]))) for item in evaluation["construction_payments"]
-    )
-    flows = assemble_cashflows(
-        TimelineInputs(
-            construction_period=period,
-            operation_years=operation,
-            evaluation_years=years,
-            payments=payments,
-            annual=tuple(annual),
-        ),
-        total,
-    )
+    flows = [entry["amount"]["value"] for entry in facts["annual_net_flows"]]
     assessed = evaluate_project_investment(
-        flows,
+        [Decimal(value) for value in flows],
         rate,
         years,
         currency=currency,
@@ -839,6 +686,8 @@ def build_financial_evaluation(
         base_year=finance.base_year,
     )
     return {
+        "schema": "ies.financial-evaluation",
+        "schema_version": "1.0.0",
         "status": "evaluated",
         "evaluation_years": years,
         # K/N 回显冻结输入(展示时轴映射用, 不做第二权威读取)。
@@ -849,23 +698,28 @@ def build_financial_evaluation(
         "base_year": finance.base_year,
         "profile_id": finance.profile_id,
         "discount_rate": rate,
-        "construction_total": str(total),
-        "construction_total_unit": currency,
-        "annual_fixed_om": str(fixed_total),
+        "construction_total": facts["construction_total"]["value"],
+        "construction_total_unit": facts["construction_total"]["unit"],
+        "annual_fixed_om": facts["annual_fixed_om"]["value"],
         "payments_applied": [
-            {"t": t, "ratio": str(ratio), "amount": str(ratio * total)} for t, ratio in payments
+            {"t": entry["t"], "ratio": entry["ratio"], "amount": entry["amount"]["value"]}
+            for entry in facts["payments"]
         ],
         "annual_operation": [
             {
-                "financial_year": period + index + 1,
-                "energy_net": str(item.energy_net),
-                "variable_om": str(item.variable_om),
-                "fixed_om": str(item.fixed_om),
-                "maintenance": str(item.maintenance),
-                "net": str(item.net),
+                "financial_year": entry["financial_year"],
+                "energy_net": entry["energy_net"]["value"],
+                "variable_om": entry["variable_om"]["value"],
+                "fixed_om": entry["fixed_om"]["value"],
+                "maintenance": entry["maintenance"],
+                "net": entry["net"]["value"],
             }
-            for index, item in enumerate(annual)
+            for entry in facts["annual_operation"]
         ],
+        # 同次解税务事实原样投影(结构与金额不重算、不改写)。
+        "tax_cash": tax_cash,
+        # 完整税后现金流 CF[0..E](与目标同一模型表达式，未折现)。
+        "annual_net_flows": list(flows),
         "evaluation": assessed.to_dict(),
     }
 
