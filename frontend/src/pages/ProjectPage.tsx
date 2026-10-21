@@ -18,7 +18,7 @@ import { useWorkbench } from './workbench'
 import type { AutosaveStatus } from './workbench'
 import './workbench.css'
 
-type NavIconName = 'model' | 'data' | 'config' | 'validation' | 'tasks' | 'versions' | 'results' | 'export'
+type NavIconName = 'model' | 'data' | 'config' | 'finance' | 'validation' | 'tasks' | 'versions' | 'results' | 'export'
 
 interface NavItem {
   path: string
@@ -31,6 +31,7 @@ const NAV_ITEMS: NavItem[] = [
   { path: 'model', labelKey: 'ies.nav.model', icon: 'model' },
   { path: 'data', labelKey: 'ies.nav.data', icon: 'data' },
   { path: 'config', labelKey: 'ies.nav.config', icon: 'config' },
+  { path: 'finance', labelKey: 'ies.nav.finance', icon: 'finance' },
   { path: 'validation', labelKey: 'ies.nav.validation', icon: 'validation' },
   { path: 'tasks', labelKey: 'ies.nav.tasks', icon: 'tasks' },
   { path: 'versions', labelKey: 'ies.nav.versions', icon: 'versions' },
@@ -59,6 +60,13 @@ const NAV_ICON_PATHS: Record<NavIconName, ReactNode> = {
       <path d="M4 8h10M18 8h2M4 16h2M10 16h10" />
       <circle cx="16" cy="8" r="2" />
       <circle cx="8" cy="16" r="2" />
+    </>
+  ),
+  finance: (
+    <>
+      <path d="M5 7h14v10H5z" />
+      <path d="M5 10h14" />
+      <circle cx="9" cy="14.5" r="1" />
     </>
   ),
   validation: (
