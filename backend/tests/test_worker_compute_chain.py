@@ -174,6 +174,57 @@ PLANNING_BODY = {
     "constraints": {},
 }
 
+#: 税后规划体：同一电池变量，目标为显式税后 NPV（C1b 装配闸门识别）。
+TAX_PLANNING_BODY = {
+    "objective": {"sense": "maximize", "expression": "system.after_tax_npv"},
+    "variables": {
+        "cap": {
+            "device_ref": "bat1",
+            "parameter": "rated_power_kw",
+            "lower_bound": "0",
+            "upper_bound": "100",
+            "unit": "kW",
+        },
+    },
+    "constraints": {},
+}
+
+
+def _prepare_tax_loop(client: TestClient, db: Session, user) -> int:
+    """含税则闭环项目准备：电池 + 税后规划 + 含税画像 + 冻结（返回 pid）。
+
+    顺序沿任务 API 税则用例（画像切换后重存规划），装配/冻结复用既有
+    链 helper；评价确认走提交默认块（K=0/E=1/N=1）。
+    """
+    from test_config_revisions import _tax_profile_payload  # noqa: E402
+
+    from iesplan.application import configuration as config_cases  # noqa: E402
+
+    pid = _create_project(client, user, "链税务测试项目")
+    _declare_finance(db, user, pid)
+    device_ref, revision = declare_compute_device(client, pid, _h(client, user))
+    config_cases.save_planning_config(db, pid, dict(TAX_PLANNING_BODY), None, user.id)
+    revision = _set_explicit_calc(client, pid, user, revision)
+    revision = _declare_assembly_sections(client, pid, user, revision, {device_ref: {"type": "none"}})
+    _bind_and_freeze(client, pid, user, None, revision=revision)
+    tax_payload = _tax_profile_payload()
+    config_cases.register_finance_profile(db, dict(tax_payload), user.id)
+    config_cases.set_project_finance_profile(db, pid, "cn-tax-demo", user.id)
+    config_cases.save_planning_config(db, pid, dict(TAX_PLANNING_BODY), None, user.id)
+    return pid
+
+
+def _submit_tax_calc_task(client: TestClient, db: Session) -> int:
+    """含税则项目 → 保存配置 → 真实提交，返回 task_id（期望 201）。"""
+    user = make_user(db, "chain_tax_owner")
+    pid = _prepare_tax_loop(client, db, user)
+    rev = _save_config_body(client, pid, user, dict(_CONFIG_BODY))
+    status, body = _submit_task(
+        client, pid, user, config={"config_revision": rev}, idempotency_key="chain-tax-1"
+    )
+    assert status == 201, body
+    return int(body["task"]["id"])
+
 
 def _claim(db: Session, task_id: int) -> worker_app.Claim:
     """领取任务并提交事务(模拟 Daemon 领取动作)。"""
@@ -284,6 +335,68 @@ class TestComputeChainEndToEnd:
         assert entry["size_bytes"] == len(raw)
         for _path, descriptor in sorted(sealed["bundle_files"].items()):
             assert get_object(db, descriptor["object_id"]) is not None
+
+    def test_tax_task_completes_with_sealed_financial_evaluation(
+        self, client: TestClient, db: Session, engine: Engine, plane
+    ) -> None:
+        """含税则闭环(C3)：提交 201 → 真实求解 → 封存 financial_evaluation。
+
+        同任务/attempt/快照身份；税后 CF/NPV 与求解目标同源（评价 NPV ==
+        同次解目标值）；公开事实形状符合映射表；无交易税基的税额关系
+        强制成立（VAT 全零、所得税零税/亏损恒等），不手填电池调度值。
+        """
+        task_id = _submit_tax_calc_task(client, db)
+        claim = _claim(db, task_id)
+        assert _run(engine, claim, plane) == "completed"
+
+        task = db.execute(select(Task).where(Task.id == task_id)).scalar_one()
+        assert task.status == "completed"
+        assert task.business_outcome == "normal_completion"
+        snapshot = worker_app.get_snapshot_record(db, task.calc_snapshot_id)
+        assert snapshot is not None
+        assert snapshot.result_adapter == "ies.result-adapter.highs@3.0.0"
+
+        evidence = results_store.latest_evidence_for_task(db, task_id)
+        assert evidence is not None
+        sealed = json.loads(get_object(db, evidence.object_id).decode("utf-8"))
+        assert sealed["outcome"] == "normal_completion"
+        assert sealed["compute_result"]["math_status"] == "solved"
+        assert sealed["receipt"]["bundle_id"] == f"snapshot-{snapshot.id}:attempt-{claim.attempt_id}"
+        assert sealed["bundle_manifest"]["bundle"]["generator"] == "ies.generator.highs_milp@3.4.0"
+
+        fin = sealed["financial_evaluation"]
+        assert fin["schema"] == "ies.financial-evaluation"
+        assert fin["schema_version"] == "1.0.0"
+        assert fin["currency"] == "CNY"
+        assert set(fin) == {
+            "schema", "schema_version", "status", "evaluation_years",
+            "construction_period", "operation_years", "currency", "price_basis",
+            "base_year", "profile_id", "discount_rate", "construction_total",
+            "construction_total_unit", "annual_fixed_om", "payments_applied",
+            "annual_operation", "tax_cash", "annual_net_flows", "evaluation",
+        }
+        # K=0/E=1/N=1：单池 12 月 VAT 全零（无计费绑定，留抵恒零强制成立）。
+        vat = fin["tax_cash"]["vat"]
+        assert len(vat) == 12
+        for row in vat:
+            assert row["pool"] == "main_pool"
+            for key in ("paid", "refund_claimed", "refund_arrived", "carry"):
+                assert float(row[key]) == pytest.approx(0.0, abs=1e-9)
+        # 所得税单规则单年：无利润故税为零；负税基全部转为新生亏损。
+        income = fin["tax_cash"]["income"]
+        assert [(row["rule"], row["year"]) for row in income] == [("income", 1)]
+        only = income[0]
+        assert float(only["tax"]) == pytest.approx(0.0, abs=1e-9)
+        assert float(only["loss_used"]) == pytest.approx(0.0, abs=1e-9)
+        assert float(only["loss_expired"]) == pytest.approx(0.0, abs=1e-9)
+        assert float(only["taxable_base"]) <= 0.0
+        assert float(only["loss_generated"]) == pytest.approx(
+            -float(only["taxable_base"]), rel=1e-6
+        )
+        assert len(fin["annual_net_flows"]) == 2
+        # 评价 NPV 与同次解目标值同源一致（同一模型现金表达式）。
+        objective = sealed["compute_result"]["outputs"]["solution"]["objective_value"]
+        assert float(fin["evaluation"]["npv"]) == pytest.approx(float(objective), rel=1e-6)
 
     def test_prediction_required_fails_with_clear_reason(
         self, client: TestClient, db: Session

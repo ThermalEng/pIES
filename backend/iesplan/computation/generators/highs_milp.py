@@ -78,7 +78,17 @@ DESCRIPTOR = GeneratorDescriptor(
     assembly_schema_version=ASSEMBLY_SCHEMA_VERSION,
     modes=("planning",),
     precisions=("medium",),
-    capabilities=("affine", "mutex_bigm"),
+    # 税务提交能力标记（手册“税务提交能力”节为正文）：三种税则种类、
+    # 抵扣池存在、同次解财务事实输出；提交闸门凭此核对，不按名称猜测。
+    capabilities=(
+        "affine",
+        "mutex_bigm",
+        "finance.vat",
+        "finance.construction_input_vat",
+        "finance.income_tax",
+        "finance.credit_pools",
+        "finance.financial_facts",
+    ),
     solvers=(SOLVER_REF,),
     executors=(EXECUTOR_REF,),
     equation_contracts=("ies.equation.ast",),

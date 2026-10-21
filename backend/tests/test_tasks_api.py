@@ -548,12 +548,13 @@ def test_compute_submission_uses_unified_assembly_gate(
     assert db.execute(select(func.count(CalcSnapshot.id))).scalar() == 0
 
 
-def test_submit_rejects_nonempty_tax_rules_without_creating_task(
+def test_submit_accepts_tax_rules_with_capable_generator(
     client: TestClient, db: Session
 ) -> None:
-    """真实提交入口：有效快照含非空 tax_rules 即 400 且不创建任务/快照。
+    """真实提交入口(C3)：非空 tax_rules + HiGHS 3.4.0 能力 → 201 并冻结配套引用。
 
-    切回空规则 Profile 后同一项目可正常提交（既有路径保持）。
+    快照 result_adapter/executor 与所选描述符同一来源；项目财务画像保持
+    含税则（不再要求切回空规则）。
     """
     from assembly_fixture import save_compute_planning
     from test_config_revisions import _tax_profile_payload
@@ -578,10 +579,15 @@ def test_submit_rejects_nonempty_tax_rules_without_creating_task(
     rev = _save_config(client, pid, owner)
     status, body = _submit_task(
         client, pid, owner, config={"config_revision": rev}, idempotency_key="op-tax-001")
-    assert status == 400, body
-    assert body["error"]["code"] == "TASK-REQ-007"
-    assert db.execute(select(func.count(Task.id))).scalar() == 0
-    assert db.execute(select(func.count(CalcSnapshot.id))).scalar() == 0
+    assert status == 201, body
+    assert body["task"]["status"] == "queued"
+    snapshot = db.execute(
+        select(CalcSnapshot).where(CalcSnapshot.id == body["task"]["calc_snapshot_id"])
+    ).scalar_one()
+    assert snapshot.result_adapter == "ies.result-adapter.highs@3.0.0"
+    assert snapshot.executor == "ies.executor.local_process@1.0.0"
+    assert snapshot.calc_config_snapshot["generator"] == "ies.generator.highs_milp@3.4.0"
+    assert db.execute(select(func.count(Task.id))).scalar() == 1
     config_cases.set_project_finance_profile(db, pid, "cn-north-demo", owner.id)
     save_compute_planning(db, pid, owner.id, device_ref)
     status, body = _submit_task(
@@ -590,13 +596,12 @@ def test_submit_rejects_nonempty_tax_rules_without_creating_task(
     assert body["task"]["status"] == "queued"
 
 
-def test_submit_rejects_nonempty_credit_pools_without_creating_task(
+def test_submit_accepts_pool_only_with_capable_generator(
     client: TestClient, db: Session
 ) -> None:
-    """真实提交入口：tax_rules 为空但 credit_pools 非空即 400，不建任务/快照。
+    """真实提交入口(C3)：仅含池（期初留抵/明确退款）+ 池能力 → 201。
 
-    与生成器能力边界同范围（两者任一非空即不支持），已明确不支持的
-    输入不在提交后失败。
+    能力判断覆盖无税则的纯池情形，不遗漏；快照冻结同一配套引用。
     """
     from assembly_fixture import save_compute_planning
     from test_config_revisions import _tax_profile_payload
@@ -630,10 +635,106 @@ def test_submit_rejects_nonempty_credit_pools_without_creating_task(
     rev = _save_config(client, pid, owner)
     status, body = _submit_task(
         client, pid, owner, config={"config_revision": rev}, idempotency_key="op-pool-001")
-    assert status == 400, body
-    assert body["error"]["code"] == "TASK-REQ-007"
-    assert db.execute(select(func.count(Task.id))).scalar() == 0
-    assert db.execute(select(func.count(CalcSnapshot.id))).scalar() == 0
+    assert status == 201, body
+    assert body["task"]["status"] == "queued"
+    snapshot = db.execute(
+        select(CalcSnapshot).where(CalcSnapshot.id == body["task"]["calc_snapshot_id"])
+    ).scalar_one()
+    assert snapshot.result_adapter == "ies.result-adapter.highs@3.0.0"
+    assert snapshot.executor == "ies.executor.local_process@1.0.0"
+    assert db.execute(select(func.count(Task.id))).scalar() == 1
+
+
+def test_submit_rejects_tax_rules_without_provider_capabilities(
+    db: Session, tmp_path: Path
+) -> None:
+    """真实提交入口(C3)：合成 provider 缺税务能力标记 → 400 且不建任务/快照。
+
+    经独立 app.state 组合根注入无税务能力的合成生成器目录（只缺标记，
+    求解器/执行器声明合法）；同一含税则项目在真实 HiGHS 下本可放行，
+    此处必须按缺失能力 007。空税则不受影响（另见空规则正例）。
+    """
+    from types import SimpleNamespace
+
+    from assembly_fixture import save_compute_planning
+    from test_config_revisions import _tax_profile_payload
+
+    from iesplan.application import configuration as config_cases
+    from iesplan.computation.errors import ComputationUnavailableError
+    from iesplan.computation.generators.descriptor import GeneratorDescriptor
+
+    stub_ref = "ies.generator.stub@1.0.0"
+    stub_descriptor = GeneratorDescriptor(
+        generator_id="ies.generator.stub",
+        version="1.0.0",
+        options_schema={"type": "object", "additionalProperties": False},
+        assembly_schema_version="2.0",
+        modes=("planning",),
+        precisions=("medium",),
+        solvers=("ies.solver.highs@1.7.2",),
+        executors=("ies.executor.local_process@1.0.0",),
+        result_adapter="ies.result-adapter.highs@3.0.0",
+        unit_system="SI",
+        seed_semantics="测试合成 provider，无税务能力标记",
+    )
+    assert stub_descriptor.capabilities == ()
+
+    def _get(ref: str):
+        if ref == stub_ref:
+            return SimpleNamespace(descriptor=stub_descriptor)
+        raise ComputationUnavailableError(f"未知生成器: {ref}", reason="no-generator")
+
+    settings.data_dir = tmp_path
+    app = create_app()
+    app.include_router(projects_api.router)
+    app.include_router(tasks_api.router)
+    app.include_router(config_router)
+
+    def _override_request_db() -> Iterator[Session]:
+        yield db
+
+    app.dependency_overrides[get_request_db] = _override_request_db
+    with TestClient(app, raise_server_exceptions=False) as stub_client:
+        app.state.bootstrap_context = SimpleNamespace(
+            generator_registry=SimpleNamespace(get=_get),
+            predictor_registry=None,
+        )
+        owner = make_user(db, "owner_stubgate")
+        pid = _create_project(stub_client, owner, "任务测试项目")
+        _declare_finance(db, owner, pid)
+        device_ref, revision = _declare_device_and_planning(stub_client, db, owner, pid)
+        revision = _set_explicit_calc(stub_client, pid, owner, revision)
+        revision = _declare_assembly_sections(
+            stub_client, pid, owner, revision, {device_ref: {"type": "none"}}
+        )
+        _bind_and_freeze(stub_client, pid, owner, None, revision=revision)
+        tax_payload = _tax_profile_payload()
+        config_cases.register_finance_profile(db, dict(tax_payload), owner.id)
+        config_cases.set_project_finance_profile(db, pid, "cn-tax-demo", owner.id)
+        save_compute_planning(db, pid, owner.id, device_ref)
+        stub_config = dict(_CONFIG_BODY)
+        stub_config["generator"] = stub_ref
+        resp = stub_client.put(
+            f"/api/projects/{pid}/config",
+            json={"calculation_config": stub_config, "expected_revision": None},
+            headers=_h(stub_client, owner),
+        )
+        assert resp.status_code == 200, resp.text
+        rev = resp.json()["revision"]
+        status, body = _submit_task(
+            stub_client, pid, owner,
+            config={"config_revision": rev}, idempotency_key="op-stub-001")
+        assert status == 400, body
+        assert body["error"]["code"] == "TASK-REQ-007"
+        assert body["error"]["params"]["generator"] == stub_ref
+        assert body["error"]["params"]["missing_capabilities"] == [
+            "finance.credit_pools",
+            "finance.financial_facts",
+            "finance.income_tax",
+            "finance.vat",
+        ]
+        assert db.execute(select(func.count(Task.id))).scalar() == 0
+        assert db.execute(select(func.count(CalcSnapshot.id))).scalar() == 0
 
 
 def _prepare_taxref_project(client: TestClient, db: Session, owner, profile_payload: dict) -> tuple:
@@ -707,8 +808,8 @@ def _maint_ref_overrides(items: list) -> dict:
     }
 
 
-def test_submit_tax_refs_two_items_same_year_reach_capability_gate(client: TestClient, db: Session) -> None:
-    """同年两笔合法引用(两维度独立)：跨输入通过，仍到能力 007，不建任务。"""
+def test_submit_tax_refs_two_items_same_year_accepted(client: TestClient, db: Session) -> None:
+    """同年两笔合法引用(两维度独立)：跨输入与能力闸门均通过，201 建任务。"""
     from assembly_fixture import save_compute_planning
     from test_config_revisions import _tax_profile_payload
 
@@ -741,10 +842,10 @@ def test_submit_tax_refs_two_items_same_year_reach_capability_gate(client: TestC
         ),
         idempotency_key="op-taxref-ok",
     )
-    assert status == 400, body
-    assert body["error"]["code"] == "TASK-REQ-007"
-    assert db.execute(select(func.count(Task.id))).scalar() == 0
-    assert db.execute(select(func.count(CalcSnapshot.id))).scalar() == 0
+    assert status == 201, body
+    assert body["task"]["status"] == "queued"
+    assert db.execute(select(func.count(Task.id))).scalar() == 1
+    assert db.execute(select(func.count(CalcSnapshot.id))).scalar() == 1
 
 
 def test_submit_tax_refs_reject_missing_year(client: TestClient, db: Session) -> None:
@@ -854,7 +955,7 @@ def _sched_refund_overrides(schedule: list | None, refund_period: int, arrival: 
 
 
 def test_submit_tax_schedule_and_refund_bounds(client: TestClient, db: Session) -> None:
-    """确认期边界：period=12E 合法且晚到账通过本项(到 007)；超上界 015，不建任务。"""
+    """确认期边界：period=12E 合法且晚到账通过本项(201)；超上界 015，不再建任务。"""
     from assembly_fixture import save_compute_planning
 
     owner = make_user(db, "owner_taxsched")
@@ -874,9 +975,10 @@ def test_submit_tax_schedule_and_refund_bounds(client: TestClient, db: Session) 
         evaluation=evaluation,
         idempotency_key="op-taxsched-ok",
     )
-    assert status == 400, body
-    assert body["error"]["code"] == "TASK-REQ-007"
-    assert db.execute(select(func.count(Task.id))).scalar() == 0
+    assert status == 201, body
+    assert body["task"]["status"] == "queued"
+    assert db.execute(select(func.count(Task.id))).scalar() == 1
+    assert db.execute(select(func.count(CalcSnapshot.id))).scalar() == 1
 
     _put_project_overrides(
         client, pid, owner, _sched_refund_overrides([{"period": 25, "ratio": "1"}], 24, 30), 2
@@ -893,8 +995,8 @@ def test_submit_tax_schedule_and_refund_bounds(client: TestClient, db: Session) 
     assert status == 400, body
     assert body["error"]["code"] == "TASK-REQ-015"
     assert body["error"]["params"]["period"] == 25
-    assert db.execute(select(func.count(Task.id))).scalar() == 0
-    assert db.execute(select(func.count(CalcSnapshot.id))).scalar() == 0
+    assert db.execute(select(func.count(Task.id))).scalar() == 1
+    assert db.execute(select(func.count(CalcSnapshot.id))).scalar() == 1
 
     _put_project_overrides(client, pid, owner, _sched_refund_overrides(None, 25, 26), 3)
     save_compute_planning(db, pid, owner.id, device_ref)
@@ -910,8 +1012,8 @@ def test_submit_tax_schedule_and_refund_bounds(client: TestClient, db: Session) 
     assert body["error"]["code"] == "TASK-REQ-015"
     assert body["error"]["params"]["pool"] == "main_pool"
     assert body["error"]["params"]["period"] == 25
-    assert db.execute(select(func.count(Task.id))).scalar() == 0
-    assert db.execute(select(func.count(CalcSnapshot.id))).scalar() == 0
+    assert db.execute(select(func.count(Task.id))).scalar() == 1
+    assert db.execute(select(func.count(CalcSnapshot.id))).scalar() == 1
 
 
 def test_idempotency_key_scoped_to_project(client: TestClient, db: Session) -> None:

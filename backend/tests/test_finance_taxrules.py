@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from iesplan.application.tasks.submissions import _reject_unsupported_tax_rules
+from iesplan.application.tasks.submissions import _check_tax_capabilities
 from iesplan.finance import (
     EffectiveFinanceConfig,
     FinanceOverrides,
@@ -464,13 +464,38 @@ def test_bad_schedule_and_incomplete_atoms_rejected() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_submission_gate_rejects_nonempty_rules() -> None:
+def test_submission_gate_rejects_without_capabilities() -> None:
+    """无税务能力的生成器 + 非空规则/池 → 007，列明缺失能力与字段。"""
     profile = FinanceProfile.from_dict(_base_profile())
     effective = merge_effective(profile, None)
     with pytest.raises(InvalidRequestError) as caught:
-        _reject_unsupported_tax_rules("acme.generator@1.0.0", effective)
+        _check_tax_capabilities("acme.generator@1.0.0", (), effective)
     assert caught.value.code == "TASK-REQ-007"
-    assert sorted(caught.value.params["tax_rules"]) == ["building_vat", "income", "operating_vat"]
+    assert caught.value.params["missing_capabilities"] == [
+        "finance.construction_input_vat",
+        "finance.credit_pools",
+        "finance.financial_facts",
+        "finance.income_tax",
+        "finance.vat",
+    ]
+    assert caught.value.params["generator"] == "acme.generator@1.0.0"
+    assert caught.value.params["fields"]
+
+
+def test_submission_gate_passes_with_highs_capabilities() -> None:
+    """HiGHS 3.4.0 描述符能力 + 非空规则/池 → 放行（不同名猜测）。"""
+    from iesplan.computation.generators.highs_milp import DESCRIPTOR as HIGHS_DESCRIPTOR
+
+    profile = FinanceProfile.from_dict(_base_profile())
+    effective = merge_effective(profile, None)
+    assert (
+        _check_tax_capabilities(
+            HIGHS_DESCRIPTOR.generator_id + "@" + HIGHS_DESCRIPTOR.version,
+            tuple(HIGHS_DESCRIPTOR.capabilities),
+            effective,
+        )
+        is None
+    )
 
 
 def test_submission_gate_passes_empty_rules() -> None:
@@ -478,7 +503,7 @@ def test_submission_gate_passes_empty_rules() -> None:
     payload["credit_pools"] = {}
     payload["tax_rules"] = {}
     effective = merge_effective(FinanceProfile.from_dict(payload), None)
-    assert _reject_unsupported_tax_rules("acme.generator@1.0.0", effective) is None
+    assert _check_tax_capabilities("acme.generator@1.0.0", (), effective) is None
 
 
 # ---------------------------------------------------------------------------

@@ -356,7 +356,7 @@ def _resolve_execution_refs(
     body: Mapping[str, Any],
     generator_registry: Any | None,
     project_id: int,
-) -> tuple[str, str]:
+) -> tuple[str, str, tuple[str, ...]]:
     """解析并冻结执行引用(0.12-A3): generator → descriptor → 配套 adapter/executor。
 
     只做引用解析, 不做 mode/精度/options 能力门禁(那是生成时
@@ -366,7 +366,8 @@ def _resolve_execution_refs(
       TASK-REQ-007;
     - solver 不在 descriptor.solvers → 400 TASK-REQ-008;
     - executors 非恰好一个 → 400 TASK-REQ-009(不按首项/注册顺序猜测)。
-    返回 (result_adapter 精确引用, executor 精确引用)。
+    返回 (result_adapter 精确引用, executor 精确引用, 描述符能力标记)。
+    能力元组供本次提交税务闸门复用同一已解析描述符，不二次取目录。
     """
     generator_ref = body.get("generator")
     solver_ref = body.get("solver")
@@ -407,7 +408,7 @@ def _resolve_execution_refs(
             params={"project_id": project_id, "generator": generator_ref, "executors": list(executors)},
             location={"object_type": "calculation_config", "object_id": project_id, "field": "generator"},
         )
-    return descriptor.result_adapter, executors[0]
+    return descriptor.result_adapter, executors[0], tuple(descriptor.capabilities or ())
 
 
 def _freeze_device_models(artifact: Any, device_documents: Mapping[str, Any]) -> dict[str, Any]:
@@ -648,7 +649,8 @@ def _assemble_snapshot(
     dataset_ids = _bound_dataset_ids(content)
     extensions = content.get("extensions") or {}
     # 执行引用与快照同事务冻结: 同一已解析 generator 派生同一配套对。
-    result_adapter, executor = _resolve_execution_refs(
+    # 描述符能力元组一并带回，供税务闸门复用，不二次取目录。
+    result_adapter, executor, generator_capabilities = _resolve_execution_refs(
         calc_config, generator_registry, project_id
     )
 
@@ -670,10 +672,12 @@ def _assemble_snapshot(
     # 落在本次评价输入内(能力拒绝之前，先给可定位的输入错误)。复用闸门
     # 实际消费的不可变快照与已解析评价输入，不读当前财务行、不二次解析。
     _check_tax_evaluation_refs(evaluation, effective)
-    # 提交边界税务能力闸门: 有效快照含税务计算规则时，求解链尚不支持(C批
-    # 接通后解除)，明确拒绝，不静默按税前执行。复用闸门实际消费的不可变
-    # 快照，不二次解析。
-    _reject_unsupported_tax_rules(calc_config.get("generator"), effective)
+    # 提交边界税务能力闸门(C3): 凭本次已解析所选生成器描述符能力核对，
+    # 缺项明确 007，不静默按税前执行。复用执行引用解析带回的能力元组与
+    # 闸门实际消费的不可变快照，不二次取目录、不二次解析。
+    _check_tax_capabilities(
+        calc_config.get("generator"), generator_capabilities, effective
+    )
     # 提交边界维护币种核对(本次闸门实际消费的不可变快照口径; 不一致阻断):
     # 维护清单币种须与有效财务配置一致, 空清单直接通过。
     for expense in evaluation.maintenance_expenses:
@@ -824,33 +828,67 @@ def _check_tax_evaluation_refs(
                 )
 
 
-def _reject_unsupported_tax_rules(generator_ref: object, effective: EffectiveFinanceConfig) -> None:
-    """税务规则提交能力闸门(B1a/C1b)：非空 ``tax_rules``/``credit_pools`` 即 400。
+def _check_tax_capabilities(
+    generator_ref: object,
+    capabilities: tuple[str, ...],
+    effective: EffectiveFinanceConfig,
+) -> None:
+    """税务提交能力闸门(C3)：凭所选生成器已解析描述符能力核对。
 
-    求解链尚未表达税务关系(C批接通后解除)；两者皆空不影响现有计算。
-    与生成器能力边界同范围：已明确不支持的输入不在提交后失败。
-    复用提交边界生成器能力诊断码 TASK-REQ-007，不建临时注册表/开关。
+    ``finance.vat``/``finance.construction_input_vat``/``finance.income_tax``
+    分别对应三种税则种类；``finance.credit_pools`` 对应抵扣池存在；采用
+    任一税则或池还要求 ``finance.financial_facts``。空税则且空池不要求
+    税务能力（既有路径不变）。缺项返回 TASK-REQ-007 并标明缺失能力、
+    所选生成器与触发字段，不静默按税前执行，不按 provider 名称猜测。
+    能力元组由本次提交执行引用解析复用，不二次取目录。
     """
-    if effective.tax_rules:
-        raise InvalidRequestError(
-            "有效财务配置含税务计算规则，当前求解链尚不支持，不按税前执行",
-            code="TASK-REQ-007",
-            params={
-                "generator": generator_ref,
-                "tax_rules": sorted(effective.tax_rules),
-            },
-            location={"object_type": "task", "field": "effective_finance.tax_rules"},
-        )
+    from iesplan.finance import ConstructionVatRule, IncomeTaxRule, VatRule
+
+    required: dict[str, list[str]] = {}
+    for rule_id, rule in effective.tax_rules.items():
+        if isinstance(rule, VatRule):
+            marker: str | None = "finance.vat"
+        elif isinstance(rule, ConstructionVatRule):
+            marker = "finance.construction_input_vat"
+        elif isinstance(rule, IncomeTaxRule):
+            marker = "finance.income_tax"
+        else:
+            # 无对应声明标记的未知种类不在此猜测，由生成阶段能力边界报告；
+            # 财务事实输出要求仍适用（下文按非空税则统一核对）。
+            marker = None
+        field = f"effective_finance.tax_rules.{rule_id}"
+        if marker is not None and marker not in capabilities:
+            required.setdefault(marker, []).append(field)
     if effective.credit_pools:
-        raise InvalidRequestError(
-            "有效财务配置含税务抵扣池，当前求解链尚不支持，不按税前执行",
-            code="TASK-REQ-007",
-            params={
-                "generator": generator_ref,
-                "credit_pools": sorted(effective.credit_pools),
-            },
-            location={"object_type": "task", "field": "effective_finance.credit_pools"},
+        if "finance.credit_pools" not in capabilities:
+            required.setdefault("finance.credit_pools", []).extend(
+                f"effective_finance.credit_pools.{pool_id}"
+                for pool_id in sorted(effective.credit_pools)
+            )
+        if "finance.financial_facts" not in capabilities:
+            required.setdefault("finance.financial_facts", []).extend(
+                f"effective_finance.credit_pools.{pool_id}"
+                for pool_id in sorted(effective.credit_pools)
+            )
+    if effective.tax_rules and "finance.financial_facts" not in capabilities:
+        required.setdefault("finance.financial_facts", []).extend(
+            f"effective_finance.tax_rules.{rule_id}"
+            for rule_id in sorted(effective.tax_rules)
         )
+    if not required:
+        return
+    missing = sorted(required)
+    fields = [field for marker in missing for field in required[marker]]
+    raise InvalidRequestError(
+        "所选生成器缺税务计算能力，不按税前执行",
+        code="TASK-REQ-007",
+        params={
+            "generator": generator_ref,
+            "missing_capabilities": missing,
+            "fields": fields,
+        },
+        location={"object_type": "task", "field": fields[0]},
+    )
 
 
 def _used_price_oids(artifact: Any, effective: EffectiveFinanceConfig) -> list[str]:
