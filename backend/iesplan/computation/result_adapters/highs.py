@@ -58,6 +58,16 @@ DESCRIPTOR = ResultAdapterDescriptor(
     version=ADAPTER_VERSION,
 )
 
+#: 同次解财务事实配套协议（配 ``ies.generator.highs_milp@3.4.0``）。
+#: 映射协议改变故升版；仿射求值复用 2.0.0 同一路径。
+FACTS_ADAPTER_VERSION = "3.0.0"
+FACTS_ADAPTER_REF = f"{ADAPTER_ID}@{FACTS_ADAPTER_VERSION}"
+
+FACTS_DESCRIPTOR = ResultAdapterDescriptor(
+    adapter_id=ADAPTER_ID,
+    version=FACTS_ADAPTER_VERSION,
+)
+
 #: 本 provider 消费的 Bundle 内相对路径（与 generator 声明一致）。
 #: V1 主解按索引排列，变量映射需 MPS 列序。
 _SOLUTION_PATH = "output/solution.sol"
@@ -266,6 +276,8 @@ def _parameters(bundle: SolverBundle) -> dict[str, Any]:
         "requested": list(requested),
         "step_series": [dict(entry) for entry in series],
         "components": {ident: dict(decl) for ident, decl in components.items()},
+        # 结构化财务事实原始声明（2.0.0 路径忽略；3.0.0 子类收紧为必需映射）。
+        "financial_facts": doc.get("financial_facts"),
     }
 
 
@@ -338,13 +350,26 @@ class HighsResultAdapter:
         except KeyError:
             _fail(f"未知回执状态: {status!r}")
 
+    def _load_params(self, bundle: SolverBundle) -> dict[str, Any]:
+        """读 Bundle 内 generator 规范 parameters（子类可收紧必需映射）."""
+        return _parameters(bundle)
+
+    def _extend_outputs(
+        self,
+        out: dict[str, object],
+        params: Mapping[str, Any],
+        solution: Mapping[str, Any],
+        index_of: Mapping[str, int],
+    ) -> None:
+        """solution 已请求且有解时的额外业务输出（默认无；子类扩展）."""
+
     def _adapt_succeeded(
         self,
         bundle: SolverBundle,
         receipt: ExecutionReceipt,
         outputs: Mapping[str, object],
     ) -> ComputeResult:
-        params = _parameters(bundle)
+        params = self._load_params(bundle)
         solution_raw = outputs.get(_SOLUTION_PATH)
         if not isinstance(solution_raw, bytes):
             _fail(f"声明输出缺失: {_SOLUTION_PATH}")
@@ -470,6 +495,7 @@ class HighsResultAdapter:
                     "values": values,
                 }
             out["series"] = series_out
+            self._extend_outputs(out, params, solution, index_of)
         if "metrics" in params["requested"]:
             out["metrics"] = {
                 "model_status": status,
@@ -486,8 +512,237 @@ class HighsResultAdapter:
         )
 
 
+#: financial_facts 声明顶层必需键（缺一即旧包，明确失败，不回退）。
+_FACTS_REQUIRED = (
+    "currency",
+    "construction_total",
+    "annual_fixed_om",
+    "payments",
+    "annual_operation",
+    "vat",
+    "refunds",
+    "income",
+    "depreciation",
+    "loss_balances",
+    "annual_net_flows",
+)
+
+
+def _facts_number(value: object, label: str) -> float:
+    """声明内数值校验（拒 bool；int/float 均可，统一转 float 求值）。"""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        _fail(f"财务事实 {label} 须为数值，得到 {value!r}")
+    return float(value)
+
+
+def _facts_int(value: object, label: str) -> int:
+    """声明内整数期间/时点校验（拒 bool）。"""
+    if isinstance(value, bool) or not isinstance(value, int):
+        _fail(f"财务事实 {label} 须为整数，得到 {value!r}")
+    return value
+
+
+def _facts_str(value: object, label: str) -> str:
+    """声明内业务身份/字面量校验（消费者不得拆解，仅透传）。"""
+    if not isinstance(value, str):
+        _fail(f"财务事实 {label} 须为字符串，得到 {value!r}")
+    return value
+
+
+def _facts_amount(
+    node: object,
+    index_of: Mapping[str, int],
+    primals: list[float],
+    currency: str,
+    label: str,
+) -> dict[str, object]:
+    """仿射声明节点 → 同次主解求值金额（十进制字符串，不作展示舍入）。
+
+    求值方式与分量路径同一逻辑；引用未知列或结果非有限即协议失败。
+    """
+    if not isinstance(node, dict):
+        _fail(f"财务事实 {label} 须为仿射声明，得到 {node!r}")
+    total = _facts_number(node.get("constant"), f"{label}.constant")
+    terms = node.get("terms")
+    if not isinstance(terms, dict):
+        _fail(f"财务事实 {label}.terms 须为映射，得到 {terms!r}")
+    for name, coeff in terms.items():
+        if not isinstance(name, str):
+            _fail(f"财务事实 {label}.terms 键须为字符串，得到 {name!r}")
+        index = index_of.get(name)
+        if index is None:
+            _fail(f"财务事实 {label} 的求解列不在 MPS 列中: {name!r}")
+        total += _facts_number(coeff, f"{label}.terms[{name!r}]") * primals[index]
+    if not math.isfinite(total):
+        _fail(f"财务事实 {label} 求值非有限")
+    return {"value": repr(total), "unit": currency}
+
+
+def _recover_financial_facts(
+    decl: object,
+    index_of: Mapping[str, int],
+    primals: list[float],
+) -> dict[str, object]:
+    """结构化财务事实声明 → 同次主解业务事实（格式页映射表为唯一正文）。
+
+    只恢复业务事实，不重算税务、不猜列名、不改写期间；字面量（身份、
+    期间、比例、维护金额）原样透传，金额节点同次求值。任一偏离即协议失败。
+    """
+    if not isinstance(decl, dict):
+        _fail("parameters.financial_facts 缺失或非法（旧包不支持，不回退）")
+    for key in _FACTS_REQUIRED:
+        if key not in decl:
+            _fail(f"parameters.financial_facts 缺 {key!r}（旧包不支持，不回退）")
+    currency = _facts_str(decl["currency"], "currency")
+
+    def amount(node: object, label: str) -> dict[str, object]:
+        return _facts_amount(node, index_of, primals, currency, label)
+
+    def entries(key: str) -> list[dict[str, object]]:
+        items = decl[key]
+        if not isinstance(items, list):
+            _fail(f"parameters.financial_facts.{key} 须为数组，得到 {items!r}")
+        checked: list[dict[str, object]] = []
+        for position, entry in enumerate(items):
+            if not isinstance(entry, dict):
+                _fail(f"parameters.financial_facts.{key}[{position}] 须为映射")
+            checked.append(entry)
+        return checked
+
+    out: dict[str, object] = {
+        "currency": currency,
+        "construction_total": amount(decl["construction_total"], "construction_total"),
+        "annual_fixed_om": amount(decl["annual_fixed_om"], "annual_fixed_om"),
+        "payments": [
+            {
+                "t": _facts_int(entry["t"], f"payments[{i}].t"),
+                "ratio": _facts_str(entry["ratio"], f"payments[{i}].ratio"),
+                "amount": amount(entry["amount"], f"payments[{i}].amount"),
+            }
+            for i, entry in enumerate(entries("payments"))
+        ],
+        "annual_operation": [
+            {
+                "financial_year": _facts_int(entry["financial_year"], f"annual_operation[{i}]"),
+                "energy_net": amount(entry["energy_net"], f"annual_operation[{i}].energy_net"),
+                "variable_om": amount(entry["variable_om"], f"annual_operation[{i}].variable_om"),
+                "fixed_om": amount(entry["fixed_om"], f"annual_operation[{i}].fixed_om"),
+                "maintenance": _facts_str(entry["maintenance"], f"annual_operation[{i}].maintenance"),
+                "net": amount(entry["net"], f"annual_operation[{i}].net"),
+            }
+            for i, entry in enumerate(entries("annual_operation"))
+        ],
+        "vat": [
+            {
+                "pool": _facts_str(entry["pool"], f"vat[{i}].pool"),
+                "month": _facts_int(entry["month"], f"vat[{i}].month"),
+                "paid": amount(entry["paid"], f"vat[{i}].paid"),
+                "refund_claimed": amount(entry["refund_claimed"], f"vat[{i}].refund_claimed"),
+                "refund_arrived": amount(entry["refund_arrived"], f"vat[{i}].refund_arrived"),
+                "carry": amount(entry["carry"], f"vat[{i}].carry"),
+            }
+            for i, entry in enumerate(entries("vat"))
+        ],
+        "refunds": [
+            {
+                "pool": _facts_str(entry["pool"], f"refunds[{i}].pool"),
+                "period": _facts_int(entry["period"], f"refunds[{i}].period"),
+                "arrival_period": _facts_int(entry["arrival_period"], f"refunds[{i}].arrival_period"),
+                "amount": amount(entry["amount"], f"refunds[{i}].amount"),
+            }
+            for i, entry in enumerate(entries("refunds"))
+        ],
+        "income": [
+            {
+                "rule": _facts_str(entry["rule"], f"income[{i}].rule"),
+                "year": _facts_int(entry["year"], f"income[{i}].year"),
+                "taxable_base": amount(entry["taxable_base"], f"income[{i}].taxable_base"),
+                "loss_used": amount(entry["loss_used"], f"income[{i}].loss_used"),
+                "loss_generated": amount(entry["loss_generated"], f"income[{i}].loss_generated"),
+                "loss_expired": amount(entry["loss_expired"], f"income[{i}].loss_expired"),
+                "tax": amount(entry["tax"], f"income[{i}].tax"),
+            }
+            for i, entry in enumerate(entries("income"))
+        ],
+        "depreciation": [
+            {
+                "rule": _facts_str(entry["rule"], f"depreciation[{i}].rule"),
+                "asset": _facts_str(entry["asset"], f"depreciation[{i}].asset"),
+                "year": _facts_int(entry["year"], f"depreciation[{i}].year"),
+                "amount": amount(entry["amount"], f"depreciation[{i}].amount"),
+            }
+            for i, entry in enumerate(entries("depreciation"))
+        ],
+        "loss_balances": [
+            {
+                "rule": _facts_str(entry["rule"], f"loss_balances[{i}].rule"),
+                "vintage_id": _facts_str(entry["vintage_id"], f"loss_balances[{i}].vintage_id"),
+                "year": _facts_int(entry["year"], f"loss_balances[{i}].year"),
+                "last_usable_year": _facts_int(entry["last_usable_year"], f"loss_balances[{i}]"),
+                "amount": amount(entry["amount"], f"loss_balances[{i}].amount"),
+            }
+            for i, entry in enumerate(entries("loss_balances"))
+        ],
+        "annual_net_flows": [
+            {
+                "year": _facts_int(entry["year"], f"annual_net_flows[{i}].year"),
+                "amount": amount(entry["amount"], f"annual_net_flows[{i}].amount"),
+            }
+            for i, entry in enumerate(entries("annual_net_flows"))
+        ],
+    }
+    return out
+
+
+class HighsFinancialFactsAdapter(HighsResultAdapter):
+    """HiGHS 财务事实配套适配：``ies.result-adapter.highs@3.0.0``。
+
+    配 ``ies.generator.highs_milp@3.4.0``：复用 2.0.0 同一主解解析与
+    仿射求值路径，另以同一次主解恢复结构化 ``outputs.financial_facts``。
+    必需映射缺席（旧包）即协议失败，不回退、不补零。随已请求的
+    ``solution`` 且存在可用数学解时发布；其余语义与 2.0.0 一致。
+    """
+
+    __slots__ = ()
+
+    @property
+    def descriptor(self) -> ResultAdapterDescriptor:
+        """公开能力描述符（与 ``ref`` 单一来源）。"""
+        return FACTS_DESCRIPTOR
+
+    @property
+    def ref(self) -> str:
+        """适配器精确引用（即描述符引用，不另存第二份）。"""
+        return FACTS_DESCRIPTOR.ref
+
+    def _load_params(self, bundle: SolverBundle) -> dict[str, Any]:
+        """必需 parameters 外加结构化财务事实映射（缺席即旧包，失败）。"""
+        params = _parameters(bundle)
+        if not isinstance(params.get("financial_facts"), dict):
+            _fail("parameters.financial_facts 缺失或非法（旧包不支持，不回退）")
+        return params
+
+    def _extend_outputs(
+        self,
+        out: dict[str, object],
+        params: Mapping[str, Any],
+        solution: Mapping[str, Any],
+        index_of: Mapping[str, int],
+    ) -> None:
+        """solution 已请求且有解时恢复财务事实（调用方已核对请求）。"""
+        facts = params["financial_facts"]
+        primals = solution["primals"]
+        if not isinstance(primals, list):
+            _fail("主解 primals 非法")
+        out["financial_facts"] = _recover_financial_facts(facts, index_of, primals)
+
+
 #: 组合根显式注册的内置 provider 单例（无状态，可共享）。
 HIGHS_ADAPTER = HighsResultAdapter()
+
+
+#: 财务事实配套 provider 单例（无状态，可共享）。
+HIGHS_FACTS_ADAPTER = HighsFinancialFactsAdapter()
 
 
 __all__ = [
@@ -495,6 +750,11 @@ __all__ = [
     "ADAPTER_REF",
     "ADAPTER_VERSION",
     "DESCRIPTOR",
+    "FACTS_ADAPTER_REF",
+    "FACTS_ADAPTER_VERSION",
+    "FACTS_DESCRIPTOR",
     "HIGHS_ADAPTER",
+    "HIGHS_FACTS_ADAPTER",
+    "HighsFinancialFactsAdapter",
     "HighsResultAdapter",
 ]

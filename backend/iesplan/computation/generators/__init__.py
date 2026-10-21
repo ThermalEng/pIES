@@ -24,7 +24,10 @@ from iesplan.computation.generators.linear import (
     lower_relation,
 )
 from iesplan.computation.generators.mps import write_mps
-from iesplan.computation.generators.project import build_project_model
+from iesplan.computation.generators.project import (
+    build_project_model,
+    build_project_model_with_facts,
+)
 from iesplan.computation.generators.registry import (
     GeneratorRegistry,
     build_registry,
@@ -42,6 +45,7 @@ __all__ = [
     "LinearModel",
     "LinearVariable",
     "build_project_model",
+    "build_project_model_with_facts",
     "build_registry",
     "lower_expression",
     "lower_planning_constraint",

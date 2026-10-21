@@ -38,6 +38,7 @@ import math
 from collections import Counter
 from collections.abc import Mapping
 from datetime import datetime, timedelta
+from decimal import Decimal
 from types import MappingProxyType
 from typing import Any
 
@@ -187,6 +188,12 @@ class _AffineAcc:
             constant=self.constant,
         )
 
+    def snapshot(self) -> _AffineAcc:
+        """独立副本（留存事实与后续变更隔离；调用方保证语义时点）"""
+        out = _AffineAcc()
+        out.add_scaled(self, 1.0)
+        return out
+
 
 #: 年秒数（与单位表 ``a`` 同源：适配器 ``from_si(..., "CNY/a")`` 发布年值
 #: 即按此折算，生成器年金额取同一因子，保证目标与评价现金流同源）。
@@ -226,7 +233,28 @@ def build_project_model(
     同一组直接输入产生同一模型；超出首版降级能力的数学抛
     ``LoweringUnsupportedError``。
     """
-    return _new_builder(artifact, models, materialized, finance, evaluation).build()
+    return build_project_model_with_facts(
+        artifact, models, materialized, finance, config, evaluation
+    )[:3]
+
+
+def build_project_model_with_facts(
+    artifact: ValidatedAssemblyArtifact,
+    models: Mapping[str, DeviceMathContribution],
+    materialized: MaterializedSet,
+    finance: EffectiveFinanceConfig,
+    config: CalculationConfig,
+    evaluation: EvaluationInput,
+) -> tuple[LinearModel, Mapping[str, str], str, Mapping[str, object]]:
+    """由直接输入构造模型、单位映射、目标单位与同次解财务事实声明。
+
+    与 ``build_project_model`` 同一构造器一次建模：模型三元组与该函数
+    完全一致，第四项为 ``financial_facts`` 结构化声明（格式页映射表为
+    唯一正文，供配套适配器用同一次主解恢复，不重建模型）。
+    """
+    builder = _new_builder(artifact, models, materialized, finance, evaluation)
+    model, unit_map, objective_unit = builder.build()
+    return model, unit_map, objective_unit, builder.financial_facts()
 
 
 def _new_builder(
@@ -316,6 +344,18 @@ class _ProjectBuilder:
         self.evaluation = evaluation
         self._vat_cash: _AffineAcc | None = None
         self._income_cash: _AffineAcc | None = None
+        #: 同源财务事实留存（与目标同一表达式/循环内并行累积，供
+        #: ``financial_facts`` 声明；键与结构见格式页映射表）。
+        self._fact_cash: dict[int, _AffineAcc] = {}
+        self._fact_annual: dict[int, dict[str, _AffineAcc]] = {}
+        self._fact_construction = _AffineAcc()
+        self._fact_fixed_om = _AffineAcc()
+        self._fact_payments: list[tuple[int, str, _AffineAcc]] = []
+        self._fact_vat: list[dict[str, Any]] = []
+        self._fact_refunds: list[dict[str, Any]] = []
+        self._fact_income: list[dict[str, Any]] = []
+        self._fact_depr: list[dict[str, Any]] = []
+        self._fact_balances: list[dict[str, Any]] = []
         self.point_count = point_count
         self.step_s = step_s
         self.series: dict[tuple[str, str], list[float]] = {}
@@ -1067,6 +1107,14 @@ class _ProjectBuilder:
             out[entry.year] = out.get(entry.year, 0.0) + float(entry.amount)
         return out
 
+    def _year_cash(self, year: int) -> _AffineAcc:
+        """评价年未折现现金累积（与目标同一表达式并行累积，同源声明用）"""
+        slot = self._fact_cash.get(year)
+        if slot is None:
+            slot = _AffineAcc()
+            self._fact_cash[year] = slot
+        return slot
+
     def _npv_objective(self) -> _AffineAcc:
         """显式全周期 NPV 目标仿射式（gross 现金流基础，同次解内表达）。
 
@@ -1093,16 +1141,24 @@ class _ProjectBuilder:
         def discount(year: int) -> float:
             return (1.0 + evaluation.discount_rate) ** year
 
+        self._fact_construction.add_scaled(construction, 1.0)
         for payment in evaluation.construction_payments:
             npv.add_scaled(
                 construction, -float(payment.ratio) / discount(payment.t)
             )
+            amount = _AffineAcc()
+            amount.add_scaled(construction, float(payment.ratio))
+            self._year_cash(payment.t).add_scaled(construction, -float(payment.ratio))
+            self._fact_payments.append((payment.t, payment.ratio, amount.snapshot()))
         for index, (start, end) in enumerate(bounds):
             year_no = evaluation.construction_period + index + 1
+            energy = _AffineAcc()
+            variable = _AffineAcc()
+            fixed = _AffineAcc()
             annual = _AffineAcc()
             for binding_id in sorted(bindings):
                 price_id = bindings[binding_id]["price"]
-                annual.add_scaled(
+                energy.add_scaled(
                     self._tariff_affine(binding_id, start, end),
                     -price_markup.get(price_id, 1.0),
                 )
@@ -1117,7 +1173,7 @@ class _ProjectBuilder:
                     "period_variable_om" in produced
                     and ft_entry.period_variable_om is not None
                 ):
-                    annual.add_scaled(
+                    variable.add_scaled(
                         self._cost_affine(inst, "period_variable_om", start, end),
                         -om_markup.get(f"{finance_type}.period_variable_om", 1.0),
                     )
@@ -1125,12 +1181,24 @@ class _ProjectBuilder:
                     "annual_fixed_om" in produced
                     and ft_entry.annual_fixed_om is not None
                 ):
-                    annual.add_scaled(
+                    fixed.add_scaled(
                         self._annual_fixed_om_annual(inst),
                         -om_markup.get(f"{finance_type}.annual_fixed_om", 1.0),
                     )
+            annual.add_scaled(energy, 1.0)
+            annual.add_scaled(variable, 1.0)
+            annual.add_scaled(fixed, 1.0)
             annual.add_const(-maintenance.get(year_no, 0.0))
             npv.add_scaled(annual, 1.0 / discount(year_no))
+            self._year_cash(year_no).add_scaled(annual, 1.0)
+            self._fact_annual[year_no] = {
+                "energy": energy.snapshot(),
+                "variable": variable.snapshot(),
+                "fixed": fixed.snapshot(),
+                "net": annual.snapshot(),
+            }
+            if index == 0:
+                self._fact_fixed_om.add_scaled(fixed, 1.0)
         return npv
 
     # -- VAT 月度精确关系（3.2.0；无规则无池时整段跳过）--
@@ -1394,6 +1462,14 @@ class _ProjectBuilder:
                     arrivals[refund.arrival_period] = (
                         arrivals.get(refund.arrival_period, 0.0) + amount
                     )
+                self._fact_refunds.append(
+                    {
+                        "pool": pool_id,
+                        "period": refund.period,
+                        "arrival_period": refund.arrival_period,
+                        "amount": amount,
+                    }
+                )
             cumulative_hi = _money_to_internal(pool.opening_credit)
             previous = _AffineAcc()
             previous.add_const(cumulative_hi)
@@ -1479,6 +1555,19 @@ class _ProjectBuilder:
                 cash.add_term(paid_name, -1.0 / discount(year))
                 if month in arrivals:
                     cash.add_const(arrivals[month] / discount(year))
+                self._year_cash(year).add_term(paid_name, -1.0)
+                if month in arrivals:
+                    self._year_cash(year).add_const(arrivals[month])
+                self._fact_vat.append(
+                    {
+                        "pool": pool_id,
+                        "month": month,
+                        "paid": paid_name,
+                        "carry": carry_name,
+                        "claim": claim,
+                        "arrival": arrivals.get(month, 0.0),
+                    }
+                )
                 previous = _AffineAcc()
                 previous.add_term(carry_name, 1.0)
                 previous.add_const(-claim)
@@ -1603,6 +1692,7 @@ class _ProjectBuilder:
         self,
         base: _AffineAcc,
         rule: IncomeTaxRule,
+        rule_id: str,
         year: int,
         con_credit: dict[str, tuple[float, float]],
         instances: Mapping[str, Any],
@@ -1653,6 +1743,14 @@ class _ProjectBuilder:
                 )
                 if capex_hi <= 0.0:
                     # 静态已知未形成资产：不计提，残值不产生任何影响。
+                    self._fact_depr.append(
+                        {
+                            "rule": rule_id,
+                            "asset": entry.asset,
+                            "year": year,
+                            "amount": _AffineAcc(),
+                        }
+                    )
                     continue
                 if capex_lo <= 0.0:
                     raise LoweringUnsupportedError(
@@ -1671,10 +1769,17 @@ class _ProjectBuilder:
             life = float(entry.life_years)
             base.add_scaled(depreciable, -1.0 / life)
             base.add_const(float(entry.residual.value) / life)
+            deduct = _AffineAcc()
+            deduct.add_scaled(depreciable, 1.0 / life)
+            deduct.add_const(-float(entry.residual.value) / life)
+            self._fact_depr.append(
+                {"rule": rule_id, "asset": entry.asset, "year": year, "amount": deduct}
+            )
 
     def _income_annual_base(
         self,
         rule: IncomeTaxRule,
+        rule_id: str,
         year: int,
         year_span: tuple[int, int] | None,
         credits: tuple[
@@ -1732,7 +1837,7 @@ class _ProjectBuilder:
             coef = maint_credit.get((item.year, item.position), 0.0)
             base.add_const(-gross * (1.0 - coef))
         self._income_deduct_depreciation(
-            base, rule, year, credits[2], instances, var_bounds, location
+            base, rule, rule_id, year, credits[2], instances, var_bounds, location
         )
         return base
 
@@ -1812,9 +1917,21 @@ class _ProjectBuilder:
             seq_next = len(vintages)
             for year in range(1, years + 1):
                 location = f"所得税规则 {rule_id!r} 第 {year} 年"
+                expired: list[tuple[str, int, _AffineAcc]] = []
+                for vintage in vintages:
+                    if vintage["last"] == year - 1:
+                        expired.append(
+                            (
+                                f"v{vintage['seq']}",
+                                vintage["last"],
+                                vintage["rem"].snapshot(),
+                            )
+                        )
                 base = self._income_annual_base(
-                    rule, year, span_by_year.get(year), credits, var_bounds, location
+                    rule, rule_id, year, span_by_year.get(year), credits, var_bounds,
+                    location,
                 )
+                base_kept = base.snapshot()
                 base_hi = self._affine_side(
                     base, var_bounds, side="max", label=location
                 )
@@ -1852,9 +1969,11 @@ class _ProjectBuilder:
                 need = _AffineAcc()
                 need.add_term(profit_name, 1.0)
                 used_total = _AffineAcc()
+                used_names: list[str] = []
                 for vintage in available:
                     seq = vintage["seq"]
                     use_name = f"inc__{rule_id}__use__y{year}__v{seq}"
+                    used_names.append(use_name)
                     order_name = f"inc__{rule_id}__ord__y{year}__v{seq}"
                     use_upper = min(profit_hi, vintage["init_upper"])
                     declare(use_name, use_upper)
@@ -1895,6 +2014,20 @@ class _ProjectBuilder:
                     vintage["rem"].add_term(use_name, -1.0)
                 cash.add_term(profit_name, -tax_rate / discount(year))
                 cash.add_scaled(used_total, tax_rate / discount(year))
+                self._year_cash(year).add_term(profit_name, -tax_rate)
+                self._year_cash(year).add_scaled(used_total, tax_rate)
+                self._fact_income.append(
+                    {
+                        "rule": rule_id,
+                        "year": year,
+                        "base": base_kept,
+                        "used": list(used_names),
+                        "gen": gen_name,
+                        "expired": expired,
+                        "rate": tax_rate,
+                        "profit": profit_name,
+                    }
+                )
                 if gen_hi > 0.0:
                     # 上界为零则实现恒为零，B0 亦不追加余额；跳过以保持
                     # 序号与 B0 对齐（上界非零而实现为零的年份不受影响，
@@ -1910,6 +2043,19 @@ class _ProjectBuilder:
                         }
                     )
                     seq_next += 1
+                # 年末余额：本年新生已入列（B0 年末剩余含当年新生），
+                # 到期批次已在可用集外，不在此重复。
+                for vintage in vintages:
+                    if vintage["last"] >= year:
+                        self._fact_balances.append(
+                            {
+                                "rule": rule_id,
+                                "vintage_id": f"v{vintage['seq']}",
+                                "year": year,
+                                "last": vintage["last"],
+                                "rem": vintage["rem"].snapshot(),
+                            }
+                        )
         return cash
 
     def _build_objective(self) -> tuple[_AffineAcc, str]:
@@ -2016,6 +2162,135 @@ class _ProjectBuilder:
             })
         return tuple(out)
 
+    @staticmethod
+    def _decl_affine(acc: _AffineAcc) -> dict[str, object]:
+        """仿射留存 → 声明节点（求解列引用，消费者不得拆解）。"""
+        return {"constant": acc.constant, "terms": dict(sorted(acc.terms.items()))}
+
+    @staticmethod
+    def _decl_var(name: str) -> dict[str, object]:
+        """单求解列引用声明节点。"""
+        return {"constant": 0.0, "terms": {name: 1.0}}
+
+    @staticmethod
+    def _decl_const(value: float) -> dict[str, object]:
+        """已知常量声明节点（与求值路径统一，适配器同口径恢复）。"""
+        return {"constant": value, "terms": {}}
+
+    def financial_facts(self) -> Mapping[str, object]:
+        """同次解结构化财务事实声明（格式页映射表为唯一正文）。
+
+        须在 ``build`` 之后调用：全部金额/现金仿射与目标同一表达式、
+        同一循环内并行留存，同源；业务身份/期间为字面量，求解列引用
+        只出现在声明节点内，消费者不得拆解。无适用规则的数组为空
+        （真实不适用）；适用零金额显式保留；无税则仍声明完整现金流。
+        同一输入恒得同一声明。
+        """
+        years = self.evaluation.evaluation_years
+        maint: dict[int, Decimal] = {}
+        for item in self.evaluation.maintenance_expenses:
+            maint[item.year] = maint.get(item.year, Decimal("0")) + Decimal(item.amount)
+        annual_operation: list[dict[str, object]] = []
+        for year_no in sorted(self._fact_annual):
+            fields = self._fact_annual[year_no]
+            annual_operation.append(
+                {
+                    "financial_year": year_no,
+                    "energy_net": self._decl_affine(fields["energy"]),
+                    "variable_om": self._decl_affine(fields["variable"]),
+                    "fixed_om": self._decl_affine(fields["fixed"]),
+                    "maintenance": str(maint.get(year_no, Decimal("0"))),
+                    "net": self._decl_affine(fields["net"]),
+                }
+            )
+        vat: list[dict[str, object]] = []
+        for row in self._fact_vat:
+            vat.append(
+                {
+                    "pool": row["pool"],
+                    "month": row["month"],
+                    "paid": self._decl_var(row["paid"]),
+                    "refund_claimed": self._decl_const(row["claim"]),
+                    "refund_arrived": self._decl_const(row["arrival"]),
+                    "carry": self._decl_var(row["carry"]),
+                }
+            )
+        income: list[dict[str, object]] = []
+        for row in self._fact_income:
+            used = _AffineAcc()
+            for name in row["used"]:
+                used.add_term(name, 1.0)
+            expired = _AffineAcc()
+            for _, _, acc in row["expired"]:
+                expired.add_scaled(acc, 1.0)
+            tax = _AffineAcc()
+            tax.add_term(row["profit"], -row["rate"])
+            for name in row["used"]:
+                tax.add_term(name, row["rate"])
+            gen = _AffineAcc()
+            gen.add_term(row["gen"], 1.0)
+            income.append(
+                {
+                    "rule": row["rule"],
+                    "year": row["year"],
+                    "taxable_base": self._decl_affine(row["base"]),
+                    "loss_used": self._decl_affine(used),
+                    "loss_generated": self._decl_affine(gen),
+                    "loss_expired": self._decl_affine(expired),
+                    "tax": self._decl_affine(tax),
+                }
+            )
+        out: dict[str, object] = {
+            "currency": self.finance.currency,
+            "construction_total": self._decl_affine(self._fact_construction),
+            "annual_fixed_om": self._decl_affine(self._fact_fixed_om),
+            "payments": [
+                {"t": t, "ratio": ratio, "amount": self._decl_affine(acc)}
+                for t, ratio, acc in self._fact_payments
+            ],
+            "annual_operation": annual_operation,
+            "vat": vat,
+            "refunds": [
+                {
+                    "pool": row["pool"],
+                    "period": row["period"],
+                    "arrival_period": row["arrival_period"],
+                    "amount": self._decl_const(row["amount"]),
+                }
+                for row in self._fact_refunds
+            ],
+            "income": income,
+            "depreciation": [
+                {
+                    "rule": row["rule"],
+                    "asset": row["asset"],
+                    "year": row["year"],
+                    "amount": self._decl_affine(row["amount"]),
+                }
+                for row in self._fact_depr
+            ],
+            "loss_balances": [
+                {
+                    "rule": row["rule"],
+                    "vintage_id": row["vintage_id"],
+                    "year": row["year"],
+                    "last_usable_year": row["last"],
+                    "amount": self._decl_affine(row["rem"]),
+                }
+                for row in self._fact_balances
+            ],
+            "annual_net_flows": [
+                {
+                    "year": t,
+                    "amount": self._decl_affine(
+                        self._fact_cash.get(t) or _AffineAcc()
+                    ),
+                }
+                for t in range(years + 1)
+            ],
+        }
+        return MappingProxyType(out)
+
     def build(self) -> tuple[LinearModel, Mapping[str, str], str]:
         buses = self._compute_buses()
         bus_flows = self._bus_flow_index(buses)
@@ -2047,4 +2322,8 @@ def _money_to_internal(money: Any) -> float:
     return _to_internal(float(money.value), money.unit)
 
 
-__all__ = ["build_project_model", "finance_component_declarations"]
+__all__ = [
+    "build_project_model",
+    "build_project_model_with_facts",
+    "finance_component_declarations",
+]

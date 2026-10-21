@@ -56,6 +56,7 @@ from iesplan.computation.generators import (
     GeneratorRegistry,
     HighsMilpProvider,
     build_project_model,
+    build_project_model_with_facts,
     build_registry,
     write_mps,
 )
@@ -113,6 +114,8 @@ from iesplan.computation.result_adapter import (
 )
 from iesplan.computation.result_adapters import (
     HIGHS_ADAPTER,
+    HIGHS_FACTS_ADAPTER,
+    HighsFinancialFactsAdapter,
     HighsResultAdapter,
 )
 from iesplan.computation.runtime import (
@@ -151,6 +154,7 @@ __all__ = [
     "HIGHS_ADAPTER",
     "HIGHS_ADAPTER_PATH",
     "HIGHS_EXECUTABLE_REF",
+    "HIGHS_FACTS_ADAPTER",
     "HIGHS_MILP_PROVIDER",
     "HIGHS_VERSION",
     "NAIVE_PREDICTOR",
@@ -174,6 +178,7 @@ __all__ = [
     "GeneratorProvider",
     "GeneratorRegistry",
     "HighsMilpProvider",
+    "HighsFinancialFactsAdapter",
     "HighsResultAdapter",
     "MaterializedPriceSeries",
     "MaterializedSeries",
@@ -199,6 +204,7 @@ __all__ = [
     "build_executor_registry",
     "build_predictor_registry",
     "build_project_model",
+    "build_project_model_with_facts",
     "build_registry",
     "build_result_adapter_registry",
     "check_convergence",

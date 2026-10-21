@@ -1,4 +1,4 @@
-"""首个真实 GeneratorProvider：``ies.generator.highs_milp@3.3.0``。
+"""首个真实 GeneratorProvider：``ies.generator.highs_milp@3.4.0``。
 
 纯内存确定性转换：直接输入（装配产物、设备数学贡献、物化序列、
 有效财务快照、计算配置、冻结评价确认）→ ``SolverBundle`` 完整聚合
@@ -13,7 +13,9 @@ constant tariff；数学能力即 ``build_project_model`` 现有 lowerer 明确
 3.0.0 相对 2.0.0 的唯一破坏性变化：冻结评价确认为必需生成输入，
 不保留旧调用签名或默认评价值。3.1.0 新增显式全周期 NPV 目标能力，
 直接输入形状不变。3.2.0 新增 VAT 月度精确关系与同次 NPV 现金。
-3.3.0 新增所得税年度计税/折旧/亏损结转同次建模。通用 Bundle manifest 未变；结果适配
+3.3.0 新增所得税年度计税/折旧/亏损结转同次建模。3.4.0 新增与目标同源的
+结构化财务事实声明（配套 ``ies.result-adapter.highs@3.0.0`` 恢复），
+直接输入形状不变。通用 Bundle manifest 未变；结果适配
 协议按实际输出变化独立版本化，不因生成器输入变化而同步升版。
 """
 
@@ -28,7 +30,7 @@ from iesplan.computation.errors import ComputationUnavailableError
 from iesplan.computation.generators.descriptor import GeneratorDescriptor
 from iesplan.computation.generators.mps import write_mps
 from iesplan.computation.generators.project import (
-    build_project_model,
+    build_project_model_with_facts,
     finance_component_declarations,
     step_series_declarations,
 )
@@ -37,16 +39,17 @@ from iesplan.computation.protocols import (
     SolverBundle,
     SolverBundleManifest,
 )
+from iesplan.computation.result_adapters.highs import FACTS_ADAPTER_REF
 from iesplan.computation.sequences import MaterializedSet
 from iesplan.finance import EffectiveFinanceConfig, EvaluationInput
 from iesplan.modeling import DeviceMathContribution
 
 GENERATOR_ID = "ies.generator.highs_milp"
-GENERATOR_VERSION = "3.3.0"
+GENERATOR_VERSION = "3.4.0"
 GENERATOR_REF = f"{GENERATOR_ID}@{GENERATOR_VERSION}"
 SOLVER_REF = "ies.solver.highs@1.7.2"
 EXECUTOR_REF = "ies.executor.local_process@1.0.0"
-ADAPTER_REF = "ies.result-adapter.highs@2.0.0"
+ADAPTER_REF = FACTS_ADAPTER_REF
 ASSEMBLY_SCHEMA_VERSION = "3.0.0"
 
 #: seed 为 null 时 descriptor 明示的固定种子。
@@ -128,7 +131,7 @@ class HighsMilpProvider:
         """
         self._check_capabilities(artifact, config, finance)
         seed = config.seed if config.seed is not None else FIXED_SEED
-        model, unit_map, objective_unit = build_project_model(
+        model, unit_map, objective_unit, facts = build_project_model_with_facts(
             artifact, models, materialized, finance, config, evaluation
         )
         mps_text, offset = write_mps(model)
@@ -143,6 +146,7 @@ class HighsMilpProvider:
             config,
             components,
             series,
+            facts,
         )
         manifest = SolverBundleManifest(
             bundle={"generator": self.ref, "solver": SOLVER_REF},
@@ -228,17 +232,21 @@ class HighsMilpProvider:
         config: CalculationConfig,
         components: Mapping[str, Mapping[str, object]],
         series: tuple[Mapping[str, object], ...],
+        facts: Mapping[str, object],
     ) -> bytes:
         """ResultAdapter 后续必需的最小规范 JSON 元数据（规范字节）。
 
         只记录反向换算与追溯必需项（unit_map、目标偏移、目标业务单位、
-        财务分量求值声明 components、可发布步序列声明 step_series、请求
-        outputs、固定 seed、precision、装配/引用追溯），不复制完整
-        assembly、models、finance，不写 hash。
+        财务分量求值声明 components、可发布步序列声明 step_series、结构化
+        财务事实声明 financial_facts、请求 outputs、固定 seed、precision、
+        装配/引用追溯），不复制完整 assembly、models、finance，不写 hash。
         components 为分量 ident → {unit, caliber, constant, terms}，与目标
         同一分量展开路径，供配套适配器用同一次真实解求值发布。
         step_series 为可发布步序列声明（与建变量同一路径形成），供配套
         适配器用同一次真实解恢复统一序列发布；无步变量时为空数组。
+        financial_facts 为与目标同源的结构化财务事实映射（格式页映射表
+        为唯一正文），供配套 3.0.0 适配器用同一次主解恢复发布；消费者
+        不得拆解其中求解列引用。
         """
         doc = json.loads(artifact.canonical_text)
         assembly = doc.get("assembly") or {}
@@ -257,6 +265,7 @@ class HighsMilpProvider:
                 for ident, decl in components.items()
             },
             "generator": self.ref,
+            "financial_facts": dict(facts),
             "objective_offset": offset,
             "objective_unit": objective_unit,
             "outputs": list(config.outputs),

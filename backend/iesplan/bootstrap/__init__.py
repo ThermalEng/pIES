@@ -232,6 +232,7 @@ def _assemble_execution_plane(policy: Any) -> tuple[Any, Any, Any]:
         HIGHS_ADAPTER,
         HIGHS_ADAPTER_PATH,
         HIGHS_EXECUTABLE_REF,
+        HIGHS_FACTS_ADAPTER,
         HIGHS_VERSION,
         ExecutableReadiness,
         ExecutorDescriptor,
@@ -266,7 +267,7 @@ def _assemble_execution_plane(policy: Any) -> tuple[Any, Any, Any]:
         base_environ={},
     )
     executor_registry = build_executor_registry([local_provider])
-    adapter_registry = build_result_adapter_registry([HIGHS_ADAPTER])
+    adapter_registry = build_result_adapter_registry([HIGHS_ADAPTER, HIGHS_FACTS_ADAPTER])
     runtime = SolverRuntime(executor_registry, policy)
     return executor_registry, adapter_registry, runtime
 
