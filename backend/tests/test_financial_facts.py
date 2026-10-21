@@ -8,21 +8,17 @@
 
 from __future__ import annotations
 
+import json
 from decimal import Decimal
 from types import SimpleNamespace
 
 import pytest
 from test_highs_result_adapter import (
-    SHIM_OPTIMAL,
     SOLUTION_PATH,
-    TINY_MPS,
     _receipt,
 )
 from test_highs_result_adapter import (
     _bundle as _wrap_bundle,
-)
-from test_highs_result_adapter import (
-    _parameters as _tiny_parameters,
 )
 from test_income_annual import (
     INC_CARRY_YEARS,
@@ -45,11 +41,10 @@ from test_vat_monthly import (
 
 from iesplan.application.worker.compute_cases import build_financial_evaluation
 from iesplan.computation import HIGHS_MILP_PROVIDER
-from iesplan.computation.errors import ComputationUnavailableError
 from iesplan.computation.protocols import ComputeResult
 from iesplan.computation.result_adapters.highs import (
-    FACTS_ADAPTER_REF,
-    HIGHS_FACTS_ADAPTER,
+    ADAPTER_REF,
+    HIGHS_ADAPTER,
 )
 from iesplan.finance.tax import income_tax_payable, use_losses
 
@@ -79,9 +74,9 @@ def _finance_stub():
 
 def _seal(bundle, solution_raw, finance, snapshot):
     """生产 Adapter（3.0.0）恢复 + 封存评价，返回（结果，封存）。"""
-    adapted = HIGHS_FACTS_ADAPTER.adapt(
+    adapted = HIGHS_ADAPTER.adapt(
         _wrap_bundle({path: bundle.files[path] for path in SOLVER_FILES}),
-        _receipt(result_adapter_ref=FACTS_ADAPTER_REF),
+        _receipt(result_adapter_ref=ADAPTER_REF),
         {SOLUTION_PATH: solution_raw},
     )
     assert adapted.execution_status == "completed"
@@ -92,16 +87,13 @@ def _seal(bundle, solution_raw, finance, snapshot):
     return adapted, sealed, facts
 
 
-def _amount(entry):
-    return float(entry["value"])
+def _amount(value):
+    """公开事实金额字符串 → float（测试内比较，不舍入生产值）。"""
+    return float(value)
 
 
 def _assert_facts_close(left, right):
     """两份事实数值近似一致、字面量精确一致（测试内比较，不舍入生产值）。"""
-    if isinstance(left, dict) and set(left) == {"value", "unit"}:
-        assert left["unit"] == right["unit"]
-        assert float(left["value"]) == pytest.approx(float(right["value"]), rel=1e-6)
-        return
     if isinstance(left, dict):
         assert set(left) == set(right)
         for key in left:
@@ -127,7 +119,7 @@ def test_facts_mix_seal_matches_hand_and_objective(tmp_path) -> None:
     """混合全链：事实恢复对手算，封存 NPV 与求解目标同源一致。"""
     artifact, models, materialized, finance, config, evaluation = _inputs(payload=_mix_payload())
     bundle = HIGHS_MILP_PROVIDER.generate(artifact, models, materialized, finance, config, evaluation)
-    assert bundle.manifest.result_adapter == FACTS_ADAPTER_REF
+    assert bundle.manifest.result_adapter == ADAPTER_REF
     out, inp = _hand_monthly(con_ratio=Decimal("0.5"))
     paids, carries = _hand_chain(out, inp)
     value, _, solution_raw = _solve_internal(bundle, tmp_path)
@@ -136,7 +128,22 @@ def test_facts_mix_seal_matches_hand_and_objective(tmp_path) -> None:
     assert sealed["schema_version"] == "1.0.0"
     assert sealed["status"] == "evaluated"
     assert facts["currency"] == "CNY"
-    vat_rows = {(row["pool"], row["month"]): row for row in facts["vat"]}
+    # 公开形状：顶层键、tax_cash 嵌套、金额裸字符串、CF 顺序数组。
+    assert set(facts) == {
+        "currency",
+        "construction_total",
+        "annual_fixed_om",
+        "payments_applied",
+        "annual_operation",
+        "tax_cash",
+        "annual_net_flows",
+    }
+    assert set(facts["tax_cash"]) == {"vat", "refunds", "income", "depreciation", "loss_balances"}
+    assert isinstance(facts["construction_total"], str)
+    assert isinstance(facts["annual_fixed_om"], str)
+    assert all(isinstance(value, str) for value in facts["annual_net_flows"])
+    assert len(facts["annual_net_flows"]) == 4
+    vat_rows = {(row["pool"], row["month"]): row for row in facts["tax_cash"]["vat"]}
     for month in range(1, 37):
         row = vat_rows[("main_pool", month)]
         assert _amount(row["paid"]) == pytest.approx(float(paids[month - 1]), rel=1e-6)
@@ -151,7 +158,7 @@ def test_facts_mix_seal_matches_hand_and_objective(tmp_path) -> None:
     )
     assert year3.uses == (-base_y2,)
     tax = income_tax_payable(taxable_base=base_y3, loss_used=-base_y2, rate=INC_RATE)
-    income_rows = {(row["rule"], row["year"]): row for row in facts["income"]}
+    income_rows = {(row["rule"], row["year"]): row for row in facts["tax_cash"]["income"]}
     row_y2 = income_rows[("income_demo", 2)]
     assert _amount(row_y2["taxable_base"]) == pytest.approx(float(base_y2), rel=1e-6)
     assert _amount(row_y2["loss_generated"]) == pytest.approx(float(-base_y2), rel=1e-6)
@@ -172,6 +179,9 @@ def test_facts_mix_seal_matches_hand_and_objective(tmp_path) -> None:
     assert float(sealed["evaluation"]["npv"]) == pytest.approx(float(expected), rel=1e-6)
     published = adapted.outputs["solution"]
     assert published["objective_value"] == pytest.approx(float(expected), rel=1e-6)
+    # 封存 tax_cash/CF 为公开事实原样投影（结构与金额不重算、不改写）。
+    assert sealed["tax_cash"] == json.loads(json.dumps(facts["tax_cash"]))
+    assert sealed["annual_net_flows"] == list(facts["annual_net_flows"])
 
 
 def test_facts_gross_net_equivalence(tmp_path) -> None:
@@ -231,7 +241,7 @@ def test_facts_two_pools_counted_once(tmp_path) -> None:
     _, _, solution_raw = _solve_internal(bundle, tmp_path)
     adapted, sealed, facts = _seal(bundle, solution_raw, finance, _snapshot())
     by_pool: dict[str, list] = {}
-    for row in facts["vat"]:
+    for row in facts["tax_cash"]["vat"]:
         by_pool.setdefault(row["pool"], []).append(row)
     assert sorted(by_pool) == ["main_pool", "pool2"]
     for month in range(1, 37):
@@ -243,7 +253,7 @@ def test_facts_two_pools_counted_once(tmp_path) -> None:
         assert _amount(second["paid"]) == pytest.approx(0.0, abs=1e-6)
         assert _amount(second["carry"]) == pytest.approx(float(carry2[month - 1]), rel=1e-6)
     base_y1, base_y2, base_y3 = _mix_bases()
-    income_rows = {(row["rule"], row["year"]): row for row in facts["income"]}
+    income_rows = {(row["rule"], row["year"]): row for row in facts["tax_cash"]["income"]}
     assert _amount(income_rows[("income_demo", 3)]["taxable_base"]) == pytest.approx(float(base_y3), rel=1e-6)
     assert sealed["schema"] == "ies.financial-evaluation"
 
@@ -265,15 +275,41 @@ def test_facts_post_period_refund_retained_not_cash(tmp_path) -> None:
     artifact, models, materialized, finance, config, evaluation = _inputs(refunds=refunds)
     bundle = HIGHS_MILP_PROVIDER.generate(artifact, models, materialized, finance, config, evaluation)
     out, inp = _hand_monthly()
-    paids, _ = _hand_chain(out, inp, claims={20: Decimal("1500"), 25: Decimal("2000")})
-    value, _, solution_raw = _solve_internal(bundle, tmp_path)
+    paids, carries = _hand_chain(out, inp, claims={20: Decimal("1500"), 25: Decimal("2000")})
+    value, solved, solution_raw = _solve_internal(bundle, tmp_path)
     adapted, sealed, facts = _seal(bundle, solution_raw, finance, _snapshot())
-    assert [(row["pool"], row["period"], row["arrival_period"]) for row in facts["refunds"]] == [
+    assert [(row["pool"], row["period"], row["arrival_period"]) for row in facts["tax_cash"]["refunds"]] == [
         ("main_pool", 20, 22),
         ("main_pool", 25, 40),
     ]
-    assert _amount(facts["refunds"][0]["amount"]) == pytest.approx(1500.0, rel=1e-9)
-    assert _amount(facts["refunds"][1]["amount"]) == pytest.approx(2000.0, rel=1e-9)
+    assert _amount(facts["tax_cash"]["refunds"][0]["amount"]) == pytest.approx(1500.0, rel=1e-9)
+    assert _amount(facts["tax_cash"]["refunds"][1]["amount"]) == pytest.approx(2000.0, rel=1e-9)
+    # 发布 carry 为扣当月确认退款后的期末可结转余额（与下月 previous 同源）。
+    vat_rows = {(row["pool"], row["month"]): row for row in facts["tax_cash"]["vat"]}
+    before_m20 = solved["vat__main_pool__carry__m20"]
+    assert _amount(vat_rows[("main_pool", 20)]["carry"]) == pytest.approx(
+        before_m20 - 1500.0, rel=1e-6
+    )
+    assert _amount(vat_rows[("main_pool", 20)]["carry"]) == pytest.approx(
+        float(carries[19]) - 1500.0, rel=1e-6
+    )
+    assert _amount(vat_rows[("main_pool", 21)]["carry"]) == pytest.approx(
+        solved["vat__main_pool__carry__m21"], rel=1e-6
+    )
+    # 次月手算余额已以前月扣claim值前向传播，与发布值同源一致。
+    assert _amount(vat_rows[("main_pool", 21)]["carry"]) == pytest.approx(
+        float(carries[20]), rel=1e-6
+    )
+    before_m25 = solved["vat__main_pool__carry__m25"]
+    assert _amount(vat_rows[("main_pool", 25)]["carry"]) == pytest.approx(
+        before_m25 - 2000.0, rel=1e-6
+    )
+    assert _amount(vat_rows[("main_pool", 25)]["carry"]) == pytest.approx(
+        float(carries[24]) - 2000.0, rel=1e-6
+    )
+    assert _amount(vat_rows[("main_pool", 26)]["carry"]) == pytest.approx(
+        float(carries[25]), rel=1e-6
+    )
     expected = _hand_npv_with_vat(paids, arrivals={22: Decimal("1500")})
     assert value == pytest.approx(float(expected), rel=1e-6)
     assert float(sealed["evaluation"]["npv"]) == pytest.approx(float(expected), rel=1e-6)
@@ -296,11 +332,13 @@ def test_facts_empty_rules_full_cashflow(tmp_path) -> None:
     value, solved, solution_raw = _solve_internal(bundle, tmp_path, check_soc_pin=False)
     assert solved["gen_cap"] == pytest.approx(10000.0, rel=1e-6)
     adapted, sealed, facts = _seal(bundle, solution_raw, finance, _snapshot())
-    assert facts["vat"] == []
-    assert facts["refunds"] == []
-    assert facts["income"] == []
-    assert facts["depreciation"] == []
-    assert facts["loss_balances"] == []
+    assert facts["tax_cash"] == {
+        "vat": [],
+        "refunds": [],
+        "income": [],
+        "depreciation": [],
+        "loss_balances": [],
+    }
     assert sealed["tax_cash"] == {
         "vat": [],
         "refunds": [],
@@ -343,20 +381,6 @@ def test_facts_absence_keeps_old_semantics() -> None:
     assert build_financial_evaluation(_snapshot(), _finance_stub(), metrics_only) is None
 
 
-def test_facts_old_bundle_without_mapping_rejected() -> None:
-    """旧包缺必需映射：3.0.0 明确失败，不回退、不补零（无需求解）。"""
-    receipt = _receipt(result_adapter_ref=FACTS_ADAPTER_REF)
-    bundle = _wrap_bundle(
-        {
-            "input/problem.mps": TINY_MPS.encode("utf-8"),
-            "input/parameters.json": _tiny_parameters(),
-        }
-    )
-    with pytest.raises(ComputationUnavailableError) as exc_info:
-        HIGHS_FACTS_ADAPTER.adapt(bundle, receipt, {"output/solution.sol": SHIM_OPTIMAL.encode()})
-    assert exc_info.value.reason == "result-protocol-failure"
-
-
 def test_facts_non_npv_objective(tmp_path) -> None:
     """非 NPV 目标也有正确事实：约束精确性不依赖目标（此处不核对目标值）。"""
     ordinary = {
@@ -376,7 +400,7 @@ def test_facts_non_npv_objective(tmp_path) -> None:
     _, _, solution_raw = _solve_internal(bundle, tmp_path)
     adapted, sealed, facts = _seal(bundle, solution_raw, finance, _snapshot())
     base_y1, base_y2, base_y3 = _mix_bases()
-    income_rows = {(row["rule"], row["year"]): row for row in facts["income"]}
+    income_rows = {(row["rule"], row["year"]): row for row in facts["tax_cash"]["income"]}
     assert _amount(income_rows[("income_demo", 2)]["taxable_base"]) == pytest.approx(float(base_y2), rel=1e-6)
     assert _amount(income_rows[("income_demo", 3)]["taxable_base"]) == pytest.approx(float(base_y3), rel=1e-6)
     assert sealed["schema"] == "ies.financial-evaluation"

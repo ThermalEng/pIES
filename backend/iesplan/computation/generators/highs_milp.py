@@ -39,7 +39,7 @@ from iesplan.computation.protocols import (
     SolverBundle,
     SolverBundleManifest,
 )
-from iesplan.computation.result_adapters.highs import FACTS_ADAPTER_REF
+from iesplan.computation.result_adapters.highs import ADAPTER_REF as HIGHS_ADAPTER_REF
 from iesplan.computation.sequences import MaterializedSet
 from iesplan.finance import EffectiveFinanceConfig, EvaluationInput
 from iesplan.modeling import DeviceMathContribution
@@ -49,7 +49,7 @@ GENERATOR_VERSION = "3.4.0"
 GENERATOR_REF = f"{GENERATOR_ID}@{GENERATOR_VERSION}"
 SOLVER_REF = "ies.solver.highs@1.7.2"
 EXECUTOR_REF = "ies.executor.local_process@1.0.0"
-ADAPTER_REF = FACTS_ADAPTER_REF
+ADAPTER_REF = HIGHS_ADAPTER_REF
 ASSEMBLY_SCHEMA_VERSION = "3.0.0"
 
 #: seed 为 null 时 descriptor 明示的固定种子。

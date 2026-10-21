@@ -115,8 +115,6 @@ from iesplan.computation.result_adapter import (
 )
 from iesplan.computation.result_adapters import (
     HIGHS_ADAPTER,
-    HIGHS_FACTS_ADAPTER,
-    HighsFinancialFactsAdapter,
     HighsResultAdapter,
 )
 from iesplan.computation.runtime import (
@@ -155,7 +153,6 @@ __all__ = [
     "HIGHS_ADAPTER",
     "HIGHS_ADAPTER_PATH",
     "HIGHS_EXECUTABLE_REF",
-    "HIGHS_FACTS_ADAPTER",
     "HIGHS_MILP_PROVIDER",
     "HIGHS_VERSION",
     "NAIVE_PREDICTOR",
@@ -179,7 +176,6 @@ __all__ = [
     "GeneratorProvider",
     "GeneratorRegistry",
     "HighsMilpProvider",
-    "HighsFinancialFactsAdapter",
     "HighsResultAdapter",
     "MaterializedPriceSeries",
     "MaterializedSeries",

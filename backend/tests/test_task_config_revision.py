@@ -727,7 +727,7 @@ def test_ambiguous_executors_blocked_without_guessing() -> None:
         precisions=("medium",),
         solvers=("ies.solver.highs@1.7.2",),
         executors=("ies.executor.a@1.0.0", "ies.executor.b@1.0.0"),
-        result_adapter="ies.result-adapter.highs@2.0.0",
+        result_adapter="ies.result-adapter.highs@3.0.0",
         unit_system="SI",
         seed_semantics="seed 解释见 descriptor",
     )

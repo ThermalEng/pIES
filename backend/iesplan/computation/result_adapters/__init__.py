@@ -7,14 +7,10 @@ bootstrap 组合根；API/Worker 不得自行发现或动态加载 provider。
 
 from iesplan.computation.result_adapters.highs import (
     HIGHS_ADAPTER,
-    HIGHS_FACTS_ADAPTER,
-    HighsFinancialFactsAdapter,
     HighsResultAdapter,
 )
 
 __all__ = [
     "HIGHS_ADAPTER",
-    "HIGHS_FACTS_ADAPTER",
-    "HighsFinancialFactsAdapter",
     "HighsResultAdapter",
 ]

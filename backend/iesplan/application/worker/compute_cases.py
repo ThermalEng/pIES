@@ -669,14 +669,10 @@ def build_financial_evaluation(
 
     currency = finance.currency
     # 适配输出为协议冻结值（tuple/MappingProxy）；封存载荷面向 JSON，
-    # 用协议层互逆函数解冻为普通结构，金额字符串本身不改写。
-    tax_cash = thaw_json_value(
-        {
-            key: facts[key]
-            for key in ("vat", "refunds", "income", "depreciation", "loss_balances")
-        }
-    )
-    flows = [entry["amount"]["value"] for entry in facts["annual_net_flows"]]
+    # 用协议层互逆函数解冻为普通结构，金额字符串本身不改写。公开事实
+    # 已为手册形状，此处只取键投影，不重组税务结构、不改写金额。
+    tax_cash = thaw_json_value(facts["tax_cash"])
+    flows = [value for value in facts["annual_net_flows"]]
     assessed = evaluate_project_investment(
         [Decimal(value) for value in flows],
         rate,
@@ -698,21 +694,22 @@ def build_financial_evaluation(
         "base_year": finance.base_year,
         "profile_id": finance.profile_id,
         "discount_rate": rate,
-        "construction_total": facts["construction_total"]["value"],
-        "construction_total_unit": facts["construction_total"]["unit"],
-        "annual_fixed_om": facts["annual_fixed_om"]["value"],
+        "construction_total": facts["construction_total"],
+        # 公开事实金额统摄于顶层 currency；封存按手册保留独立单位字段。
+        "construction_total_unit": currency,
+        "annual_fixed_om": facts["annual_fixed_om"],
         "payments_applied": [
-            {"t": entry["t"], "ratio": entry["ratio"], "amount": entry["amount"]["value"]}
-            for entry in facts["payments"]
+            {"t": entry["t"], "ratio": entry["ratio"], "amount": entry["amount"]}
+            for entry in facts["payments_applied"]
         ],
         "annual_operation": [
             {
                 "financial_year": entry["financial_year"],
-                "energy_net": entry["energy_net"]["value"],
-                "variable_om": entry["variable_om"]["value"],
-                "fixed_om": entry["fixed_om"]["value"],
+                "energy_net": entry["energy_net"],
+                "variable_om": entry["variable_om"],
+                "fixed_om": entry["fixed_om"],
                 "maintenance": entry["maintenance"],
-                "net": entry["net"]["value"],
+                "net": entry["net"],
             }
             for entry in facts["annual_operation"]
         ],

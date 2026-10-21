@@ -212,7 +212,7 @@ class _StubRuntime:
                 solver_ref="ies.solver.highs@1.7.2",
                 executor_ref="ies.executor.local_process@1.0.0",
                 executable_ref="ies.solver.highs@1.7.2",
-                result_adapter_ref="ies.result-adapter.highs@2.0.0",
+                result_adapter_ref="ies.result-adapter.highs@3.0.0",
                 status=self._status,
                 termination_reason=self._status,
             ),

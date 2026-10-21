@@ -104,7 +104,7 @@ def _make_snapshot(db: Session, version_id: int) -> int:
         random_seed=42,
         created_by=7,
         schema_version="2.0.0",
-        result_adapter="ies.result-adapter.highs@2.0.0",
+        result_adapter="ies.result-adapter.highs@3.0.0",
         executor="ies.executor.local_process@1.0.0",
         device_models={},
         evaluation={

@@ -151,7 +151,7 @@ def _seed_evidence(
         calc_config_snapshot={"params": {"horizon_years": 1}, "algorithm": "milp"},
         program_version="0.1.0", extension_versions={}, random_seed=42,
         schema_version="1.0.0",
-        result_adapter="ies.result-adapter.highs@2.0.0",
+        result_adapter="ies.result-adapter.highs@3.0.0",
         executor="ies.executor.local_process@1.0.0", created_by=owner_id,
     )
     db.add(snapshot)

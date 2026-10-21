@@ -2233,7 +2233,13 @@ class _ProjectBuilder:
                     "paid": self._decl_var(row["paid"]),
                     "refund_claimed": self._decl_const(row["claim"]),
                     "refund_arrived": self._decl_const(row["arrival"]),
-                    "carry": self._decl_var(row["carry"]),
+                    # 期末可结转留抵 = 当月 carry 列 - 当月确认退款，与
+                    # 下月 previous 同源（claim 为已知常量；无退款时恒
+                    # 等于 carry 列本身）。
+                    "carry": {
+                        "constant": -row["claim"],
+                        "terms": {row["carry"]: 1.0},
+                    },
                 }
             )
         income: list[dict[str, object]] = []
@@ -2266,48 +2272,46 @@ class _ProjectBuilder:
             "currency": self.finance.currency,
             "construction_total": self._decl_affine(self._fact_construction),
             "annual_fixed_om": self._decl_affine(self._fact_fixed_om),
-            "payments": [
+            "payments_applied": [
                 {"t": t, "ratio": ratio, "amount": self._decl_affine(acc)}
                 for t, ratio, acc in self._fact_payments
             ],
             "annual_operation": annual_operation,
-            "vat": vat,
-            "refunds": [
-                {
-                    "pool": row["pool"],
-                    "period": row["period"],
-                    "arrival_period": row["arrival_period"],
-                    "amount": self._decl_const(row["amount"]),
-                }
-                for row in self._fact_refunds
-            ],
-            "income": income,
-            "depreciation": [
-                {
-                    "rule": row["rule"],
-                    "asset": row["asset"],
-                    "year": row["year"],
-                    "amount": self._decl_affine(row["amount"]),
-                }
-                for row in self._fact_depr
-            ],
-            "loss_balances": [
-                {
-                    "rule": row["rule"],
-                    "vintage_id": row["vintage_id"],
-                    "year": row["year"],
-                    "last_usable_year": row["last"],
-                    "amount": self._decl_affine(row["rem"]),
-                }
-                for row in self._fact_balances
-            ],
+            "tax_cash": {
+                "vat": vat,
+                "refunds": [
+                    {
+                        "pool": row["pool"],
+                        "period": row["period"],
+                        "arrival_period": row["arrival_period"],
+                        "amount": self._decl_const(row["amount"]),
+                    }
+                    for row in self._fact_refunds
+                ],
+                "income": income,
+                "depreciation": [
+                    {
+                        "rule": row["rule"],
+                        "asset": row["asset"],
+                        "year": row["year"],
+                        "amount": self._decl_affine(row["amount"]),
+                    }
+                    for row in self._fact_depr
+                ],
+                "loss_balances": [
+                    {
+                        "rule": row["rule"],
+                        "vintage_id": row["vintage_id"],
+                        "year": row["year"],
+                        "last_usable_year": row["last"],
+                        "amount": self._decl_affine(row["rem"]),
+                    }
+                    for row in self._fact_balances
+                ],
+            },
+            # 完整税后现金流按 t=0..E 顺序排列（时点为下标位置，不另存年键）。
             "annual_net_flows": [
-                {
-                    "year": t,
-                    "amount": self._decl_affine(
-                        self._fact_cash.get(t) or _AffineAcc()
-                    ),
-                }
+                self._decl_affine(self._fact_cash.get(t) or _AffineAcc())
                 for t in range(years + 1)
             ],
         }

@@ -1,4 +1,4 @@
-"""ies.result-adapter.highs@2.0.0 聚焦行为测试。
+"""ies.result-adapter.highs@3.0.0 聚焦行为测试。
 
 V1 夹具为 Docker 内真实求解垫片（``ies-highs-solver``，highspy 1.7.2）
 逐字节产出，断言前已核对：
@@ -112,6 +112,30 @@ ENDATA
 """
 
 
+def _facts() -> dict:
+    """无财务口径的最小必需声明（常量零值 + 空数组 = 真实不适用）。
+
+    配套生成器恒声明该映射；本夹具只验主解/序列/度量解析，故以零
+    常量声明不断言任何税额。旧包缺该键即协议失败，见拒绝测试。
+    """
+    zero = {"constant": 0.0, "terms": {}}
+    return {
+        "currency": "CNY",
+        "construction_total": {"constant": 0.0, "terms": {}},
+        "annual_fixed_om": {"constant": 0.0, "terms": {}},
+        "payments_applied": [],
+        "annual_operation": [],
+        "tax_cash": {
+            "vat": [],
+            "refunds": [],
+            "income": [],
+            "depreciation": [],
+            "loss_balances": [],
+        },
+        "annual_net_flows": [dict(zero)],
+    }
+
+
 def _parameters(
     unit_map: dict | None = None,
     offset: object = 1.5,
@@ -123,6 +147,7 @@ def _parameters(
     doc = {
         "assembly": {"id": "assembly-7", "schema_version": "2.0.0"},
         "components": {} if components is None else components,
+        "financial_facts": _facts(),
         "generator": "ies.generator.highs_milp@3.4.0",
         "objective_offset": offset,
         "objective_unit": objective_unit,
@@ -196,7 +221,7 @@ def _adapt(bundle_files, receipt, solution: bytes | None) -> ComputeResult:
 def test_identity_and_registry() -> None:
     """公开身份与独立原子注册（精确引用选中，无回退）。"""
     assert isinstance(HIGHS_ADAPTER, HighsResultAdapter)
-    assert HIGHS_ADAPTER.ref == ADAPTER_REF == "ies.result-adapter.highs@2.0.0"
+    assert HIGHS_ADAPTER.ref == ADAPTER_REF == "ies.result-adapter.highs@3.0.0"
     assert HIGHS_ADAPTER.descriptor.ref == ADAPTER_REF
     assert HIGHS_ADAPTER.available() is True
     registry = build_result_adapter_registry([HIGHS_ADAPTER])
@@ -206,6 +231,19 @@ def test_identity_and_registry() -> None:
     assert exc_info.value.reason == "no-result-adapter"
 
 
+def test_bundle_without_financial_facts_fails() -> None:
+    """旧包缺必需财务事实声明即自然失败，不回退、不补零。"""
+    doc = json.loads(_parameters().decode("utf-8"))
+    del doc["financial_facts"]
+    raw = (json.dumps(doc, sort_keys=True) + "\n").encode("utf-8")
+    files = {
+        PROBLEM_PATH: TINY_MPS.encode("utf-8"),
+        PARAMETERS_PATH: raw,
+    }
+    with pytest.raises(KeyError):
+        _adapt(files, _receipt(), SHIM_OPTIMAL.encode("utf-8"))
+
+
 def test_optimal_money_objective_keeps_currency() -> None:
     """真实最优解：金额目标守币种原值，变量换算，offset 只加一次。"""
     result = _adapt(None, _receipt(), SHIM_OPTIMAL.encode("utf-8"))
@@ -213,7 +251,7 @@ def test_optimal_money_objective_keeps_currency() -> None:
     assert result.math_status == "solved"
     assert result.bundle_id == "bundle-7"
     assert result.receipt_id == "receipt-7"
-    assert set(result.outputs) == {"solution", "metrics", "series"}
+    assert set(result.outputs) == {"solution", "metrics", "series", "financial_facts"}
     assert dict(result.outputs["series"]) == {}
     solution = result.outputs["solution"]
     assert solution["objective_value"] == 3001.5
@@ -272,14 +310,14 @@ def test_requested_subset_only() -> None:
         PARAMETERS_PATH: _parameters(outputs=["solution"]),
     }
     result = _adapt(files, _receipt(), SHIM_OPTIMAL.encode("utf-8"))
-    assert set(result.outputs) == {"solution", "series"}
+    assert set(result.outputs) == {"solution", "series", "financial_facts"}
     assert dict(result.outputs["series"]) == {}
     files = {
         PROBLEM_PATH: TINY_MPS.encode("utf-8"),
         PARAMETERS_PATH: _parameters(outputs=["solution", "nope"]),
     }
     result = _adapt(files, _receipt(), SHIM_OPTIMAL.encode("utf-8"))
-    assert set(result.outputs) == {"solution", "series"}
+    assert set(result.outputs) == {"solution", "series", "financial_facts"}
     assert dict(result.outputs["series"]) == {}
 
 
@@ -522,7 +560,7 @@ def test_series_recovers_by_declared_columns() -> None:
     }
     result = _adapt(files, _receipt(), SHIM_OPTIMAL.encode("utf-8"))
     assert result.math_status == "solved"
-    assert set(result.outputs) == {"solution", "metrics", "series"}
+    assert set(result.outputs) == {"solution", "metrics", "series", "financial_facts"}
     series = {key: dict(item) for key, item in result.outputs["series"].items()}
     assert series == {
         "inst.flow": {
