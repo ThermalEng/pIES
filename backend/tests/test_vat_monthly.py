@@ -440,6 +440,7 @@ def _inputs(
     rules="all",
     tank_origin="new",
     maintenance_tax=True,
+    payload=None,
 ):
     doc = _doc(tank_origin=tank_origin)
     if objective is not None:
@@ -450,18 +451,15 @@ def _inputs(
         "load1": _contribution(LOAD_YAML),
         "grid1": _contribution(GRID_YAML),
     }
-    finance = merge_effective(
-        FinanceProfile.from_dict(
-            _finance_payload(
-                refunds=refunds,
-                opening=opening,
-                basis=basis,
-                rules=rules,
-                maintenance_tax=maintenance_tax,
-            )
-        ),
-        None,
-    )
+    if payload is None:
+        payload = _finance_payload(
+            refunds=refunds,
+            opening=opening,
+            basis=basis,
+            rules=rules,
+            maintenance_tax=maintenance_tax,
+        )
+    finance = merge_effective(FinanceProfile.from_dict(payload), None)
     init_registry()
     result = validate_assembly_doc(
         doc,
@@ -502,7 +500,12 @@ def _inputs(
 
 
 def _hand_monthly(
-    *, tax_factor=GROSS_FACTOR, upfront=Decimal("6000"), fixed_om=Decimal("2100"), maintenance_tax=True
+    *,
+    tax_factor=GROSS_FACTOR,
+    upfront=Decimal("6000"),
+    fixed_om=Decimal("2100"),
+    maintenance_tax=True,
+    con_ratio=Decimal("1"),
 ):
     """36 个月 (out, in) 手算（业务 Decimal，与实现公式独立书写）。
 
@@ -513,7 +516,7 @@ def _hand_monthly(
     """
     out = [Decimal("0")] * 36
     inp = [Decimal("0")] * 36
-    deductible_total = upfront * tax_factor
+    deductible_total = upfront * tax_factor * con_ratio
     inp[0] += Decimal("0.6") * deductible_total
     inp[12] += Decimal("0.4") * deductible_total
     for index, hours in enumerate(HOURS_2026):
@@ -587,11 +590,12 @@ def _hand_npv_with_vat(
 # ---------------------------------------------------------------------------
 
 
-def _solve_internal(bundle, tmp_path):
+def _solve_internal(bundle, tmp_path, *, check_soc_pin=True):
     """真实求解：返回（目标值 + 偏移，列名 → 取值，解字节）。
 
     列顺序与解映射走生产读取（``_mps_column_names`` / ``_parse_solution``）；
     无系数固定变量（soc_pin）在生产 writer 显式占列，交接严格等长。
+    无该变量的夹具传 ``check_soc_pin=False``。
     """
     from iesplan.computation.result_adapters.highs import (
         _mps_column_names,
@@ -627,7 +631,8 @@ def _solve_internal(bundle, tmp_path):
     primals = solution["primals"]
     assert len(primals) == len(order)
     values = dict(zip(order, primals, strict=True))
-    assert values.get("soc_pin") == pytest.approx(0.5)
+    if check_soc_pin:
+        assert values.get("soc_pin") == pytest.approx(0.5)
     metadata = json.loads(bundle.files["input/parameters.json"].decode("utf-8"))
     return float(solution["objective"]) + metadata["objective_offset"], values, solution_raw
 
@@ -920,11 +925,11 @@ def test_vat_unbounded_flow_is_unsupported() -> None:
         build_project_model(artifact, models, materialized, finance, config, evaluation)
 
 
-def test_generate_rejects_income_tax() -> None:
-    """所得税关系在唯一建模能力边界明确拒绝，不与 VAT 混合半生成。
+def test_generate_accepts_income_tax_with_vat() -> None:
+    """所得税与 VAT 混合可生成：3.3.0 同次建模，不再整单拒绝。
 
-    所得税规则引用本夹具真实价格/分量（公开入口完整通过），拒绝只
-    发生在建模能力边界，不伪装成输入非法。
+    所得税规则引用本夹具真实价格/分量（公开入口完整通过）；未知类型
+    仍在唯一建模边界拒绝（见 C1b 未知类型用例）。
     """
     payload = _finance_payload()
     payload["tax_rules"]["income_tax"] = {
@@ -945,5 +950,7 @@ def test_generate_rejects_income_tax() -> None:
     from iesplan.finance import IncomeTaxRule
 
     assert any(isinstance(rule, IncomeTaxRule) for rule in finance.tax_rules.values())
-    with pytest.raises(LoweringUnsupportedError, match="超出 3.2.0 已实现关系"):
-        HIGHS_MILP_PROVIDER.generate(artifact, models, materialized, finance, config, evaluation)
+    bundle = HIGHS_MILP_PROVIDER.generate(
+        artifact, models, materialized, finance, config, evaluation
+    )
+    assert bundle.manifest.bundle["generator"] == GENERATOR_REF

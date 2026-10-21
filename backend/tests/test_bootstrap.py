@@ -24,7 +24,7 @@ def test_assemble_api_full_context() -> None:
     assert ctx.device_registry is not None
     assert ctx.generator_registry is not None
     assert [d.ref for d in ctx.generator_registry.snapshot()] == [
-        "ies.generator.highs_milp@3.2.0"
+        "ies.generator.highs_milp@3.3.0"
     ]
     assert len(ctx.generator_registry) == 1
     health = ctx.health()

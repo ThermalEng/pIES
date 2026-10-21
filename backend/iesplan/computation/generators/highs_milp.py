@@ -1,4 +1,4 @@
-"""首个真实 GeneratorProvider：``ies.generator.highs_milp@3.2.0``。
+"""首个真实 GeneratorProvider：``ies.generator.highs_milp@3.3.0``。
 
 纯内存确定性转换：直接输入（装配产物、设备数学贡献、物化序列、
 有效财务快照、计算配置、冻结评价确认）→ ``SolverBundle`` 完整聚合
@@ -12,8 +12,8 @@ constant tariff；数学能力即 ``build_project_model`` 现有 lowerer 明确
 
 3.0.0 相对 2.0.0 的唯一破坏性变化：冻结评价确认为必需生成输入，
 不保留旧调用签名或默认评价值。3.1.0 新增显式全周期 NPV 目标能力，
-直接输入形状不变。3.2.0 新增 VAT 月度精确关系与同次 NPV 现金，
-所得税仍明确拒绝。通用 Bundle manifest 未变；结果适配
+直接输入形状不变。3.2.0 新增 VAT 月度精确关系与同次 NPV 现金。
+3.3.0 新增所得税年度计税/折旧/亏损结转同次建模。通用 Bundle manifest 未变；结果适配
 协议按实际输出变化独立版本化，不因生成器输入变化而同步升版。
 """
 
@@ -42,7 +42,7 @@ from iesplan.finance import EffectiveFinanceConfig, EvaluationInput
 from iesplan.modeling import DeviceMathContribution
 
 GENERATOR_ID = "ies.generator.highs_milp"
-GENERATOR_VERSION = "3.2.0"
+GENERATOR_VERSION = "3.3.0"
 GENERATOR_REF = f"{GENERATOR_ID}@{GENERATOR_VERSION}"
 SOLVER_REF = "ies.solver.highs@1.7.2"
 EXECUTOR_REF = "ies.executor.local_process@1.0.0"

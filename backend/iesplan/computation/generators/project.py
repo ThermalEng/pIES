@@ -70,6 +70,7 @@ from iesplan.finance import (
     ConstructionVatRule,
     EffectiveFinanceConfig,
     EvaluationInput,
+    IncomeTaxRule,
     VatRule,
     annual_boundaries,
 )
@@ -314,6 +315,7 @@ class _ProjectBuilder:
         self.finance = finance
         self.evaluation = evaluation
         self._vat_cash: _AffineAcc | None = None
+        self._income_cash: _AffineAcc | None = None
         self.point_count = point_count
         self.step_s = step_s
         self.series: dict[tuple[str, str], list[float]] = {}
@@ -1164,9 +1166,10 @@ class _ProjectBuilder:
         """已支持税则按池分组；无规则无池返回 None；未支持类型明确拒绝。
 
         结算口径/确认方式/池存在/分量口径已由公开财务入口核对，此处
-        信任类型化交接。3.2.0 仅实现 ``vat`` 与
-        ``construction_input_vat`` 的建模，其余类型不忽略、不半生成，
-        在此唯一能力边界拒绝（provider 不再复制该判断）。
+        信任类型化交接。仅实现 ``vat`` 与 ``construction_input_vat``
+        的建模；所得税规则由独立所得税路径建模，此处跳过不拒；其余
+        未知类型不忽略、不半生成，在此唯一能力边界拒绝（provider 不
+        再复制该判断）。
         """
         rules = self.finance.tax_rules
         pools = self.finance.credit_pools
@@ -1183,9 +1186,11 @@ class _ProjectBuilder:
                 grouped.setdefault(
                     rule.credit_pool, {"vat": [], "construction": []}
                 )["construction"].append(rule)
+            elif isinstance(rule, IncomeTaxRule):
+                continue
             else:
                 raise LoweringUnsupportedError(
-                    f"税务规则 {rule_id!r} 类型 {type(rule).__name__} 超出 3.2.0 已实现关系"
+                    f"税务规则 {rule_id!r} 类型 {type(rule).__name__} 超出已实现关系"
                 )
         for pool_id in sorted(pools):
             grouped.setdefault(pool_id, {"vat": [], "construction": []})
@@ -1328,13 +1333,12 @@ class _ProjectBuilder:
         var_bounds: Mapping[str, tuple[float | None, float | None]],
         *,
         side: str,
-        pool_id: str,
-        month: int,
+        label: str,
     ) -> float:
         """仿射式在变量盒上的确界；无界即明确能力不支持。
 
-        有限界由实际变量界推导，不猜常量；缺界命名池/月/变量后拒绝，
-        不填业务默认。
+        有限界由实际变量界推导，不猜常量；缺界命名位置/变量后拒绝，
+        不填业务默认。``label`` 为调用方业务位置（如 VAT 池月、所得税年）。
         """
         total = affine.constant
         for name, coeff in affine.terms.items():
@@ -1342,14 +1346,13 @@ class _ProjectBuilder:
                 continue
             if name not in var_bounds:
                 raise LoweringUnsupportedError(
-                    f"VAT 池 {pool_id!r} 第 {month} 月引用未知变量 {name!r}"
+                    f"{label}引用未知变量 {name!r}"
                 )
             lower, upper = var_bounds[name]
             bound = upper if (coeff > 0.0) == (side == "max") else lower
             if bound is None or not math.isfinite(bound):
                 raise LoweringUnsupportedError(
-                    f"VAT 池 {pool_id!r} 第 {month} 月缺有限界："
-                    f"变量 {name!r} 界不足，互斥分段无法精确"
+                    f"{label}缺有限界：变量 {name!r} 界不足，无法精确"
                 )
             total += coeff * bound
         return total
@@ -1395,21 +1398,18 @@ class _ProjectBuilder:
             previous = _AffineAcc()
             previous.add_const(cumulative_hi)
             for month in range(1, months + 1):
+                location = f"VAT 池 {pool_id!r} 第 {month} 月"
                 out_max = self._affine_side(
-                    out_list[month - 1], var_bounds,
-                    side="max", pool_id=pool_id, month=month,
+                    out_list[month - 1], var_bounds, side="max", label=location
                 )
                 out_min = self._affine_side(
-                    out_list[month - 1], var_bounds,
-                    side="min", pool_id=pool_id, month=month,
+                    out_list[month - 1], var_bounds, side="min", label=location
                 )
                 in_max = self._affine_side(
-                    in_list[month - 1], var_bounds,
-                    side="max", pool_id=pool_id, month=month,
+                    in_list[month - 1], var_bounds, side="max", label=location
                 )
                 in_min = self._affine_side(
-                    in_list[month - 1], var_bounds,
-                    side="min", pool_id=pool_id, month=month,
+                    in_list[month - 1], var_bounds, side="min", label=location
                 )
                 # 留抵上界须覆盖销项为负（销售记账抵减）的一侧：单调递推
                 # cumulative_hi（只增不减）保证归纳每一步不切割真解；
@@ -1484,6 +1484,355 @@ class _ProjectBuilder:
                 previous.add_const(-claim)
         return cash
 
+    # -- 所得税年度关系（3.3.0；无所得税规则时整段跳过）--
+
+    def _income_rules(self) -> list[tuple[str, IncomeTaxRule]]:
+        """已解析所得税规则（按规则 ID 排序；未知类型由分组边界拒绝）。"""
+        return sorted(
+            (rule_id, rule)
+            for rule_id, rule in self.finance.tax_rules.items()
+            if isinstance(rule, IncomeTaxRule)
+        )
+
+    def _income_vat_credits(
+        self, grouped: dict[str, dict[str, list]] | None
+    ) -> tuple[dict[str, float], dict[tuple[int, int], float], dict[str, tuple[float, float]]]:
+        """所得税可扣口径对应的 VAT 抵免查找。
+
+        返回（运维抵免，维护抵免，建设抵免）：运维键为 ``for`` 路径，
+        值为抵免系数（税率因子 × 可抵比例）；维护键为 ``(year, position)``，
+        值为多条合计系数（维护金额恒含税拆价）；建设键为 finance_type，
+        值为（抵免系数，价税合计系数）。引用存在性与口径已由公开财务
+        入口核对，此处只消费；同一 ``for``/价格全局唯一，已在入口保证。
+        """
+        om: dict[str, float] = {}
+        maint: dict[tuple[int, int], float] = {}
+        construction: dict[str, tuple[float, float]] = {}
+        if grouped is None:
+            return om, maint, construction
+        for pool_rules in grouped.values():
+            for rule in pool_rules["vat"]:
+                for entry in rule.om_input_tax:
+                    om[entry.for_path] = self._vat_gross_factor(entry.rate) * float(
+                        entry.deductible_ratio.value
+                    )
+                for entry in rule.maintenance_input_tax:
+                    key = (entry.year, entry.position)
+                    maint[key] = maint.get(key, 0.0) + self._vat_gross_split_factor(
+                        entry.rate
+                    ) * float(entry.deductible_ratio.value)
+            for rule in pool_rules["construction"]:
+                finance_type, _, _ = rule.for_path.partition(".")
+                rate = float(rule.rate.value)
+                markup = 1.0 + rate if self.finance.price_basis == "tax_exclusive" else 1.0
+                construction[finance_type] = (
+                    self._vat_gross_factor(rule.rate) * float(rule.deductible_ratio.value),
+                    markup,
+                )
+        return om, maint, construction
+
+    def _income_deduct_om(
+        self,
+        base: _AffineAcc,
+        for_path: str,
+        span: tuple[int, int] | None,
+        om_credit: dict[str, float],
+        instances: Mapping[str, Any],
+    ) -> None:
+        """运维可扣额 = 实际消费额 − 已声明 VAT 抵免（与基础现金同一增量范围）。
+
+        既有沉没固定 OM 不消费亦不抵扣；真实消费的可变分量保留。可抵
+        比例只改变抵扣额，不改变实际付款。
+        """
+        finance_type, _, component = for_path.partition(".")
+        coef = om_credit.get(for_path, 0.0)
+        for inst in sorted(self.devices):
+            if inst not in instances or instances[inst].get("type") != "costed":
+                continue
+            if instances[inst].get("finance_type") != finance_type:
+                continue
+            produced = (
+                _COMPONENTS_NEW
+                if self.devices[inst].get("asset_origin") == "new"
+                else _COMPONENTS_EXISTING
+            )
+            if component not in produced:
+                continue
+            ft_entry = self.finance.finance_types[finance_type]
+            if getattr(ft_entry, component) is None:
+                continue
+            if component == "annual_fixed_om":
+                amount = self._annual_fixed_om_annual(inst)
+            else:
+                # variable_om 调用方恒传运营年区间（分量口径已在入口保证）。
+                start, end = span  # type: ignore[misc]
+                amount = self._cost_affine(inst, component, start, end)
+            base.add_scaled(amount, -(1.0 - coef))
+
+    def _income_deduct_depreciation(
+        self,
+        base: _AffineAcc,
+        rule: IncomeTaxRule,
+        year: int,
+        con_credit: dict[str, tuple[float, float]],
+        instances: Mapping[str, Any],
+    ) -> None:
+        """直线折旧可扣额（计税基础随建设选择与容量派生；残值只减一次）。
+
+        单资产年额 =（价税合计建设额 − 可抵建设进项 − 残值）/ 年限，
+        仅在 ``[K+first_year, K+first_year+life)`` 计提。不可抵进项留在
+        计税基础中；无已声明建设税率时基础即陈述建设额，不推断。
+        """
+        construction = self.evaluation.construction_period
+        for entry in rule.depreciation:
+            if not (
+                construction + entry.first_year
+                <= year
+                < construction + entry.first_year + entry.life_years
+            ):
+                continue
+            capex = _AffineAcc()
+            for inst in sorted(self.devices):
+                if inst not in instances or instances[inst].get("type") != "costed":
+                    continue
+                if self.devices[inst].get("asset_origin") != "new":
+                    continue
+                if instances[inst].get("finance_type") != entry.asset:
+                    continue
+                ft_entry = self.finance.finance_types[entry.asset]
+                if ft_entry.upfront_capex is None:
+                    continue
+                capex.add_scaled(self._cost_affine(inst, "upfront_capex"), 1.0)
+            credit_coef, markup = con_credit.get(entry.asset, (0.0, 1.0))
+            depreciable = _AffineAcc()
+            depreciable.add_scaled(capex, markup)
+            depreciable.add_scaled(capex, -credit_coef)
+            life = float(entry.life_years)
+            base.add_scaled(depreciable, -1.0 / life)
+            base.add_const(float(entry.residual.value) / life)
+
+    def _income_annual_base(
+        self,
+        rule: IncomeTaxRule,
+        year: int,
+        year_span: tuple[int, int] | None,
+        credits: tuple[dict[str, float], dict[tuple[int, int], float], dict[str, tuple[float, float]]],
+    ) -> _AffineAcc:
+        """单所得税规则单评价年应税基础（收入 − 成本 − 可扣维护 − 折旧）。
+
+        收入/能源/运维按实际消费归集（建设年无运行步为零）；维护可扣额
+        为含税付款扣已声明 VAT 抵免；收入与能源按陈述记账，不另扣销项税。
+        """
+        base = _AffineAcc()
+        instances = (self.doc.get("finance_binding") or {}).get("instances") or {}
+        bindings = self.doc.get("tariff_bindings") or {}
+        om_credit, maint_credit, _ = credits
+        if year_span is not None:
+            start, end = year_span
+            revenue = set(rule.revenue)
+            energy = set(rule.energy_cost)
+            for binding_id in sorted(bindings):
+                price_id = bindings[binding_id]["price"]
+                if price_id in revenue:
+                    base.add_scaled(self._tariff_affine(binding_id, start, end), -1.0)
+                elif price_id in energy:
+                    base.add_scaled(self._tariff_affine(binding_id, start, end), -1.0)
+            for for_path in rule.annual_om:
+                self._income_deduct_om(base, for_path, None, om_credit, instances)
+            for for_path in rule.variable_om:
+                self._income_deduct_om(
+                    base, for_path, (start, end), om_credit, instances
+                )
+        for item in rule.deductible_maintenance.items:
+            if item.year != year or not item.deductible:
+                continue
+            year_amounts = [
+                float(entry.amount)
+                for entry in self.evaluation.maintenance_expenses
+                if entry.year == item.year
+            ]
+            gross = year_amounts[item.position - 1]
+            coef = maint_credit.get((item.year, item.position), 0.0)
+            base.add_const(-gross * (1.0 - coef))
+        self._income_deduct_depreciation(base, rule, year, credits[2], instances)
+        return base
+
+    def _build_income(self) -> _AffineAcc | None:
+        """各所得税规则年度计税/亏损/税额精确链；返回 NPV 现金仿射（或 None）。
+
+        ``profit - gen = base`` 等式 + 非负 + 互斥确定唯一正负分段；
+        亏损按（到期年，输入顺序）逐笔精确领取（有序 min 的等价约束，
+        界由变量盒与累计推导），到期自动核销，新生来自负原始基础且
+        按明确年限结转。税额 = 税率 ×（正所得 − 领取），按评价年入现金。
+        约束与目标选择无关，现金只入 NPV；折旧/亏损抵扣不是现金流，
+        不重复扣除。
+        """
+        rules = self._income_rules()
+        if not rules:
+            return None
+        credits = self._income_vat_credits(self._vat_grouped_rules())
+        evaluation = self.evaluation
+        years = evaluation.evaluation_years
+        construction = evaluation.construction_period
+        operation = evaluation.operation_years
+        baseline = self.doc["project_baseline"]
+        bounds = annual_boundaries(
+            baseline["resolution"], baseline["start_year"], operation
+        )
+        span_by_year = {
+            construction + index + 1: span for index, span in enumerate(bounds)
+        }
+        var_bounds = {
+            variable.name: (variable.lower, variable.upper)
+            for variable in self.variables.values()
+        }
+        taken = set(var_bounds)
+        cash = _AffineAcc()
+        tax_rate_default = evaluation.discount_rate
+
+        def discount(year: int) -> float:
+            return (1.0 + tax_rate_default) ** year
+
+        def declare(name: str, upper: float, binary: bool = False) -> None:
+            if name in taken:
+                raise LoweringUnsupportedError(
+                    f"所得税内部列名与已有变量冲突 {name!r}"
+                )
+            taken.add(name)
+            self.variables[name] = LinearVariable(
+                name,
+                lower=0.0,
+                upper=upper,
+                kind="binary" if binary else "continuous",
+            )
+
+        def constrain(
+            name: str, expression: _AffineAcc, sense: str, rhs: float
+        ) -> None:
+            self.rows.append(
+                LinearConstraint(
+                    name=name, expression=expression.freeze(), sense=sense, rhs=rhs
+                )
+            )
+
+        for rule_id, rule in rules:
+            tax_rate = float(rule.rate.value)
+            carry_years = int(rule.loss_carryforward_years)
+            vintages: list[dict] = []
+            for position, opening in enumerate(rule.opening_losses):
+                opening_acc = _AffineAcc()
+                opening_acc.add_const(float(opening.amount.value))
+                vintages.append(
+                    {
+                        "seq": position,
+                        "last": int(opening.last_usable_year),
+                        "init_upper": float(opening.amount.value),
+                        "rem": opening_acc,
+                    }
+                )
+            seq_next = len(vintages)
+            for year in range(1, years + 1):
+                base = self._income_annual_base(
+                    rule, year, span_by_year.get(year), credits
+                )
+                location = f"所得税规则 {rule_id!r} 第 {year} 年"
+                base_hi = self._affine_side(
+                    base, var_bounds, side="max", label=location
+                )
+                base_lo = self._affine_side(
+                    base, var_bounds, side="min", label=location
+                )
+                profit_hi = max(base_hi, 0.0)
+                gen_hi = max(-base_lo, 0.0)
+                profit_name = f"inc__{rule_id}__profit__y{year}"
+                gen_name = f"inc__{rule_id}__gen__y{year}"
+                declare(profit_name, profit_hi)
+                declare(gen_name, gen_hi)
+                equation = _AffineAcc()
+                equation.add_term(profit_name, 1.0)
+                equation.add_term(gen_name, -1.0)
+                equation.add_scaled(base, -1.0)
+                constrain(f"inc__{rule_id}__eq__y{year}", equation, "eq", 0.0)
+                if profit_hi > 0.0 and gen_hi > 0.0:
+                    mutex = _mutex_big_m(
+                        f"inc__{rule_id}__m{year}",
+                        (profit_name, 0),
+                        (gen_name, 0),
+                        {
+                            profit_name: ("var", 0.0, profit_hi),
+                            gen_name: ("var", 0.0, gen_hi),
+                        },
+                    )
+                    binary = mutex.variables[0]
+                    self.variables[binary.name] = binary
+                    self.rows.extend(mutex.constraints)
+                available = sorted(
+                    (vintage for vintage in vintages if vintage["last"] >= year),
+                    key=lambda vintage: (vintage["last"], vintage["seq"]),
+                )
+                need = _AffineAcc()
+                need.add_term(profit_name, 1.0)
+                used_total = _AffineAcc()
+                for vintage in available:
+                    seq = vintage["seq"]
+                    use_name = f"inc__{rule_id}__use__y{year}__v{seq}"
+                    order_name = f"inc__{rule_id}__ord__y{year}__v{seq}"
+                    use_upper = min(profit_hi, vintage["init_upper"])
+                    declare(use_name, use_upper)
+                    declare(order_name, 1.0, binary=True)
+                    big_m = profit_hi + vintage["init_upper"]
+                    take_cap = _AffineAcc()
+                    take_cap.add_term(use_name, 1.0)
+                    take_cap.add_scaled(need, -1.0)
+                    constrain(
+                        f"inc__{rule_id}__take__y{year}__v{seq}__a",
+                        take_cap, "le", 0.0,
+                    )
+                    take_avail = _AffineAcc()
+                    take_avail.add_term(use_name, 1.0)
+                    take_avail.add_scaled(vintage["rem"], -1.0)
+                    constrain(
+                        f"inc__{rule_id}__take__y{year}__v{seq}__b",
+                        take_avail, "le", 0.0,
+                    )
+                    take_need = _AffineAcc()
+                    take_need.add_term(use_name, 1.0)
+                    take_need.add_scaled(need, -1.0)
+                    take_need.add_term(order_name, -big_m)
+                    constrain(
+                        f"inc__{rule_id}__take__y{year}__v{seq}__c",
+                        take_need, "ge", -big_m,
+                    )
+                    take_balance = _AffineAcc()
+                    take_balance.add_term(use_name, 1.0)
+                    take_balance.add_scaled(vintage["rem"], -1.0)
+                    take_balance.add_term(order_name, big_m)
+                    constrain(
+                        f"inc__{rule_id}__take__y{year}__v{seq}__d",
+                        take_balance, "ge", 0.0,
+                    )
+                    need.add_term(use_name, -1.0)
+                    used_total.add_term(use_name, 1.0)
+                    vintage["rem"].add_term(use_name, -1.0)
+                cash.add_term(profit_name, -tax_rate / discount(year))
+                cash.add_scaled(used_total, tax_rate / discount(year))
+                if gen_hi > 0.0:
+                    # 上界为零则实现恒为零，B0 亦不追加余额；跳过以保持
+                    # 序号与 B0 对齐（上界非零而实现为零的年份不受影响，
+                    # 其后年份的可用集与 B0 一致）。
+                    gen_acc = _AffineAcc()
+                    gen_acc.add_term(gen_name, 1.0)
+                    vintages.append(
+                        {
+                            "seq": seq_next,
+                            "last": year + carry_years,
+                            "init_upper": gen_hi,
+                            "rem": gen_acc,
+                        }
+                    )
+                    seq_next += 1
+        return cash
+
     def _build_objective(self) -> tuple[_AffineAcc, str]:
         planning = self.doc["planning"]
         raw = planning["objective"]
@@ -1498,6 +1847,8 @@ class _ProjectBuilder:
             npv = self._npv_objective()
             if self._vat_cash is not None:
                 npv.add_scaled(self._vat_cash, 1.0)
+            if self._income_cash is not None:
+                npv.add_scaled(self._income_cash, 1.0)
             return npv, self.finance.currency
         symbols, placeholders = self._planning_symbols()
         compiled = compile_planning_expression(
@@ -1597,6 +1948,7 @@ class _ProjectBuilder:
         self._build_bus_rows(buses)
         self._build_planning_rows()
         self._vat_cash = self._build_vat()
+        self._income_cash = self._build_income()
         objective, objective_unit = self._build_objective()
         model = LinearModel(
             variables=tuple(self.variables.values()),

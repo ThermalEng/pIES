@@ -1,6 +1,6 @@
 """首个真实 ResultAdapterProvider：``ies.result-adapter.highs@2.0.0``。
 
-与 ``ies.generator.highs_milp@3.2.0`` 配套（适配协议本身未变，不跟随升版），解释其声明输出
+与 ``ies.generator.highs_milp@3.3.0`` 配套（适配协议本身未变，不跟随升版），解释其声明输出
 ``output/solution.sol``。该文件由求解 executable
 ``ies.solver.highs@1.7.2``（``ies-highs-solver`` 垫片，0.9-E 已提交
 契约）写出的 ``HIGHS_SOLUTION_V1`` 文本：状态行、目标值、列数与按

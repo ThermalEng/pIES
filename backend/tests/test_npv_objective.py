@@ -553,7 +553,7 @@ def test_generate_rejects_unsupported_tax_relations() -> None:
 
     artifact, models, materialized, finance, config, evaluation = _inputs()
     taxed = replace(finance, tax_rules={"rule1": object()})
-    with pytest.raises(LoweringUnsupportedError, match="超出 3.2.0 已实现关系"):
+    with pytest.raises(LoweringUnsupportedError, match="超出已实现关系"):
         HIGHS_MILP_PROVIDER.generate(artifact, models, materialized, taxed, config, evaluation)
 
 
