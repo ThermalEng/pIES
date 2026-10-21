@@ -42,6 +42,118 @@ def test_negative_swapped_cf_nets_must_fail():
         assert_block_exact(pairs, sealed)
 
 
+def _tax_seal() -> dict:
+    """合成含税封存(E=1/K=0)：12 月单池、期后到账退款、所得税/折旧/余额各一。"""
+    vat = [
+        {
+            "pool": "main_pool",
+            "month": month,
+            "paid": "10.5" if month == 3 else "0.0",
+            "refund_claimed": "5.0" if month == 3 else "0.0",
+            "refund_arrived": "5.0" if month == 5 else "0.0",
+            "carry": "100.25",
+        }
+        for month in range(1, 13)
+    ]
+    return {
+        "currency": "CNY",
+        "evaluation_years": 1,
+        "annual_net_flows": ["-1000.0", "2500.5"],
+        "tax_cash": {
+            "vat": vat,
+            "refunds": [
+                {"pool": "main_pool", "period": 3, "arrival_period": 5, "amount": "5.0"},
+                {"pool": "main_pool", "period": 11, "arrival_period": 14, "amount": "7.5"},
+            ],
+            "income": [
+                {
+                    "rule": "income",
+                    "year": 1,
+                    "taxable_base": "2000.0",
+                    "loss_used": "500.0",
+                    "loss_generated": "0.0",
+                    "loss_expired": "0.0",
+                    "tax": "375.0",
+                }
+            ],
+            "depreciation": [{"rule": "depr", "asset": "pv_system", "year": 1, "amount": "800.0"}],
+            "loss_balances": [
+                {
+                    "rule": "income",
+                    "vintage_id": "vintage-with-a-very-long-identifier-0001",
+                    "year": 1,
+                    "last_usable_year": 6,
+                    "amount": "1200.0",
+                }
+            ],
+        },
+        "evaluation": {
+            "rows": [
+                {
+                    "year": 0, "net": "-1000.0", "discounted": "-1000.0",
+                    "cumulative": "-1000.0", "cumulative_discounted": "-1000.0",
+                },
+                {
+                    "year": 1, "net": "2500.5", "discounted": "2314.0",
+                    "cumulative": "1500.5", "cumulative_discounted": "1314.0",
+                },
+            ],
+            "npv": "1314.0",
+            "npv_unit": "CNY",
+            "irr": "1.5",
+            "irr_status": "normal",
+            "static_payback": 1,
+            "static_payback_unit": "year",
+            "static_status": "normal",
+            "dynamic_payback": 1,
+            "dynamic_payback_unit": "year",
+            "dynamic_status": "normal",
+        },
+    }
+
+
+def test_tax_rows_consume_sealed_facts_without_recompute():
+    """税务明细行消费封存原样：金额全出现、无截断、期后到账标应收。"""
+    from iesplan.application.packages.transfers import _sealed_tax_rows
+
+    fin = _tax_seal()
+    rows = _sealed_tax_rows(fin, "CNY")
+    values = [value for _, value in rows]
+    for amount in (
+        "-1000.0", "2500.5", "10.5", "5.0", "100.25", "7.5",
+        "2000.0", "500.0", "375.0", "800.0", "1200.0",
+    ):
+        assert any(amount in str(value) for value in values), amount
+    # 长 vintage 不截断。
+    assert any("vintage-with-a-very-long-identifier-0001" in label for label, _ in rows)
+    # 期后到账标应收，期内到账不标。
+    post = [label for label, _ in rows if "确认m=11→到账m=14" in label]
+    assert len(post) == 1 and "(期后应收，非期内现金)" in post[0]
+    within = [label for label, _ in rows if "确认m=3→到账m=5" in label]
+    assert len(within) == 1 and "期后应收" not in within[0]
+    # 行数精确：CF 2 + VAT 48 + 退款 2 + 所得税 5 + 折旧 1 + 余额 1。
+    assert len(rows) == 2 + 48 + 2 + 5 + 1 + 1
+
+
+def test_tax_expected_mirror_matches_production():
+    """测试镜像与生产渲染逐行一致（供未来检入下载精确对照）。"""
+    from xlsx_content_check import _expected_tax_pairs
+
+    from iesplan.application.packages.transfers import _excel_safe, _sealed_tax_rows
+
+    fin = _tax_seal()
+    assert _expected_tax_pairs(fin, "CNY") == [
+        (label, _excel_safe(value)) for label, value in _sealed_tax_rows(fin, "CNY")
+    ]
+
+
+def test_tax_rows_absent_for_legacy_seal():
+    """旧封存无 tax_cash：空表，历史下载不变。"""
+    from iesplan.application.packages.transfers import _sealed_tax_rows
+
+    assert _sealed_tax_rows({"currency": "CNY", "evaluation_years": 1}, "CNY") == []
+
+
 def test_negative_wrong_k_must_fail():
     """错改 K=1→2(数字 2 在 N/年度行仍存在): 精确对照必须失败。"""
     sealed, pairs = _load_fixtures()

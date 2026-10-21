@@ -75,6 +75,7 @@ def _expected_pairs(fin: dict) -> list:
                 f"{item['cumulative_discounted']} {ccy}",
             )
         )
+    rows.extend(_expected_tax_pairs(fin, ccy))
     rows.append(("净现值 NPV / NPV", f"{evaluation['npv']} {evaluation['npv_unit']}"))
     irr = evaluation["irr"]
     rows.append(
@@ -97,6 +98,79 @@ def _expected_pairs(fin: dict) -> list:
             )
         else:
             rows.append((f"{label} / {key} payback", f"— / {evaluation[f'{key}_status']}"))
+    return [(label, _excel_safe(value)) for label, value in rows]
+
+
+def _expected_tax_pairs(fin: dict, ccy: str) -> list:
+    """税务明细期望行(独立组装展示文本，只组装不重算财务业务)。
+
+    与生产 ``_sealed_tax_rows`` 逐行对应；旧封存无 tax_cash 时为空表。
+    """
+    tax = fin.get("tax_cash")
+    if not isinstance(tax, dict):
+        return []
+    horizon = int(fin.get("evaluation_years", 0)) * 12
+    rows = []
+    for index, amount in enumerate(fin.get("annual_net_flows") or []):
+        rows.append((f"税后现金流 CF[t={index}] / After-tax CF[t={index}]", f"{amount} {ccy}"))
+    vat = tax.get("vat") or []
+    if vat:
+        for row in vat:
+            head = f"增值税 {row['pool']} m={row['month']} / VAT {row['pool']} m={row['month']}"
+            rows.append((f"{head} 实缴 / paid", f"{row['paid']} {ccy}"))
+            rows.append((f"{head} 确认退款 / claimed", f"{row['refund_claimed']} {ccy}"))
+            rows.append((f"{head} 到账退款 / arrived", f"{row['refund_arrived']} {ccy}"))
+            rows.append((f"{head} 期末结转 / carry", f"{row['carry']} {ccy}"))
+    else:
+        rows.append(("增值税 / VAT", "无适用规则 / No applicable rules"))
+    refunds = tax.get("refunds") or []
+    if refunds:
+        for row in refunds:
+            post = "(期后应收，非期内现金)" if int(row["arrival_period"]) > horizon else ""
+            rows.append(
+                (
+                    f"退款 {row['pool']} 确认m={row['period']}→到账m={row['arrival_period']}{post} "
+                    f"/ Refund {row['pool']} confirm m={row['period']}→arrive m={row['arrival_period']}",
+                    f"{row['amount']} {ccy}",
+                )
+            )
+    else:
+        rows.append(("退款计划 / Refunds", "无适用规则 / No applicable rules"))
+    income = tax.get("income") or []
+    if income:
+        for row in income:
+            head = f"所得税 {row['rule']} y={row['year']} / Income {row['rule']} y={row['year']}"
+            rows.append((f"{head} 税基 / base", f"{row['taxable_base']} {ccy}"))
+            rows.append((f"{head} 抵亏 / used", f"{row['loss_used']} {ccy}"))
+            rows.append((f"{head} 新生亏损 / generated", f"{row['loss_generated']} {ccy}"))
+            rows.append((f"{head} 到期核销 / expired", f"{row['loss_expired']} {ccy}"))
+            rows.append((f"{head} 税额 / tax", f"{row['tax']} {ccy}"))
+    else:
+        rows.append(("所得税 / Income tax", "无适用规则 / No applicable rules"))
+    depreciation = tax.get("depreciation") or []
+    if depreciation:
+        for row in depreciation:
+            rows.append(
+                (
+                    f"计税折旧 {row['rule']} {row['asset']} y={row['year']} / "
+                    f"Depreciation {row['rule']} {row['asset']} y={row['year']}",
+                    f"{row['amount']} {ccy}",
+                )
+            )
+    else:
+        rows.append(("计税折旧 / Depreciation", "无适用规则 / No applicable rules"))
+    balances = tax.get("loss_balances") or []
+    if balances:
+        for row in balances:
+            rows.append(
+                (
+                    f"亏损余额 {row['rule']} {row['vintage_id']} y={row['year']} "
+                    f"(可用至y={row['last_usable_year']}) / Loss balance",
+                    f"{row['amount']} {ccy}",
+                )
+            )
+    else:
+        rows.append(("亏损余额 / Loss balances", "无适用规则 / No applicable rules"))
     return [(label, _excel_safe(value)) for label, value in rows]
 
 

@@ -1671,6 +1671,28 @@ function FinancialEvaluationCard({ fin }: { fin: FinancialEvaluationBlock }) {
           </table>
         </div>
       ) : null}
+      {fin.tax_cash ? (
+        <TaxCashSections fin={fin} />
+      ) : null}
+      {fin.annual_net_flows && fin.annual_net_flows.length > 0 ? (
+        <div style={{ marginTop: 'var(--ies-space-3)' }}>
+          <h3 style={{ fontSize: 'var(--ies-fs-sm)', fontWeight: 700, marginBottom: 'var(--ies-space-2)' }}>
+            {t('ies.result.fin_tax_flows')}
+          </h3>
+          <table className="ies-metric-table">
+            <tbody>
+              {fin.annual_net_flows.map((value, tIndex) => (
+                <tr key={tIndex}>
+                  <td>CF[t={tIndex}]</td>
+                  <td>
+                    {value} {ccy}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : null}
       {rows.length > 0 ? (
         <div style={{ marginTop: 'var(--ies-space-3)' }}>
           <h3 style={{ fontSize: 'var(--ies-fs-sm)', fontWeight: 700, marginBottom: 'var(--ies-space-2)' }}>
@@ -1726,5 +1748,134 @@ function FinancialEvaluationCard({ fin }: { fin: FinancialEvaluationBlock }) {
         </dl>
       </div>
     </Card>
+  )
+}
+
+/** 同次解税务事实展示(封存原样, 金额裸字符串只展示不重算)。 */
+function TaxCashSections({ fin }: { fin: FinancialEvaluationBlock }) {
+  const { t } = useI18n()
+  const ccy = fin.currency
+  const tax = fin.tax_cash
+  if (!tax) return null
+  const horizonMonths = fin.evaluation_years * 12
+  const sectionTitle = { fontSize: 'var(--ies-fs-sm)', fontWeight: 700, marginBottom: 'var(--ies-space-2)' } as const
+  const sectionGap = { marginTop: 'var(--ies-space-3)' } as const
+  const noneText = t('ies.result.fin_tax_none')
+  return (
+    <>
+      <div style={sectionGap}>
+        <h3 style={sectionTitle}>{t('ies.result.fin_tax_vat')}</h3>
+        {tax.vat.length > 0 ? (
+          <table className="ies-metric-table">
+            <tbody>
+              {tax.vat.map((row, index) => (
+                <tr key={`${row.pool}-${row.month}-${index}`}>
+                  <td>
+                    {row.pool} / m={row.month}
+                  </td>
+                  <td>
+                    {t('ies.result.fin_tax_paid')}: {row.paid} / {t('ies.result.fin_tax_claimed')}: {row.refund_claimed} /{' '}
+                    {t('ies.result.fin_tax_arrived')}: {row.refund_arrived} / {t('ies.result.fin_tax_carry')}: {row.carry} {ccy}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        ) : (
+          <p style={{ fontSize: 'var(--ies-fs-sm)', color: 'var(--ies-color-text-secondary)' }}>{noneText}</p>
+        )}
+      </div>
+      <div style={sectionGap}>
+        <h3 style={sectionTitle}>{t('ies.result.fin_tax_refunds')}</h3>
+        {tax.refunds.length > 0 ? (
+          <table className="ies-metric-table">
+            <tbody>
+              {tax.refunds.map((row, index) => (
+                <tr key={`${row.pool}-${row.period}-${index}`}>
+                  <td>
+                    {row.pool} / {t('ies.result.fin_tax_period', { p: row.period })} →{' '}
+                    {t('ies.result.fin_tax_arrival', { p: row.arrival_period })}
+                    {row.arrival_period > horizonMonths ? t('ies.result.fin_tax_post_receivable') : ''}
+                  </td>
+                  <td>
+                    {row.amount} {ccy}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        ) : (
+          <p style={{ fontSize: 'var(--ies-fs-sm)', color: 'var(--ies-color-text-secondary)' }}>{noneText}</p>
+        )}
+      </div>
+      <div style={sectionGap}>
+        <h3 style={sectionTitle}>{t('ies.result.fin_tax_income')}</h3>
+        {tax.income.length > 0 ? (
+          <table className="ies-metric-table">
+            <tbody>
+              {tax.income.map((row, index) => (
+                <tr key={`${row.rule}-${row.year}-${index}`}>
+                  <td>
+                    {row.rule} / y={row.year}
+                  </td>
+                  <td>
+                    {t('ies.result.fin_tax_base')}: {row.taxable_base} / {t('ies.result.fin_tax_used')}: {row.loss_used} /{' '}
+                    {t('ies.result.fin_tax_generated')}: {row.loss_generated} / {t('ies.result.fin_tax_expired')}:{' '}
+                    {row.loss_expired} / {t('ies.result.fin_tax_tax')}: {row.tax} {ccy}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        ) : (
+          <p style={{ fontSize: 'var(--ies-fs-sm)', color: 'var(--ies-color-text-secondary)' }}>{noneText}</p>
+        )}
+      </div>
+      <div style={sectionGap}>
+        <h3 style={sectionTitle}>{t('ies.result.fin_tax_depreciation')}</h3>
+        {tax.depreciation.length > 0 ? (
+          <table className="ies-metric-table">
+            <tbody>
+              {tax.depreciation.map((row, index) => (
+                <tr key={`${row.rule}-${row.asset}-${row.year}-${index}`}>
+                  <td>
+                    {row.rule} / {row.asset} / y={row.year}
+                  </td>
+                  <td>
+                    {row.amount} {ccy}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        ) : (
+          <p style={{ fontSize: 'var(--ies-fs-sm)', color: 'var(--ies-color-text-secondary)' }}>{noneText}</p>
+        )}
+        <p style={{ fontSize: 'var(--ies-fs-sm)', color: 'var(--ies-color-text-secondary)' }}>
+          {t('ies.result.fin_tax_depreciation_note')}
+        </p>
+      </div>
+      <div style={sectionGap}>
+        <h3 style={sectionTitle}>{t('ies.result.fin_tax_balances')}</h3>
+        {tax.loss_balances.length > 0 ? (
+          <table className="ies-metric-table">
+            <tbody>
+              {tax.loss_balances.map((row, index) => (
+                <tr key={`${row.rule}-${row.vintage_id}-${row.year}-${index}`}>
+                  <td>
+                    {row.rule} / {row.vintage_id} / y={row.year} / {t('ies.result.fin_tax_last_usable', { y: row.last_usable_year })}
+                  </td>
+                  <td>
+                    {row.amount} {ccy}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        ) : (
+          <p style={{ fontSize: 'var(--ies-fs-sm)', color: 'var(--ies-color-text-secondary)' }}>{noneText}</p>
+        )}
+      </div>
+    </>
   )
 }

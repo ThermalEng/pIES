@@ -863,6 +863,56 @@ export interface FinancialEvaluationRow {
   cumulative_discounted: string
 }
 
+/** 同次解税务事实(格式页映射表形状, 金额裸字符串, 只展示不重算)。 */
+export interface FinancialTaxCashVatRow {
+  pool: string
+  month: number
+  paid: string
+  refund_claimed: string
+  refund_arrived: string
+  carry: string
+}
+
+export interface FinancialTaxCashRefund {
+  pool: string
+  period: number
+  arrival_period: number
+  amount: string
+}
+
+export interface FinancialTaxCashIncomeRow {
+  rule: string
+  year: number
+  taxable_base: string
+  loss_used: string
+  loss_generated: string
+  loss_expired: string
+  tax: string
+}
+
+export interface FinancialTaxCashDepreciation {
+  rule: string
+  asset: string
+  year: number
+  amount: string
+}
+
+export interface FinancialTaxCashLossBalance {
+  rule: string
+  vintage_id: string
+  year: number
+  last_usable_year: number
+  amount: string
+}
+
+export interface FinancialTaxCash {
+  vat: FinancialTaxCashVatRow[]
+  refunds: FinancialTaxCashRefund[]
+  income: FinancialTaxCashIncomeRow[]
+  depreciation: FinancialTaxCashDepreciation[]
+  loss_balances: FinancialTaxCashLossBalance[]
+}
+
 export interface FinancialEvaluationBlock {
   status: string
   evaluation_years: number
@@ -877,6 +927,8 @@ export interface FinancialEvaluationBlock {
   annual_fixed_om: string
   payments_applied: FinancialEvaluationPayment[]
   annual_operation: FinancialEvaluationYear[]
+  tax_cash: FinancialTaxCash
+  annual_net_flows: string[]
   evaluation: {
     rows: FinancialEvaluationRow[]
     npv: string

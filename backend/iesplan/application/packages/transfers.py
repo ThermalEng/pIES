@@ -1791,6 +1791,83 @@ def _is_sealed_evaluation(section: Any) -> bool:
     return isinstance(section, dict) and section.get("status") == "evaluated"
 
 
+def _sealed_tax_rows(fin: dict[str, Any], ccy: str) -> list[tuple[str, Any]]:
+    """同次解税务事实与税后现金流明细行（封存原样消费，不重算、不截断）。
+
+    旧封存（无 ``tax_cash``）返回空表，历史下载字节不变；新封存逐项
+    展平：完整税后现金流数组、月 VAT 实缴/确认/到账/结转、退款计划
+    （期后到账标应收，不计期内现金）、年所得税/折旧/亏损余额。
+    空数组显式记“无适用规则”，不用空表掩盖。
+    """
+    tax = fin.get("tax_cash")
+    if not isinstance(tax, dict):
+        return []
+    horizon = int(fin.get("evaluation_years", 0)) * 12
+    rows: list[tuple[str, Any]] = []
+    flows = fin.get("annual_net_flows") or []
+    for index, amount in enumerate(flows):
+        rows.append((f"税后现金流 CF[t={index}] / After-tax CF[t={index}]", f"{amount} {ccy}"))
+    vat = tax.get("vat") or []
+    if vat:
+        for row in vat:
+            head = f"增值税 {row['pool']} m={row['month']} / VAT {row['pool']} m={row['month']}"
+            rows.append((f"{head} 实缴 / paid", f"{row['paid']} {ccy}"))
+            rows.append((f"{head} 确认退款 / claimed", f"{row['refund_claimed']} {ccy}"))
+            rows.append((f"{head} 到账退款 / arrived", f"{row['refund_arrived']} {ccy}"))
+            rows.append((f"{head} 期末结转 / carry", f"{row['carry']} {ccy}"))
+    else:
+        rows.append(("增值税 / VAT", "无适用规则 / No applicable rules"))
+    refunds = tax.get("refunds") or []
+    if refunds:
+        for row in refunds:
+            post = "(期后应收，非期内现金)" if int(row["arrival_period"]) > horizon else ""
+            rows.append(
+                (
+                    f"退款 {row['pool']} 确认m={row['period']}→到账m={row['arrival_period']}{post} "
+                    f"/ Refund {row['pool']} confirm m={row['period']}→arrive m={row['arrival_period']}",
+                    f"{row['amount']} {ccy}",
+                )
+            )
+    else:
+        rows.append(("退款计划 / Refunds", "无适用规则 / No applicable rules"))
+    income = tax.get("income") or []
+    if income:
+        for row in income:
+            head = f"所得税 {row['rule']} y={row['year']} / Income {row['rule']} y={row['year']}"
+            rows.append((f"{head} 税基 / base", f"{row['taxable_base']} {ccy}"))
+            rows.append((f"{head} 抵亏 / used", f"{row['loss_used']} {ccy}"))
+            rows.append((f"{head} 新生亏损 / generated", f"{row['loss_generated']} {ccy}"))
+            rows.append((f"{head} 到期核销 / expired", f"{row['loss_expired']} {ccy}"))
+            rows.append((f"{head} 税额 / tax", f"{row['tax']} {ccy}"))
+    else:
+        rows.append(("所得税 / Income tax", "无适用规则 / No applicable rules"))
+    depreciation = tax.get("depreciation") or []
+    if depreciation:
+        for row in depreciation:
+            rows.append(
+                (
+                    f"计税折旧 {row['rule']} {row['asset']} y={row['year']} / "
+                    f"Depreciation {row['rule']} {row['asset']} y={row['year']}",
+                    f"{row['amount']} {ccy}",
+                )
+            )
+    else:
+        rows.append(("计税折旧 / Depreciation", "无适用规则 / No applicable rules"))
+    balances = tax.get("loss_balances") or []
+    if balances:
+        for row in balances:
+            rows.append(
+                (
+                    f"亏损余额 {row['rule']} {row['vintage_id']} y={row['year']} "
+                    f"(可用至y={row['last_usable_year']}) / Loss balance",
+                    f"{row['amount']} {ccy}",
+                )
+            )
+    else:
+        rows.append(("亏损余额 / Loss balances", "无适用规则 / No applicable rules"))
+    return rows
+
+
 def _sealed_evaluation_rows(fin: dict[str, Any]) -> list[tuple[str, Any]]:
     """已封存评价块 → 展示行(纯展示格式化, 不重算、不读最新配置)。
 
@@ -1843,6 +1920,7 @@ def _sealed_evaluation_rows(fin: dict[str, Any]) -> list[tuple[str, Any]]:
                 f"{item['cumulative_discounted']} {ccy}",
             )
         )
+    rows.extend(_sealed_tax_rows(fin, ccy))
     rows.append(("净现值 NPV / NPV", f"{evaluation['npv']} {evaluation['npv_unit']}"))
     irr = evaluation["irr"]
     irr_text = (
