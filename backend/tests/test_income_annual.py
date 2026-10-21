@@ -14,6 +14,8 @@ from test_npv_objective import GEN_YAML, RATE, _contribution
 from test_vat_monthly import (
     ELEC_KW,
     GROSS_FACTOR,
+    HOURS_2026,
+    HOURS_2027,
     _finance_payload,
     _hand_chain,
     _hand_monthly,
@@ -484,24 +486,35 @@ def _mix_payload():
     return payload
 
 
+VAT_RATE = Decimal("0.13")
+VAT_UNIT = Decimal("1") + VAT_RATE
+
+
 def _mix_bases():
     """混合夹具评价年 1..3 应税基础手算（含税；建设可抵 50%）。
 
-    年固定 OM 可抵半、tank 可变全抵、heater 可变无 VAT，全按“含税额扣
-    已声明可抵进项”；维护 (2,1) 可扣净额、(2,2) 不可扣但现金不变；
-    折旧基础 = 6000 − 建设可抵半，20 年。
+    计税收入 = 实际销售收款 − 已声明销项税；可扣购能 = 实际含税付款 −
+    已声明可抵进项（heat 全抵，不可抵部分无）；年固定 OM 可抵半、
+    tank 可变全抵、sys_var 可变无声明（按陈述）；维护 (2,1) 可扣净额、
+    (2,2) 不可扣但现金不变；折旧基础 = 6000 − 建设可抵半，20 年。
+    负价保留符号。
     """
     energy_kwh = Decimal(str(ELEC_KW)) * Decimal("8760")
     heat_kwh = Decimal("7") * Decimal("8760")
+    gross_y2 = Decimal("-0.05") * energy_kwh
+    rev_y2 = gross_y2 - gross_y2 * VAT_RATE / VAT_UNIT
+    gross_y3 = Decimal("2.0") * energy_kwh
+    rev_y3 = gross_y3 - gross_y3 * VAT_RATE / VAT_UNIT
+    gross_heat = Decimal("0.7") * heat_kwh
+    energy = gross_heat - gross_heat * GROSS_FACTOR
     om_fixed = Decimal("2100") * (Decimal("1") - GROSS_FACTOR * Decimal("0.5"))
     var_thr = Decimal("5") * Decimal("8760") * Decimal("0.01") * (Decimal("1") - GROSS_FACTOR)
     var_e = energy_kwh * Decimal("0.02")
     maint_y2 = Decimal("1200.50") * (Decimal("1") - GROSS_FACTOR)
     depr = (Decimal("6000") - Decimal("6000") * GROSS_FACTOR * Decimal("0.5")) / Decimal("20")
-    energy = Decimal("0.7") * heat_kwh
     base_y1 = Decimal("0")
-    base_y2 = Decimal("-0.05") * energy_kwh - energy - om_fixed - var_thr - var_e - maint_y2 - depr
-    base_y3 = Decimal("2.0") * energy_kwh - energy - om_fixed - var_thr - var_e - depr
+    base_y2 = rev_y2 - energy - om_fixed - var_thr - var_e - maint_y2 - depr
+    base_y3 = rev_y3 - energy - om_fixed - var_thr - var_e - depr
     return base_y1, base_y2, base_y3
 
 
@@ -542,4 +555,119 @@ def test_income_vat_mix_matches_hand_and_b0(tmp_path) -> None:
     assert solved[f"{prefix}__profit__y3"] == pytest.approx(float(base_y3), rel=1e-6)
     assert solved[f"{prefix}__use__y3__v0"] == pytest.approx(float(-base_y2), rel=1e-6)
     expected = _hand_npv_with_vat(paids) - tax / Decimal(str(1.0 + RATE)) ** 3
+    assert value == pytest.approx(float(expected), rel=1e-6)
+
+
+def _mix_payload_exclusive_half_energy():
+    """不含税混合载荷：同值陈述视作净额，购能可抵比例改为 50%。
+
+    覆盖不含税口径的销售（销项已声明）、部分可抵购能、年度/使用 OM
+    加成、维护恒含税、建设部分可抵折旧。
+    """
+    payload = _mix_payload()
+    payload["profile"]["price_basis"] = "tax_exclusive"
+    payload["tax_rules"]["vat_op"]["in_tax"][0]["deductible_ratio"] = {
+        "value": "0.5",
+        "unit": "1",
+    }
+    return payload
+
+
+def _mix_bases_exclusive_half_energy():
+    """不含税混合手算：实际收付 = 陈述 × 1.13，再减明确税额/抵免。
+
+    购能可抵 50%、年固定 OM 可抵 50%、tank 可变全抵、sys_var 无声明、
+    维护恒含税拆价、折旧基础 = 6000×1.13 − 6000×0.13×0.5。
+    """
+    markup = VAT_UNIT
+    energy_kwh = Decimal(str(ELEC_KW)) * Decimal("8760")
+    heat_kwh = Decimal("7") * Decimal("8760")
+    rev_y2 = Decimal("-0.05") * energy_kwh
+    rev_y3 = Decimal("2.0") * energy_kwh
+    stated_heat = Decimal("0.7") * heat_kwh
+    energy = stated_heat * markup - stated_heat * VAT_RATE * Decimal("0.5")
+    stated_fixed = Decimal("2100")
+    om_fixed = stated_fixed * markup - stated_fixed * VAT_RATE * Decimal("0.5")
+    stated_thr = Decimal("5") * Decimal("8760") * Decimal("0.01")
+    var_thr = stated_thr * markup - stated_thr * VAT_RATE
+    var_e = energy_kwh * Decimal("0.02")
+    maint_y2 = Decimal("1200.50") * (Decimal("1") - GROSS_FACTOR)
+    depr = (Decimal("6000") * markup - Decimal("6000") * VAT_RATE * Decimal("0.5")) / Decimal("20")
+    base_y1 = Decimal("0")
+    base_y2 = rev_y2 - energy - om_fixed - var_thr - var_e - maint_y2 - depr
+    base_y3 = rev_y3 - energy - om_fixed - var_thr - var_e - depr
+    return base_y1, base_y2, base_y3
+
+
+def _hand_monthly_exclusive_half_energy():
+    """不含税 + 购能半抵的 36 个月 (out, in) 手算（业务 Decimal）。
+
+    税额系数取净额税率 0.13；维护恒按含税拆价；其余与含税链同口径。
+    """
+    out = [Decimal("0")] * 36
+    inp = [Decimal("0")] * 36
+    deductible_total = Decimal("6000") * VAT_RATE * Decimal("0.5")
+    inp[0] += Decimal("0.6") * deductible_total
+    inp[12] += Decimal("0.4") * deductible_total
+    for index, hours in enumerate(HOURS_2026):
+        month = 13 + index
+        energy = Decimal("7") * Decimal(str(hours))
+        inp[month - 1] += energy * Decimal("0.7") * VAT_RATE * Decimal("0.5")
+        inp[month - 1] += Decimal("5") * Decimal(str(hours)) * Decimal("0.01") * VAT_RATE
+        out[month - 1] += Decimal(str(ELEC_KW)) * Decimal(str(hours)) * Decimal("-0.05") * VAT_RATE
+    for index, hours in enumerate(HOURS_2027):
+        month = 25 + index
+        energy = Decimal("7") * Decimal(str(hours))
+        inp[month - 1] += energy * Decimal("0.7") * VAT_RATE * Decimal("0.5")
+        inp[month - 1] += Decimal("5") * Decimal(str(hours)) * Decimal("0.01") * VAT_RATE
+        out[month - 1] += Decimal(str(ELEC_KW)) * Decimal(str(hours)) * Decimal("2.0") * VAT_RATE
+    inp[23] += Decimal("2100") * VAT_RATE * Decimal("0.5")
+    inp[35] += Decimal("2100") * VAT_RATE * Decimal("0.5")
+    inp[23] += Decimal("1200.50") * GROSS_FACTOR
+    return out, inp
+
+
+def test_income_vat_mix_exclusive_matches_hand_and_b0(tmp_path) -> None:
+    """不含税口径混合全链：税基按净额语义，税后 NPV 同源一致。
+
+    销售/购能/OM 先形成实际收付再扣明确税额；购能半抵与年固定 OM
+    半抵验证部分可抵；无声明的 sys_var 按陈述；维护现金不变。
+    """
+    artifact, models, materialized, finance, config, evaluation = _inputs(
+        payload=_mix_payload_exclusive_half_energy()
+    )
+    assert finance.price_basis == "tax_exclusive"
+    bundle = HIGHS_MILP_PROVIDER.generate(artifact, models, materialized, finance, config, evaluation)
+    out, inp = _hand_monthly_exclusive_half_energy()
+    paids, carries = _hand_chain(out, inp)
+    value, solved, _ = _solve_internal(bundle, tmp_path)
+    for month in range(1, 37):
+        assert solved[f"vat__main_pool__paid__m{month}"] == pytest.approx(float(paids[month - 1]), rel=1e-6)
+        assert solved[f"vat__main_pool__carry__m{month}"] == pytest.approx(
+            float(carries[month - 1]), rel=1e-6
+        )
+    base_y1, base_y2, base_y3 = _mix_bases_exclusive_half_energy()
+    year1 = use_losses(taxable_base=base_y1, balances=(), year=1, carryforward_years=INC_CARRY_YEARS)
+    assert year1.generated == Decimal("0")
+    year2 = use_losses(
+        taxable_base=base_y2,
+        balances=year1.remaining,
+        year=2,
+        carryforward_years=INC_CARRY_YEARS,
+    )
+    assert year2.generated == -base_y2 > Decimal("0")
+    year3 = use_losses(
+        taxable_base=base_y3,
+        balances=year2.remaining,
+        year=3,
+        carryforward_years=INC_CARRY_YEARS,
+    )
+    assert year3.uses == (-base_y2,)
+    tax = income_tax_payable(taxable_base=base_y3, loss_used=-base_y2, rate=INC_RATE)
+    prefix = "inc__income_demo"
+    assert solved[f"{prefix}__profit__y2"] == pytest.approx(0.0, abs=1e-6)
+    assert solved[f"{prefix}__gen__y2"] == pytest.approx(float(-base_y2), rel=1e-6)
+    assert solved[f"{prefix}__profit__y3"] == pytest.approx(float(base_y3), rel=1e-6)
+    assert solved[f"{prefix}__use__y3__v0"] == pytest.approx(float(-base_y2), rel=1e-6)
+    expected = _hand_npv_with_vat(paids, cash=Decimal("1.13")) - tax / Decimal(str(1.0 + RATE)) ** 3
     assert value == pytest.approx(float(expected), rel=1e-6)

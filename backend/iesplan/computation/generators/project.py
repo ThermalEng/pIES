@@ -1496,25 +1496,54 @@ class _ProjectBuilder:
 
     def _income_vat_credits(
         self, grouped: dict[str, dict[str, list]] | None
-    ) -> tuple[dict[str, float], dict[tuple[int, int], float], dict[str, tuple[float, float]]]:
+    ) -> tuple[
+        dict[str, tuple[float, float]],
+        dict[tuple[int, int], float],
+        dict[str, tuple[float, float]],
+        dict[str, tuple[float, float]],
+        dict[str, tuple[float, float]],
+    ]:
         """所得税可扣口径对应的 VAT 抵免查找。
 
-        返回（运维抵免，维护抵免，建设抵免）：运维键为 ``for`` 路径，
-        值为抵免系数（税率因子 × 可抵比例）；维护键为 ``(year, position)``，
-        值为多条合计系数（维护金额恒含税拆价）；建设键为 finance_type，
-        值为（抵免系数，价税合计系数）。引用存在性与口径已由公开财务
-        入口核对，此处只消费；同一 ``for``/价格全局唯一，已在入口保证。
+        返回（运维抵免，维护抵免，建设抵免，销项税，购能进项税）：运维
+        键为 ``for`` 路径，值为（抵免系数，价税合计系数）；维护键为
+        ``(year, position)``，值为多条合计系数（维护金额恒含税拆价）；
+        建设键为 finance_type，值为（抵免系数，价税合计系数）；销项键
+        为价格 ID，值为（税额系数，价税合计系数）；购能键为价格 ID，
+        值为（抵免系数，价税合计系数）。价税合计系数仅在不含税口径且
+        有已声明税率时为 ``1 + 税率``（先形成实际收付款），其余为 1；
+        无声明不推断。引用存在性与口径已由公开财务入口核对，此处只
+        消费；同一 ``for``/价格全局唯一，已在入口保证。
         """
-        om: dict[str, float] = {}
+        om: dict[str, tuple[float, float]] = {}
         maint: dict[tuple[int, int], float] = {}
         construction: dict[str, tuple[float, float]] = {}
+        out_tax: dict[str, tuple[float, float]] = {}
+        in_tax: dict[str, tuple[float, float]] = {}
+        exclusive = self.finance.price_basis == "tax_exclusive"
         if grouped is None:
-            return om, maint, construction
+            return om, maint, construction, out_tax, in_tax
         for pool_rules in grouped.values():
             for rule in pool_rules["vat"]:
+                for entry in rule.in_tax:
+                    rate = float(entry.rate.value)
+                    in_tax[entry.price] = (
+                        self._vat_gross_factor(entry.rate)
+                        * float(entry.deductible_ratio.value),
+                        1.0 + rate if exclusive else 1.0,
+                    )
+                for entry in rule.out_tax:
+                    rate = float(entry.rate.value)
+                    out_tax[entry.price] = (
+                        self._vat_gross_factor(entry.rate),
+                        1.0 + rate if exclusive else 1.0,
+                    )
                 for entry in rule.om_input_tax:
-                    om[entry.for_path] = self._vat_gross_factor(entry.rate) * float(
-                        entry.deductible_ratio.value
+                    rate = float(entry.rate.value)
+                    om[entry.for_path] = (
+                        self._vat_gross_factor(entry.rate)
+                        * float(entry.deductible_ratio.value),
+                        1.0 + rate if exclusive else 1.0,
                     )
                 for entry in rule.maintenance_input_tax:
                     key = (entry.year, entry.position)
@@ -1524,28 +1553,29 @@ class _ProjectBuilder:
             for rule in pool_rules["construction"]:
                 finance_type, _, _ = rule.for_path.partition(".")
                 rate = float(rule.rate.value)
-                markup = 1.0 + rate if self.finance.price_basis == "tax_exclusive" else 1.0
+                markup = 1.0 + rate if exclusive else 1.0
                 construction[finance_type] = (
                     self._vat_gross_factor(rule.rate) * float(rule.deductible_ratio.value),
                     markup,
                 )
-        return om, maint, construction
+        return om, maint, construction, out_tax, in_tax
 
     def _income_deduct_om(
         self,
         base: _AffineAcc,
         for_path: str,
         span: tuple[int, int] | None,
-        om_credit: dict[str, float],
+        om_credit: dict[str, tuple[float, float]],
         instances: Mapping[str, Any],
     ) -> None:
-        """运维可扣额 = 实际消费额 − 已声明 VAT 抵免（与基础现金同一增量范围）。
+        """运维可扣额 = 实际付款 − 已声明 VAT 抵免（与基础现金同一增量范围）。
 
-        既有沉没固定 OM 不消费亦不抵扣；真实消费的可变分量保留。可抵
-        比例只改变抵扣额，不改变实际付款。
+        不含税口径下已声明税率的实际付款先按价税合计加成，再减明确可抵
+        额；含税口径基础金额已为全额。既有沉没固定 OM 不消费亦不抵扣；
+        真实消费的可变分量保留。可抵比例只改变抵扣额，不改变实际付款。
         """
         finance_type, _, component = for_path.partition(".")
-        coef = om_credit.get(for_path, 0.0)
+        coef, markup = om_credit.get(for_path, (0.0, 1.0))
         for inst in sorted(self.devices):
             if inst not in instances or instances[inst].get("type") != "costed":
                 continue
@@ -1567,7 +1597,7 @@ class _ProjectBuilder:
                 # variable_om 调用方恒传运营年区间（分量口径已在入口保证）。
                 start, end = span  # type: ignore[misc]
                 amount = self._cost_affine(inst, component, start, end)
-            base.add_scaled(amount, -(1.0 - coef))
+            base.add_scaled(amount, -(markup - coef))
 
     def _income_deduct_depreciation(
         self,
@@ -1620,13 +1650,15 @@ class _ProjectBuilder:
     ) -> _AffineAcc:
         """单所得税规则单评价年应税基础（收入 − 成本 − 可扣维护 − 折旧）。
 
-        收入/能源/运维按实际消费归集（建设年无运行步为零）；维护可扣额
-        为含税付款扣已声明 VAT 抵免；收入与能源按陈述记账，不另扣销项税。
+        计税收入 = 实际销售收款 − 已声明销项税；可扣购能费用 = 实际含税
+        付款 − 已声明可抵进项，不可抵部分保留。不含税口径下先按已声明
+        税率形成实际收付款；无声明不推断。负价符号如实保留。维护可扣额
+        为含税付款扣已声明 VAT 抵免。实缴/留抵兑现时点不改变这些税基。
         """
         base = _AffineAcc()
         instances = (self.doc.get("finance_binding") or {}).get("instances") or {}
         bindings = self.doc.get("tariff_bindings") or {}
-        om_credit, maint_credit, _ = credits
+        om_credit, maint_credit, _, out_tax, in_tax = credits
         if year_span is not None:
             start, end = year_span
             revenue = set(rule.revenue)
@@ -1634,9 +1666,15 @@ class _ProjectBuilder:
             for binding_id in sorted(bindings):
                 price_id = bindings[binding_id]["price"]
                 if price_id in revenue:
-                    base.add_scaled(self._tariff_affine(binding_id, start, end), -1.0)
+                    factor, markup = out_tax.get(price_id, (0.0, 1.0))
+                    base.add_scaled(
+                        self._tariff_affine(binding_id, start, end), -(markup - factor)
+                    )
                 elif price_id in energy:
-                    base.add_scaled(self._tariff_affine(binding_id, start, end), -1.0)
+                    coef, markup = in_tax.get(price_id, (0.0, 1.0))
+                    base.add_scaled(
+                        self._tariff_affine(binding_id, start, end), -(markup - coef)
+                    )
             for for_path in rule.annual_om:
                 self._income_deduct_om(base, for_path, None, om_credit, instances)
             for for_path in rule.variable_om:
