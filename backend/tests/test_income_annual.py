@@ -491,13 +491,14 @@ VAT_RATE = Decimal("0.13")
 VAT_UNIT = Decimal("1") + VAT_RATE
 
 
-def _mix_bases(*, energy_credit=Decimal("1")):
+def _mix_bases(*, energy_credit=Decimal("1"), residual=Decimal("0")):
     """混合夹具评价年 1..3 应税基础手算（含税；建设可抵 50%）。
 
     计税收入 = 实际销售收款 − 已声明销项税；可扣购能 = 实际含税付款 −
     已声明可抵进项（不可抵部分保留）；年固定 OM 可抵半、tank 可变全抵、
     sys_var 可变无声明（按陈述）；维护 (2,1) 可扣净额、(2,2) 不可扣但
-    现金不变；折旧基础 = 6000 − 建设可抵半，20 年。负价保留符号。
+    现金不变；折旧 =（6000 − 建设可抵半 − 残值）/ 20，残值须由调用方
+    保证不超过计税基础。负价保留符号。
     """
     energy_kwh = Decimal(str(ELEC_KW)) * Decimal("8760")
     heat_kwh = Decimal("7") * Decimal("8760")
@@ -511,7 +512,7 @@ def _mix_bases(*, energy_credit=Decimal("1")):
     var_thr = Decimal("5") * Decimal("8760") * Decimal("0.01") * (Decimal("1") - GROSS_FACTOR)
     var_e = energy_kwh * Decimal("0.02")
     maint_y2 = Decimal("1200.50") * (Decimal("1") - GROSS_FACTOR)
-    depr = (Decimal("6000") - Decimal("6000") * GROSS_FACTOR * Decimal("0.5")) / Decimal("20")
+    depr = (Decimal("6000") - Decimal("6000") * GROSS_FACTOR * Decimal("0.5") - residual) / Decimal("20")
     base_y1 = Decimal("0")
     base_y2 = rev_y2 - energy - om_fixed - var_thr - var_e - maint_y2 - depr
     base_y3 = rev_y3 - energy - om_fixed - var_thr - var_e - depr
@@ -762,3 +763,132 @@ def test_income_equivalent_gross_net_statement_matches(tmp_path) -> None:
     assert value_incl == pytest.approx(float(expected), rel=1e-6)
     assert value_excl == pytest.approx(float(expected), rel=1e-6)
     assert value_excl == pytest.approx(value_incl, rel=1e-6)
+
+
+def _residual_payload(base, residual: str):
+    """复制载荷并将首条折旧残值改写（不改其他业务）。"""
+    payload = base()
+    payload["tax_rules"]["income_gen" if "income_gen" in payload["tax_rules"] else "income_demo"][
+        "depreciation"
+    ][0]["residual"] = {"value": residual, "unit": "CNY"}
+    return payload
+
+
+def test_income_depreciation_zero_build_no_fictitious_income(tmp_path) -> None:
+    """零容量 + 正残值：静态已知未形成资产，不计提且无虚构所得。
+
+    容量固定为 0、残值 100：旧实现给出 profit_y2=10 的反例；修正后
+    两年所得与目标值均为零。
+    """
+    payload = _residual_payload(_gen_finance_payload, "100")
+    inputs = _gen_inputs(
+        {"sense": "maximize", "expression": NPV_MARKER},
+        cap_bounds=("0", "0"),
+        payload=payload,
+    )
+    value, solved = _gen_solve(inputs, tmp_path)
+    assert solved["gen_cap"] == pytest.approx(0.0, abs=1e-6)
+    assert solved["inc__income_gen__profit__y2"] == pytest.approx(0.0, abs=1e-6)
+    assert solved["inc__income_gen__profit__y3"] == pytest.approx(0.0, abs=1e-6)
+    assert value == pytest.approx(0.0, abs=1e-6)
+
+
+def test_income_depreciation_variable_capacity_positive_residual_rejected(tmp_path) -> None:
+    """可变容量 + 固定正残值：无法静态判定是否形成资产，明确拒绝。
+
+    不猜形成状态，不提高容量下界强迫建设，不把残值擅改比例。
+    """
+    from iesplan.computation.generators.linear import LoweringUnsupportedError
+
+    payload = _residual_payload(_gen_finance_payload, "100")
+    inputs = _gen_inputs(
+        {"sense": "maximize", "expression": NPV_MARKER},
+        cap_bounds=("0", "10"),
+        payload=payload,
+    )
+    with pytest.raises(LoweringUnsupportedError, match="可变容量"):
+        HIGHS_MILP_PROVIDER.generate(*inputs)
+
+
+def test_income_depreciation_static_residual_matches_hand(tmp_path) -> None:
+    """静态已形成资产 + 合法正残值：残值 100 在计税基础内，精确计提。
+
+    固定 60kW 上限资产计税基础 6000 − 建设可抵半；折旧少提 5/年，
+    两年税基各 +5，税后 NPV 同源变化。
+    """
+    payload = _residual_payload(_mix_payload, "100")
+    artifact, models, materialized, finance, config, evaluation = _inputs(payload=payload)
+    bundle = HIGHS_MILP_PROVIDER.generate(artifact, models, materialized, finance, config, evaluation)
+    out, inp = _hand_monthly(con_ratio=Decimal("0.5"))
+    paids, _ = _hand_chain(out, inp)
+    value, solved, _ = _solve_internal(bundle, tmp_path)
+    base_y1, base_y2, base_y3 = _mix_bases(residual=Decimal("100"))
+    year2 = use_losses(taxable_base=base_y2, balances=(), year=2, carryforward_years=INC_CARRY_YEARS)
+    year3 = use_losses(
+        taxable_base=base_y3,
+        balances=year2.remaining,
+        year=3,
+        carryforward_years=INC_CARRY_YEARS,
+    )
+    assert year3.uses == (-base_y2,)
+    tax = income_tax_payable(taxable_base=base_y3, loss_used=-base_y2, rate=INC_RATE)
+    prefix = "inc__income_demo"
+    assert solved[f"{prefix}__gen__y2"] == pytest.approx(float(-base_y2), rel=1e-6)
+    assert solved[f"{prefix}__profit__y3"] == pytest.approx(float(base_y3), rel=1e-6)
+    assert solved[f"{prefix}__use__y3__v0"] == pytest.approx(float(-base_y2), rel=1e-6)
+    expected = _hand_npv_with_vat(paids) - tax / Decimal(str(1.0 + RATE)) ** 3
+    assert value == pytest.approx(float(expected), rel=1e-6)
+
+
+def test_income_depreciation_excess_residual_rejected(tmp_path) -> None:
+    """已形成资产但残值超计税基础：不得以负折旧放行，明确拒绝。"""
+    from iesplan.computation.generators.linear import LoweringUnsupportedError
+
+    payload = _residual_payload(_mix_payload, "100000")
+    artifact, models, materialized, finance, config, evaluation = _inputs(payload=payload)
+    with pytest.raises(LoweringUnsupportedError, match="超过最小计税基础"):
+        HIGHS_MILP_PROVIDER.generate(artifact, models, materialized, finance, config, evaluation)
+
+
+def test_income_depreciation_skipped_without_new_asset(tmp_path) -> None:
+    """无本课题新增可折旧资产：既有资产不计提，残值无影响。
+
+    tank 转既有后建设/固定 OM 进项与折旧同步消失；收入/购能/可变
+    OM/维护口径不变，税基与 NPV 与显式手算一致。
+    """
+    payload = _residual_payload(_mix_payload, "100")
+    artifact, models, materialized, finance, config, evaluation = _inputs(
+        payload=payload, tank_origin="existing"
+    )
+    bundle = HIGHS_MILP_PROVIDER.generate(artifact, models, materialized, finance, config, evaluation)
+    out, inp = _hand_monthly(upfront=Decimal("0"), fixed_om=Decimal("0"), con_ratio=Decimal("0.5"))
+    paids, _ = _hand_chain(out, inp)
+    value, solved, _ = _solve_internal(bundle, tmp_path)
+    energy_kwh = Decimal(str(ELEC_KW)) * Decimal("8760")
+    heat_kwh = Decimal("7") * Decimal("8760")
+    gross_y2 = Decimal("-0.05") * energy_kwh
+    rev_y2 = gross_y2 - gross_y2 * VAT_RATE / VAT_UNIT
+    gross_y3 = Decimal("2.0") * energy_kwh
+    rev_y3 = gross_y3 - gross_y3 * VAT_RATE / VAT_UNIT
+    gross_heat = Decimal("0.7") * heat_kwh
+    energy = gross_heat - gross_heat * GROSS_FACTOR
+    var_thr = Decimal("5") * Decimal("8760") * Decimal("0.01") * (Decimal("1") - GROSS_FACTOR)
+    var_e = energy_kwh * Decimal("0.02")
+    maint_y2 = Decimal("1200.50") * (Decimal("1") - GROSS_FACTOR)
+    base_y2 = rev_y2 - energy - var_thr - var_e - maint_y2
+    base_y3 = rev_y3 - energy - var_thr - var_e
+    year2 = use_losses(taxable_base=base_y2, balances=(), year=2, carryforward_years=INC_CARRY_YEARS)
+    year3 = use_losses(
+        taxable_base=base_y3,
+        balances=year2.remaining,
+        year=3,
+        carryforward_years=INC_CARRY_YEARS,
+    )
+    assert year3.uses == (-base_y2,)
+    tax = income_tax_payable(taxable_base=base_y3, loss_used=-base_y2, rate=INC_RATE)
+    prefix = "inc__income_demo"
+    assert solved[f"{prefix}__gen__y2"] == pytest.approx(float(-base_y2), rel=1e-6)
+    assert solved[f"{prefix}__profit__y3"] == pytest.approx(float(base_y3), rel=1e-6)
+    expected = _hand_npv_with_vat(paids, upfront=Decimal("0"), fixed_om=Decimal("0"))
+    expected -= tax / Decimal(str(1.0 + RATE)) ** 3
+    assert value == pytest.approx(float(expected), rel=1e-6)

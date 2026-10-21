@@ -1606,12 +1606,19 @@ class _ProjectBuilder:
         year: int,
         con_credit: dict[str, tuple[float, float]],
         instances: Mapping[str, Any],
+        var_bounds: Mapping[str, tuple[float | None, float | None]],
+        location: str,
     ) -> None:
         """直线折旧可扣额（计税基础随建设选择与容量派生；残值只减一次）。
 
         单资产年额 =（价税合计建设额 − 可抵建设进项 − 残值）/ 年限，
         仅在 ``[K+first_year, K+first_year+life)`` 计提。不可抵进项留在
-        计税基础中；无已声明建设税率时基础即陈述建设额，不推断。
+        计税基础中；无已声明建设税率时基础即陈述建设额，不推断。派生
+        建设额静态已知为零（含无本课题新增可折旧资产）时不计提，残值
+        亦不产生税盾或反向所得；静态恒已形成且残值不超过最小计税基础
+        时按公式计提，超基础则明确拒绝（不以负折旧放行）；可变容量下
+        固定正残值无法静态判定资产是否形成时明确拒绝，不猜形成状态。
+        界由实际变量盒推导，不猜常量。
         """
         construction = self.evaluation.construction_period
         for entry in rule.depreciation:
@@ -1634,6 +1641,30 @@ class _ProjectBuilder:
                     continue
                 capex.add_scaled(self._cost_affine(inst, "upfront_capex"), 1.0)
             credit_coef, markup = con_credit.get(entry.asset, (0.0, 1.0))
+            residual = float(entry.residual.value)
+            if residual > 0.0:
+                position = f"{location}折旧资产 {entry.asset!r}"
+                scale = markup - credit_coef
+                capex_lo = self._affine_side(
+                    capex, var_bounds, side="min", label=position
+                )
+                capex_hi = self._affine_side(
+                    capex, var_bounds, side="max", label=position
+                )
+                if capex_hi <= 0.0:
+                    # 静态已知未形成资产：不计提，残值不产生任何影响。
+                    continue
+                if capex_lo <= 0.0:
+                    raise LoweringUnsupportedError(
+                        f"{position}为可变容量且残值 {residual!r} 为正："
+                        "零建设时无资产可提、有建设时残值须以实际基础 "
+                        "为限，当前线性表达不能精确区分，超出首版能力"
+                    )
+                if residual > scale * capex_lo:
+                    raise LoweringUnsupportedError(
+                        f"{position}残值 {residual!r} 超过最小计税基础 "
+                        f"{scale * capex_lo!r}：不得以负折旧增加所得"
+                    )
             depreciable = _AffineAcc()
             depreciable.add_scaled(capex, markup)
             depreciable.add_scaled(capex, -credit_coef)
@@ -1646,7 +1677,15 @@ class _ProjectBuilder:
         rule: IncomeTaxRule,
         year: int,
         year_span: tuple[int, int] | None,
-        credits: tuple[dict[str, float], dict[tuple[int, int], float], dict[str, tuple[float, float]]],
+        credits: tuple[
+            dict[str, tuple[float, float]],
+            dict[tuple[int, int], float],
+            dict[str, tuple[float, float]],
+            dict[str, tuple[float, float]],
+            dict[str, tuple[float, float]],
+        ],
+        var_bounds: Mapping[str, tuple[float | None, float | None]],
+        location: str,
     ) -> _AffineAcc:
         """单所得税规则单评价年应税基础（收入 − 成本 − 可扣维护 − 折旧）。
 
@@ -1692,7 +1731,9 @@ class _ProjectBuilder:
             gross = year_amounts[item.position - 1]
             coef = maint_credit.get((item.year, item.position), 0.0)
             base.add_const(-gross * (1.0 - coef))
-        self._income_deduct_depreciation(base, rule, year, credits[2], instances)
+        self._income_deduct_depreciation(
+            base, rule, year, credits[2], instances, var_bounds, location
+        )
         return base
 
     def _build_income(self) -> _AffineAcc | None:
@@ -1770,10 +1811,10 @@ class _ProjectBuilder:
                 )
             seq_next = len(vintages)
             for year in range(1, years + 1):
-                base = self._income_annual_base(
-                    rule, year, span_by_year.get(year), credits
-                )
                 location = f"所得税规则 {rule_id!r} 第 {year} 年"
+                base = self._income_annual_base(
+                    rule, year, span_by_year.get(year), credits, var_bounds, location
+                )
                 base_hi = self._affine_side(
                     base, var_bounds, side="max", label=location
                 )
