@@ -133,9 +133,9 @@
 | `operation_years` | 正整数，投产后的运营年限；必须满足 `evaluation_years = construction_period + operation_years` |
 | `discount_rate` | 无量纲比例，API 规范值 `0..1`，零合法 |
 | `construction_payments` | 显式付款比例清单 `[{t: integer, ratio: number}]`；`t` 为自开工起的整数年时点，`0..construction_period`；比例各在 `0..1`，按十进制语义求和须精确等于 `1.0`，不猜金额、不自动均摊 |
-| `maintenance_expenses` | 显式维护／换新清单 `[{year: integer, amount: Decimal, currency: string}]`；`year` 为从开工起的财务发生年（对应 `CF[year]`，范围 `construction_period+1..evaluation_years`），不是公历年份；金额为非负十进制定点字符串，币种与有效财务配置一致；空清单明确表示无额外支出 |
+| `maintenance_expenses` | 显式年度维护／换新清单；`year` 为从开工起的财务发生年（对应 `CF[year]`，范围 `construction_period+1..evaluation_years`），不是公历年份；币种与有效财务配置一致。金额来源支持非负十进制定点金额，或对指定实例规模变量／成本分量的受限声明式引用与系数，允许组合；最终金额与规划同次求解。空清单明确表示无额外支出；金额语义见[财务计算](modules/finance.md#运行期换新与指标口径)，传输结构以对应版本的 OpenAPI/schema 为准 |
 
-服务端记录 `confirmed_by`/`confirmed_at`，将上述确认及运行年度边界随任务冻结。无确认、时间关系不成立、付款比例不成立或必要财务参数未确定，在公开提交边界阻断；自由字典式 `baseline-confirm` 审计记录不作为参数来源。冻结块仍为 `evaluation`，目标快照 schema 为 `4.0.0`，不保留旧字段语义或双轨读取。评价确认作为独立的不可变输入直接交给 Generator，不混入运行步序列、财务三件套或封闭计算配置；不新增用户填写项，也不改变现有 HTTP 与快照字段。建设支出与运营净流的时点映射以[财务计算](modules/finance.md)为唯一语义正文。
+服务端在任务提交时记录 `confirmed_by`/`confirmed_at`，将上述确认及运行年度边界随任务冻结。无确认、时间关系不成立、付款比例不成立或必要财务参数未确定，在公开提交边界阻断；项目预检不以缺少另一次 `baseline-confirm` 审计阻断进入评价确认。自由字典式审计记录不作为参数来源。冻结块仍为 `evaluation`，结构变化按快照版本规则升级，不保留旧字段语义或双轨读取。评价确认作为独立的不可变输入直接交给 Generator，不混入运行步序列、财务三件套或封闭计算配置。建设支出与运营净流的时点映射以[财务计算](modules/finance.md)为唯一语义正文。
 
 Worker 只有在命令可解析、租约有效且写入资格仍成立时才能提交进度和结果。失败保留结构化诊断；取消、超时和重试遵守公开状态转换。
 
