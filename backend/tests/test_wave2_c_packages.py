@@ -42,6 +42,11 @@ from iesplan.tasks.persistence import CalcSnapshot, Task  # noqa: E402
 from iesplan.results.persistence import EvidencePackage, ResultAssessment, ResultIndex  # noqa: E402
 from iesplan.storage import get_object, put_object, storage_stats  # noqa: E402
 
+# 建表前必须显式导入: 包域/结果域表外键指向身份域 users 表, 而身份域
+# persistence 为延迟装载, 未显式导入时 create_all 报 NoReferencedTableError
+# (与 test_config_api.py / test_integration.py 同一既有做法, 不改生产注册)。
+from iesplan.identity.persistence import User as _UserForDDL  # noqa: E402,F401
+
 # ---------------------------------------------------------------------------
 # 测试环境
 # ---------------------------------------------------------------------------
@@ -300,7 +305,7 @@ def test_export_excel_usecase(client: TestClient, db: Session) -> None:
 
 
 def _sealed_k1n2() -> dict:
-    """最小 K1N2 封存评价块(展示用, 含同年双维护已合计)。"""
+    """最小 K1N2 封存评价块(展示用, 含同年双维护已合计; 当前 1.0.0 形态)。"""
     return {
         "status": "evaluated",
         "evaluation_years": 3,
@@ -327,6 +332,15 @@ def _sealed_k1n2() -> dict:
                 "fixed_om": "1400", "maintenance": "3500.50", "net": "6979.50",
             },
         ],
+        "annual_net_flows": ["-84000.0", "-56000.0", "8500", "6979.50"],
+        # 无税展示夹具: 五个数组显式为空(合法"不适用"), 不用缺字段伪装。
+        "tax_cash": {
+            "vat": [],
+            "refunds": [],
+            "income": [],
+            "depreciation": [],
+            "loss_balances": [],
+        },
         "evaluation": {
             "currency": "CNY", "evaluation_years": 3,
             "rows": [

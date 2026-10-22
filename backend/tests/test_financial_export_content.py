@@ -3,7 +3,13 @@
 阳性: 检入的真实下载 xlsx(财务摘要表)与同一封存 JSON 逐行
 (标签、值、顺序、行数)精确一致, 覆盖 K/N/E/C/币种、付款时点
 比例金额(同一 t 多笔按序)、每年度全部分量、CF 每个时点净额/
-贴现/累计/贴现累计、NPV 与 IRR/回收期值和状态。
+贴现/累计/贴现累计、完整税后现金流数组、逐月 VAT 实缴/确认/
+到账/结转、退款计划(期后到账标应收)、所得税/折旧/亏损余额,
+以及 NPV 与 IRR/回收期值和状态。
+
+封存块为当前 ``ies.financial-evaluation@1.0.0``(tax_cash 与
+annual_net_flows 必填): 缺必填字段按契约违例暴露, 不静默补空
+税务表。
 
 阴性对照(不入生产): 内存中交换两 CF 行数值 / 错改 K(相同数字
 仍在别处存在), 精确对照必须失败——旧全表子串命中对此类篡改
@@ -147,11 +153,12 @@ def test_tax_expected_mirror_matches_production():
     ]
 
 
-def test_tax_rows_absent_for_legacy_seal():
-    """旧封存无 tax_cash：空表，历史下载不变。"""
+def test_tax_rows_absent_for_missing_required_fields():
+    """封存块缺必填 tax_cash/annual_net_flows：按契约违例暴露，不静默补空税务。"""
     from iesplan.application.packages.transfers import _sealed_tax_rows
 
-    assert _sealed_tax_rows({"currency": "CNY", "evaluation_years": 1}, "CNY") == []
+    with pytest.raises(KeyError):
+        _sealed_tax_rows({"currency": "CNY", "evaluation_years": 1}, "CNY")
 
 
 def test_negative_wrong_k_must_fail():

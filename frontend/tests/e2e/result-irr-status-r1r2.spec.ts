@@ -62,6 +62,22 @@ async function openResults(page: Page): Promise<void> {
   await expect(page).toHaveURL(/\/results/)
 }
 
+/**
+ * 当前浏览器会话(cookie)下的只读 GET。
+ *
+ * 不再二次登录: 登录按窗口接管规则撤销旧会话, 会使 UI 会话失效
+ * (结果页跳登录页, 封存卡定位不到)。这里复用页面已登录的会话取
+ * 同一 HTTP oracle, 断言与页面同源。
+ */
+async function sessionGet(page: Page, path: string): Promise<any> {
+  const res = await page.request.get(`${APP}${path}`)
+  const text = await res.text()
+  if (!res.ok()) {
+    throw new Error(`GET ${path} -> ${res.status()}: ${text.slice(0, 300)}`)
+  }
+  return text ? JSON.parse(text) : null
+}
+
 test.describe('R1/R2: IRR 状态走封存字段', () => {
   test.setTimeout(900_000)
 
@@ -94,14 +110,12 @@ test.describe('R1/R2: IRR 状态走封存字段', () => {
     await expect(page.getByText(/评价现金流\(封存\)|Sealed evaluation/i).first()).toBeVisible({ timeout: 30_000 })
 
     // HTTP 封存 irr_status 是唯一依据；未知状态直接失败。
-    const token2 = await loginToken(apiCtx.request, username, password)
-    const listed = await requestJson(apiCtx.request, 'GET', `/api/projects/${pid}/tasks?limit=10`, undefined, token2)
+    // 取 oracle 复用页面已登录的会话(不再二次登录, 免撤销 UI 会话)。
+    const listed = await sessionGet(page, `/api/projects/${pid}/tasks?limit=10`)
     const items = (listed.items ?? []) as TaskListItem[]
     const taskId: number = items[0].id
     expect(taskId).toBeTruthy()
-    const result = await requestJson(
-      apiCtx.request, 'GET', `/api/projects/${pid}/tasks/${taskId}/result`, undefined, token2,
-    )
+    const result = await sessionGet(page, `/api/projects/${pid}/tasks/${taskId}/result`)
     const irrStatus: string = result.result.financial_evaluation?.evaluation?.irr_status
     expect(typeof irrStatus).toBe('string')
     const expectedLabel = IRR_LABEL[irrStatus]
@@ -160,15 +174,12 @@ test.describe('R1/R2: IRR 状态走封存字段', () => {
     await expect(page.getByText(/评价现金流\(封存\)|Sealed evaluation/i)).toHaveCount(0)
     expect(await page.getByText('IRR 计算状态').count()).toBe(0)
 
-    // HTTP 与页面一致。
-    const token2 = await loginToken(apiCtx.request, username, password)
-    const listed = await requestJson(apiCtx.request, 'GET', `/api/projects/${pid}/tasks?limit=10`, undefined, token2)
+    // HTTP 与页面一致(复用页面会话, 不二次登录)。
+    const listed = await sessionGet(page, `/api/projects/${pid}/tasks?limit=10`)
     const items = (listed.items ?? []) as TaskListItem[]
     const taskId: number = items[0].id
     expect(taskId).toBeTruthy()
-    const result = await requestJson(
-      apiCtx.request, 'GET', `/api/projects/${pid}/tasks/${taskId}/result`, undefined, token2,
-    )
+    const result = await sessionGet(page, `/api/projects/${pid}/tasks/${taskId}/result`)
     expect(result.result.financial_evaluation).toBeNull()
     expect(result.result.financial_absence).toBe('solution_not_requested')
 

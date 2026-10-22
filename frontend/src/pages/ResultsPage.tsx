@@ -1671,10 +1671,8 @@ function FinancialEvaluationCard({ fin }: { fin: FinancialEvaluationBlock }) {
           </table>
         </div>
       ) : null}
-      {fin.tax_cash ? (
-        <TaxCashSections fin={fin} />
-      ) : null}
-      {fin.annual_net_flows && fin.annual_net_flows.length > 0 ? (
+      <TaxCashSections fin={fin} />
+      {fin.annual_net_flows.length > 0 ? (
         <div style={{ marginTop: 'var(--ies-space-3)' }}>
           <h3 style={{ fontSize: 'var(--ies-fs-sm)', fontWeight: 700, marginBottom: 'var(--ies-space-2)' }}>
             {t('ies.result.fin_tax_flows')}
@@ -1756,7 +1754,6 @@ function TaxCashSections({ fin }: { fin: FinancialEvaluationBlock }) {
   const { t } = useI18n()
   const ccy = fin.currency
   const tax = fin.tax_cash
-  if (!tax) return null
   const horizonMonths = fin.evaluation_years * 12
   const sectionTitle = { fontSize: 'var(--ies-fs-sm)', fontWeight: 700, marginBottom: 'var(--ies-space-2)' } as const
   const sectionGap = { marginTop: 'var(--ies-space-3)' } as const

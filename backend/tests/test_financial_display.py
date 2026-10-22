@@ -13,6 +13,7 @@ from iesplan.application.results.writes import _financial_absence
 
 
 def _sealed() -> dict:
+    """K1N2 封存评价块(当前 1.0.0 形态: tax_cash 与 annual_net_flows 必填)。"""
     return {
         "status": "evaluated",
         "evaluation_years": 3,
@@ -39,11 +40,24 @@ def _sealed() -> dict:
                 "fixed_om": "1400", "maintenance": "3500.50", "net": "6979.50",
             },
         ],
+        "annual_net_flows": ["-84000.0", "-56000.0", "8500", "6979.50"],
+        # 无税展示夹具: 五个数组显式为空(合法"不适用"), 不用缺字段伪装。
+        "tax_cash": {
+            "vat": [],
+            "refunds": [],
+            "income": [],
+            "depreciation": [],
+            "loss_balances": [],
+        },
         "evaluation": {
             "currency": "CNY", "evaluation_years": 3,
             "rows": [
                 {"year": 0, "net": "-84000.0", "discounted": "-84000.0",
                  "cumulative": "-84000.0", "cumulative_discounted": "-84000.0"},
+                {"year": 1, "net": "-56000.0", "discounted": "-51851.85",
+                 "cumulative": "-140000.0", "cumulative_discounted": "-135851.85"},
+                {"year": 2, "net": "8500", "discounted": "7288.07",
+                 "cumulative": "-131500.0", "cumulative_discounted": "-128563.78"},
                 {"year": 3, "net": "6979.50", "discounted": "5543.47",
                  "cumulative": "-124520.50", "cumulative_discounted": "-123020.31"},
             ],

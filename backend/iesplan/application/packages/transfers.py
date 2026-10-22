@@ -1794,20 +1794,17 @@ def _is_sealed_evaluation(section: Any) -> bool:
 def _sealed_tax_rows(fin: dict[str, Any], ccy: str) -> list[tuple[str, Any]]:
     """同次解税务事实与税后现金流明细行（封存原样消费，不重算、不截断）。
 
-    旧封存（无 ``tax_cash``）返回空表，历史下载字节不变；新封存逐项
-    展平：完整税后现金流数组、月 VAT 实缴/确认/到账/结转、退款计划
-    （期后到账标应收，不计期内现金）、年所得税/折旧/亏损余额。
-    空数组显式记“无适用规则”，不用空表掩盖。
+    封存块 ``ies.financial-evaluation@1.0.0`` 的 ``tax_cash`` 与
+    ``annual_net_flows`` 必填：直接消费字段，不为缺字段的旧块做静默
+    兼容（缺字段即契约违例，按实际错误暴露，不补空税务）。合法空数组
+    仍显式记“无适用规则”，不用空表掩盖。
     """
-    tax = fin.get("tax_cash")
-    if not isinstance(tax, dict):
-        return []
-    horizon = int(fin.get("evaluation_years", 0)) * 12
+    tax = fin["tax_cash"]
+    horizon = int(fin["evaluation_years"]) * 12
     rows: list[tuple[str, Any]] = []
-    flows = fin.get("annual_net_flows") or []
-    for index, amount in enumerate(flows):
+    for index, amount in enumerate(fin["annual_net_flows"]):
         rows.append((f"税后现金流 CF[t={index}] / After-tax CF[t={index}]", f"{amount} {ccy}"))
-    vat = tax.get("vat") or []
+    vat = tax["vat"]
     if vat:
         for row in vat:
             head = f"增值税 {row['pool']} m={row['month']} / VAT {row['pool']} m={row['month']}"
@@ -1817,7 +1814,7 @@ def _sealed_tax_rows(fin: dict[str, Any], ccy: str) -> list[tuple[str, Any]]:
             rows.append((f"{head} 期末结转 / carry", f"{row['carry']} {ccy}"))
     else:
         rows.append(("增值税 / VAT", "无适用规则 / No applicable rules"))
-    refunds = tax.get("refunds") or []
+    refunds = tax["refunds"]
     if refunds:
         for row in refunds:
             post = "(期后应收，非期内现金)" if int(row["arrival_period"]) > horizon else ""
@@ -1830,7 +1827,7 @@ def _sealed_tax_rows(fin: dict[str, Any], ccy: str) -> list[tuple[str, Any]]:
             )
     else:
         rows.append(("退款计划 / Refunds", "无适用规则 / No applicable rules"))
-    income = tax.get("income") or []
+    income = tax["income"]
     if income:
         for row in income:
             head = f"所得税 {row['rule']} y={row['year']} / Income {row['rule']} y={row['year']}"
@@ -1841,7 +1838,7 @@ def _sealed_tax_rows(fin: dict[str, Any], ccy: str) -> list[tuple[str, Any]]:
             rows.append((f"{head} 税额 / tax", f"{row['tax']} {ccy}"))
     else:
         rows.append(("所得税 / Income tax", "无适用规则 / No applicable rules"))
-    depreciation = tax.get("depreciation") or []
+    depreciation = tax["depreciation"]
     if depreciation:
         for row in depreciation:
             rows.append(
@@ -1853,7 +1850,7 @@ def _sealed_tax_rows(fin: dict[str, Any], ccy: str) -> list[tuple[str, Any]]:
             )
     else:
         rows.append(("计税折旧 / Depreciation", "无适用规则 / No applicable rules"))
-    balances = tax.get("loss_balances") or []
+    balances = tax["loss_balances"]
     if balances:
         for row in balances:
             rows.append(

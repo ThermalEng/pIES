@@ -104,16 +104,15 @@ def _expected_pairs(fin: dict) -> list:
 def _expected_tax_pairs(fin: dict, ccy: str) -> list:
     """税务明细期望行(独立组装展示文本，只组装不重算财务业务)。
 
-    与生产 ``_sealed_tax_rows`` 逐行对应；旧封存无 tax_cash 时为空表。
+    与生产 ``_sealed_tax_rows`` 逐行对应：封存块 1.0.0 的 ``tax_cash`` 与
+    ``annual_net_flows`` 必填，直接消费；合法空数组显式记“无适用规则”。
     """
-    tax = fin.get("tax_cash")
-    if not isinstance(tax, dict):
-        return []
-    horizon = int(fin.get("evaluation_years", 0)) * 12
+    tax = fin["tax_cash"]
+    horizon = int(fin["evaluation_years"]) * 12
     rows = []
-    for index, amount in enumerate(fin.get("annual_net_flows") or []):
+    for index, amount in enumerate(fin["annual_net_flows"]):
         rows.append((f"税后现金流 CF[t={index}] / After-tax CF[t={index}]", f"{amount} {ccy}"))
-    vat = tax.get("vat") or []
+    vat = tax["vat"]
     if vat:
         for row in vat:
             head = f"增值税 {row['pool']} m={row['month']} / VAT {row['pool']} m={row['month']}"
@@ -123,7 +122,7 @@ def _expected_tax_pairs(fin: dict, ccy: str) -> list:
             rows.append((f"{head} 期末结转 / carry", f"{row['carry']} {ccy}"))
     else:
         rows.append(("增值税 / VAT", "无适用规则 / No applicable rules"))
-    refunds = tax.get("refunds") or []
+    refunds = tax["refunds"]
     if refunds:
         for row in refunds:
             post = "(期后应收，非期内现金)" if int(row["arrival_period"]) > horizon else ""
@@ -136,7 +135,7 @@ def _expected_tax_pairs(fin: dict, ccy: str) -> list:
             )
     else:
         rows.append(("退款计划 / Refunds", "无适用规则 / No applicable rules"))
-    income = tax.get("income") or []
+    income = tax["income"]
     if income:
         for row in income:
             head = f"所得税 {row['rule']} y={row['year']} / Income {row['rule']} y={row['year']}"
@@ -147,7 +146,7 @@ def _expected_tax_pairs(fin: dict, ccy: str) -> list:
             rows.append((f"{head} 税额 / tax", f"{row['tax']} {ccy}"))
     else:
         rows.append(("所得税 / Income tax", "无适用规则 / No applicable rules"))
-    depreciation = tax.get("depreciation") or []
+    depreciation = tax["depreciation"]
     if depreciation:
         for row in depreciation:
             rows.append(
@@ -159,7 +158,7 @@ def _expected_tax_pairs(fin: dict, ccy: str) -> list:
             )
     else:
         rows.append(("计税折旧 / Depreciation", "无适用规则 / No applicable rules"))
-    balances = tax.get("loss_balances") or []
+    balances = tax["loss_balances"]
     if balances:
         for row in balances:
             rows.append(
