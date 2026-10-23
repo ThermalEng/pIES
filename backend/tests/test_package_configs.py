@@ -63,7 +63,7 @@ from iesplan.main import create_app  # noqa: E402
 
 PROFILE_PAYLOAD: dict = {
     "schema": "ies.finance-profile",
-    "schema_version": "3.0.0",
+    "schema_version": "4.0.0",
     "profile": {
         "id": "cn-north-demo",
         "region": "CN-North",
@@ -94,6 +94,7 @@ PROFILE_PAYLOAD: dict = {
             "value": {"value": "0.7", "unit": "CNY/kWh"},
         },
     },
+    "demand_charges": {},
     "taxes": {},
     "credit_pools": {},
     "tax_rules": {},
@@ -103,7 +104,7 @@ PROFILE_PAYLOAD: dict = {
 def _overrides_payload(profile: FinanceProfile) -> dict:
     return {
         "schema": "ies.finance-overrides",
-        "schema_version": "3.0.0",
+        "schema_version": "4.0.0",
         "profile_ref": {"id": profile.profile_id},
         "finance_types": {
             "pv_system": {
@@ -1404,7 +1405,7 @@ def _tax_package_overrides(rate: str, refund_amount: str) -> dict:
     """非空税则包覆盖: 所得税率 + 维护两维度 + 期初亏损 + 池期初/退款。"""
     return {
         "schema": "ies.finance-overrides",
-        "schema_version": "3.0.0",
+        "schema_version": "4.0.0",
         "profile_ref": {"id": "cn-tax-demo"},
         "credit_pools": {
             "main_pool": {
