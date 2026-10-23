@@ -1144,6 +1144,7 @@ def _assembly_gate(
         finance=finance,
         finance_binding=content.get("finance_binding"),
         tariff_bindings=content.get("tariff_bindings"),
+        demand_bindings=content.get("demand_bindings"),
         planning=planning,
         finance_snapshots=finance_snapshots,
         operation_years=operation_years,
