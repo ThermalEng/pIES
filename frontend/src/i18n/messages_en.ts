@@ -713,6 +713,7 @@ export const messagesEn: Record<string, string> = {
   'ies.finance.invalid_json': 'JSON parse failed',
   'ies.finance.see_diagnostics': 'See the error title above.',
   'ies.nav.finance': 'Finance',
+  'ies.nav.bindings': 'Cost & tariff bindings',
   // Exports
   // -------------------------------------------------------------------------
   'ies.export.title': 'Export',
