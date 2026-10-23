@@ -138,3 +138,90 @@ test('cost and tariff GUI: no inferred cost, atomic draft save, reload, 409 pres
   assertSecondErrors()
   await context.close()
 })
+
+
+test('empty model: explicitly remove orphan cost and tariff bindings, then persist empty sections', async ({ browser }) => {
+  const username = uniqueName('issue03-empty')
+  const password = strongPassword('Init')
+  const profileId = uniqueName('issue03-empty-profile')
+  const api = await browser.newContext({ baseURL: process.env.E2E_APP_URL ?? 'http://web:80' })
+  await createEngineer(api.request, username, password)
+  const token = await loginToken(api.request, username, password)
+  const created = await requestJson(api.request, 'POST', '/api/projects', {
+    name: uniqueName('Issue03 stale bindings'),
+    baseline_resolution: '1h',
+    baseline_start_year: 2026,
+    baseline_scenario_mode: 'single',
+  }, token)
+  const pid = created.project.id as number
+  await requestJson(api.request, 'POST', '/api/finance-profiles', {
+    finance_profile: financeProfile(profileId),
+  }, token)
+  await requestJson(api.request, 'PUT', '/api/projects/' + pid + '/finance-profile', {
+    profile_ref: { id: profileId },
+  }, token)
+  const before = await requestJson(api.request, 'GET', '/api/projects/' + pid, undefined, token)
+  // Fixture only: the last device was deleted, leaving its old finance and meter
+  // sections behind. The cleanup itself must take place in the tested GUI.
+  await requestJson(api.request, 'PUT', '/api/projects/' + pid + '/draft', {
+    expected_revision: before.draft.revision,
+    commands: [
+      { id: 'issue03-empty-add', unit: 'model', type: 'model.upsert_device', payload: {
+        name: 'grid1', device_type: 'ies.device.grid_connection', kind: 'existing',
+        params: { max_import_power_kw: 100, max_export_power_kw: 0 },
+      } },
+      { id: 'issue03-empty-cost', unit: 'assembly', type: 'assembly.set_finance_binding', payload: {
+        instances: { grid1: { type: 'none' } },
+      } },
+      { id: 'issue03-empty-meter', unit: 'assembly', type: 'assembly.set_tariff_bindings', payload: {
+        bindings: {
+          import_meter: {
+            price: 'grid_import', instance: 'grid1',
+            interface: 'electricity_import', aggregation: 'integrate_positive',
+          },
+        },
+      } },
+      { id: 'issue03-empty-remove', unit: 'model', type: 'model.remove_device', payload: { name: 'grid1' } },
+    ],
+  }, token)
+  await api.close()
+
+  const context = await browser.newContext()
+  const page = await context.newPage()
+  const session = await createSession(page, username, password)
+  await page.goto('/projects/' + pid + '/bindings')
+  await expect(page.locator('#binding-mode-grid1')).toHaveCount(0)
+  await expect(page.locator('input[id^="tariff-id-"]')).toHaveValue('import_meter')
+  const saveButton = page.getByRole('button', { name: /保存成本与计费绑定|Save cost & tariff bindings/i })
+  // A model with zero devices can still persist an explicit cleanup.
+  await expect(saveButton).toBeEnabled()
+  await saveButton.click()
+  await expect(page.getByText(/存在旧实例关联|Remove or reconcile bindings/)).toBeVisible()
+
+  // Explicitly discard each obsolete association, not an implicit side effect
+  // of the model deletion or an automatic selection of type:none.
+  const removeButtons = page.getByRole('button', { name: /^移除$|^Remove$/ })
+  await expect(removeButtons).toHaveCount(2)
+  await removeButtons.first().click() // orphan finance_binding.instances.grid1
+  await expect(removeButtons).toHaveCount(1)
+  await removeButtons.click() // stale tariff_bindings.import_meter
+  await expect(page.locator('input[id^="tariff-id-"]')).toHaveCount(0)
+  await expect(saveButton).toBeEnabled()
+  await saveButton.click()
+  await expect(page.getByText(/绑定已保存|Bindings saved/)).toBeVisible()
+
+  const saved = await page.request.get('/api/projects/' + pid)
+  expect(saved.ok()).toBe(true)
+  const content = (await saved.json()).draft.content
+  expect(content.model.devices).toEqual([])
+  expect(content.finance_binding).toEqual({ instances: {} })
+  expect(content.tariff_bindings).toEqual({})
+
+  await page.reload()
+  await expect(saveButton).toBeEnabled()
+  await expect(page.locator('#binding-mode-grid1')).toHaveCount(0)
+  await expect(page.locator('input[id^="tariff-id-"]')).toHaveCount(0)
+  await expect(page.getByText(/原草稿存在已移除的设备绑定|Bindings for removed instances/)).toHaveCount(0)
+  session.assertNoErrors()
+  await context.close()
+})
