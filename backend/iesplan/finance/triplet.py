@@ -881,7 +881,7 @@ def _parse_tax_rule(rule_id: str, mapping: object) -> TaxRule:
 
 
 def _require_keys(mapping: Mapping, keys: set[str], field: str, *, optional: set[str] | None = None) -> None:
-    unknown = set(mapping) - keys
+    unknown = set(mapping) - keys - (optional or set())
     if unknown:
         raise FinanceTripletError(f"{field} 未知字段: {sorted(unknown)}")
     missing = keys - set(mapping)
@@ -1141,6 +1141,7 @@ def _check_tax_refs(
     currency: str,
     energy_prices: Mapping[str, EnergyPrice],
     finance_types: Mapping[str, FinanceTypeEntry],
+    demand_charges: Mapping[str, DemandCharge],
     taxes: Mapping[str, TaxEntry],
     credit_pools: Mapping[str, CreditPool],
     tax_rules: Mapping[str, TaxRule],
@@ -1165,6 +1166,8 @@ def _check_tax_refs(
     seen_for: dict[str, str] = {}
     seen_income_price: dict[str, str] = {}
     seen_income_om: dict[str, str] = {}
+    seen_demand_input: dict[str, str] = {}
+    seen_demand_cost: dict[str, str] = {}
     for rule_id, rule in tax_rules.items():
         field = f"tax_rules.{rule_id}"
         if rule.label_ref not in taxes:
@@ -1173,6 +1176,8 @@ def _check_tax_refs(
         if pool_ref is not None and pool_ref not in credit_pools:
             raise FinanceTripletError(f"{field}.credit_pool 引用的池不存在: {pool_ref!r}")
         if isinstance(rule, VatRule):
+            for entry in rule.demand_input_tax:
+                _claim_demand(seen_demand_input, entry.charge, rule_id, demand_charges, f"{field}.demand_input_tax")
             for entry in rule.in_tax:
                 _claim_price(seen_in, entry.price, rule_id, energy_prices, "purchase", f"{field}.in_tax")
             for entry in rule.out_tax:
@@ -1191,6 +1196,8 @@ def _check_tax_refs(
             _claim_component(seen_for, rule.for_path, rule_id, ft_paths,
                              ("upfront_capex",), field)
         elif isinstance(rule, IncomeTaxRule):
+            for charge in rule.demand_cost:
+                _claim_demand(seen_demand_cost, charge, rule_id, demand_charges, f"{field}.demand_cost")
             for price_id in rule.revenue:
                 _claim_price(seen_income_price, price_id, rule_id, energy_prices, "sale",
                              f"{field}.revenue")
@@ -1221,6 +1228,17 @@ def _check_tax_refs(
                         f"{field}.depreciation.base_from 须为 {item.asset}.upfront_capex_net")
                 if item.residual.unit != currency:
                     raise FinanceTripletError(f"{field}.depreciation.residual 单位须为 Profile 币种")
+
+
+def _claim_demand(
+    seen: dict[str, str], charge: str, rule_id: str,
+    charges: Mapping[str, DemandCharge], field: str,
+) -> None:
+    if charge not in charges:
+        raise FinanceTripletError(f"{field} 引用未知需量费项: {charge!r}")
+    if charge in seen:
+        raise FinanceTripletError(f"{field} 需量费项 {charge!r} 已被规则 {seen[charge]!r} 使用")
+    seen[charge] = rule_id
 
 
 def _claim_price(
@@ -1333,6 +1351,7 @@ class FinanceProfile:
     taxes: Mapping[str, TaxEntry] = field(default_factory=lambda: MappingProxyType({}))
     credit_pools: Mapping[str, CreditPool] = field(default_factory=lambda: MappingProxyType({}))
     tax_rules: Mapping[str, TaxRule] = field(default_factory=lambda: MappingProxyType({}))
+    demand_charges: Mapping[str, DemandCharge] = field(default_factory=lambda: MappingProxyType({}))
 
     def __post_init__(self) -> None:
         if self.schema != SCHEMA_PROFILE:
@@ -1344,6 +1363,7 @@ class FinanceProfile:
         object.__setattr__(self, "profile", MappingProxyType(profile_sorted))
         object.__setattr__(self, "finance_types", MappingProxyType(dict(sorted(self.finance_types.items()))))
         object.__setattr__(self, "energy_prices", MappingProxyType(dict(sorted(self.energy_prices.items()))))
+        object.__setattr__(self, "demand_charges", MappingProxyType(dict(sorted(self.demand_charges.items()))))
         object.__setattr__(self, "taxes", MappingProxyType(dict(sorted(self.taxes.items()))))
         object.__setattr__(self, "credit_pools", MappingProxyType(dict(sorted(self.credit_pools.items()))))
         object.__setattr__(self, "tax_rules", MappingProxyType(dict(sorted(self.tax_rules.items()))))
@@ -1351,7 +1371,7 @@ class FinanceProfile:
         # 或 finance_types 的分量路径(<finance_type>.<分量>, 如 pv_system.upfront_capex)。
         for tax_id, tax in self.taxes.items():
             target = tax.applies_to
-            if target in self.energy_prices:
+            if target in self.energy_prices or (target.startswith("demand_charges.") and target.removeprefix("demand_charges.") in self.demand_charges):
                 continue
             parts = target.split(".")
             if (
@@ -1393,6 +1413,7 @@ class FinanceProfile:
             "profile": dict(sorted(self.profile.items())),
             "finance_types": {k: v.to_dict() for k, v in sorted(self.finance_types.items())},
             "energy_prices": {k: v.to_dict() for k, v in sorted(self.energy_prices.items())},
+            "demand_charges": {k: v.to_dict() for k, v in sorted(self.demand_charges.items())},
             "taxes": {k: v.to_dict() for k, v in sorted(self.taxes.items())},
             "credit_pools": {k: v.to_dict() for k, v in sorted(self.credit_pools.items())},
             "tax_rules": {k: v.to_dict() for k, v in sorted(self.tax_rules.items())},
@@ -1402,12 +1423,12 @@ class FinanceProfile:
     def from_dict(cls, mapping: object) -> FinanceProfile:
         if not isinstance(mapping, Mapping):
             raise FinanceTripletError("FinanceProfile 必须是字典")
-        known_profile = {"schema", "schema_version", "profile", "finance_types", "energy_prices", "taxes",
+        known_profile = {"schema", "schema_version", "profile", "finance_types", "energy_prices", "demand_charges", "taxes",
                          "credit_pools", "tax_rules"}
         unknown = set(mapping) - known_profile
         if unknown:
             raise FinanceTripletError(f"FinanceProfile 未知字段: {sorted(unknown)}")
-        missing = {"schema", "schema_version", "profile", "finance_types", "energy_prices"} - set(mapping)
+        missing = {"schema", "schema_version", "profile", "finance_types", "energy_prices", "demand_charges"} - set(mapping)
         if missing:
             raise FinanceTripletError(f"FinanceProfile 缺少字段: {sorted(missing)}")
         schema = str(mapping["schema"])
@@ -1486,6 +1507,8 @@ class FinanceProfile:
             _check_price_unit(currency, price_id, price)
             energy_prices[price_id] = price
 
+        demand_charges = _parse_demand_charges(mapping["demand_charges"], currency)
+
         taxes_raw = mapping.get("taxes") or {}
         if not isinstance(taxes_raw, Mapping):
             raise FinanceTripletError("taxes 必须是字典")
@@ -1515,6 +1538,7 @@ class FinanceProfile:
             currency=currency,
             energy_prices=energy_prices,
             finance_types=finance_types,
+            demand_charges=demand_charges,
             taxes=taxes,
             credit_pools=credit_pools,
             tax_rules=tax_rules,
@@ -2358,6 +2382,7 @@ class EffectiveFinanceConfig:
             currency=currency,
             energy_prices=energy_prices,
             finance_types=finance_types,
+            demand_charges=demand_charges,
             taxes=taxes,
             credit_pools=credit_pools,
             tax_rules=tax_rules,
