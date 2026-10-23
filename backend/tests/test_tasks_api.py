@@ -784,7 +784,7 @@ def _evaluation_2y(expenses: list) -> dict:
 def _maint_ref_overrides(items: list) -> dict:
     return {
         "schema": "ies.finance-overrides",
-        "schema_version": "3.0.0",
+        "schema_version": "4.0.0",
         "profile_ref": {"id": "cn-tax-demo"},
         "tax_rules": {
             "operating_vat": {
@@ -935,7 +935,7 @@ def _sched_profile_payload() -> dict:
 def _sched_refund_overrides(schedule: list | None, refund_period: int, arrival: int) -> dict:
     patch: dict = {
         "schema": "ies.finance-overrides",
-        "schema_version": "3.0.0",
+        "schema_version": "4.0.0",
         "profile_ref": {"id": "cn-tax-sched"},
         "credit_pools": {
             "main_pool": {
