@@ -199,7 +199,7 @@ async function saveTemplateModelViaUi(page: Page, setup: Setup): Promise<void> {
   await expect(page.locator('.ies-modeling__saved').getByText(new RegExp(`${setup.deviceId}_1`)).first()).toBeVisible()
 }
 
-async function addModelDeviceViaCanvas(page: Page, setup: Setup): Promise<void> {
+async function addModelDeviceViaCanvas(page: Page, setup: Setup, readFailure = false): Promise<void> {
   // 模型保存推进了项目修订; 重载工作区丢弃画布旧修订(真实用户刷新后继续)。
   await page.reload()
   await page.getByRole('navigation', { name: /工作台|Workspace/i }).getByText(/系统建模|System Modeling/i).click({ timeout: 30_000 })
@@ -217,6 +217,7 @@ async function addModelDeviceViaCanvas(page: Page, setup: Setup): Promise<void> 
   await page.mouse.down()
   await page.mouse.move(canvasBox!.x + canvasBox!.width * 0.5, canvasBox!.y + canvasBox!.height * 0.65, { steps: 10 })
   await page.mouse.up()
+  if (readFailure) return
   await expect(page.locator('.react-flow__node', { hasText: NODE_NAME }).first()).toBeVisible({ timeout: 15_000 })
   // 模板输入在创建时即形成显式实例来源(无需再次手选)。
   await waitDraft(page, setup.pid, (content) => {
@@ -343,18 +344,18 @@ test.describe('S1 模板数据输入 GUI 全链', () => {
     await mode.selectOption('constant')
     const value = page.locator('#mp-source-value-electric_demand')
     await expect(value).toBeVisible({ timeout: 15_000 })
-    await value.fill('25')
-
     // 正在编辑 constant 时保存其他参数, 不得清除本地未提交的 mode/value。
     const peak = page.locator('#mp-param-peak_power_kw, input[aria-label^="peak_power_kw"]').first()
-    if (await peak.isVisible().catch(() => false)) {
-      await peak.fill('160')
-      await peak.press('Tab')
-      await page.waitForTimeout(800)
-    }
+    await expect(peak).toBeVisible()
+    await peak.fill('160')
+    await peak.press('Tab')
+    await waitDraft(page, setup.pid, (content) =>
+      content.model.devices.find((d: any) => d.name === NODE_NAME)?.params.peak_power_kw === 160,
+    '其他参数保存')
     await expect(mode).toHaveValue('constant')
-    await expect(value).toHaveValue('25')
+    await expect(value).toHaveValue('')
 
+    await value.fill('25')
     await value.press('Tab')
     await waitDraft(page, setup.pid, (content) => {
       const device = (content.model?.devices ?? []).find((d: any) => d.name === NODE_NAME)
@@ -366,6 +367,48 @@ test.describe('S1 模板数据输入 GUI 全链', () => {
     await page.locator('.react-flow__node', { hasText: NODE_NAME }).first().click()
     await expect(page.locator('#mp-source-mode-electric_demand')).toHaveValue('constant')
     await expect(page.locator('#mp-source-value-electric_demand')).toHaveValue('25')
+
+    // 清除来源再原地改名，不能再次填入模板来源。
+    await page.locator('#mp-source-mode-electric_demand').selectOption('')
+    await waitDraft(page, setup.pid, (content) =>
+      !('electric_demand' in content.model.devices.find((d: any) => d.name === NODE_NAME).params),
+    '清除来源')
+    const renamed = 'Renamed S1 load'
+    await page.locator('#mp-device-name').fill(renamed)
+    await page.locator('#mp-device-name').press('Tab')
+    await waitDraft(page, setup.pid, (content) => {
+      const device = content.model.devices.find((d: any) => d.name === renamed)
+      return device && !('electric_demand' in device.params)
+    }, '原地改名保持清除状态')
+    await context.close()
+  })
+
+  test('创建已保存但读回失败时阻断旧画布，重试读取真实来源', async ({ browser }) => {
+    const setup = await apiSetup(browser)
+    const context = await browser.newContext()
+    const page = await context.newPage()
+    await openProject(page, setup)
+    await saveTemplateModelViaUi(page, setup)
+    let failRead = false
+    page.on('response', (response) => {
+      const request = response.request()
+      if (request.method() === 'PUT' && new URL(response.url()).pathname.endsWith('/draft')
+        && request.postData()?.includes('model.upsert_device') && response.ok()) failRead = true
+    })
+    await page.route(`**/api/projects/${setup.pid}`, (route) => {
+      if (route.request().method() === 'GET' && failRead) {
+        failRead = false
+        return route.abort()
+      }
+      return route.continue()
+    })
+    await addModelDeviceViaCanvas(page, setup, true)
+    await expect(page.getByText(/模型加载失败|Failed to load model/)).toBeVisible()
+    await expect(page.locator('.react-flow__node', { hasText: NODE_NAME })).toHaveCount(0)
+    await page.getByRole('button', { name: /重试|Retry/i, exact: true }).click()
+    await page.locator('.react-flow__node', { hasText: NODE_NAME }).click()
+    await expect(page.locator('#mp-source-mode-electric_demand')).toHaveValue('data_repeat')
+    await expect(page.locator('#mp-source-version-electric_demand')).toHaveValue(String(setup.vid))
     await context.close()
   })
 

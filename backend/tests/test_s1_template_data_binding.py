@@ -20,6 +20,21 @@ from pathlib import Path
 
 import pytest
 from sqlalchemy.orm import Session
+from test_project_model_save import (  # noqa: E402
+    _make_owner,
+    _publish_template,
+    _save,
+    _token_ns_map,
+)
+from test_project_model_save import (
+    client as client,
+)
+from test_project_model_save import (
+    db_session as db_session,
+)
+from test_project_model_save import (
+    engine as engine,
+)
 
 from iesplan import project as project_domain
 from iesplan.application.models.project_devices import (
@@ -30,16 +45,6 @@ from iesplan.application.projects.content_objects import load_content_object
 from iesplan.assembly import build_assembly_doc_from_content
 from iesplan.assembly.builder import dataset_export_path
 from iesplan.core.namespace import build_stable_id
-
-from test_project_model_save import (  # noqa: E402
-    _make_owner,
-    _publish_template,
-    _save,
-    _token_ns_map,
-    client,  # noqa: F401  (pytest fixture)
-    db_session,  # noqa: F401  (pytest fixture)
-    engine,  # noqa: F401  (pytest fixture)
-)
 
 TEMPLATE_YAML = """
 schema: ies.device-model
@@ -144,7 +149,7 @@ def _add_device(
             "expected_revision": revision,
             "commands": [
                 {
-                    "id": f"add-{name}",
+                    "id": f"add-{name}-{revision}",
                     "unit": "model",
                     "type": "model.upsert_device",
                     "payload": {
@@ -238,8 +243,6 @@ def test_template_data_input_required_and_must_resolve(
     client, db_session: Session
 ) -> None:
     headers, pid = _make_owner(client, db_session, "s1_bind_required")
-    token = headers["Authorization"].replace("Bearer ", "")
-    base_id = build_stable_id(_token_ns_map[token], "electric-load")
     template_id, revision = _publish_template(client, headers, TEMPLATE_YAML, slug="electric-load")
 
     # 缺少数据叶子 → 拒绝(不静默保留模板值)
@@ -320,18 +323,81 @@ def test_template_data_modes_declared_and_saved(
 SAMPLES = Path(__file__).parent.parent / "iesplan" / "assembly" / "samples"
 
 
-def test_numbered_model_csv_identity_uses_base_id_through_assembly() -> None:
-    """同基名模型实际分配 _2 时, CSV 用稳定基础 ID 仍通过真实装配身份核对。"""
-    import dataclasses
+def test_created_binding_is_not_reapplied_after_clear_and_rename(client, db_session):
+    headers, pid = _make_owner(client, db_session, "s1_rename")
+    token = headers["Authorization"].replace("Bearer ", "")
+    base_id = build_stable_id(_token_ns_map[token], "electric-load")
+    vid = _upload_version(client, headers, pid, base_id)
+    template_id, revision = _publish_template(client, headers, TEMPLATE_YAML)
+    saved = _save(
+        client, pid, headers, "", source="template", template_id=template_id,
+        template_revision=revision, template_inputs=_template_inputs(dataset_export_path(vid)),
+    )
+    assert saved.status_code == 201, saved.text
+    model_id = saved.json()["project_model"]["device_id"]
+    _add_device(client, headers, pid, "load1", model_id)
+    view = client.get(f"/api/projects/{pid}", headers=headers).json()
+    assert view["draft"]["content"]["model"]["devices"][0]["params"]["electric_demand"] == {
+        "mode": "data_repeat", "dataset_version_id": vid,
+    }
+    # 清除来源后再改名，不能重新应用模板中记录的来源。
+    _add_device(client, headers, pid, "load1", model_id, {"peak_power_kw": 120})
+    _add_device(client, headers, pid, "grid1", "ies.device.grid_connection", {
+        "max_import_power_kw": 200, "max_export_power_kw": 0,
+    })
+    view = client.get(f"/api/projects/{pid}", headers=headers).json()
+    response = client.put(
+        f"/api/projects/{pid}/draft", headers=headers,
+        json={"expected_revision": view["draft"]["revision"], "commands": [
+            {"id": "place-load", "unit": "model", "type": "model.upsert_device",
+             "payload": {"name": "load1", "position": {"x": 10, "y": 20}}},
+            {"id": "wire-load", "unit": "model", "type": "model.upsert_connection",
+             "payload": {"name": "edge", "from_device": "grid1", "from_port": "electricity_import",
+                         "to_device": "load1", "to_port": "electricity_in"}},
+            {"id": "rename-load", "unit": "model", "type": "model.rename_device",
+             "payload": {"name": "load1", "new_name": "renamed"}},
+        ]},
+    )
+    assert response.status_code == 200, response.text
+    content = client.get(f"/api/projects/{pid}", headers=headers).json()["draft"]["content"]
+    assert content["model"]["devices"][0]["name"] == "renamed"
+    assert content["model"]["devices"][0]["params"] == {"peak_power_kw": 120}
+    assert content["model"]["connections"][0]["to_device"] == "renamed"
+    assert content["layout"]["positions"] == {"renamed": {"x": 10, "y": 20}}
+    collision = client.put(f"/api/projects/{pid}/draft", headers=headers, json={
+        "expected_revision": response.json()["revision"], "commands": [{
+            "id": "rename-collision", "unit": "model", "type": "model.rename_device",
+            "payload": {"name": "renamed", "new_name": "grid1"},
+        }],
+    })
+    assert collision.status_code == 400, collision.text
 
+
+def test_numbered_model_csv_identity_uses_base_id_through_assembly(
+    client, db_session: Session,
+) -> None:
+    """同基名模型实际分配 _2 时, CSV 用稳定基础 ID 仍通过真实装配身份核对。"""
     from iesplan.assembly import validate_assembly_doc
-    from iesplan.devices import get_device
-    from iesplan.devices.contracts2 import DeviceInfo
+    from iesplan.core.yamlmini import dump as yaml_dump
+    from iesplan.devices import get_device, to_dict
+
+    headers, pid = _make_owner(client, db_session, "s1_numbered")
+    pv = to_dict(get_device("ies.device.pv"))
+    pv["device"]["id"] = "acme.device.pv"
+    saved = [_save(client, pid, headers, yaml_dump(pv)) for _ in range(2)]
+    assert [response.status_code for response in saved] == [201, 201]
+    numbered_id = saved[1].json()["project_model"]["device_id"]
+    assert numbered_id == "acme.device.pv_2"
+    project = project_domain.require_project(db_session, pid)
+    draft = project_domain.require_current_draft(db_session, project)
+    content = load_content_object(db_session, draft.content_object_id)
+    documents = load_project_device_documents(db_session, content)
+    base_ids = load_project_device_base_ids(db_session, content)
 
     sample_text = (SAMPLES / "valid" / "campus.assembly.yaml").read_text(encoding="utf-8")
     numbered = sample_text.replace(
         "    definition:\n      id: ies.device.pv",
-        "    definition:\n      id: acme.device.pv_2",
+        f"    definition:\n      id: {numbered_id}",
     )
     assert numbered != sample_text
     # 用基础 ID 的合成 CSV(与样例同值形状)覆盖样例副本。
@@ -343,13 +409,6 @@ def test_numbered_model_csv_identity_uses_base_id_through_assembly() -> None:
         }
     }
 
-    pv_doc = get_device("ies.device.pv")
-    numbered_doc = dataclasses.replace(
-        pv_doc,
-        device=DeviceInfo(id="acme.device.pv_2", names=pv_doc.device.names),
-    )
-    documents = {"acme.device.pv_2": numbered_doc}
-
     from iesplan.assembly import parse_assembly_doc
 
     parsed = parse_assembly_doc(numbered, source_name="campus.assembly.yaml")
@@ -359,7 +418,7 @@ def test_numbered_model_csv_identity_uses_base_id_through_assembly() -> None:
         package_dir=SAMPLES,
         dataset_contents=contents,
         device_documents=documents,
-        device_base_ids={"acme.device.pv_2": "acme.device.pv"},
+        device_base_ids=base_ids,
     )
     assert ok.artifact is not None, [d.code for d in ok.diagnostics if d.blocking]
     assert not any(
@@ -434,3 +493,92 @@ def test_data_predict_binding_with_explicit_target_passes_assembly() -> None:
     assert "target_type: ambient_temperature" in result.artifact.canonical_text.replace(
         '"target_type":"ambient_temperature"', "target_type: ambient_temperature"
     ) or "ambient_temperature" in result.artifact.canonical_text
+
+
+def test_template_prediction_created_then_confirmed_and_submitted(client, db_session):
+    import json
+
+    from test_prediction_capability import _prepare_predict_project, _save_calc
+    from test_tasks_api import _CONFIG_BODY, _submit_task
+
+    from iesplan import dataset as dataset_domain
+    from iesplan import tasks as tasks_domain
+    from iesplan.computation import NAIVE_PREDICTOR_REF
+    from iesplan.identity.persistence import User
+    from iesplan.storage import get_object
+
+    headers, initial_pid = _make_owner(client, db_session, "s1_predict_submit")
+    owner_id = project_domain.require_project(db_session, initial_pid).owner_id
+    user = db_session.get(User, owner_id)
+    pid, _ = _prepare_predict_project(client, db_session, user, [("load1", "load", [10, 11])])
+    token = headers["Authorization"].replace("Bearer ", "")
+    base_id = build_stable_id(_token_ns_map[token], "electric-load")
+    template = TEMPLATE_YAML.replace("type: data_repeat", "type: data_predict")
+    template_id, revision = _publish_template(client, headers, template)
+    vid = _upload_version(client, headers, pid, base_id, "data_predict")
+    _bind_dataset(client, headers, pid, vid)
+    saved = _save(
+        client, pid, headers, "", source="template", template_id=template_id,
+        template_revision=revision, template_inputs=_template_inputs(dataset_export_path(vid)),
+    )
+    assert saved.status_code == 201, saved.text
+    model_id = saved.json()["project_model"]["device_id"]
+    view = client.get(f"/api/projects/{pid}", headers=headers).json()
+    removed = client.put(f"/api/projects/{pid}/draft", headers=headers, json={
+        "expected_revision": view["draft"]["revision"], "commands": [{
+            "id": "replace-old-load", "unit": "model", "type": "model.remove_device",
+            "payload": {"name": "load1"},
+        }],
+    })
+    assert removed.status_code == 200, removed.text
+    _add_device(client, headers, pid, "load1", model_id)
+    view = client.get(f"/api/projects/{pid}", headers=headers).json()
+    instance = next(d for d in view["draft"]["content"]["model"]["devices"] if d["name"] == "load1")
+    assert instance["params"]["electric_demand"] == {
+        "mode": "data_predict", "dataset_version_id": vid,
+    }
+    # 预测目标由实例入口显式确认；模板来源只在创建时传递。
+    _add_device(client, headers, pid, "load1", model_id, {
+        "peak_power_kw": 120,
+        "electric_demand": {"mode": "data_predict", "dataset_version_id": vid, "target_type": "load"},
+    })
+    view = client.get(f"/api/projects/{pid}", headers=headers).json()
+    connected = client.put(f"/api/projects/{pid}/draft", headers=headers, json={
+        "expected_revision": view["draft"]["revision"], "commands": [{
+            "id": "connect-template-load", "unit": "model", "type": "model.upsert_connection",
+            "payload": {"name": "template-edge", "from_device": "grid1", "from_port": "electricity_import",
+                        "to_device": "load1", "to_port": "electricity_in"},
+        }],
+    })
+    assert connected.status_code == 200, connected.text
+    config = dict(_CONFIG_BODY)
+    config["predictions"] = [{
+        "target": {"instance": "load1", "interface": "electric_demand"},
+        "algorithm": NAIVE_PREDICTOR_REF, "parameters": {},
+    }]
+    revision = _save_calc(client, pid, user, config)
+    status, result = _submit_task(
+        client, pid, user, config={"config_revision": revision},
+        evaluation={"evaluation_years": 1, "construction_period": 0, "operation_years": 1,
+                    "discount_rate": 0.08, "construction_payments": [{"t": 0, "ratio": 1}],
+                    "maintenance_expenses": []},
+        idempotency_key="s1-template-prediction",
+    )
+    assert status == 201, result
+    task = tasks_domain.get_task(db_session, int(result["task"]["id"]))
+    snapshot = tasks_domain.get_snapshot(db_session, task.calc_snapshot_id)
+    assert vid in snapshot.dataset_version_ids
+    assembly = json.loads(snapshot.canonical_assembly_text)
+    instance = assembly["devices"]["load1"]
+    assert instance["definition"]["id"] == model_id
+    source = instance["predefined_interfaces"]["electric_demand"]
+    sealed_content = source.pop("content")
+    assert source == {
+        "mode": "data_predict", "path": dataset_export_path(vid), "target_type": "load",
+    }
+    data_file = next(f for f in dataset_domain.list_files(db_session, vid) if f.file_kind == "data")
+    assert sealed_content["object_id"] == str(data_file.object_id)
+    raw = get_object(db_session, data_file.object_id).decode("utf-8")
+    rows = [line for line in raw.splitlines() if line and not line.startswith("#")]
+    assert rows[0] == "step,electric_demand"
+    assert [float(row.split(",")[1]) for row in rows[1:4]] == [10, 11, 12]

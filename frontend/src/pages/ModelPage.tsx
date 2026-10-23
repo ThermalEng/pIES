@@ -343,13 +343,16 @@ function ModelCanvas({ projectId }: { projectId: number }) {
         revisionRef.current = revision
         // 创建入口可能携带模板保存的显式来源声明(服务端补齐到实例 params);
         // 读回权威实例内容, 保证画布/侧栏与已保存事实一致。
-        let savedParams = params
+        let savedParams: Record<string, unknown>
         try {
           const view = await getModel(projectId)
           const saved = (view.model.devices ?? []).find((d) => d.name === name)
-          if (saved?.params) savedParams = saved.params
-        } catch {
-          // 读回失败保留本次提交参数; 保存状态仍以写入结果为准。
+          if (!saved) throw new Error(lt('load.created_missing'))
+          savedParams = saved.params
+        } catch (err) {
+          // 写入已成功，但当前画布尚未读到权威参数；重载前不能继续写旧副本。
+          setLoadError(errorMessage(err))
+          throw err
         }
         const device: LocalDevice = {
           id: name,
@@ -410,15 +413,11 @@ function ModelCanvas({ projectId }: { projectId: number }) {
           revisionRef.current = revision
           setDevices((prev) => prev.map((d) => (d.id === deviceId ? next : d)))
         } else {
-          // 改名即换键: 单批 remove 旧设备 + upsert 新设备 + 重建受影响连接
-          // (服务端删设备级联移除关联连接, 须随批补回, 否则连线丢失)。
-          const touched = connections.filter(
-            (c) => c.fromDeviceId === deviceId || c.toDeviceId === deviceId,
-          )
+          // 原地改名保留实例来源、连接和布局，不触发新建模板输入。
           const { revision } = await sendCommands(
             projectId,
             [
-              { type: 'model.remove_device', payload: { name: current.name } },
+              { type: 'model.rename_device', payload: { name: current.name, new_name: finalName } },
               {
                 type: 'model.upsert_device',
                 payload: {
@@ -428,16 +427,6 @@ function ModelCanvas({ projectId }: { projectId: number }) {
                   params: next.params,
                 },
               },
-              ...touched.map((c) => ({
-                type: 'model.upsert_connection',
-                payload: {
-                  name: c.id,
-                  from_device: c.fromDeviceId === deviceId ? finalName : devices.find((d) => d.id === c.fromDeviceId)?.name ?? '',
-                  from_port: parseHandle(c.fromHandle)?.name ?? '',
-                  to_device: c.toDeviceId === deviceId ? finalName : devices.find((d) => d.id === c.toDeviceId)?.name ?? '',
-                  to_port: parseHandle(c.toHandle)?.name ?? '',
-                },
-              })),
             ],
             revisionRef.current,
           )

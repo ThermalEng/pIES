@@ -63,6 +63,7 @@ const TEXTS: Record<string, Entry> = {
   'source.retry': { zh: '重试', en: 'Retry' },
   'source.version_saved': { zh: '已保存版本 {id}', en: 'Saved version {id}' },
   'source.value_required': { zh: '请输入有限常量值', en: 'Enter a finite constant value' },
+  'load.created_missing': { zh: '设备已保存，但读取结果中没有该设备，请重新加载', en: 'Device saved but absent from the read result. Reload the model.' },
 
   // 端口与连接
   'port.solar': { zh: '太阳辐射', en: 'Solar' },

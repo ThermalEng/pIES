@@ -36,7 +36,6 @@ from iesplan.core.contracts import ProjectBaseline, ProjectBaselineError
 from iesplan.core.errors import ConflictError, ForbiddenError, NotFoundError
 from iesplan.core.jsonutil import jsonable
 from iesplan.identity.contracts import UserRecord
-from iesplan.storage import get_object
 from iesplan.project import (
     OWNER_CAPABILITIES,
     InvalidRequestError,
@@ -52,6 +51,7 @@ from iesplan.project.contracts import (
     ProjectConflictError,
     ProjectRecord,
 )
+from iesplan.storage import get_object
 
 # ---------------------------------------------------------------------------
 # 访问控制（跨域组合授权唯一实现归属 application.projects.authorization；
@@ -708,6 +708,30 @@ def _cmd_model_upsert_device(content: dict, payload: dict) -> dict:
     return {"device": name, "stored": True}
 
 
+def _cmd_model_rename_device(content: dict, payload: dict) -> dict:
+    """原地改名，保留实例参数并同步连接与布局，不重新实例化模板。"""
+    name, new_name = payload.get("name"), payload.get("new_name")
+    if set(payload) != {"name", "new_name"} or not all(
+        isinstance(value, str) and value.strip() for value in (name, new_name)
+    ):
+        raise InvalidRequestError("重命名需要 name 和 new_name", code="PROJ-CMD-005")
+    devices = content["model"]["devices"]
+    device = next((item for item in devices if item["name"] == name), None)
+    if device is None:
+        raise InvalidRequestError("设备不存在", code="PROJ-CMD-005", params={"name": name})
+    if new_name != name and any(item["name"] == new_name for item in devices):
+        raise InvalidRequestError("设备名称已存在", code="PROJ-CMD-005", params={"name": new_name})
+    device["name"] = new_name
+    for connection in content["model"]["connections"]:
+        for endpoint in ("from_device", "to_device"):
+            if connection[endpoint] == name:
+                connection[endpoint] = new_name
+    positions = content["layout"].get("positions", {})
+    if name in positions:
+        positions[new_name] = positions.pop(name)
+    return {"device": new_name, "renamed": True}
+
+
 def _cmd_model_remove_device(content: dict, payload: dict) -> dict:
     """删除设备(级联移除关联连接与布局位置)。"""
     name = payload.get("name")
@@ -912,6 +936,7 @@ def _cmd_task_set_working_inputs(content: dict, payload: dict) -> dict:
 _COMMAND_HANDLERS.update(
     {
         "model.upsert_device": _cmd_model_upsert_device,
+        "model.rename_device": _cmd_model_rename_device,
         "model.remove_device": _cmd_model_remove_device,
         "model.upsert_connection": _cmd_model_upsert_connection,
         "model.remove_connection": _cmd_model_remove_connection,
