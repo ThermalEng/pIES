@@ -1539,6 +1539,8 @@ class FinanceProfile:
             energy_prices=energy_prices,
             finance_types=finance_types,
             demand_charges=demand_charges,
+            demand_charges=demand_charges,
+            demand_charges=demand_charges,
             taxes=taxes,
             credit_pools=credit_pools,
             tax_rules=tax_rules,
@@ -2277,6 +2279,7 @@ class EffectiveFinanceConfig:
     taxes: Mapping[str, TaxEntry] = field(default_factory=lambda: MappingProxyType({}))
     credit_pools: Mapping[str, CreditPool] = field(default_factory=lambda: MappingProxyType({}))
     tax_rules: Mapping[str, TaxRule] = field(default_factory=lambda: MappingProxyType({}))
+    demand_charges: Mapping[str, DemandCharge] = field(default_factory=lambda: MappingProxyType({}))
 
     def __post_init__(self) -> None:
         if self.schema != SCHEMA_EFFECTIVE:
@@ -2295,6 +2298,7 @@ class EffectiveFinanceConfig:
             raise FinanceTripletError(f"cost_method 非法: {self.cost_method!r}")
         object.__setattr__(self, "finance_types", MappingProxyType(dict(sorted(self.finance_types.items()))))
         object.__setattr__(self, "energy_prices", MappingProxyType(dict(sorted(self.energy_prices.items()))))
+        object.__setattr__(self, "demand_charges", MappingProxyType(dict(sorted(self.demand_charges.items()))))
         object.__setattr__(self, "taxes", MappingProxyType(dict(sorted(self.taxes.items()))))
         object.__setattr__(self, "credit_pools", MappingProxyType(dict(sorted(self.credit_pools.items()))))
         object.__setattr__(self, "tax_rules", MappingProxyType(dict(sorted(self.tax_rules.items()))))
@@ -2310,6 +2314,7 @@ class EffectiveFinanceConfig:
             "cost_method": self.cost_method,
             "finance_types": {k: v.to_dict() for k, v in sorted(self.finance_types.items())},
             "energy_prices": {k: v.to_dict() for k, v in sorted(self.energy_prices.items())},
+            "demand_charges": {k: v.to_dict() for k, v in sorted(self.demand_charges.items())},
             "taxes": {k: v.to_dict() for k, v in sorted(self.taxes.items())},
             "credit_pools": {k: v.to_dict() for k, v in sorted(self.credit_pools.items())},
             "tax_rules": {k: v.to_dict() for k, v in sorted(self.tax_rules.items())},
@@ -2322,7 +2327,7 @@ class EffectiveFinanceConfig:
         unknown = set(mapping) - {
             "schema", "schema_version", "profile_id",
             "currency", "base_year", "price_basis", "cost_method",
-            "finance_types", "energy_prices", "taxes",
+            "finance_types", "energy_prices", "demand_charges", "taxes",
             "credit_pools", "tax_rules",
         }
         if unknown:
@@ -2330,7 +2335,7 @@ class EffectiveFinanceConfig:
         missing = {
             "schema", "schema_version", "profile_id",
             "currency", "base_year", "price_basis", "cost_method",
-            "finance_types", "energy_prices",
+            "finance_types", "energy_prices", "demand_charges",
         } - set(mapping)
         if missing:
             raise FinanceTripletError(f"EffectiveFinanceConfig 缺少字段: {sorted(missing)}")
@@ -2374,6 +2379,7 @@ class EffectiveFinanceConfig:
             price = EnergyPrice.from_dict(price_val)
             _check_price_unit(currency, price_id, price)
             energy_prices[price_id] = price
+        demand_charges = _parse_demand_charges(mapping["demand_charges"], currency)
         taxes_raw = mapping.get("taxes") or {}
         if not isinstance(taxes_raw, Mapping):
             raise FinanceTripletError("taxes 必须是字典")
@@ -2419,6 +2425,7 @@ class EffectiveFinanceConfig:
             cost_method=cost_method,
             finance_types=finance_types,
             energy_prices=energy_prices,
+            demand_charges=demand_charges,
             taxes=taxes,
             credit_pools=credit_pools,
             tax_rules=tax_rules,
@@ -2560,6 +2567,7 @@ def merge_effective(profile: FinanceProfile, overrides: FinanceOverrides | None)
         energy_prices=profile.energy_prices,
         finance_types=profile.finance_types,
         demand_charges=merged_demand,
+        demand_charges=merged_demand,
         taxes=profile.taxes,
         credit_pools=merged_pools,
         tax_rules=merged_rules,
@@ -2699,7 +2707,7 @@ def _apply_rule_patch(rule_id: str, rule: TaxRule, values: Mapping) -> TaxRule:
 def _rule_entry_index(base: list, target: str, field: str, key: str) -> int:
     """稀疏条目按 price/for 定位基线下标(纪律已核对，缺席为内部非法)。"""
     for index, entry in enumerate(base):
-        candidate = getattr(entry, "price", getattr(entry, "for_path", None))
+        candidate = getattr(entry, "price", getattr(entry, "for_path", getattr(entry, "charge", None)))
         if candidate == target:
             return index
     raise FinanceTripletError(f"{field}.{key} {target!r} 在 Profile 中不存在(内部状态非法)")
@@ -2715,4 +2723,6 @@ def _patched_entry(base: list, target: str, atom_values: Mapping, field: str, ke
     ratio = atom_values.get("deductible_ratio", old.deductible_ratio)  # type: ignore[union-attr]
     if isinstance(old, InTaxEntry):
         return InTaxEntry(price=old.price, rate=rate, deductible_ratio=ratio)
+    if isinstance(old, DemandInputTaxEntry):
+        return DemandInputTaxEntry(charge=old.charge, rate=rate, deductible_ratio=ratio)
     return OmInputTaxEntry(for_path=old.for_path, rate=rate, deductible_ratio=ratio)  # type: ignore[union-attr]
