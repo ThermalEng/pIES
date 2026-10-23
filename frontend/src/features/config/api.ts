@@ -9,7 +9,7 @@
 
 import type { CalcConfig, CalcConfigInput } from '../../types'
 import { request } from '../../shared/http'
-import type { ConfigEnvelopeDto, DeploymentDefaultsDto } from './contracts'
+import type { ConfigEnvelopeDto, DeploymentDefaultsDto, PlanningConfigBody, PlanningConfigEnvelopeDto } from './contracts'
 import { configFromServer, deploymentDefaultsFromServer } from './mappers'
 
 /** 读取最新计算配置 revision(未保存过 404, 由调用方呈现失败)。 */
@@ -31,4 +31,22 @@ export async function saveCalcConfig(projectId: number, input: CalcConfigInput):
 export async function getDeploymentDefaults(): Promise<DeploymentDefaultsDto> {
   const body = await request<DeploymentDefaultsDto>('/deployment/defaults')
   return deploymentDefaultsFromServer(body)
+}
+
+
+/** Current planning revision; 404 means the project has no effective saved planning config. */
+export async function getPlanningConfig(projectId: number): Promise<PlanningConfigEnvelopeDto> {
+  return request<PlanningConfigEnvelopeDto>('/projects/' + projectId + '/planning-config')
+}
+
+/** Save an explicit objective, variable map and named constraints as a new planning revision. */
+export async function savePlanningConfig(
+  projectId: number,
+  planningConfig: PlanningConfigBody,
+  expectedRevision: number | null,
+): Promise<PlanningConfigEnvelopeDto> {
+  return request<PlanningConfigEnvelopeDto>('/projects/' + projectId + '/planning-config', {
+    method: 'PUT',
+    body: { planning_config: planningConfig, expected_revision: expectedRevision },
+  })
 }
