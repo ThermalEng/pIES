@@ -28,6 +28,8 @@ test('planning editor: new revision, readback, conflict keeps edits and reload i
   const context = await browser.newContext()
   const page = await context.newPage()
   const session = await createSession(page, username, password)
+  // attachTab replaces the harness callback; retain the main tab monitor separately.
+  const assertMainErrors = session.assertNoErrors
   await page.goto('/projects/' + projectId + '/planning')
   await expect(page.getByText(/尚未保存规划配置|No saved planning configuration/)).toBeVisible()
   await page.locator('#planning-sense').selectOption('maximize')
@@ -43,8 +45,32 @@ test('planning editor: new revision, readback, conflict keeps edits and reload i
   await page.locator('[id^="planning-con-name-"]').fill('max_carbon')
   await page.locator('[id^="planning-con-type-"]').selectOption('co2_limit')
   await page.locator('[id^="planning-con-expression-"]').fill('1 <= 2')
+  // Hold the real PUT at the browser transport boundary. No response mocking:
+  // edits (including adding/removing rows) must be blocked until it completes.
+  let releaseSave!: () => void
+  let saveIntercepted!: () => void
+  const saveGate = new Promise<void>((resolve) => { releaseSave = resolve })
+  const saveStarted = new Promise<void>((resolve) => { saveIntercepted = resolve })
+  const planningPath = '/api/projects/' + projectId + '/planning-config'
+  const planningRoute = '**' + planningPath
+  await page.route(planningRoute, async (route) => {
+    if (route.request().method() === 'PUT') {
+      saveIntercepted()
+      await saveGate
+    }
+    await route.continue()
+  })
   await page.getByRole('button', { name: /保存规划配置|Save planning config/ }).click()
+  await saveStarted
+  await expect(page.locator('#planning-expression')).toBeDisabled()
+  await expect(page.locator('[id^="planning-var-lower-"]')).toBeDisabled()
+  await expect(page.locator('[id^="planning-con-expression-"]')).toBeDisabled()
+  await expect(page.getByRole('button', { name: /添加规划变量|Add variable/ })).toBeDisabled()
+  await expect(page.getByRole('button', { name: /添加约束|Add constraint/ })).toBeDisabled()
+  releaseSave()
   await expect(page.getByText(/规划配置已保存 revision v1|Planning config saved, revision v1/)).toBeVisible()
+  await page.unroute(planningRoute)
+  await expect(page.locator('#planning-expression')).toBeEnabled()
 
   const response = await page.request.get('/api/projects/' + projectId + '/planning-config')
   const body = await response.json()
@@ -58,6 +84,7 @@ test('planning editor: new revision, readback, conflict keeps edits and reload i
   await expect(page.locator('#planning-expression')).toHaveValue('system.after_tax_npv')
   const second = await context.newPage()
   attachTab(session, second)
+  const assertSecondErrors = session.assertNoErrors
   await second.goto('/projects/' + projectId + '/planning')
   await expect(second.locator('#planning-expression')).toHaveValue('system.after_tax_npv')
   await second.locator('#planning-expression').fill('system.after_tax_npv')
@@ -70,9 +97,34 @@ test('planning editor: new revision, readback, conflict keeps edits and reload i
   await page.getByRole('button', { name: /保存规划配置|Save planning config/ }).click()
   await expect(page.getByText(/当前编辑已保留|Your edits are preserved/)).toBeVisible()
   await expect(page.locator('[id^="planning-var-lower-"]')).toHaveValue('60')
+  // Delay the real readback to verify reload also locks the form until response.
+  let releaseRead!: () => void
+  let readIntercepted!: () => void
+  const readGate = new Promise<void>((resolve) => { releaseRead = resolve })
+  const readStarted = new Promise<void>((resolve) => { readIntercepted = resolve })
+  await page.route(planningRoute, async (route) => {
+    if (route.request().method() === 'GET') {
+      readIntercepted()
+      await readGate
+    }
+    await route.continue()
+  })
   await page.getByRole('button', { name: /重新加载最新规划|Reload latest planning/ }).click()
+  await readStarted
+  await expect(page.locator('#planning-expression')).toBeDisabled()
+  await expect(page.locator('[id^="planning-var-lower-"]')).toBeDisabled()
+  await expect(page.getByRole('button', { name: /添加规划变量|Add variable/ })).toBeDisabled()
+  releaseRead()
   await expect(page.locator('[id^="planning-var-upper-"]')).toHaveValue('900')
+  await expect(page.locator('#planning-expression')).toBeEnabled()
+  await page.unroute(planningRoute)
   await expect(page.locator('[id^="planning-var-lower-"]')).toHaveValue('50')
-  // The blank planning read is a documented 404. The workbench also reads config on entry.
+  // The initial missing revision and intentional optimistic-lock conflict are
+  // the only expected browser HTTP errors. The second tab has none.
+  assertMainErrors([
+    { method: 'GET', path: planningPath, status: 404, times: 1 },
+    { method: 'PUT', path: planningPath, status: 409, times: 1 },
+  ])
+  assertSecondErrors()
   await context.close()
 })
