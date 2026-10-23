@@ -1550,6 +1550,7 @@ class FinanceProfile:
             profile=profile,
             finance_types=finance_types,
             energy_prices=energy_prices,
+            demand_charges=demand_charges,
             taxes=taxes,
             credit_pools=credit_pools,
             tax_rules=tax_rules,
