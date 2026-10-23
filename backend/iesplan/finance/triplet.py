@@ -37,7 +37,7 @@ from iesplan.core.units import UnitError, normalize_unit
 SCHEMA_PROFILE: Final[str] = "ies.finance-profile"
 SCHEMA_OVERRIDES: Final[str] = "ies.finance-overrides"
 SCHEMA_EFFECTIVE: Final[str] = "ies.effective-finance-config"
-SCHEMA_VERSION: Final[str] = "3.0.0"
+SCHEMA_VERSION: Final[str] = "4.0.0"
 
 CURRENCIES: Final[tuple[str, ...]] = ("CNY", "USD")
 PRICE_BASIS_VALUES: Final[tuple[str, ...]] = ("tax_inclusive", "tax_exclusive")
@@ -413,6 +413,39 @@ class EnergyPrice:
             series_meta=SeriesMeta.from_dict(mapping["series_meta"]),
         )
 
+@dataclass(frozen=True, slots=True)
+class DemandCharge:
+    """自然月最大购电功率的单位峰值费率，月是计费周期而非时间换算单位。"""
+
+    rate: Money
+
+    def to_dict(self) -> dict:
+        return {"rate": self.rate.to_dict()}
+
+    @classmethod
+    def from_dict(cls, mapping: object, *, currency: str, charge_id: str) -> DemandCharge:
+        field = f"demand_charges.{charge_id}"
+        if not isinstance(mapping, Mapping) or set(mapping) != {"rate"}:
+            raise FinanceTripletError(f"{field} 必须且只能包含 rate")
+        rate = Money.from_dict(mapping["rate"], field=f"{field}.rate")
+        if _dims(rate.unit) != {"currency": 1, "power": -1}:
+            raise FinanceTripletError(f"{field}.rate 单位必须为货币/功率")
+        if rate.unit.split("/")[0] != currency:
+            raise FinanceTripletError(f"{field}.rate 币种必须为 {currency}")
+        return cls(rate=rate)
+
+
+def _parse_demand_charges(mapping: object, currency: str) -> dict[str, DemandCharge]:
+    if not isinstance(mapping, Mapping):
+        raise FinanceTripletError("demand_charges 必须是映射（无需量费时显式为 {}）")
+    return {
+        _validate_local_id(charge_id, "charge_id"): DemandCharge.from_dict(
+            value, currency=currency, charge_id=charge_id
+        )
+        for charge_id, value in mapping.items()
+    }
+
+
 # ---------------------------------------------------------------------------
 # 税目登记
 # ---------------------------------------------------------------------------
@@ -643,6 +676,20 @@ class MaintInputTaxEntry:
 
 
 @dataclass(frozen=True, slots=True)
+class DemandInputTaxEntry:
+    charge: str
+    rate: Money
+    deductible_ratio: Money
+
+    def to_dict(self) -> dict:
+        return {
+            "charge": self.charge,
+            "rate": self.rate.to_dict(),
+            "deductible_ratio": self.deductible_ratio.to_dict(),
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class VatRule:
     """``kind: vat`` 规则(按月结算；期初/退款归池所有，本规则不携带)。"""
 
@@ -652,6 +699,7 @@ class VatRule:
     out_tax: tuple[OutTaxEntry, ...]
     om_input_tax: tuple[OmInputTaxEntry, ...]
     maintenance_input_tax: tuple[MaintInputTaxEntry, ...]
+    demand_input_tax: tuple[DemandInputTaxEntry, ...]
     credit_pool: str
     confirmation: str
 
@@ -664,6 +712,7 @@ class VatRule:
             "out_tax": [item.to_dict() for item in self.out_tax],
             "om_input_tax": [item.to_dict() for item in self.om_input_tax],
             "maintenance_input_tax": [item.to_dict() for item in self.maintenance_input_tax],
+            **({"demand_input_tax": [item.to_dict() for item in self.demand_input_tax]} if self.demand_input_tax else {}),
             "credit_pool": self.credit_pool,
             "confirmation": self.confirmation,
         }
@@ -787,6 +836,7 @@ class IncomeTaxRule:
     rate: Money
     revenue: tuple[str, ...]
     energy_cost: tuple[str, ...]
+    demand_cost: tuple[str, ...]
     annual_om: tuple[str, ...]
     variable_om: tuple[str, ...]
     deductible_maintenance: DeductibleMaintenance
@@ -801,6 +851,7 @@ class IncomeTaxRule:
             "rate": self.rate.to_dict(),
             "revenue": list(self.revenue),
             "energy_cost": list(self.energy_cost),
+            **({"demand_cost": list(self.demand_cost)} if self.demand_cost else {}),
             "annual_om": list(self.annual_om),
             "variable_om": list(self.variable_om),
             "deductible_maintenance": self.deductible_maintenance.to_dict(),
@@ -829,7 +880,7 @@ def _parse_tax_rule(rule_id: str, mapping: object) -> TaxRule:
     raise FinanceTripletError(f"{field}.kind 非法: {kind!r}")
 
 
-def _require_keys(mapping: Mapping, keys: set[str], field: str) -> None:
+def _require_keys(mapping: Mapping, keys: set[str], field: str, *, optional: set[str] | None = None) -> None:
     unknown = set(mapping) - keys
     if unknown:
         raise FinanceTripletError(f"{field} 未知字段: {sorted(unknown)}")
@@ -845,6 +896,7 @@ def _parse_vat_rule(rule_id: str, mapping: Mapping) -> VatRule:
         {"kind", "label_ref", "settlement", "in_tax", "out_tax", "om_input_tax",
          "maintenance_input_tax", "credit_pool", "confirmation"},
         field,
+        optional={"demand_input_tax"},
     )
     settlement = str(mapping["settlement"])
     if settlement not in VAT_SETTLEMENTS:
@@ -898,6 +950,17 @@ def _parse_vat_rule(rule_id: str, mapping: Mapping) -> VatRule:
             rate=_ratio_money(entry["rate"], f"{sub}.rate"),
             deductible_ratio=_ratio_money(entry["deductible_ratio"], f"{sub}.deductible_ratio"),
         ))
+    demand_input_tax: list[DemandInputTaxEntry] = []
+    for index, entry in enumerate(_as_list(mapping.get("demand_input_tax", []), f"{field}.demand_input_tax")):
+        sub = f"{field}.demand_input_tax[{index}]"
+        if not isinstance(entry, Mapping):
+            raise FinanceTripletError(f"{sub} 必须是映射")
+        _require_keys(entry, {"charge", "rate", "deductible_ratio"}, sub)
+        demand_input_tax.append(DemandInputTaxEntry(
+            charge=_validate_local_id(entry["charge"], f"{sub}.charge"),
+            rate=_ratio_money(entry["rate"], f"{sub}.rate"),
+            deductible_ratio=_ratio_money(entry["deductible_ratio"], f"{sub}.deductible_ratio"),
+        ))
     return VatRule(
         label_ref=str(mapping["label_ref"]),
         settlement=settlement,
@@ -905,6 +968,7 @@ def _parse_vat_rule(rule_id: str, mapping: Mapping) -> VatRule:
         out_tax=tuple(out_tax),
         om_input_tax=tuple(om_input_tax),
         maintenance_input_tax=tuple(maintenance_input_tax),
+        demand_input_tax=tuple(demand_input_tax),
         credit_pool=str(mapping["credit_pool"]),
         confirmation=confirmation,
     )
@@ -995,6 +1059,7 @@ def _parse_income_rule(rule_id: str, mapping: Mapping) -> IncomeTaxRule:
          "variable_om", "deductible_maintenance", "depreciation",
          "loss_carryforward_years", "opening_losses"},
         field,
+        optional={"demand_cost"},
     )
     raw_maint = mapping["deductible_maintenance"]
     if not isinstance(raw_maint, Mapping):
@@ -1045,6 +1110,7 @@ def _parse_income_rule(rule_id: str, mapping: Mapping) -> IncomeTaxRule:
         rate=_ratio_money(mapping["rate"], f"{field}.rate"),
         revenue=tuple(_as_price_list(mapping["revenue"], f"{field}.revenue")),
         energy_cost=tuple(_as_price_list(mapping["energy_cost"], f"{field}.energy_cost")),
+        demand_cost=tuple(_as_price_list(mapping.get("demand_cost", []), f"{field}.demand_cost")),
         annual_om=tuple(_as_path_list(mapping["annual_om"], f"{field}.annual_om")),
         variable_om=tuple(_as_path_list(mapping["variable_om"], f"{field}.variable_om")),
         deductible_maintenance=DeductibleMaintenance(mode="explicit_items", items=tuple(items)),
