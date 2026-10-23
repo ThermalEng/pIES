@@ -710,6 +710,8 @@ class _DocBuilder:
             return
         for billing_id, raw in m.items():
             self._local_id(billing_id, f"{field}.{billing_id}")
+            if not re.fullmatch(r"[a-z][a-z0-9_]*", str(billing_id)):
+                self._diag(ASM_SYN_PARSE, f"{field}.{billing_id}", {"reason": "invalid_billing_id"})
             entry = self._require_map(raw, f"{field}.{billing_id}")
             if entry is None:
                 continue
