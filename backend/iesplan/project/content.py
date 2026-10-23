@@ -30,6 +30,7 @@ def initial_content(language: str = "zh-CN") -> dict:
         "model": {"devices": [], "connections": []},
         "layout": {},
         "dataset_bindings": [],
+        "demand_bindings": {},  # 显式无需量费；不为任何实例推断计费
         "calc_config": {
             "params": {},
             "variables": [],
