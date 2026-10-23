@@ -127,6 +127,43 @@ def _validate_leaf_value(spec: TemplateInputSpec, value: Any) -> None:
             raise ParseError(f"inputs.{spec.path} 必须是项目目录内相对 .csv 路径")
         if not path.lower().endswith(".csv"):
             raise ParseError(f"inputs.{spec.path} 必须指向 .csv 文件")
+    elif spec.type == "array":
+        if not isinstance(value, list):
+            raise ParseError(f"inputs.{spec.path} 期望数组，收到 {type(value).__name__}")
+        item = spec.children[0] if spec.children else None
+        if item is None:
+            raise ParseError(f"inputs.{spec.path} 缺少 items 元素声明")
+        for index, element in enumerate(value):
+            _validate_element(item, element, f"{spec.path}[{index}]")
+
+
+def _validate_element(spec: TemplateInputSpec, value: Any, label: str) -> None:
+    """数组 items 元素校验（整体提交, 逐元素核对; 不形成额外 [] 输入）。"""
+    if spec.type == "object":
+        if not isinstance(value, Mapping):
+            raise ParseError(f"inputs.{label} 期望对象")
+        declared = {child.path.rsplit(".", 1)[-1]: child for child in spec.children}
+        extra = sorted(key for key in value if key not in declared)
+        if extra:
+            raise ParseError(f"inputs.{label} 存在未声明字段: {extra}")
+        for key, child in declared.items():
+            if key not in value:
+                raise ParseError(f"inputs.{label}.{key} 为必填字段")
+            _validate_element(child, value[key], f"{label}.{key}")
+        return
+    if spec.type == "array":
+        if not isinstance(value, list):
+            raise ParseError(f"inputs.{label} 期望数组")
+        item = spec.children[0] if spec.children else None
+        if item is None:
+            raise ParseError(f"inputs.{label} 缺少 items 元素声明")
+        for index, element in enumerate(value):
+            _validate_element(item, element, f"{label}[{index}]")
+        return
+    leaf = TemplateInputSpec(
+        path=label, type=spec.type, unit=spec.unit, valid_range=spec.valid_range
+    )
+    _validate_leaf_value(leaf, value)
 
 
 def _apply_leaf(leaf: TemplateInputSpec, model: dict[str, Any], user_value: Any) -> None:
@@ -188,11 +225,8 @@ def _merge_tree(leaves: tuple[TemplateInputSpec, ...], template_raw: Mapping[str
                 break
             user_value = user_value[seg]
         if not found:
-            # 2.1.0: 模板已声明的标量/数据叶子必填, 不接受 default 或隐式回退。
-            # 数组容器及其元素子路径可缺省(空数组合法)。
-            if leaf.type != "array" and "[]" not in leaf.path:
-                raise ParseError(f"inputs.{leaf.path} 为必填输入，缺少用户值")
-            continue
+            # 2.1.0: 所有声明叶子（含 array 整体）必填, 不接受 default 或隐式回退。
+            raise ParseError(f"inputs.{leaf.path} 为必填输入，缺少用户值")
         if leaf.type in INPUT_DATA_TYPES:
             _validate_leaf_value(leaf, user_value)
             # 记录实例化绑定（CSV 路径不进入最终纯技术模型）

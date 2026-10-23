@@ -3,8 +3,9 @@
 证明 0.15 S1 修正后的生产链:
 1. 模板数据叶子必填(缺失即拒绝, 无隐式回退);
 2. 数据值是项目数据集版本的公开装配路径, 不在本项目即明确失败;
-3. 保存成功的项目模型回执保留数据绑定, 且装配构造器在没有手工补绑的
-   情况下为使用该模型的设备实例生成 ``predefined_interfaces`` 来源声明。
+3. 回执只记录模板来源溯源; 装配来源事实由设备实例 params 显式持有
+   (与页面实例来源编辑同一 model.upsert_device 入口), 构造器不读取回执;
+4. 数据 CSV 的 device_id 是稳定基础 ID, 不要求用户猜项目作用域 _N 编号。
 
 只使用自造合成 CSV 与临时 SQLite/对象目录; 不依赖部署环境。
 """
@@ -22,7 +23,7 @@ from sqlalchemy.orm import Session
 
 from iesplan import project as project_domain
 from iesplan.application.models.project_devices import (
-    load_project_device_data_bindings,
+    load_project_device_base_ids,
     load_project_device_documents,
 )
 from iesplan.application.projects.content_objects import load_content_object
@@ -132,7 +133,9 @@ def _bind_dataset(client, headers, pid: int, vid: int) -> int:
     return int(resp.json()["revision"])
 
 
-def _add_device(client, headers, pid: int, name: str, device_type: str) -> None:
+def _add_device(
+    client, headers, pid: int, name: str, device_type: str, params: dict | None = None,
+) -> None:
     project = client.get(f"/api/projects/{pid}", headers=headers)
     revision = int(project.json()["draft"]["revision"])
     resp = client.put(
@@ -148,7 +151,7 @@ def _add_device(client, headers, pid: int, name: str, device_type: str) -> None:
                         "name": name,
                         "device_type": device_type,
                         "kind": "new",
-                        "params": {"peak_power_kw": 120},
+                        "params": params or {"peak_power_kw": 120},
                     },
                 }
             ],
@@ -171,9 +174,9 @@ def test_template_data_binding_reaches_assembly(
     headers, pid = _make_owner(client, db_session, "s1_bind_owner")
     token = headers["Authorization"].replace("Bearer ", "")
     base_id = build_stable_id(_token_ns_map[token], "electric-load")
-    final_id = f"{base_id}_1"
 
-    vid = _upload_version(client, headers, pid, final_id)
+    # CSV 的 device_id 是稳定设备 ID(不含项目作用域 _N 编号), 用户无需猜编号。
+    vid = _upload_version(client, headers, pid, base_id)
     _bind_dataset(client, headers, pid, vid)
     template_id, revision = _publish_template(client, headers, TEMPLATE_YAML, slug="electric-load")
 
@@ -197,21 +200,20 @@ def test_template_data_binding_reaches_assembly(
         }
     ]
 
-    _add_device(client, headers, pid, "load1", final_id)
+    # 实例显式持有来源事实(与页面参数编辑同一 model.upsert_device params)。
+    _add_device(
+        client, headers, pid, "load1", f"{base_id}_1",
+        params={
+            "peak_power_kw": 120,
+            "electric_demand": {"mode": "data_repeat", "dataset_version_id": vid},
+        },
+    )
     project = project_domain.require_project(db_session, pid)
     draft = project_domain.require_current_draft(db_session, project)
     content = load_content_object(db_session, draft.content_object_id)
     documents = load_project_device_documents(db_session, content)
-    bindings = load_project_device_data_bindings(db_session, content)
-    assert bindings == {
-        final_id: [
-            {
-                "interface": "electric_demand",
-                "mode": "data_repeat",
-                "dataset_version_id": vid,
-            }
-        ]
-    }
+    # CSV 身份用稳定基础 ID(不随项目作用域 _N 编号变化)。
+    assert load_project_device_base_ids(db_session, content) == {f"{base_id}_1": base_id}
 
     export_content = dict(content)
     export_content["name"] = f"project_{pid}"
@@ -223,7 +225,6 @@ def test_template_data_binding_reaches_assembly(
     built = build_assembly_doc_from_content(
         export_content,
         device_documents=documents,
-        device_data_bindings=bindings,
     )
     assert built.doc is not None
     instance = built.doc["devices"]["load1"]
@@ -292,14 +293,13 @@ def test_template_data_modes_declared_and_saved(
     headers, pid = _make_owner(client, db_session, f"s1_bind_{mode}")
     token = headers["Authorization"].replace("Bearer ", "")
     base_id = build_stable_id(_token_ns_map[token], "electric-load")
-    final_id = f"{base_id}_1"
     template_yaml = TEMPLATE_YAML.replace(
         "electric_demand: {type: data_repeat}", f"electric_demand: {{type: {mode}}}"
     )
     template_id, revision = _publish_template(
         client, headers, template_yaml, slug=f"electric-load-{mode.replace('_', '-')}"
     )
-    vid = _upload_version(client, headers, pid, final_id, mode)
+    vid = _upload_version(client, headers, pid, base_id, mode)
     _bind_dataset(client, headers, pid, vid)
     resp = _save(
         client,

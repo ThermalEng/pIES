@@ -47,6 +47,18 @@ const TEXTS: Record<string, Entry> = {
   },
   'save.conflict_reload': { zh: '加载服务器版本', en: 'Load server version' },
 
+  // 预定义接口来源(实例显式事实; 设备模型不携带项目来源)
+  'source.section': { zh: '预定义接口来源', en: 'Predefined interface source' },
+  'source.hint': {
+    zh: '来源按设备实例声明; 设备模型不携带项目来源。',
+    en: 'Sources are declared per device instance; the device model carries none.',
+  },
+  'source.mode_none': { zh: '未设置', en: 'Not set' },
+  'source.constant_value': { zh: '常量值', en: 'Constant value' },
+  'source.version_choose': { zh: '选择数据集版本', en: 'Choose dataset version' },
+  'source.version_empty': { zh: '项目暂无数据集版本', en: 'No dataset versions in this project' },
+  'source.target_type': { zh: '预测目标类型', en: 'Prediction target type' },
+
   // 端口与连接
   'port.solar': { zh: '太阳辐射', en: 'Solar' },
   'port.direction_out': { zh: '输出', en: 'Output' },

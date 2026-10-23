@@ -383,7 +383,6 @@ def canonicalize_device_data_v2(
     *,
     expected_rows: int | None = None,
     expected_interfaces: list[str] | None = None,
-    check_device_id: bool = True,
     baseline_resolution: str | None = None,
     baseline_start_year: int | None = None,
 ) -> DeviceData2Result:
@@ -397,7 +396,7 @@ def canonicalize_device_data_v2(
             field_name="device_id",
         ))
         return DeviceData2Result(meta, (STEP_COL,), [], [], (), diags)
-    if check_device_id and meta.device_id != document.device.id:
+    if meta.device_id != document.device.id:
         diags.append(_diag(
             "DATA-META-008",
             {"declared": meta.device_id, "expected": document.device.id},

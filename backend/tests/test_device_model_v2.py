@@ -574,3 +574,92 @@ equations:
         res, _ = instantiate_template(yaml_load(self.TEMPLATE), self._inputs())
         receipt = res.receipt
         assert receipt["instantiator"] == "ies.device-model.instantiator@2.0.0"
+
+
+ARRAY_TEMPLATE = """
+schema: ies.device-model
+schema_version: "2.1.0"
+device: {id: acme.device.relations, names: {zh-CN: 关系模板, en-US: Relations Template}}
+inputs:
+  equations:
+    relations:
+      type: array
+      items:
+        type: object
+        fields:
+          id: {type: string}
+          expression: {type: string}
+properties: {}
+interfaces: {}
+equations: {variables: {}, relations: []}
+"""
+
+
+def _instantiate(text: str, inputs: dict):
+    from iesplan.devices.template2 import instantiate_template
+
+    return instantiate_template(yaml_load(text), inputs)
+
+
+def test_empty_object_and_array_declarations_rejected():
+    """现行规则: 空 object/array 声明非法。"""
+    empty_object = ARRAY_TEMPLATE.replace(
+        """  equations:
+    relations:
+      type: array
+      items:
+        type: object
+        fields:
+          id: {type: string}
+          expression: {type: string}
+""",
+        """  equations:
+    relations:
+      type: object
+""",
+    )
+    r = _parse(empty_object)
+    assert not r.ok
+    assert any("声明不得为空" in d.params.get("detail", "") for d in r.diagnostics)
+
+    empty_array = ARRAY_TEMPLATE.replace(
+        """      items:
+        type: object
+        fields:
+          id: {type: string}
+          expression: {type: string}
+""",
+        "",
+    )
+    r = _parse(empty_array)
+    assert not r.ok
+    assert any("items" in d.params.get("detail", "") for d in r.diagnostics)
+
+
+def test_array_input_required_and_no_extra_item_inputs():
+    """array 整体必填, items 只逐元素校验, 不形成额外 path[] 必填输入。"""
+    res, diags = _instantiate(ARRAY_TEMPLATE, {})
+    assert res is None
+    assert any("必填输入" in d.params.get("detail", "") for d in diags)
+
+    # 提交空数组合法(整体提交), 且不要求 relations[].id 等额外叶子。
+    res, diags = _instantiate(ARRAY_TEMPLATE, {"equations": {"relations": []}})
+    assert res is not None, [d.params.get("detail") for d in diags]
+    assert res.document.inputs is None
+
+
+def test_array_item_fields_required_and_extra_rejected():
+    """items 元素逐元素校验: fields 全部必填并拒绝多余键。"""
+    missing = _instantiate(
+        ARRAY_TEMPLATE,
+        {"equations": {"relations": [{"id": "r1"}]}},
+    )
+    assert missing[0] is None
+    assert any("必填字段" in d.params.get("detail", "") for d in missing[1])
+
+    extra = _instantiate(
+        ARRAY_TEMPLATE,
+        {"equations": {"relations": [{"id": "r1", "expression": "", "extra": 1}]}},
+    )
+    assert extra[0] is None
+    assert any("未声明字段" in d.params.get("detail", "") for d in extra[1])

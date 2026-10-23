@@ -121,6 +121,7 @@ def validate_assembly_doc(
     finance_snapshots: Mapping[str, EffectiveFinanceConfig] | None = None,
     operation_years: int | None = None,
     device_documents: Mapping[str, Any] | None = None,
+    device_base_ids: Mapping[str, str] | None = None,
 ) -> AssemblyValidationResult:
     """ies.assembly 3.0.0 文档 → 单管线校验(结构一次 + 领域阶段)。
 
@@ -141,6 +142,7 @@ def validate_assembly_doc(
         finance_snapshots=finance_snapshots,
         operation_years=operation_years,
         device_documents=device_documents,
+        device_base_ids=device_base_ids,
     )
 
 
@@ -155,7 +157,7 @@ def validate_project_export(
     finance_snapshots: Mapping[str, EffectiveFinanceConfig] | None = None,
     operation_years: int | None = None,
     device_documents: Mapping[str, Any] | None = None,
-    device_data_bindings: Mapping[str, list[dict]] | None = None,
+    device_base_ids: Mapping[str, str] | None = None,
 ) -> AssemblyValidationResult:
     """GUI 项目导出入口:
 
@@ -180,7 +182,6 @@ def validate_project_export(
         tariff_bindings=tariff_bindings,
         planning=planning,
         device_documents=device_documents,
-        device_data_bindings=device_data_bindings,
     )
     if built.doc is None:
         return AssemblyValidationResult(diagnostics=list(built.diagnostics), artifact=None)
@@ -191,6 +192,7 @@ def validate_project_export(
         finance_snapshots=finance_snapshots,
         operation_years=operation_years,
         device_documents=device_documents,
+        device_base_ids=device_base_ids,
     )
 
 
@@ -207,6 +209,7 @@ def _run_validation(
     finance_snapshots: Mapping[str, EffectiveFinanceConfig] | None,
     operation_years: int | None = None,
     device_documents: Mapping[str, Any] | None = None,
+    device_base_ids: Mapping[str, str] | None = None,
 ) -> AssemblyValidationResult:
     from iesplan.assembly.rules.finance import (
         check_finance_binding,
@@ -224,6 +227,7 @@ def _run_validation(
     resource_media = _check_predefined(
         doc, registry, package_dir, dataset_contents, diags,
         operation_years=operation_years,
+        device_base_ids=device_base_ids,
     )
 
     if _any_blocking(diags):
@@ -438,6 +442,7 @@ def _check_predefined(
     diags: list[Diagnostic],
     *,
     operation_years: int | None = None,
+    device_base_ids: Mapping[str, str] | None = None,
 ) -> dict[str, dict]:
     """预定义来源声明: 槽覆盖 + 槽类型 + 文件内容确认。
 
@@ -533,6 +538,7 @@ def _check_predefined(
             if _check_csv_binding(
                 dev_id, type_id, iface_id, iface, binding, payload, resolution, start_year, diags,
                 operation_years=operation_years,
+                base_device_id=(device_base_ids or {}).get(type_id, type_id),
             ):
                 object_id = payload.get("object_id", "")
                 media_type = payload.get("media_type", "") or "text/csv"
@@ -628,6 +634,7 @@ def _check_csv_binding(
     diags: list[Diagnostic],
     *,
     operation_years: int | None = None,
+    base_device_id: str | None = None,
 ) -> bool:
     """绑定 CSV 内容确认(device_id/mode/分辨率/step/列/单位/值域)。"""
     from iesplan.core.contracts import horizon_point_count
@@ -643,10 +650,11 @@ def _check_csv_binding(
         return False
     meta = parsed.meta
     mode = binding.get("mode")
-    if meta.device_id != type_id:
+    expected_device_id = base_device_id or type_id
+    if meta.device_id != expected_device_id:
         _bind_fail(
             diags, dev_id, iface_id, "csv_device_mismatch",
-            {"expected": type_id, "actual": meta.device_id},
+            {"expected": expected_device_id, "actual": meta.device_id},
         )
         return False
     if meta.source_mode != mode:

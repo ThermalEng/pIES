@@ -48,7 +48,6 @@ from iesplan.devices import (
     parse_device_model_v2,
     to_dict,
 )
-from iesplan.devices.datacontract2 import canonicalize_device_data_v2
 from iesplan.model import (
     MODEL_SOURCE_DIRECT,
     MODEL_SOURCE_TEMPLATE,
@@ -255,7 +254,6 @@ def _parse_candidate_document(
 def _resolve_template_data_bindings(
     db: Session,
     project_id: int,
-    document: DeviceModelDocument,
     bindings: list[dict[str, Any]],
 ) -> tuple[list[dict[str, Any]], list[Diagnostic]]:
     """模板 CSV 路径 → 本项目数据集版本，并在真实入口读取数据对象。
@@ -317,19 +315,9 @@ def _resolve_template_data_bindings(
             )
             continue
         # 读取权威数据对象: 不可读是真实存储错误(直接透传), 不伪装成成功。
-        raw = get_object(db, data_file.object_id)
-        # 按被绑定的 predefined interface 校验 CSV(模式/分辨率/step/列/单位/值域);
-        # 设备 id 在保存阶段仍是基础 ID(最终 _N 在保存后分配), 由装配绑定边界核对。
-        checked = canonicalize_device_data_v2(
-            raw,
-            document,
-            expected_interfaces=[iface],
-            check_device_id=False,
-        )
-        blocking = [d for d in checked.diagnostics if d.blocking]
-        if blocking:
-            diags.extend(blocking)
-            continue
+        # CSV 内容(device_id/mode/列/单位/值域)由装配绑定边界一次校验(宪法 §2.6),
+        # 此处只确认项目数据集版本与数据本体可解析, 不复制第二套校核。
+        get_object(db, data_file.object_id)
         resolved.append(
             {
                 "interface": iface,
@@ -416,7 +404,7 @@ def validate_candidate(
     if source == MODEL_SOURCE_TEMPLATE and receipt is not None:
         raw_bindings = receipt.get("data_bindings") or []
         resolved, binding_diags = _resolve_template_data_bindings(
-            db, project_id, doc, list(raw_bindings)
+            db, project_id, list(raw_bindings)
         )
         diags.extend(binding_diags)
         if diags:

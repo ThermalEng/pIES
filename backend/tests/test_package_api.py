@@ -760,3 +760,73 @@ def test_admin_unlock_task(client: TestClient, db: Session) -> None:
         headers=_h(client, admin),
     )
     assert resp.status_code == 409
+
+
+def test_import_preserves_instance_data_source_binding(
+    client: TestClient, db: Session,
+) -> None:
+    """项目包往返: 设备实例显式来源声明的 dataset_version_id 随导入重映射保持。
+
+    设备实例来源是草稿内容事实(而非模型回执); 导入为数据集版本分配新 id 后,
+    实例声明必须指向新版本, 页面编辑/任务冻结/导出导入继续消费同一事实。
+    """
+    owner = make_user(db, "bind_owner")
+    importer = make_user(db, "bind_importer")
+    pid = _create_project(client, owner)
+    _create_version(client, owner, pid)
+    dvid = _seed_dataset_version(db, pid, tag="bind")
+
+    project = client.get(f"/api/projects/{pid}", headers=_h(client, owner))
+    revision = project.json()["draft"]["revision"]
+    resp = client.put(
+        f"/api/projects/{pid}/draft",
+        json={
+            "expected_revision": revision,
+            "commands": [
+                {
+                    "id": "bind-ds", "unit": "dataset", "type": "dataset.bind",
+                    "payload": {"dataset_version_id": dvid, "role": "main"},
+                },
+                {
+                    "id": "add-load", "unit": "model", "type": "model.upsert_device",
+                    "payload": {
+                        "name": "load1",
+                        "device_type": "ies.device.electric_load",
+                        "kind": "new",
+                        "params": {
+                            "peak_power_kw": 100,
+                            "electricity_demand": {
+                                "mode": "data_repeat",
+                                "dataset_version_id": dvid,
+                            },
+                        },
+                    },
+                },
+            ],
+        },
+        headers=_h(client, owner),
+    )
+    assert resp.status_code == 200, resp.text
+
+    exported = client.post(f"/api/projects/{pid}/exports/package", headers=_h(client, owner))
+    assert exported.status_code == 200, exported.text
+    zip_bytes = client.get(
+        f"/api/projects/{pid}/exports/package/download",
+        params={"token": exported.json()["token"]},
+        headers=_h(client, owner),
+    ).content
+
+    proposal = packages_uc.propose_import(
+        db, importer, zip_bytes, idempotency_key="idem-bind-import"
+    )
+    imported = packages_uc.confirm_import(db, importer, proposal.id)
+    db.commit()
+
+    content = projects_lifecycle.get_current_draft_content(db, imported.id)
+    new_version_id = content["dataset_bindings"][0]["dataset_version_id"]
+    assert new_version_id != dvid
+    device = next(d for d in content["model"]["devices"] if d["name"] == "load1")
+    assert device["params"]["electricity_demand"] == {
+        "mode": "data_repeat",
+        "dataset_version_id": new_version_id,
+    }

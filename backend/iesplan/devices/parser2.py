@@ -295,8 +295,10 @@ def _parse_inputs_tree(node: Any, path: str, file: str) -> TemplateInputSpec:
     if not isinstance(node, Mapping):
         raise ParseError(f"inputs.{path or '<root>'} 必须是 mapping")
     if "type" not in node:
-        # 隐式 object 容器：子键即为下一层声明
+        # 隐式 object 容器：子键即为下一层声明；空容器非法（字段全部必填）
         base = path or "<root>"
+        if not node:
+            raise ParseError(f"inputs.{base} 空 object 声明非法")
         children = tuple(
             _parse_inputs_tree(sub, f"{base}.{k}", file) for k, sub in node.items()
         )
@@ -310,18 +312,17 @@ def _parse_inputs_tree(node: Any, path: str, file: str) -> TemplateInputSpec:
     if type_ in ("object", "array"):
         inner = node.get("fields") if type_ == "object" else node.get("items")
         if inner is None:
-            # object/array 未声明 fields/items 时作为空容器
-            return TemplateInputSpec(path=path, type=type_, children=children)
+            raise ParseError(f"inputs.{path} {type_} 声明不得为空(必须声明 fields/items)")
         if type_ == "object":
-            if not isinstance(inner, Mapping):
-                raise ParseError(f"inputs.{path}.fields 必须是 mapping")
+            if not isinstance(inner, Mapping) or not inner:
+                raise ParseError(f"inputs.{path}.fields 必须是非空 mapping")
             children = tuple(
                 _parse_inputs_tree(sub, f"{path}.{k}" if path else str(k), file)
                 for k, sub in inner.items()
             )
         else:
-            if not isinstance(inner, (Mapping, list)):
-                raise ParseError(f"inputs.{path}.items 必须是 mapping 或 sequence")
+            if not isinstance(inner, (Mapping, list)) or (isinstance(inner, list) and not inner):
+                raise ParseError(f"inputs.{path}.items 必须是非空 mapping 或 sequence")
             if isinstance(inner, list):
                 children = tuple(_parse_inputs_tree(v, f"{path}[]", file) for v in inner)
             else:
@@ -376,7 +377,9 @@ def _collect_leaves(spec: TemplateInputSpec, out: list[TemplateInputSpec]) -> No
     - 隐式/显式 ``object`` 是结构容器（mapping 递归合并），其子声明才是叶子。
     """
     if spec.type in INPUT_SCALAR_TYPES or spec.type in INPUT_DATA_TYPES or spec.type == "array":
+        # array 作为整体提交; items 只逐元素校验, 不形成额外的 path[] 必填输入。
         out.append(spec)
+        return
     for child in spec.children:
         _collect_leaves(child, out)
 
