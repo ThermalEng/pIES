@@ -230,7 +230,7 @@ const PAGE_MESSAGES_ZH: Record<string, string> = {
   'ies.custom.published_ok': '已发布为不可变 revision',
   'ies.custom.rev_label': 'revision',
   'ies.custom.schema_version': 'schema 版本',
-  'ies.custom.inputs': 'inputs 数量'
+  'ies.custom.inputs': 'inputs 数量',
   'ies.planning.title': "规划配置",
   'ies.planning.no_project': "请从项目工作台进入规划配置",
   'ies.planning.unsaved': "尚未保存规划配置",
