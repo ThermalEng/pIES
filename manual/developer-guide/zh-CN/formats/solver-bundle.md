@@ -113,14 +113,15 @@ extensions: {}
 
 配套生成器在 `parameters.json` 的 `financial_facts` 声明结构化财务事实映射，ResultAdapter 使用同一次主解恢复为 `ComputeResult.outputs.financial_facts`。声明复用既有仿射求值方式，包含明确字段、业务身份、期间、单位与求解列引用；消费者不拆解分量键、序列 ID 或列名。现金流声明与规划目标中的现金表达式同源，不重新建立税务模型。声明不复制完整财务配置，也不是新的用户公式语言。
 
-以下为配套生成器 `ies.generator.highs_milp@3.4.0` 与适配器 `ies.result-adapter.highs@3.0.0` 的目标业务输出：
+以下为配套生成器 `ies.generator.highs_milp@4.0.0` 与适配器 `ies.result-adapter.highs@4.0.0` 的目标业务输出：
 
 | 字段 | 语义 |
 | --- | --- |
 | `currency` | 冻结财务币种，所有金额使用该单位和十进制字符串，不作展示舍入 |
 | `construction_total`、`annual_fixed_om` | 实际含税建设总额与年度固定运维金额，按本课题增量范围计取 |
 | `payments_applied` | `[{t, ratio, amount}]`，明确建设付款时点、比例与实际含税付款；不合并或丢失同一时点的多笔付款 |
-| `annual_operation` | `[{financial_year, energy_net, variable_om, fixed_om, maintenance, net}]`，实际含税收付；`net` 为扣除所列费用后的税款结算前运行净额，不重复扣税或折旧 |
+| `annual_operation` | `[{financial_year, energy_net, variable_om, fixed_om, maintenance, demand_charge, net}]`，实际含税收付；`demand_charge` 为当年需量费正金额合计，无费用为 `"0"`；`net` 扣除所列费用各一次，尚未扣税款结算或折旧 |
+| `monthly_demand` | `[{billing_id, charge_id, calendar_year, calendar_month, financial_year, peak_power, peak_unit, rate, charge}]`；每个需量绑定、每个运营自然月一项。`peak_power` 为实际月峰十进制字符串，`peak_unit` 为 `kW`；`rate` 是冻结费率 Money，`charge` 是实际含税支付金额字符串；币种沿顶层。无绑定时显式 `[]`，零费率仍保留真实峰值与零账单 |
 | `tax_cash.vat` | `[{pool, month, paid, refund_claimed, refund_arrived, carry}]`，每池每评价月一行；`carry` 为扣除当月确认退款后的期末可结转留抵，实缴与到账退款才影响现金 |
 | `tax_cash.refunds` | `[{pool, period, arrival_period, amount}]`，明确确认和到账期间；保留评价期后到账的已确认款项，期后款不计入期内现金 |
 | `tax_cash.income` | `[{rule, year, taxable_base, loss_used, loss_generated, loss_expired, tax}]`，每所得税规则每评价年一行，基础为当年抵扣亏损前的应税基础 |
@@ -128,7 +129,9 @@ extensions: {}
 | `tax_cash.loss_balances` | `[{rule, vintage_id, year, last_usable_year, amount}]`，按规则及不透明亏损批次标识记录年末余额，批次标识不得由消费者拆解 |
 | `annual_net_flows` | 按 `t=0..evaluation_years` 排列的完整税后现金流；包含明确建设付款、运行收支、VAT实缴／退款到账与所得税，余额及折旧不额外计入现金 |
 
-`t`、`month`、`year`、`period`、`arrival_period`、`last_usable_year` 均为整数；`ratio` 与金额均为十进制字符串。期间映射以财务契约为准，池与规则保持显式身份，共享池不得按规则重复计入。没有适用规则时对应数组为空，含义为不适用；适用规则的零税额、零余额显式发布，不省略为未知。无税则的完整现金流仍须声明并恢复，不以缺映射冒充零税。
+`t`、`month`、`year`、`period`、`arrival_period`、`last_usable_year` 及日历／评价年、日历月均为整数；`ratio` 与金额均为十进制字符串。期间映射以财务契约为准，池与规则保持显式身份，共享池不得按规则重复计入。没有适用规则时对应数组为空，含义为不适用；适用规则的零税额、零余额显式发布，不省略为未知。无税则的完整现金流仍须声明并恢复，不以缺映射冒充零税。
+
+需量费与能源电量费分列，不重复包含于 `energy_net` 或 O&M。月明细按 `(billing_id, calendar_year, calendar_month)` 排序，年度正费用与净额在模型中同源产生；适配器只恢复声明，不重新取 max、重新计税或扣费。此目标随 `ies.financial-evaluation@2.0.0` 封存（新增必填月明细与年度分量），生成器／适配器为本节列出的 `4.0.0` 配套；不改通用 Bundle、ComputeResult 或快照顶层版本，不在旧结果上注入新字段。
 
 该块随已请求的 `solution` 且存在可用数学解时发布；未请求solution或无可用解时缺席。它不增加 CalculationConfig 输出词汇，不改变 ComputeResult 顶层身份与状态或通用 Bundle manifest。适配器只恢复业务事实，不重算税务、猜列名或改写期间；内部可信声明不增加重复结构、摘要或完整性复核。
 

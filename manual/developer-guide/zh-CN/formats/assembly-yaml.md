@@ -1,6 +1,6 @@
 # 装配 YAML
 
-> 契约标识：`ies.assembly`；目标 schema：`3.0.0`（`3.0.0` 删除基线 `leap_year` 并新增 `start_year`；`2.0.0` 文件不再接受）；推荐文件名：`<assembly-id>.assembly.yaml`。
+> 契约标识：`ies.assembly`；目标 schema：`4.0.0`（新增独立需量计量绑定；运行基线沿用 `start_year`，不接受旧字头或双轨解析）；推荐文件名：`<assembly-id>.assembly.yaml`。
 > 文档状态：生效目标契约；本页只定义目标文件语义，不声明实现进度。
 
 装配 YAML 是系统模型与规划意图的完整、可审查文本：它固定项目计算基线，实例化精确设备内容，绑定已校验的预定义来源声明、规范数据和不可变输入引用，连接可连接的真实 interfaces，区分存量/新增设备，为每个设备实例显式声明**设备成本**财务绑定（判别联合 `costed`/`none`），并用独立的 `tariff_bindings` 把能源价格条目（`price_id`）绑定到计费点实例/接口与聚合（计费点可以是 `type: none` 的纯计量实例），用精确引用固定装配前合并签发的不可变有效财务快照，并承载规划配置。它不包含物化后的未来序列、generator、solver、预测算法、计算精度或求解选项；这些计算事项在规范装配产物转换为计算包时固定。财务三件套的 schema 与字段见[财务 YAML 契约](finance-yaml.md)。
@@ -9,7 +9,7 @@
 
 ```yaml
 schema: ies.assembly
-schema_version: "3.0.0"
+schema_version: "4.0.0"
 
 assembly:
   id: campus_demo
@@ -91,6 +91,8 @@ tariff_bindings:
     interface: electricity_export
     aggregation: integrate_positive
 
+demand_bindings: {}                  # 无需量费时显式为空；独立于能源电量计费
+
 planning:
   objective:
     sense: minimize
@@ -125,6 +127,7 @@ extensions: {}
 | `finance` | 对装配前由 `FinanceProfile` + `FinanceOverrides` 合并生成、完整校验的不可变 `EffectiveFinanceConfig` 的引用：`ref` 携带对象身份，`profile_id` 携带来源标识；规划与财务计算共同消费同一引用；装配内不内联另一份完整财务配置 |
 | `finance_binding` | 每个设备实例的**设备成本**财务判别联合：`type: costed`（含 `finance_type` 与 `driver → property/interface` 映射）或 `type: none`（该实例无设备成本贡献，可作纯计量点；能源计费不在此表达）。缺口、未知 `finance_type`、非法映射、按增量语义缺失的 driver 与单位量纲不兼容在装配校验中阻断 |
 | `tariff_bindings` | 能源价格计费绑定：`binding_id → {price, instance, interface, aggregation}`，`price` 引用有效快照 `energy_prices` 的 `price_id`（`carrier`/`direction` 由 Profile 条目显式声明）；独立于设备成本绑定，计费点实例可以是 `type: none`；逐点计价与会计方向规则见[财务 YAML 契约](finance-yaml.md) |
+| `demand_bindings` | 必填独立需量计量映射；无需量费时 `{}`，不依赖能源价格绑定，见「自然月需量计量绑定」 |
 | `planning` | 目标函数、规划变量、上下界和规划/系统约束；目标逐项引用设备成本或能源计费分量（见上方规划示例），不依赖隐式总成本 |
 | `extensions` | 命名空间化扩展 |
 
@@ -213,9 +216,10 @@ finance:
 ```text
 设备成本分量：<instance_id>__<分量>              # 分量 ∈ {upfront_capex, annual_fixed_om, period_variable_om}
 能源计费分量：<binding_id>__period_energy_purchase | <binding_id>__period_energy_sale
+需量计费分量：<billing_id>__period_demand_charge
 ```
 
-例如 `pv_1__annual_fixed_om`、`import_meter__period_energy_purchase`、`export_meter__period_energy_sale`。映射规则（装配规划校验强制）：
+例如 `pv_1__annual_fixed_om`、`import_meter__period_energy_purchase`、`export_meter__period_energy_sale`。新增需量分量是货币量纲的全运营期费用，前缀必须存在于 `demand_bindings`，引用其真实产生的费用。下列实例／能源计费命名约束同时扩展到需量绑定，三个前缀集合彼此不冲突。映射规则（装配规划校验强制）：
 
 - 两个前缀集合共用同一表达式命名空间：`instance_id` 与 `binding_id` 都必须是 `lower_snake_case`、不含连续双下划线（`__`）、文件内唯一，且 **`binding_id` 不得与任何 `instance_id` 相同**（同名会把设备成本与能源计费两类分量混在同一前缀下）；因此 `<前缀>__<后缀>` 从左向右按首个 `__` 切分即可唯一解析，不与其它标识符碰撞；
 - 后缀决定分量族：`upfront_capex`/`annual_fixed_om`/`period_variable_om` 只与实例前缀（设备成本）合法；`period_energy_purchase`/`period_energy_sale` 只与绑定前缀（能源计费）合法，且必须与被引用价格的显式 `direction` 匹配——`direction: purchase` 的 price 产生 `<binding_id>__period_energy_purchase`，`direction: sale` 的 price 产生 `<binding_id>__period_energy_sale`；方向不靠 binding_id 或 price_id 的名称推断，后缀与方向不匹配即阻断；
@@ -287,6 +291,16 @@ tariff_bindings:
 - 实例与绑定状态互不约束：被 `tariff_bindings` 引用的实例可以声明 `type: none`（纯计量点，如示例 `grid`），也可以 `type: costed`；`type: none` 只表示无设备成本，不禁止承担能源计费；装配校验确认计量点实例与接口存在、接口可用、其预定义/连接状态与该计量一致；
 - 时序计费按被引用价格的定价定义：`constant` 每点同价；`time_series` 按上文「规划配置与有效财务快照引用」的元数据规则与项目基线核对，不匹配阻断且不重采样；时变价格按逐点计价 `Σ price[t]×e[t]`（聚合与计价衔接见[财务 YAML 契约](finance-yaml.md)），禁止先对时变价格总量聚合再与总能量相乘。
 
+## 自然月需量计量绑定 `demand_bindings`
+
+必填映射 `billing_id → {charge, instance, interface}`；无需量计费时为 `{}`。`charge` 引用有效财务快照的 `demand_charges`，实例与接口由用户指定，不引用能源价格或 tariff_binding；仅有需量费而没有按电量计价同样有效。
+
+计量接口必须是电力载体、方向为 `out` 的非负时序功率接口，表示外部向系统供电；不接受双向净值、绝对值、标量或区间电量，不积分、不隐式从电量推导功率。实例可以为 `type: none`。接口、量纲和引用在装配输入边界核对，内部流程不重复校验。
+
+`billing_id` 与实例、能源计费 binding_id 共用互不冲突的局部命名空间（不含 `__`）。同一费项与同一实例接口的重复绑定拒绝；同点不同费项可以由用户显式声明并分别计费，不自动合并不同实例功率。
+
+每个绑定公开全运营期费用分量 `<billing_id>__period_demand_charge`，单位为币种、费用非负，金额沿快照 `price_basis` 等于各月费率乘峰值的合计；可在规划表达式与约束中显式引用。现金流按明确税务规则形成实际含税付款并只扣一次。无论是否将该分量写入目标，财务事实都必须反映该解的真实月峰与费用。
+
 ## 首年建设与全周期运行优化
 
 本计算课题在项目首年启动建设，按明确建设期完成后投产，优化建设选择、容量与全周期运行，不优化何年启动建设。中期扩建属于新的计算课题，不在本课题中增加分年建设决策。首年启动建设不等于立即投产、投资一次付清或只求解首年运行。
@@ -322,14 +336,14 @@ tariff_bindings:
 
 生成器直接消费这两者。人工修改规范文本、替换资源或变更财务快照/绑定必须形成新的装配产物；任务创建后只消费该产物，不得重新读取“当前设备”“当前价格”或“最新项目”。
 
-规范化算法标识为 `ies.assembly.canonical@3.0.0`。相同语义必须得到相同规范文本和回执；算法语义变化必须升级版本并保留历史解释能力。
+规范化算法标识为 `ies.assembly.canonical@4.0.0`，包含需量绑定的确定性规范化。相同语义必须得到相同规范文本和回执；算法语义变化必须升级版本并保留历史解释能力。
 
 ## 完成标准
 
-- 示例补齐真实设备引用、`finance` 精确引用、`finance_binding` 判别联合与 `tariff_bindings` 绑定映射后可通过 `3.0.0` schema；
+- 示例的真实设备引用、财务精确引用、成本／能源计费及需量绑定必须满足 `4.0.0` schema；
 - 装配没有设备独立版本、parameters/ports/model commands 或设备经济字段；财务成本模型来自被引用的有效快照，不来自设备文件，也不在装配内内联完整财务配置；
 - 五类 interface、来源模式（`constant`/`data_repeat`/`data_full`/`data_predict`）、存量/新增、设备成本绑定（`costed`/`none`）、按增量语义的 driver 齐全性、`tariff_bindings` 的 `price_id`/`carrier`/`direction` 校验（含 `type: none` 计量点）、财务分量标识符映射（实例前缀与绑定前缀的命名空间规则）与带单位常量量纲校验、规划目标逐项引用及有效财务快照身份/血缘均有契约测试；
 - 非法文件没有旁路进入生成器，合法文件只产生一个规范形态；
 - 生成器只读 `ValidatedAssemblyArtifact`，不重新解释原始项目、CSV 路径或 GUI 状态；
 - `ies.assembly` `1.0.0` 是未发布开发草案；其 schema、迁移器、迁移回执、样例和兼容路径直接删除，不提供 1.0/2.0 双轨或离线迁移入口。
-- `ies.assembly` `3.0.0` 删除基线 `leap_year` 并新增必填 `start_year`；现行开发数据按 `3.0.0` 重建，`2.0.0` 文件不再接受，不提供 2.0/3.0 双轨或离线迁移入口。
+- `ies.assembly` `4.0.0` 新增必填 `demand_bindings`（无需量时为空）；开发数据按现行目标重建，不提供旧字头解析或离线迁移入口。版本化历史事实不以新字段补默认值解释。

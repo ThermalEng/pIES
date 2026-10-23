@@ -1,6 +1,6 @@
 # 财务 YAML 契约
 
-> 契约标识与版本：`ies.finance-profile@3.0.0`、`ies.finance-overrides@3.0.0`、`ies.effective-finance-config@3.0.0`。本版增加计算规则与抵扣池，税率归计算规则；不接受旧字头、旧税率登记或双轨解析。
+> 契约标识与版本：`ies.finance-profile@4.0.0`、`ies.finance-overrides@4.0.0`、`ies.effective-finance-config@4.0.0`。本版新增独立需量费及其税务引用；不接受旧字头或双轨解析。
 > 推荐文件名（项目包内固定名称）：`finance_profile.yaml`、`finance_overrides.yaml`、`effective_finance.yaml`
 > 文档状态：生效目标契约；本页只定义目标文件语义，不声明实现进度。
 
@@ -22,13 +22,13 @@ assembly / computation / 项目包（精确引用 Effective YAML）
 
 金额一律为 `{value, unit}` 原子：`value` 为十进制定点字符串（禁止 `float`、`NaN/Infinity`、`null`），`unit` 来自公共单位规范并经 `normalize_unit` 规范化；禁止部分金额（缺 `value` 或 `unit`）与 `null`。成本分量金额非负（允许 `0`，零费用类别、零固定成本均合法）。能源价格不设符号限制：允许有限正数、零与负数（见 `energy_prices` 行与「计价规则」）；禁止 NaN/Infinity。
 
-## `ies.finance-profile@3.0.0`
+## `ies.finance-profile@4.0.0`
 
 ### 完整示例
 
 ```yaml
 schema: ies.finance-profile
-schema_version: "3.0.0"
+schema_version: "4.0.0"
 profile:
   id: cn-north-demo
   region: CN-North
@@ -78,6 +78,7 @@ energy_prices:
     direction: purchase
     kind: constant
     value: {value: "0.35", unit: CNY/kWh}
+demand_charges: {}
 taxes:
   grid_import_vat:
     display_name: 购电增值税
@@ -94,7 +95,7 @@ tax_rules: {}                  # 本例只有展示登记，没有启用税务�
 | 路径 | 必需 | 规则 |
 |---|---|---|
 | `schema` | 是 | 固定 `ies.finance-profile` |
-| `schema_version` | 是 | 固定 `"3.0.0"` |
+| `schema_version` | 是 | 固定 `"4.0.0"` |
 | `profile.id` | 是 | 稳定 ASCII 小写 ID（命名空间点分式、`lower_snake_case` 或短横线，同文件内保持一致），如 `cn-north-demo`；Overrides 与 Effective 沿用它做引用 |
 | `profile.region` | 是 | 地区标识（展示与追溯，不参与计算） |
 | `profile.currency` | 是 | `CNY` / `USD` |
@@ -117,12 +118,13 @@ tax_rules: {}                  # 本例只有展示登记，没有启用税务�
 | `taxes` | 可选（无税目可写 `{}`） | 展示标签映射：`id` → `{display_name, tax_type, applies_to}`，无税率；见下「税目登记」 |
 | `credit_pools` | 是 | 抵扣池映射，无池时显式 `{}`；期初余额与退税仅在池声明 |
 | `tax_rules` | 是 | 计算规则映射，无规则时显式 `{}`；规则结构见下「税务计算输入」 |
+| `demand_charges` | 是 | 独立自然月需量费目录；无费项时 `{}`，费率、覆盖及税务引用见「自然月需量费」 |
 
 单位与范围校验：
 
 - 成本分量金额非负（允许 `0`）；每个线性分量的 `unit_cost` 单位与装配绑定的规范化 driver 单位相乘后必须得到 `currency`（upfront/period）或 `currency/year`（annual_fixed_om）量纲；
 - 能源价格为有限 Decimal（正、零、负均合法），单位量纲 = currency /（对应 carrier 的能源量纲）；constant 的 `value.unit` 与 time_series 的 `series_meta.unit` 必须一致；禁止 NaN/Infinity；
-- `taxes.*.applies_to` 引用的 price_id 或 `finance_types` 分量路径必须存在；计算规则中的税率、可抵比例为 `0..1` 的 `{value, unit: "1"}` 原子。
+- `taxes.*.applies_to` 引用的 price_id、`finance_types` 分量路径或 `demand_charges.<charge_id>` 必须存在；计算规则中的税率、可抵比例为 `0..1` 的 `{value, unit: "1"}` 原子。
 
 ### 税目登记
 
@@ -131,7 +133,7 @@ tax_rules: {}                  # 本例只有展示登记，没有启用税务�
 - `id`：唯一 `lower_snake_case` 稳定标识；
 - `display_name`：人类可读税种名；
 - `tax_type`：税种标识（如 `value_added_tax`）；本契约只登记不解析税种语义，不预建税务引擎；
-- `applies_to`：明确适用对象，二选一——引用本文件 `energy_prices` 的 `price_id`（如 `grid_import`），或 `finance_types` 的分量路径（如 `pv_system.upfront_capex`）；一个税目对应一个适用对象，多个对象登记多个税目。
+- `applies_to`：引用本文件 `energy_prices` 的 price_id、`finance_types` 的分量路径或 `demand_charges.<charge_id>`；一个税目对应一个适用对象，多个对象登记多个税目。
 
 `applies_to` 是标签展示对象，不是计算范围。计算唯一消费 `tax_rules` 中的明确对象、方法与参数，不从税种名称或标签推断税率、范围或抵扣资格。金额、余额及同次优化语义见[财务计算](../modules/finance.md#税务参与规划与现金流)。
 
@@ -148,10 +150,12 @@ tax_rules: {}                  # 本例只有展示登记，没有启用税务�
 | `out_tax[]` | `{price, rate}`，price 引用 sale 价格条目 |
 | `om_input_tax[]` | `{for, rate, deductible_ratio}`，for 为已有 `<finance_type>.annual_fixed_om` 或 `.period_variable_om` 分量路径 |
 | `maintenance_input_tax[]` | `{year, position, rate, deductible_ratio}`；引用评价维护清单中的一项，复用本规则抵扣池与确认方法 |
+| `demand_input_tax[]` | 可选 `{charge, rate, deductible_ratio}`；需量费进项范围与覆盖规则见「自然月需量费」 |
 | `kind: construction_input_vat` | 必填 `label_ref, for, rate, deductible_ratio, credit_pool, confirmation`；for 为已有 `<finance_type>.upfront_capex`，金额按实例选建及容量派生，不填写固定建设税额 |
 | 建设 `confirmation` | 判别联合 `{method: payment_period}` 或 `{method: explicit_schedule, schedule: [{period, ratio}]}`；只接受所选方法字段。schedule 比例为十进制字符串，非负且精确合计1，作用于派生的可抵建设进项总额，不再次乘付款比例 |
 | `kind: income_tax` | 必填 `label_ref, rate, revenue, energy_cost, annual_om, variable_om, deductible_maintenance, depreciation, loss_carryforward_years, opening_losses`；按年核算 |
 | 所得税范围列表 | revenue / energy_cost 引用已有 sale / purchase 价格；annual_om / variable_om 引用对应已有财务分量。各项以列表显式声明，不因键名或未列出而猜测范围 |
+| `demand_cost` | 可选 charge_id 列表，显式声明可扣需量费用范围；见「自然月需量费」 |
 | `deductible_maintenance` | `{mode: explicit_items, items: [{year, position, deductible}]}`；deductible 为布尔值，表示所得税费用可扣性，独立于进项抵扣 |
 | `depreciation[]` | `{asset, base_from, method: straight_line, life_years, residual: Money, first_year}`；asset 为已有 finance_type，base_from 仅为同类 `<finance_type>.upfront_capex_net` 派生引用。life_years、first_year 为正整数；残值非负，不另填固定计税基础 |
 | `opening_losses[]` | `{amount: Money, last_usable_year}`；金额非负，最后可用评价年为正整数；同到期年保留输入顺序 |
@@ -234,13 +238,35 @@ tax_rules:
 - NPV、IRR 和回收期是评价输出；规划目标与财务关系的衔接见[财务计算](../modules/finance.md#税务参与规划与现金流)；
 - 规划表达式引用这些分量的合法标识符编码与单位字面量规则见[装配 YAML](assembly-yaml.md)「规划表达式中的财务分量标识符」。
 
-## `ies.finance-overrides@3.0.0`
+### 自然月需量费
+
+Profile 与 Effective 增加必填 `demand_charges` 映射，无需量费时显式为 `{}`。键 `charge_id` 使用与价格 ID 相同的局部命名规则；每项为 `{rate: Money}`，`rate.value` 非负，单位为文件币种/功率（例如 `CNY/kW`）。该费率表示每个自然月每单位峰值功率的金额；月是计费期间，不是单位中的固定秒数，不填写 `CNY/kW/month`。
+
+```yaml
+demand_charges:
+  import_demand:
+    rate: {value: "20", unit: CNY/kW}  # 合成示例；每自然月适用，不是默认费率
+```
+
+每项费率适用于全部运营自然月。本契约不包含周期价格或费率年表；需要变化费率时另行定义公开载体，不能私自复用运行步价格序列。需量费不属于 `energy_prices` 或设备 O&M，是否生效由装配显式绑定决定；目录中未绑定的条目不产生费用。
+
+Overrides 可用 `demand_charges.<charge_id>.rate` 原子替换 Profile 已有费率，币种与单位保持一致，不新增或删除费项；未覆盖内容原样进入 Effective。
+
+税务复用现有规则：
+
+- 税目标签的 `applies_to` 可引用 `demand_charges.<charge_id>`。
+- VAT 规则新增可选 `demand_input_tax: [{charge, rate, deductible_ratio}]`，`charge` 引用已有 charge_id；省略表示没有该类进项规则。适用时覆盖该费项的全部计量绑定，沿用规则的抵扣池及 `same_period` 确认，运营月账单在对应评价月确认。
+- 所得税规则新增可选 `demand_cost: [charge_id, ...]`，显式列出可扣费用范围；省略表示未声明可扣，不推断资格。费用基础按实际含税付款减明确可抵进项计算，与能源费用规则一致。
+- Overrides 对既有 `demand_input_tax` 条目按 `charge` 匹配，只覆盖税率与可抵比例，不改变范围；`demand_cost` 是 Profile 的范围，不允许覆盖。
+- 需量费沿用 `price_basis`：含税口径不重复加税，不含税口径按明确税率形成实际付款。未声明的税额与抵扣不自动生成；同一需量费税基不能重复抵扣或扣除，实际现金只支出一次。
+
+## `ies.finance-overrides@4.0.0`
 
 ### 完整示例
 
 ```yaml
 schema: ies.finance-overrides
-schema_version: "3.0.0"
+schema_version: "4.0.0"
 profile_ref:
   id: cn-north-demo
 finance_types:
@@ -266,7 +292,7 @@ energy_prices:
 
 | 路径 | 规则 |
 |---|---|
-| `schema` / `schema_version` | 固定 `ies.finance-overrides` / `"3.0.0"` |
+| `schema` / `schema_version` | 固定 `ies.finance-overrides` / `"4.0.0"` |
 | `profile_ref` | 必填 `{id}`：与目标 Profile 的 `id` 一致（文本文件按字头校验，不做内容摘要） |
 | `finance_types` | 只允许覆盖目标 Profile **已存在** 的 `finance_type`；禁止新增或删除 `finance_type` |
 | `finance_types.*` | 只允许按 Profile 实际存在的叶子路径整体替换 `Money` 原子：`<分量>.fixed`（如 `upfront_capex.fixed`）替换为 `{value, unit}`；`<分量>.linear.<driver>.unit_cost` 替换为 `{value, unit}`。被替换叶子必须已在 Profile 声明；禁止新增或删除分量、`fixed` 节点或 `driver`（`driver` 集合不可增删）、禁止改分量类型与 `cost_method`、禁止改 `unit`（规范化后必须与 Profile 相同）；替换值必须为完整 `{value, unit}` 原子，禁止部分金额与 `null`；成本金额非负 |
@@ -282,7 +308,7 @@ energy_prices:
 
 ```yaml
 schema: ies.finance-overrides
-schema_version: "3.0.0"
+schema_version: "4.0.0"
 profile_ref: {id: cn-north-demo}
 tax_rules:
   operating_vat:
@@ -296,7 +322,7 @@ tax_rules:
         - {year: 2, position: 2, deductible: false}
 ```
 
-## `ies.effective-finance-config@3.0.0`
+## `ies.effective-finance-config@4.0.0`
 
 ### 完整示例
 
@@ -304,7 +330,7 @@ tax_rules:
 
 ```yaml
 schema: ies.effective-finance-config
-schema_version: "3.0.0"
+schema_version: "4.0.0"
 profile_id: cn-north-demo
 currency: CNY
 base_year: 2025
@@ -352,6 +378,7 @@ energy_prices:
     direction: purchase
     kind: constant
     value: {value: "0.35", unit: CNY/kWh}
+demand_charges: {}                                      # 继承 Profile，原样保留
 taxes:                                                 # 继承 Profile，原样保留
   grid_import_vat:
     display_name: 购电增值税
@@ -365,7 +392,7 @@ tax_rules: {}
 
 - `EffectiveFinanceConfig` 只能由合并器生成：`merge(FinanceProfile, FinanceOverrides | None)`；无覆盖时使用空 Overrides 文档，不允许省略来源字段。
 - 合并边界检查本页覆盖纪律及合并后的领域引用；已类型化输入不重复做类型、数值或字头校验。任一覆盖或领域引用错误不产生 Effective。
-- 稀疏覆盖只替换声明的参数或完整列表：未覆盖的成本、能源价格、税目、规则与池全部原样保留，不允许省略、裁剪或按“示例只写用到的部分”生成。
+- 稀疏覆盖只替换声明的参数或完整列表：未覆盖的成本、能源价格、需量费、税目、规则与池全部原样保留，不允许省略、裁剪或按“示例只写用到的部分”生成。
 - `EffectiveFinanceConfig` 可以导出、导入、进入快照；项目包导入在外部上传边界连同来源 Profile 与 Overrides 一次性完成合并验证，确认阶段不重复执行。
 - 装配与计算只消费该不可变快照：不运行期继承 Profile、不读取“最新地区价格”、不静默默认值。
 
@@ -375,7 +402,7 @@ tax_rules: {}
 
 ```yaml
 schema: ies.finance-overrides
-schema_version: "3.0.0"
+schema_version: "4.0.0"
 profile_ref:
   id: <profile-id>
 ```
