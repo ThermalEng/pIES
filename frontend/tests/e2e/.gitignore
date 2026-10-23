@@ -1,3 +1,4 @@
-node_modules/
-test-results/
-playwright-report/
+# 临时在线开发快照；原规则版本：b5411bb。
+# node_modules/
+# test-results/
+# playwright-report/
