@@ -315,3 +315,122 @@ def test_template_data_modes_declared_and_saved(
     assert resp.json()["receipt"]["data_bindings"] == [
         {"interface": "electric_demand", "mode": mode, "dataset_version_id": vid}
     ]
+
+
+SAMPLES = Path(__file__).parent.parent / "iesplan" / "assembly" / "samples"
+
+
+def test_numbered_model_csv_identity_uses_base_id_through_assembly() -> None:
+    """同基名模型实际分配 _2 时, CSV 用稳定基础 ID 仍通过真实装配身份核对。"""
+    import dataclasses
+
+    from iesplan.assembly import validate_assembly_doc
+    from iesplan.devices import get_device
+    from iesplan.devices.contracts2 import DeviceInfo
+
+    sample_text = (SAMPLES / "valid" / "campus.assembly.yaml").read_text(encoding="utf-8")
+    numbered = sample_text.replace(
+        "    definition:\n      id: ies.device.pv",
+        "    definition:\n      id: acme.device.pv_2",
+    )
+    assert numbered != sample_text
+    # 用基础 ID 的合成 CSV(与样例同值形状)覆盖样例副本。
+    csv_text = (SAMPLES / "data" / "pv_irradiance.data.csv").read_text(encoding="utf-8")
+    csv_base = csv_text.replace("ies.device.pv", "acme.device.pv")
+    contents = {
+        "data/pv_irradiance.data.csv": {
+            "object_id": "synthetic", "media_type": "text/csv", "data": csv_base.encode("utf-8"),
+        }
+    }
+
+    pv_doc = get_device("ies.device.pv")
+    numbered_doc = dataclasses.replace(
+        pv_doc,
+        device=DeviceInfo(id="acme.device.pv_2", names=pv_doc.device.names),
+    )
+    documents = {"acme.device.pv_2": numbered_doc}
+
+    from iesplan.assembly import parse_assembly_doc
+
+    parsed = parse_assembly_doc(numbered, source_name="campus.assembly.yaml")
+    assert parsed.doc is not None
+    ok = validate_assembly_doc(
+        parsed.doc,
+        package_dir=SAMPLES,
+        dataset_contents=contents,
+        device_documents=documents,
+        device_base_ids={"acme.device.pv_2": "acme.device.pv"},
+    )
+    assert ok.artifact is not None, [d.code for d in ok.diagnostics if d.blocking]
+    assert not any(
+        d.code == "ASM-BIND-001" and d.params.get("reason") == "csv_device_mismatch"
+        for d in ok.diagnostics
+    )
+
+    # 去掉基础 ID 映射: 身份约束仍然生效, 明确阻断(重新解析, 避免同次校验就地写入)。
+    parsed_bad = parse_assembly_doc(numbered, source_name="campus.assembly.yaml")
+    assert parsed_bad.doc is not None
+    bad = validate_assembly_doc(
+        parsed_bad.doc,
+        package_dir=SAMPLES,
+        dataset_contents=contents,
+        device_documents=documents,
+    )
+    assert bad.artifact is None
+    assert any(
+        d.code == "ASM-BIND-001" and d.params.get("reason") == "csv_device_mismatch"
+        for d in bad.diagnostics
+    )
+
+
+def test_data_predict_binding_with_explicit_target_passes_assembly() -> None:
+    """data_predict 由实例显式 target_type 声明, 真实装配校验签发产物。"""
+    from iesplan.assembly import parse_assembly_doc, validate_assembly_doc
+    from iesplan.devices import get_device
+
+    sample_text = (SAMPLES / "valid" / "campus.assembly.yaml").read_text(encoding="utf-8")
+    predict = sample_text.replace(
+        """      ambient_temperature:
+        mode: constant
+        value: 25""",
+        """      ambient_temperature:
+        mode: data_predict
+        path: data/pv_predict.data.csv
+        target_type: ambient_temperature""",
+    )
+    assert predict != sample_text
+    solar_csv = (SAMPLES / "data" / "pv_irradiance.data.csv").read_text(encoding="utf-8")
+    predict_csv = "\n".join([
+        "# schema: ies.device-data",
+        "# schema_version: 2.1.0",
+        "# dataset_id: synthetic_predict",
+        "# device_id: ies.device.pv",
+        "# source_mode: data_predict",
+        "# resolution: 1h",
+        "# unit.ambient_temperature: °C",
+        "step,ambient_temperature",
+        *[f"{i},{20 + (i % 3)}" for i in range(24)],
+        "",
+    ])
+    contents = {
+        "data/pv_irradiance.data.csv": {
+            "object_id": "solar", "media_type": "text/csv", "data": solar_csv.encode("utf-8"),
+        },
+        "data/pv_predict.data.csv": {
+            "object_id": "predict", "media_type": "text/csv", "data": predict_csv.encode("utf-8"),
+        },
+    }
+    parsed = parse_assembly_doc(predict, source_name="campus.assembly.yaml")
+    assert parsed.doc is not None
+    result = validate_assembly_doc(
+        parsed.doc,
+        package_dir=SAMPLES,
+        dataset_contents=contents,
+        device_documents={"ies.device.pv": get_device("ies.device.pv")},
+    )
+    assert result.artifact is not None, [
+        (d.code, d.params.get("reason")) for d in result.diagnostics if d.blocking
+    ]
+    assert "target_type: ambient_temperature" in result.artifact.canonical_text.replace(
+        '"target_type":"ambient_temperature"', "target_type: ambient_temperature"
+    ) or "ambient_temperature" in result.artifact.canonical_text

@@ -58,6 +58,11 @@ const TEXTS: Record<string, Entry> = {
   'source.version_choose': { zh: '选择数据集版本', en: 'Choose dataset version' },
   'source.version_empty': { zh: '项目暂无数据集版本', en: 'No dataset versions in this project' },
   'source.target_type': { zh: '预测目标类型', en: 'Prediction target type' },
+  'source.loading': { zh: '数据集版本加载中…', en: 'Loading dataset versions…' },
+  'source.load_failed': { zh: '数据集版本加载失败', en: 'Failed to load dataset versions' },
+  'source.retry': { zh: '重试', en: 'Retry' },
+  'source.version_saved': { zh: '已保存版本 {id}', en: 'Saved version {id}' },
+  'source.value_required': { zh: '请输入有限常量值', en: 'Enter a finite constant value' },
 
   // 端口与连接
   'port.solar': { zh: '太阳辐射', en: 'Solar' },
