@@ -265,7 +265,7 @@ export default function EconomicBindingsPage() {
         </div>
         <div className="ies-flex">
           <Button variant="secondary" onClick={() => void reloadLatest()} loading={busy === 'reload'} disabled={busy !== null}>{pt('ies.bindings.reload')}</Button>
-          <Button onClick={() => void save()} loading={busy === 'save'} disabled={busy !== null || !catalog || devices.length === 0}>{pt('ies.bindings.save')}</Button>
+          <Button onClick={() => void save()} loading={busy === 'save'} disabled={busy !== null || !catalog}>{pt('ies.bindings.save')}</Button>
         </div>
       </div>
       <p>{pt('ies.bindings.intro')}</p>
