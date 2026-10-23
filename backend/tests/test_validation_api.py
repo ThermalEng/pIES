@@ -1,8 +1,9 @@
-"""项目校验单元(U07)测试: 预检报告聚合 / 财务基准确认 / 最近报告 / 阻断不被降级。
+"""项目校验单元(U07)测试: 预检报告聚合 / 财务基准确认审计 / 最近报告 / 阻断不被降级。
 
-- 空项目(缺设备/数据/基准确认)→ blocked;
+- 空项目(缺设备/数据)→ blocked;
 - 补全设备与数据 → 通过(ok);
-- 财务基准确认前后状态变化;
+- 财务基准确认接口仍可记录审计; 预检不再要求旧确认证据(0.15 S0):
+  评价确认存在于计算提交边界(类型化校验并冻结);
 - 阻断错误不被警告降级。
 全部测试使用 SQLite :memory:(StaticPool)与临时 data_dir。
 """
@@ -49,7 +50,7 @@ def _headers(client: TestClient) -> dict[str, str]:
         client._auth_token = token  # type: ignore[attr-defined]
     return {"Authorization": f"Bearer {token}"}
 
-#: 显式确认假设(调用方明确提供; 预检只判证据存在, 不再比对过期)
+#: 显式确认假设(调用方明确提供; 独立确认接口的审计入参, 预检门禁不读取)
 DEFAULT_ASSUMPTIONS: dict = {
     "discount_rate": 0.08,
     "tax_rate": 0.25,
@@ -225,7 +226,7 @@ def _diag_codes(diags: list[dict]) -> set[str]:
 
 
 def test_empty_project_blocked(client: TestClient, factory: sessionmaker) -> None:
-    """空项目: 缺设备/数据/基准确认, 应阻断并一次返回全部问题; 未保存配置无默认可用, 为错误级阻断。"""
+    """空项目: 缺设备/数据, 应阻断并一次返回全部问题; 未保存配置无默认可用, 为错误级阻断。"""
     pid = _create_project(factory)
     report = _run_report(client, pid)
     assert report["status"] == "blocked"
@@ -236,16 +237,16 @@ def test_empty_project_blocked(client: TestClient, factory: sessionmaker) -> Non
     assert "VALID-MODEL-002" in codes
     # 数据: 未绑定
     assert "VALID-DATA-001" in codes
-    # 财务基准确认: 缺失
-    assert "VALID-FIN-001" in codes
+    # 预检不要求旧 baseline-confirm 审计证据(0.15 S0)
+    assert "VALID-FIN-001" not in codes
     # 未保存配置无默认可用: 错误级阻断(随 validate_project 统一标记 blocking)
     assert any(
         d["code"] == "VALID-CONFIG-001" and d["severity"] == "error" and d["blocking"]
         for d in report["diagnostics"]
     )
-    # summary 计数一致(模型 2 + 数据 1 + 财务 1 + 配置 1)
+    # summary 计数一致(模型 2 + 数据 1 + 配置 1)
     summary = report["summary"]
-    assert summary["blocking"] >= 5
+    assert summary["blocking"] >= 4
 
 
 def test_complete_project_passes(client: TestClient, factory: sessionmaker) -> None:
@@ -280,7 +281,7 @@ def test_complete_project_passes(client: TestClient, factory: sessionmaker) -> N
     )
     assert resp.status_code == 200, resp.text
     assert resp.json()["revision"] == 1
-    # 4) 财务基准确认
+    # 4) 财务基准确认审计(独立用途, 非预检门禁)
     resp = client.post(
         f"/api/projects/{pid}/validation/baseline-confirm",
         json={"assumptions": DEFAULT_ASSUMPTIONS},
@@ -303,20 +304,26 @@ def test_complete_project_passes(client: TestClient, factory: sessionmaker) -> N
 # ---------------------------------------------------------------------------
 
 
-def test_baseline_confirm_state_change(client: TestClient, factory: sessionmaker) -> None:
-    """基准确认前阻断(VFIN-001), 确认后不再因此阻断; 模型/数据仍缺失保持阻断。"""
+def test_baseline_confirm_no_precheck_gate(client: TestClient, factory: sessionmaker) -> None:
+    """确认接口仍记录审计(独立用途); 预检不要求旧确认证据(0.15 S0)。
+
+    未调用 baseline-confirm 的空项目不应出现 VALID-FIN-001(评价确认在计算提交
+    边界类型化校验并冻结); 调用后也不因此产生/消除预检诊断。
+    """
     pid = _create_project(factory)
     report = _run_report(client, pid)
-    assert any(
-        d["code"] == "VALID-FIN-001" and d["blocking"]
-        for d in report["diagnostics"]
-    )
+    codes = _diag_codes(report["diagnostics"])
+    assert "VALID-FIN-001" not in codes
+    # 模型与数据缺失, 继续阻断
+    assert report["blocks_submit"] is True
+    assert {"VALID-MODEL-001", "VALID-MODEL-002", "VALID-DATA-001"} <= codes
     resp = client.post(
         f"/api/projects/{pid}/validation/baseline-confirm",
         json={"assumptions": DEFAULT_ASSUMPTIONS},
         headers=_headers(client),
     )
     assert resp.status_code == 200, resp.text
+    assert resp.json()["confirmed"] is True
     report = _run_report(client, pid)
     codes = _diag_codes(report["diagnostics"])
     assert "VALID-FIN-001" not in codes

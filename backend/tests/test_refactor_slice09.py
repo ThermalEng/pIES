@@ -80,25 +80,14 @@ def test_project_archive_audit_through_domain(db: Session) -> None:
     assert rows[0].actor_id == 7 and rows[0].after == {"status": "archived"}
 
 
-def test_validation_confirm_and_evidence_through_domain(db: Session, data_dir: Path) -> None:
+def test_baseline_confirm_records_through_domain(db: Session, data_dir: Path) -> None:
     user = SimpleNamespace(id=7)
     project = _project(db, "slice9-confirm")
-    # 公开预检要求当前草稿存在: 先建空绑定草稿(数据诊断不影响 FIN 断言)
-    obj = put_object(
-        db, json.dumps({"dataset_bindings": []}).encode("utf-8"),
-        "application/json", source_category="draft",
-    )
-    project_domain.create_draft(db, project_id=project.id, content_object_id=obj.id, updated_by=7)
     record = validations_uc.mark_baseline_confirmed(db, project.id, user, assumptions={"k": "v"})
     assert record.after["confirmed_by"] == 7
     assert record.after["assumptions"] == {"k": "v"}
     assert "confirmed_at" in record.after
-
-    # 证据回读经公开预检能力(旧 services.validation._latest_baseline_evidence
-    # 私有函数已删除, 不复制其实现; 预检内部走同一证据读取路径):
-    # 确认后财务基准缺失诊断 VALID-FIN-001 消除
-    report = validations_uc.validate_project(db, project.id)
-    assert "VALID-FIN-001" not in [d.code for d in report.diagnostics]
+    # 旧 baseline-confirm 审计已不是预检门禁证据(0.15 S0): 预检不再读取该证据
 
 
 def test_storage_put_object_no_direct_audit(db: Session, data_dir: Path) -> None:

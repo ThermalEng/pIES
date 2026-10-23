@@ -12,8 +12,8 @@
 - 浏览器跨站请求必须携带匹配的来源头: 优先校验 ``Origin``(现代浏览器对
   非 GET/HEAD 请求一律携带), 缺失时回退校验 ``Referer``(表单导航默认携带);
   规范化后必须命中可信来源 —— ``settings.app_url`` + CORS 来源清单 +
-  请求自身 Host 推导的同源来源(nginx 反向代理后 Host 由 ``$host`` 转发,
-  浏览器同源 POST 的 Origin 恒等于该 Host, 覆盖任意部署拓扑)。
+  请求自身 Host 推导的同源来源(nginx 反向代理后 Host 由 ``$http_host`` 转发,
+  含端口, 浏览器同源 POST 的 Origin 恒等于该 Host:端口, 覆盖任意部署拓扑)。
 
 为什么优先 Origin + 回退 Referer + 无头放行:
 - CSRF 本质是浏览器自动附加的 Cookie 被第三方站点冒用; 跨站请求的来源头
@@ -109,8 +109,8 @@ def build_trusted_origins() -> frozenset[str]:
     """静态可信来源集合: ``settings.app_url`` + CORS 来源清单(规范化后)。
 
     注意: 仅覆盖「已配置的部署来源」。实际部署时浏览器同源 POST 的来源恒等于
-    请求 Host(nginx 转发 ``$host``), 由 dispatch 动态并入 Host 推导来源,
-    因此本集合不要求穷举所有可达域名。
+    请求 Host:端口(nginx 转发 ``$http_host``, 含端口), 由 dispatch 动态并入
+    Host 推导来源, 因此本集合不要求穷举所有可达域名/端口。
     """
     trusted: set[str] = set()
     for raw in (settings.app_url, *cors_origin_list()):
@@ -123,8 +123,8 @@ def build_trusted_origins() -> frozenset[str]:
 def _request_own_origin(request: Request) -> str:
     """从请求 Host 推导其自身的浏览器来源(scheme://host[:port])。
 
-    - 反代部署时后端看到的 Host 由 nginx ``proxy_set_header Host $host`` 转发,
-      与浏览器请求头一致; scheme 优先取 X-Forwarded-Proto(HTTPS 反代)。
+    - 反代部署时后端看到的 Host 由 nginx ``proxy_set_header Host $http_host`` 转发,
+      含端口, 与浏览器请求头一致; scheme 优先取 X-Forwarded-Proto(HTTPS 反代)。
     - 失败/无法解析时返回空串(不参与可信集合, 仅依赖静态集合兜底)。
     """
     scheme = request.headers.get("x-forwarded-proto", "").split(",")[0].strip() or request.url.scheme

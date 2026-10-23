@@ -662,7 +662,8 @@ def _prepare_project(
 def test_task_submit_snapshot_preguard(client: TestClient, db: Session) -> None:
     """注册/登录 → 项目 → 设备/连接 → 数据集 → 配置/基线 → 提交方案评价任务。
 
-    断言: 未确认基线时预检阻断提交; 提交后任务 queued 且计算快照已固化。
+    断言: 空项目预检阻断提交(设备/数据/配置缺失, 0.15 S0 起不再含旧基准确
+    认审计); 提交后任务 queued 且计算快照已固化。
     （计算入口显式不可用：本测试止于提交，不期待真实求解；
     执行语义见测试 1b。）
     """
@@ -674,13 +675,14 @@ def test_task_submit_snapshot_preguard(client: TestClient, db: Session) -> None:
     eng_login = _login(client, "eng_li", ENGINEER_PASSWORD)
     assert eng_login["user"]["role"] == "engineer"
 
-    # 预检门禁：未确认基线时阻断提交（见 manual/developer-guide/zh-CN/domain-model.md §规划、财务与计算配置； manual/developer-guide/zh-CN/ARCHITECTURE_CONSTITUTION.md §4.4 assembly）
+    # 预检门禁：空项目(缺设备/数据/配置)阻断提交（见 manual/developer-guide/zh-CN/domain-model.md §规划、财务与计算配置； manual/developer-guide/zh-CN/ARCHITECTURE_CONSTITUTION.md §4.4 assembly）
     pid = _create_project(client, eng_id, name="预检门禁项目")
     resp = client.post(f"/api/projects/{pid}/validation/run", headers=_h(client, eng_id))
     assert resp.status_code == 200, resp.text
     report = resp.json()["report"]
     assert report["blocks_submit"] is True
-    assert any(d["code"] == "VALID-FIN-001" for d in report["diagnostics"])
+    codes = {d["code"] for d in report["diagnostics"]}
+    assert {"VALID-MODEL-001", "VALID-DATA-001", "VALID-MODEL-002"} <= codes
     assert resp.json()["stored"]["object_id"] > 0  # 报告已持久化为内容寻址对象
 
     # 全链路准备(含基准确认)
@@ -701,6 +703,43 @@ def test_task_submit_snapshot_preguard(client: TestClient, db: Session) -> None:
     task = _get_task(client, eng_id, ctx["project_id"], task_id)
     assert task["status"] == "running", task
     assert worker_app.verify_lease(db, claim.attempt_id, claim.lease_token) is not None
+
+
+# ---------------------------------------------------------------------------
+# 测试 1a-2: 0.15 S0 — 完整输入无需旧基准确认审计即可提交
+# ---------------------------------------------------------------------------
+
+
+def test_submit_without_legacy_confirm_audit(client: TestClient, db: Session) -> None:
+    """0.15 S0 入口修复: 未调用旧 baseline-confirm 审计的完整输入可提交。
+
+    评价确认保留在计算提交边界(类型化校验, 服务端记录确认人/时间并冻结);
+    预检与提交都不读取旧确认审计证据。评价缺失仍拒绝(400 TASK-REQ-015)。
+    """
+    eng_id = _seed_engineer_direct(client, db)
+    ctx = _prepare_project(client, db, eng_id, confirm_baseline=False)
+    pid = ctx["project_id"]
+
+    task_id, status_code = _submit_calc_task(
+        client, eng_id, pid, idempotency_key="it-s0-no-confirm",
+        config_revision=ctx["config_revision"],
+    )
+    assert status_code == 201
+    task = _get_task(client, eng_id, pid, task_id)
+    assert task["status"] == "queued"
+    assert task["calc_snapshot_id"] is not None
+
+    # 评价缺失仍拒绝(提交边界类型化校验, 与旧确认审计无关)
+    resp = client.post(
+        f"/api/projects/{pid}/tasks",
+        json={
+            "task_type": "calc", "idempotency_key": "it-s0-no-eval",
+            "config": {"config_revision": ctx["config_revision"]},
+        },
+        headers=_h(client, eng_id),
+    )
+    assert resp.status_code == 400, resp.text
+    assert resp.json()["error"]["code"] == "TASK-REQ-015"
 
 
 # ---------------------------------------------------------------------------

@@ -17,14 +17,14 @@ import type {
 
 /** 已登记 Profile 列表。 */
 export async function listFinanceProfiles(): Promise<FinanceProfileListDto> {
-  return request<FinanceProfileListDto>('/finance-profiles/')
+  return request<FinanceProfileListDto>('/finance-profiles')
 }
 
 /** 登记地区 Profile(全文正式格式, 按 id 复用)。 */
 export async function registerFinanceProfile(
   doc: Record<string, unknown>,
 ): Promise<FinanceProfileEnvelopeDto> {
-  return request<FinanceProfileEnvelopeDto>('/finance-profiles/', {
+  return request<FinanceProfileEnvelopeDto>('/finance-profiles', {
     method: 'POST',
     body: { finance_profile: doc },
   })

@@ -1,10 +1,11 @@
 """项目校验用例(Wave 2 W2-A: application/validations)。
 
-U07 项目校验流程（旧 ``iesplan.services.validation`` 已删除；计算前完整预检
-与财务基准确认）：
+U07 项目校验流程（旧 ``iesplan.services.validation`` 已删除；计算前完整预检）：
 - ``validate_project``（聚合模型完整性/参数变量/数据绑定与质量/配置兼容与
-  IRR 硬约束/财务基准确认/计算就绪，一次返回全部诊断）；
-- ``mark_baseline_confirmed``（财务基准确认审计追加）；
+  IRR 硬约束/计算就绪，一次返回全部诊断）；
+- ``mark_baseline_confirmed``（财务基准确认审计追加，仅供独立审计与评价确认
+  流程使用；预检门禁不要求先调用该确认接口——评价确认在计算提交边界
+  类型化校验并冻结，见 application.tasks.submissions）；
 - ``store_validation_report`` / ``get_latest_validation_report``
   （校验报告对象存储持久化与读取）。
 
@@ -73,7 +74,6 @@ VALID_CONFIG_NOT_SAVED = "VALID-CONFIG-001"  # 计算配置未保存(无默认�
 VALID_DATA_NO_BINDING = "VALID-DATA-001"  # 未绑定任何数据集版本
 VALID_DATA_VERSION_INVALID = "VALID-DATA-002"  # 数据集版本质量阻断
 VALID_DATA_BINDING_BROKEN = "VALID-DATA-004"  # 绑定的版本缺失/已删除/不属于本项目
-VALID_FIN_NO_CONFIRM = "VALID-FIN-001"  # 缺少财务基准确认证据
 VALID_READY_NOT_ASSEMBLABLE = "VALID-READY-001"  # 计算快照不可组装
 
 
@@ -89,7 +89,6 @@ def _register_diag_codes() -> None:
         VALID_DATA_NO_BINDING: "项目未绑定任何数据集版本",
         VALID_DATA_VERSION_INVALID: "所选数据集版本存在阻断性质量问题",
         VALID_DATA_BINDING_BROKEN: "绑定的数据集版本缺失/已删除或不属于本项目",
-        VALID_FIN_NO_CONFIRM: "缺少财务基准确认证据(架构宪法 §16 安全与审计)",
         VALID_READY_NOT_ASSEMBLABLE: "计算快照不可组装",
     }
     for code, desc in codes.items():
@@ -102,7 +101,6 @@ def _register_diag_codes() -> None:
         VALID_DATA_NO_BINDING: "ies.diag.valid.data_no_binding",
         VALID_DATA_VERSION_INVALID: "ies.diag.valid.data_version_invalid",
         VALID_DATA_BINDING_BROKEN: "ies.diag.valid.data_binding_broken",
-        VALID_FIN_NO_CONFIRM: "ies.diag.valid.fin_no_confirm",
         VALID_READY_NOT_ASSEMBLABLE: "ies.diag.valid.ready_not_assemblable",
     }.items():
         diag_mod.DIAG_MESSAGE_KEYS.setdefault(code, key)
@@ -114,7 +112,6 @@ def _register_diag_codes() -> None:
         VALID_DATA_NO_BINDING: "ies.fix.valid.data_bind",
         VALID_DATA_VERSION_INVALID: "ies.fix.valid.data_fix_version",
         VALID_DATA_BINDING_BROKEN: "ies.fix.valid.data_fix_binding",
-        VALID_FIN_NO_CONFIRM: "ies.fix.valid.fin_confirm",
         VALID_READY_NOT_ASSEMBLABLE: "ies.fix.valid.ready_check",
     }.items():
         diag_mod.DIAG_FIX_HINT_KEYS.setdefault(code, hint)
@@ -198,7 +195,9 @@ def validate_project(db: Session, project_id: int, include_data: bool = True) ->
     """执行项目完整预检(REQ-CALC-007 校验门禁), 一次返回全部问题。
 
     聚合检查: 模型完整性/拓扑、参数与变量、数据绑定与质量、配置兼容与 IRR 硬约束、
-    财务基准确认、计算就绪(快照可组装)。
+    计算就绪(快照可组装)。财务基准确认不在预检门禁内: 评价确认存在于
+    计算提交边界(类型化校验并冻结), 旧 baseline-confirm 审计证据的重复
+    阻断已移除(0.15 S0), 独立确认接口保留审计用途。
 
     参数:
         db: 数据库会话。
@@ -215,7 +214,6 @@ def validate_project(db: Session, project_id: int, include_data: bool = True) ->
     _check_config(db, project_id, diags)
     if include_data:
         _check_data(db, project, diags)
-    _check_financial_baseline(db, project, diags)
     _check_readiness(project, diags)
     # 统一标记: 阻断错误保持阻断(与严重度一致), 警告不降级也不升级。
     # Diagnostic 为深度不可变类型, 上下文/阻断标记经 replace 生成新对象。
@@ -786,63 +784,7 @@ def _quality_blocking_codes(report: dict) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
-# 检查项 e: 财务基准确认(确认人 + 确认内容完整性校验)
-# ---------------------------------------------------------------------------
-
-
-def _latest_baseline_evidence(db: Session, project_id: int) -> AuditRecord | None:
-    """最近一次财务基准确认证据(追加式审计, 按 id 倒序取最新)。"""
-    rows = audit_domain.list_entries(
-        db,
-        entity_type="project",
-        entity_id=project_id,
-        action=BASELINE_ACTION,
-        limit=1,
-    )
-    return rows[0] if rows else None
-
-
-def _check_financial_baseline(
-    db: Session, project: ProjectRecord, diags: list[Diagnostic]
-) -> None:
-    """财务基准确认证据检查(架构宪法 §16 安全与审计): 确认证据存在且确认人
-    齐全即通过。
-
-    注: 确认内容与当前假设的一致性比对已随旧形态经济参数移除而暂停;
-    评价输入(评价年限/折现率)以后续独立用户确认流程重建该比对, 此处不以
-    空假设伪造过期警告。
-    """
-    loc = {
-        "object_type": "project",
-        "object_id": str(project.id),
-        "field": "baseline_confirmation",
-    }
-    evidence = _latest_baseline_evidence(db, project.id)
-    if evidence is None:
-        diags.append(
-            make_diag(
-                VALID_FIN_NO_CONFIRM,
-                severity=SEVERITY_ERROR,
-                params={"project_id": project.id, "reason_code": "no_evidence"},
-                location=loc,
-            )
-        )
-        return
-    after = evidence.after or {}
-    if not after.get("confirmed_by"):
-        diags.append(
-            make_diag(
-                VALID_FIN_NO_CONFIRM,
-                severity=SEVERITY_ERROR,
-                params={"project_id": project.id, "reason_code": "incomplete_evidence"},
-                location=loc,
-            )
-        )
-        return
-
-
-# ---------------------------------------------------------------------------
-# 检查项 f: 计算就绪(快照可组装)
+# 检查项 e: 计算就绪(快照可组装)
 # ---------------------------------------------------------------------------
 
 
