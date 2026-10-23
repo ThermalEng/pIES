@@ -1586,6 +1586,7 @@ class FinanceOverrides:
     profile_ref: Mapping[str, str]
     finance_types: Mapping[str, Mapping[str, object]] = field(default_factory=lambda: MappingProxyType({}))
     energy_prices: Mapping[str, Mapping[str, object]] = field(default_factory=lambda: MappingProxyType({}))
+    demand_charges: Mapping[str, Mapping[str, object]] = field(default_factory=lambda: MappingProxyType({}))
     tax_rules: Mapping[str, Mapping[str, object]] = field(default_factory=lambda: MappingProxyType({}))
     credit_pools: Mapping[str, Mapping[str, object]] = field(default_factory=lambda: MappingProxyType({}))
     #: 解析时绑定的 Profile id（合并器据此判定覆盖权限是否已核对；不序列化）。
@@ -1607,6 +1608,7 @@ class FinanceOverrides:
         object.__setattr__(self, "profile_ref", MappingProxyType(dict(sorted(self.profile_ref.items()))))
         object.__setattr__(self, "finance_types", MappingProxyType(dict(sorted(self.finance_types.items()))))
         object.__setattr__(self, "energy_prices", MappingProxyType(dict(sorted(self.energy_prices.items()))))
+        object.__setattr__(self, "demand_charges", MappingProxyType(dict(sorted(self.demand_charges.items()))))
         object.__setattr__(self, "tax_rules", MappingProxyType(dict(sorted(self.tax_rules.items()))))
         object.__setattr__(self, "credit_pools", MappingProxyType(dict(sorted(self.credit_pools.items()))))
         object.__setattr__(
@@ -1626,6 +1628,8 @@ class FinanceOverrides:
             d["finance_types"] = _freeze_overrides(self.finance_types)
         if self.energy_prices:
             d["energy_prices"] = _freeze_overrides(self.energy_prices)
+        if self.demand_charges:
+            d["demand_charges"] = _freeze_overrides(self.demand_charges)
         if self.tax_rules:
             d["tax_rules"] = _thaw(self.tax_rules)
         if self.credit_pools:
@@ -1650,7 +1654,7 @@ class FinanceOverrides:
         for forbidden in ("profile", "currency", "base_year", "price_basis", "cost_method", "taxes"):
             if forbidden in mapping:
                 raise FinanceTripletError(f"FinanceOverrides 禁止出现字段: {forbidden!r}")
-        known_overrides = {"schema", "schema_version", "profile_ref", "finance_types", "energy_prices",
+        known_overrides = {"schema", "schema_version", "profile_ref", "finance_types", "energy_prices", "demand_charges",
                            "tax_rules", "credit_pools"}
         unknown = set(mapping) - known_overrides
         if unknown:
@@ -1701,6 +1705,22 @@ class FinanceOverrides:
                 raise FinanceTripletError(f"energy_prices.{price_id} 必须为非空字典")
             energy_prices[price_id] = _validate_price_override(price_id, price_val, profile)
 
+        demand_raw = _optional_section(mapping, "demand_charges", "demand_charges")
+        demand_charges: dict[str, Mapping[str, object]] = {}
+        for charge_id, patch in demand_raw.items():
+            charge_id = _validate_local_id(charge_id, "charge_id")
+            if not isinstance(patch, Mapping) or set(patch) != {"rate"}:
+                raise FinanceTripletError(f"demand_charges.{charge_id} 只允许覆盖 rate 原子")
+            if profile is not None and charge_id not in profile.demand_charges:
+                raise FinanceTripletError(f"demand_charges.{charge_id} 不允许新增费项")
+            rate = Money.from_dict(patch["rate"], field=f"demand_charges.{charge_id}.rate")
+            if _dims(rate.unit) != {"currency": 1, "power": -1}:
+                raise FinanceTripletError(f"demand_charges.{charge_id}.rate 必须为货币/功率")
+            if profile is not None:
+                base = profile.demand_charges[charge_id].rate
+                _check_same_unit(rate.unit, base.unit, f"demand_charges.{charge_id}.rate")
+            demand_charges[charge_id] = {"rate": rate.to_dict()}
+
         tax_raw = _optional_section(mapping, "tax_rules", "tax_rules")
         tax_rules: dict[str, Mapping[str, object]] = {}
         parsed_rules: dict[str, dict] = {}
@@ -1731,6 +1751,7 @@ class FinanceOverrides:
             profile_ref=profile_ref,
             finance_types=finance_types,
             energy_prices=energy_prices,
+            demand_charges=demand_charges,
             tax_rules=tax_rules,
             credit_pools=credit_pools,
             _bound_profile=profile.profile_id if profile is not None else "",
@@ -1961,18 +1982,18 @@ def _check_rule_override_shape(rule_id: str, out: Mapping[str, object], prof_rul
     """
     field = f"tax_rules.{rule_id}"
     if isinstance(prof_rule, VatRule):
-        allowed = {"in_tax", "out_tax", "om_input_tax", "maintenance_input_tax"}
+        allowed = {"in_tax", "out_tax", "om_input_tax", "maintenance_input_tax", "demand_input_tax"}
         unknown = set(out) - allowed
         if unknown:
             raise FinanceTripletError(f"{field} 只允许覆盖已有参数: {sorted(unknown)}")
-        for key in ("in_tax", "out_tax", "om_input_tax"):
+        for key in ("in_tax", "out_tax", "om_input_tax", "demand_input_tax"):
             if key not in out:
                 continue
             raw = out[key]
             if not isinstance(raw, Mapping):
-                raise FinanceTripletError(f"{field}.{key} 必须是 price/for 键控的字典")
+                raise FinanceTripletError(f"{field}.{key} 必须是 price/for/charge 键控的字典")
             base_entries = {
-                getattr(item, "price", getattr(item, "for_path", None)): item
+                getattr(item, "price", getattr(item, "for_path", getattr(item, "charge", None))): item
                 for item in getattr(prof_rule, key)
             }
             for target, patch in raw.items():
@@ -2058,7 +2079,7 @@ def _parse_rule_patch_values(rule_id: str, patch: Mapping, rule: TaxRule) -> dic
     field = f"tax_rules.{rule_id}"
     values: dict = {}
     if isinstance(rule, VatRule):
-        for key in ("in_tax", "out_tax", "om_input_tax"):
+        for key in ("in_tax", "out_tax", "om_input_tax", "demand_input_tax"):
             if key not in patch:
                 continue
             atoms: dict = {}
@@ -2487,6 +2508,15 @@ def merge_effective(profile: FinanceProfile, overrides: FinanceOverrides | None)
                 series_meta=SeriesMeta.from_dict(price_override_dict["series_meta"]),
             )
 
+    # ---- demand_charges: only existing Profile rates may be overridden ----
+    merged_demand = dict(profile.demand_charges)
+    for charge_id, patch in sorted(overrides.demand_charges.items()):
+        if charge_id not in profile.demand_charges:
+            raise FinanceTripletError(f"demand_charges.{charge_id} 不允许新增费项")
+        rate = Money.from_dict(patch["rate"], field=f"demand_charges.{charge_id}.rate")
+        _check_same_unit(rate.unit, profile.demand_charges[charge_id].rate.unit, f"demand_charges.{charge_id}.rate")
+        merged_demand[charge_id] = DemandCharge(rate=rate)
+
     # ---- taxes: 税目只属于 Profile, 原样继承 ----
     merged_taxes: dict[str, TaxEntry] = dict(profile.taxes)
 
@@ -2529,6 +2559,7 @@ def merge_effective(profile: FinanceProfile, overrides: FinanceOverrides | None)
         currency=profile.currency,
         energy_prices=profile.energy_prices,
         finance_types=profile.finance_types,
+        demand_charges=merged_demand,
         taxes=profile.taxes,
         credit_pools=merged_pools,
         tax_rules=merged_rules,
@@ -2544,6 +2575,7 @@ def merge_effective(profile: FinanceProfile, overrides: FinanceOverrides | None)
         cost_method=profile.cost_method,
         finance_types=merged_ft,
         energy_prices=merged_ep,
+        demand_charges=merged_demand,
         taxes=merged_taxes,
         credit_pools=merged_pools,
         tax_rules=merged_rules,
@@ -2598,7 +2630,8 @@ def _apply_rule_patch(rule_id: str, rule: TaxRule, values: Mapping) -> TaxRule:
         in_tax = list(rule.in_tax)
         out_tax = list(rule.out_tax)
         om_input_tax = list(rule.om_input_tax)
-        for key, base in (("in_tax", in_tax), ("out_tax", out_tax), ("om_input_tax", om_input_tax)):
+        demand_input_tax = list(rule.demand_input_tax)
+        for key, base in (("in_tax", in_tax), ("out_tax", out_tax), ("om_input_tax", om_input_tax), ("demand_input_tax", demand_input_tax)):
             for target, atom_values in values.get(key, {}).items():
                 base[_rule_entry_index(base, target, field, key)] = _patched_entry(
                     base, target, atom_values, field, key)
@@ -2608,6 +2641,7 @@ def _apply_rule_patch(rule_id: str, rule: TaxRule, values: Mapping) -> TaxRule:
             in_tax=tuple(in_tax),
             out_tax=tuple(out_tax),
             om_input_tax=tuple(om_input_tax),
+            demand_input_tax=tuple(demand_input_tax),
             maintenance_input_tax=values.get(
                 "maintenance_input_tax", rule.maintenance_input_tax),
             credit_pool=rule.credit_pool,
@@ -2650,6 +2684,7 @@ def _apply_rule_patch(rule_id: str, rule: TaxRule, values: Mapping) -> TaxRule:
             rate=values.get("rate", rule.rate),
             revenue=rule.revenue,
             energy_cost=rule.energy_cost,
+            demand_cost=rule.demand_cost,
             annual_om=rule.annual_om,
             variable_om=rule.variable_om,
             deductible_maintenance=deductible_maintenance,
