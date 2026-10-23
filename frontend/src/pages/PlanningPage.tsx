@@ -219,6 +219,11 @@ export default function PlanningPage() {
         </Button>
       )}
 
+      {/* A saved/reloaded revision replaces the entire form. Prevent edits in flight. */}
+      <fieldset
+        disabled={saving || reloading}
+        style={{ border: 0, margin: 0, padding: 0, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 'var(--ies-space-4)' }}
+      >
       <Card title={pt('ies.planning.objective')}>
         <FormField label={pt('ies.planning.sense')} htmlFor="planning-sense" required>
           <Select id="planning-sense" value={sense} onChange={(e) => setSense(e.target.value as Sense)}>
@@ -312,6 +317,7 @@ export default function PlanningPage() {
           }])}>{pt('ies.planning.add_constraint')}</Button>
         </div>
       </Card>
+      </fieldset>
     </div>
   )
 }
