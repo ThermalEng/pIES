@@ -1,8 +1,7 @@
 /** Assembly binding GUI transport: only the existing project public draft contract. */
 import { request } from '../../shared/http'
 import { putDraftCommands } from '../projects'
-import type { ProjectViewResponseDto, DraftContentDeviceDto } from '../projects'
-import type { CostBindingDto, TariffBindingDto } from './contracts'
+import type { ProjectViewResponseDto, DraftContentDeviceDto, CostBindingDto, TariffBindingDto } from '../projects'
 
 export interface BindingDraft {
   revision: number
