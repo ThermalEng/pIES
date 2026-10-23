@@ -50,6 +50,7 @@ TOP_SECTIONS: tuple[str, ...] = (
     "finance",
     "finance_binding",
     "tariff_bindings",
+    "demand_bindings",
     "planning",
     "outputs",
     "extensions",
@@ -319,6 +320,7 @@ class _DocBuilder:
         self._build_finance_binding(tree.get("finance_binding"), "finance_binding")
         self._build_connections(tree.get("connections"), "connections")
         self._build_tariff_bindings(tree.get("tariff_bindings"), "tariff_bindings")
+        self._build_demand_bindings(tree.get("demand_bindings"), "demand_bindings")
         self._build_planning(tree.get("planning"), "planning")
         self._build_outputs(tree.get("outputs"), "outputs")
         self._build_extensions(tree.get("extensions"), "extensions")
@@ -700,6 +702,24 @@ class _DocBuilder:
                         ASM_SYN_PARSE, f"{field}.{binding_id}.{key}",
                         {"reason": "unknown_key", "key": key},
                     )
+
+    def _build_demand_bindings(self, value: Any, field: str) -> None:
+        """billing_id → explicit demand charge and metered power interface."""
+        m = self._require_map(value, field)
+        if m is None:
+            return
+        for billing_id, raw in m.items():
+            self._local_id(billing_id, f"{field}.{billing_id}")
+            entry = self._require_map(raw, f"{field}.{billing_id}")
+            if entry is None:
+                continue
+            for key in ("charge", "instance", "interface"):
+                self._str(entry, key, f"{field}.{billing_id}.{key}", required=True)
+            for key in set(entry) - {"charge", "instance", "interface"}:
+                self._diag(
+                    ASM_SYN_PARSE, f"{field}.{billing_id}.{key}",
+                    {"reason": "unknown_key", "key": key},
+                )
 
     def _build_planning(self, value: Any, field: str) -> None:
         """planning: {objective: {sense, expression}, variables?, constraints?}。
