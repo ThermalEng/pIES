@@ -314,7 +314,7 @@ export default function EconomicBindingsPage() {
                 {cost.mode === 'costed' && <>
                   <FormField label={pt('ies.bindings.finance_type')} htmlFor={'binding-finance-' + cost.instance} required>
                     <Select id={'binding-finance-' + cost.instance} value={cost.financeType}
-                      onChange={(e) => updateCost(cost.instance, { financeType: e.target.value, drivers: [] })}>
+                      onChange={(e) => updateCost(cost.instance, { financeType: e.target.value })}>
                       <option value="">{pt('ies.bindings.choose')}</option>
                       {cost.financeType && !Object.hasOwn(catalog?.financeTypes ?? {}, cost.financeType) &&
                         <option value={cost.financeType}>{cost.financeType}</option>}
