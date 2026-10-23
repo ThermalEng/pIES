@@ -1390,6 +1390,17 @@ def confirm_import(db: Session, user: UserRecord, proposal_id: int) -> ProjectRe
             if original in dataset_id_map:
                 binding["dataset_version_id"] = dataset_id_map[original]
                 binding.pop("dataset_id", None)
+        # 设备实例显式来源声明(params[predefined] 字典形态)同样引用数据集版本;
+        # 导入重建版本后按映射改写, 保持页面编辑/快照/导入导出一致事实。
+        for device in (content.get("model") or {}).get("devices") or []:
+            params = device.get("params") if isinstance(device, dict) else None
+            if not isinstance(params, dict):
+                continue
+            for decl in params.values():
+                if isinstance(decl, dict):
+                    original = decl.get("dataset_version_id")
+                    if original in dataset_id_map:
+                        decl["dataset_version_id"] = dataset_id_map[original]
         content.pop("applied_commands", None)  # 命令簿记不外泄
         return content
 

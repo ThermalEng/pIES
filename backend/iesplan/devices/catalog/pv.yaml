@@ -1,5 +1,5 @@
 schema: ies.device-model
-schema_version: "2.0.0"
+schema_version: "2.1.0"
 device:
   id: ies.device.pv
   names:
@@ -35,9 +35,6 @@ properties:
 interfaces:
   solar_irradiance:
     type: predefined
-    source:
-      mode: data_repeat
-      data_ref: data/solar_irradiance.csv
     carrier: solar
     unit: W/m2
     valid_range:
@@ -45,9 +42,6 @@ interfaces:
       maximum: 2000
   ambient_temperature:
     type: predefined
-    source:
-      mode: data_repeat
-      data_ref: data/ambient_temperature.csv
     carrier: environment
     unit: "°C"
     valid_range:

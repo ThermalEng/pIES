@@ -39,7 +39,7 @@ from iesplan.devices.contracts2 import (
 from iesplan.devices.parser2 import ParseError, parse_device_model_v2, parse_template_inputs
 
 #: 实例化算法标识，只用于回执追溯；不是模型类型或 schema_version。
-INSTANTIATOR_VERSION = "ies.device-model.instantiator@1.0.0"
+INSTANTIATOR_VERSION = "ies.device-model.instantiator@2.0.0"
 
 #: 允许的叶子路径第一段 → 模型容器（用于“添加”场景与非法路径拒绝）
 _ALLOWED_FIRST_SEGMENTS = ("properties", "interfaces", "equations")
@@ -120,29 +120,61 @@ def _validate_leaf_value(spec: TemplateInputSpec, value: Any) -> None:
             raise ParseError(f"inputs.{spec.path} 期望 string，收到 {type(value).__name__}")
     elif spec.type in INPUT_DATA_TYPES:
         if not isinstance(value, str) or not value.strip():
-            raise ParseError(f"inputs.{spec.path} 期望非空 data_ref 字符串")
+            raise ParseError(f"inputs.{spec.path} 期望非空 CSV 相对路径")
+        path = value.strip()
+        # 安全相对路径：禁止绝对路径、遍历、URL、反斜杠
+        if path.startswith("/") or path.startswith("\\") or "://" in path or ".." in path.split("/"):
+            raise ParseError(f"inputs.{spec.path} 必须是项目目录内相对 .csv 路径")
+        if not path.lower().endswith(".csv"):
+            raise ParseError(f"inputs.{spec.path} 必须指向 .csv 文件")
+    elif spec.type == "array":
+        if not isinstance(value, list):
+            raise ParseError(f"inputs.{spec.path} 期望数组，收到 {type(value).__name__}")
+        item = spec.children[0] if spec.children else None
+        if item is None:
+            raise ParseError(f"inputs.{spec.path} 缺少 items 元素声明")
+        for index, element in enumerate(value):
+            _validate_element(item, element, f"{spec.path}[{index}]")
 
 
-def _validate_source_mode(leaf: TemplateInputSpec, model: Mapping[str, Any]) -> None:
-    """data_repeat/data_predict 叶子要求模型目标 source.mode 与叶子类型一致。"""
-    segs = leaf.path.split(".")
-    node: Any = model
-    try:
-        for seg in segs[:-1]:
-            node = node[seg]
-    except (KeyError, TypeError):
-        return  # 目标不存在：添加场景不检查
-    if not isinstance(node, Mapping) or not isinstance(node.get("source"), Mapping):
+def _validate_element(spec: TemplateInputSpec, value: Any, label: str) -> None:
+    """数组 items 元素校验（整体提交, 逐元素核对; 不形成额外 [] 输入）。"""
+    if spec.type == "object":
+        if not isinstance(value, Mapping):
+            raise ParseError(f"inputs.{label} 期望对象")
+        declared = {child.path.rsplit(".", 1)[-1]: child for child in spec.children}
+        extra = sorted(key for key in value if key not in declared)
+        if extra:
+            raise ParseError(f"inputs.{label} 存在未声明字段: {extra}")
+        for key, child in declared.items():
+            if key not in value:
+                raise ParseError(f"inputs.{label}.{key} 为必填字段")
+            _validate_element(child, value[key], f"{label}.{key}")
         return
-    mode = node["source"].get("mode")
-    if mode is not None and mode != leaf.type:
-        raise ParseError(
-            f"inputs.{leaf.path} 声明 {leaf.type}，但模型 source.mode 为 {mode!r}"
-        )
+    if spec.type == "array":
+        if not isinstance(value, list):
+            raise ParseError(f"inputs.{label} 期望数组")
+        item = spec.children[0] if spec.children else None
+        if item is None:
+            raise ParseError(f"inputs.{label} 缺少 items 元素声明")
+        for index, element in enumerate(value):
+            _validate_element(item, element, f"{label}[{index}]")
+        return
+    leaf = TemplateInputSpec(
+        path=label, type=spec.type, unit=spec.unit, valid_range=spec.valid_range
+    )
+    _validate_leaf_value(leaf, value)
 
 
 def _apply_leaf(leaf: TemplateInputSpec, model: dict[str, Any], user_value: Any) -> None:
-    """把叶子值写入模型目标位置（覆盖或添加）。"""
+    """把叶子值写入模型目标位置（覆盖或添加）。
+
+    数据叶子（data_repeat/data_full/data_predict）的 CSV 路径不写入最终模型
+    （设备模型为纯技术），仅做路径校验；绑定记录由调用方在回执中追溯。
+    """
+    if leaf.type in INPUT_DATA_TYPES:
+        _validate_leaf_value(leaf, user_value)
+        return
     segs = leaf.path.split(".")
     target_segs, key = segs[:-1], segs[-1]
     node: dict[str, Any] = model
@@ -168,10 +200,15 @@ def _apply_leaf(leaf: TemplateInputSpec, model: dict[str, Any], user_value: Any)
 
 
 def _merge_tree(leaves: tuple[TemplateInputSpec, ...], template_raw: Mapping[str, Any],
-                inputs: Mapping[str, Any]) -> dict[str, Any]:
-    """把用户 inputs 按叶子路径合并到模板模型副本中（覆盖或添加）。"""
+                inputs: Mapping[str, Any]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """把用户 inputs 按叶子路径合并到模板模型副本中（覆盖或添加）。
+
+    返回 (merged, data_bindings)：数据叶子的 CSV 路径不写入模型，但记录为
+    绑定（interface → mode + 相对路径）供回执追溯。
+    """
     merged = json.loads(json.dumps(template_raw))  # 深拷贝为可变结构
     model_root: dict[str, Any] = merged
+    data_bindings: list[dict[str, Any]] = []
     for leaf in leaves:
         if leaf.path.split(".")[0] not in _ALLOWED_FIRST_SEGMENTS:
             raise ParseError(
@@ -180,16 +217,27 @@ def _merge_tree(leaves: tuple[TemplateInputSpec, ...], template_raw: Mapping[str
             )
         # 用户提交树中按叶子路径取用户值
         user_value: Any = inputs
+        found = True
         for seg in leaf.path.split("."):
             if not isinstance(user_value, Mapping) or seg not in user_value:
                 user_value = None
+                found = False
                 break
             user_value = user_value[seg]
-        if user_value is None:
-            continue  # 用户未提交该叶子：保持模型原样
-        _validate_source_mode(leaf, model_root)
+        if not found:
+            # 2.1.0: 所有声明叶子（含 array 整体）必填, 不接受 default 或隐式回退。
+            raise ParseError(f"inputs.{leaf.path} 为必填输入，缺少用户值")
+        if leaf.type in INPUT_DATA_TYPES:
+            _validate_leaf_value(leaf, user_value)
+            # 记录实例化绑定（CSV 路径不进入最终纯技术模型）
+            data_bindings.append({
+                "interface": leaf.path.split(".")[-1] if leaf.path.startswith("interfaces.") else leaf.path,
+                "mode": leaf.type,
+                "path": str(user_value).strip(),
+            })
+            continue
         _apply_leaf(leaf, model_root, user_value)
-    return model_root
+    return model_root, data_bindings
 
 def instantiate_template(
     template_raw: Mapping[str, Any],
@@ -227,11 +275,11 @@ def instantiate_template(
 
     # 3) 递归合并（以模板声明树为准，覆盖/新增到模型）
     try:
-        merged = _merge_tree(template_inputs.leaves, template_raw, inputs)
+        merged, data_bindings = _merge_tree(template_inputs.leaves, template_raw, inputs)
     except ParseError as exc:
         return None, _diag_list(file, str(exc))
 
-    # 4) 删除顶层 inputs，输出普通 2.0.0 模型
+    # 4) 删除顶层 inputs，输出普通 2.1.0 模型
     merged.pop("inputs", None)
 
     # 5) 最终模型必须重新通过完整 2.0.0 校验
@@ -252,6 +300,7 @@ def instantiate_template(
                 "instantiator": INSTANTIATOR_VERSION,
                 "schema": SCHEMA_ID,
                 "schema_version": SCHEMA_VERSION,
+                "data_bindings": data_bindings,
             },
         ),
         [],

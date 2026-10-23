@@ -47,7 +47,7 @@ PASSWORD = "Test12345"
 
 TEMPLATE_YAML = """
 schema: ies.device-model
-schema_version: "2.0.0"
+schema_version: "2.1.0"
 device: {id: acme.device.electric_load, names: {zh-CN: 电负荷, en-US: Electric Load}}
 inputs:
   properties:
@@ -56,9 +56,8 @@ inputs:
         type: number
         unit: kW
         valid_range: {minimum: 0, maximum: 1000}
-        default: 100
     is_switchable:
-      value: {type: boolean, default: false}
+      value: {type: boolean}
 properties:
   cop: {value: 3.0, unit: "1", valid_range: {minimum: 1, maximum: 10}}
 interfaces:
@@ -67,7 +66,6 @@ interfaces:
     carrier: electricity
     unit: kW
     valid_range: {minimum: 0, maximum: null}
-    source: {mode: constant, value: 0}
 equations:
   variables: {}
   relations: []
@@ -75,7 +73,7 @@ equations:
 
 #: 无顶层 inputs 的普通模型(模板必须声明 inputs, 用于非法样例)
 NO_INPUTS_YAML = TEMPLATE_YAML.replace(
-    "inputs:\n  properties:\n    peak_power_kw:\n      value:\n        type: number\n        unit: kW\n        valid_range: {minimum: 0, maximum: 1000}\n        default: 100\n    is_switchable:\n      value: {type: boolean, default: false}\n",
+    "inputs:\n  properties:\n    peak_power_kw:\n      value:\n        type: number\n        unit: kW\n        valid_range: {minimum: 0, maximum: 1000}\n    is_switchable:\n      value: {type: boolean}\n",
     "",
 )
 
@@ -337,7 +335,7 @@ def test_publish_revision_immutable_and_idempotent(client: TestClient, db_sessio
     assert body["duplicate"] is False
     rev = body["revision"]
     assert rev["revision"] == 1
-    assert rev["schema_version"] == "2.0.0"
+    assert rev["schema_version"] == "2.1.0"
     # 模板状态推进
     detail = client.get(f"/api/model-templates/{tpl['template_id']}", headers=headers).json()
     assert detail["template"]["status"] == "published"

@@ -47,6 +47,24 @@ const TEXTS: Record<string, Entry> = {
   },
   'save.conflict_reload': { zh: '加载服务器版本', en: 'Load server version' },
 
+  // 预定义接口来源(实例显式事实; 设备模型不携带项目来源)
+  'source.section': { zh: '预定义接口来源', en: 'Predefined interface source' },
+  'source.hint': {
+    zh: '来源按设备实例声明; 设备模型不携带项目来源。',
+    en: 'Sources are declared per device instance; the device model carries none.',
+  },
+  'source.mode_none': { zh: '未设置', en: 'Not set' },
+  'source.constant_value': { zh: '常量值', en: 'Constant value' },
+  'source.version_choose': { zh: '选择数据集版本', en: 'Choose dataset version' },
+  'source.version_empty': { zh: '项目暂无数据集版本', en: 'No dataset versions in this project' },
+  'source.target_type': { zh: '预测目标类型', en: 'Prediction target type' },
+  'source.loading': { zh: '数据集版本加载中…', en: 'Loading dataset versions…' },
+  'source.load_failed': { zh: '数据集版本加载失败', en: 'Failed to load dataset versions' },
+  'source.retry': { zh: '重试', en: 'Retry' },
+  'source.version_saved': { zh: '已保存版本 {id}', en: 'Saved version {id}' },
+  'source.value_required': { zh: '请输入有限常量值', en: 'Enter a finite constant value' },
+  'load.created_missing': { zh: '设备已保存，但读取结果中没有该设备，请重新加载', en: 'Device saved but absent from the read result. Reload the model.' },
+
   // 端口与连接
   'port.solar': { zh: '太阳辐射', en: 'Solar' },
   'port.direction_out': { zh: '输出', en: 'Output' },

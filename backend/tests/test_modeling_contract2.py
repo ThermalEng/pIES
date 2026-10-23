@@ -18,7 +18,6 @@ from iesplan.devices.contracts2 import (
     EquationVariable,
     InterfaceSpec,
     PropertySpec,
-    SourceSpec,
 )
 from iesplan.devices.parser2 import parse_device_model_v2
 from iesplan.modeling.contract2 import (
@@ -64,17 +63,12 @@ def _make_document(
     }
     ifaces: dict[str, InterfaceSpec] = {}
     for iid, i in (interfaces or {}).items():
-        src = None
-        if i.get("source"):
-            s = i["source"]
-            src = SourceSpec(mode=s["mode"], value=s.get("value"), data_ref=s.get("data_ref"))
         ifaces[iid] = InterfaceSpec(
             id=iid,
             type=i.get("type", "blind"),
             carrier=i.get("carrier", "electricity"),
             unit=i["unit"],
             valid_range=_range(i.get("valid_range")) or (None, None),
-            source=src,
         )
     eq_vars = {
         vid: EquationVariable(
@@ -101,7 +95,7 @@ def _out(name: str, unit: str = "kW", vr=None) -> dict:
 
 HEAT_PUMP = """
 schema: ies.device-model
-schema_version: "2.0.0"
+schema_version: "2.1.0"
 device: {id: acme.device.heat_pump, names: {zh-CN: 热泵, en-US: Heat Pump}}
 properties:
   cop: {value: 3.2, unit: "1", valid_range: {minimum: 1, maximum: 10}}
@@ -118,7 +112,7 @@ equations:
 
 BATTERY = """
 schema: ies.device-model
-schema_version: "2.0.0"
+schema_version: "2.1.0"
 device: {id: acme.device.battery, names: {zh-CN: 电池, en-US: Battery}}
 properties:
   charge_efficiency: {value: 0.95, unit: "1", valid_range: {minimum: 0, maximum: 1}}
@@ -189,7 +183,7 @@ class TestValidContribution:
     def test_relation_without_equations(self):
         text = """
 schema: ies.device-model
-schema_version: "2.0.0"
+schema_version: "2.1.0"
 device: {id: acme.device.minimal, names: {zh-CN: 最小, en-US: Minimal}}
 properties: {}
 interfaces: {}
@@ -227,7 +221,7 @@ equations: {variables: {}, relations: []}
         # 关系按 id 规范化，与声明顺序无关
         text_a = """
 schema: ies.device-model
-schema_version: "2.0.0"
+schema_version: "2.1.0"
 device: {id: acme.device.two, names: {zh-CN: 双关系}}
 properties: {}
 interfaces:

@@ -25,11 +25,11 @@
 import type { DeviceKind, InterfaceDirection } from '../../types'
 
 // ---------------------------------------------------------------------------
-// 模板 inputs(与后端 TemplateInputSpec / device-model-2.0.0.schema.json 对应)
+// 模板 inputs(与后端 TemplateInputSpec / device-model-2.1.0.schema.json 对应)
 // ---------------------------------------------------------------------------
 
-/** 模板 inputs 叶子类型: 标量 + 预定义数据。 */
-export type ModelInputLeafType = 'number' | 'boolean' | 'string' | 'data_repeat' | 'data_predict'
+/** 模板 inputs 叶子类型: 标量 + 预定义数据(含 data_full)。 */
+export type ModelInputLeafType = 'number' | 'boolean' | 'string' | 'data_repeat' | 'data_full' | 'data_predict'
 
 /** 模板 inputs 节点类型(叶子 + 结构容器)。 */
 export type ModelInputNodeType = ModelInputLeafType | 'object' | 'array'
@@ -47,9 +47,6 @@ export interface TemplateInputSpecDto {
   type: ModelInputNodeType
   unit?: string | null
   valid_range?: ValidRangeDto | null
-  default?: number | boolean | string | null
-  /** data_repeat/data_predict 绑定的数据引用(由模板声明, 用户上传临时文件为其提供内容)。 */
-  data_ref?: string | null
   /** object(fields)/array(items) 子声明。 */
   children?: TemplateInputSpecDto[]
 }

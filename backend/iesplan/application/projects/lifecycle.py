@@ -23,6 +23,7 @@ from sqlalchemy.orm import Session
 from iesplan import audit as audit_domain
 from iesplan import dataset as dataset_domain
 from iesplan import identity as identity_domain
+from iesplan import model as model_domain
 from iesplan import project as project_domain
 from iesplan import tasks as tasks_domain
 from iesplan.application.projects.authorization import ensure_access
@@ -50,6 +51,7 @@ from iesplan.project.contracts import (
     ProjectConflictError,
     ProjectRecord,
 )
+from iesplan.storage import get_object
 
 # ---------------------------------------------------------------------------
 # 访问控制（跨域组合授权唯一实现归属 application.projects.authorization；
@@ -400,6 +402,64 @@ def delete_project(
 _COMMAND_HANDLERS: dict[str, Any] = {}
 
 
+def _created_source_bindings(
+    db: Session, content: dict, device_type: str
+) -> dict[str, dict]:
+    """模板保存时记录的数据来源 → 新建实例的显式 params 来源声明。
+
+    只在该设备首次创建时传递(用户可随后在实例来源编辑中修改); 不参与装配/
+    提交/运行时的隐式补齐, 实例 params 是唯一权威。
+    """
+    ref = next(
+        (
+            item
+            for item in content.get("project_models") or []
+            if str(item.get("device_id")) == device_type
+        ),
+        None,
+    )
+    if ref is None:
+        return {}
+    model = model_domain.get_project_model(db, int(ref["id"]))
+    if model is None:
+        return {}
+    import json
+
+    receipt = json.loads(get_object(db, model.receipt_object_id).decode("utf-8"))
+    bindings = receipt.get("data_bindings") if isinstance(receipt, dict) else None
+    if not isinstance(bindings, list):
+        return {}
+    out: dict[str, dict] = {}
+    for item in bindings:
+        if not isinstance(item, dict):
+            continue
+        iface = item.get("interface")
+        mode = item.get("mode")
+        vid = item.get("dataset_version_id")
+        if isinstance(iface, str) and isinstance(mode, str) and isinstance(vid, int):
+            out[iface] = {"mode": mode, "dataset_version_id": vid}
+    return out
+
+
+def _with_created_source_bindings(db: Session, content: dict, cmd: dict) -> dict:
+    """新建实例时把模板已填写的接口/模式/数据集版本落实到 params。"""
+    payload = dict(cmd["payload"])
+    name = payload.get("name")
+    if any(device.get("name") == name for device in content["model"]["devices"]):
+        return cmd
+    device_type = payload.get("device_type")
+    if not isinstance(device_type, str):
+        return cmd
+    bindings = _created_source_bindings(db, content, device_type)
+    if not bindings:
+        return cmd
+    params = dict(payload.get("params") or {})
+    for iface, declaration in bindings.items():
+        params.setdefault(iface, declaration)
+    payload["params"] = params
+    return {**cmd, "payload": payload}
+
+
 def _update_draft(
     db: Session,
     user: UserRecord,
@@ -459,6 +519,7 @@ def _update_draft(
             _validate_dataset_bind(db, project_id, cmd["payload"])
         if cmd.get("type") == "model.upsert_device" and isinstance(cmd.get("payload"), dict):
             _validate_device_type_ref(db, content, cmd["payload"])
+            cmd = _with_created_source_bindings(db, content, cmd)
         result = _apply_command(content, cmd)
         applied[cid] = {"revision": draft.revision + 1, "result": jsonable(result)}
         changed = True
@@ -645,6 +706,30 @@ def _cmd_model_upsert_device(content: dict, payload: dict) -> dict:
     if "position" in payload:
         content["layout"].setdefault("positions", {})[name] = payload["position"]
     return {"device": name, "stored": True}
+
+
+def _cmd_model_rename_device(content: dict, payload: dict) -> dict:
+    """原地改名，保留实例参数并同步连接与布局，不重新实例化模板。"""
+    name, new_name = payload.get("name"), payload.get("new_name")
+    if set(payload) != {"name", "new_name"} or not all(
+        isinstance(value, str) and value.strip() for value in (name, new_name)
+    ):
+        raise InvalidRequestError("重命名需要 name 和 new_name", code="PROJ-CMD-005")
+    devices = content["model"]["devices"]
+    device = next((item for item in devices if item["name"] == name), None)
+    if device is None:
+        raise InvalidRequestError("设备不存在", code="PROJ-CMD-005", params={"name": name})
+    if new_name != name and any(item["name"] == new_name for item in devices):
+        raise InvalidRequestError("设备名称已存在", code="PROJ-CMD-005", params={"name": new_name})
+    device["name"] = new_name
+    for connection in content["model"]["connections"]:
+        for endpoint in ("from_device", "to_device"):
+            if connection[endpoint] == name:
+                connection[endpoint] = new_name
+    positions = content["layout"].get("positions", {})
+    if name in positions:
+        positions[new_name] = positions.pop(name)
+    return {"device": new_name, "renamed": True}
 
 
 def _cmd_model_remove_device(content: dict, payload: dict) -> dict:
@@ -851,6 +936,7 @@ def _cmd_task_set_working_inputs(content: dict, payload: dict) -> dict:
 _COMMAND_HANDLERS.update(
     {
         "model.upsert_device": _cmd_model_upsert_device,
+        "model.rename_device": _cmd_model_rename_device,
         "model.remove_device": _cmd_model_remove_device,
         "model.upsert_connection": _cmd_model_upsert_connection,
         "model.remove_connection": _cmd_model_remove_connection,

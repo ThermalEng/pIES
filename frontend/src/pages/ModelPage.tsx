@@ -40,6 +40,7 @@ import {
   upsertDevice,
   validateModel,
 } from '../features/modeling'
+import { listDatasets, listVersions } from '../features/datasets'
 import { ApiError } from '../types'
 import type { Diagnostic, DeviceTypeSpec, ParameterSpec } from '../types'
 import { useI18n, translateDiagnostic, errorMessage } from '../i18n'
@@ -50,6 +51,7 @@ import {
   Icon,
   IconButton,
   Input,
+  Select,
   SeverityBadge,
   Spinner,
 } from '../components/ui'
@@ -339,12 +341,25 @@ function ModelCanvas({ projectId }: { projectId: number }) {
           revisionRef.current,
         )
         revisionRef.current = revision
+        // 创建入口可能携带模板保存的显式来源声明(服务端补齐到实例 params);
+        // 读回权威实例内容, 保证画布/侧栏与已保存事实一致。
+        let savedParams: Record<string, unknown>
+        try {
+          const view = await getModel(projectId)
+          const saved = (view.model.devices ?? []).find((d) => d.name === name)
+          if (!saved) throw new Error(lt('load.created_missing'))
+          savedParams = saved.params
+        } catch (err) {
+          // 写入已成功，但当前画布尚未读到权威参数；重载前不能继续写旧副本。
+          setLoadError(errorMessage(err))
+          throw err
+        }
         const device: LocalDevice = {
           id: name,
           deviceType: spec.type_id,
           kind: 'new',
           name,
-          params,
+          params: savedParams,
           position,
         }
         setDevices((prev) => [...prev, device])
@@ -398,15 +413,11 @@ function ModelCanvas({ projectId }: { projectId: number }) {
           revisionRef.current = revision
           setDevices((prev) => prev.map((d) => (d.id === deviceId ? next : d)))
         } else {
-          // 改名即换键: 单批 remove 旧设备 + upsert 新设备 + 重建受影响连接
-          // (服务端删设备级联移除关联连接, 须随批补回, 否则连线丢失)。
-          const touched = connections.filter(
-            (c) => c.fromDeviceId === deviceId || c.toDeviceId === deviceId,
-          )
+          // 原地改名保留实例来源、连接和布局，不触发新建模板输入。
           const { revision } = await sendCommands(
             projectId,
             [
-              { type: 'model.remove_device', payload: { name: current.name } },
+              { type: 'model.rename_device', payload: { name: current.name, new_name: finalName } },
               {
                 type: 'model.upsert_device',
                 payload: {
@@ -416,16 +427,6 @@ function ModelCanvas({ projectId }: { projectId: number }) {
                   params: next.params,
                 },
               },
-              ...touched.map((c) => ({
-                type: 'model.upsert_connection',
-                payload: {
-                  name: c.id,
-                  from_device: c.fromDeviceId === deviceId ? finalName : devices.find((d) => d.id === c.fromDeviceId)?.name ?? '',
-                  from_port: parseHandle(c.fromHandle)?.name ?? '',
-                  to_device: c.toDeviceId === deviceId ? finalName : devices.find((d) => d.id === c.toDeviceId)?.name ?? '',
-                  to_port: parseHandle(c.toHandle)?.name ?? '',
-                },
-              })),
             ],
             revisionRef.current,
           )
@@ -940,6 +941,7 @@ function ModelCanvas({ projectId }: { projectId: number }) {
           ) : null}
           {selectedDevice && !readBlocked ? (
             <DeviceSidebar
+              projectId={projectId}
               device={selectedDevice}
               spec={specOf(selectedDevice.deviceType) ?? EMPTY_SPEC}
               onPatch={(patch) => patchDevice(selectedDevice.id, patch)}
@@ -1152,12 +1154,14 @@ function ConnectionPanel({
 // ===========================================================================
 
 function DeviceSidebar({
+  projectId,
   device,
   spec,
   onPatch,
   onDelete,
   onClose,
 }: {
+  projectId: number
   device: LocalDevice
   spec: ExtendedDeviceTypeSpec
   onPatch: (patch: Partial<Pick<LocalDevice, 'name' | 'kind' | 'params'>>) => void
@@ -1169,6 +1173,40 @@ function DeviceSidebar({
   const [paramDrafts, setParamDrafts] = useState<Record<string, ParamDraft>>(() => draftsOf(device.params))
   const [errors, setErrors] = useState<Record<string, string | null>>({})
   const [armed, setArmed] = useState(false)
+  const [datasetVersions, setDatasetVersions] = useState<Array<{ id: number; label: string }>>([])
+  const [datasetVersionsState, setDatasetVersionsState] = useState<'loading' | 'ready' | 'error'>('loading')
+  const [datasetVersionsReload, setDatasetVersionsReload] = useState(0)
+
+  // 项目数据集版本(实例来源声明的可选目标; 只读列表, 绑定写入实例 params)。
+  // 加载失败显式可见并重试, 不伪装成"项目没有版本"; 已保存声明保持原值。
+  useEffect(() => {
+    let cancelled = false
+    setDatasetVersionsState('loading')
+    void (async () => {
+      try {
+        const datasets = await listDatasets({ project_id: projectId })
+        const items: Array<{ id: number; label: string }> = []
+        for (const dataset of datasets.items) {
+          const versions = await listVersions(projectId, dataset.id)
+          for (const version of versions) {
+            items.push({
+              id: version.id,
+              label: `${dataset.name} v${version.version_no}${version.resolution ? ` (${version.resolution})` : ''}`,
+            })
+          }
+        }
+        if (!cancelled) {
+          setDatasetVersions(items)
+          setDatasetVersionsState('ready')
+        }
+      } catch {
+        if (!cancelled) setDatasetVersionsState('error')
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [projectId, datasetVersionsReload])
 
   // 切换设备时重置表单草稿
   useEffect(() => {
@@ -1272,6 +1310,80 @@ function DeviceSidebar({
       return
     }
     onDelete()
+  }
+
+  // ---- 预定义接口来源(实例显式事实) --------------------------------------
+  type SourceDraft = { mode: string; value: string; datasetVersionId: string; targetType: string }
+  const draftFromParams = (iface: string): SourceDraft => {
+    const raw = device.params[iface]
+    if (typeof raw === 'number') {
+      return { mode: 'constant', value: String(raw), datasetVersionId: '', targetType: '' }
+    }
+    if (raw !== null && typeof raw === 'object') {
+      const obj = raw as Record<string, unknown>
+      return {
+        mode: typeof obj.mode === 'string' ? obj.mode : '',
+        value: '',
+        datasetVersionId: obj.dataset_version_id != null ? String(obj.dataset_version_id) : '',
+        targetType: typeof obj.target_type === 'string' ? obj.target_type : '',
+      }
+    }
+    return { mode: '', value: '', datasetVersionId: '', targetType: '' }
+  }
+  const predefinedPorts = spec.ports.filter((port) => port.direction === 'predefined')
+  const [sourceDrafts, setSourceDrafts] = useState<Record<string, SourceDraft>>({})
+
+  useEffect(() => {
+    const next: Record<string, SourceDraft> = {}
+    for (const port of predefinedPorts) next[port.name] = draftFromParams(port.name)
+    setSourceDrafts(next)
+    // 只在切换设备时从已保存参数重建草稿; 保存引起的 params 变化不得
+    // 清除用户正在编辑的未提交状态。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [device.id])
+
+  const patchSource = (iface: string, patch: Partial<SourceDraft>) => {
+    setSourceDrafts((prev) => {
+      const current = prev[iface] ?? draftFromParams(iface)
+      return { ...prev, [iface]: { ...current, ...patch } }
+    })
+  }
+
+  const [sourceErrors, setSourceErrors] = useState<Record<string, string | null>>({})
+
+  /** 完整合法的来源才写入已保存事实; 未填完只保留本地草稿(不造默认值)。 */
+  const persistSource = (iface: string, draft: SourceDraft): boolean => {
+    if (!draft.mode) {
+      const params: Record<string, unknown> = { ...device.params }
+      delete params[iface]
+      onPatch({ params })
+      return true
+    }
+    if (draft.mode === 'constant') {
+      const num = Number(draft.value)
+      if (draft.value.trim() === '' || !Number.isFinite(num)) return false
+      onPatch({ params: { ...device.params, [iface]: num } })
+      return true
+    }
+    if (!draft.datasetVersionId) return false
+    const decl: Record<string, unknown> = {
+      mode: draft.mode,
+      dataset_version_id: Number(draft.datasetVersionId),
+    }
+    if (draft.mode === 'data_predict' && draft.targetType.trim()) {
+      decl.target_type = draft.targetType.trim()
+    }
+    onPatch({ params: { ...device.params, [iface]: decl } })
+    return true
+  }
+
+  const commitSource = (iface: string) => {
+    const draft = sourceDrafts[iface] ?? draftFromParams(iface)
+    const ok = persistSource(iface, draft)
+    setSourceErrors((prev) => ({
+      ...prev,
+      [iface]: ok ? null : lt('source.value_required'),
+    }))
   }
 
   return (
@@ -1409,6 +1521,113 @@ function DeviceSidebar({
             </div>
           )
         })}
+        {predefinedPorts.length > 0 ? (
+          <>
+            <p className="mp-sidebar__section">{lt('source.section')}</p>
+            <p className="mp-sidebar__hint">{lt('source.hint')}</p>
+            {predefinedPorts.map((port) => {
+              const draft = sourceDrafts[port.name] ?? draftFromParams(port.name)
+              return (
+                <div className="mp-source" key={port.name} data-testid={`mp-source-${port.name}`}>
+                  <div className="mp-param__head">
+                    <span className="mp-param__name">{port.name}</span>
+                    <span className="mp-param__unit">{port.energy_carrier}</span>
+                  </div>
+                  <Select
+                    id={`mp-source-mode-${port.name}`}
+                    value={draft.mode}
+                    onChange={(event) => {
+                      const mode = event.target.value
+                      const next = { ...draft, mode }
+                      patchSource(port.name, { mode })
+                      // 空模式=清除; constant/data 未填完只保留本地草稿, 完整后才持久化。
+                      persistSource(port.name, next)
+                      setSourceErrors((prev) => ({ ...prev, [port.name]: null }))
+                    }}
+                  >
+                    <option value="">{lt('source.mode_none')}</option>
+                    <option value="constant">constant</option>
+                    <option value="data_repeat">data_repeat</option>
+                    <option value="data_full">data_full</option>
+                    <option value="data_predict">data_predict</option>
+                  </Select>
+                  {draft.mode === 'constant' ? (
+                    <Input
+                      id={`mp-source-value-${port.name}`}
+                      type="text"
+                      inputMode="decimal"
+                      aria-label={`${port.name} ${lt('source.constant_value')}`}
+                      value={draft.value}
+                      invalid={Boolean(sourceErrors[port.name])}
+                      onChange={(event) => {
+                        patchSource(port.name, { value: event.target.value })
+                        setSourceErrors((prev) => ({ ...prev, [port.name]: null }))
+                      }}
+                      onBlur={() => commitSource(port.name)}
+                    />
+                  ) : null}
+                  {draft.mode.startsWith('data_') ? (
+                    <>
+                      {datasetVersionsState === 'loading' ? (
+                        <p className="mp-sidebar__hint">{lt('source.loading')}</p>
+                      ) : null}
+                      {datasetVersionsState === 'error' ? (
+                        <div className="mp-sidebar__hint" role="alert">
+                          <span>{lt('source.load_failed')} </span>
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            id={`mp-source-versions-retry-${port.name}`}
+                            onClick={() => setDatasetVersionsReload((n) => n + 1)}
+                          >
+                            {lt('source.retry')}
+                          </Button>
+                        </div>
+                      ) : null}
+                      <Select
+                        id={`mp-source-version-${port.name}`}
+                        value={draft.datasetVersionId}
+                        onChange={(event) => {
+                          const next = { ...draft, datasetVersionId: event.target.value }
+                          patchSource(port.name, { datasetVersionId: event.target.value })
+                          persistSource(port.name, next)
+                        }}
+                      >
+                        <option value="">
+                          {datasetVersionsState === 'ready' && datasetVersions.length === 0
+                            ? lt('source.version_empty')
+                            : lt('source.version_choose')}
+                        </option>
+                        {draft.datasetVersionId
+                          && !datasetVersions.some((version) => String(version.id) === draft.datasetVersionId) ? (
+                            <option value={draft.datasetVersionId}>
+                              {lt('source.version_saved', { id: draft.datasetVersionId })}
+                            </option>
+                          ) : null}
+                        {datasetVersions.map((version) => (
+                          <option key={version.id} value={String(version.id)}>{version.label}</option>
+                        ))}
+                      </Select>
+                    </>
+                  ) : null}
+                  {draft.mode === 'data_predict' ? (
+                    <Input
+                      id={`mp-source-target-${port.name}`}
+                      type="text"
+                      aria-label={`${port.name} ${lt('source.target_type')}`}
+                      value={draft.targetType}
+                      onChange={(event) => patchSource(port.name, { targetType: event.target.value })}
+                      onBlur={() => commitSource(port.name)}
+                    />
+                  ) : null}
+                  {sourceErrors[port.name] ? (
+                    <p className="mp-sidebar__hint" role="alert">{sourceErrors[port.name]}</p>
+                  ) : null}
+                </div>
+              )
+            })}
+          </>
+        ) : null}
       </div>
       <footer className="mp-sidebar__footer">
         <Button variant="danger" size="sm" className="mp-sidebar__delete" onClick={onDeleteClick}>

@@ -40,7 +40,7 @@ step,electric_demand
 | `schema` | 固定为 `ies.device-data` |
 | `schema_version` | 文件契约版本 |
 | `dataset_id` | 稳定数据集 ID，不等同于文件名 |
-| `device_id` | 稳定设备 ID，不含设备独立版本；与 `schema` 字头共同决定允许绑定的 `predefined` interfaces |
+| `device_id` | 稳定基础设备 ID，不含项目模型的 `_N` 编号或设备独立版本；项目实例通过模型引用关联该基础 ID，与 `schema` 字头共同决定允许绑定的 `predefined` interfaces |
 | `source_mode` | 原始输入只能为 `data_repeat`、`data_full` 或 `data_predict`；`constant` 在装配绑定中直接给值，没有 CSV |
 | `resolution` | 该文件每个 step 的采样间隔，例如 `15min`、`30min`、`1h`；必须与项目基线一致 |
 | `unit.<column>` | 每个数值数据列的单位，必须与设备模型一致 |

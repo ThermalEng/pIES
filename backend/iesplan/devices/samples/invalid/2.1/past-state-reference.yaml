@@ -1,35 +1,26 @@
 schema: ies.device-model
-schema_version: "2.0.0"
+schema_version: "2.1.0"
 device:
   id: acme.device.heat_pump
-  names:
-    zh-CN: 热泵
-    en-US: Heat Pump
-  version: "1.0.0"
+  names: {zh-CN: 热泵, en-US: Heat Pump}
 properties:
   cop:
     value: 3.2
     unit: "1"
-    valid_range:
-      minimum: 1
-      maximum: 10
+    valid_range: {minimum: 1, maximum: 10}
 interfaces:
   electricity_in:
     type: in
     carrier: electricity
     unit: kW
-    valid_range:
-      minimum: 0
-      maximum: null
+    valid_range: {minimum: 0, maximum: null}
   heat_out:
     type: out
     carrier: heat
     unit: kW
-    valid_range:
-      minimum: 0
-      maximum: null
+    valid_range: {minimum: 0, maximum: null}
 equations:
   variables: {}
   relations:
     - id: heat_conversion
-      expression: "heat_out[t] = electricity_in[t] * cop"
+      expression: "heat_out[t] = electricity_in[t-2] * cop"

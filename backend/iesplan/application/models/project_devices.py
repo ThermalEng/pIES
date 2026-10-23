@@ -54,4 +54,20 @@ def load_project_device_documents(
     return documents
 
 
-__all__ = ["load_project_device_documents", "project_device_type_ids"]
+def load_project_device_base_ids(db: Session, content: dict) -> dict[str, str]:
+    """内容精确引用的项目模型 → ``{最终 device_id: 稳定基础 ID}``。
+
+    设备数据 CSV 的 ``device_id`` 是稳定设备 ID（不含项目作用域 ``_N`` 编号）；
+    装配绑定用它核对数据文件属于哪个设备模型，不要求用户猜编号。
+    """
+    return {
+        model.device_id: model.base_device_id
+        for model in _referenced_models(db, content)
+    }
+
+
+__all__ = [
+    "load_project_device_base_ids",
+    "load_project_device_documents",
+    "project_device_type_ids",
+]

@@ -23,6 +23,7 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from iesplan import audit as audit_domain
+from iesplan import dataset as dataset_domain
 from iesplan import model as model_domain
 from iesplan import project as project_domain
 from iesplan.application.model_templates import resolve_template_revision
@@ -250,6 +251,83 @@ def _parse_candidate_document(
     return doc, [], text, canonical_receipt(doc)
 
 
+def _resolve_template_data_bindings(
+    db: Session,
+    project_id: int,
+    bindings: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[Diagnostic]]:
+    """模板 CSV 路径 → 本项目数据集版本，并在真实入口读取数据对象。
+
+    规范（device-model-yaml.md §模板 inputs）: 数据叶子的用户值是项目目录内
+    .csv 相对路径，后端在实例化入口直接读取并绑定；数据文件由数据集流程保存。
+    本函数按装配公开路径 ``data/ds{vid}.data.csv`` 解析项目数据集版本，读取
+    权威数据对象确认可消费；路径不可解析或对象缺失在此明确失败，不以只记回执
+    替代。CSV 与具体设备实例的 id/模式/列/单位核对发生在装配绑定边界
+    （最终 ``_N`` 设备 id 在保存时才分配，模型保存阶段不重复核对）。
+    最终设备仍为纯技术模型，项目来源只在装配实例上出现。
+    """
+    if not bindings:
+        return [], []
+    from iesplan.assembly import dataset_export_path
+
+    versions: dict[str, int] = {}
+    for dataset in dataset_domain.list_datasets(db, project_id):
+        for version in dataset_domain.list_versions(db, dataset.id):
+            versions[dataset_export_path(version.id)] = version.id
+
+    resolved: list[dict[str, Any]] = []
+    diags: list[Diagnostic] = []
+    for binding in bindings:
+        iface = str(binding.get("interface") or "")
+        path = str(binding.get("path") or "")
+        vid = versions.get(path)
+        if vid is None:
+            diags.append(
+                _diag(
+                    PROJ_MDL_VALIDATION_FAILED,
+                    "模板数据输入的 CSV 路径不在本项目数据集版本中",
+                    field=f"template_inputs.{iface}",
+                    params={
+                        "detail": "模板数据输入的 CSV 路径不在本项目数据集版本中",
+                        "interface": iface,
+                        "path": path,
+                        "expected": "data/ds{vid}.data.csv",
+                    },
+                )
+            )
+            continue
+        data_file = next(
+            (f for f in dataset_domain.list_files(db, vid) if f.file_kind == "data"),
+            None,
+        )
+        if data_file is None:
+            diags.append(
+                _diag(
+                    PROJ_MDL_VALIDATION_FAILED,
+                    "数据集版本缺少数据本体，无法绑定模板数据输入",
+                    field=f"template_inputs.{iface}",
+                    params={
+                        "detail": "数据集版本缺少数据本体，无法绑定模板数据输入",
+                        "interface": iface,
+                        "dataset_version_id": vid,
+                    },
+                )
+            )
+            continue
+        # 读取权威数据对象: 不可读是真实存储错误(直接透传), 不伪装成成功。
+        # CSV 内容(device_id/mode/列/单位/值域)由装配绑定边界一次校验(宪法 §2.6),
+        # 此处只确认项目数据集版本与数据本体可解析, 不复制第二套校核。
+        get_object(db, data_file.object_id)
+        resolved.append(
+            {
+                "interface": iface,
+                "mode": str(binding.get("mode") or ""),
+                "dataset_version_id": vid,
+            }
+        )
+    return resolved, diags
+
+
 def validate_candidate(
     db: Session,
     user,
@@ -323,6 +401,16 @@ def validate_candidate(
     diags.extend(parse_diags)
     if diags:
         return CandidateValidation(ok=False, diagnostics=diags)
+    if source == MODEL_SOURCE_TEMPLATE and receipt is not None:
+        raw_bindings = receipt.get("data_bindings") or []
+        resolved, binding_diags = _resolve_template_data_bindings(
+            db, project_id, list(raw_bindings)
+        )
+        diags.extend(binding_diags)
+        if diags:
+            return CandidateValidation(ok=False, diagnostics=diags)
+        receipt = dict(receipt)
+        receipt["data_bindings"] = resolved
     return CandidateValidation(
         ok=True,
         document=doc,
@@ -515,8 +603,10 @@ def _save_project_model(
     # 实例化器算法标识)与最终模型
     final_receipt = dict(final_receipt)
     if template_provenance is not None:
-        final_receipt["instantiator"] = "ies.device-model.instantiator@1.0.0"
+        final_receipt["instantiator"] = "ies.device-model.instantiator@2.0.0"
         final_receipt.update(template_provenance)
+        if validation.receipt and "data_bindings" in validation.receipt:
+            final_receipt["data_bindings"] = validation.receipt["data_bindings"]
 
     # 写入模型与回执对象，清单行建立后统一 attach 最终 owner。
     model_handle = put_object(

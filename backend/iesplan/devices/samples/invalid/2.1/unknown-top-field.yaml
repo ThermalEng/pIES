@@ -1,5 +1,5 @@
 schema: ies.device-model
-schema_version: "2.0.0"
+schema_version: "2.1.0"
 device:
   id: acme.device.heat_pump
   names:
@@ -32,4 +32,5 @@ equations:
   relations:
     - id: heat_conversion
       expression: "heat_out[t] = electricity_in[t] * cop"
-finance_type: acme.finance.heat_pump
+parameters:
+  x: 1

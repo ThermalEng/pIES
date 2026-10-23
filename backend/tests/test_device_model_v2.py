@@ -25,7 +25,7 @@ from iesplan.devices.template2 import instantiate_template
 
 HEAT_PUMP_YAML = """
 schema: ies.device-model
-schema_version: "2.0.0"
+schema_version: "2.1.0"
 
 device:
   id: acme.device.heat_pump
@@ -69,9 +69,6 @@ interfaces:
     valid_range:
       minimum: -50
       maximum: 60
-    source:
-      mode: data_predict
-      data_ref: ambient_temperature_prediction
   fixed_temperature:
     type: predefined
     carrier: environment
@@ -79,9 +76,6 @@ interfaces:
     valid_range:
       minimum: -50
       maximum: 60
-    source:
-      mode: constant
-      value: 25
   unused_terminal:
     carrier: heat
     unit: kW
@@ -112,11 +106,8 @@ class TestValidModel:
         assert doc.interfaces["electricity_in"].type == "in"
         assert doc.interfaces["heat_out"].type == "out"
         assert doc.interfaces["ambient_temperature"].type == "predefined"
-        assert doc.interfaces["fixed_temperature"].source.mode == "constant"
-        assert doc.interfaces["fixed_temperature"].source.value == 25
         # 缺省 type 规范化为 blind
         assert doc.interfaces["unused_terminal"].type == "blind"
-        assert doc.interfaces["unused_terminal"].source is None
         assert len(doc.equations.relations) == 1
 
     def test_interface_default_blind(self):
@@ -126,7 +117,7 @@ class TestValidModel:
     def test_equations_with_state_variable(self):
         text = """
 schema: ies.device-model
-schema_version: "2.0.0"
+schema_version: "2.1.0"
 device: {id: acme.device.battery, names: {zh-CN: 电池, en-US: Battery}}
 properties:
   charge_efficiency: {value: 0.95, unit: "1", valid_range: {minimum: 0, maximum: 1}}
@@ -153,7 +144,7 @@ equations:
     def test_empty_sections(self):
         text = """
 schema: ies.device-model
-schema_version: "2.0.0"
+schema_version: "2.1.0"
 device: {id: acme.device.minimal, names: {zh-CN: 最小, en-US: Minimal}}
 properties: {}
 interfaces: {}
@@ -167,7 +158,7 @@ equations:
     def test_boolean_and_string_property(self):
         text = """
 schema: ies.device-model
-schema_version: "2.0.0"
+schema_version: "2.1.0"
 device: {id: acme.device.switch, names: {zh-CN: 开关, en-US: Switch}}
 properties:
   enabled: {value: true, unit: "-"}
@@ -237,10 +228,24 @@ class TestInvalidModel:
         assert any("Additional properties" in x or "version" in x for x in d)
 
     def test_wrong_schema_version(self):
-        d = self._diag_details(HEAT_PUMP_YAML.replace('schema_version: "2.0.0"', 'schema_version: "9.9.9"'))
-        # jsonschema const 错误消息为 "'2.0.0' was expected"；确保版本被拒绝
+        d = self._diag_details(HEAT_PUMP_YAML.replace('schema_version: "2.1.0"', 'schema_version: "9.9.9"'))
+        # jsonschema const 错误消息为 "'2.1.0' was expected"；确保版本被拒绝
         assert d
-        assert any("2.0.0" in x for x in d)
+        assert any("2.1.0" in x for x in d)
+
+    def test_old_2_0_header_rejected(self):
+        """2.1.0 是唯一正式字头; 2.0.0 文件不再接受(无双轨)。"""
+        d = self._diag_details(HEAT_PUMP_YAML.replace('schema_version: "2.1.0"', 'schema_version: "2.0.0"'))
+        assert d
+        assert any("2.1.0" in x for x in d)
+
+    def test_embedded_source_on_predefined_rejected(self):
+        """predefined 槽不得内嵌项目 source; 来源由装配实例绑定。"""
+        d = self._diag_details(HEAT_PUMP_YAML.replace(
+            "  fixed_temperature:\n    type: predefined",
+            "  fixed_temperature:\n    type: predefined\n    source: {mode: constant, value: 25}",
+        ))
+        assert any("禁止声明 source" in x for x in d)
 
     def test_old_schema_1(self):
         d = self._diag_details(HEAT_PUMP_YAML.replace("ies.device-model", "ies.device-model-x"))
@@ -277,14 +282,6 @@ class TestInvalidModel:
         d = self._diag_details(text)
         assert any("禁止声明 source" in x for x in d)
 
-    def test_predefined_missing_source(self):
-        text = HEAT_PUMP_YAML.replace(
-            "    source:\n      mode: data_predict\n      data_ref: ambient_temperature_prediction",
-            "",
-        )
-        # 删除后 predefined 无 source → 非法
-        d = self._diag_details(text)
-        assert any("必须声明 source" in x for x in d)
 
     def test_blind_with_source(self):
         text = HEAT_PUMP_YAML.replace(
@@ -295,18 +292,6 @@ class TestInvalidModel:
         d = self._diag_details(text)
         assert any("禁止声明 source" in x for x in d)
 
-    def test_constant_source_missing_value(self):
-        text = HEAT_PUMP_YAML.replace("      mode: constant\n      value: 25", "      mode: constant")
-        d = self._diag_details(text)
-        assert any("必须声明 value" in x for x in d)
-
-    def test_data_repeat_missing_data_ref(self):
-        text = HEAT_PUMP_YAML.replace(
-            "      mode: data_predict\n      data_ref: ambient_temperature_prediction",
-            "      mode: data_predict",
-        )
-        d = self._diag_details(text)
-        assert any("必须声明 data_ref" in x for x in d)
 
     def test_unknown_carrier_vocabulary_rejected(self):
         text = HEAT_PUMP_YAML.replace("carrier: electricity", "carrier: ENERGY!")
@@ -347,7 +332,7 @@ class TestInvalidModel:
     def test_equation_cycle(self):
         text = """
 schema: ies.device-model
-schema_version: "2.0.0"
+schema_version: "2.1.0"
 device: {id: acme.device.cycle, names: {zh-CN: 环, en-US: Cycle}}
 properties: {}
 interfaces: {}
@@ -380,7 +365,7 @@ equations:
         # 多个独立错误一次返回（interfaces type + property unit + equation）
         text = """
 schema: ies.device-model
-schema_version: "2.0.0"
+schema_version: "2.1.0"
 device: {id: acme.device.multi, names: {zh-CN: 多错, en-US: Multi}}
 properties:
   p1: {value: 1, unit: not-a-unit, valid_range: {minimum: 0, maximum: 1}}
@@ -398,7 +383,7 @@ equations:
         # 多个独立错误一次返回（interfaces type + property unit + equation）
         text = """
 schema: ies.device-model
-schema_version: "2.0.0"
+schema_version: "2.1.0"
 device: {id: acme.device.multi, names: {zh-CN: 多错, en-US: Multi}}
 properties:
   p1: {value: 1, unit: not-a-unit, valid_range: {minimum: 0, maximum: 1}}
@@ -423,7 +408,7 @@ equations:
 class TestTemplateInstantiation:
     TEMPLATE = """
 schema: ies.device-model
-schema_version: "2.0.0"
+schema_version: "2.1.0"
 device: {id: acme.device.electric_load, names: {zh-CN: 电负荷, en-US: Electric Load}}
 inputs:
   properties:
@@ -432,17 +417,10 @@ inputs:
         type: number
         unit: kW
         valid_range: {minimum: 0, maximum: 1000}
-        default: 100
     is_switchable:
-      value: {type: boolean, default: false}
+      value: {type: boolean}
     new_prop:
       value: {type: number, unit: kW, valid_range: {minimum: 0, maximum: 500}}
-  interfaces:
-    electric_demand:
-      source:
-        data_ref:
-          type: data_repeat
-          data_ref: typical_day_load
 properties:
   cop: {value: 3.0, unit: "1", valid_range: {minimum: 1, maximum: 10}}
 interfaces:
@@ -451,11 +429,22 @@ interfaces:
     carrier: electricity
     unit: kW
     valid_range: {minimum: 0, maximum: null}
-    source: {mode: data_repeat, data_ref: typical_day_load}
 equations:
   variables: {}
   relations: []
 """
+
+    def _inputs(self, **props: dict) -> dict:
+        base = {
+            "properties": {
+                "peak_power_kw": {"value": 250},
+                "is_switchable": {"value": True},
+                "new_prop": {"value": 120},
+            }
+        }
+        for key, value in props.items():
+            base["properties"][key] = value
+        return base
 
     def test_template_parse(self):
         r = _parse(self.TEMPLATE)
@@ -464,7 +453,7 @@ equations:
 
     def test_overwrite_existing_field(self):
         res, diags = instantiate_template(
-            yaml_load(self.TEMPLATE), {"properties": {"peak_power_kw": {"value": 250}}}
+            yaml_load(self.TEMPLATE), self._inputs(peak_power_kw={"value": 250})
         )
         assert res is not None, [d.params.get("detail") for d in diags]
         doc = res.document
@@ -473,7 +462,7 @@ equations:
 
     def test_add_new_field(self):
         res, _ = instantiate_template(
-            yaml_load(self.TEMPLATE), {"properties": {"new_prop": {"value": 120}}}
+            yaml_load(self.TEMPLATE), self._inputs(new_prop={"value": 120})
         )
         doc = res.document
         assert doc.properties["new_prop"].value == 120
@@ -482,78 +471,47 @@ equations:
 
     def test_boolean_add_default_unit(self):
         res, _ = instantiate_template(
-            yaml_load(self.TEMPLATE), {"properties": {"is_switchable": {"value": True}}}
+            yaml_load(self.TEMPLATE), self._inputs(is_switchable={"value": True})
         )
         assert res.document.properties["is_switchable"].unit == "-"
 
-    def test_data_ref_overwrite(self):
-        res, _ = instantiate_template(
-            yaml_load(self.TEMPLATE),
-            {"interfaces": {"electric_demand": {"source": {"data_ref": "my_curve"}}}},
+    def test_missing_required_input_rejected(self):
+        """2.1.0: 模板已声明叶子必填, 缺失不得静默保留模板值。"""
+        res, diags = instantiate_template(
+            yaml_load(self.TEMPLATE), {"properties": {"peak_power_kw": {"value": 250}}}
         )
-        src = res.document.interfaces["electric_demand"].source
-        assert src.data_ref == "my_curve"
-        assert src.mode == "data_repeat"
+        assert res is None
+        assert any("必填输入" in d.params.get("detail", "") for d in diags)
 
-    def test_add_interface_fields_declared_by_inputs(self):
-        """inputs 可添加任意同构字段；完整模型校验负责判断新增结构是否合法。"""
-        raw = yaml_load(
-            """
-schema: ies.device-model
-schema_version: "2.0.0"
-device: {id: acme.device.load_template, names: {zh-CN: 负荷模板, en-US: Load Template}}
-inputs:
-  interfaces:
-    demand:
-      type: object
-      fields:
-        type: {type: string}
-        carrier: {type: string}
-        unit: {type: string}
-        valid_range:
-          minimum: {type: number, unit: kW}
-          maximum: {type: number, unit: kW}
-        source:
-          mode: {type: string}
-          data_ref: {type: data_repeat, data_ref: load_curve}
-properties: {}
-interfaces: {}
-equations: {variables: {}, relations: []}
-"""
+    def test_template_default_rejected(self):
+        """2.1.0: 模板 inputs 不接受 default(无隐式回退)。"""
+        bad = self.TEMPLATE.replace(
+            "        valid_range: {minimum: 0, maximum: 1000}",
+            "        valid_range: {minimum: 0, maximum: 1000}\n        default: 100",
         )
-        values = {
-            "interfaces": {
-                "demand": {
-                    "type": "predefined",
-                    "carrier": "electricity",
-                    "unit": "kW",
-                    "valid_range": {"minimum": 0, "maximum": 1000},
-                    "source": {"mode": "data_repeat", "data_ref": "project_load"},
-                }
-            }
-        }
-        res, diags = instantiate_template(raw, values)
-        assert res is not None, [d.params.get("detail") for d in diags]
-        iface = res.document.interfaces["demand"]
-        assert iface.type == "predefined"
-        assert iface.source.data_ref == "project_load"
+        r = _parse(bad)
+        assert not r.ok
+        assert any("禁止声明 default" in d.params.get("detail", "") for d in r.diagnostics)
 
     def test_inputs_removed_after_instantiation(self):
         res, _ = instantiate_template(
-            yaml_load(self.TEMPLATE), {"properties": {"peak_power_kw": {"value": 250}}}
+            yaml_load(self.TEMPLATE), self._inputs()
         )
         assert res.document.inputs is None
         assert '"inputs"' not in res.canonical_text
 
     def test_undeclared_field_rejected(self):
-        res, diags = instantiate_template(yaml_load(self.TEMPLATE), {"properties": {"evil": {"value": 1}}})
+        res, diags = instantiate_template(
+            yaml_load(self.TEMPLATE),
+            {**self._inputs(), "properties": {**self._inputs()["properties"], "evil": {"value": 1}}},
+        )
         assert res is None
         assert any("未在模板 inputs 中声明" in d.params.get("detail", "") for d in diags)
 
     def test_type_error_rejected(self):
         res, diags = instantiate_template(
             yaml_load(self.TEMPLATE),
-            {"properties": {"peak_power_kw": {"value": "x"}}},
+            self._inputs(peak_power_kw={"value": "x"}),
         )
         assert res is None
         assert any("期望 number" in d.params.get("detail", "") for d in diags)
@@ -561,7 +519,7 @@ equations: {variables: {}, relations: []}
     def test_range_error_rejected(self):
         res, diags = instantiate_template(
             yaml_load(self.TEMPLATE),
-            {"properties": {"peak_power_kw": {"value": 9999}}},
+            self._inputs(peak_power_kw={"value": 9999}),
         )
         assert res is None
         assert any("高于 valid_range.maximum" in d.params.get("detail", "") for d in diags)
@@ -569,18 +527,16 @@ equations: {variables: {}, relations: []}
     def test_equivalent_direct_yaml_same_canonical(self):
         res, diags = instantiate_template(
             yaml_load(self.TEMPLATE),
-            {
-                "properties": {
-                    "peak_power_kw": {"value": 250},
-                    "is_switchable": {"value": True},
-                    "new_prop": {"value": 120},
-                }
-            },
+            self._inputs(
+                peak_power_kw={"value": 250},
+                is_switchable={"value": True},
+                new_prop={"value": 120},
+            ),
         )
         assert res is not None, [d.params.get("detail") for d in diags]
         direct = """
 schema: ies.device-model
-schema_version: "2.0.0"
+schema_version: "2.1.0"
 device: {id: acme.device.electric_load, names: {zh-CN: 电负荷, en-US: Electric Load}}
 properties:
   cop: {value: 3.0, unit: "1", valid_range: {minimum: 1, maximum: 10}}
@@ -593,7 +549,6 @@ interfaces:
     carrier: electricity
     unit: kW
     valid_range: {minimum: 0, maximum: null}
-    source: {mode: data_repeat, data_ref: typical_day_load}
 equations:
   variables: {}
   relations: []
@@ -603,10 +558,8 @@ equations:
         assert canonical_bytes(res.document) == canonical_bytes(r_direct.document)
 
     def test_final_model_passes_full_validation(self):
-        res, _ = instantiate_template(
-            yaml_load(self.TEMPLATE), {"properties": {"peak_power_kw": {"value": 250}}}
-        )
-        # 实例化后文档应通过完整 2.0.0 校验（解析器内部已保证；此处以 to_dict 往返验证）
+        res, _ = instantiate_template(yaml_load(self.TEMPLATE), self._inputs())
+        # 实例化后文档应通过完整 2.1.0 校验（解析器内部已保证；此处以 to_dict 往返验证）
         assert res is not None
         r = parse_device_model_v2(to_dict(res.document))
         assert r.ok
@@ -618,8 +571,95 @@ equations:
         assert any("必须声明顶层 inputs" in d.params.get("detail", "") for d in diags)
 
     def test_receipt_contains_traceability(self):
-        res, _ = instantiate_template(
-            yaml_load(self.TEMPLATE), {"properties": {"peak_power_kw": {"value": 250}}}
-        )
+        res, _ = instantiate_template(yaml_load(self.TEMPLATE), self._inputs())
         receipt = res.receipt
-        assert receipt["instantiator"] == "ies.device-model.instantiator@1.0.0"
+        assert receipt["instantiator"] == "ies.device-model.instantiator@2.0.0"
+
+
+ARRAY_TEMPLATE = """
+schema: ies.device-model
+schema_version: "2.1.0"
+device: {id: acme.device.relations, names: {zh-CN: 关系模板, en-US: Relations Template}}
+inputs:
+  equations:
+    relations:
+      type: array
+      items:
+        type: object
+        fields:
+          id: {type: string}
+          expression: {type: string}
+properties: {}
+interfaces: {}
+equations: {variables: {}, relations: []}
+"""
+
+
+def _instantiate(text: str, inputs: dict):
+    from iesplan.devices.template2 import instantiate_template
+
+    return instantiate_template(yaml_load(text), inputs)
+
+
+def test_empty_object_and_array_declarations_rejected():
+    """现行规则: 空 object/array 声明非法。"""
+    empty_object = ARRAY_TEMPLATE.replace(
+        """  equations:
+    relations:
+      type: array
+      items:
+        type: object
+        fields:
+          id: {type: string}
+          expression: {type: string}
+""",
+        """  equations:
+    relations:
+      type: object
+""",
+    )
+    r = _parse(empty_object)
+    assert not r.ok
+    assert any("声明不得为空" in d.params.get("detail", "") for d in r.diagnostics)
+
+    empty_array = ARRAY_TEMPLATE.replace(
+        """      items:
+        type: object
+        fields:
+          id: {type: string}
+          expression: {type: string}
+""",
+        "",
+    )
+    r = _parse(empty_array)
+    assert not r.ok
+    assert any("items" in d.params.get("detail", "") for d in r.diagnostics)
+
+
+def test_array_input_required_and_no_extra_item_inputs():
+    """array 整体必填, items 只逐元素校验, 不形成额外 path[] 必填输入。"""
+    res, diags = _instantiate(ARRAY_TEMPLATE, {})
+    assert res is None
+    assert any("必填输入" in d.params.get("detail", "") for d in diags)
+
+    # 提交空数组合法(整体提交), 且不要求 relations[].id 等额外叶子。
+    res, diags = _instantiate(ARRAY_TEMPLATE, {"equations": {"relations": []}})
+    assert res is not None, [d.params.get("detail") for d in diags]
+    assert res.document.inputs is None
+
+
+def test_array_item_fields_required_and_extra_rejected():
+    """items 元素逐元素校验: fields 全部必填并拒绝多余键。"""
+    missing = _instantiate(
+        ARRAY_TEMPLATE,
+        {"equations": {"relations": [{"id": "r1"}]}},
+    )
+    assert missing[0] is None
+    assert any("必填字段" in d.params.get("detail", "") for d in missing[1])
+
+    extra = _instantiate(
+        ARRAY_TEMPLATE,
+        {"equations": {"relations": [{"id": "r1", "expression": "", "extra": 1}]}},
+    )
+    assert extra[0] is None
+    assert any("未声明字段" in d.params.get("detail", "") for d in extra[1])

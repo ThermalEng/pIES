@@ -17,6 +17,7 @@ import { test, expect } from '@playwright/test'
 import type { Page } from '@playwright/test'
 import { createSession, uniqueName, strongPassword } from './fixtures'
 import { createEngineer, loginToken, requestJson } from './setup/api'
+import { APP } from './financial-scaffold'
 
 // ---------------------------------------------------------------------------
 // 测试模板(与后端 test_project_model_save.py 同构; 含 number/boolean/string/
@@ -31,7 +32,7 @@ const escapeRegExp = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, '\\
 const makeTemplateYaml = (deviceId: string): string => TEMPLATE_YAML_HEAD.replace('__DEVICE_ID__', deviceId)
 
 const TEMPLATE_YAML_HEAD = `schema: ies.device-model
-schema_version: "2.0.0"
+schema_version: "2.1.0"
 device:
   id: __DEVICE_ID__
   names:
@@ -44,17 +45,12 @@ inputs:
         type: number
         unit: kW
         valid_range: {minimum: 0, maximum: 1000}
-        default: 100
     is_switchable:
-      value: {type: boolean, default: false}
+      value: {type: boolean}
     label:
-      value: {type: string, default: ""}
+      value: {type: string}
   interfaces:
-    electric_demand:
-      source:
-        data_ref:
-          type: data_repeat
-          data_ref: data/e2e_load.csv
+    electric_demand: {type: data_repeat}
 properties:
   cop:
     value: 3
@@ -66,7 +62,6 @@ interfaces:
     carrier: electricity
     unit: kW
     valid_range: {minimum: 0, maximum: 1000}
-    source: {mode: data_repeat, data_ref: ${DATA_REF}}
 equations:
   variables: {}
   relations: []
@@ -107,6 +102,57 @@ async function publishTemplate(
   return { templateId, revision: rev.revision, deviceId }
 }
 
+/** 自造 1h 完整日 data_repeat CSV; 设备 id 用保存后的最终 _N ID。 */
+function ddCsv(deviceId: string): string {
+  return [
+    '# schema: ies.device-data',
+    '# schema_version: 2.1.0',
+    '# dataset_id: e2e_model_new_data',
+    `# device_id: ${deviceId}`,
+    '# source_mode: data_repeat',
+    '# resolution: 1h',
+    '# unit.electric_demand: kW',
+    'step,electric_demand',
+    ...Array.from({ length: 24 }, (_, i) => `${i},${10 + (i % 3)}`),
+    '',
+  ].join('\n')
+}
+
+/** 通过真实数据 API 上传并绑定模板数据版本, 返回项目内相对 CSV 路径。 */
+async function uploadAndBindData(page: Page, projectId: string, deviceId: string): Promise<string> {
+  const dsRes = await page.request.post(`${APP}/api/projects/${projectId}/datasets`, {
+    data: { name: 'E2E 模板数据', source_category: 'user_upload', license: 'CC-BY-4.0' },
+  })
+  if (!dsRes.ok()) throw new Error(`创建数据集失败: ${dsRes.status()} ${await dsRes.text()}`)
+  const dsId = (await dsRes.json()).dataset.id
+  const verRes = await page.request.post(
+    `${APP}/api/projects/${projectId}/datasets/${dsId}/versions`,
+    {
+      multipart: {
+        resolution: '1h',
+        utc_offset_minutes: '480',
+        file: { name: 'e2e_load.csv', mimeType: 'text/csv', buffer: Buffer.from(ddCsv(deviceId)) },
+      },
+    },
+  )
+  if (!verRes.ok()) throw new Error(`上传数据版本失败: ${verRes.status()} ${await verRes.text()}`)
+  const vid = (await verRes.json()).dataset_version.id
+  const projRes = await page.request.get(`${APP}/api/projects/${projectId}`)
+  if (!projRes.ok()) throw new Error(`读取项目失败: ${projRes.status()}`)
+  const rev = (await projRes.json()).draft.revision
+  const bindRes = await page.request.put(`${APP}/api/projects/${projectId}/draft`, {
+    data: {
+      expected_revision: rev,
+      commands: [{
+        id: 'e2e-bind-model-data', unit: 'dataset', type: 'dataset.bind',
+        payload: { dataset_version_id: vid, role: 'model-template-data' },
+      }],
+    },
+  })
+  if (!bindRes.ok()) throw new Error(`绑定数据版本失败: ${bindRes.status()} ${await bindRes.text()}`)
+  return `data/ds${vid}.data.csv`
+}
+
 // ---------------------------------------------------------------------------
 // 场景 12: 候选模型创建(模板表单 + 直接 YAML, 状态流转与诊断保留)
 // ---------------------------------------------------------------------------
@@ -140,6 +186,8 @@ test.describe('场景 12: 新建项目模型(真实后端模板与 YAML)', () =>
     await page.getByText(projectName).click()
     await expect(page).toHaveURL(/\/projects\/\d+$/)
     const projectId = page.url().match(/\/projects\/(\d+)/)![1]
+    // 模板数据输入: 项目内 CSV 版本(真实数据 API 前置造数, 断言见保存后的表单/回执)。
+    const dataPath = await uploadAndBindData(page, projectId, `${templateDeviceId}_1`)
     await page.getByRole('navigation', { name: /工作台|Workspace/i }).getByText(/系统建模|System Modeling/i).click()
     await expect(page).toHaveURL(/\/model$/)
 
@@ -151,9 +199,8 @@ test.describe('场景 12: 新建项目模型(真实后端模板与 YAML)', () =>
 
     // 12c. 模板表单按 inputs 递归生成(number/boolean/string/data_repeat)
     await expect(page.getByLabel('properties.peak_power_kw.value [kW]')).toBeVisible()
-    await expect(page.getByText('interfaces.electric_demand.source.data_ref')).toBeVisible()
-    // 模板 data_repeat 默认路径以后缀提示(placeholder)呈现, 需用户填写项目内相对路径
-    await expect(page.getByPlaceholder('data/e2e_load.csv')).toBeVisible()
+    // data_repeat 叶子以项目内相对 CSV 路径输入(无 default/data_ref 回退)
+    await expect(page.getByPlaceholder('data/example.csv')).toBeVisible()
     // 初始状态: 编辑中(非已保存)
     await expect(page.getByRole('status', { name: /编辑中|Editing/i })).toBeVisible()
 
@@ -162,7 +209,7 @@ test.describe('场景 12: 新建项目模型(真实后端模板与 YAML)', () =>
     await numberInput.fill('150')
     await page.getByRole('checkbox').nth(0).check()
     await page.getByLabel(/^properties\.label\.value$/).fill('e2e-label')
-    await page.getByPlaceholder('data/e2e_load.csv').fill('data/e2e_load.csv')
+    await page.getByPlaceholder('data/example.csv').fill(dataPath)
 
     // 12e. 提交候选并正式保存。
     await page.getByRole('button', { name: /提交为候选|Submit as candidate/i }).click()
@@ -170,7 +217,7 @@ test.describe('场景 12: 新建项目模型(真实后端模板与 YAML)', () =>
     const savedPanel = page.locator('.ies-modeling__saved')
     // 最终 _N ID(后端分配; 面板同时展示"最终编号"与"设备 ID"两处, 限定面板内取首处)
     await expect(savedPanel.getByText(new RegExp(`${escapeRegExp(templateDeviceId)}_1`)).first()).toBeVisible()
-    await expect(savedPanel.getByText('2', { exact: true })).toBeVisible() // 项目修订(后端返回)
+    await expect(savedPanel.getByText('3', { exact: true })).toBeVisible() // 项目修订(数据绑定 + 模型保存)
     await expect(page.getByText(/模型已进入项目模型列表|ready for assembly/i)).toBeVisible()
     // 保存成功后提交按钮禁用(不允许再次覆盖)
     await expect(page.getByRole('button', { name: /提交为候选|Submit as candidate/i })).toBeDisabled()
@@ -181,7 +228,7 @@ test.describe('场景 12: 新建项目模型(真实后端模板与 YAML)', () =>
     await expect(yamlEditor).toBeVisible()
     const skeleton = await yamlEditor.inputValue()
     expect(skeleton).toContain('schema: ies.device-model')
-    expect(skeleton).toContain('schema_version: "2.0.0"')
+    expect(skeleton).toContain('schema_version: "2.1.0"')
     // 编辑 YAML(替换占位设备 ID)后提交
     await yamlEditor.fill(
       skeleton
@@ -199,14 +246,14 @@ test.describe('场景 12: 新建项目模型(真实后端模板与 YAML)', () =>
     await expect(page.getByText(templateDeviceId)).toBeVisible()
     await expect(page.getByText(/已发布|Published/i).first()).toBeVisible()
 
-    // 窄切片 /custom 回归: 查看精确 revision 详情，断言实际 schema_version 真实值 2.0.0 (非仅标签)
+    // 窄切片 /custom 回归: 查看精确 revision 详情，断言实际 schema_version 真实值 2.1.0 (非仅标签)
     const v1Btn = page.locator('.ies-custom-card__rev', { hasText: 'v1' }).first()
     await expect(v1Btn).toBeVisible()
     await v1Btn.click()
     const revBox = page.locator('.ies-custom-revision')
     await expect(revBox).toBeVisible()
     await expect(revBox.getByText(/v1/)).toBeVisible()
-    await expect(revBox.getByText(/2\.0\.0/)).toBeVisible()
+    await expect(revBox.getByText(/2\.1\.0/)).toBeVisible()
     // 点击返回回到列表
     await page.getByRole('button', { name: /返回|Back/i }).click()
     await expect(page.locator('.ies-custom-list')).toBeVisible()
@@ -216,7 +263,7 @@ test.describe('场景 12: 新建项目模型(真实后端模板与 YAML)', () =>
     await page.getByRole('button', { name: /创建模板|New template/i }).click()
     const yamlInput = page.locator('#ies-custom-yaml')
     await expect(yamlInput).toBeVisible()
-    const invalidYaml = 'schema: ies.device-model\nschema_version: "2.0.0"\ninvalid_key: true\n'
+    const invalidYaml = 'schema: ies.device-model\nschema_version: "2.1.0"\ninvalid_key: true\n'
     await yamlInput.fill(invalidYaml)
     // 点击校验
     await page.getByRole('button', { name: /校验|Validate/i }).click()
@@ -229,7 +276,7 @@ test.describe('场景 12: 新建项目模型(真实后端模板与 YAML)', () =>
     // (b) 替换为合法 YAML 再次校验
     const validYaml = [
       'schema: ies.device-model',
-      'schema_version: "2.0.0"',
+      'schema_version: "2.1.0"',
       'device:',
       `  id: user.custom.valid_${Date.now()}`,
       '  names:',
@@ -242,7 +289,6 @@ test.describe('场景 12: 新建项目模型(真实后端模板与 YAML)', () =>
       '        type: number',
       '        unit: kW',
       '        valid_range: {minimum: 0, maximum: 1000}',
-      '        default: 100',
       'properties:',
       '  cop:',
       '    value: 3.2',

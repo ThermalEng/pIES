@@ -5,7 +5,7 @@
  * - number → 数字输入(文本保留编辑中状态, 单位/范围只读提示);
  * - boolean → 开关(Checkbox);
  * - string → 文本输入;
- * - data_repeat / data_predict → 项目内相对 CSV 路径;
+ * - data_repeat / data_full / data_predict → 项目内相对 CSV 路径;
  * - object / array → 受控结构编辑器(对象递归分组; 数组逐行编辑, 整体替换)。
  *
  * 前端预检查(即时反馈)不阻断提交; 后端校验始终是权威闸门。
@@ -171,6 +171,7 @@ function NodeEditor({ node, values, errorByPath, onFieldChange, onArrayChange, d
       )
     }
     case 'data_repeat':
+    case 'data_full':
     case 'data_predict':
       return (
         <DataFileField
@@ -241,7 +242,7 @@ function DataFileField({
         type="text"
         value={path}
         disabled={disabled}
-        placeholder={node.data_ref ?? 'data/example.csv'}
+        placeholder={'data/example.csv'}
         aria-label={pt('ies.modeling.form.data_file')}
         onChange={(event) => onChange(node.path, { kind: 'data', path: event.target.value })}
       />
@@ -279,7 +280,7 @@ function ArrayEditor({
       if (child.type === 'number') row[f.rel] = { kind: 'number', text: '' }
       else if (child.type === 'boolean') row[f.rel] = { kind: 'boolean', checked: false }
       else if (child.type === 'string') row[f.rel] = { kind: 'string', text: '' }
-      else if (child.type === 'data_repeat' || child.type === 'data_predict') row[f.rel] = { kind: 'data', path: child.data_ref ?? '' }
+      else if (child.type === 'data_repeat' || child.type === 'data_full' || child.type === 'data_predict') row[f.rel] = { kind: 'data', path: '' }
     }
     onArrayChange(node.path, [...items, row])
   }
@@ -352,14 +353,14 @@ function ArrayEditor({
                   </FormField>
                 )
               }
-              if (f.node.type === 'data_repeat' || f.node.type === 'data_predict') {
+              if (f.node.type === 'data_repeat' || f.node.type === 'data_full' || f.node.type === 'data_predict') {
                 return (
                   <Input
                     key={f.rel}
                     type="text"
                     value={rowValue?.kind === 'data' ? rowValue.path : ''}
                     disabled={disabled}
-                    placeholder={f.node.data_ref ?? 'data/example.csv'}
+                    placeholder={'data/example.csv'}
                     aria-label={f.rel || itemPath}
                     onChange={(event) => updateRow(i, f.rel, { kind: 'data', path: event.target.value })}
                   />
