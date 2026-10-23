@@ -1,5 +1,5 @@
 schema: ies.assembly
-schema_version: "3.0.0"
+schema_version: "4.0.0"
 
 assembly:
   id: campus_demo
@@ -157,6 +157,8 @@ tariff_bindings:
     instance: grid
     interface: electricity_export
     aggregation: integrate_positive
+
+demand_bindings: {}
 
 planning:
   objective:
