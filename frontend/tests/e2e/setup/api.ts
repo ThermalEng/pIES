@@ -115,7 +115,7 @@ export async function createProject(
     baseline_start_year: 2026,
     baseline_scenario_mode: 'single',
   }, userToken)
-  return { id: res.id, name: res.name }
+  return { id: res.project.id, name: res.project.name }
 }
 
 /** 删除用户(管理员; 先预览取确认令牌, 再携带 confirm + 令牌执行删除)。 */

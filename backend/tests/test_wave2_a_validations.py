@@ -81,9 +81,8 @@ def test_precheck_repeatable_consistent(db_session: Session) -> None:
     assert new_report.status == old_report.status == "blocked"
     assert new_report.blocks_submit is True
     assert _codes(new_report) == _codes(old_report)
-    # 关键诊断存在：未绑定数据 + 缺少财务基准确认 + 未保存配置警告
+    # 关键诊断存在：未绑定数据 + 未保存配置错误
     assert "VALID-DATA-001" in _codes(new_report)
-    assert "VALID-FIN-001" in _codes(new_report)
     assert "VALID-CONFIG-001" in _codes(new_report)
 
 
@@ -92,12 +91,13 @@ def test_baseline_confirm_flow_and_commit(engine: Engine, db_session: Session) -
     project = projects_uc.create_project(db_session, owner, "W2A 确认项目", **BASELINE)
 
     before = validations_uc.validate_project(db_session, project.id)
-    assert "VALID-FIN-001" in _codes(before)
+    # 预检不要求旧 baseline-confirm 审计证据(0.15 S0)
+    assert "VALID-FIN-001" not in _codes(before)
 
     record = validations_uc.mark_baseline_confirmed(db_session, project.id, owner, {"note": "v1"})
     assert record.action == validations_uc.BASELINE_ACTION
 
-    # 独立执行并提交事务：新会话可见确认证据，预检不再报 FIN-001
+    # 独立执行并提交事务：新会话可见确认证据(审计独立用途, 预检不依赖)
     with _new_session(engine) as fresh:
         after = validations_uc.validate_project(fresh, project.id)
         assert "VALID-FIN-001" not in _codes(after)
