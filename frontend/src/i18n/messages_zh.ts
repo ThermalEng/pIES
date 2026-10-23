@@ -723,6 +723,7 @@ export const messagesZh: Record<string, string> = {
   'ies.finance.invalid_json': 'JSON 解析失败',
   'ies.finance.see_diagnostics': '见上标题行错误说明。',
   'ies.nav.finance': '财务配置',
+  'ies.nav.bindings': '成本与计费绑定',
   // 导出
   // -------------------------------------------------------------------------
   'ies.export.title': '导出',

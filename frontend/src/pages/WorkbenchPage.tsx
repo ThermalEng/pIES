@@ -34,6 +34,7 @@ const subPageLoaders = import.meta.glob<{ default: ComponentType }>([
   './ConfigPage.tsx',
   './PlanningPage.tsx',
   './FinancePage.tsx',
+  './EconomicBindingsPage.tsx',
   './ValidationPage.tsx',
   './ExportPage.tsx',
 ])
@@ -57,6 +58,7 @@ const DataPage = lazySubPage('./DataPage.tsx')
 const ConfigPage = lazySubPage('./ConfigPage.tsx')
 const PlanningPage = lazySubPage('./PlanningPage.tsx')
 const FinancePage = lazySubPage('./FinancePage.tsx')
+const EconomicBindingsPage = lazySubPage('./EconomicBindingsPage.tsx')
 const ValidationPage = lazySubPage('./ValidationPage.tsx')
 const ExportPage = lazySubPage('./ExportPage.tsx')
 
@@ -82,6 +84,7 @@ export default function WorkbenchPage() {
           <Route path="config" element={<ConfigPage />} />
           <Route path="planning" element={<PlanningPage />} />
           <Route path="finance" element={<FinancePage />} />
+          <Route path="bindings" element={<EconomicBindingsPage />} />
           <Route path="validation" element={<ValidationPage />} />
           <Route path="tasks" element={<TasksPage />} />
           <Route path="versions" element={<VersionsPage />} />
