@@ -699,9 +699,9 @@ class VatRule:
     out_tax: tuple[OutTaxEntry, ...]
     om_input_tax: tuple[OmInputTaxEntry, ...]
     maintenance_input_tax: tuple[MaintInputTaxEntry, ...]
-    demand_input_tax: tuple[DemandInputTaxEntry, ...]
     credit_pool: str
     confirmation: str
+    demand_input_tax: tuple[DemandInputTaxEntry, ...] = ()
 
     def to_dict(self) -> dict:
         return {
@@ -836,13 +836,13 @@ class IncomeTaxRule:
     rate: Money
     revenue: tuple[str, ...]
     energy_cost: tuple[str, ...]
-    demand_cost: tuple[str, ...]
     annual_om: tuple[str, ...]
     variable_om: tuple[str, ...]
     deductible_maintenance: DeductibleMaintenance
     depreciation: tuple[DepreciationEntry, ...]
     loss_carryforward_years: int
     opening_losses: tuple[OpeningLoss, ...]
+    demand_cost: tuple[str, ...] = ()
 
     def to_dict(self) -> dict:
         return {
