@@ -111,8 +111,8 @@ class TestSchemaFile:
         schema_path = ASSEMBLY_DIR / ASSEMBLY_SCHEMA_PATH
         assert schema_path.exists(), f"缺少 {ASSEMBLY_SCHEMA_PATH}"
         schema = json.loads(schema_path.read_text(encoding="utf-8"))
-        assert schema["$id"] == f"{SCHEMA_ID}/3.0.0"
-        assert schema["title"] == "ies.assembly 3.0.0 装配 YAML 契约"
+        assert schema["$id"] == f"{SCHEMA_ID}/4.0.0"
+        assert schema["title"] == "ies.assembly 4.0.0 装配 YAML 契约"
         required = schema["required"]
         assert "schema" in required and "schema_version" in required
         assert set(required) >= {
@@ -401,7 +401,7 @@ class TestSamples:
         assert doc is not None, [d.to_dict() for d in diags]
         assert not any(d.blocking for d in diags)
         assert doc["schema"] == SCHEMA_ID
-        assert doc["schema_version"] == SCHEMA_VERSION == "3.0.0"
+        assert doc["schema_version"] == SCHEMA_VERSION == "4.0.0"
         assert doc["assembly"]["id"] == "campus_demo"
         assert doc["project_baseline"] == {
             "resolution": "1h",
@@ -568,7 +568,7 @@ class TestSamples:
         assert any("extensions_key_not_namespaced" in str(d.params) for d in diags)
 
     def test_old_schema_version_rejected(self):
-        text = _load("campus.assembly.yaml").replace('schema_version: "3.0.0"', 'schema_version: "1.0.0"')
+        text = _load("campus.assembly.yaml").replace('schema_version: "4.0.0"', 'schema_version: "1.0.0"')
         doc, diags = _structure(text)
         assert doc is None
         assert any(d.code == "ASM-SYN-003" for d in diags)
@@ -1264,12 +1264,12 @@ class TestArtifact:
         assert result.artifact is not None
         receipt = result.artifact.receipt.to_dict()
         assert receipt["schema"] == SCHEMA_ID
-        assert receipt["schema_version"] == SCHEMA_VERSION == "3.0.0"
+        assert receipt["schema_version"] == SCHEMA_VERSION == "4.0.0"
         assert receipt["canonical_algorithm"] == {
             "id": CANON_ALGORITHM_ID,
             "version": CANON_ALGORITHM_VERSION,
         }
-        assert CANON_ALGORITHM_VERSION == "3.0.0"
+        assert CANON_ALGORITHM_VERSION == "4.0.0"
         assert set(receipt["dependencies"]["devices"]) >= {
             "ies.device.pv",
             "ies.device.electric_load",
@@ -1285,7 +1285,7 @@ class TestArtifact:
             "profile_id": "cn-north-demo",
             "revision": None,
             "schema": "ies.effective-finance-config",
-            "schema_version": "3.0.0",
+            "schema_version": "4.0.0",
             "currency": "CNY",
         }
         assert receipt["planning"] == {
