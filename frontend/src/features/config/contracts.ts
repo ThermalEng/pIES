@@ -24,3 +24,33 @@ export interface ConfigEnvelopeDto {
 export interface DeploymentDefaultsDto {
   calculation_defaults: { time_limit_seconds: number }
 }
+
+
+/** PlanningConfig public envelope (GET/PUT /api/projects/{pid}/planning-config).
+ * Decimal bounds are transmitted as exact strings, never JS floating-point numbers.
+ * A saved planning revision is valid only against its effective finance snapshot.
+ */
+export interface PlanningVariableDto {
+  device_ref: string
+  parameter: string
+  lower_bound: string | null
+  upper_bound: string | null
+  unit: string | null
+}
+
+export interface PlanningConstraintDto {
+  type: string
+  expression: string
+  enabled: boolean
+}
+
+export interface PlanningConfigBody {
+  objective: { sense: 'minimize' | 'maximize'; expression: string }
+  variables: Record<string, PlanningVariableDto>
+  constraints: Record<string, PlanningConstraintDto>
+}
+
+export interface PlanningConfigEnvelopeDto {
+  planning_config: PlanningConfigBody
+  revision: number
+}
