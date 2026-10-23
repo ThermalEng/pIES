@@ -60,6 +60,7 @@ def build_assembly_doc_from_content(
     finance: Mapping[str, Any] | None = None,
     finance_binding: Mapping[str, Any] | None = None,
     tariff_bindings: Mapping[str, Any] | None = None,
+    demand_bindings: Mapping[str, Any] | None = None,
     planning: Mapping[str, Any] | None = None,
     device_documents: Mapping[str, Any] | None = None,
 ) -> BuildDocResult:
@@ -368,6 +369,8 @@ def build_assembly_doc_from_content(
         doc["finance_binding"] = merged_binding
     if tariff_bindings is not None:
         doc["tariff_bindings"] = dict(tariff_bindings)
+    if demand_bindings is not None:
+        doc["demand_bindings"] = dict(demand_bindings)
     if planning is not None:
         doc["planning"] = dict(planning)
     doc.update(
