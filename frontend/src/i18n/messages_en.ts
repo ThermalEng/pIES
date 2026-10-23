@@ -65,6 +65,7 @@ export const messagesEn: Record<string, string> = {
   'ies.nav.model': 'System Modeling',
   'ies.nav.data': 'Data',
   'ies.nav.config': 'Calc Config',
+  'ies.nav.planning': 'Planning config',
   'ies.nav.tasks': 'Tasks',
   'ies.nav.versions': 'Versions',
   'ies.nav.results': 'Results',

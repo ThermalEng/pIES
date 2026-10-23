@@ -75,6 +75,7 @@ export const messagesZh: Record<string, string> = {
   'ies.nav.model': '系统建模',
   'ies.nav.data': '数据管理',
   'ies.nav.config': '计算配置',
+  'ies.nav.planning': '规划配置',
   'ies.nav.tasks': '任务中心',
   'ies.nav.versions': '版本历史',
   'ies.nav.results': '结果分析',

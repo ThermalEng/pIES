@@ -31,6 +31,7 @@ const NAV_ITEMS: NavItem[] = [
   { path: 'model', labelKey: 'ies.nav.model', icon: 'model' },
   { path: 'data', labelKey: 'ies.nav.data', icon: 'data' },
   { path: 'config', labelKey: 'ies.nav.config', icon: 'config' },
+  { path: 'planning', labelKey: 'ies.nav.planning', icon: 'config' },
   { path: 'finance', labelKey: 'ies.nav.finance', icon: 'finance' },
   { path: 'validation', labelKey: 'ies.nav.validation', icon: 'validation' },
   { path: 'tasks', labelKey: 'ies.nav.tasks', icon: 'tasks' },
