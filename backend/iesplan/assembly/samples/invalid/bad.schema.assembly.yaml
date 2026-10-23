@@ -1,6 +1,6 @@
 # 非法样例: schema 标识无法识别(≠ ies.assembly)→ ASM-SYN-006
 schema: ies.assembly.other
-schema_version: "3.0.0"
+schema_version: "4.0.0"
 
 assembly:
   id: bad_schema
