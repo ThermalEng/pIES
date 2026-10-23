@@ -1600,3 +1600,71 @@ def test_import_rejects_tampered_tax_values(client: TestClient, db: Session) -> 
         headers=_h(client, importer),
     )
     assert resp.status_code == 400, resp.text
+
+
+def test_issue04_d1_demand_rate_and_binding_package_roundtrip(client: TestClient, db: Session) -> None:
+    """Real package: profile/rate override + draft/version demand bindings survive import."""
+    from copy import deepcopy
+    from iesplan.core.yamlmini import load as yaml_load
+
+    owner = make_user(db, "d1_pkg_owner")
+    importer = make_user(db, "d1_pkg_importer")
+    pid = _create_project(client, owner, "D1 synthetic demand package")
+    profile_doc = deepcopy(PROFILE_PAYLOAD)
+    profile_doc["profile"]["id"] = "d1-rate-profile"
+    profile_doc["demand_charges"] = {
+        "month_kw": {"rate": {"value": "22", "unit": "CNY/kW"}},
+    }
+    _register_profile(client, owner, profile_doc)
+    _set_profile(client, owner, pid, "d1-rate-profile")
+    override = FinanceOverrides.from_dict({
+        "schema": "ies.finance-overrides", "schema_version": "4.0.0",
+        "profile_ref": {"id": "d1-rate-profile"},
+        "demand_charges": {"month_kw": {"rate": {"value": "33", "unit": "CNY/kW"}}},
+    }, profile=FinanceProfile.from_dict(profile_doc))
+    resp = client.put(
+        f"/api/projects/{pid}/finance-overrides",
+        json={"finance_overrides": override.to_dict(), "expected_revision": 1},
+        headers=_h(client, owner),
+    )
+    assert resp.status_code == 200, resp.text
+
+    binding = {
+        "billing_main": {"charge": "month_kw", "instance": "grid1", "interface": "electricity_import"},
+    }
+    view = client.get(f"/api/projects/{pid}", headers=_h(client, owner)).json()
+    resp = client.put(
+        f"/api/projects/{pid}/draft",
+        json={"expected_revision": view["draft"]["revision"], "commands": [{
+            "id": "d1-explicit-demand-binding", "unit": "assembly",
+            "type": "assembly.set_demand_bindings", "payload": {"bindings": binding},
+        }]},
+        headers=_h(client, owner),
+    )
+    assert resp.status_code == 200, resp.text
+    _create_hist_version(client, owner, pid, "D1 frozen binding")
+    package = _export_zip(client, owner, pid)
+    with zipfile.ZipFile(io.BytesIO(package)) as zipped:
+        assert json.loads(zipped.read("draft.json"))["content"]["demand_bindings"] == binding
+        history = json.loads(zipped.read("versions/0001.json"))
+        assert history["content"]["demand_bindings"] == binding
+        effective = yaml_load(zipped.read("effective_finance.yaml").decode("utf-8"))
+        assert effective["schema_version"] == "4.0.0"
+        assert effective["demand_charges"]["month_kw"]["rate"]["value"] == "33"
+        overrides = yaml_load(zipped.read("finance_overrides.yaml").decode("utf-8"))
+        assert overrides["demand_charges"]["month_kw"]["rate"]["value"] == "33"
+    new_pid, _ = _import_new_project(client, importer, package)
+    view = client.get(f"/api/projects/{new_pid}", headers=_h(client, importer)).json()
+    assert view["draft"]["content"]["demand_bindings"] == binding
+    effective = client.get(f"/api/projects/{new_pid}/effective-finance", headers=_h(client, importer))
+    assert effective.status_code == 200
+    assert effective.json()["effective_finance_config"]["demand_charges"]["month_kw"]["rate"]["value"] == "33"
+    versions = client.get(f"/api/projects/{new_pid}/versions", headers=_h(client, importer)).json()["versions"]
+    assert len(versions) == 1
+    restored = client.post(
+        f"/api/projects/{new_pid}/versions/{versions[0]['id']}/restore",
+        headers=_h(client, importer),
+    )
+    assert restored.status_code == 200, restored.text
+    view = client.get(f"/api/projects/{new_pid}", headers=_h(client, importer)).json()
+    assert view["draft"]["content"]["demand_bindings"] == binding
