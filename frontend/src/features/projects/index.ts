@@ -25,6 +25,9 @@ export {
 } from './mappers'
 export type {
   DraftBindingDto,
+  CostBindingDto,
+  DriverTargetDto,
+  TariffBindingDto,
   DraftCommandDto,
   DraftCommandInput,
   DraftContentConnectionDto,
