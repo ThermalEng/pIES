@@ -2,8 +2,8 @@
  * 财务配置 feature 前后端契约(与后端 iesplan/api/config_revisions.py 一致)。
  *
  * 端点:
- *   GET  /api/finance-profiles/              已登记列表 → {items, count}
- *   POST /api/finance-profiles/              登记 → {finance_profile, row}
+ *   GET  /api/finance-profiles               已登记列表 → {items, count}
+ *   POST /api/finance-profiles               登记 → {finance_profile, row}
  *   GET  /api/finance-profiles/{id}          按 id 读取 → {finance_profile, row}
  *   GET  /api/projects/{pid}/finance-profile 当前引用 → {finance_profile, row}
  *   PUT  /api/projects/{pid}/finance-profile 引用/切换 → {finance_profile, overrides_revision, effective_finance_config, revision}
