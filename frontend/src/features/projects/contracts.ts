@@ -71,6 +71,21 @@ export interface ProjectMutationResponseDto {
   my_role: unknown
 }
 
+export type DriverTargetDto =
+  | { property: string }
+  | { interface: string; aggregation: 'integrate_positive' | 'sum_positive' }
+
+export type CostBindingDto =
+  | { type: 'none' }
+  | { type: 'costed'; finance_type: string; drivers: Record<string, DriverTargetDto> }
+
+export interface TariffBindingDto {
+  price: string
+  instance: string
+  interface: string
+  aggregation: 'integrate_positive' | 'sum_positive'
+}
+
 // ---------------------------------------------------------------------------
 // 项目视图(含草稿摘要与内容)
 // ---------------------------------------------------------------------------
@@ -110,9 +125,9 @@ export interface DraftContentModelDto {
 export interface DraftContentDto {
   model: DraftContentModelDto
   /** assembly.set_finance_binding: omitted until explicitly saved. */
-  finance_binding?: { instances: Record<string, import('../assembly-bindings/contracts').CostBindingDto> }
+  finance_binding?: { instances: Record<string, CostBindingDto> }
   /** assembly.set_tariff_bindings: omitted until explicitly saved. */
-  tariff_bindings?: Record<string, import('../assembly-bindings/contracts').TariffBindingDto>
+  tariff_bindings?: Record<string, TariffBindingDto>
   task_working_inputs?: Record<string, unknown> | null
   [key: string]: unknown
 }
