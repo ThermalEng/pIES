@@ -155,6 +155,7 @@ def validate_project_export(
     finance_snapshots: Mapping[str, EffectiveFinanceConfig] | None = None,
     operation_years: int | None = None,
     device_documents: Mapping[str, Any] | None = None,
+    device_data_bindings: Mapping[str, list[dict]] | None = None,
 ) -> AssemblyValidationResult:
     """GUI 项目导出入口:
 
@@ -179,6 +180,7 @@ def validate_project_export(
         tariff_bindings=tariff_bindings,
         planning=planning,
         device_documents=device_documents,
+        device_data_bindings=device_data_bindings,
     )
     if built.doc is None:
         return AssemblyValidationResult(diagnostics=list(built.diagnostics), artifact=None)

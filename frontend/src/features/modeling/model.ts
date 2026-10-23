@@ -72,9 +72,6 @@ export interface InputNode {
   type: ModelInputNodeType
   unit: string | null
   valid_range: { minimum: number | null; maximum: number | null } | null
-  default: number | boolean | string | null
-  /** data_repeat/data_predict 绑定的数据引用(只读展示)。 */
-  data_ref: string | null
   /** object(fields)/array(items) 子节点。 */
   children: InputNode[]
   /** 类型声明无法识别时为 true(不静默丢弃, 表单中明确提示)。 */

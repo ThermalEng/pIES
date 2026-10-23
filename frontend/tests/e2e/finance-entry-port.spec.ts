@@ -8,7 +8,7 @@
 //   docker compose ... run --rm e2e npx playwright test finance-entry-port.spec.ts
 //
 // 覆盖:
-// A) 尾示例尾斜杠请求的合法重定向 Location 保持实际请求的 Host 与端口
+// A) 尾斜杠请求的合法重定向 Location 保持实际请求的 Host 与端口
 //    (反代 $http_host 透传), 不再丢失部署端口;
 // B) 财务页 UI 全链路: 列表加载 → 登记画像 → 列表出现 → 引用到项目
 //    (状态变更 PUT 经 CSRF Host:端口同源推导, 不因非标准端口 403)。
@@ -31,7 +31,7 @@ test.describe('S0 财务入口: 非标准端口部署', () => {
     '本 spec 面向非标准端口部署; 标准端口布局下由 compose 覆盖启用(见文件头)',
   )
 
-  test('A: 尾示例尾斜杠重定向 Location 保持实际请求的 Host 与端口', async ({ request }) => {
+  test('A: 尾斜杠重定向 Location 保持实际请求的 Host 与端口', async ({ request }) => {
     await test.step('未跟随重定向时, Location 不得丢失部署端口', async () => {
       const res = await request.get('/api/finance-profiles/', { maxRedirects: 0 })
       const origin = new URL(APP).origin

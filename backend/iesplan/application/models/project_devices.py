@@ -16,6 +16,7 @@ import json
 from sqlalchemy.orm import Session
 
 from iesplan import model as model_domain
+from iesplan.core.errors import AppError
 from iesplan.devices import DeviceModelDocument, from_dict
 from iesplan.storage import get_object
 
@@ -54,4 +55,34 @@ def load_project_device_documents(
     return documents
 
 
-__all__ = ["load_project_device_documents", "project_device_type_ids"]
+def load_project_device_data_bindings(
+    db: Session, content: dict
+) -> dict[str, list[dict]]:
+    """项目模型回执中的模板数据绑定 → ``{device_id: [绑定]}``。
+
+    模板数据输入在模型保存入口已解析为项目数据集版本并校验；装配构造器
+    据此为使用该模型的设备实例补齐 ``predefined_interfaces`` 来源声明。
+    回执缺失/损坏是真实的数据损坏，直接透传错误，不静默跳过。
+    """
+    bindings: dict[str, list[dict]] = {}
+    for model in _referenced_models(db, content):
+        raw = get_object(db, model.receipt_object_id)
+        receipt = json.loads(raw.decode("utf-8"))
+        if not isinstance(receipt, dict):
+            raise AppError(
+                "项目模型回执对象损坏",
+                code="SYS-STORE-001",
+                message_key="ies.diag.store.corrupt",
+                location={"object_type": "project_model", "object_id": str(model.id)},
+            )
+        items = receipt.get("data_bindings")
+        if isinstance(items, list) and items:
+            bindings[model.device_id] = [dict(item) for item in items if isinstance(item, dict)]
+    return bindings
+
+
+__all__ = [
+    "load_project_device_data_bindings",
+    "load_project_device_documents",
+    "project_device_type_ids",
+]

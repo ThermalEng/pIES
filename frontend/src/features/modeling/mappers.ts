@@ -92,7 +92,7 @@ export function validRangeFromServer(value: unknown): ValidRangeDto | null {
 // ---------------------------------------------------------------------------
 
 /** 模板 inputs 叶子类型集合。 */
-const LEAF_TYPES = new Set(['number', 'boolean', 'string', 'data_repeat', 'data_predict'])
+const LEAF_TYPES = new Set(['number', 'boolean', 'string', 'data_repeat', 'data_full', 'data_predict'])
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
@@ -123,8 +123,6 @@ function buildInputNode(value: unknown, path: string, key: string): InputNode {
       type: 'object',
       unit: null,
       valid_range: null,
-      default: null,
-      data_ref: null,
       children: [],
       unsupported: true,
     }
@@ -138,8 +136,6 @@ function buildInputNode(value: unknown, path: string, key: string): InputNode {
       type: 'object',
       unit: null,
       valid_range: null,
-      default: null,
-      data_ref: null,
       children: buildInputTree(rec, path),
       unsupported: false,
     }
@@ -153,8 +149,6 @@ function buildInputNode(value: unknown, path: string, key: string): InputNode {
         type: 'object',
         unit: null,
         valid_range: null,
-        default: null,
-        data_ref: null,
         children: fields ? buildInputTree(fields, path) : [],
         unsupported: false,
       }
@@ -162,7 +156,7 @@ function buildInputNode(value: unknown, path: string, key: string): InputNode {
     if (type === 'array') {
       const items = rec.items
       if (items === null || items === undefined) {
-        return { path, key, type: 'array', unit: null, valid_range: null, default: null, data_ref: null, children: [], unsupported: false }
+        return { path, key, type: 'array', unit: null, valid_range: null, children: [], unsupported: false }
       }
       if (Array.isArray(items)) {
         return {
@@ -171,8 +165,6 @@ function buildInputNode(value: unknown, path: string, key: string): InputNode {
           type: 'array',
           unit: null,
           valid_range: null,
-          default: null,
-          data_ref: null,
           children: items.map((item, i) => buildInputNode(item, `${path}[]`, `[]${i}`)),
           unsupported: false,
         }
@@ -184,13 +176,11 @@ function buildInputNode(value: unknown, path: string, key: string): InputNode {
           type: 'array',
           unit: null,
           valid_range: null,
-          default: null,
-          data_ref: null,
           children: [buildInputNode(items, `${path}[]`, '[]')],
           unsupported: false,
         }
       }
-      return { path, key, type: 'array', unit: null, valid_range: null, default: null, data_ref: null, children: [], unsupported: true }
+      return { path, key, type: 'array', unit: null, valid_range: null, children: [], unsupported: true }
     }
     // 未知类型
     return {
@@ -199,8 +189,6 @@ function buildInputNode(value: unknown, path: string, key: string): InputNode {
       type: type as InputNode['type'],
       unit: null,
       valid_range: null,
-      default: null,
-      data_ref: null,
       children: [],
       unsupported: true,
     }
@@ -212,16 +200,12 @@ function buildInputNode(value: unknown, path: string, key: string): InputNode {
     unit = typeof rec.unit === 'string' ? rec.unit : null
     vrange = validRangeFromServer(rec.valid_range)
   }
-  const dataRef = type === 'data_repeat' || type === 'data_predict' ? (typeof rec.data_ref === 'string' ? rec.data_ref : null) : null
-  const def = rec.default === null || rec.default === undefined ? null : (rec.default as number | boolean | string)
   return {
     path,
     key,
     type: type as InputNode['type'],
     unit,
     valid_range: vrange,
-    default: def,
-    data_ref: dataRef,
     children: [],
     unsupported: false,
   }
@@ -248,17 +232,19 @@ function collectDefaults(node: InputNode, out: Record<string, FormFieldValue>): 
   if (node.unsupported) return
   switch (node.type) {
     case 'number':
-      out[node.path] = { kind: 'number', text: formatNumberText(typeof node.default === 'number' ? node.default : null) }
+      // 2.1.0: 模板不提供默认值, 由用户必填。
+      out[node.path] = { kind: 'number', text: '' }
       break
     case 'boolean':
-      out[node.path] = { kind: 'boolean', checked: node.default === true }
+      out[node.path] = { kind: 'boolean', checked: false }
       break
     case 'string':
-      out[node.path] = { kind: 'string', text: typeof node.default === 'string' ? node.default : '' }
+      out[node.path] = { kind: 'string', text: '' }
       break
     case 'data_repeat':
+    case 'data_full':
     case 'data_predict':
-      out[node.path] = { kind: 'data', path: typeof node.default === 'string' ? node.default : node.data_ref ?? '' }
+      out[node.path] = { kind: 'data', path: '' }
       break
   }
 }
@@ -303,6 +289,12 @@ function validateNode(node: InputNode, values: Record<string, FormFieldValue>, e
           max: node.valid_range?.maximum ?? null,
         },
       })
+    }
+  }
+  if (node.type === 'data_repeat' || node.type === 'data_full' || node.type === 'data_predict') {
+    const path = field?.kind === 'data' ? field.path.trim() : ''
+    if (path === '') {
+      errors.push({ path: node.path, message_key: 'ies.modeling.form.err.required' })
     }
   }
 }
@@ -411,6 +403,7 @@ function buildSubmitted(node: InputNode, values: Record<string, FormFieldValue>,
       out[node.key] = field?.kind === 'string' ? field.text : ''
       break
     case 'data_repeat':
+    case 'data_full':
     case 'data_predict': {
       const data = field?.kind === 'data' ? field : null
       if (data?.path.trim()) out[node.key] = data.path.trim()
@@ -438,7 +431,7 @@ function buildArrayItem(
         obj[child.key] = leaf?.kind === 'boolean' ? leaf.checked : false
       } else if (child.type === 'string') {
         obj[child.key] = leaf?.kind === 'string' ? leaf.text : ''
-      } else if (child.type === 'data_repeat' || child.type === 'data_predict') {
+      } else if (child.type === 'data_repeat' || child.type === 'data_full' || child.type === 'data_predict') {
         if (leaf?.kind === 'data' && leaf.path.trim()) obj[child.key] = leaf.path.trim()
       }
     }

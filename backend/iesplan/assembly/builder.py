@@ -62,6 +62,7 @@ def build_assembly_doc_from_content(
     tariff_bindings: Mapping[str, Any] | None = None,
     planning: Mapping[str, Any] | None = None,
     device_documents: Mapping[str, Any] | None = None,
+    device_data_bindings: Mapping[str, list[dict]] | None = None,
 ) -> BuildDocResult:
     """项目内容 → ies.assembly 3.0.0 文档(无静默默认)。
 
@@ -233,7 +234,7 @@ def build_assembly_doc_from_content(
             )
             continue
         instance, inst_diags = _build_instance(
-            d, type_id, dev_id, kind_raw, device_documents
+            d, type_id, dev_id, kind_raw, device_documents, device_data_bindings
         )
         diags.extend(inst_diags)
         if inst_diags and any(x.blocking for x in inst_diags):
@@ -506,6 +507,7 @@ def _build_instance(
     dev_id: str,
     asset_origin: str,
     device_documents: Mapping[str, Any] | None = None,
+    device_data_bindings: Mapping[str, list[dict]] | None = None,
 ) -> tuple[dict | None, list[Diagnostic]]:
     """项目设备 → 2.0 实例形态(属性覆盖 + 预定义来源声明)。
 
@@ -541,6 +543,22 @@ def _build_instance(
             }
         else:
             properties_out[key] = {"value": value, "unit": "1"}
+
+    # 项目模型保存时经模板数据输入解析的项目数据集版本绑定: 为使用该模型的
+    # 实例补齐 predefined_interfaces 来源(实例自身声明优先)。最终设备模型
+    # 仍为纯技术内容, 项目来源只在装配实例上出现。
+    for binding in (device_data_bindings or {}).get(type_id, []):
+        iface_id = binding.get("interface")
+        if not isinstance(iface_id, str) or iface_id not in predefined_ids:
+            continue
+        if iface_id in predefined_out:
+            continue
+        declaration = {"mode": binding.get("mode"), "dataset_version_id": binding.get("dataset_version_id")}
+        if binding.get("target_type"):
+            declaration["target_type"] = binding["target_type"]
+        declared = _predefined_source_declaration(dev_id, iface_id, declaration, diags)
+        if declared is not None:
+            predefined_out[iface_id] = declared
 
     if any(d.blocking for d in diags):
         return None, diags

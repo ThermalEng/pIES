@@ -1,5 +1,5 @@
 schema: ies.device-model
-schema_version: "2.0.0"
+schema_version: "2.1.0"
 device:
   id: acme.device.heat_pump
   names:
@@ -27,10 +27,18 @@ interfaces:
     valid_range:
       minimum: 0
       maximum: null
+  blind_terminal:
+    type: blind
+    carrier: heat
+    unit: kW
+    valid_range:
+      minimum: 0
+      maximum: null
+    source:
+      mode: constant
+      value: 1
 equations:
   variables: {}
   relations:
     - id: heat_conversion
       expression: "heat_out[t] = electricity_in[t] * cop"
-parameters:
-  x: 1

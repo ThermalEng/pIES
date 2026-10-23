@@ -233,6 +233,20 @@ class TestInvalidModel:
         assert d
         assert any("2.1.0" in x for x in d)
 
+    def test_old_2_0_header_rejected(self):
+        """2.1.0 是唯一正式字头; 2.0.0 文件不再接受(无双轨)。"""
+        d = self._diag_details(HEAT_PUMP_YAML.replace('schema_version: "2.1.0"', 'schema_version: "2.0.0"'))
+        assert d
+        assert any("2.1.0" in x for x in d)
+
+    def test_embedded_source_on_predefined_rejected(self):
+        """predefined 槽不得内嵌项目 source; 来源由装配实例绑定。"""
+        d = self._diag_details(HEAT_PUMP_YAML.replace(
+            "  fixed_temperature:\n    type: predefined",
+            "  fixed_temperature:\n    type: predefined\n    source: {mode: constant, value: 25}",
+        ))
+        assert any("禁止声明 source" in x for x in d)
+
     def test_old_schema_1(self):
         d = self._diag_details(HEAT_PUMP_YAML.replace("ies.device-model", "ies.device-model-x"))
         assert d
@@ -420,6 +434,18 @@ equations:
   relations: []
 """
 
+    def _inputs(self, **props: dict) -> dict:
+        base = {
+            "properties": {
+                "peak_power_kw": {"value": 250},
+                "is_switchable": {"value": True},
+                "new_prop": {"value": 120},
+            }
+        }
+        for key, value in props.items():
+            base["properties"][key] = value
+        return base
+
     def test_template_parse(self):
         r = _parse(self.TEMPLATE)
         assert r.ok, [d.params.get("detail") for d in r.diagnostics]
@@ -427,7 +453,7 @@ equations:
 
     def test_overwrite_existing_field(self):
         res, diags = instantiate_template(
-            yaml_load(self.TEMPLATE), {"properties": {"peak_power_kw": {"value": 250}}}
+            yaml_load(self.TEMPLATE), self._inputs(peak_power_kw={"value": 250})
         )
         assert res is not None, [d.params.get("detail") for d in diags]
         doc = res.document
@@ -436,7 +462,7 @@ equations:
 
     def test_add_new_field(self):
         res, _ = instantiate_template(
-            yaml_load(self.TEMPLATE), {"properties": {"new_prop": {"value": 120}}}
+            yaml_load(self.TEMPLATE), self._inputs(new_prop={"value": 120})
         )
         doc = res.document
         assert doc.properties["new_prop"].value == 120
@@ -445,26 +471,47 @@ equations:
 
     def test_boolean_add_default_unit(self):
         res, _ = instantiate_template(
-            yaml_load(self.TEMPLATE), {"properties": {"is_switchable": {"value": True}}}
+            yaml_load(self.TEMPLATE), self._inputs(is_switchable={"value": True})
         )
         assert res.document.properties["is_switchable"].unit == "-"
 
+    def test_missing_required_input_rejected(self):
+        """2.1.0: 模板已声明叶子必填, 缺失不得静默保留模板值。"""
+        res, diags = instantiate_template(
+            yaml_load(self.TEMPLATE), {"properties": {"peak_power_kw": {"value": 250}}}
+        )
+        assert res is None
+        assert any("必填输入" in d.params.get("detail", "") for d in diags)
+
+    def test_template_default_rejected(self):
+        """2.1.0: 模板 inputs 不接受 default(无隐式回退)。"""
+        bad = self.TEMPLATE.replace(
+            "        valid_range: {minimum: 0, maximum: 1000}",
+            "        valid_range: {minimum: 0, maximum: 1000}\n        default: 100",
+        )
+        r = _parse(bad)
+        assert not r.ok
+        assert any("禁止声明 default" in d.params.get("detail", "") for d in r.diagnostics)
+
     def test_inputs_removed_after_instantiation(self):
         res, _ = instantiate_template(
-            yaml_load(self.TEMPLATE), {"properties": {"peak_power_kw": {"value": 250}}}
+            yaml_load(self.TEMPLATE), self._inputs()
         )
         assert res.document.inputs is None
         assert '"inputs"' not in res.canonical_text
 
     def test_undeclared_field_rejected(self):
-        res, diags = instantiate_template(yaml_load(self.TEMPLATE), {"properties": {"evil": {"value": 1}}})
+        res, diags = instantiate_template(
+            yaml_load(self.TEMPLATE),
+            {**self._inputs(), "properties": {**self._inputs()["properties"], "evil": {"value": 1}}},
+        )
         assert res is None
         assert any("未在模板 inputs 中声明" in d.params.get("detail", "") for d in diags)
 
     def test_type_error_rejected(self):
         res, diags = instantiate_template(
             yaml_load(self.TEMPLATE),
-            {"properties": {"peak_power_kw": {"value": "x"}}},
+            self._inputs(peak_power_kw={"value": "x"}),
         )
         assert res is None
         assert any("期望 number" in d.params.get("detail", "") for d in diags)
@@ -472,7 +519,7 @@ equations:
     def test_range_error_rejected(self):
         res, diags = instantiate_template(
             yaml_load(self.TEMPLATE),
-            {"properties": {"peak_power_kw": {"value": 9999}}},
+            self._inputs(peak_power_kw={"value": 9999}),
         )
         assert res is None
         assert any("高于 valid_range.maximum" in d.params.get("detail", "") for d in diags)
@@ -480,13 +527,11 @@ equations:
     def test_equivalent_direct_yaml_same_canonical(self):
         res, diags = instantiate_template(
             yaml_load(self.TEMPLATE),
-            {
-                "properties": {
-                    "peak_power_kw": {"value": 250},
-                    "is_switchable": {"value": True},
-                    "new_prop": {"value": 120},
-                }
-            },
+            self._inputs(
+                peak_power_kw={"value": 250},
+                is_switchable={"value": True},
+                new_prop={"value": 120},
+            ),
         )
         assert res is not None, [d.params.get("detail") for d in diags]
         direct = """
@@ -513,10 +558,8 @@ equations:
         assert canonical_bytes(res.document) == canonical_bytes(r_direct.document)
 
     def test_final_model_passes_full_validation(self):
-        res, _ = instantiate_template(
-            yaml_load(self.TEMPLATE), {"properties": {"peak_power_kw": {"value": 250}}}
-        )
-        # 实例化后文档应通过完整 2.0.0 校验（解析器内部已保证；此处以 to_dict 往返验证）
+        res, _ = instantiate_template(yaml_load(self.TEMPLATE), self._inputs())
+        # 实例化后文档应通过完整 2.1.0 校验（解析器内部已保证；此处以 to_dict 往返验证）
         assert res is not None
         r = parse_device_model_v2(to_dict(res.document))
         assert r.ok
@@ -528,8 +571,6 @@ equations:
         assert any("必须声明顶层 inputs" in d.params.get("detail", "") for d in diags)
 
     def test_receipt_contains_traceability(self):
-        res, _ = instantiate_template(
-            yaml_load(self.TEMPLATE), {"properties": {"peak_power_kw": {"value": 250}}}
-        )
+        res, _ = instantiate_template(yaml_load(self.TEMPLATE), self._inputs())
         receipt = res.receipt
         assert receipt["instantiator"] == "ies.device-model.instantiator@2.0.0"

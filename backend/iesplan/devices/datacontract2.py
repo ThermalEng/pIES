@@ -382,8 +382,8 @@ def canonicalize_device_data_v2(
     document: DeviceModelDocument | None,
     *,
     expected_rows: int | None = None,
-    expected_data_ref: str | None = None,
     expected_interfaces: list[str] | None = None,
+    check_device_id: bool = True,
     baseline_resolution: str | None = None,
     baseline_start_year: int | None = None,
 ) -> DeviceData2Result:
@@ -397,7 +397,7 @@ def canonicalize_device_data_v2(
             field_name="device_id",
         ))
         return DeviceData2Result(meta, (STEP_COL,), [], [], (), diags)
-    if meta.device_id != document.device.id:
+    if check_device_id and meta.device_id != document.device.id:
         diags.append(_diag(
             "DATA-META-008",
             {"declared": meta.device_id, "expected": document.device.id},
@@ -415,9 +415,8 @@ def canonicalize_device_data_v2(
             iid for iid, iface in document.interfaces.items()
             if iface.type == "predefined" and iid in file_columns
         ]
-    mismatched: set[str] = set()
     for column in file_columns:
-        if column not in expected_columns and column not in mismatched:
+        if column not in expected_columns:
             diags.append(_diag("DATA-COL-003", {"column": column}, field_name=column))
     for column in expected_columns:
         if column not in file_columns:

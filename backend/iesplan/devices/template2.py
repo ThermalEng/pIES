@@ -180,13 +180,19 @@ def _merge_tree(leaves: tuple[TemplateInputSpec, ...], template_raw: Mapping[str
             )
         # 用户提交树中按叶子路径取用户值
         user_value: Any = inputs
+        found = True
         for seg in leaf.path.split("."):
             if not isinstance(user_value, Mapping) or seg not in user_value:
                 user_value = None
+                found = False
                 break
             user_value = user_value[seg]
-        if user_value is None:
-            continue  # 用户未提交该叶子：保持模型原样
+        if not found:
+            # 2.1.0: 模板已声明的标量/数据叶子必填, 不接受 default 或隐式回退。
+            # 数组容器及其元素子路径可缺省(空数组合法)。
+            if leaf.type != "array" and "[]" not in leaf.path:
+                raise ParseError(f"inputs.{leaf.path} 为必填输入，缺少用户值")
+            continue
         if leaf.type in INPUT_DATA_TYPES:
             _validate_leaf_value(leaf, user_value)
             # 记录实例化绑定（CSV 路径不进入最终纯技术模型）
