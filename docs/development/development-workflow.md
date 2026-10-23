@@ -70,6 +70,16 @@ API 的一次业务动作应转交一个完整 application 用例。Worker 不�
 
 所有测试都在 Docker 中执行。画布拖放、interface 连接、property 编辑等 GUI 功能统一使用 Playwright 完成真实浏览器验收，不设人工检查例外。
 
+## GitHub Actions 云端测试
+
+`.github/workflows/docker-ci.yml` 在面向 `master` 的 PR、合入 `master` 后以及手动触发时运行，使用 GitHub 托管的独立 Ubuntu Runner。所有项目依赖、编译和测试均在 Docker 内进行：
+
+1. **Backend Pytest (Docker)**：构建 `backend` 镜像，在容器中运行 `python -m pytest -q -ra tests`，保存 JUnit XML；全局测试配置使用 SQLite/内存队列，要求 Docker Socket 或独立 PostgreSQL 线束的专项用例不因普通 CI 获得额外能力，跳过情况以 Pytest 报告为准。
+2. **Playwright Chromium (Docker)**：由 Compose 启动 PostgreSQL、Redis、Backend、I/O 与 Compute Worker 及 Web，然后通过独立 `e2e` 容器执行默认 Chromium 浏览器验收；默认配置排除需额外挂载设备目录的 `device-yaml-extension.spec.ts`，该专用用例仍按 E2E README 的独立覆盖命令运行。
+3. **诊断与清理**：失败时输出服务日志；上传 Pytest XML 与 Playwright HTML/trace/截图（有产物时）；结束时清理本次测试容器和构建镜像。每个 Job 使用独立全新 Runner，不与本地 `./data` 共享数据。
+
+云端浏览器测试使用 `.github/ci/docker-compose.yml` 覆盖后端 API 为单 worker，以避免空库并发初始化竞态；本地和生产的 `docker-compose.yml` 不变。CI 通过是合并前的自动化证据，不能取代本地对 PR 实现和契约的人工主审。首次新增工作流的运行结果应在 PR 的 Checks 页面确认，不能仅凭工作流文件存在就宣称测试通过。
+
 ## 端点实现：状态码与包装键选择
 
 实现 HTTP 端点前，先查阅[公共契约](../../manual/developer-guide/zh-CN/contracts.md)的「成功与错误」与「HTTP 语义」两节确定：

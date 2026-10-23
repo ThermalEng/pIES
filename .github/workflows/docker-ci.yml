@@ -1,0 +1,89 @@
+name: Docker CI
+
+on:
+  pull_request:
+    branches: [master]
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+# Test untrusted PR code without write privileges or repository secrets.
+permissions:
+  contents: read
+
+concurrency:
+  group: docker-ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: Backend Pytest (Docker)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build backend test image
+        run: docker compose build backend
+
+      - name: Run backend suite in Docker
+        run: |
+          mkdir -p ci-artifacts/backend
+          docker compose run --rm --no-deps \
+            --volume "$PWD/ci-artifacts/backend:/ci-artifacts" \
+            backend python -m pytest -q -ra tests \
+            --junitxml=/ci-artifacts/pytest.xml
+
+      - name: Upload Pytest report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-pytest
+          path: ci-artifacts/backend/pytest.xml
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Remove test containers and built images
+        if: always()
+        run: docker compose down --remove-orphans --rmi local
+
+  browser:
+    name: Playwright Chromium (Docker)
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      # The default deployment uses 2 API workers. A fresh DB is initialized
+      # with one API worker in CI to avoid the documented first-boot race.
+      - name: Build and start isolated application
+        run: |
+          docker compose -f docker-compose.yml -f .github/ci/docker-compose.yml \
+            up -d --build web backend io_worker compute_worker
+
+      - name: Run real-browser acceptance suite
+        run: |
+          docker compose -f docker-compose.yml -f .github/ci/docker-compose.yml \
+            --profile e2e run --rm --build e2e npm run test:chromium
+
+      - name: Show application diagnostics on failure
+        if: failure()
+        run: |
+          docker compose -f docker-compose.yml -f .github/ci/docker-compose.yml ps -a
+          docker compose -f docker-compose.yml -f .github/ci/docker-compose.yml \
+            logs --no-color --tail=200
+
+      - name: Upload Playwright screenshots, traces and HTML report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-chromium
+          path: frontend/tests/e2e/test-results/
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Remove test containers and built images
+        if: always()
+        run: |
+          docker compose -f docker-compose.yml -f .github/ci/docker-compose.yml \
+            down --remove-orphans --rmi local
