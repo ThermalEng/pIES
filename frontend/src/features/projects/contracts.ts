@@ -109,6 +109,10 @@ export interface DraftContentModelDto {
 /** 草稿内容文档(初始骨架见 backend project/content.py: schema_version, model, calc_config 等)。 */
 export interface DraftContentDto {
   model: DraftContentModelDto
+  /** assembly.set_finance_binding: omitted until explicitly saved. */
+  finance_binding?: { instances: Record<string, import('../assembly-bindings/contracts').CostBindingDto> }
+  /** assembly.set_tariff_bindings: omitted until explicitly saved. */
+  tariff_bindings?: Record<string, import('../assembly-bindings/contracts').TariffBindingDto>
   task_working_inputs?: Record<string, unknown> | null
   [key: string]: unknown
 }
