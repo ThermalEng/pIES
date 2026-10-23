@@ -231,8 +231,6 @@ const PAGE_MESSAGES_ZH: Record<string, string> = {
   'ies.custom.rev_label': 'revision',
   'ies.custom.schema_version': 'schema 版本',
   'ies.custom.inputs': 'inputs 数量'
-}
-
   'ies.planning.title': "规划配置",
   'ies.planning.no_project': "请从项目工作台进入规划配置",
   'ies.planning.unsaved': "尚未保存规划配置",
@@ -271,6 +269,8 @@ const PAGE_MESSAGES_ZH: Record<string, string> = {
   'ies.planning.enabled': "启用",
   'ies.planning.disabled': "禁用",
   'ies.planning.add_constraint': "添加约束",
+}
+
 const PAGE_MESSAGES_EN: Record<string, string> = {
   // Data management (Design Input §8 data constraints / §15.3 time-series fields)
   'ies.data.resolution': 'Resolution',
@@ -489,8 +489,6 @@ const PAGE_MESSAGES_EN: Record<string, string> = {
   'ies.custom.rev_label': 'revision',
   'ies.custom.schema_version': 'schema version',
   'ies.custom.inputs': 'inputs count',
-}
-
   'ies.planning.title': "Planning configuration",
   'ies.planning.no_project': "Open planning config from a project workbench",
   'ies.planning.unsaved': "No saved planning configuration",
@@ -529,6 +527,8 @@ const PAGE_MESSAGES_EN: Record<string, string> = {
   'ies.planning.enabled': "Enabled",
   'ies.planning.disabled': "Disabled",
   'ies.planning.add_constraint': "Add constraint",
+}
+
 function table(locale: Locale): Record<string, string> {
   return locale === 'zh' ? PAGE_MESSAGES_ZH : PAGE_MESSAGES_EN
 }
