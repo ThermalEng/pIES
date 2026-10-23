@@ -43,6 +43,7 @@ from iesplan.main import create_app  # noqa: E402
 from iesplan.audit.persistence import AuditLog  # noqa: E402
 from iesplan.identity.persistence import User  # noqa: E402
 from iesplan.project.persistence import Project  # noqa: E402
+from iesplan.tasks.persistence import Task  # noqa: E402,F401
 from iesplan.model.persistence import ProjectModel, ProjectModelSequence  # noqa: E402
 from iesplan import project as project_domain  # noqa: E402
 from iesplan.application import identity  # noqa: E402
@@ -54,7 +55,7 @@ PASSWORD = "Test12345"
 #: 合法 2.0.0 设备模型(阶段 1 契约样例)
 HEAT_PUMP_YAML = """
 schema: ies.device-model
-schema_version: "2.0.0"
+schema_version: "2.1.0"
 
 device:
   id: acme.device.heat_pump
@@ -98,9 +99,6 @@ interfaces:
     valid_range:
       minimum: -50
       maximum: 60
-    source:
-      mode: constant
-      value: 25
   unused_terminal:
     carrier: heat
     unit: kW
@@ -118,7 +116,7 @@ equations:
 #: 多错误候选(interfaces type + property unit + equation 引用, 聚合 ≥3 条)
 MULTI_ERROR_YAML = """
 schema: ies.device-model
-schema_version: "2.0.0"
+schema_version: "2.1.0"
 device: {id: acme.device.multi, names: {zh-CN: 多错, en-US: Multi}}
 properties:
   p1: {value: 1, unit: not-a-unit, valid_range: {minimum: 0, maximum: 1}}
@@ -134,7 +132,7 @@ equations:
 #: 模板样例(与等值直接 YAML 汇合; inputs 实例化后删除顶层 inputs)
 TEMPLATE_YAML = """
 schema: ies.device-model
-schema_version: "2.0.0"
+schema_version: "2.1.0"
 device: {id: acme.device.electric_load, names: {zh-CN: 电负荷, en-US: Electric Load}}
 inputs:
   properties:
@@ -143,9 +141,8 @@ inputs:
         type: number
         unit: kW
         valid_range: {minimum: 0, maximum: 1000}
-        default: 100
     is_switchable:
-      value: {type: boolean, default: false}
+      value: {type: boolean}
 properties:
   cop: {value: 3.0, unit: "1", valid_range: {minimum: 1, maximum: 10}}
 interfaces:
@@ -154,7 +151,6 @@ interfaces:
     carrier: electricity
     unit: kW
     valid_range: {minimum: 0, maximum: null}
-    source: {mode: constant, value: 0}
 equations:
   variables: {}
   relations: []
@@ -163,7 +159,7 @@ equations:
 #: 与模板实例化等值的直接 YAML
 DIRECT_EQ_YAML = """
 schema: ies.device-model
-schema_version: "2.0.0"
+schema_version: "2.1.0"
 device: {id: acme.device.electric_load, names: {zh-CN: 电负荷, en-US: Electric Load}}
 properties:
   cop: {value: 3.0, unit: "1", valid_range: {minimum: 1, maximum: 10}}
@@ -175,7 +171,6 @@ interfaces:
     carrier: electricity
     unit: kW
     valid_range: {minimum: 0, maximum: null}
-    source: {mode: constant, value: 0}
 equations:
   variables: {}
   relations: []
@@ -626,7 +621,7 @@ def test_template_and_direct_yaml_converge(client: TestClient, db_session: Sessi
     receipt = r_tpl.json()["receipt"]
     assert receipt["template_id"] == template_id
     assert receipt["template_revision"] == tpl_revision
-    assert receipt["instantiator"] == "ies.device-model.instantiator@1.0.0"
+    assert receipt["instantiator"] == "ies.device-model.instantiator@2.0.0"
     assert "instantiator" not in r_direct.json()["receipt"]
     # 等值语义：候选模型规范内容一致；回执结构按来源分别验证。
     owner = identity_user(db_session, "sv_conv")
@@ -638,7 +633,7 @@ def test_template_and_direct_yaml_converge(client: TestClient, db_session: Sessi
         model_yaml=TEMPLATE_YAML, source="template", template_inputs=TEMPLATE_INPUTS,
     )
     assert v_direct.ok and v_tpl.ok
-    assert v_tpl.receipt["instantiator"] == "ies.device-model.instantiator@1.0.0"
+    assert v_tpl.receipt["instantiator"] == "ies.device-model.instantiator@2.0.0"
     assert "instantiator" not in v_direct.receipt
 
 

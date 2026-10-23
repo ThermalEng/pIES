@@ -13,7 +13,6 @@ from iesplan.devices.contracts2 import (
     DeviceInfo,
     DeviceModelDocument,
     InterfaceSpec,
-    SourceSpec,
 )
 from iesplan.devices.datacontract2 import (
     SCHEMA_ID,
@@ -34,16 +33,14 @@ def _device_doc() -> DeviceModelDocument:
             "electric_demand": InterfaceSpec(
                 id="electric_demand", type="predefined", carrier="electricity", unit="kW",
                 valid_range=(0.0, 1000.0),
-                source=SourceSpec(mode="data_repeat", data_ref="typical_day_load"),
             ),
             "ambient_temperature": InterfaceSpec(
                 id="ambient_temperature", type="predefined", carrier="environment", unit="°C",
                 valid_range=(-50.0, 60.0),
-                source=SourceSpec(mode="data_predict", data_ref="weather_prediction"),
             ),
             "fixed_temperature": InterfaceSpec(
                 id="fixed_temperature", type="predefined", carrier="environment", unit="°C",
-                valid_range=(-50.0, 60.0), source=SourceSpec(mode="constant", value=25.0),
+                valid_range=(-50.0, 60.0),
             ),
         },
     )
@@ -275,18 +272,6 @@ class TestBindingColumnsAndValues:
             _csv_text(device_id="acme.device.other").encode(), _device_doc()
         )
         assert "DATA-META-008" in _codes(wrong_id)
-
-    def test_source_mode_mismatch_is_rejected(self) -> None:
-        # 显式绑定上下文声明 data_predict，CSV 字头声明 data_repeat → 阻断
-        result = canonicalize_device_data_v2(
-            _csv_text(
-                source_mode="data_repeat", columns=["ambient_temperature"],
-                units={"ambient_temperature": "°C"}, rows=[f"{i},{i}" for i in range(24)],
-            ).encode(),
-            _device_doc(),
-        )
-        assert "DATA-META-011" in _codes(result)
-
     def test_unknown_duplicate_and_missing_columns_are_rejected(self) -> None:
         unknown = _csv_text().replace(
             "step,ambient_temperature", "step,ambient_temperature,extra"
@@ -303,7 +288,7 @@ class TestBindingColumnsAndValues:
         )
         assert "DATA-COL-003" in _codes(canonicalize_device_data_v2(unknown.encode(), _device_doc()))
         assert "DATA-COL-004" in _codes(canonicalize_device_data_v2(duplicate.encode(), _device_doc()))
-        assert "DATA-COL-005" in _codes(canonicalize_device_data_v2(missing.encode(), _device_doc()))
+        assert "DATA-COL-005" in _codes(canonicalize_device_data_v2(missing.encode(), _device_doc(), expected_interfaces=["ambient_temperature"]))
 
     def test_units_check_dimension(self) -> None:
         good = _csv_text(

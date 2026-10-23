@@ -383,6 +383,7 @@ def canonicalize_device_data_v2(
     *,
     expected_rows: int | None = None,
     expected_data_ref: str | None = None,
+    expected_interfaces: list[str] | None = None,
     baseline_resolution: str | None = None,
     baseline_start_year: int | None = None,
 ) -> DeviceData2Result:
@@ -404,29 +405,17 @@ def canonicalize_device_data_v2(
         ))
 
     file_columns = list(parsed.header[1:])
-    expected_columns = [
-        iid for iid, iface in document.interfaces.items()
-        if iface.type == "predefined"
-        and iface.source is not None
-        and iface.source.mode == meta.source_mode
-        and (expected_data_ref is None or iface.source.data_ref == expected_data_ref)
-    ]
-    if expected_data_ref is not None and not expected_columns:
-        diags.append(_diag(
-            "DATA-META-011", {"column": "", "mode": "missing_data_ref",
-                               "source_mode": meta.source_mode, "data_ref": expected_data_ref},
-            field_name="source_mode",
-        ))
+    if expected_interfaces is not None:
+        expected_columns = [
+            iid for iid in expected_interfaces
+            if iid in document.interfaces and document.interfaces[iid].type == "predefined"
+        ]
+    else:
+        expected_columns = [
+            iid for iid, iface in document.interfaces.items()
+            if iface.type == "predefined" and iid in file_columns
+        ]
     mismatched: set[str] = set()
-    for column in file_columns:
-        iface = document.interfaces.get(column)
-        if iface is not None and iface.type == "predefined" and iface.source is not None \
-                and iface.source.mode != meta.source_mode:
-            mismatched.add(column)
-            diags.append(_diag(
-                "DATA-META-011", {"column": column, "mode": iface.source.mode,
-                                   "source_mode": meta.source_mode}, field_name=column,
-            ))
     for column in file_columns:
         if column not in expected_columns and column not in mismatched:
             diags.append(_diag("DATA-COL-003", {"column": column}, field_name=column))

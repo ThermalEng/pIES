@@ -1,13 +1,14 @@
-"""`ies.device-model` 2.0.0 公开契约：深度不可变值对象与唯一规范化。
+"""`ies.device-model` 2.1.0 公开契约：深度不可变值对象与唯一规范化。
 
 对应格式标准 [device-model-yaml.md](../../../manual/developer-guide/zh-CN/formats/device-model-yaml.md)
-与包内 `schema/device-model-2.0.0.contract.md`。
+与包内 `schema/device-model-2.1.0.contract.md`。
 
 顶层只允许 `schema/schema_version/device/properties/interfaces/equations`；
 模板额外允许顶层 `inputs`（见 ``DeviceModelTemplate``）。设备不声明独立语义版本，
 内容由稳定 ID、发布 revision 与校验回执固定。文本文件只校验字头。
 
-本模块是纯数据类型与纯函数：不访问数据库、文件系统与业务模块。
+所有 interface 都不承载项目来源（source/mode/value/data_ref/target_type 均禁止）；
+项目来源由装配实例绑定。本模块是纯数据类型与纯函数：不访问数据库、文件系统与业务模块。
 """
 
 from __future__ import annotations
@@ -20,22 +21,18 @@ from typing import Any, Mapping
 
 #: 统一文件契约标识与版本
 SCHEMA_ID = "ies.device-model"
-SCHEMA_VERSION = "2.0.0"
+SCHEMA_VERSION = "2.1.0"
 
 #: 模板 inputs 叶子类型（标量 + 预定义数据 + 结构容器）
 INPUT_SCALAR_TYPES: tuple[str, ...] = ("number", "boolean", "string")
-INPUT_DATA_TYPES: tuple[str, ...] = ("data_repeat", "data_predict")
+INPUT_DATA_TYPES: tuple[str, ...] = ("data_repeat", "data_full", "data_predict")
 INPUT_TYPES: tuple[str, ...] = INPUT_SCALAR_TYPES + INPUT_DATA_TYPES + ("object", "array")
 
 #: 接口类型（五类；缺省规范化为 blind）
 INTERFACE_TYPES: tuple[str, ...] = ("in", "out", "bidirectional", "predefined", "blind")
-#: 预定义来源模式
-SOURCE_MODES: tuple[str, ...] = ("constant", "data_repeat", "data_predict")
 
 #: 允许被连接的接口类型（in/out/bidirectional 之外均为盲或预定义）
 CONNECTABLE_TYPES: tuple[str, ...] = ("in", "out", "bidirectional")
-#: 允许声明 source 的接口类型
-SOURCE_TYPES: tuple[str, ...] = ("predefined",)
 
 #: 稳定设备类型 ID（非项目实例 ID）
 _ID_PATTERN = re.compile(r"^[a-z0-9]+([._-][a-z0-9]+)*$")
@@ -90,19 +87,11 @@ class PropertySpec:
 
 
 @dataclass(frozen=True, slots=True)
-class SourceSpec:
-    """``source``：预定义序列来源。"""
-
-    mode: str  # constant | data_repeat | data_predict
-    value: float | bool | str | None = None
-    data_ref: str | None = None
-
-
-@dataclass(frozen=True, slots=True)
 class InterfaceSpec:
     """``interfaces`` 单项：序列接口。
 
     值域界可为数值或 ``{property_ref}``（实例额定能力引用，实例级解析）。
+    设备模型不承载项目来源；来源由装配实例绑定。
     """
 
     id: str
@@ -110,7 +99,6 @@ class InterfaceSpec:
     carrier: str
     unit: str
     valid_range: tuple[float | None, float | None]
-    source: SourceSpec | None = None
     minimum_property_ref: str | None = None
     maximum_property_ref: str | None = None
 
@@ -155,7 +143,7 @@ class Equations:
 
 @dataclass(frozen=True, slots=True)
 class DeviceModelDocument:
-    """一份 ``ies.device-model`` 2.0.0 设备的深度不可变文档。
+    """一份 ``ies.device-model`` 2.1.0 设备的深度不可变文档。
 
     ``inputs`` 仅在模板（未实例化阶段）存在；普通模型为 ``None``。
     """
@@ -170,14 +158,12 @@ class DeviceModelDocument:
 
 @dataclass(frozen=True, slots=True)
 class TemplateInputSpec:
-    """``inputs`` 叶子声明（number/boolean/string/data_repeat/data_predict/object/array）。"""
+    """``inputs`` 叶子声明（number/boolean/string/data_repeat/data_full/data_predict/object/array）。"""
 
     path: str  # 点分路径，如 "peak_power_kw"、"profile.rows"
     type: str
     unit: str | None = None
     valid_range: tuple[float | None, float | None] | None = None
-    default: float | bool | str | None = None
-    data_ref: str | None = None  # data_repeat/data_predict 绑定的数据引用
     children: tuple["TemplateInputSpec", ...] = ()  # object/array 子声明
 
 
@@ -227,25 +213,6 @@ def to_dict(document: DeviceModelDocument) -> dict[str, Any]:
             "carrier": iface.carrier,
             "unit": iface.unit,
             "valid_range": {"minimum": iface.minimum, "maximum": iface.maximum},
-            **(
-                {
-                    "source": {
-                        "mode": iface.source.mode,
-                        **(
-                            {"value": iface.source.value}
-                            if iface.source.value is not None
-                            else {}
-                        ),
-                        **(
-                            {"data_ref": iface.source.data_ref}
-                            if iface.source.data_ref is not None
-                            else {}
-                        ),
-                    }
-                }
-                if iface.source is not None
-                else {}
-            ),
         }
         for iid, iface in document.interfaces.items()
     }
@@ -306,23 +273,12 @@ def from_dict(raw: Mapping[str, Any]) -> DeviceModelDocument:
     )
     interfaces: dict[str, InterfaceSpec] = {}
     for iid, item in (raw.get("interfaces") or {}).items():
-        source_raw = item.get("source")
-        source = (
-            SourceSpec(
-                mode=str(source_raw["mode"]),
-                value=source_raw.get("value"),
-                data_ref=source_raw.get("data_ref"),
-            )
-            if isinstance(source_raw, Mapping)
-            else None
-        )
         interfaces[str(iid)] = InterfaceSpec(
             id=str(iid),
             type=str(item["type"]),
             carrier=str(item["carrier"]),
             unit=str(item["unit"]),
             valid_range=_valid_range_of(item.get("valid_range")) or (None, None),
-            source=source,
         )
     equations_raw = raw.get("equations") or {}
     variables = MappingProxyType(
@@ -356,7 +312,7 @@ def canonical_receipt(document: DeviceModelDocument) -> dict[str, Any]:
     return {
         "schema": SCHEMA_ID,
         "schema_version": document.schema_version,
-        "canonicalizer": "ies.device-model.canonical@2.0.0",
+        "canonicalizer": "ies.device-model.canonical@2.1.0",
         "device_id": document.device.id if document.device is not None else None,
         "property_count": len(document.properties),
         "interface_count": len(document.interfaces),

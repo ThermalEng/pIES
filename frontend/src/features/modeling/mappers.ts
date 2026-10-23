@@ -653,11 +653,11 @@ export function isValidDeviceId(id: string): boolean {
   return DEVICE_ID_PATTERN.test(id)
 }
 
-/** 标准 ies.device-model 2.0.0 YAML 骨架(直接创建页初始内容)。 */
+/** 标准 ies.device-model 2.1.0 YAML 骨架(直接创建页初始内容)。 */
 export function buildYamlSkeleton(): string {
   return [
     'schema: ies.device-model',
-    'schema_version: "2.0.0"',
+    'schema_version: "2.1.0"',
     '',
     'device:',
     '  id: your.namespace.device_id',

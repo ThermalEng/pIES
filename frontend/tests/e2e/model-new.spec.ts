@@ -31,7 +31,7 @@ const escapeRegExp = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, '\\
 const makeTemplateYaml = (deviceId: string): string => TEMPLATE_YAML_HEAD.replace('__DEVICE_ID__', deviceId)
 
 const TEMPLATE_YAML_HEAD = `schema: ies.device-model
-schema_version: "2.0.0"
+schema_version: "2.1.0"
 device:
   id: __DEVICE_ID__
   names:
@@ -44,17 +44,10 @@ inputs:
         type: number
         unit: kW
         valid_range: {minimum: 0, maximum: 1000}
-        default: 100
     is_switchable:
-      value: {type: boolean, default: false}
+      value: {type: boolean}
     label:
-      value: {type: string, default: ""}
-  interfaces:
-    electric_demand:
-      source:
-        data_ref:
-          type: data_repeat
-          data_ref: data/e2e_load.csv
+      value: {type: string}
 properties:
   cop:
     value: 3
@@ -66,7 +59,6 @@ interfaces:
     carrier: electricity
     unit: kW
     valid_range: {minimum: 0, maximum: 1000}
-    source: {mode: data_repeat, data_ref: ${DATA_REF}}
 equations:
   variables: {}
   relations: []
@@ -151,9 +143,6 @@ test.describe('场景 12: 新建项目模型(真实后端模板与 YAML)', () =>
 
     // 12c. 模板表单按 inputs 递归生成(number/boolean/string/data_repeat)
     await expect(page.getByLabel('properties.peak_power_kw.value [kW]')).toBeVisible()
-    await expect(page.getByText('interfaces.electric_demand.source.data_ref')).toBeVisible()
-    // 模板 data_repeat 默认路径以后缀提示(placeholder)呈现, 需用户填写项目内相对路径
-    await expect(page.getByPlaceholder('data/e2e_load.csv')).toBeVisible()
     // 初始状态: 编辑中(非已保存)
     await expect(page.getByRole('status', { name: /编辑中|Editing/i })).toBeVisible()
 
@@ -162,7 +151,6 @@ test.describe('场景 12: 新建项目模型(真实后端模板与 YAML)', () =>
     await numberInput.fill('150')
     await page.getByRole('checkbox').nth(0).check()
     await page.getByLabel(/^properties\.label\.value$/).fill('e2e-label')
-    await page.getByPlaceholder('data/e2e_load.csv').fill('data/e2e_load.csv')
 
     // 12e. 提交候选并正式保存。
     await page.getByRole('button', { name: /提交为候选|Submit as candidate/i }).click()
@@ -181,7 +169,7 @@ test.describe('场景 12: 新建项目模型(真实后端模板与 YAML)', () =>
     await expect(yamlEditor).toBeVisible()
     const skeleton = await yamlEditor.inputValue()
     expect(skeleton).toContain('schema: ies.device-model')
-    expect(skeleton).toContain('schema_version: "2.0.0"')
+    expect(skeleton).toContain('schema_version: "2.1.0"')
     // 编辑 YAML(替换占位设备 ID)后提交
     await yamlEditor.fill(
       skeleton
@@ -199,14 +187,14 @@ test.describe('场景 12: 新建项目模型(真实后端模板与 YAML)', () =>
     await expect(page.getByText(templateDeviceId)).toBeVisible()
     await expect(page.getByText(/已发布|Published/i).first()).toBeVisible()
 
-    // 窄切片 /custom 回归: 查看精确 revision 详情，断言实际 schema_version 真实值 2.0.0 (非仅标签)
+    // 窄切片 /custom 回归: 查看精确 revision 详情，断言实际 schema_version 真实值 2.1.0 (非仅标签)
     const v1Btn = page.locator('.ies-custom-card__rev', { hasText: 'v1' }).first()
     await expect(v1Btn).toBeVisible()
     await v1Btn.click()
     const revBox = page.locator('.ies-custom-revision')
     await expect(revBox).toBeVisible()
     await expect(revBox.getByText(/v1/)).toBeVisible()
-    await expect(revBox.getByText(/2\.0\.0/)).toBeVisible()
+    await expect(revBox.getByText(/2\.1\.0/)).toBeVisible()
     // 点击返回回到列表
     await page.getByRole('button', { name: /返回|Back/i }).click()
     await expect(page.locator('.ies-custom-list')).toBeVisible()
@@ -216,7 +204,7 @@ test.describe('场景 12: 新建项目模型(真实后端模板与 YAML)', () =>
     await page.getByRole('button', { name: /创建模板|New template/i }).click()
     const yamlInput = page.locator('#ies-custom-yaml')
     await expect(yamlInput).toBeVisible()
-    const invalidYaml = 'schema: ies.device-model\nschema_version: "2.0.0"\ninvalid_key: true\n'
+    const invalidYaml = 'schema: ies.device-model\nschema_version: "2.1.0"\ninvalid_key: true\n'
     await yamlInput.fill(invalidYaml)
     // 点击校验
     await page.getByRole('button', { name: /校验|Validate/i }).click()
@@ -229,7 +217,7 @@ test.describe('场景 12: 新建项目模型(真实后端模板与 YAML)', () =>
     // (b) 替换为合法 YAML 再次校验
     const validYaml = [
       'schema: ies.device-model',
-      'schema_version: "2.0.0"',
+      'schema_version: "2.1.0"',
       'device:',
       `  id: user.custom.valid_${Date.now()}`,
       '  names:',
@@ -242,7 +230,6 @@ test.describe('场景 12: 新建项目模型(真实后端模板与 YAML)', () =>
       '        type: number',
       '        unit: kW',
       '        valid_range: {minimum: 0, maximum: 1000}',
-      '        default: 100',
       'properties:',
       '  cop:',
       '    value: 3.2',

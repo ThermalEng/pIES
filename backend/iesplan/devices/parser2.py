@@ -1,4 +1,4 @@
-"""`ies.device-model` 2.0.0 解析与校验（纯协议入口，不访问注册表/数据库）。
+"""`ies.device-model` 2.1.0 解析与校验（纯协议入口，不访问注册表/数据库）。
 
 职责（宪法 §7.8 + device-model-yaml.md「校验与规范化」）：
 1. 校验顶层 schema/schema_version 与未知字段（JSON Schema 2.0.0）；
@@ -38,8 +38,6 @@ from iesplan.devices.contracts2 import (
     INPUT_TYPES,
     INTERFACE_TYPES,
     SCHEMA_VERSION,
-    SOURCE_MODES,
-    SOURCE_TYPES,
     DeviceInfo,
     DeviceModelDocument,
     EquationRelation,
@@ -47,14 +45,13 @@ from iesplan.devices.contracts2 import (
     Equations,
     InterfaceSpec,
     PropertySpec,
-    SourceSpec,
     TemplateInputSpec,
     TemplateInputs,
     is_valid_id,
 )
 
 #: 包内 JSON Schema 相对路径
-SCHEMA_FILE = "schema/device-model-2.0.0.schema.json"
+SCHEMA_FILE = "schema/device-model-2.1.0.schema.json"
 
 _ID_PATTERN = re.compile(r"^[a-z0-9]+([._-][a-z0-9]+)*$")
 
@@ -174,17 +171,11 @@ def _check_range_bounds_ref(
 
 
 def _check_interface_source(iface_id: str, type_: str, source: object, file: str) -> None:
-    """interface type 与 source 组合规则（2.0: 预定义接口必须携带 source，其余禁止）。
+    """interface 不得承载项目来源（2.1.0：所有 interface 禁止 source/mode/value/data_ref/target_type）。
 
-    - ``predefined`` 必须声明 ``source``（`mode` 为 constant/data_repeat/data_predict），
-      否则为非法（缺失来源无法在装配时解析包内相对路径）；
-    - 其余类型（in/out/bidirectional/blind）禁止声明 source。
+    ``predefined`` 槽为纯技术声明，项目来源由装配实例绑定。
     """
-    if source is None:
-        if type_ == "predefined":
-            raise ParseError(f"interfaces.{iface_id} 类型为 predefined 时必须声明 source")
-        return
-    if type_ != "predefined":
+    if source is not None:
         raise ParseError(
             f"interfaces.{iface_id} 禁止声明 source（设备模型不得预设序列来源，绑定在装配中声明）"
         )
@@ -351,20 +342,17 @@ def _parse_inputs_tree(node: Any, path: str, file: str) -> TemplateInputSpec:
             if not isinstance(vr, Mapping):
                 raise ParseError(f"inputs.{path}.valid_range 必须是 mapping")
             vrange = _check_range_bounds(vr.get("minimum"), vr.get("maximum"), file, f"inputs.{path}")
-    elif type_ in ("data_repeat", "data_predict"):
-        data_ref = node.get("data_ref")
-        if not isinstance(data_ref, str) or not data_ref.strip():
-            raise ParseError(f"inputs.{path} {type_} 必须声明 data_ref")
-    default = node.get("default")
-    if default is not None and not isinstance(default, (int, float, bool, str)):
-        raise ParseError(f"inputs.{path}.default 必须是标量")
+    elif type_ in ("data_repeat", "data_full", "data_predict"):
+        pass  # 2.1.0: CSV 路径由实例化时的用户值提供，声明中不携带
+    # 2.1.0: 任何叶子都不允许 default/source/mode/data_ref/隐式回退
+    for forbidden in ("default", "source", "mode", "data_ref"):
+        if forbidden in node:
+            raise ParseError(f"inputs.{path} 禁止声明 {forbidden}")
     return TemplateInputSpec(
         path=path,
         type=type_,
         unit=unit,
         valid_range=vrange,
-        default=default,
-        data_ref=node.get("data_ref") if type_ in ("data_repeat", "data_predict") else None,
     )
 
 
@@ -542,47 +530,19 @@ def parse_device_model_v2(raw: Mapping[str, Any], *, file: str = "") -> DeviceMo
         except ParseError as exc:
             diags.append(_diag("SYS-CFG-001", str(exc), file=file, field=f"{fld}.valid_range"))
             continue
-        source_raw = iraw.get("source")
-        source: SourceSpec | None = None
-        if source_raw is None:
-            if type_ == "predefined":
-                diags.append(
-                    _diag(
-                        "SYS-CFG-001",
-                        f"interfaces.{iid} 类型为 predefined 时必须声明 source",
-                        file=file,
-                        field=f"{fld}.source",
-                    )
+        # 2.1.0: interface 不得承载项目来源（source/mode/value/data_ref/target_type）
+        if "source" in iraw or "mode" in iraw or "value" in iraw or "data_ref" in iraw or "target_type" in iraw:
+            diags.append(
+                _diag(
+                    "SYS-CFG-001",
+                    f"interfaces.{iid} 禁止声明 source/mode/value/data_ref/target_type（设备模型不得预设序列来源，绑定在装配中声明）",
+                    file=file,
+                    field=f"{fld}.source",
                 )
-                continue
-        else:
-            if type_ != "predefined":
-                diags.append(
-                    _diag(
-                        "SYS-CFG-001",
-                        f"interfaces.{iid} 禁止声明 source（设备模型不得预设序列来源，绑定在装配中声明）",
-                        file=file,
-                        field=f"{fld}.source",
-                    )
-                )
-                continue
-            # 校验 source 内部必填字段
-            try:
-                if not isinstance(source_raw, dict):
-                    raise ParseError(f"interfaces.{iid}.source 必须是 mapping")
-                mode = source_raw.get("mode")
-                if mode not in ("constant", "data_repeat", "data_predict"):
-                    raise ParseError(f"interfaces.{iid}.source.mode 非法: {mode!r}")
-                if mode == "constant" and source_raw.get("value") is None:
-                    raise ParseError(f"interfaces.{iid}.source.mode 为 constant 时必须声明 value")
-                if mode in ("data_repeat", "data_predict") and not source_raw.get("data_ref"):
-                    raise ParseError(f"interfaces.{iid}.source.mode 为 {mode} 时必须声明 data_ref")
-                source = SourceSpec(mode=mode, value=source_raw.get("value"), data_ref=source_raw.get("data_ref"))
-            except ParseError as exc:
-                diags.append(_diag("SYS-CFG-001", str(exc), file=file, field=f"{fld}.source"))
-                continue
+            )
+            continue
         interfaces[iid] = InterfaceSpec(
-            id=iid, type=type_, carrier=carrier, unit=unit.strip(), valid_range=vrange, source=source,
+            id=iid, type=type_, carrier=carrier, unit=unit.strip(), valid_range=vrange,
             minimum_property_ref=lo_ref, maximum_property_ref=hi_ref,
         )
 

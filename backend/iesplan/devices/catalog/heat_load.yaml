@@ -1,5 +1,5 @@
 schema: ies.device-model
-schema_version: "2.0.0"
+schema_version: "2.1.0"
 device:
   id: ies.device.heat_load
   names:
@@ -22,9 +22,6 @@ interfaces:
       maximum: null
   heat_demand:
     type: predefined
-    source:
-      mode: data_repeat
-      data_ref: data/heat_load.csv
     carrier: heat
     unit: kW
     valid_range:
