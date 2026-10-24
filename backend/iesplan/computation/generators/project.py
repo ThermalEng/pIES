@@ -1218,6 +1218,25 @@ class _ProjectBuilder:
                 construction[finance_type] = 1.0 + float(rule.rate.value)
         return prices, oms, construction
 
+    def _demand_tax_factors(self) -> dict[str, tuple[float, float]]:
+        """费项→(实际付款加成, 可抵进项占基本账单比例)。
+
+        不含税口径先全额加税再形成现金；含税口径先拆出进项。
+        未声明进项的费项既不臆测税率也不臆测抵扣资格。
+        """
+        out: dict[str, tuple[float, float]] = {}
+        for rule in self.finance.tax_rules.values():
+            if not isinstance(rule, VatRule):
+                continue
+            for entry in rule.demand_input_tax:
+                rate = float(entry.rate.value)
+                gross = 1.0 + rate if self.finance.price_basis == "tax_exclusive" else 1.0
+                deductible = self._vat_gross_factor(entry.rate) * float(
+                    entry.deductible_ratio.value
+                )
+                out[entry.charge] = (gross, deductible)
+        return out
+
     def _annual_fixed_om_annual(self, inst: str) -> _AffineAcc:
         """单个实例年固定 O&M 的年金额仿射式（每年全额）。
 
@@ -1277,6 +1296,7 @@ class _ProjectBuilder:
         """
         evaluation = self.evaluation
         price_markup, om_markup, construction_markup = self._vat_gross_markups()
+        demand_tax = self._demand_tax_factors()
         construction = self._construction_affine(construction_markup or None)
         maintenance = self._maintenance_by_year()
         baseline = self.doc["project_baseline"]
@@ -1297,7 +1317,13 @@ class _ProjectBuilder:
             energy = _AffineAcc()
             variable = _AffineAcc()
             fixed = _AffineAcc()
+            demand = _AffineAcc()
             annual = _AffineAcc()
+            for row in self._demand_rows:
+                if row["financial_year"] == year_no:
+                    demand.add_scaled(
+                        row["base_charge"], demand_tax.get(row["charge_id"], (1.0, 0.0))[0]
+                    )
             for binding_id in sorted(bindings):
                 price_id = bindings[binding_id]["price"]
                 energy.add_scaled(
@@ -1330,12 +1356,14 @@ class _ProjectBuilder:
             annual.add_scaled(energy, 1.0)
             annual.add_scaled(variable, 1.0)
             annual.add_scaled(fixed, 1.0)
+            annual.add_scaled(demand, -1.0)
             annual.add_const(-maintenance.get(year_no, 0.0))
             self._year_cash(year_no).add_scaled(annual, 1.0)
             self._fact_annual[year_no] = {
                 "energy": energy.snapshot(),
                 "variable": variable.snapshot(),
                 "fixed": fixed.snapshot(),
+                "demand": demand.snapshot(),
                 "net": annual.snapshot(),
             }
             if index == 0:
@@ -1437,6 +1465,13 @@ class _ProjectBuilder:
         bindings = self.doc.get("tariff_bindings") or {}
         instances = (self.doc.get("finance_binding") or {}).get("instances") or {}
         for rule in pool_rules["vat"]:
+            for entry in rule.demand_input_tax:
+                factor = self._vat_gross_factor(entry.rate) * float(
+                    entry.deductible_ratio.value
+                )
+                for row in self._demand_rows:
+                    if row["charge_id"] == entry.charge:
+                        inp[row["month"] - 1].add_scaled(row["base_charge"], factor)
             for entry in rule.in_tax:
                 factor = self._vat_gross_factor(entry.rate) * float(
                     entry.deductible_ratio.value
@@ -1960,6 +1995,12 @@ class _ProjectBuilder:
                     base.add_scaled(
                         self._tariff_affine(binding_id, start, end), -(markup - coef)
                     )
+            demand_tax = self._demand_tax_factors()
+            for row in self._demand_rows:
+                if row["financial_year"] != year or row["charge_id"] not in rule.demand_cost:
+                    continue
+                gross, credit = demand_tax.get(row["charge_id"], (1.0, 0.0))
+                base.add_scaled(row["base_charge"], -(gross - credit))
             for for_path in rule.annual_om:
                 self._income_deduct_om(base, for_path, None, om_credit, instances)
             for for_path in rule.variable_om:
