@@ -66,15 +66,17 @@ BROWSER_GROUPS = {
 # domain in the path. Map these to the correct bounded test group.
 ALIASES = {
     "auth": "auth", "identity": "auth", "csrf": "auth", "limits": "auth",
-    "admin": "admin", "audit": "admin",
+    "admin": "admin", "audit": "admin", "admin_audit": "admin",
     "project": "project", "projects": "project", "project_models": "project",
+    "project_versions": "project", "project_import": "package",
     "package": "package", "packages": "package", "exports": "package",
     "config": "config", "configuration": "config", "config_revisions": "config",
     "datasets": "datasets", "dataset": "datasets", "objects": "storage",
-    "devices": "devices", "model_templates": "devices", "model": "modeling",
-    "modeling": "modeling", "assembly": "assembly",
+    "devices": "devices", "model_templates": "devices", "customization": "devices",
+    "model": "modeling", "modeling": "modeling", "assembly": "assembly",
+    "assembly_bindings": "assembly",
     "finance": "finance", "evaluation": "finance", "metrics": "finance",
-    "planning": "planning", "computation": "computation",
+    "planning": "planning", "computation": "computation", "price_series": "datasets",
     "results": "results", "result": "results",
     "tasks": "tasks", "task": "tasks", "worker": "worker",
     "storage": "storage", "core": "core", "bootstrap": "bootstrap",
@@ -94,11 +96,16 @@ def expand(group: str, available: set[str]) -> set[str]:
 
 def find_area(path: str, prefix: str) -> str | None:
     relative = path.removeprefix(prefix)
-    parts = [p.replace("-", "_").removesuffix(".py").removesuffix(".ts").removesuffix(".tsx")
+    parts = [p.replace("-", "_").removesuffix(".py").removesuffix(".ts").removesuffix(".tsx").lower()
              for p in relative.split("/")]
     for p in parts:
         if p in ALIASES:
             return ALIASES[p]
+    # Page components often use names such as FinancePage.tsx or ResultsPage.tsx.
+    for part in reversed(parts):
+        for name, area in ALIASES.items():
+            if len(name) >= 5 and part.startswith(name):
+                return area
     return None
 
 
@@ -143,9 +150,11 @@ def pick(changed: list[str], full: bool = False) -> dict[str, str]:
             browser.update((SMOKE_BROWSER, "page-loading.spec.ts"))
         elif path.startswith("frontend/tests/e2e/"):
             name = path.rsplit("/", 1)[-1]
-            if name == SPECIAL or "device-catalog-external/" in path:
+            if name in (SPECIAL, "playwright.ext-device.config.ts", "docker-compose.ext-device.yml") or "device-catalog-external/" in path:
                 special = True
                 browser.add(SMOKE_BROWSER)
+            elif "device-data-external/" in path:
+                browser.update((SMOKE_BROWSER, "device-data-csv-extension.spec.ts"))
             elif name in browser_available:
                 browser.update((SMOKE_BROWSER, name))
             elif path.endswith((".ts", ".json")) and not path.endswith("package-lock.json"):
@@ -159,6 +168,8 @@ def pick(changed: list[str], full: bool = False) -> dict[str, str]:
             # Non-app files: docs / generated metadata do not trigger a full browser suite.
             if path.endswith((".ts", ".tsx", ".js", ".mjs", ".css")):
                 browser.update((SMOKE_BROWSER, "page-loading.spec.ts"))
+        elif path.startswith("manual/user-guide/"):
+            browser.update((SMOKE_BROWSER, "admin-help-lang.spec.ts"))
         elif path.startswith(("manual/", "docs/")) or path in ("README.md", "LICENSE", "AGENTS.md", "CLAUDE.md", ".gitignore", ".dockerignore"):
             pass  # documentation-only changes do not require an app build
         else:
@@ -192,6 +203,9 @@ def self_test() -> None:
     assert "test_auth_api.py" in pick(["backend/iesplan/api/auth.py"])["backend_tests"]
     assert "economic-bindings-issue03.spec.ts" in pick(["frontend/src/features/finance/api.ts"])["browser_specs"]
     assert "model-new.spec.ts" in pick(["frontend/src/features/modeling/form.ts"])["browser_specs"]
+    assert "economic-bindings-issue03.spec.ts" in pick(["frontend/src/features/assembly-bindings/api.ts"])["browser_specs"]
+    assert "admin-audit.spec.ts" in pick(["frontend/src/features/admin-audit/api.ts"])["browser_specs"]
+    assert "financial-evaluation.spec.ts" in pick(["frontend/src/pages/FinancePage.tsx"])["browser_specs"]
     assert "tests/test_task_draft_load.py" in pick(["backend/tests/test_task_draft_load.py"])["backend_tests"]
     assert pick(["docs/reviews/notes.md"])["backend_run"] == "false"
     assert pick(["docs/reviews/notes.md"])["browser_run"] == "false"
