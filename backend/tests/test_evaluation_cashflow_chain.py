@@ -156,6 +156,7 @@ def _prepare_t2_project(
     planning: dict,
     profile: dict | None = None,
     with_existing_hp: bool = False,
+    demand_bindings: dict | None = None,
 ) -> int:
     """T2 执行项目: grid1 + data_full 负荷 + 必建热泵 + 购电计费绑定。
 
@@ -289,27 +290,35 @@ def _prepare_t2_project(
         instances["hp_old"] = dict(hp_binding)
     view = client.get(f"/api/projects/{pid}", headers=_h(client, user)).json()
     revision = _declare_assembly_sections(client, pid, user, view["draft"]["revision"], instances)
+    billing_commands = [
+        {
+            "id": "c-tariff-bind",
+            "unit": "assembly",
+            "type": "assembly.set_tariff_bindings",
+            "payload": {
+                "bindings": {
+                    "grid_import": {
+                        "price": "grid_import",
+                        "instance": "grid1",
+                        "interface": "electricity_import",
+                        "aggregation": "integrate_positive",
+                    }
+                }
+            },
+        },
+    ]
+    if demand_bindings is not None:
+        billing_commands.append({
+            "id": "c-demand-bind",
+            "unit": "assembly",
+            "type": "assembly.set_demand_bindings",
+            "payload": {"bindings": demand_bindings},
+        })
     resp = client.put(
         f"/api/projects/{pid}/draft",
         json={
             "expected_revision": revision,
-            "commands": [
-                {
-                    "id": "c-tariff-bind",
-                    "unit": "assembly",
-                    "type": "assembly.set_tariff_bindings",
-                    "payload": {
-                        "bindings": {
-                            "grid_import": {
-                                "price": "grid_import",
-                                "instance": "grid1",
-                                "interface": "electricity_import",
-                                "aggregation": "integrate_positive",
-                            }
-                        }
-                    },
-                }
-            ],
+            "commands": billing_commands,
         },
         headers=_h(client, user),
     )
