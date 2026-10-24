@@ -153,7 +153,8 @@ test.describe('项目已保存模型消费链', () => {
     const page: Page = await context.newPage()
     const session = await createSession(page, username, password)
     await page.getByText(projectName).click({ timeout: 30_000 })
-    await expect(page).toHaveURL(/\/projects\/\d+$/)
+    await expect(page).toHaveURL(/\/projects\/\d+\/tasks$/)
+    await expect(page.getByRole('button', { name: /提交任务|Submit task/i }).first()).toBeVisible()
 
     await page.getByRole('navigation', { name: /工作台|Workspace/i }).getByText('系统建模').click()
     await expect(page).toHaveURL(/\/model$/)
