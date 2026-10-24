@@ -301,7 +301,7 @@ def test_protocol_methods_match_constitution_boundaries() -> None:
     import inspect
 
     assert list(inspect.signature(GeneratorProvider.generate).parameters) == [
-        "self", "artifact", "models", "materialized", "finance", "config",
+        "self", "artifact", "models", "materialized", "finance", "config", "evaluation",
     ]
     assert list(inspect.signature(ExecutorProvider.execute).parameters) == [
         "self", "command", "workdir", "stop",
