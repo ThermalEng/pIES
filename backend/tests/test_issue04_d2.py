@@ -37,7 +37,7 @@ POWER_KW = 7.0 / 0.9
 def _inputs(*, resolution="1h", start_year=2024, rate="12",
             second_rate=None, bounded=True, empty=False, vat=False,
             income=False, basis="tax_inclusive", deductible="1",
-            dispatch=False):
+            dispatch=False, sales=False, income_deduct_demand=True):
     doc = _doc()
     doc["project_baseline"]["resolution"] = resolution
     doc["project_baseline"]["start_year"] = start_year
@@ -63,6 +63,20 @@ def _inputs(*, resolution="1h", start_year=2024, rate="12",
             "rate": {"value": second_rate, "unit": "CNY/kW"},
         }
     profile["profile"]["price_basis"] = basis
+    if sales:
+        # Revenue from the physically constrained 7 kW heater output.
+        doc["tariff_bindings"] = {
+            "heat_sales_meter": {
+                "price": "heat_sale", "instance": "heater1",
+                "interface": "heat_out", "aggregation": "integrate_positive",
+            },
+        }
+        doc["finance_binding"]["instances"]["heater1"] = {"type": "none"}
+        doc["finance_binding"]["instances"]["tank1"] = {"type": "none"}
+        profile["energy_prices"]["heat_sale"] = {
+            "carrier": "heat", "direction": "sale", "kind": "constant",
+            "value": {"value": "1", "unit": "CNY/kWh"},
+        }
     if dispatch:
         # One real dispatch decision: costly local generator vs cheap utility.
         # Demand cost drives utility consumption down in the same NPV solve.
@@ -118,7 +132,10 @@ def _inputs(*, resolution="1h", start_year=2024, rate="12",
         }
         profile["tax_rules"]["vat_demand"] = {
             "kind": "vat", "label_ref": "demand_label",
-            "settlement": "monthly", "in_tax": [], "out_tax": [],
+            "settlement": "monthly", "in_tax": [],
+            "out_tax": ([{
+                "price": "heat_sale", "rate": {"value": "0.13", "unit": "1"},
+            }] if sales else []),
             "om_input_tax": [], "maintenance_input_tax": [],
             "demand_input_tax": [{
                 "charge": "charge_a",
@@ -135,7 +152,9 @@ def _inputs(*, resolution="1h", start_year=2024, rate="12",
         profile["tax_rules"]["income_demand"] = {
             "kind": "income_tax", "label_ref": "income_label",
             "rate": {"value": "0.25", "unit": "1"},
-            "revenue": [], "energy_cost": [], "demand_cost": ["charge_a"],
+            "revenue": ["heat_sale"] if sales else [],
+            "energy_cost": [],
+            "demand_cost": ["charge_a"] if income_deduct_demand else [],
             "annual_om": [], "variable_om": [],
             "deductible_maintenance": {"mode": "explicit_items", "items": []},
             "depreciation": [], "loss_carryforward_years": 0,
@@ -343,4 +362,77 @@ def test_dispatch_changes_due_to_monthly_demand_cost(tmp_path):
     ) + 50_000
     assert float(charged["annual_operation"][0]["energy_net"]) > float(
         baseline["annual_operation"][0]["energy_net"]
+    )
+
+
+@pytest.mark.parametrize("deductible", ("0", "1"))
+@pytest.mark.parametrize("income_deduct_demand", (False, True))
+def test_nonzero_sales_vat_income_and_after_tax_npv_by_hand(
+    tmp_path, deductible, income_deduct_demand,
+):
+    """Positive output VAT, VAT actually paid, income tax and NPV from HiGHS.
+
+    Gross revenue = 7 kW * 8760 h * 1 CNY/kWh. Each demand month
+    independently uses the solved 7/0.9 kW grid supply meter.
+    """
+    facts, sealed, _ = _solved(
+        _inputs(
+            start_year=2023, vat=True, income=True, sales=True,
+            deductible=deductible, income_deduct_demand=income_deduct_demand,
+        ),
+        tmp_path,
+    )
+    gross_revenue = 7.0 * 8760
+    gross_demand_month = POWER_KW * 12.0
+    gross_demand_year = gross_demand_month * 12
+    output_vat = gross_revenue * 0.13 / 1.13
+    input_vat = gross_demand_year * 0.1 / 1.1 * float(deductible)
+    hand_vat_paid = output_vat - input_vat
+    hand_taxable = gross_revenue - output_vat
+    if income_deduct_demand:
+        hand_taxable -= gross_demand_year - input_vat
+    hand_income_paid = hand_taxable * 0.25
+    hand_net_cash = (
+        gross_revenue - gross_demand_year - hand_vat_paid - hand_income_paid
+    )
+
+    assert len(facts["monthly_demand"]) == 12
+    assert all(
+        float(row["charge"]) == pytest.approx(gross_demand_month, abs=1e-4)
+        for row in facts["monthly_demand"]
+    )
+    assert float(facts["annual_operation"][0]["demand_charge"]) == pytest.approx(
+        gross_demand_year, abs=1e-4,
+    )
+    assert float(facts["annual_operation"][0]["energy_net"]) == pytest.approx(
+        gross_revenue, abs=1e-4,
+    )
+    assert float(facts["annual_operation"][0]["variable_om"]) == pytest.approx(0)
+    assert float(facts["annual_operation"][0]["fixed_om"]) == pytest.approx(0)
+    assert float(facts["construction_total"]) == pytest.approx(0)
+    assert sum(float(row["paid"]) for row in facts["tax_cash"]["vat"]) == pytest.approx(
+        hand_vat_paid, abs=1e-4,
+    )
+    assert hand_vat_paid > 0
+    assert float(facts["tax_cash"]["vat"][-1]["carry"]) == pytest.approx(0, abs=1e-5)
+    year2 = next(
+        row for row in facts["tax_cash"]["income"]
+        if row["rule"] == "income_demand" and row["year"] == 2
+    )
+    assert float(year2["taxable_base"]) == pytest.approx(hand_taxable, abs=1e-4)
+    assert float(year2["tax"]) == pytest.approx(hand_income_paid, abs=1e-4)
+    assert hand_income_paid > 0
+    assert float(facts["annual_operation"][0]["net"]) == pytest.approx(
+        gross_revenue - gross_demand_year, abs=1e-4,
+    )
+    # Demand paid once in operation; no second charge in tax or cashflow.
+    assert [float(v) for v in facts["annual_net_flows"][:2]] == pytest.approx(
+        [0, 0], abs=1e-5,
+    )
+    assert float(facts["annual_net_flows"][2]) == pytest.approx(
+        hand_net_cash, abs=1e-4,
+    )
+    assert sealed["monthly_demand"] == list(facts["monthly_demand"])
+    assert float(sealed["evaluation"]["npv"]) == pytest.approx(
+        hand_net_cash, abs=1e-4,
     )
