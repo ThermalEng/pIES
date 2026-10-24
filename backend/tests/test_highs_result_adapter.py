@@ -623,3 +623,43 @@ def test_series_unknown_column_fails() -> None:
     with pytest.raises(ComputationUnavailableError) as exc_info:
         _adapt(files, _receipt(), SHIM_OPTIMAL.encode("utf-8"))
     assert exc_info.value.reason == "result-protocol-failure"
+
+
+def test_monthly_demand_facts_recovered_from_same_primal() -> None:
+    """适配器只求值声明：x=3000 W、实际月峰3kW、每月支付90CNY。
+
+    不能把主解 primal 的 x=3000 当 3000 kW；不能重新取峰或追加费。
+    """
+    doc = json.loads(_parameters().decode("utf-8"))
+    zero = {"constant": 0.0, "terms": {}}
+    charge = {"constant": 0.0, "terms": {"x": 0.03}}
+    negative = {"constant": 0.0, "terms": {"x": -0.03}}
+    doc["financial_facts"]["monthly_demand"] = [{
+        "billing_id": "real_meter", "charge_id": "fee",
+        "calendar_year": 2024, "calendar_month": 2, "financial_year": 2,
+        "peak_power": {"constant": 0.0, "terms": {"x": 0.001}},
+        "peak_unit": "kW", "rate": {"value": "30", "unit": "CNY/kW"},
+        "charge": charge,
+    }]
+    doc["financial_facts"]["annual_operation"] = [{
+        "financial_year": 2, "energy_net": zero, "variable_om": zero,
+        "fixed_om": zero, "maintenance": "0", "demand_charge": charge,
+        "net": negative,
+    }]
+    doc["financial_facts"]["annual_net_flows"] = [zero, zero, negative]
+    raw = (json.dumps(doc, sort_keys=True) + "\n").encode("utf-8")
+    result = _adapt(
+        {PROBLEM_PATH: TINY_MPS.encode("utf-8"), PARAMETERS_PATH: raw},
+        _receipt(), SHIM_OPTIMAL.encode("utf-8"),
+    )
+    facts = result.outputs["financial_facts"]
+    month = facts["monthly_demand"][0]
+    assert month["billing_id"] == "real_meter"
+    assert month["calendar_year"] == 2024 and month["calendar_month"] == 2
+    assert month["peak_power"] == "3.0"
+    assert month["peak_unit"] == "kW"
+    assert month["charge"] == "90.0"
+    assert month["rate"] == {"value": "30", "unit": "CNY/kW"}
+    assert facts["annual_operation"][0]["demand_charge"] == "90.0"
+    assert facts["annual_operation"][0]["net"] == "-90.0"
+    assert facts["annual_net_flows"][-1] == "-90.0"
