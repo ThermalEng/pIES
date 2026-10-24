@@ -153,6 +153,7 @@ def validate_project_export(
     finance: Mapping[str, Any] | None = None,
     finance_binding: Mapping[str, Any] | None = None,
     tariff_bindings: Mapping[str, Any] | None = None,
+    demand_bindings: Mapping[str, Any] | None = None,
     planning: Mapping[str, Any] | None = None,
     finance_snapshots: Mapping[str, EffectiveFinanceConfig] | None = None,
     operation_years: int | None = None,
@@ -180,6 +181,7 @@ def validate_project_export(
         finance=finance,
         finance_binding=finance_binding,
         tariff_bindings=tariff_bindings,
+        demand_bindings=demand_bindings,
         planning=planning,
         device_documents=device_documents,
     )
@@ -217,6 +219,7 @@ def _run_validation(
     )
     from iesplan.assembly.rules.planning import check_planning
     from iesplan.assembly.rules.tariff import check_tariff_bindings
+    from iesplan.assembly.rules.demand import check_demand_bindings
 
     diags: list[Diagnostic] = []
     registry = _device_registry(device_documents)
@@ -256,6 +259,9 @@ def _run_validation(
         baseline_resolution=resolution,
         diags=diags,
     )
+    if _any_blocking(diags):
+        return AssemblyValidationResult(diagnostics=diags, artifact=None)
+    check_demand_bindings(doc, snapshot, registry, diags)
     if _any_blocking(diags):
         return AssemblyValidationResult(diagnostics=diags, artifact=None)
     check_finance_binding(doc, snapshot, registry, diags)

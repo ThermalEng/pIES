@@ -94,7 +94,8 @@ test.describe('D2: 版本加载失败可见', () => {
 
     // A 数据页成功基线: 两数据集、有版本徽章、合法空版本徽章。
     await page.getByText(projectA).click({ timeout: 30_000 })
-    await expect(page).toHaveURL(/\/projects\/\d+$/)
+    await expect(page).toHaveURL(/\/projects\/\d+\/tasks$/)
+    await expect(page.getByRole('button', { name: /提交任务|Submit task/i }).first()).toBeVisible()
     await page.getByRole('navigation', { name: /工作台|Workspace/i }).getByText('数据管理').click({ timeout: 30_000 })
     await expect(page).toHaveURL(/\/data$/)
     await expect(page.getByText(dsA1Name)).toBeVisible({ timeout: 60_000 })

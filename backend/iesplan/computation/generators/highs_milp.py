@@ -50,7 +50,7 @@ GENERATOR_REF = f"{GENERATOR_ID}@{GENERATOR_VERSION}"
 SOLVER_REF = "ies.solver.highs@1.7.2"
 EXECUTOR_REF = "ies.executor.local_process@1.0.0"
 ADAPTER_REF = HIGHS_ADAPTER_REF
-ASSEMBLY_SCHEMA_VERSION = "3.0.0"
+ASSEMBLY_SCHEMA_VERSION = "4.0.0"
 
 #: seed 为 null 时 descriptor 明示的固定种子。
 FIXED_SEED = 0
@@ -221,6 +221,11 @@ class HighsMilpProvider:
                     f"{list(SUPPORTED_OUTPUTS)!r}，未知输出不忽略）"
                 )
         doc = json.loads(artifact.canonical_text)
+        if doc.get("demand_bindings"):
+            raise ComputationUnavailableError(
+                "本生成器尚无自然月需量峰值/费用同次建模能力",
+                reason="unsupported-monthly-demand",
+            )
         bindings = doc.get("tariff_bindings") or {}
         for binding_id in sorted(bindings):
             price_id = bindings[binding_id]["price"]

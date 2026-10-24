@@ -115,7 +115,7 @@ def _manifest() -> SolverBundleManifest:
 
 _FINANCE_PAYLOAD = {
     "schema": "ies.finance-profile",
-    "schema_version": "3.0.0",
+    "schema_version": "4.0.0",
     "profile": {
         "id": "cn-north-demo",
         "region": "CN-North",
@@ -137,6 +137,7 @@ _FINANCE_PAYLOAD = {
             "value": {"value": "0.7", "unit": "CNY/kWh"},
         }
     },
+    "demand_charges": {},
     "taxes": {},
     "credit_pools": {},
     "tax_rules": {},
@@ -300,7 +301,7 @@ def test_protocol_methods_match_constitution_boundaries() -> None:
     import inspect
 
     assert list(inspect.signature(GeneratorProvider.generate).parameters) == [
-        "self", "artifact", "models", "materialized", "finance", "config",
+        "self", "artifact", "models", "materialized", "finance", "config", "evaluation",
     ]
     assert list(inspect.signature(ExecutorProvider.execute).parameters) == [
         "self", "command", "workdir", "stop",

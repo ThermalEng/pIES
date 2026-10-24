@@ -459,18 +459,27 @@ export default function TasksPage() {
     async (force: boolean) => {
       // 提交即冻结当时工作区: 先把对话框工作输入落到草稿(失败则中止并可见,
       // 不冻结与草稿不一致的值), 再按表单值提交(与刚落定的草稿一致)。
+      // Capture and validate the submitted form before any asynchronous draft
+      // persistence or validation request. Otherwise an invalid click can build
+      // an input *without* evaluation, then later edits make the second check
+      // pass while the stale input is still submitted (TASK-REQ-015).
+      const submittedForm = { ...formRef.current }
+      if (parseEvaluation(submittedForm) === null) {
+        setFormError(t('ies.task.evaluation_invalid'))
+        return
+      }
       if (saveTimer.current !== null) {
         window.clearTimeout(saveTimer.current)
         saveTimer.current = null
       }
       if (dirtyRef.current) {
-        const flushed = await persistWorking(formRef.current)
+        const flushed = await persistWorking(submittedForm)
         if (!flushed) {
           setFormError(t('ies.task.working_save_failed'))
           return
         }
       }
-      const input = buildInput(formRef.current, projectId, savedRevisionValue, submitNonce)
+      const input = buildInput(submittedForm, projectId, savedRevisionValue, submitNonce)
       // 校验门禁:存在阻断问题禁止提交(与校验页一致; 否则任务提交后约 1 秒
       // 会被 worker 以数据/配置缺失拒绝, 造成无效提交)
       setChecking(true)
@@ -493,7 +502,7 @@ export default function TasksPage() {
         // 同参数指纹, 兼容旧键形态)。这只是 UX 提示, 不得误当幂等身份:
         // 真正的幂等身份是完整幂等键(含一次性随机段), 由后端裁决; 用户
         // 确认后仍以本次新键提交产生新任务。
-        const sig = logicalSigOf(formRef.current, savedRevisionValue)
+        const sig = logicalSigOf(submittedForm, savedRevisionValue)
         const dup =
           tasks?.find((tk) => {
             // 幂等键可空: 历史 null 行永不命中签名(按缺席处理, 不伪造空串比较)。
@@ -504,10 +513,6 @@ export default function TasksPage() {
           setDuplicate(dup)
           return
         }
-      }
-      if (parseEvaluation(formRef.current) === null) {
-        setFormError(t('ies.task.evaluation_invalid'))
-        return
       }
       setFormError(null)
       setSubmitting(true)

@@ -37,7 +37,7 @@ from iesplan.core.units import UnitError, normalize_unit
 SCHEMA_PROFILE: Final[str] = "ies.finance-profile"
 SCHEMA_OVERRIDES: Final[str] = "ies.finance-overrides"
 SCHEMA_EFFECTIVE: Final[str] = "ies.effective-finance-config"
-SCHEMA_VERSION: Final[str] = "3.0.0"
+SCHEMA_VERSION: Final[str] = "4.0.0"
 
 CURRENCIES: Final[tuple[str, ...]] = ("CNY", "USD")
 PRICE_BASIS_VALUES: Final[tuple[str, ...]] = ("tax_inclusive", "tax_exclusive")
@@ -413,6 +413,39 @@ class EnergyPrice:
             series_meta=SeriesMeta.from_dict(mapping["series_meta"]),
         )
 
+@dataclass(frozen=True, slots=True)
+class DemandCharge:
+    """自然月最大购电功率的单位峰值费率，月是计费周期而非时间换算单位。"""
+
+    rate: Money
+
+    def to_dict(self) -> dict:
+        return {"rate": self.rate.to_dict()}
+
+    @classmethod
+    def from_dict(cls, mapping: object, *, currency: str, charge_id: str) -> DemandCharge:
+        field = f"demand_charges.{charge_id}"
+        if not isinstance(mapping, Mapping) or set(mapping) != {"rate"}:
+            raise FinanceTripletError(f"{field} 必须且只能包含 rate")
+        rate = Money.from_dict(mapping["rate"], field=f"{field}.rate")
+        if _dims(rate.unit) != {"currency": 1, "power": -1}:
+            raise FinanceTripletError(f"{field}.rate 单位必须为货币/功率")
+        if rate.unit.split("/")[0] != currency:
+            raise FinanceTripletError(f"{field}.rate 币种必须为 {currency}")
+        return cls(rate=rate)
+
+
+def _parse_demand_charges(mapping: object, currency: str) -> dict[str, DemandCharge]:
+    if not isinstance(mapping, Mapping):
+        raise FinanceTripletError("demand_charges 必须是映射（无需量费时显式为 {}）")
+    return {
+        _validate_local_id(charge_id, "charge_id"): DemandCharge.from_dict(
+            value, currency=currency, charge_id=charge_id
+        )
+        for charge_id, value in mapping.items()
+    }
+
+
 # ---------------------------------------------------------------------------
 # 税目登记
 # ---------------------------------------------------------------------------
@@ -643,6 +676,20 @@ class MaintInputTaxEntry:
 
 
 @dataclass(frozen=True, slots=True)
+class DemandInputTaxEntry:
+    charge: str
+    rate: Money
+    deductible_ratio: Money
+
+    def to_dict(self) -> dict:
+        return {
+            "charge": self.charge,
+            "rate": self.rate.to_dict(),
+            "deductible_ratio": self.deductible_ratio.to_dict(),
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class VatRule:
     """``kind: vat`` 规则(按月结算；期初/退款归池所有，本规则不携带)。"""
 
@@ -654,6 +701,7 @@ class VatRule:
     maintenance_input_tax: tuple[MaintInputTaxEntry, ...]
     credit_pool: str
     confirmation: str
+    demand_input_tax: tuple[DemandInputTaxEntry, ...] = ()
 
     def to_dict(self) -> dict:
         return {
@@ -664,6 +712,7 @@ class VatRule:
             "out_tax": [item.to_dict() for item in self.out_tax],
             "om_input_tax": [item.to_dict() for item in self.om_input_tax],
             "maintenance_input_tax": [item.to_dict() for item in self.maintenance_input_tax],
+            **({"demand_input_tax": [item.to_dict() for item in self.demand_input_tax]} if self.demand_input_tax else {}),
             "credit_pool": self.credit_pool,
             "confirmation": self.confirmation,
         }
@@ -793,6 +842,7 @@ class IncomeTaxRule:
     depreciation: tuple[DepreciationEntry, ...]
     loss_carryforward_years: int
     opening_losses: tuple[OpeningLoss, ...]
+    demand_cost: tuple[str, ...] = ()
 
     def to_dict(self) -> dict:
         return {
@@ -801,6 +851,7 @@ class IncomeTaxRule:
             "rate": self.rate.to_dict(),
             "revenue": list(self.revenue),
             "energy_cost": list(self.energy_cost),
+            **({"demand_cost": list(self.demand_cost)} if self.demand_cost else {}),
             "annual_om": list(self.annual_om),
             "variable_om": list(self.variable_om),
             "deductible_maintenance": self.deductible_maintenance.to_dict(),
@@ -829,8 +880,8 @@ def _parse_tax_rule(rule_id: str, mapping: object) -> TaxRule:
     raise FinanceTripletError(f"{field}.kind 非法: {kind!r}")
 
 
-def _require_keys(mapping: Mapping, keys: set[str], field: str) -> None:
-    unknown = set(mapping) - keys
+def _require_keys(mapping: Mapping, keys: set[str], field: str, *, optional: set[str] | None = None) -> None:
+    unknown = set(mapping) - keys - (optional or set())
     if unknown:
         raise FinanceTripletError(f"{field} 未知字段: {sorted(unknown)}")
     missing = keys - set(mapping)
@@ -845,6 +896,7 @@ def _parse_vat_rule(rule_id: str, mapping: Mapping) -> VatRule:
         {"kind", "label_ref", "settlement", "in_tax", "out_tax", "om_input_tax",
          "maintenance_input_tax", "credit_pool", "confirmation"},
         field,
+        optional={"demand_input_tax"},
     )
     settlement = str(mapping["settlement"])
     if settlement not in VAT_SETTLEMENTS:
@@ -898,6 +950,17 @@ def _parse_vat_rule(rule_id: str, mapping: Mapping) -> VatRule:
             rate=_ratio_money(entry["rate"], f"{sub}.rate"),
             deductible_ratio=_ratio_money(entry["deductible_ratio"], f"{sub}.deductible_ratio"),
         ))
+    demand_input_tax: list[DemandInputTaxEntry] = []
+    for index, entry in enumerate(_as_list(mapping.get("demand_input_tax", []), f"{field}.demand_input_tax")):
+        sub = f"{field}.demand_input_tax[{index}]"
+        if not isinstance(entry, Mapping):
+            raise FinanceTripletError(f"{sub} 必须是映射")
+        _require_keys(entry, {"charge", "rate", "deductible_ratio"}, sub)
+        demand_input_tax.append(DemandInputTaxEntry(
+            charge=_validate_local_id(entry["charge"], f"{sub}.charge"),
+            rate=_ratio_money(entry["rate"], f"{sub}.rate"),
+            deductible_ratio=_ratio_money(entry["deductible_ratio"], f"{sub}.deductible_ratio"),
+        ))
     return VatRule(
         label_ref=str(mapping["label_ref"]),
         settlement=settlement,
@@ -905,6 +968,7 @@ def _parse_vat_rule(rule_id: str, mapping: Mapping) -> VatRule:
         out_tax=tuple(out_tax),
         om_input_tax=tuple(om_input_tax),
         maintenance_input_tax=tuple(maintenance_input_tax),
+        demand_input_tax=tuple(demand_input_tax),
         credit_pool=str(mapping["credit_pool"]),
         confirmation=confirmation,
     )
@@ -995,6 +1059,7 @@ def _parse_income_rule(rule_id: str, mapping: Mapping) -> IncomeTaxRule:
          "variable_om", "deductible_maintenance", "depreciation",
          "loss_carryforward_years", "opening_losses"},
         field,
+        optional={"demand_cost"},
     )
     raw_maint = mapping["deductible_maintenance"]
     if not isinstance(raw_maint, Mapping):
@@ -1045,6 +1110,7 @@ def _parse_income_rule(rule_id: str, mapping: Mapping) -> IncomeTaxRule:
         rate=_ratio_money(mapping["rate"], f"{field}.rate"),
         revenue=tuple(_as_price_list(mapping["revenue"], f"{field}.revenue")),
         energy_cost=tuple(_as_price_list(mapping["energy_cost"], f"{field}.energy_cost")),
+        demand_cost=tuple(_as_price_list(mapping.get("demand_cost", []), f"{field}.demand_cost")),
         annual_om=tuple(_as_path_list(mapping["annual_om"], f"{field}.annual_om")),
         variable_om=tuple(_as_path_list(mapping["variable_om"], f"{field}.variable_om")),
         deductible_maintenance=DeductibleMaintenance(mode="explicit_items", items=tuple(items)),
@@ -1075,6 +1141,7 @@ def _check_tax_refs(
     currency: str,
     energy_prices: Mapping[str, EnergyPrice],
     finance_types: Mapping[str, FinanceTypeEntry],
+    demand_charges: Mapping[str, DemandCharge],
     taxes: Mapping[str, TaxEntry],
     credit_pools: Mapping[str, CreditPool],
     tax_rules: Mapping[str, TaxRule],
@@ -1099,6 +1166,8 @@ def _check_tax_refs(
     seen_for: dict[str, str] = {}
     seen_income_price: dict[str, str] = {}
     seen_income_om: dict[str, str] = {}
+    seen_demand_input: dict[str, str] = {}
+    seen_demand_cost: dict[str, str] = {}
     for rule_id, rule in tax_rules.items():
         field = f"tax_rules.{rule_id}"
         if rule.label_ref not in taxes:
@@ -1107,6 +1176,8 @@ def _check_tax_refs(
         if pool_ref is not None and pool_ref not in credit_pools:
             raise FinanceTripletError(f"{field}.credit_pool 引用的池不存在: {pool_ref!r}")
         if isinstance(rule, VatRule):
+            for entry in rule.demand_input_tax:
+                _claim_demand(seen_demand_input, entry.charge, rule_id, demand_charges, f"{field}.demand_input_tax")
             for entry in rule.in_tax:
                 _claim_price(seen_in, entry.price, rule_id, energy_prices, "purchase", f"{field}.in_tax")
             for entry in rule.out_tax:
@@ -1125,6 +1196,8 @@ def _check_tax_refs(
             _claim_component(seen_for, rule.for_path, rule_id, ft_paths,
                              ("upfront_capex",), field)
         elif isinstance(rule, IncomeTaxRule):
+            for charge in rule.demand_cost:
+                _claim_demand(seen_demand_cost, charge, rule_id, demand_charges, f"{field}.demand_cost")
             for price_id in rule.revenue:
                 _claim_price(seen_income_price, price_id, rule_id, energy_prices, "sale",
                              f"{field}.revenue")
@@ -1155,6 +1228,17 @@ def _check_tax_refs(
                         f"{field}.depreciation.base_from 须为 {item.asset}.upfront_capex_net")
                 if item.residual.unit != currency:
                     raise FinanceTripletError(f"{field}.depreciation.residual 单位须为 Profile 币种")
+
+
+def _claim_demand(
+    seen: dict[str, str], charge: str, rule_id: str,
+    charges: Mapping[str, DemandCharge], field: str,
+) -> None:
+    if charge not in charges:
+        raise FinanceTripletError(f"{field} 引用未知需量费项: {charge!r}")
+    if charge in seen:
+        raise FinanceTripletError(f"{field} 需量费项 {charge!r} 已被规则 {seen[charge]!r} 使用")
+    seen[charge] = rule_id
 
 
 def _claim_price(
@@ -1267,6 +1351,7 @@ class FinanceProfile:
     taxes: Mapping[str, TaxEntry] = field(default_factory=lambda: MappingProxyType({}))
     credit_pools: Mapping[str, CreditPool] = field(default_factory=lambda: MappingProxyType({}))
     tax_rules: Mapping[str, TaxRule] = field(default_factory=lambda: MappingProxyType({}))
+    demand_charges: Mapping[str, DemandCharge] = field(default_factory=lambda: MappingProxyType({}))
 
     def __post_init__(self) -> None:
         if self.schema != SCHEMA_PROFILE:
@@ -1278,6 +1363,7 @@ class FinanceProfile:
         object.__setattr__(self, "profile", MappingProxyType(profile_sorted))
         object.__setattr__(self, "finance_types", MappingProxyType(dict(sorted(self.finance_types.items()))))
         object.__setattr__(self, "energy_prices", MappingProxyType(dict(sorted(self.energy_prices.items()))))
+        object.__setattr__(self, "demand_charges", MappingProxyType(dict(sorted(self.demand_charges.items()))))
         object.__setattr__(self, "taxes", MappingProxyType(dict(sorted(self.taxes.items()))))
         object.__setattr__(self, "credit_pools", MappingProxyType(dict(sorted(self.credit_pools.items()))))
         object.__setattr__(self, "tax_rules", MappingProxyType(dict(sorted(self.tax_rules.items()))))
@@ -1285,7 +1371,7 @@ class FinanceProfile:
         # 或 finance_types 的分量路径(<finance_type>.<分量>, 如 pv_system.upfront_capex)。
         for tax_id, tax in self.taxes.items():
             target = tax.applies_to
-            if target in self.energy_prices:
+            if target in self.energy_prices or (target.startswith("demand_charges.") and target.removeprefix("demand_charges.") in self.demand_charges):
                 continue
             parts = target.split(".")
             if (
@@ -1327,6 +1413,7 @@ class FinanceProfile:
             "profile": dict(sorted(self.profile.items())),
             "finance_types": {k: v.to_dict() for k, v in sorted(self.finance_types.items())},
             "energy_prices": {k: v.to_dict() for k, v in sorted(self.energy_prices.items())},
+            "demand_charges": {k: v.to_dict() for k, v in sorted(self.demand_charges.items())},
             "taxes": {k: v.to_dict() for k, v in sorted(self.taxes.items())},
             "credit_pools": {k: v.to_dict() for k, v in sorted(self.credit_pools.items())},
             "tax_rules": {k: v.to_dict() for k, v in sorted(self.tax_rules.items())},
@@ -1336,12 +1423,12 @@ class FinanceProfile:
     def from_dict(cls, mapping: object) -> FinanceProfile:
         if not isinstance(mapping, Mapping):
             raise FinanceTripletError("FinanceProfile 必须是字典")
-        known_profile = {"schema", "schema_version", "profile", "finance_types", "energy_prices", "taxes",
+        known_profile = {"schema", "schema_version", "profile", "finance_types", "energy_prices", "demand_charges", "taxes",
                          "credit_pools", "tax_rules"}
         unknown = set(mapping) - known_profile
         if unknown:
             raise FinanceTripletError(f"FinanceProfile 未知字段: {sorted(unknown)}")
-        missing = {"schema", "schema_version", "profile", "finance_types", "energy_prices"} - set(mapping)
+        missing = {"schema", "schema_version", "profile", "finance_types", "energy_prices", "demand_charges"} - set(mapping)
         if missing:
             raise FinanceTripletError(f"FinanceProfile 缺少字段: {sorted(missing)}")
         schema = str(mapping["schema"])
@@ -1420,6 +1507,8 @@ class FinanceProfile:
             _check_price_unit(currency, price_id, price)
             energy_prices[price_id] = price
 
+        demand_charges = _parse_demand_charges(mapping["demand_charges"], currency)
+
         taxes_raw = mapping.get("taxes") or {}
         if not isinstance(taxes_raw, Mapping):
             raise FinanceTripletError("taxes 必须是字典")
@@ -1449,6 +1538,7 @@ class FinanceProfile:
             currency=currency,
             energy_prices=energy_prices,
             finance_types=finance_types,
+            demand_charges=demand_charges,
             taxes=taxes,
             credit_pools=credit_pools,
             tax_rules=tax_rules,
@@ -1460,6 +1550,7 @@ class FinanceProfile:
             profile=profile,
             finance_types=finance_types,
             energy_prices=energy_prices,
+            demand_charges=demand_charges,
             taxes=taxes,
             credit_pools=credit_pools,
             tax_rules=tax_rules,
@@ -1496,6 +1587,7 @@ class FinanceOverrides:
     profile_ref: Mapping[str, str]
     finance_types: Mapping[str, Mapping[str, object]] = field(default_factory=lambda: MappingProxyType({}))
     energy_prices: Mapping[str, Mapping[str, object]] = field(default_factory=lambda: MappingProxyType({}))
+    demand_charges: Mapping[str, Mapping[str, object]] = field(default_factory=lambda: MappingProxyType({}))
     tax_rules: Mapping[str, Mapping[str, object]] = field(default_factory=lambda: MappingProxyType({}))
     credit_pools: Mapping[str, Mapping[str, object]] = field(default_factory=lambda: MappingProxyType({}))
     #: 解析时绑定的 Profile id（合并器据此判定覆盖权限是否已核对；不序列化）。
@@ -1517,6 +1609,7 @@ class FinanceOverrides:
         object.__setattr__(self, "profile_ref", MappingProxyType(dict(sorted(self.profile_ref.items()))))
         object.__setattr__(self, "finance_types", MappingProxyType(dict(sorted(self.finance_types.items()))))
         object.__setattr__(self, "energy_prices", MappingProxyType(dict(sorted(self.energy_prices.items()))))
+        object.__setattr__(self, "demand_charges", MappingProxyType(dict(sorted(self.demand_charges.items()))))
         object.__setattr__(self, "tax_rules", MappingProxyType(dict(sorted(self.tax_rules.items()))))
         object.__setattr__(self, "credit_pools", MappingProxyType(dict(sorted(self.credit_pools.items()))))
         object.__setattr__(
@@ -1536,6 +1629,8 @@ class FinanceOverrides:
             d["finance_types"] = _freeze_overrides(self.finance_types)
         if self.energy_prices:
             d["energy_prices"] = _freeze_overrides(self.energy_prices)
+        if self.demand_charges:
+            d["demand_charges"] = _freeze_overrides(self.demand_charges)
         if self.tax_rules:
             d["tax_rules"] = _thaw(self.tax_rules)
         if self.credit_pools:
@@ -1560,7 +1655,7 @@ class FinanceOverrides:
         for forbidden in ("profile", "currency", "base_year", "price_basis", "cost_method", "taxes"):
             if forbidden in mapping:
                 raise FinanceTripletError(f"FinanceOverrides 禁止出现字段: {forbidden!r}")
-        known_overrides = {"schema", "schema_version", "profile_ref", "finance_types", "energy_prices",
+        known_overrides = {"schema", "schema_version", "profile_ref", "finance_types", "energy_prices", "demand_charges",
                            "tax_rules", "credit_pools"}
         unknown = set(mapping) - known_overrides
         if unknown:
@@ -1611,6 +1706,22 @@ class FinanceOverrides:
                 raise FinanceTripletError(f"energy_prices.{price_id} 必须为非空字典")
             energy_prices[price_id] = _validate_price_override(price_id, price_val, profile)
 
+        demand_raw = _optional_section(mapping, "demand_charges", "demand_charges")
+        demand_charges: dict[str, Mapping[str, object]] = {}
+        for charge_id, patch in demand_raw.items():
+            charge_id = _validate_local_id(charge_id, "charge_id")
+            if not isinstance(patch, Mapping) or set(patch) != {"rate"}:
+                raise FinanceTripletError(f"demand_charges.{charge_id} 只允许覆盖 rate 原子")
+            if profile is not None and charge_id not in profile.demand_charges:
+                raise FinanceTripletError(f"demand_charges.{charge_id} 不允许新增费项")
+            rate = Money.from_dict(patch["rate"], field=f"demand_charges.{charge_id}.rate")
+            if _dims(rate.unit) != {"currency": 1, "power": -1}:
+                raise FinanceTripletError(f"demand_charges.{charge_id}.rate 必须为货币/功率")
+            if profile is not None:
+                base = profile.demand_charges[charge_id].rate
+                _check_same_unit(rate.unit, base.unit, f"demand_charges.{charge_id}.rate")
+            demand_charges[charge_id] = {"rate": rate.to_dict()}
+
         tax_raw = _optional_section(mapping, "tax_rules", "tax_rules")
         tax_rules: dict[str, Mapping[str, object]] = {}
         parsed_rules: dict[str, dict] = {}
@@ -1641,6 +1752,7 @@ class FinanceOverrides:
             profile_ref=profile_ref,
             finance_types=finance_types,
             energy_prices=energy_prices,
+            demand_charges=demand_charges,
             tax_rules=tax_rules,
             credit_pools=credit_pools,
             _bound_profile=profile.profile_id if profile is not None else "",
@@ -1871,18 +1983,18 @@ def _check_rule_override_shape(rule_id: str, out: Mapping[str, object], prof_rul
     """
     field = f"tax_rules.{rule_id}"
     if isinstance(prof_rule, VatRule):
-        allowed = {"in_tax", "out_tax", "om_input_tax", "maintenance_input_tax"}
+        allowed = {"in_tax", "out_tax", "om_input_tax", "maintenance_input_tax", "demand_input_tax"}
         unknown = set(out) - allowed
         if unknown:
             raise FinanceTripletError(f"{field} 只允许覆盖已有参数: {sorted(unknown)}")
-        for key in ("in_tax", "out_tax", "om_input_tax"):
+        for key in ("in_tax", "out_tax", "om_input_tax", "demand_input_tax"):
             if key not in out:
                 continue
             raw = out[key]
             if not isinstance(raw, Mapping):
-                raise FinanceTripletError(f"{field}.{key} 必须是 price/for 键控的字典")
+                raise FinanceTripletError(f"{field}.{key} 必须是 price/for/charge 键控的字典")
             base_entries = {
-                getattr(item, "price", getattr(item, "for_path", None)): item
+                getattr(item, "price", getattr(item, "for_path", getattr(item, "charge", None))): item
                 for item in getattr(prof_rule, key)
             }
             for target, patch in raw.items():
@@ -1968,7 +2080,7 @@ def _parse_rule_patch_values(rule_id: str, patch: Mapping, rule: TaxRule) -> dic
     field = f"tax_rules.{rule_id}"
     values: dict = {}
     if isinstance(rule, VatRule):
-        for key in ("in_tax", "out_tax", "om_input_tax"):
+        for key in ("in_tax", "out_tax", "om_input_tax", "demand_input_tax"):
             if key not in patch:
                 continue
             atoms: dict = {}
@@ -2166,6 +2278,7 @@ class EffectiveFinanceConfig:
     taxes: Mapping[str, TaxEntry] = field(default_factory=lambda: MappingProxyType({}))
     credit_pools: Mapping[str, CreditPool] = field(default_factory=lambda: MappingProxyType({}))
     tax_rules: Mapping[str, TaxRule] = field(default_factory=lambda: MappingProxyType({}))
+    demand_charges: Mapping[str, DemandCharge] = field(default_factory=lambda: MappingProxyType({}))
 
     def __post_init__(self) -> None:
         if self.schema != SCHEMA_EFFECTIVE:
@@ -2184,6 +2297,7 @@ class EffectiveFinanceConfig:
             raise FinanceTripletError(f"cost_method 非法: {self.cost_method!r}")
         object.__setattr__(self, "finance_types", MappingProxyType(dict(sorted(self.finance_types.items()))))
         object.__setattr__(self, "energy_prices", MappingProxyType(dict(sorted(self.energy_prices.items()))))
+        object.__setattr__(self, "demand_charges", MappingProxyType(dict(sorted(self.demand_charges.items()))))
         object.__setattr__(self, "taxes", MappingProxyType(dict(sorted(self.taxes.items()))))
         object.__setattr__(self, "credit_pools", MappingProxyType(dict(sorted(self.credit_pools.items()))))
         object.__setattr__(self, "tax_rules", MappingProxyType(dict(sorted(self.tax_rules.items()))))
@@ -2199,6 +2313,7 @@ class EffectiveFinanceConfig:
             "cost_method": self.cost_method,
             "finance_types": {k: v.to_dict() for k, v in sorted(self.finance_types.items())},
             "energy_prices": {k: v.to_dict() for k, v in sorted(self.energy_prices.items())},
+            "demand_charges": {k: v.to_dict() for k, v in sorted(self.demand_charges.items())},
             "taxes": {k: v.to_dict() for k, v in sorted(self.taxes.items())},
             "credit_pools": {k: v.to_dict() for k, v in sorted(self.credit_pools.items())},
             "tax_rules": {k: v.to_dict() for k, v in sorted(self.tax_rules.items())},
@@ -2211,7 +2326,7 @@ class EffectiveFinanceConfig:
         unknown = set(mapping) - {
             "schema", "schema_version", "profile_id",
             "currency", "base_year", "price_basis", "cost_method",
-            "finance_types", "energy_prices", "taxes",
+            "finance_types", "energy_prices", "demand_charges", "taxes",
             "credit_pools", "tax_rules",
         }
         if unknown:
@@ -2219,7 +2334,7 @@ class EffectiveFinanceConfig:
         missing = {
             "schema", "schema_version", "profile_id",
             "currency", "base_year", "price_basis", "cost_method",
-            "finance_types", "energy_prices",
+            "finance_types", "energy_prices", "demand_charges",
         } - set(mapping)
         if missing:
             raise FinanceTripletError(f"EffectiveFinanceConfig 缺少字段: {sorted(missing)}")
@@ -2263,6 +2378,7 @@ class EffectiveFinanceConfig:
             price = EnergyPrice.from_dict(price_val)
             _check_price_unit(currency, price_id, price)
             energy_prices[price_id] = price
+        demand_charges = _parse_demand_charges(mapping["demand_charges"], currency)
         taxes_raw = mapping.get("taxes") or {}
         if not isinstance(taxes_raw, Mapping):
             raise FinanceTripletError("taxes 必须是字典")
@@ -2292,6 +2408,7 @@ class EffectiveFinanceConfig:
             currency=currency,
             energy_prices=energy_prices,
             finance_types=finance_types,
+            demand_charges=demand_charges,
             taxes=taxes,
             credit_pools=credit_pools,
             tax_rules=tax_rules,
@@ -2307,6 +2424,7 @@ class EffectiveFinanceConfig:
             cost_method=cost_method,
             finance_types=finance_types,
             energy_prices=energy_prices,
+            demand_charges=demand_charges,
             taxes=taxes,
             credit_pools=credit_pools,
             tax_rules=tax_rules,
@@ -2396,6 +2514,15 @@ def merge_effective(profile: FinanceProfile, overrides: FinanceOverrides | None)
                 series_meta=SeriesMeta.from_dict(price_override_dict["series_meta"]),
             )
 
+    # ---- demand_charges: only existing Profile rates may be overridden ----
+    merged_demand = dict(profile.demand_charges)
+    for charge_id, patch in sorted(overrides.demand_charges.items()):
+        if charge_id not in profile.demand_charges:
+            raise FinanceTripletError(f"demand_charges.{charge_id} 不允许新增费项")
+        rate = Money.from_dict(patch["rate"], field=f"demand_charges.{charge_id}.rate")
+        _check_same_unit(rate.unit, profile.demand_charges[charge_id].rate.unit, f"demand_charges.{charge_id}.rate")
+        merged_demand[charge_id] = DemandCharge(rate=rate)
+
     # ---- taxes: 税目只属于 Profile, 原样继承 ----
     merged_taxes: dict[str, TaxEntry] = dict(profile.taxes)
 
@@ -2438,6 +2565,7 @@ def merge_effective(profile: FinanceProfile, overrides: FinanceOverrides | None)
         currency=profile.currency,
         energy_prices=profile.energy_prices,
         finance_types=profile.finance_types,
+        demand_charges=merged_demand,
         taxes=profile.taxes,
         credit_pools=merged_pools,
         tax_rules=merged_rules,
@@ -2453,6 +2581,7 @@ def merge_effective(profile: FinanceProfile, overrides: FinanceOverrides | None)
         cost_method=profile.cost_method,
         finance_types=merged_ft,
         energy_prices=merged_ep,
+        demand_charges=merged_demand,
         taxes=merged_taxes,
         credit_pools=merged_pools,
         tax_rules=merged_rules,
@@ -2507,7 +2636,8 @@ def _apply_rule_patch(rule_id: str, rule: TaxRule, values: Mapping) -> TaxRule:
         in_tax = list(rule.in_tax)
         out_tax = list(rule.out_tax)
         om_input_tax = list(rule.om_input_tax)
-        for key, base in (("in_tax", in_tax), ("out_tax", out_tax), ("om_input_tax", om_input_tax)):
+        demand_input_tax = list(rule.demand_input_tax)
+        for key, base in (("in_tax", in_tax), ("out_tax", out_tax), ("om_input_tax", om_input_tax), ("demand_input_tax", demand_input_tax)):
             for target, atom_values in values.get(key, {}).items():
                 base[_rule_entry_index(base, target, field, key)] = _patched_entry(
                     base, target, atom_values, field, key)
@@ -2517,6 +2647,7 @@ def _apply_rule_patch(rule_id: str, rule: TaxRule, values: Mapping) -> TaxRule:
             in_tax=tuple(in_tax),
             out_tax=tuple(out_tax),
             om_input_tax=tuple(om_input_tax),
+            demand_input_tax=tuple(demand_input_tax),
             maintenance_input_tax=values.get(
                 "maintenance_input_tax", rule.maintenance_input_tax),
             credit_pool=rule.credit_pool,
@@ -2559,6 +2690,7 @@ def _apply_rule_patch(rule_id: str, rule: TaxRule, values: Mapping) -> TaxRule:
             rate=values.get("rate", rule.rate),
             revenue=rule.revenue,
             energy_cost=rule.energy_cost,
+            demand_cost=rule.demand_cost,
             annual_om=rule.annual_om,
             variable_om=rule.variable_om,
             deductible_maintenance=deductible_maintenance,
@@ -2573,7 +2705,7 @@ def _apply_rule_patch(rule_id: str, rule: TaxRule, values: Mapping) -> TaxRule:
 def _rule_entry_index(base: list, target: str, field: str, key: str) -> int:
     """稀疏条目按 price/for 定位基线下标(纪律已核对，缺席为内部非法)。"""
     for index, entry in enumerate(base):
-        candidate = getattr(entry, "price", getattr(entry, "for_path", None))
+        candidate = getattr(entry, "price", getattr(entry, "for_path", getattr(entry, "charge", None)))
         if candidate == target:
             return index
     raise FinanceTripletError(f"{field}.{key} {target!r} 在 Profile 中不存在(内部状态非法)")
@@ -2589,4 +2721,6 @@ def _patched_entry(base: list, target: str, atom_values: Mapping, field: str, ke
     ratio = atom_values.get("deductible_ratio", old.deductible_ratio)  # type: ignore[union-attr]
     if isinstance(old, InTaxEntry):
         return InTaxEntry(price=old.price, rate=rate, deductible_ratio=ratio)
+    if isinstance(old, DemandInputTaxEntry):
+        return DemandInputTaxEntry(charge=old.charge, rate=rate, deductible_ratio=ratio)
     return OmInputTaxEntry(for_path=old.for_path, rate=rate, deductible_ratio=ratio)  # type: ignore[union-attr]

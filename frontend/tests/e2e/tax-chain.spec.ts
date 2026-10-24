@@ -497,7 +497,8 @@ test.describe('D3: 税务主链(财务页→提交→求解→税额→评估→
     const session = await createSession(page, username, password)
 
     await page.getByText(projectName).click({ timeout: 30_000 })
-    await expect(page).toHaveURL(/\/projects\/\d+$/)
+    await expect(page).toHaveURL(/\/projects\/\d+\/tasks$/)
+    await expect(page.getByRole('button', { name: /提交任务|Submit task/i }).first()).toBeVisible()
 
     // 税画像经财务页 UI 登记/引用(被测财务步骤)，规划目标选择现有税后 NPV。
     const profile = taxProfile(`d3_tax_${Date.now()}`)
@@ -688,7 +689,8 @@ test.describe('D3: 税务主链(财务页→提交→求解→税额→评估→
     const page: Page = await context.newPage()
     const session = await createSession(page, username, password)
     await page.getByText(projectName).click({ timeout: 30_000 })
-    await expect(page).toHaveURL(/\/projects\/\d+$/)
+    await expect(page).toHaveURL(/\/projects\/\d+\/tasks$/)
+    await expect(page.getByRole('button', { name: /提交任务|Submit task/i }).first()).toBeVisible()
     const profile = taxProfile(`d3_switch_${Date.now()}`)
     await registerAndBindTaxProfile(page, profile)
     await saveAfterTaxPlanningObjective(page, pid)
@@ -761,7 +763,8 @@ test.describe('D3: 税务主链(财务页→提交→求解→税额→评估→
     const page: Page = await context.newPage()
     const session = await createSession(page, username, password)
     await page.getByText(projectName).click({ timeout: 30_000 })
-    await expect(page).toHaveURL(/\/projects\/\d+$/)
+    await expect(page).toHaveURL(/\/projects\/\d+\/tasks$/)
+    await expect(page.getByRole('button', { name: /提交任务|Submit task/i }).first()).toBeVisible()
     await page.getByRole('navigation', { name: /工作台|Workspace/i }).getByText('导出').click({ timeout: 30_000 })
     await expect(page).toHaveURL(/\/export$/)
     // 无可用结果：显示缺结果引导，不发起下载。

@@ -123,6 +123,7 @@ test.describe('场景 2: 项目与页面导航 @basic', () => {
     // 2b. 打开项目 → 默认落在任务中心
     await page.getByText(projectName).click()
     await expect(page).toHaveURL(/\/projects\/\d+\/tasks$/)
+    await expect(page.getByRole('button', { name: /提交任务|Submit task/i }).first()).toBeVisible()
 
     // 2c. 遍历 7 个子页面: 模型/数据/配置/校验/任务/结果/导出
     // 各页标题结构不同(tasks/results 用 Card 标题, 无 h1), 统一断言:
@@ -177,6 +178,7 @@ test.describe('场景 3: 建模与连线 @basic', () => {
     await expect(page.getByText(projectName)).toBeVisible()
     await page.getByText(projectName).click()
     await expect(page).toHaveURL(/\/projects\/\d+\/tasks$/)
+    await expect(page.getByRole('button', { name: /提交任务|Submit task/i }).first()).toBeVisible()
 
     // 进入模型页
     await page.getByRole('navigation', { name: /工作台|Workspace/i }).getByText('系统建模').click()

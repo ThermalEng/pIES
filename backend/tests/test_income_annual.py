@@ -70,7 +70,7 @@ DEPR_LIFE = 10
 def _gen_finance_payload(*, opening=(), carry_years=INC_CARRY_YEARS):
     return {
         "schema": "ies.finance-profile",
-        "schema_version": "3.0.0",
+        "schema_version": "4.0.0",
         "profile": {
             "id": "income-gen",
             "region": "CN-North",
@@ -98,6 +98,7 @@ def _gen_finance_payload(*, opening=(), carry_years=INC_CARRY_YEARS):
                 },
             },
         },
+        "demand_charges": {},
         "taxes": {
             "income_ii": {
                 "display_name": "合成所得税",
@@ -139,7 +140,7 @@ def _gen_finance_payload(*, opening=(), carry_years=INC_CARRY_YEARS):
 def _gen_doc(objective: dict, *, cap_bounds: tuple[str, str] = ("0", "10")) -> dict:
     return {
         "schema": "ies.assembly",
-        "schema_version": "3.0.0",
+        "schema_version": "4.0.0",
         "assembly": {"id": "income-gen", "name": "所得税选择算例"},
         "project_baseline": {
             "resolution": "1h",
@@ -178,6 +179,7 @@ def _gen_doc(objective: dict, *, cap_bounds: tuple[str, str] = ("0", "10")) -> d
                 "aggregation": "integrate_positive",
             },
         },
+        "demand_bindings": {},
         "planning": {
             "objective": objective,
             "variables": {

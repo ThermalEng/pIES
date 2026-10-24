@@ -1,6 +1,6 @@
 # 非法样例: 属性未在模型声明 → ASM-INPUT-006
 schema: ies.assembly
-schema_version: "3.0.0"
+schema_version: "4.0.0"
 
 assembly:
   id: bad_property_undeclared
@@ -38,6 +38,8 @@ finance_binding:
       type: none
 
 tariff_bindings: {}
+
+demand_bindings: {}
 
 planning:
   objective:

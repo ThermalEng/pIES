@@ -1,7 +1,7 @@
 """装配域公共契约与生产管线测试。
 
 覆盖(公开入口运行时断言 + 纯标准库 AST 静态断言,无需数据库):
-- 公共装配入口面(ies.assembly 3.0.0)完整可用,旧管线模块与入口已移除;
+- 公共装配入口面(ies.assembly 4.0.0)完整可用,旧管线模块与入口已移除;
 - 现行契约常量与 ValidatedAssemblyArtifact 不可变二件套行为;
 - 诊断码静态登记(ASM 域 ↔ 消息键/修复键,不改写 core 目录);
 - 内部依赖方向(assembly 只依赖 core/devices/computation 公开面与域内模块,无穿透);
@@ -49,7 +49,7 @@ ASSEMBLY_DIR = ASM_DIR
 SAMPLES_DIR = ASSEMBLY_DIR / "samples"
 VALID_DIR = SAMPLES_DIR / "valid"
 
-#: 现行公共入口面(ies.assembly 3.0.0): 历史名单不断言, 只稳定现行契约。
+#: 现行公共入口面(ies.assembly 4.0.0): 历史名单不断言, 只稳定现行契约。
 CURRENT_ENTRIES = (
     parse_assembly_doc,
     build_assembly_doc_from_content,
@@ -132,11 +132,11 @@ class TestPublicEntries:
 class TestContract:
     def test_schema_identity(self):
         assert SCHEMA_ID == "ies.assembly"
-        assert SCHEMA_VERSION == "3.0.0"
+        assert SCHEMA_VERSION == "4.0.0"
         assert VALIDATOR_ID == "ies.assembly.validator"
-        assert VALIDATOR_VERSION == "3.0.0"
+        assert VALIDATOR_VERSION == "4.0.0"
         assert CANON_ALGORITHM_ID == "ies.assembly.canonical"
-        assert CANON_ALGORITHM_VERSION == "3.0.0"
+        assert CANON_ALGORITHM_VERSION == "4.0.0"
 
     def test_schema_file_loads(self):
         path = ASSEMBLY_DIR / ASSEMBLY_SCHEMA_PATH
@@ -153,7 +153,7 @@ class TestContract:
         artifact = result.artifact
         assert isinstance(artifact, ValidatedAssemblyArtifact)
         assert artifact.canonical_text.endswith("\n")
-        assert json.loads(artifact.canonical_text)["schema_version"] == "3.0.0"
+        assert json.loads(artifact.canonical_text)["schema_version"] == "4.0.0"
         receipt = artifact.receipt
         assert receipt.schema_id == "ies.assembly"
         assert receipt.validator_id == "ies.assembly.validator"
@@ -336,6 +336,7 @@ class TestProductionPipeline:
             finance=finance,
             finance_binding=binding,
             tariff_bindings=tariff,
+            demand_bindings={},
             planning=planning,
             finance_snapshots=snapshots,
         )
@@ -343,7 +344,7 @@ class TestProductionPipeline:
             (d.code, d.params) for d in export_result.diagnostics if d.blocking
         ]
         for artifact in (text_result.artifact, export_result.artifact):
-            assert artifact.receipt.schema_version == "3.0.0"
+            assert artifact.receipt.schema_version == "4.0.0"
             assert json.loads(artifact.canonical_text)["schema"] == "ies.assembly"
             assert artifact.receipt.to_dict()["finance_snapshot"]["profile_id"] == "cn-north-demo"
 

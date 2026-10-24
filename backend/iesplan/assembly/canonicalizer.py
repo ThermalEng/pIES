@@ -42,6 +42,7 @@ _TOP_ORDER = (
     "finance",
     "finance_binding",
     "tariff_bindings",
+    "demand_bindings",
     "planning",
     "outputs",
     "extensions",

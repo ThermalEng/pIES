@@ -359,7 +359,8 @@ test.describe('R3: 曲线读取失败可见', () => {
     const page = await context.newPage()
     const session = await createSession(page, username, password)
     await page.getByText(projectName).click({ timeout: 30_000 })
-    await expect(page).toHaveURL(/\/projects\/\d+$/)
+    await expect(page).toHaveURL(/\/projects\/\d+\/tasks$/)
+    await expect(page.getByRole('button', { name: /提交任务|Submit task/i }).first()).toBeVisible()
     // 评价确认/提交走 UI(与 financial-absence A 同源)。
     await page.getByRole('navigation', { name: /工作台|Workspace/i }).getByText('任务中心').click({ timeout: 30_000 })
     await page.getByRole('button', { name: /提交任务|Submit task/i }).first().click({ timeout: 30_000 })

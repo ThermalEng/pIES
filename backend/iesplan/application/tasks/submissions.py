@@ -681,6 +681,9 @@ def _assemble_snapshot(
     _check_tax_capabilities(
         calc_config.get("generator"), generator_capabilities, effective
     )
+    _check_demand_capabilities(
+        artifact, calc_config.get("generator"), generator_capabilities
+    )
     # 提交边界维护币种核对(本次闸门实际消费的不可变快照口径; 不一致阻断):
     # 维护清单币种须与有效财务配置一致, 空清单直接通过。
     for expense in evaluation.maintenance_expenses:
@@ -829,6 +832,26 @@ def _check_tax_evaluation_refs(
                         "field": f"effective_finance.credit_pools.{pool_id}.refunds",
                     },
                 )
+
+
+def _check_demand_capabilities(artifact: Any, generator_ref: object, capabilities: tuple[str, ...]) -> None:
+    """D1: fail at task submission until the selected provider declares D2 support.
+
+    Read the already-issued canonical assembly rather than the mutable draft.
+    Unbound demand rate catalogue entries do not trigger a compute requirement.
+    """
+    bindings = json.loads(artifact.canonical_text)["demand_bindings"]
+    if bindings and "finance.monthly_demand" not in capabilities:
+        raise InvalidRequestError(
+            "所选生成器尚不支持自然月需量计费；任务未提交且费用不会被忽略",
+            code="TASK-REQ-007",
+            params={
+                "generator": generator_ref,
+                "missing_capabilities": ["finance.monthly_demand"],
+                "fields": [f"demand_bindings.{key}" for key in sorted(bindings)],
+            },
+            location={"object_type": "task", "field": f"demand_bindings.{sorted(bindings)[0]}"},
+        )
 
 
 def _check_tax_capabilities(
@@ -1144,6 +1167,7 @@ def _assembly_gate(
         finance=finance,
         finance_binding=content.get("finance_binding"),
         tariff_bindings=content.get("tariff_bindings"),
+        demand_bindings=content.get("demand_bindings"),
         planning=planning,
         finance_snapshots=finance_snapshots,
         operation_years=operation_years,

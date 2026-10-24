@@ -225,7 +225,8 @@ test.describe('任务选择载入草稿：切换恢复全部分类、编辑保�
 
     // ---- GUI 块 1：T1 提交（评价 K1N2；数据集清单来自脚手架绑定 v1，对话框无选择）。
     await page.getByText(projectName).click({ timeout: 30_000 })
-    await expect(page).toHaveURL(/\/projects\/\d+$/)
+    await expect(page).toHaveURL(/\/projects\/\d+\/tasks$/)
+    await expect(page.getByRole('button', { name: /提交任务|Submit task/i }).first()).toBeVisible()
     await page.getByRole('navigation', { name: /工作台|Workspace/i }).getByText('任务中心').click({ timeout: 30_000 })
     await page.getByRole('button', { name: /提交任务|Submit task/i }).first().click({ timeout: 30_000 })
     await page.locator('#task-type').selectOption('optimization')

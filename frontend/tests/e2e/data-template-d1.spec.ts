@@ -56,7 +56,8 @@ test.describe('D1: 模板下载失败可见', () => {
     page.on('download', (dl) => downloads.push(dl.url))
     const session = await createSession(page, userName, password)
     await page.getByText(projectName).click({ timeout: 30_000 })
-    await expect(page).toHaveURL(/\/projects\/\d+$/)
+    await expect(page).toHaveURL(/\/projects\/\d+\/tasks$/)
+    await expect(page.getByRole('button', { name: /提交任务|Submit task/i }).first()).toBeVisible()
     await page.getByRole('navigation', { name: /工作台|Workspace/i }).getByText('数据管理').click({ timeout: 30_000 })
     await expect(page).toHaveURL(/\/data$/)
 

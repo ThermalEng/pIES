@@ -334,7 +334,7 @@ const BATTERY_COMMAND = {
 function financeProfile(profileId: string): Record<string, unknown> {
   return {
     schema: 'ies.finance-profile',
-    schema_version: '1.0.0',
+    schema_version: '4.0.0',
     profile: {
       id: profileId,
       region: 'CN-North',
@@ -367,7 +367,10 @@ function financeProfile(profileId: string): Record<string, unknown> {
         value: { value: '0.4', unit: 'CNY/kWh' },
       },
     },
+    demand_charges: {},
     taxes: {},
+    credit_pools: {},
+    tax_rules: {},
   }
 }
 

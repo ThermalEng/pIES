@@ -54,7 +54,8 @@ test.describe('场景 4: 数据上传 / 质量报告 / 绑定', () => {
     const page: Page = await context.newPage()
     const session = await createSession(page, username, password)
     await page.getByText(projectName).click()
-    await expect(page).toHaveURL(/\/projects\/\d+$/)
+    await expect(page).toHaveURL(/\/projects\/\d+\/tasks$/)
+    await expect(page.getByRole('button', { name: /提交任务|Submit task/i }).first()).toBeVisible()
     await page.getByRole('navigation', { name: /工作台|Workspace/i }).getByText('数据管理').click()
     await expect(page).toHaveURL(/\/data$/)
 
@@ -115,7 +116,8 @@ test.describe.skip('场景 6: 任务提交 / 状态 / 结果 / 导出(后续切�
 
     // 打开项目(已由 API 造数)
     await page.getByText(projectName).click()
-    await expect(page).toHaveURL(/\/projects\/\d+$/)
+    await expect(page).toHaveURL(/\/projects\/\d+\/tasks$/)
+    await expect(page.getByRole('button', { name: /提交任务|Submit task/i }).first()).toBeVisible()
 
     // 数据: 生成样例并绑定
     await page.getByRole('navigation', { name: /工作台|Workspace/i }).getByText('数据管理').click()

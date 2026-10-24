@@ -74,9 +74,18 @@ test.describe('空值门禁(非画布 GUI)', () => {
     const context: BrowserContext = await browser.newContext()
     const page: Page = await context.newPage()
     const session = await createSession(page, username, password)
+    // Invalid submissions must never enter the HTTP submit path, even when
+    // an earlier async validation races with later valid form edits.
+    const taskPosts: Array<{ body: Record<string, unknown> }> = []
+    page.on('request', (request) => {
+      if (request.method() === 'POST' && new URL(request.url()).pathname === `/api/projects/${projectId}/tasks`) {
+        taskPosts.push({ body: request.postDataJSON() as Record<string, unknown> })
+      }
+    })
 
     await page.getByText(projectName).click()
-    await expect(page).toHaveURL(/\/projects\/\d+$/)
+    await expect(page).toHaveURL(/\/projects\/\d+\/tasks$/)
+    await expect(page.getByRole('button', { name: /提交任务|Submit task/i }).first()).toBeVisible()
 
     // 数据: 生成样例并绑定(与场景 4 同流程, 使提交校验门禁通过)
     await page.getByRole('navigation', { name: /工作台|Workspace/i }).getByText('数据管理').click()
@@ -110,12 +119,14 @@ test.describe('空值门禁(非画布 GUI)', () => {
     // 评价非法提示出现, 对话框保持打开, 未产生任务
     await expect(dialog.getByText('请填写建设期(非负整数)、运营年限(正整数)、0..1 区间内折现率与合法付款/维护 JSON(均必填)')).toBeVisible({ timeout: 10_000 })
     await expect(dialog).toBeVisible()
+    expect(taskPosts).toHaveLength(0)
 
     // 折现率留空(0 被静默接受的回归点): 只填年限仍被拒绝
     await dialog.locator('#task-construction-period').fill('0')
     await dialog.locator('#task-operation-years').fill('1')
     await dialog.getByRole('button', { name: /^提交任务$|^Submit task$/i }).click()
     await expect(dialog.getByText('请填写建设期(非负整数)、运营年限(正整数)、0..1 区间内折现率与合法付款/维护 JSON(均必填)')).toBeVisible({ timeout: 10_000 })
+    expect(taskPosts).toHaveLength(0)
 
     // 填入合法评价后提交: 先断言发出请求的形态(本切片契约)——评价确认走顶层
     // evaluation 字段(不在 config 内), 评价年限 E=K+N 随提交明确发送,
@@ -130,6 +141,8 @@ test.describe('空值门禁(非画布 GUI)', () => {
       dialog.getByRole('button', { name: /^提交任务$|^Submit task$/i }).click(),
     ])
     const submitBody = submitResponse.request().postDataJSON() as Record<string, unknown>
+    expect(taskPosts).toHaveLength(1)
+    expect(taskPosts[0].body).toEqual(submitBody)
     expect(submitBody.evaluation).toEqual({
       evaluation_years: 1,
       construction_period: 0,

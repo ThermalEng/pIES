@@ -51,6 +51,7 @@ from iesplan.finance import CURRENCIES, EffectiveFinanceConfig, FinanceTypeEntry
 #: 分量后缀族(实例前缀合法)与能源后缀族(绑定前缀合法)
 _COST_SUFFIXES: tuple[str, ...] = ("upfront_capex", "annual_fixed_om", "period_variable_om")
 _ENERGY_SUFFIXES: tuple[str, ...] = ("period_energy_purchase", "period_energy_sale")
+_DEMAND_SUFFIX = "period_demand_charge"
 
 #: 标识符词元
 _IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
@@ -128,6 +129,8 @@ def finance_identifiers(
     for binding_id, price in tariff.items():
         suffix = "period_energy_purchase" if price.direction == "purchase" else "period_energy_sale"
         dims[f"{binding_id}__{suffix}"] = Counter({"currency": 1})
+    for billing_id in sorted(doc.get("demand_bindings") or {}):
+        dims[f"{billing_id}__{_DEMAND_SUFFIX}"] = Counter({"currency": 1})
     return dims, prod
 
 
@@ -139,6 +142,7 @@ def _check_expression(
     currency: str,
     instance_ids: set[str],
     binding_ids: set[str],
+    demand_ids: set[str],
     prod: Mapping[str, dict],
     diags: list[Diagnostic],
 ) -> None:
@@ -165,17 +169,19 @@ def _check_expression(
                     reason = "sunk_component_reference"
                 else:
                     reason = "unproduced_component"
-            elif suffix in _ENERGY_SUFFIXES:
+            elif suffix in _ENERGY_SUFFIXES or suffix == _DEMAND_SUFFIX:
                 reason = "component_prefix_mismatch"
             else:
                 reason = "undefined_identifier"
         elif prefix in binding_ids:
             if suffix in _ENERGY_SUFFIXES:
                 reason = "direction_suffix_mismatch"
-            elif suffix in _COST_SUFFIXES:
+            elif suffix in _COST_SUFFIXES or suffix == _DEMAND_SUFFIX:
                 reason = "component_prefix_mismatch"
             else:
                 reason = "undefined_identifier"
+        elif prefix in demand_ids:
+            reason = "undefined_identifier" if suffix == _DEMAND_SUFFIX else "component_prefix_mismatch"
         else:
             reason = "undefined_identifier"
         _plan_fail(
@@ -388,6 +394,7 @@ def check_planning(
             allowed[var_name] = Counter()
     instance_ids = {str(k) for k in devices}
     binding_ids = {str(k) for k in binding_prices(doc, snapshot)}
+    demand_ids = {str(k) for k in (doc.get("demand_bindings") or {})}
     objective_expr = objective_raw.get("expression")
     if isinstance(objective_expr, str) and objective_expr.strip() == SYSTEM_AFTER_TAX_NPV:
         # 显式全周期 NPV 保留目标：只核对方向，不送标识符/编译检查；
@@ -405,6 +412,7 @@ def check_planning(
             currency=snapshot.currency,
             instance_ids=instance_ids,
             binding_ids=binding_ids,
+            demand_ids=demand_ids,
             prod=prod,
             diags=diags,
         )
@@ -433,6 +441,7 @@ def check_planning(
             currency=snapshot.currency,
             instance_ids=instance_ids,
             binding_ids=binding_ids,
+            demand_ids=demand_ids,
             prod=prod,
             diags=diags,
         )
