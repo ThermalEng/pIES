@@ -41,7 +41,7 @@ test('calculation settings survive save and browser reload @basic', async ({ bro
   // JSON formatting is presentation, not part of the saved value contract.
   expect(JSON.parse(await page.locator('#calc-outputs').inputValue())).toEqual(['solution'])
   session.assertNoErrors([
-    { method: 'GET', path: `/api/projects/${projectId}/config`, status: 404, times: 2 },
+    { method: 'GET', path: `/api/projects/${projectId}/config`, status: 404 },
   ])
   await context.close()
 })

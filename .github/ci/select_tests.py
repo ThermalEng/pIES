@@ -173,7 +173,13 @@ PAGE_LOGIC = {
     "model/canvasModel.ts": ("modeling_draft_mapper.test.mjs",),
     "uploadHeadScan.ts": ("upload_head_scan.test.mjs",),
 }
-BASIC = "basic-operations.spec.ts"
+# All six established @basic cases currently live in these three spec files.
+# Execute these alongside (never instead of) any selected domain-specific specs.
+BASIC_SPECS = (
+    "basic-operations.spec.ts",
+    "auth-navigation-model.spec.ts",
+    "device-data-upload.spec.ts",
+)
 HELP_BROWSER = "admin-help-lang.spec.ts"
 HELP_LOGIC = "help_markdown.test.mjs"
 
@@ -221,6 +227,8 @@ def pick(changed: list[str], full: bool = False) -> dict[str, str]:
             backend.add(SMOKE_BACKEND)
             browser.add(SMOKE_BROWSER)
             frontend.add("task_selection.test.mjs")
+            if path == ".github/ci/select_tests.py":
+                browser.update(BASIC_SPECS)  # exercise all six real @basic cases after selector edits
             if path.startswith((".github/ci/", ".github/workflows/docker-ci.yml")):
                 startup = True
         elif path in ("docker-compose.yml", "backend/Dockerfile", "backend/pyproject.toml"):
@@ -261,7 +269,7 @@ def pick(changed: list[str], full: bool = False) -> dict[str, str]:
                 backend.update(GENERATOR_PROJECT_CONSUMERS)
                 browser.update(("tax-chain.spec.ts", "result-planning-solution.spec.ts"))
         elif path in ("frontend/Dockerfile", "frontend/package.json", "frontend/package-lock.json"):
-            browser.update((SMOKE_BROWSER, "page-loading.spec.ts", BASIC))
+            browser.update((SMOKE_BROWSER, "page-loading.spec.ts", *BASIC_SPECS))
             frontend_all = True
         elif path == "frontend/scripts/run-logic-tests.mjs":
             frontend_all = True
@@ -291,20 +299,28 @@ def pick(changed: list[str], full: bool = False) -> dict[str, str]:
                 browser.update((SMOKE_BROWSER, *selected))
                 frontend.update(PAGE_LOGIC.get(page, ()))
                 if page.endswith(".css") or page in ("workbench.tsx", "WorkbenchPage.tsx"):
-                    browser.add(BASIC)
+                    browser.update(BASIC_SPECS)
         elif path.startswith("frontend/src/"):
             area = find_area(path, "frontend/src/")
             if path.startswith(("frontend/src/shared/http", "frontend/src/api/client", "frontend/src/features/auth/")):
-                browser.update((SMOKE_BROWSER, BASIC, "auth-navigation-model.spec.ts",
+                browser.update((SMOKE_BROWSER, *BASIC_SPECS, "auth-navigation-model.spec.ts",
                                 "config-revision.spec.ts", "error-envelope.spec.ts"))
                 frontend.update(("auth_admin_contracts.test.mjs", "error-envelope.test.mjs",
                                  "project_draft_commands.test.mjs"))
             elif path.startswith(("frontend/src/lib/helpMarkdown", "frontend/src/features/admin-help/")):
-                browser.update((SMOKE_BROWSER, HELP_BROWSER, BASIC))
+                browser.update((SMOKE_BROWSER, HELP_BROWSER, *BASIC_SPECS))
                 frontend.add(HELP_LOGIC)
+            elif path == "frontend/src/api/hourlyPages.ts":
+                browser.update((SMOKE_BROWSER, "hourly-r3.spec.ts", "hourly-steps.spec.ts"))
+                frontend.update(("hourly_pages.test.mjs", "hourly_absence.test.mjs",
+                                 "hourly_consume.test.mjs"))
+            elif path == "frontend/src/application/exportTaskReport.ts":
+                browser.update((SMOKE_BROWSER, "export-assessment-r7.spec.ts",
+                                "excel-export-lang.spec.ts"))
+                frontend.add("export_no_implicit_assessment.test.mjs")
             elif path.startswith(("frontend/src/components/", "frontend/src/shared/", "frontend/src/application/",
                                   "frontend/src/i18n/", "frontend/src/App.tsx", "frontend/src/styles.css")):
-                browser.update((SMOKE_BROWSER, BASIC))
+                browser.update((SMOKE_BROWSER, *BASIC_SPECS))
                 if path.startswith("frontend/src/i18n/"):
                     browser.add(HELP_BROWSER)
                     frontend.add(HELP_LOGIC)
@@ -319,7 +335,7 @@ def pick(changed: list[str], full: bool = False) -> dict[str, str]:
             frontend.add(HELP_LOGIC)
         elif path.startswith("frontend/"):
             if path.endswith((".ts", ".tsx", ".js", ".mjs", ".css")):
-                browser.update((SMOKE_BROWSER, BASIC))
+                browser.update((SMOKE_BROWSER, *BASIC_SPECS))
         elif path.startswith("manual/user-guide/"):
             browser.update((SMOKE_BROWSER, HELP_BROWSER))
             frontend.add(HELP_LOGIC)
@@ -399,11 +415,27 @@ def self_test() -> None:
     assert "tests/test_protocol_baseline.py" not in database["backend_tests"].split()
     assert len(database["backend_tests"].split()) < 10
     assert pick(["docs/readme.md"])["startup_run"] == "false"
+    basic_specs = set(pick(["frontend/src/components/ui/Button.tsx"])["browser_specs"].split())
+    assert set(BASIC_SPECS) <= basic_specs
+    assert len(basic_specs) < 8
+    assert set(BASIC_SPECS) <= set(pick([".github/ci/select_tests.py"])["browser_specs"].split())
+    assert {"financial-evaluation.spec.ts", *BASIC_SPECS} <= set(
+        pick(["frontend/src/components/ui/Button.tsx",
+              "frontend/src/pages/FinancePage.tsx"])["browser_specs"].split())
     assert "basic-operations.spec.ts" in pick(["frontend/src/components/ui/Button.tsx"])["browser_specs"]
     assert "basic-operations.spec.ts" in pick(["frontend/src/components/FormField.tsx"])["browser_specs"]
     assert "auth-navigation-model.spec.ts" in pick(["frontend/src/shared/http.ts"])["browser_specs"]
     assert "config-revision.spec.ts" in pick(["frontend/src/shared/http.ts"])["browser_specs"]
     assert "auth_admin_contracts.test.mjs" in pick(["frontend/src/shared/http.ts"])["frontend_tests"]
+    hourly = pick(["frontend/src/api/hourlyPages.ts"])
+    assert {"hourly_pages.test.mjs", "hourly_absence.test.mjs",
+            "hourly_consume.test.mjs"} <= set(hourly["frontend_tests"].split())
+    assert "hourly-r3.spec.ts" in hourly["browser_specs"]
+    assert len(hourly["browser_specs"].split()) < 8
+    report = pick(["frontend/src/application/exportTaskReport.ts"])
+    assert "export_no_implicit_assessment.test.mjs" in report["frontend_tests"]
+    assert "export-assessment-r7.spec.ts" in report["browser_specs"]
+    assert len(report["browser_specs"].split()) < 8
     assert "help_markdown.test.mjs" in pick(["frontend/src/lib/helpMarkdown.ts"])["frontend_tests"]
     assert "admin-help-lang.spec.ts" in pick(["frontend/src/lib/helpMarkdown.ts"])["browser_specs"]
     assert "help_markdown.test.mjs" in pick(["manual/user-guide/zh-CN/quickstart.md"])["frontend_tests"]
@@ -413,6 +445,8 @@ def self_test() -> None:
     assert pick(["frontend/src/pages/model/model.css"])["browser_run"] == "true"
     assert len(pick(["frontend/src/pages/model/model.css"])["browser_specs"].split()) < 8
     assert len(pick(["frontend/src/styles.css"])["browser_specs"].split()) < 8
+    assert len(pick(["frontend/src/pages/model/model.css"])["browser_specs"].split()) < 8
+    assert pick(["docs/reviews/local-style.md"])["browser_run"] == "false"
     assert "basic-operations.spec.ts" in pick(["frontend/src/styles.css"])["browser_specs"]
     assert "frontend_run" in pick(["frontend/tests/auth_admin_contracts.test.mjs"])
     assert pick(["frontend/tests/auth_admin_contracts.test.mjs"])["frontend_tests"] == "auth_admin_contracts.test.mjs"
