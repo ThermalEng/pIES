@@ -133,7 +133,9 @@ test('cost and tariff GUI: no inferred cost, atomic draft save, reload, 409 pres
   await expect(page.locator('input[id^="tariff-id-"]')).toHaveValue('edited_meter')
   await page.getByRole('button', { name: /重载最新草稿|Reload latest draft/i }).click()
   await expect(page.locator('input[id^="tariff-id-"]')).toHaveCount(2)
-  await expect(page.locator('input[id^="tariff-id-"]').last()).toHaveValue('backup_meter')
+  await expect.poll(() => page.locator('input[id^="tariff-id-"]').evaluateAll(
+    inputs => inputs.map(input => (input as HTMLInputElement).value).sort(),
+  )).toEqual(['backup_meter', 'import_meter'])
   assertMainErrors([{ method: 'PUT', path: draftPath, status: 409, times: 1 }])
   assertSecondErrors()
   await context.close()

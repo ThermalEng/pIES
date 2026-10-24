@@ -1,18 +1,18 @@
 # QA-E2E-01: Playwright 真实用户验收
 
-场景定义见 `docs/reviews/fullstack-decoupling-review-2026-08-20.md` §13(QA-E2E-01)。
+浏览器探索与回归分工见 `manual/developer-guide/zh-CN/frontend.md`「浏览器探索与自动回归」。
 
 ## 环境要求(13.4)
 
 - Playwright 与应用均在 Docker 环境运行(`docker compose` e2e 服务);
-- Chromium 是每次变更的最低门禁;firefox/webkit 作为发布前扩展(镜像内
+- GUI 变更按影响范围运行 Chromium 用例；firefox/webkit 作为发布前扩展(镜像内
   未安装对应浏览器时自动跳过);
 - 失败自动保存 trace(`test-results/artifacts`),关键视觉问题截图。
 
 ## 运行
 
 ```bash
-# 1. 构建并启动当前应用（计算 Worker 随 0.8 接入）
+# 1. 在隔离 Compose 项目及数据目录构建并启动当前应用
 docker compose up -d --build web backend io_worker
 
 # 2. 等待 backend 就绪(首次启动会自动 seed admin + 初始化数据库)
@@ -28,9 +28,17 @@ docker compose run --rm e2e npm run test:chromium
 # 指定场景:
 docker compose run --rm e2e npx playwright test --project=chromium --grep "场景 3"
 
+# 基本操作（@basic）：登录/会话、项目导航、画布拖放连线、
+# 配置保存与刷新重读、数据上传、帮助章节访问与刷新。
+docker compose run --rm --build e2e npm run test:basic
+
 # 输出位置(失败 trace / 截图 / html 报告):
 #   frontend/tests/e2e/test-results/
 ```
+
+`test:basic` 不替代按变更选择的专项回归，也不代表完整计算、财务或导出验收。
+基础用例核对操作结果、保存值和资源身份，不锁定视觉截图、JSON 排版或无业务语义的列表顺序。
+复杂并发冲突、故障注入和精确财务结果仍由各专题用例覆盖，不因基础套件通过而删除或忽略。
 
 ### 0.15 外部设备 YAML 注入验收(隔离覆盖)
 

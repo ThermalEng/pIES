@@ -53,7 +53,7 @@ function timestampCsv(rows: number): string {
 }
 
 test.describe('数据上传两种格式: step 自描述与通用时间戳', () => {
-  test('step 文件自描述上传成功，时间戳文件保持原路径', async ({ browser }) => {
+  test('step 文件自描述上传成功，时间戳文件保持原路径 @basic', async ({ browser }) => {
     const username = uniqueName('es-ddupload')
     const password = strongPassword('Init')
     const projectName = uniqueName('QA 上传格式项目')
@@ -91,7 +91,7 @@ test.describe('数据上传两种格式: step 自描述与通用时间戳', () =
     const page: Page = await context.newPage()
     const session = await createSession(page, username, password)
     await page.getByText(projectName).click()
-    await expect(page).toHaveURL(/\/projects\/\d+$/)
+    await expect(page).toHaveURL(/\/projects\/\d+\/tasks$/)
     await page.getByRole('navigation', { name: /工作台|Workspace/i }).getByText('数据管理').click()
     await expect(page).toHaveURL(/\/data$/)
 

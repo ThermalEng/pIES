@@ -15,7 +15,7 @@ import { createEngineer } from './setup/api'
 // 场景 1: 登录 / 首登改密 / 退出 / 会话失效
 // ---------------------------------------------------------------------------
 
-test.describe('场景 1: 认证与会话', () => {
+test.describe('场景 1: 认证与会话 @basic', () => {
   test('登录、强制改密、退出、新窗口会话失效', async ({ browser }) => {
     // 独立用户(API 造数, 与被测 UI 隔离); forceChange 使首登强制改密
     const username = uniqueName('es-auth')
@@ -26,6 +26,8 @@ test.describe('场景 1: 认证与会话', () => {
 
     const context: BrowserContext = await browser.newContext()
     const page: Page = await context.newPage()
+    const runtimeErrors: string[] = []
+    page.on('pageerror', error => runtimeErrors.push(error.message))
     // 首登: 用初始密码登录 → 强制改密表单
     await page.goto('/login')
     await expect(page.getByRole('heading', { name: /登录|Sign in/i })).toBeVisible()
@@ -87,12 +89,9 @@ test.describe('场景 1: 认证与会话', () => {
     await expect(page.getByRole('button', { name: /退出登录|Logout/i })).toBeVisible()
     await context2.close()
 
-    // 控制台/网络错误检查
-    const errors: string[] = []
-    page.on('console', (msg) => {
-      if (msg.type() === 'error') errors.push(msg.text())
-    })
-    expect(errors).toEqual([])
+    // Monitor from before the first interaction, not after the tested actions.
+    // The deliberate expired-session HTTP response is tested above.
+    expect(runtimeErrors).toEqual([])
     await context.close()
   })
 })
@@ -101,7 +100,7 @@ test.describe('场景 1: 认证与会话', () => {
 // 场景 2: 创建项目并浏览全部工作台页面
 // ---------------------------------------------------------------------------
 
-test.describe('场景 2: 项目与页面导航', () => {
+test.describe('场景 2: 项目与页面导航 @basic', () => {
   test('创建项目并逐个访问工作台 7 个子页面', async ({ browser }) => {
     const username = uniqueName('es-proj')
     const password = strongPassword('Init')
@@ -123,7 +122,7 @@ test.describe('场景 2: 项目与页面导航', () => {
 
     // 2b. 打开项目 → 默认落在任务中心
     await page.getByText(projectName).click()
-    await expect(page).toHaveURL(/\/projects\/\d+$/)
+    await expect(page).toHaveURL(/\/projects\/\d+\/tasks$/)
 
     // 2c. 遍历 7 个子页面: 模型/数据/配置/校验/任务/结果/导出
     // 各页标题结构不同(tasks/results 用 Card 标题, 无 h1), 统一断言:
@@ -157,7 +156,7 @@ test.describe('场景 2: 项目与页面导航', () => {
 // 场景 3: 建模 - 真实端口连接 + 错误连接诊断
 // ---------------------------------------------------------------------------
 
-test.describe('场景 3: 建模与连线', () => {
+test.describe('场景 3: 建模与连线 @basic', () => {
   test('拖拽添加热泵/电池/电网/负荷, 合法连接, 错误连接给出诊断', async ({ browser }) => {
     const username = uniqueName('es-model')
     const password = strongPassword('Init')
@@ -177,7 +176,7 @@ test.describe('场景 3: 建模与连线', () => {
     await page.getByRole('button', { name: /确认|Confirm/i }).click()
     await expect(page.getByText(projectName)).toBeVisible()
     await page.getByText(projectName).click()
-    await expect(page).toHaveURL(/\/projects\/\d+$/)
+    await expect(page).toHaveURL(/\/projects\/\d+\/tasks$/)
 
     // 进入模型页
     await page.getByRole('navigation', { name: /工作台|Workspace/i }).getByText('系统建模').click()
