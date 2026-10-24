@@ -658,14 +658,16 @@ test.describe('全局任务选择：默认最新完成、无回退、显式提�
     await waitCompleted(page)
     await page.getByRole('navigation', { name: /工作台|Workspace/i }).getByText('结果分析').click({ timeout: 30_000 })
     const t1 = await readSelectedIds(page)
-    // 提交 T2(N=5，未完成）：全局选择跟随 T2，直达 T1 即为一次切换。
+    // T2 只需不同的冻结输入以验证直达切换。保持 K0/N1 的最小可完成求解，
+    // 用折现率 0.09 与 T1(0.08)区分，避免 N5 占用共享 Worker 并拖慢取消。
     await page.getByRole('navigation', { name: /工作台|Workspace/i }).getByText('任务中心').click({ timeout: 30_000 })
     await page.getByRole('button', { name: /提交任务|Submit task/i }).first().click({ timeout: 30_000 })
     await expect(page.getByRole('dialog')).toBeVisible({ timeout: 30_000 })
     // 对话框应水合 T1 冻结类型（optimization）；若此处为 calc，说明水合异常，
     // 直接失败而非继续一次语义不明的提交。
     await expectField(page, '#task-type', 'optimization')
-    await page.locator('#task-operation-years').fill('5')
+    await expectField(page, '#task-operation-years', '1')
+    await page.locator('#task-discount-rate').fill('0.09')
     const submitBtn2 = page.getByRole('button', { name: /提交任务|Submit task/i }).last()
     await expect(submitBtn2).toBeEnabled({ timeout: 10_000 })
     await submitBtn2.click({ timeout: 30_000 })
@@ -673,7 +675,8 @@ test.describe('全局任务选择：默认最新完成、无回退、显式提�
     expect(creates.length).toBe(2)
     // 直达前草稿即 T2 时代工作输入（失败后须原样不变）。
     const beforeWorking = await readDraftWorking(page, soloPid)
-    expect(beforeWorking?.operation_years).toBe('5')
+    expect(beforeWorking?.operation_years).toBe('1')
+    expect(beforeWorking?.discount_rate).toBe('0.09')
 
     // 只让第一份载入 500；其余放行（供显式重试成功）。
     let failedOnce = false
@@ -699,7 +702,7 @@ test.describe('全局任务选择：默认最新完成、无回退、显式提�
       expect((await errAlert.textContent())?.trim().length).toBeGreaterThan(0)
       await page.waitForTimeout(2000)
       expect(loadPosts.length).toBe(1)
-      // 草稿/选择不变：仍为直达前 T2 工作输入，未混入 T1；无成功 flash。
+      // 草稿/选择不变：仍为 T2 的 0.09 折现率，未混入 T1 的 0.08；无成功 flash。
       expect(await readDraftWorking(page, soloPid)).toEqual(beforeWorking)
       await expect(page.getByRole('status').filter({ hasText: /载入工作草稿/ })).toHaveCount(0)
       // 显式重试：恢复响应后用户刷新同一条直达链接（仅 T1 有证据包，
@@ -715,12 +718,17 @@ test.describe('全局任务选择：默认最新完成、无回退、显式提�
       // 成功后直达参数被清除并交还用户选择。
       await expect(page).toHaveURL(/\/results$/)
       expect(loadPosts.length).toBe(2)
-      // 重试成功：草稿为 T1 冻结值（数字 1）。
+      // 重试成功：草稿为 T1 冻结值（N=1、折现率 0.08）。
       await expect
         .poll(async () => (await readDraftWorking(page, soloPid))?.operation_years ?? null, {
           timeout: 30_000,
         })
         .toBe(1)
+      await expect
+        .poll(async () => (await readDraftWorking(page, soloPid))?.discount_rate ?? null, {
+          timeout: 30_000,
+        })
+        .toBe(0.08)
       expect(creates.length).toBe(2)
     } finally {
       await page.unroute('**/api/projects/*/tasks/*/load-draft')
