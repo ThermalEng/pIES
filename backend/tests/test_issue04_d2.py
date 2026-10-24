@@ -64,11 +64,13 @@ def _inputs(*, resolution="1h", start_year=2024, rate="12",
         }
     profile["profile"]["price_basis"] = basis
     if sales:
-        # Revenue from the physically constrained 7 kW heater output.
+        # The sale meter must be the receiving (in) interface at the system
+        # boundary, not the heater's technical heat_out (out) port. The
+        # 7 kW heat-load equality makes metered output physically measurable.
         doc["tariff_bindings"] = {
             "heat_sales_meter": {
-                "price": "heat_sale", "instance": "heater1",
-                "interface": "heat_out", "aggregation": "integrate_positive",
+                "price": "heat_sale", "instance": "load1",
+                "interface": "heat_in", "aggregation": "integrate_positive",
             },
         }
         doc["finance_binding"]["instances"]["heater1"] = {"type": "none"}
