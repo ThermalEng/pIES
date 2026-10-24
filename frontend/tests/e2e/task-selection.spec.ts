@@ -82,7 +82,7 @@ async function submitEvaluationViaUI(page: Page, minimal = false): Promise<void>
   await page.locator('#task-construction-period').fill(minimal ? '0' : '1')
   await page.locator('#task-operation-years').fill(minimal ? '1' : '2')
   await page.locator('#task-discount-rate').fill('0.08')
-  await page.locator('#task-construction-payments').fill(minimal ? '[]' : '[{"t": 0, "ratio": 0.6}, {"t": 1, "ratio": 0.4}]')
+  await page.locator('#task-construction-payments').fill(minimal ? '[{"t": 0, "ratio": 1}]' : '[{"t": 0, "ratio": 0.6}, {"t": 1, "ratio": 0.4}]')
   await page.locator('#task-maintenance-expenses').fill('[]')
   // 数据集版本清单唯一权威是脚手架经 API 绑定的草稿 dataset_bindings（v1）；
   // 对话框不再做数据集选择（旧勾选后端从未消费，已删除）。

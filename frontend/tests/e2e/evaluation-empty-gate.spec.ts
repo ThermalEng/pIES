@@ -76,7 +76,8 @@ test.describe('空值门禁(非画布 GUI)', () => {
     const session = await createSession(page, username, password)
 
     await page.getByText(projectName).click()
-    await expect(page).toHaveURL(/\/projects\/\d+$/)
+    await expect(page).toHaveURL(/\/projects\/\d+\/tasks$/)
+    await expect(page.getByRole('button', { name: /提交任务|Submit task/i }).first()).toBeVisible()
 
     // 数据: 生成样例并绑定(与场景 4 同流程, 使提交校验门禁通过)
     await page.getByRole('navigation', { name: /工作台|Workspace/i }).getByText('数据管理').click()
