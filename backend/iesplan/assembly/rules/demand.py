@@ -5,6 +5,7 @@ No tariff/price relation is inferred. Month/peak calculation belongs to D2.
 """
 from __future__ import annotations
 from collections.abc import Mapping
+from math import isfinite
 
 from iesplan.assembly.diags import ASM_TAR_INVALID
 from iesplan.assembly.diags import make_asm_diag
@@ -55,7 +56,30 @@ def check_demand_bindings(doc, snapshot, registry, diags) -> None:
         elif (
             spec.type != "out" or spec.carrier != "electricity"
             or dict(dims_of(spec.unit)) != {"power": 1}
-            or (spec.minimum is None and spec.minimum_property_ref is None)
-            or (spec.minimum is not None and spec.minimum < 0)
+            or not _nonnegative_instance_lower_bound(spec, device, descriptor)
         ):
             fail(billing_id, "requires_nonnegative_electric_power_out")
+
+
+def _nonnegative_instance_lower_bound(spec, instance: Mapping, descriptor) -> bool:
+    """Resolve actual instance-bound property references, not just their existence.
+
+    An otherwise valid instance property may be negative even though an interface
+    declares its minimum through a property_ref. This is a meter-eligibility
+    check; regular property type/unit validation stays in the existing phase.
+    """
+    if spec.minimum_property_ref is None:
+        return spec.minimum is not None and spec.minimum >= 0
+
+    name = spec.minimum_property_ref
+    property_spec = descriptor.properties.get(name)
+    if property_spec is None:
+        return False
+    override = (instance.get("properties") or {}).get(name)
+    value = override.get("value") if isinstance(override, Mapping) else property_spec.value
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and isfinite(value)
+        and value >= 0
+    )
