@@ -242,7 +242,7 @@ def pick(changed: list[str], full: bool = False) -> dict[str, str]:
                 # Keep fast backend contract tests scoped; no 125-file sweep.
                 startup = True
                 backend.update((SMOKE_BACKEND, "test_bootstrap.py",
-                                "test_db_immutable_triggers.py", "test_protocol_baseline.py"))
+                                "test_db_immutable_triggers.py"))
                 browser.add(SMOKE_BROWSER)
                 continue
             if path.startswith("backend/iesplan/bootstrap/"):
@@ -396,6 +396,7 @@ def self_test() -> None:
     database = pick(["backend/iesplan/db.py"])
     assert database["startup_run"] == "true"
     assert "tests/test_db_immutable_triggers.py" in database["backend_tests"].split()
+    assert "tests/test_protocol_baseline.py" not in database["backend_tests"].split()
     assert len(database["backend_tests"].split()) < 10
     assert pick(["docs/readme.md"])["startup_run"] == "false"
     assert "basic-operations.spec.ts" in pick(["frontend/src/components/ui/Button.tsx"])["browser_specs"]
