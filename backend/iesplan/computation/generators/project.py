@@ -95,6 +95,7 @@ _COMPONENT_CALIBER = {
     "period_variable_om": "period",
     "period_energy_purchase": "period",
     "period_energy_sale": "period",
+    "period_demand_charge": "period",
 }
 
 
@@ -346,6 +347,9 @@ class _ProjectBuilder:
         self._income_cash: _AffineAcc | None = None
         #: 同源财务事实留存（与目标同一表达式/循环内并行累积，供
         #: ``financial_facts`` 声明；键与结构见格式页映射表）。
+        self._demand_peaks: dict[tuple[str, str, int], _AffineAcc] = {}
+        self._demand_rows: list[dict[str, Any]] = []
+        self._demand_totals: dict[str, _AffineAcc] = {}
         self._fact_cash: dict[int, _AffineAcc] = {}
         self._fact_annual: dict[int, dict[str, _AffineAcc]] = {}
         self._fact_construction = _AffineAcc()
@@ -570,6 +574,9 @@ class _ProjectBuilder:
                 if dev_id == inst:
                     refs.add(iface_id)
         for binding in (self.doc.get("tariff_bindings") or {}).values():
+            if binding.get("instance") == inst:
+                refs.add(binding["interface"])
+        for binding in (self.doc.get("demand_bindings") or {}).values():
             if binding.get("instance") == inst:
                 refs.add(binding["interface"])
         instances = (self.doc.get("finance_binding") or {}).get("instances") or {}
@@ -2326,6 +2333,7 @@ class _ProjectBuilder:
             )
             self._build_relations(inst, statics)
         self._build_bus_rows(buses)
+        self._build_monthly_demand()
         self._build_planning_rows()
         self._vat_cash = self._build_vat()
         self._income_cash = self._build_income()
