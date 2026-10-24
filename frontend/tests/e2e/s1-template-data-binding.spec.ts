@@ -179,7 +179,8 @@ async function apiSetup(browser: any): Promise<Setup> {
 async function openProject(page: Page, setup: Setup): Promise<void> {
   await createSession(page, setup.username, setup.password)
   await page.getByText(setup.projectName).click({ timeout: 30_000 })
-  await expect(page).toHaveURL(/\/projects\/\d+$/)
+  await expect(page).toHaveURL(/\/projects\/\d+\/tasks$/)
+  await expect(page.getByRole('button', { name: /提交任务|Submit task/i }).first()).toBeVisible()
 }
 
 async function saveTemplateModelViaUi(page: Page, setup: Setup): Promise<void> {
