@@ -219,6 +219,7 @@ def pick(changed: list[str], full: bool = False) -> dict[str, str]:
     browser_all = backend_all
     frontend_all = backend_all
     startup = backend_all
+    pg_concurrency = backend_all
 
     for path in changed:
         if path == "__FULL__":
@@ -229,12 +230,22 @@ def pick(changed: list[str], full: bool = False) -> dict[str, str]:
             frontend.add("task_selection.test.mjs")
             if path == ".github/ci/select_tests.py":
                 browser.update(BASIC_SPECS)  # exercise all six real @basic cases after selector edits
-            if path.startswith((".github/ci/", ".github/workflows/docker-ci.yml")):
+            # Infrastructure validations are expensive and independent of
+            # ordinary selector/frontend-logic changes. Restrict by consumers.
+            if path in (".github/workflows/docker-ci.yml",
+                        ".github/ci/docker-compose.yml"):
                 startup = True
+                pg_concurrency = True
+            elif path in (".github/ci/start-stack.sh",
+                          ".github/ci/verify-cold-start.sh"):
+                startup = True
+            elif path == ".github/ci/verify-pg-init-concurrency.sh":
+                pg_concurrency = True
         elif path in ("docker-compose.yml", "backend/Dockerfile", "backend/pyproject.toml"):
             backend.update((SMOKE_BACKEND, "test_bootstrap.py"))
             browser.add(SMOKE_BROWSER)
             startup = True
+            pg_concurrency = True
         elif path.startswith("backend/tests/"):
             name = path.rsplit("/", 1)[-1]
             if name == "conftest.py":
@@ -244,7 +255,7 @@ def pick(changed: list[str], full: bool = False) -> dict[str, str]:
                 backend.add(SMOKE_BACKEND)
             elif path == "backend/tests/pg_init_concurrency_probe.py":
                 # Standalone two-process PostgreSQL probe, executed by cold_start.
-                startup = True
+                pg_concurrency = True
                 backend.update((SMOKE_BACKEND, "test_db_immutable_triggers.py"))
             elif path.endswith(".py"):
                 backend_all = True
@@ -253,11 +264,18 @@ def pick(changed: list[str], full: bool = False) -> dict[str, str]:
                 # PostgreSQL initialization belongs to the cold-start x3 gate.
                 # Keep fast backend contract tests scoped; no 125-file sweep.
                 startup = True
+                pg_concurrency = True
                 backend.update((SMOKE_BACKEND, "test_bootstrap.py",
                                 "test_db_immutable_triggers.py"))
                 browser.add(SMOKE_BROWSER)
                 continue
             if path.startswith("backend/iesplan/bootstrap/"):
+                startup = True
+                pg_concurrency = True
+            # API/worker boot and configuration can regress cold-start while
+            # leaving the schema initializer itself unchanged.
+            if (path.startswith("backend/iesplan/worker/")
+                    or path in ("backend/iesplan/main.py", "backend/iesplan/config.py")):
                 startup = True
             area = find_area(path, "backend/iesplan/")
             if area is None:
@@ -377,6 +395,7 @@ def pick(changed: list[str], full: bool = False) -> dict[str, str]:
         "frontend_run": str(bool(frontend)).lower(),
         "frontend_tests": " ".join(sorted(frontend)),
         "startup_run": str(startup).lower(),
+        "pg_run": str(pg_concurrency).lower(),
         "special_device": str(special).lower(),
     }
 
@@ -415,11 +434,35 @@ def self_test() -> None:
     assert len(pick(["backend/iesplan/new_module/file.py"])["backend_tests"].split()) > 80
     assert len(pick([".github/ci/select_tests.py"], full=True)["browser_specs"].split()) > 40
     assert len(pick([".github/ci/select_tests.py"], full=True)["frontend_tests"].split()) == len(inventory()[2])
+    # Exact positive/negative triggers for separate cold-start and concurrent
+    # PG checks; ordinary CI utilities and UI changes must not force either.
+    assert pick([".github/workflows/docker-ci.yml"])["startup_run"] == "true"
+    assert pick([".github/workflows/docker-ci.yml"])["pg_run"] == "true"
+    for path in (".github/ci/docker-compose.yml", "docker-compose.yml",
+                 "backend/Dockerfile", "backend/iesplan/db.py",
+                 "backend/iesplan/bootstrap/__init__.py"):
+        assert pick([path])["startup_run"] == "true", path
+        assert pick([path])["pg_run"] == "true", path
+    for path in (".github/ci/start-stack.sh", ".github/ci/verify-cold-start.sh",
+                 "backend/iesplan/worker/main.py", "backend/iesplan/main.py"):
+        assert pick([path])["startup_run"] == "true", path
+        assert pick([path])["pg_run"] == "false", path
+    assert pick([".github/ci/verify-pg-init-concurrency.sh"])["pg_run"] == "true"
+    assert pick([".github/ci/verify-pg-init-concurrency.sh"])["startup_run"] == "false"
+    assert pick(["backend/tests/pg_init_concurrency_probe.py"])["pg_run"] == "true"
+    assert pick(["backend/tests/pg_init_concurrency_probe.py"])["startup_run"] == "false"
+    for path in (".github/ci/test-frontend-logic.sh", ".github/ci/select_tests.py",
+                 "frontend/src/styles.css", "frontend/src/components/ui/Button.tsx",
+                 "docs/reviews/review.md", "README.md"):
+        assert pick([path])["startup_run"] == "false", path
+        assert pick([path])["pg_run"] == "false", path
+    assert pick([".github/ci/select_tests.py"], full=True)["startup_run"] == "true"
+    assert pick([".github/ci/select_tests.py"], full=True)["pg_run"] == "true"
     assert pick([".github/ci/start-stack.sh"])["startup_run"] == "true"
     database = pick(["backend/iesplan/db.py"])
     assert database["startup_run"] == "true"
     standalone_probe = pick(["backend/tests/pg_init_concurrency_probe.py"])
-    assert standalone_probe["startup_run"] == "true"
+    assert standalone_probe["pg_run"] == "true"
     assert len(standalone_probe["backend_tests"].split()) < 8
     fixture = pick(["frontend/tests/e2e/fixtures/session.ts"])
     assert set(BASIC_SPECS) <= set(fixture["browser_specs"].split())
