@@ -62,7 +62,7 @@ properties:
   rated_kw: {value: 50, unit: kW, valid_range: {minimum: 0, maximum: 1000}}
   step_c: {value: 1, unit: "1", valid_range: {minimum: 0, maximum: 10}}
 interfaces:
-  flow: {type: predefined, carrier: heat, unit: kW, valid_range: {minimum: 0, maximum: null}, }
+  flow: {type: predefined, carrier: heat, unit: kW, valid_range: {minimum: 0, maximum: null}}
 equations:
   variables:
     soc: {unit: "1", valid_range: {minimum: 0, maximum: 1}, initial: {property_ref: soc0}}
@@ -78,7 +78,7 @@ device: {id: acme.device.load, names: {zh-CN: 负荷, en-US: Load}}
 properties: {}
 interfaces:
   heat_in: {type: in, carrier: heat, unit: kW, valid_range: {minimum: 0, maximum: null}}
-  heat_demand: {type: predefined, carrier: heat, unit: kW, valid_range: {minimum: 0, maximum: null}, }
+  heat_demand: {type: predefined, carrier: heat, unit: kW, valid_range: {minimum: 0, maximum: null}}
 equations:
   variables: {}
   relations:
