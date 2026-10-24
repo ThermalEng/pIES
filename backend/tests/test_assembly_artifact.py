@@ -1,4 +1,4 @@
-"""ies.assembly 3.0.0 校验入口测试(roadmap 0.12 切片 F1)。
+"""ies.assembly 4.0.0 校验入口测试(roadmap 0.12 切片 F1)。
 
 覆盖:
 - 手写 YAML 与 GUI 项目导出进入同一校验入口(validate_assembly_text /
@@ -197,7 +197,7 @@ class TestUnhappyPath:
         # (预定义数据接口不参与边连接, 用真实 in 端口覆盖该规则)
         text = (
             "schema: ies.assembly\n"
-            'schema_version: "3.0.0"\n'
+            'schema_version: "4.0.0"\n'
             "assembly:\n  id: bad\n  name: bad\n"
             "project_baseline:\n  resolution: 1h\n  start_year: 2026\n  scenario_mode: single\n"
             "devices:\n"
@@ -223,7 +223,7 @@ class TestUnhappyPath:
             "  instances:\n"
             "    hp1:\n"
             "      type: none\n"
-            "tariff_bindings: {}\n"
+            "tariff_bindings: {}\n"\n            "demand_bindings: {}\n"
             "planning:\n"
             "  objective:\n"
             "    sense: minimize\n"
@@ -320,6 +320,7 @@ class TestProjectExport:
                 }
             },
             tariff_bindings=_EXPORT_TARIFF,
+            demand_bindings={},
             planning=_EXPORT_PLANNING,
             finance_snapshots=_finance_snapshots(),
         )
@@ -412,6 +413,7 @@ class TestProjectExport:
                 }
             },
             tariff_bindings=_EXPORT_TARIFF,
+            demand_bindings={},
             planning=_EXPORT_PLANNING,
             finance_snapshots=_finance_snapshots(),
         )
@@ -552,6 +554,7 @@ class TestProjectExport:
                 }
             },
             tariff_bindings=_EXPORT_TARIFF,
+            demand_bindings={},
             planning=_EXPORT_PLANNING,
             finance_snapshots=_finance_snapshots(),
         )
