@@ -10,7 +10,6 @@ from math import isfinite
 from iesplan.assembly.diags import ASM_TAR_INVALID
 from iesplan.assembly.diags import make_asm_diag
 from iesplan.core.units import dims_of
-from iesplan.assembly.rules.tariff import _definition_id
 
 
 def check_demand_bindings(doc, snapshot, registry, diags) -> None:
@@ -47,7 +46,7 @@ def check_demand_bindings(doc, snapshot, registry, diags) -> None:
         if not isinstance(device, Mapping):
             fail(billing_id, "instance_unknown")
             continue
-        descriptor = registry.get(_definition_id(device))
+        descriptor = registry.get(device['definition']['id'])
         if descriptor is None:
             continue  # earlier device validation already blocks
         spec = descriptor.interfaces.get(iface)
