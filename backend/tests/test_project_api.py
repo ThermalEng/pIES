@@ -913,3 +913,50 @@ def test_project_count_uses_aggregate_query(client: TestClient, db_session: Sess
     assert counts[u1.id] == 2
     assert counts[u2.id] == 1
     assert "GROUP BY" in queries[0].upper()
+
+
+def test_issue04_demand_bindings_draft_receipts_remain_bounded_and_idempotent(
+    client: TestClient, db_session: Session,
+) -> None:
+    """D1 review: the real PUT command must never embed the full draft in its ledger."""
+    owner = make_user(db_session, "d1_receipt_owner")
+    headers = _h(client, owner)
+    pid = _create_project(client, owner)
+    endpoint = f"/api/projects/{pid}/draft"
+    original = client.get(f"/api/projects/{pid}", headers=headers).json()
+    revision = original["draft"]["revision"]
+    sizes = []
+    for index in range(5):
+        cmd = {
+            "id": f"d1-repeat-{index}",
+            "unit": "assembly",
+            "type": "assembly.set_demand_bindings",
+            "payload": {"bindings": {}},
+        }
+        request = {"expected_revision": revision, "commands": [cmd]}
+        put = client.put(endpoint, headers=headers, json=request)
+        assert put.status_code == 200, put.text
+        reply = put.json()
+        assert reply["revision"] == revision + 1
+        assert reply["results"][0]["result"] == {"stored": True, "bindings": []}
+        view = client.get(f"/api/projects/{pid}", headers=headers).json()
+        content = view["draft"]["content"]
+        assert content["demand_bindings"] == {}
+        assert len(content["applied_commands"]) == index + 1
+        for applied in content["applied_commands"].values():
+            assert applied["result"] == {"stored": True, "bindings": []}
+        sizes.append(len(__import__("json").dumps(content, ensure_ascii=False)))
+        if index == 0:
+            # Retry stale expected_revision + same idempotency key, no new draft.
+            retry = client.put(endpoint, headers=headers, json=request)
+            assert retry.status_code == 200, retry.text
+            assert retry.json()["revision"] == reply["revision"]
+            assert retry.json()["results"][0]["status"] == "idempotent"
+            assert retry.json()["results"][0]["result"] == reply["results"][0]["result"]
+            assert client.get(f"/api/projects/{pid}", headers=headers).json()["draft"]["content"] == content
+        revision = reply["revision"]
+    # Five empty saves add five small ledger entries, not recursive draft snapshots.
+    increments = [b - a for a, b in zip(sizes, sizes[1:])]
+    assert increments
+    assert max(increments) <= 2 * min(increments)
+    assert sizes[-1] < sizes[0] + 1000
