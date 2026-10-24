@@ -195,6 +195,7 @@ def _gate_full_artifact(raw: bytes):
             }
         },
         tariff_bindings=dict(_EXPORT_TARIFF),
+        demand_bindings={},
         finance_snapshots=_finance_snapshots(),
         planning=dict(_EXPORT_PLANNING),
         dataset_contents=contents,
@@ -519,7 +520,7 @@ class TestFullHorizonTrueSolve:
 
 STORE_YAML = """
 schema: ies.device-model
-schema_version: "2.0.0"
+schema_version: "2.1.0"
 device: {id: acme.device.store, names: {zh-CN: 储能, en-US: Store}}
 properties:
   soc0: {value: 200, unit: kWh, valid_range: {minimum: 0, maximum: 1000}}
@@ -544,7 +545,7 @@ def _store_doc() -> dict:
     """
     return {
         "schema": "ies.assembly",
-        "schema_version": "3.0.0",
+        "schema_version": "4.0.0",
         "assembly": {"id": "mini-store", "name": "无序列储能"},
         "project_baseline": {
             "resolution": "1h", "start_year": START_YEAR, "scenario_mode": "single",
@@ -567,6 +568,7 @@ def _store_doc() -> dict:
             "profile_id": "cn-north-demo",
         },
         "finance_binding": {"instances": {"store1": {"type": "none"}}},
+        "demand_bindings": {},
         "tariff_bindings": {
             "meter1": {
                 "price": "power_import",
