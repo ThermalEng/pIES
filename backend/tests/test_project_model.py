@@ -1163,6 +1163,7 @@ def test_mps_tiny_maximize_model_exact_text() -> None:
         " L  cap\n"
         "COLUMNS\n"
         "    b  OBJ  -3.0  cap  5.0\n"
+        "    free  OBJ  0.0\n"
         "    x  OBJ  1.0  cap  2.0\n"
         "RHS\n"
         "    RHS1  cap  5.0\n"
