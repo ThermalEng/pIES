@@ -30,6 +30,9 @@ jobs:
       backend_tests: ${{ steps.plan.outputs.backend_tests }}
       browser_run: ${{ steps.plan.outputs.browser_run }}
       browser_specs: ${{ steps.plan.outputs.browser_specs }}
+      frontend_run: ${{ steps.plan.outputs.frontend_run }}
+      frontend_tests: ${{ steps.plan.outputs.frontend_tests }}
+      startup_run: ${{ steps.plan.outputs.startup_run }}
       special_device: ${{ steps.plan.outputs.special_device }}
     steps:
       - uses: actions/checkout@v4
@@ -72,6 +75,44 @@ jobs:
               --output /out/pies-plan.outputs \
               --full "$FULL_SUITE"
           cat "$RUNNER_TEMP/pies-plan.outputs" >> "$GITHUB_OUTPUT"
+
+  cold_start:
+    name: Cold-start x3 (Docker)
+    needs: select
+    if: needs.select.outputs.startup_run == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify three independently initialized empty databases
+        run: bash .github/ci/verify-cold-start.sh
+      - name: Prove PostgreSQL concurrent init_db in two processes
+        run: bash .github/ci/verify-pg-init-concurrency.sh
+
+      - name: Remove cold-start services and locally built images
+        if: always()
+        run: |
+          for round in 1 2 3; do
+            export COMPOSE_PROJECT_NAME="pies-ci-cold-$round"
+            export CI_TEST_DATA_DIR="$RUNNER_TEMP/pies-cold-start-$round"
+            docker compose -f docker-compose.yml -f .github/ci/docker-compose.yml down --remove-orphans --rmi local || true
+          done
+
+  frontend_logic:
+    name: Frontend Logic (Docker)
+    needs: select
+    if: needs.select.outputs.frontend_run == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run selected frontend logic tests through shared Docker entry
+        env:
+          TEST_FILES: ${{ needs.select.outputs.frontend_tests }}
+        run: |
+          read -r -a tests <<< "$TEST_FILES"
+          printf 'Selected frontend tests: %s\n' "${tests[*]}"
+          bash .github/ci/test-frontend-logic.sh "${tests[@]}"
 
   backend:
     name: Backend Pytest (Docker)
@@ -120,6 +161,8 @@ jobs:
     env:
       BROWSER_SPECS: ${{ needs.select.outputs.browser_specs }}
       SPECIAL_DEVICE: ${{ needs.select.outputs.special_device }}
+      CI_TEST_DATA_DIR: ${{ github.workspace }}/.pies-ci-browser-${{ github.run_id }}
+      COMPOSE_PROJECT_NAME: pies-ci-browser
     steps:
       - uses: actions/checkout@v4
 
@@ -128,13 +171,8 @@ jobs:
           if [[ "$SPECIAL_DEVICE" == "true" ]]; then
             export PIES_EXT_DEVICE_DIR="$PWD/frontend/tests/e2e/device-catalog-external"
             echo "PIES_EXT_DEVICE_DIR=$PIES_EXT_DEVICE_DIR" >> "$GITHUB_ENV"
-            docker compose -f docker-compose.yml -f .github/ci/docker-compose.yml \
-              -f frontend/tests/e2e/docker-compose.ext-device.yml \
-              up -d --build web backend io_worker compute_worker
-          else
-            docker compose -f docker-compose.yml -f .github/ci/docker-compose.yml \
-              up -d --build web backend io_worker compute_worker
           fi
+          bash .github/ci/start-stack.sh
 
       - name: Run selected real-browser scenarios
         run: |
@@ -175,3 +213,40 @@ jobs:
         run: |
           docker compose -f docker-compose.yml -f .github/ci/docker-compose.yml \
             down --remove-orphans --rmi local
+
+  gate:
+    name: CI Gate
+    if: always()
+    needs: [select, cold_start, frontend_logic, backend, browser]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every selected check and tolerate intentional skips
+        env:
+          SELECT: ${{ needs.select.result }}
+          COLD_REQUIRED: ${{ needs.select.outputs.startup_run }}
+          COLD_RESULT: ${{ needs.cold_start.result }}
+          LOGIC_REQUIRED: ${{ needs.select.outputs.frontend_run }}
+          LOGIC_RESULT: ${{ needs.frontend_logic.result }}
+          BACKEND_REQUIRED: ${{ needs.select.outputs.backend_run }}
+          BACKEND_RESULT: ${{ needs.backend.result }}
+          BROWSER_REQUIRED: ${{ needs.select.outputs.browser_run }}
+          BROWSER_RESULT: ${{ needs.browser.result }}
+        run: |
+          [[ "$SELECT" == "success" ]] || { echo "::error::Test selection failed: $SELECT"; exit 1; }
+          check() {
+            local label="$1" needed="$2" state="$3"
+            echo "$label required=$needed actual=$state"
+            if [[ "$needed" == "true" ]]; then
+              [[ "$state" == "success" ]] || { echo "::error::$label did not succeed ($state)"; return 1; }
+            else
+              [[ "$needed" == "false" && "$state" == "skipped" ]] || {
+                echo "::error::$label unexpectedly ran or was not skipped ($needed/$state)"; return 1;
+              }
+            fi
+          }
+          check "Cold start" "$COLD_REQUIRED" "$COLD_RESULT"
+          check "Frontend logic" "$LOGIC_REQUIRED" "$LOGIC_RESULT"
+          check "Backend Pytest" "$BACKEND_REQUIRED" "$BACKEND_RESULT"
+          check "Browser" "$BROWSER_REQUIRED" "$BROWSER_RESULT"
+          echo "All required jobs passed; intentionally omitted jobs were skipped."
+

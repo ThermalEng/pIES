@@ -38,7 +38,9 @@ services:
 
   backend:
     build: ./backend
-    command: uvicorn iesplan.main:app --host 0.0.0.0 --port 8000 --workers 2
+    # One API process on a cold database; workers start only after readyz.
+    # PostgreSQL initialization additionally takes a transaction advisory lock.
+    command: uvicorn iesplan.main:app --host 0.0.0.0 --port 8000 --workers 1
     environment:
       IESPLAN_DB_URL: postgresql+psycopg://${IESPLAN_DB_USER:-iesplan}:${IESPLAN_DB_PASSWORD:-iesplan_dev_password}@postgres:5432/${IESPLAN_DB_NAME:-iesplan}
       IESPLAN_REDIS_URL: redis://redis:6379/0
@@ -78,6 +80,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      backend:
+        condition: service_healthy
     restart: unless-stopped
 
   # B4: 计算 Worker 常驻 daemon，与 io_worker 同一后端镜像与统一部署配置
@@ -98,6 +102,8 @@ services:
       postgres:
         condition: service_healthy
       redis:
+        condition: service_healthy
+      backend:
         condition: service_healthy
     restart: unless-stopped
 

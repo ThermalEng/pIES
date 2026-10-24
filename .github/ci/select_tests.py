@@ -133,9 +133,60 @@ GENERATOR_PROJECT_CONSUMERS = (
 )
 
 
-def inventory() -> tuple[set[str], set[str]]:
+# Tests that exercise frontend logic without opening Chromium. They run with
+# one Docker entrypoint and never duplicate the business assertions in E2E.
+FRONTEND_GROUPS = {
+    "auth": ("auth_admin_contracts.test.mjs", "error-envelope.test.mjs"),
+    "admin": ("auth_admin_contracts.test.mjs",),
+    "project": ("project_draft_commands.test.mjs", "project_versions_mapper.test.mjs"),
+    "package": ("export_no_implicit_assessment.test.mjs",),
+    "config": ("config_validation_mappers.test.mjs",),
+    "datasets": ("dataset-version-mapping.test.mjs", "upload_head_scan.test.mjs"),
+    "devices": ("modeling_mappers.test.mjs",),
+    "modeling": ("modeling_mappers.test.mjs", "modeling_draft_mapper.test.mjs"),
+    "assembly": ("project_draft_commands.test.mjs",),
+    "finance": ("export_no_implicit_assessment.test.mjs",),
+    "planning": ("config_validation_mappers.test.mjs",),
+    "analysis": ("result_view_no_synthetic_diagnostics.test.mjs",),
+    "computation": ("config_validation_mappers.test.mjs",),
+    "results": ("result_view_no_synthetic_diagnostics.test.mjs",
+                "hourly_absence.test.mjs", "hourly_consume.test.mjs",
+                "hourly_pages.test.mjs", "task_selection.test.mjs"),
+    "tasks": ("tasks_mappers.test.mjs", "task_selection.test.mjs",
+              "evidence_collect.test.mjs"),
+    "worker": ("tasks_mappers.test.mjs",),
+    "storage": ("project_draft_commands.test.mjs",),
+    "core": ("error-envelope.test.mjs",),
+    "api": ("error-envelope.test.mjs", "auth_admin_contracts.test.mjs"),
+    "bootstrap": (),
+    "ui": (),
+}
+PAGE_LOGIC = {
+    "ConfigPage.tsx": ("config_validation_mappers.test.mjs",),
+    "DataPage.tsx": ("dataset-version-mapping.test.mjs", "upload_head_scan.test.mjs"),
+    "HelpPage.tsx": ("help_markdown.test.mjs",),
+    "ModelPage.tsx": ("modeling_mappers.test.mjs",),
+    "EconomicBindingsPage.tsx": ("project_draft_commands.test.mjs",),
+    "ResultsPage.tsx": ("result_view_no_synthetic_diagnostics.test.mjs",),
+    "TasksPage.tsx": ("tasks_mappers.test.mjs", "task_selection.test.mjs"),
+    "VersionsPage.tsx": ("project_versions_mapper.test.mjs",),
+    "model/canvasModel.ts": ("modeling_draft_mapper.test.mjs",),
+    "uploadHeadScan.ts": ("upload_head_scan.test.mjs",),
+}
+# All six established @basic cases currently live in these three spec files.
+# Execute these alongside (never instead of) any selected domain-specific specs.
+BASIC_SPECS = (
+    "basic-operations.spec.ts",
+    "auth-navigation-model.spec.ts",
+    "device-data-upload.spec.ts",
+)
+HELP_BROWSER = "admin-help-lang.spec.ts"
+HELP_LOGIC = "help_markdown.test.mjs"
+
+def inventory() -> tuple[set[str], set[str], set[str]]:
     return ({p.name for p in BACKEND_DIR.glob("test_*.py")},
-            {p.name for p in E2E_DIR.glob("*.spec.ts")})
+            {p.name for p in E2E_DIR.glob("*.spec.ts")},
+            {p.name for p in (ROOT / "frontend/tests").glob("*.test.mjs")})
 
 
 def expand(group: str, available: set[str]) -> set[str]:
@@ -158,13 +209,16 @@ def find_area(path: str, prefix: str) -> str | None:
 
 
 def pick(changed: list[str], full: bool = False) -> dict[str, str]:
-    backend_available, browser_available = inventory()
+    backend_available, browser_available, frontend_available = inventory()
     browser_available.discard(SPECIAL)
     backend: set[str] = set()
     browser: set[str] = set()
+    frontend: set[str] = set()
     special = False
     backend_all = full or "__FULL__" in changed
     browser_all = backend_all
+    frontend_all = backend_all
+    startup = backend_all
 
     for path in changed:
         if path == "__FULL__":
@@ -172,9 +226,15 @@ def pick(changed: list[str], full: bool = False) -> dict[str, str]:
         if path.startswith(".github/"):
             backend.add(SMOKE_BACKEND)
             browser.add(SMOKE_BROWSER)
+            frontend.add("task_selection.test.mjs")
+            if path == ".github/ci/select_tests.py":
+                browser.update(BASIC_SPECS)  # exercise all six real @basic cases after selector edits
+            if path.startswith((".github/ci/", ".github/workflows/docker-ci.yml")):
+                startup = True
         elif path in ("docker-compose.yml", "backend/Dockerfile", "backend/pyproject.toml"):
             backend.update((SMOKE_BACKEND, "test_bootstrap.py"))
             browser.add(SMOKE_BROWSER)
+            startup = True
         elif path.startswith("backend/tests/"):
             name = path.rsplit("/", 1)[-1]
             if name == "conftest.py":
@@ -182,9 +242,23 @@ def pick(changed: list[str], full: bool = False) -> dict[str, str]:
             elif name in backend_available:
                 backend.add(name)
                 backend.add(SMOKE_BACKEND)
+            elif path == "backend/tests/pg_init_concurrency_probe.py":
+                # Standalone two-process PostgreSQL probe, executed by cold_start.
+                startup = True
+                backend.update((SMOKE_BACKEND, "test_db_immutable_triggers.py"))
             elif path.endswith(".py"):
                 backend_all = True
         elif path.startswith("backend/iesplan/"):
+            if path == "backend/iesplan/db.py":
+                # PostgreSQL initialization belongs to the cold-start x3 gate.
+                # Keep fast backend contract tests scoped; no 125-file sweep.
+                startup = True
+                backend.update((SMOKE_BACKEND, "test_bootstrap.py",
+                                "test_db_immutable_triggers.py"))
+                browser.add(SMOKE_BROWSER)
+                continue
+            if path.startswith("backend/iesplan/bootstrap/"):
+                startup = True
             area = find_area(path, "backend/iesplan/")
             if area is None:
                 backend_all = True  # never quietly ignore a new subsystem
@@ -194,13 +268,26 @@ def pick(changed: list[str], full: bool = False) -> dict[str, str]:
                 backend.add(SMOKE_BACKEND)
                 browser.update(BROWSER_GROUPS.get(area, ()))
                 browser.add(SMOKE_BROWSER)
+                frontend.update(FRONTEND_GROUPS.get(area, ()))
             if path == "backend/iesplan/computation/generators/project.py":
                 backend.update(GENERATOR_PROJECT_CONSUMERS)
                 browser.update(("tax-chain.spec.ts", "result-planning-solution.spec.ts"))
         elif path in ("frontend/Dockerfile", "frontend/package.json", "frontend/package-lock.json"):
-            browser.update((SMOKE_BROWSER, "page-loading.spec.ts"))
+            browser.update((SMOKE_BROWSER, "page-loading.spec.ts", *BASIC_SPECS))
+            frontend_all = True
+        elif path == "frontend/scripts/run-logic-tests.mjs":
+            frontend_all = True
+        elif path.startswith("frontend/tests/") and not path.startswith("frontend/tests/e2e/"):
+            name = path.rsplit("/", 1)[-1]
+            if name in frontend_available:
+                frontend.add(name)
+            elif path.endswith(".mjs"):
+                frontend_all = True
         elif path.startswith("frontend/tests/e2e/"):
             name = path.rsplit("/", 1)[-1]
+            if path == "frontend/tests/e2e/fixtures/session.ts":
+                browser.update((SMOKE_BROWSER, *BASIC_SPECS, "error-envelope.spec.ts"))
+                continue
             if name in (SPECIAL, "playwright.ext-device.config.ts", "docker-compose.ext-device.yml") or "device-catalog-external/" in path:
                 special = True
                 browser.add(SMOKE_BROWSER)
@@ -214,34 +301,70 @@ def pick(changed: list[str], full: bool = False) -> dict[str, str]:
             page = path.removeprefix("frontend/src/pages/")
             selected = PAGE_SPECS.get(page)
             if selected is None:
-                browser_all = True  # unmapped page must not silently fall back to loading smoke
+                browser_all = True  # unmapped page: avoid false green
             else:
                 browser.update((SMOKE_BROWSER, *selected))
+                frontend.update(PAGE_LOGIC.get(page, ()))
+                if page.endswith(".css") or page in ("workbench.tsx", "WorkbenchPage.tsx"):
+                    browser.update(BASIC_SPECS)
         elif path.startswith("frontend/src/"):
             area = find_area(path, "frontend/src/")
-            if area is None and path.startswith("frontend/src/features/"):
-                browser_all = True  # new feature without test mapping: do not silently miss coverage
+            if path.startswith(("frontend/src/shared/http", "frontend/src/api/client", "frontend/src/features/auth/")):
+                browser.update((SMOKE_BROWSER, *BASIC_SPECS, "auth-navigation-model.spec.ts",
+                                "config-revision.spec.ts", "error-envelope.spec.ts"))
+                frontend.update(("auth_admin_contracts.test.mjs", "error-envelope.test.mjs",
+                                 "project_draft_commands.test.mjs"))
+            elif path.startswith(("frontend/src/lib/helpMarkdown", "frontend/src/features/admin-help/")):
+                browser.update((SMOKE_BROWSER, HELP_BROWSER, *BASIC_SPECS))
+                frontend.add(HELP_LOGIC)
+            elif path == "frontend/src/api/hourlyPages.ts":
+                browser.update((SMOKE_BROWSER, "hourly-r3.spec.ts", "hourly-steps.spec.ts"))
+                frontend.update(("hourly_pages.test.mjs", "hourly_absence.test.mjs",
+                                 "hourly_consume.test.mjs"))
+            elif path == "frontend/src/application/exportTaskReport.ts":
+                browser.update((SMOKE_BROWSER, "export-assessment-r7.spec.ts",
+                                "excel-export-lang.spec.ts"))
+                frontend.add("export_no_implicit_assessment.test.mjs")
+            elif path.startswith(("frontend/src/components/", "frontend/src/shared/", "frontend/src/application/",
+                                  "frontend/src/i18n/", "frontend/src/App.tsx", "frontend/src/styles.css")):
+                browser.update((SMOKE_BROWSER, *BASIC_SPECS))
+                if path.startswith("frontend/src/i18n/"):
+                    browser.add(HELP_BROWSER)
+                    frontend.add(HELP_LOGIC)
+            elif area is None and path.startswith("frontend/src/features/"):
+                browser_all = True
+                frontend_all = True
             else:
                 browser.update((SMOKE_BROWSER, *BROWSER_GROUPS[area or "ui"]))
+                frontend.update(FRONTEND_GROUPS.get(area or "ui", ()))
+        elif path == "frontend/scripts/generate-help.mjs":
+            browser.update((SMOKE_BROWSER, HELP_BROWSER))
+            frontend.add(HELP_LOGIC)
         elif path.startswith("frontend/"):
-            # Non-app files: docs / generated metadata do not trigger a full browser suite.
             if path.endswith((".ts", ".tsx", ".js", ".mjs", ".css")):
-                browser.update((SMOKE_BROWSER, "page-loading.spec.ts"))
+                browser.update((SMOKE_BROWSER, *BASIC_SPECS))
         elif path.startswith("manual/user-guide/"):
-            browser.update((SMOKE_BROWSER, "admin-help-lang.spec.ts"))
+            browser.update((SMOKE_BROWSER, HELP_BROWSER))
+            frontend.add(HELP_LOGIC)
+        elif path.endswith("/formats/finance-yaml.md") and path.startswith("manual/"):
+            backend.update((SMOKE_BACKEND, "test_finance_taxrules.py"))
         elif path.startswith(("manual/", "docs/")) or path in ("README.md", "LICENSE", "AGENTS.md", "CLAUDE.md", ".gitignore", ".dockerignore"):
             pass  # documentation-only changes do not require an app build
         else:
             # New executable top-level area: require a full run rather than falsely green CI.
             backend_all = True
             browser_all = True
+            frontend_all = True
 
     if backend_all:
         backend = set(backend_available)
     if browser_all:
         browser = set(browser_available)
+    if frontend_all:
+        frontend = set(frontend_available)
     backend &= backend_available
     browser &= browser_available
+    frontend &= frontend_available
     if backend and SMOKE_BACKEND not in backend:
         backend.add(SMOKE_BACKEND)
     if browser and SMOKE_BROWSER not in browser:
@@ -251,6 +374,9 @@ def pick(changed: list[str], full: bool = False) -> dict[str, str]:
         "backend_tests": " ".join("tests/" + name for name in sorted(backend)),
         "browser_run": str(bool(browser) or special).lower(),
         "browser_specs": " ".join(sorted(browser)),
+        "frontend_run": str(bool(frontend)).lower(),
+        "frontend_tests": " ".join(sorted(frontend)),
+        "startup_run": str(startup).lower(),
         "special_device": str(special).lower(),
     }
 
@@ -288,6 +414,55 @@ def self_test() -> None:
     assert len(pick(["frontend/src/features/new-subsystem/Feature.tsx"])["browser_specs"].split()) > 40
     assert len(pick(["backend/iesplan/new_module/file.py"])["backend_tests"].split()) > 80
     assert len(pick([".github/ci/select_tests.py"], full=True)["browser_specs"].split()) > 40
+    assert len(pick([".github/ci/select_tests.py"], full=True)["frontend_tests"].split()) == len(inventory()[2])
+    assert pick([".github/ci/start-stack.sh"])["startup_run"] == "true"
+    database = pick(["backend/iesplan/db.py"])
+    assert database["startup_run"] == "true"
+    standalone_probe = pick(["backend/tests/pg_init_concurrency_probe.py"])
+    assert standalone_probe["startup_run"] == "true"
+    assert len(standalone_probe["backend_tests"].split()) < 8
+    fixture = pick(["frontend/tests/e2e/fixtures/session.ts"])
+    assert set(BASIC_SPECS) <= set(fixture["browser_specs"].split())
+    assert len(fixture["browser_specs"].split()) < 8
+    assert "tests/test_db_immutable_triggers.py" in database["backend_tests"].split()
+    assert "tests/test_protocol_baseline.py" not in database["backend_tests"].split()
+    assert len(database["backend_tests"].split()) < 10
+    assert pick(["docs/readme.md"])["startup_run"] == "false"
+    basic_specs = set(pick(["frontend/src/components/ui/Button.tsx"])["browser_specs"].split())
+    assert set(BASIC_SPECS) <= basic_specs
+    assert len(basic_specs) < 8
+    assert set(BASIC_SPECS) <= set(pick([".github/ci/select_tests.py"])["browser_specs"].split())
+    assert {"financial-evaluation.spec.ts", *BASIC_SPECS} <= set(
+        pick(["frontend/src/components/ui/Button.tsx",
+              "frontend/src/pages/FinancePage.tsx"])["browser_specs"].split())
+    assert "basic-operations.spec.ts" in pick(["frontend/src/components/ui/Button.tsx"])["browser_specs"]
+    assert "basic-operations.spec.ts" in pick(["frontend/src/components/FormField.tsx"])["browser_specs"]
+    assert "auth-navigation-model.spec.ts" in pick(["frontend/src/shared/http.ts"])["browser_specs"]
+    assert "config-revision.spec.ts" in pick(["frontend/src/shared/http.ts"])["browser_specs"]
+    assert "auth_admin_contracts.test.mjs" in pick(["frontend/src/shared/http.ts"])["frontend_tests"]
+    hourly = pick(["frontend/src/api/hourlyPages.ts"])
+    assert {"hourly_pages.test.mjs", "hourly_absence.test.mjs",
+            "hourly_consume.test.mjs"} <= set(hourly["frontend_tests"].split())
+    assert "hourly-r3.spec.ts" in hourly["browser_specs"]
+    assert len(hourly["browser_specs"].split()) < 8
+    report = pick(["frontend/src/application/exportTaskReport.ts"])
+    assert "export_no_implicit_assessment.test.mjs" in report["frontend_tests"]
+    assert "export-assessment-r7.spec.ts" in report["browser_specs"]
+    assert len(report["browser_specs"].split()) < 8
+    assert "help_markdown.test.mjs" in pick(["frontend/src/lib/helpMarkdown.ts"])["frontend_tests"]
+    assert "admin-help-lang.spec.ts" in pick(["frontend/src/lib/helpMarkdown.ts"])["browser_specs"]
+    assert "help_markdown.test.mjs" in pick(["manual/user-guide/zh-CN/quickstart.md"])["frontend_tests"]
+    assert "modeling_mappers.test.mjs" in pick(["frontend/src/features/modeling/form.ts"])["frontend_tests"]
+    assert "dataset-version-mapping.test.mjs" in pick(["frontend/src/pages/DataPage.tsx"])["frontend_tests"]
+    assert pick(["docs/development/note.md"])["frontend_run"] == "false"
+    assert pick(["frontend/src/pages/model/model.css"])["browser_run"] == "true"
+    assert len(pick(["frontend/src/pages/model/model.css"])["browser_specs"].split()) < 8
+    assert len(pick(["frontend/src/styles.css"])["browser_specs"].split()) < 8
+    assert len(pick(["frontend/src/pages/model/model.css"])["browser_specs"].split()) < 8
+    assert pick(["docs/reviews/local-style.md"])["browser_run"] == "false"
+    assert "basic-operations.spec.ts" in pick(["frontend/src/styles.css"])["browser_specs"]
+    assert "frontend_run" in pick(["frontend/tests/auth_admin_contracts.test.mjs"])
+    assert pick(["frontend/tests/auth_admin_contracts.test.mjs"])["frontend_tests"] == "auth_admin_contracts.test.mjs"
     print("Selector self-test passed")
 
 
