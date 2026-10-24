@@ -2357,10 +2357,14 @@ class _ProjectBuilder:
         ``series_id`` 为 ``{instance}.{variable}``，Bundle 内稳定唯一，
         消费者不得拆解。只做初始化与变量声明展开，不执行装配建模。
         """
-        buses = self._compute_buses()
-        bus_flows = self._bus_flow_index(buses)
-        for inst in sorted(self.devices):
-            self._declare_instance_statics(inst, bus_flows.get(inst, frozenset()))
+        # 单次包构造在 build() 后调用，此时步列已声明；不得再次
+        # _declare_instance_statics，否则步列会被重复追加，破坏时序长度。
+        # 兼容此公开辅助函数的独立调用（未执行 build 的新构造器）。
+        if not self._step_columns:
+            buses = self._compute_buses()
+            bus_flows = self._bus_flow_index(buses)
+            for inst in sorted(self.devices):
+                self._declare_instance_statics(inst, bus_flows.get(inst, frozenset()))
         out: list[Mapping[str, object]] = []
         for inst, local in sorted(self._step_columns):
             out.append({
