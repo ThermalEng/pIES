@@ -29,11 +29,7 @@ from iesplan.assembly.contracts import ValidatedAssemblyArtifact
 from iesplan.computation.errors import ComputationUnavailableError
 from iesplan.computation.generators.descriptor import GeneratorDescriptor
 from iesplan.computation.generators.mps import write_mps
-from iesplan.computation.generators.project import (
-    build_project_model_with_facts,
-    finance_component_declarations,
-    step_series_declarations,
-)
+from iesplan.computation.generators.project import build_project_model_package
 from iesplan.computation.protocols import (
     CalculationConfig,
     SolverBundle,
@@ -142,12 +138,12 @@ class HighsMilpProvider:
         """
         self._check_capabilities(artifact, config, finance)
         seed = config.seed if config.seed is not None else FIXED_SEED
-        model, unit_map, objective_unit, facts = build_project_model_with_facts(
-            artifact, models, materialized, finance, config, evaluation
+        model, unit_map, objective_unit, facts, components, series = (
+            build_project_model_package(
+                artifact, models, materialized, finance, config, evaluation
+            )
         )
         mps_text, offset = write_mps(model)
-        components = finance_component_declarations(artifact, models, materialized, finance, evaluation)
-        series = step_series_declarations(artifact, models, materialized, finance, evaluation)
         metadata = self._metadata(
             artifact,
             unit_map,
