@@ -156,9 +156,9 @@ def _assembly():
     return doc, effective
 
 
-def _check(doc, eff):
+def _check(doc, eff, **kwargs):
     return validate_assembly_doc(
-        doc, package_dir=DIR, finance_snapshots={"fin:campus": eff},
+        doc, package_dir=DIR, finance_snapshots={"fin:campus": eff}, **kwargs,
     )
 
 
@@ -210,3 +210,74 @@ def test_zero_demand_keeps_empty_contract_without_generator_capability():
     result = _check(doc, eff)
     assert result.artifact is not None, [d.to_dict() for d in result.diagnostics]
     _check_demand_capabilities(result.artifact, "ies.generator.highs_milp@3.4.0", ("affine",))
+
+
+@pytest.mark.parametrize(
+    "instance_floor,should_accept",
+    [(-10, False), (0, True), (7, True)],
+)
+def test_demand_property_ref_uses_instance_minimum(instance_floor, should_accept):
+    """Use the real 2.1 device parser + full assembly validation, not a fake spec.
+
+    Declared minimum property accepts negative numbers (-100..100); only the
+    demand meter requires the *actual instance* floor to be nonnegative.
+    """
+    from iesplan.devices.parser2 import parse_device_model_v2
+
+    raw = yaml_load(
+        (DIR.parent.parent / "devices" / "catalog" / "grid_connection.yaml").read_text("utf-8")
+    )
+    raw["properties"]["import_floor_kw"] = {
+        "value": 12,
+        "unit": "kW",
+        "valid_range": {"minimum": -100, "maximum": 100},
+    }
+    raw["interfaces"]["electricity_import"]["valid_range"]["minimum"] = {
+        "property_ref": "import_floor_kw"
+    }
+    parsed = parse_device_model_v2(raw, file="synthetic-grid.yaml")
+    assert parsed.ok, [d.to_dict() for d in parsed.diagnostics]
+
+    doc, effective = _assembly()
+    doc["devices"]["grid"]["properties"]["import_floor_kw"] = {
+        "value": instance_floor, "unit": "kW",
+    }
+    result = _check(doc, effective, device_documents={
+        "ies.device.grid_connection": parsed.document,
+    })
+    if should_accept:
+        assert result.artifact is not None, [d.to_dict() for d in result.diagnostics]
+    else:
+        assert result.artifact is None
+        assert any(
+            d.params.get("reason") == "requires_nonnegative_electric_power_out"
+            for d in result.diagnostics
+        )
+
+
+def test_demand_property_ref_default_is_used_without_override():
+    """The unoverridden descriptor property is still an actual instance bound."""
+    from iesplan.devices.parser2 import parse_device_model_v2
+
+    raw = yaml_load(
+        (DIR.parent.parent / "devices" / "catalog" / "grid_connection.yaml").read_text("utf-8")
+    )
+    raw["properties"]["import_floor_kw"] = {
+        "value": -1, "unit": "kW",
+        "valid_range": {"minimum": -100, "maximum": 100},
+    }
+    raw["interfaces"]["electricity_import"]["valid_range"]["minimum"] = {
+        "property_ref": "import_floor_kw"
+    }
+    parsed = parse_device_model_v2(raw, file="synthetic-grid.yaml")
+    assert parsed.ok, [d.to_dict() for d in parsed.diagnostics]
+    doc, effective = _assembly()
+    assert "import_floor_kw" not in doc["devices"]["grid"]["properties"]
+    result = _check(doc, effective, device_documents={
+        "ies.device.grid_connection": parsed.document,
+    })
+    assert result.artifact is None
+    assert any(
+        d.params.get("reason") == "requires_nonnegative_electric_power_out"
+        for d in result.diagnostics
+    )
