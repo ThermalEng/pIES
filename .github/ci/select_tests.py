@@ -237,7 +237,15 @@ def pick(changed: list[str], full: bool = False) -> dict[str, str]:
             elif path.endswith(".py"):
                 backend_all = True
         elif path.startswith("backend/iesplan/"):
-            if path == "backend/iesplan/db.py" or path.startswith("backend/iesplan/bootstrap/"):
+            if path == "backend/iesplan/db.py":
+                # PostgreSQL initialization belongs to the cold-start x3 gate.
+                # Keep fast backend contract tests scoped; no 125-file sweep.
+                startup = True
+                backend.update((SMOKE_BACKEND, "test_bootstrap.py",
+                                "test_db_immutable_triggers.py", "test_protocol_baseline.py"))
+                browser.add(SMOKE_BROWSER)
+                continue
+            if path.startswith("backend/iesplan/bootstrap/"):
                 startup = True
             area = find_area(path, "backend/iesplan/")
             if area is None:
@@ -385,6 +393,10 @@ def self_test() -> None:
     assert len(pick([".github/ci/select_tests.py"], full=True)["browser_specs"].split()) > 40
     assert len(pick([".github/ci/select_tests.py"], full=True)["frontend_tests"].split()) == len(inventory()[2])
     assert pick([".github/ci/start-stack.sh"])["startup_run"] == "true"
+    database = pick(["backend/iesplan/db.py"])
+    assert database["startup_run"] == "true"
+    assert "tests/test_db_immutable_triggers.py" in database["backend_tests"].split()
+    assert len(database["backend_tests"].split()) < 10
     assert pick(["docs/readme.md"])["startup_run"] == "false"
     assert "basic-operations.spec.ts" in pick(["frontend/src/components/ui/Button.tsx"])["browser_specs"]
     assert "basic-operations.spec.ts" in pick(["frontend/src/components/FormField.tsx"])["browser_specs"]
