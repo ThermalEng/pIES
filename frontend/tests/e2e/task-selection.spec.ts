@@ -121,6 +121,44 @@ async function readSelectedIds(page: Page): Promise<{ taskId: number; packageId:
 test.describe('全局任务选择：默认最新完成、无回退、显式提交才建任务', () => {
   test.setTimeout(900_000)
 
+  // Real solver jobs must not leak into later tests, including when a test fails.
+  let cleanup: { username: string; password: string; projectId: number } | null = null
+  const terminal = new Set(['completed', 'failed', 'cancelled', 'timed_out'])
+  test.beforeEach(() => { cleanup = null })
+  test.afterEach(async ({ browser }) => {
+    const owner = cleanup
+    cleanup = null
+    if (!owner) return
+    const api = await browser.newContext({ baseURL: APP })
+    try {
+      // The GUI session superseded the setup token. Re-authenticate only once
+      // assertions have finished, to preserve the browser session under test.
+      const token = await loginToken(api.request, owner.username, owner.password)
+      const path = `/api/projects/${owner.projectId}/tasks`
+      const list = async (): Promise<{ items: Array<{ id: number; status: string }> }> =>
+        requestJson(api.request, 'GET', `${path}?limit=100`, undefined, token)
+      for (const row of (await list()).items) {
+        if (terminal.has(row.status)) continue
+        try {
+          await requestJson(api.request, 'POST', `${path}/${row.id}/cancel`, {
+            reason: 'e2e_end_of_scenario_cleanup',
+          }, token)
+        } catch (error) {
+          // Racing with a completion is fine only when the task is terminal.
+          const detail = await requestJson(
+            api.request, 'GET', `${path}/${row.id}`, undefined, token,
+          ) as { task: { status: string } }
+          if (!terminal.has(detail.task.status)) throw error
+        }
+      }
+      await expect.poll(async () =>
+        (await list()).items.filter(row => !terminal.has(row.status)).map(row => row.id),
+      { timeout: 60_000, intervals: [500, 1000, 2000] }).toEqual([])
+    } finally {
+      await api.close()
+    }
+  })
+
   test('零建任务；冻结视图与切换水合；未完成无回退且导出禁用；切换绑定；项目隔离；默认最新完成', async ({
     browser,
   }) => {
@@ -132,6 +170,7 @@ test.describe('全局任务选择：默认最新完成、无回退、显式提�
     await createEngineer(soloCtx.request, soloUser, soloPass)
     const soloToken = await loginToken(soloCtx.request, soloUser, soloPass)
     const soloPid = await scaffoldProject(requestJson, soloCtx.request, soloToken, projectName, tag)
+    cleanup = { username: soloUser, password: soloPass, projectId: soloPid }
     const pre = await requestJson(soloCtx.request, 'POST', `/api/projects/${soloPid}/validation/run`, {}, soloToken)
     expect((pre.report?.diagnostics ?? []).filter((d: { blocking: boolean }) => d.blocking)).toEqual([])
     // 项目切换隔离用的空项目 B（无任务；同一用户，脚手架走公开 API）。
@@ -310,7 +349,8 @@ test.describe('全局任务选择：默认最新完成、无回退、显式提�
     const soloCtx = await browser.newContext({ baseURL: APP })
     await createEngineer(soloCtx.request, soloUser, soloPass)
     const soloToken = await loginToken(soloCtx.request, soloUser, soloPass)
-    await scaffoldProject(requestJson, soloCtx.request, soloToken, projectName, tag)
+    const soloPid = await scaffoldProject(requestJson, soloCtx.request, soloToken, projectName, tag)
+    cleanup = { username: soloUser, password: soloPass, projectId: soloPid }
 
     const context: BrowserContext = await browser.newContext()
     const page: Page = await context.newPage()
@@ -362,6 +402,7 @@ test.describe('全局任务选择：默认最新完成、无回退、显式提�
     await createEngineer(soloCtx.request, soloUser, soloPass)
     const soloToken = await loginToken(soloCtx.request, soloUser, soloPass)
     const soloPid = await scaffoldProject(requestJson, soloCtx.request, soloToken, projectName, tag)
+    cleanup = { username: soloUser, password: soloPass, projectId: soloPid }
 
     const context: BrowserContext = await browser.newContext()
     const page: Page = await context.newPage()
@@ -477,6 +518,7 @@ test.describe('全局任务选择：默认最新完成、无回退、显式提�
     await createEngineer(soloCtx.request, soloUser, soloPass)
     const soloToken = await loginToken(soloCtx.request, soloUser, soloPass)
     const soloPid = await scaffoldProject(requestJson, soloCtx.request, soloToken, projectName, tag)
+    cleanup = { username: soloUser, password: soloPass, projectId: soloPid }
 
     const context: BrowserContext = await browser.newContext()
     const page: Page = await context.newPage()
@@ -598,6 +640,7 @@ test.describe('全局任务选择：默认最新完成、无回退、显式提�
     await createEngineer(soloCtx.request, soloUser, soloPass)
     const soloToken = await loginToken(soloCtx.request, soloUser, soloPass)
     const soloPid = await scaffoldProject(requestJson, soloCtx.request, soloToken, projectName, tag)
+    cleanup = { username: soloUser, password: soloPass, projectId: soloPid }
 
     const context: BrowserContext = await browser.newContext()
     const page: Page = await context.newPage()
