@@ -8,6 +8,11 @@ import sys
 import time
 from pathlib import Path
 
+# Executed as /app/tests/*.py inside the existing backend Docker image. Put
+# /app first so the probe exercises the working tree and its ./deploy config,
+# rather than the pip-installed site-packages copy of iesplan.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 from sqlalchemy import text
 
 from iesplan.bootstrap import collect_immutable_tables, collect_trigger_statements
