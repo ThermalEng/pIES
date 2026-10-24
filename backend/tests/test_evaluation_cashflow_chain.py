@@ -157,6 +157,7 @@ def _prepare_t2_project(
     profile: dict | None = None,
     with_existing_hp: bool = False,
     demand_bindings: dict | None = None,
+    with_hp: bool = True,
 ) -> int:
     """T2 执行项目: grid1 + data_full 负荷 + 必建热泵 + 购电计费绑定。
 
@@ -246,6 +247,15 @@ def _prepare_t2_project(
             },
         },
     ]
+    if not with_hp:
+        # The exact-demand full-worker acceptance case measures a supplied
+        # non-optional grid load. Removing the unrelated, freely dispatchable
+        # (and costed) idle heat pump keeps real per-step metered power and
+        # monthly MILP peaks, without an artificial 2-year dispatch problem.
+        commands = [
+            command for command in commands
+            if command["id"] not in ("fixture-declare-hp1", "fixture-connect-hp1")
+        ]
     if with_existing_hp:
         commands += [
             {
@@ -284,8 +294,9 @@ def _prepare_t2_project(
     instances = {
         "grid1": {"type": "none"},
         "load1": {"type": "none"},
-        "hp1": dict(hp_binding),
     }
+    if with_hp:
+        instances["hp1"] = dict(hp_binding)
     if with_existing_hp:
         instances["hp_old"] = dict(hp_binding)
     view = client.get(f"/api/projects/{pid}", headers=_h(client, user)).json()
@@ -359,7 +370,21 @@ def _solve(client, db, engine, plane, pid, user, evaluation, key, expected_revis
     def factory() -> Session:
         return sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)()
 
-    assert runner.run_task(factory, claim, worker_id="t2-e2e", compute=plane) == "completed"
+    run_status = runner.run_task(factory, claim, worker_id="t2-e2e", compute=plane)
+    if run_status != "completed":
+        # Use persisted public task diagnostics, including the solver receipt
+        # error recorded by Worker; never infer timeout from wall time alone.
+        from iesplan.tasks.persistence import list_diagnostics  # noqa: E402
+
+        with factory() as failure_db:
+            diagnostics = [
+                {"code": d.code, "level": d.level, "message": d.message}
+                for d in list_diagnostics(failure_db, task_id)
+            ]
+        pytest.fail(
+            f"Worker task {task_id} returned {run_status!r}; "
+            f"persisted diagnostics={diagnostics!r}"
+        )
     task_row = db.execute(select(Task).where(Task.id == task_id)).scalar_one()
     assert task_row.status == "completed"
     assert task_row.business_outcome == "normal_completion"
@@ -674,7 +699,16 @@ class TestT2CashflowChain:
         pid = _prepare_t2_project(
             client, db, user,
             variable_month_csv,
-            2023, HP_BINDING, BASE_PLANNING, profile,
+            2023, HP_BINDING,
+            {
+                "objective": {
+                    "sense": "minimize",
+                    "expression": "grid_import__period_energy_purchase",
+                },
+                "variables": {}, "constraints": {},
+            },
+            profile,
+            with_hp=False,
             demand_bindings={
                 "peak_meter": {
                     "charge": "monthly",
@@ -707,8 +741,15 @@ class TestT2CashflowChain:
             assert float(row["peak_power"]) == pytest.approx(peak, abs=1e-5)
             assert float(row["charge"]) == pytest.approx(peak * 20, abs=1e-5)
         annual_bills = (sum(expected_peaks[:12]) * 20, sum(expected_peaks[12:]) * 20)
+        expected_energy = (
+            -(48.0 * 8760 + sum(3.0 * month for month in range(1, 13))) * PRICE,
+            -(96.0 * 8784 + sum(3.0 * month for month in range(1, 13))) * PRICE,
+        )
         assert annual_bills[0] != annual_bills[1]
-        for row, bill in zip(fin["annual_operation"], annual_bills, strict=True):
+        for row, bill, energy in zip(
+            fin["annual_operation"], annual_bills, expected_energy, strict=True
+        ):
+            assert float(row["energy_net"]) == pytest.approx(energy, abs=1e-4)
             assert float(row["demand_charge"]) == pytest.approx(bill, abs=1e-5)
             assert float(row["net"]) == pytest.approx(
                 float(row["energy_net"]) - float(row["variable_om"])
