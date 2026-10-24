@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 from fnmatch import fnmatch
 from pathlib import Path
 
@@ -387,11 +388,18 @@ def pick(changed: list[str], full: bool = False) -> dict[str, str]:
         backend.add(SMOKE_BACKEND)
     if browser and SMOKE_BROWSER not in browser:
         browser.add(SMOKE_BROWSER)
+    # Divide the selected browser specs over at most two isolated runners.
+    # A lone spec needs only one app build; multi-file suites use Playwright's
+    # file-level sharding (fullyParallel=false) instead of shared-state workers.
+    browser_total = 2 if len(browser) >= 2 else 1
+    browser_lanes = json.dumps(list(range(1, browser_total + 1)), separators=(",", ":"))
     return {
         "backend_run": str(bool(backend)).lower(),
         "backend_tests": " ".join("tests/" + name for name in sorted(backend)),
         "browser_run": str(bool(browser) or special).lower(),
         "browser_specs": " ".join(sorted(browser)),
+        "browser_lanes": browser_lanes,
+        "browser_total": str(browser_total),
         "frontend_run": str(bool(frontend)).lower(),
         "frontend_tests": " ".join(sorted(frontend)),
         "startup_run": str(startup).lower(),
@@ -401,6 +409,22 @@ def pick(changed: list[str], full: bool = False) -> dict[str, str]:
 
 
 def self_test() -> None:
+    # Exact shard cardinality: one selected spec -> one runner; two or
+    # more specs -> two runners. The aggregation gate cannot accept only one
+    # successful lane when two are selected.
+    one = pick(["frontend/tests/e2e/infra.spec.ts"])
+    assert one["browser_specs"] == "infra.spec.ts"
+    assert one["browser_lanes"] == "[1]" and one["browser_total"] == "1"
+    multi = pick(["frontend/src/components/ui/Button.tsx"])
+    assert len(multi["browser_specs"].split()) >= 2
+    assert multi["browser_lanes"] == "[1,2]" and multi["browser_total"] == "2"
+    all_specs = pick([".github/ci/select_tests.py"], full=True)
+    assert len(all_specs["browser_specs"].split()) > 40
+    assert all_specs["browser_lanes"] == "[1,2]" and all_specs["browser_total"] == "2"
+    docs = pick(["docs/reviews/style.md"])
+    assert docs["browser_run"] == "false" and docs["browser_lanes"] == "[1]"
+    ext = pick(["frontend/tests/e2e/device-yaml-extension.spec.ts"])
+    assert ext["special_device"] == "true" and ext["browser_lanes"] == "[1]"
     assert pick([".github/workflows/docker-ci.yml"])["backend_tests"] == "tests/test_smoke.py"
     assert pick([".github/workflows/docker-ci.yml"])["browser_specs"] == "infra.spec.ts"
     assert "test_finance.py" in pick(["backend/iesplan/finance/config.py"])["backend_tests"]
