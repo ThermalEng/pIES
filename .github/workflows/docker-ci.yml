@@ -33,6 +33,7 @@ jobs:
       frontend_run: ${{ steps.plan.outputs.frontend_run }}
       frontend_tests: ${{ steps.plan.outputs.frontend_tests }}
       startup_run: ${{ steps.plan.outputs.startup_run }}
+      pg_run: ${{ steps.plan.outputs.pg_run }}
       special_device: ${{ steps.plan.outputs.special_device }}
     steps:
       - uses: actions/checkout@v4
@@ -76,27 +77,45 @@ jobs:
               --full "$FULL_SUITE"
           cat "$RUNNER_TEMP/pies-plan.outputs" >> "$GITHUB_OUTPUT"
 
+  # Matrix jobs run on independent ephemeral runners: no database/data volume
+  # is shared, and no round can succeed using a previous round's initialized DB.
   cold_start:
-    name: Cold-start x3 (Docker)
+    name: Cold-start ${{ matrix.round }}/3 (Docker)
     needs: select
     if: needs.select.outputs.startup_run == 'true'
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix:
+        round: [1, 2, 3]
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-      - name: Verify three independently initialized empty databases
-        run: bash .github/ci/verify-cold-start.sh
-      - name: Prove PostgreSQL concurrent init_db in two processes
-        run: bash .github/ci/verify-pg-init-concurrency.sh
-
-      - name: Remove cold-start services and locally built images
+      - name: Verify one independent empty database
+        env:
+          COLD_START_ROUND: ${{ matrix.round }}
+        run: bash .github/ci/verify-cold-start.sh "$COLD_START_ROUND"
+      - name: Remove isolated cold-start resources
         if: always()
+        env:
+          COLD_START_ROUND: ${{ matrix.round }}
         run: |
-          for round in 1 2 3; do
-            export COMPOSE_PROJECT_NAME="pies-ci-cold-$round"
-            export CI_TEST_DATA_DIR="$RUNNER_TEMP/pies-cold-start-$round"
-            docker compose -f docker-compose.yml -f .github/ci/docker-compose.yml down --remove-orphans --rmi local || true
-          done
+          export COMPOSE_PROJECT_NAME="pies-ci-cold-$COLD_START_ROUND"
+          export CI_TEST_DATA_DIR="$RUNNER_TEMP/pies-cold-start-$COLD_START_ROUND"
+          docker compose -f docker-compose.yml -f .github/ci/docker-compose.yml \
+            down --remove-orphans --rmi local || true
+
+  pg_concurrency:
+    name: PostgreSQL concurrent init (Docker)
+    needs: select
+    if: needs.select.outputs.pg_run == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prove synchronized two-process init_db and installed triggers
+        run: bash .github/ci/verify-pg-init-concurrency.sh
 
   frontend_logic:
     name: Frontend Logic (Docker)
@@ -217,7 +236,7 @@ jobs:
   gate:
     name: CI Gate
     if: always()
-    needs: [select, cold_start, frontend_logic, backend, browser]
+    needs: [select, cold_start, pg_concurrency, frontend_logic, backend, browser]
     runs-on: ubuntu-latest
     steps:
       - name: Require every selected check and tolerate intentional skips
@@ -225,6 +244,8 @@ jobs:
           SELECT: ${{ needs.select.result }}
           COLD_REQUIRED: ${{ needs.select.outputs.startup_run }}
           COLD_RESULT: ${{ needs.cold_start.result }}
+          PG_REQUIRED: ${{ needs.select.outputs.pg_run }}
+          PG_RESULT: ${{ needs.pg_concurrency.result }}
           LOGIC_REQUIRED: ${{ needs.select.outputs.frontend_run }}
           LOGIC_RESULT: ${{ needs.frontend_logic.result }}
           BACKEND_REQUIRED: ${{ needs.select.outputs.backend_run }}
@@ -244,7 +265,10 @@ jobs:
               }
             fi
           }
-          check "Cold start" "$COLD_REQUIRED" "$COLD_RESULT"
+          # A matrix job has one aggregate needs.*.result: it is success
+          # only when all three independent rounds succeed.
+          check "Cold-start matrix (all 3)" "$COLD_REQUIRED" "$COLD_RESULT"
+          check "PostgreSQL concurrent init" "$PG_REQUIRED" "$PG_RESULT"
           check "Frontend logic" "$LOGIC_REQUIRED" "$LOGIC_RESULT"
           check "Backend Pytest" "$BACKEND_REQUIRED" "$BACKEND_RESULT"
           check "Browser" "$BROWSER_REQUIRED" "$BROWSER_RESULT"
