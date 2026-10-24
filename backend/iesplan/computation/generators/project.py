@@ -253,9 +253,31 @@ def build_project_model_with_facts(
     完全一致，第四项为 ``financial_facts`` 结构化声明（格式页映射表为
     唯一正文，供配套适配器用同一次主解恢复，不重建模型）。
     """
+    model, unit_map, objective_unit, facts, _, _ = build_project_model_package(
+        artifact, models, materialized, finance, config, evaluation
+    )
+    return model, unit_map, objective_unit, facts
+
+
+def build_project_model_package(
+    artifact: ValidatedAssemblyArtifact,
+    models: Mapping[str, DeviceMathContribution],
+    materialized: MaterializedSet,
+    finance: EffectiveFinanceConfig,
+    config: CalculationConfig,
+    evaluation: EvaluationInput,
+) -> tuple[
+    LinearModel, Mapping[str, str], str, Mapping[str, object],
+    Mapping[str, Mapping[str, object]], tuple[Mapping[str, object], ...],
+]:
+    """一次建模取得 MPS、财务事实、分量与时序声明，不重复展开月峰。"""
     builder = _new_builder(artifact, models, materialized, finance, evaluation)
     model, unit_map, objective_unit = builder.build()
-    return model, unit_map, objective_unit, builder.financial_facts()
+    return (
+        model, unit_map, objective_unit,
+        builder.financial_facts(), builder.finance_components(),
+        builder.step_series(),
+    )
 
 
 def _new_builder(
@@ -2549,5 +2571,6 @@ def _money_to_internal(money: Any) -> float:
 __all__ = [
     "build_project_model",
     "build_project_model_with_facts",
+    "build_project_model_package",
     "finance_component_declarations",
 ]
