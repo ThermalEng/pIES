@@ -640,3 +640,69 @@ class TestT2CashflowChain:
             bounds=((0, 8760), (8760, 17544)),
             variable_rate=0.008,
         )
+
+    def test_d2_demand_monthly_full_worker_chain(
+        self, devices, client, db, engine, plane
+    ) -> None:
+        """真实提交→Worker→HiGHS→Adapter→封存: K1N2、跨年闰年、月账单、NPV。"""
+        profile = _hp_demo_profile()
+        profile["profile"]["id"] = "d2-demand-full-chain"
+        profile["demand_charges"] = {
+            "monthly": {"rate": {"value": "20", "unit": "CNY/kW"}},
+        }
+        user = make_user(db, "d2_demand_owner")
+        pid = _prepare_t2_project(
+            client, db, user,
+            _full_csv(8760, 48.0, 8784, 96.0),
+            2023, HP_BINDING, BASE_PLANNING, profile,
+            demand_bindings={
+                "peak_meter": {
+                    "charge": "monthly",
+                    "instance": "grid1",
+                    "interface": "electricity_import",
+                },
+            },
+        )
+        sealed = _solve(
+            client, db, engine, plane, pid, user, _eval_k1n2(), "d2-demand-worker"
+        )
+        fin = sealed["financial_evaluation"]
+        facts = sealed["compute_result"]["outputs"]["financial_facts"]
+        assert fin["schema_version"] == "2.0.0"
+        assert fin["construction_period"] == 1
+        assert fin["operation_years"] == 2
+        months = fin["monthly_demand"]
+        assert len(months) == 24
+        assert facts["monthly_demand"] == months
+        assert [(r["calendar_year"], r["calendar_month"]) for r in months] == [
+            (year, month) for year in (2023, 2024) for month in range(1, 13)
+        ]
+        for index, row in enumerate(months):
+            peak = 48.0 if index < 12 else 96.0
+            assert row["billing_id"] == "peak_meter"
+            assert row["charge_id"] == "monthly"
+            assert row["peak_unit"] == "kW"
+            assert row["financial_year"] == (2 if index < 12 else 3)
+            assert row["rate"] == {"value": "20", "unit": "CNY/kW"}
+            assert float(row["peak_power"]) == pytest.approx(peak, abs=1e-5)
+            assert float(row["charge"]) == pytest.approx(peak * 20, abs=1e-5)
+        for row, bill in zip(fin["annual_operation"], (11520.0, 23040.0)):
+            assert float(row["demand_charge"]) == pytest.approx(bill, abs=1e-5)
+            assert float(row["net"]) == pytest.approx(
+                float(row["energy_net"]) - float(row["variable_om"])
+                - float(row["fixed_om"]) - float(row["maintenance"]) - bill,
+                abs=1e-4,
+            )
+            assert float(fin["annual_net_flows"][row["financial_year"]]) == pytest.approx(
+                float(row["net"]), abs=1e-4,
+            )
+        assert fin["tax_cash"]["vat"] == []
+        assert fin["tax_cash"]["income"] == []
+        c = float(fin["construction_total"])
+        assert float(fin["annual_net_flows"][0]) == pytest.approx(-0.6 * c)
+        assert float(fin["annual_net_flows"][1]) == pytest.approx(-0.4 * c)
+        hand_npv = sum(
+            float(flow) / (1 + RATE) ** index
+            for index, flow in enumerate(fin["annual_net_flows"])
+        )
+        assert float(fin["evaluation"]["npv"]) == pytest.approx(hand_npv, rel=1e-7)
