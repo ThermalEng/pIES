@@ -1026,6 +1026,12 @@ class _ProjectBuilder:
                     f"财务标识符 {ident!r} 的分量未声明"
                 )
             return self._cost_affine(prefix, component)
+        if prefix in (self.doc.get("demand_bindings") or {}):
+            if component != "period_demand_charge":
+                raise LoweringUnsupportedError(
+                    f"需量标识符 {ident!r} 的分量后缀非法"
+                )
+            return self._demand_totals[prefix].snapshot()
         tariff = self.doc.get("tariff_bindings") or {}
         if prefix in tariff:
             expected = _tariff_suffix(_binding_direction(self, prefix))
@@ -1059,6 +1065,8 @@ class _ProjectBuilder:
         for binding_id in sorted(self.doc.get("tariff_bindings") or {}):
             suffix = _tariff_suffix(_binding_direction(self, binding_id))
             symbols[f"{binding_id}__{suffix}"] = Counter({"currency": 1})
+        for billing_id in sorted(self.doc.get("demand_bindings") or {}):
+            symbols[f"{billing_id}__period_demand_charge"] = Counter({"currency": 1})
         for var_name, var in self.plan_vars.items():
             unit = var.get("unit")
             if unit is None:
@@ -1100,6 +1108,8 @@ class _ProjectBuilder:
         for binding_id in (self.doc.get("tariff_bindings") or {}):
             suffix = _tariff_suffix(_binding_direction(self, binding_id))
             names.add(f"{binding_id}__{suffix}")
+        for billing_id in self.doc.get("demand_bindings") or {}:
+            names.add(f"{billing_id}__period_demand_charge")
         return names
 
     def _component_unit(self, component: str) -> str:
@@ -1146,6 +1156,13 @@ class _ProjectBuilder:
                 "caliber": _COMPONENT_CALIBER[component],
                 "constant": affine.constant,
                 "terms": dict(sorted(affine.terms.items())),
+            }
+        for billing_id, amount in sorted(self._demand_totals.items()):
+            out[f"{billing_id}__period_demand_charge"] = {
+                "unit": self.finance.currency,
+                "caliber": "period",
+                "constant": amount.constant,
+                "terms": dict(sorted(amount.terms.items())),
             }
         return MappingProxyType(out)
 
