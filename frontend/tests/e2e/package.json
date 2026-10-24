@@ -6,6 +6,7 @@
   "scripts": {
     "test": "playwright test",
     "test:chromium": "playwright test --project=chromium",
+    "test:basic": "playwright test --project=chromium --grep @basic",
     "test:headed": "playwright test --headed"
   },
   "devDependencies": {

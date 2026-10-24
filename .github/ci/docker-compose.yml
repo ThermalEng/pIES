@@ -1,0 +1,18 @@
+# Isolated CI only. Do not alter local/production bind-mounted data.
+services:
+  backend:
+    command: uvicorn iesplan.main:app --host 0.0.0.0 --port 8000 --workers 1
+    volumes:
+      - "${CI_TEST_DATA_DIR:?Set CI_TEST_DATA_DIR to a disposable absolute path}:/data"
+  io_worker:
+    volumes:
+      - "${CI_TEST_DATA_DIR:?Set CI_TEST_DATA_DIR to a disposable absolute path}:/data"
+  compute_worker:
+    volumes:
+      - "${CI_TEST_DATA_DIR:?Set CI_TEST_DATA_DIR to a disposable absolute path}:/data"
+  postgres:
+    volumes:
+      - "${CI_TEST_DATA_DIR:?Set CI_TEST_DATA_DIR to a disposable absolute path}/postgres:/var/lib/postgresql/data"
+  redis:
+    volumes:
+      - "${CI_TEST_DATA_DIR:?Set CI_TEST_DATA_DIR to a disposable absolute path}/redis:/data"

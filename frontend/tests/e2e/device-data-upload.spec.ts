@@ -53,7 +53,7 @@ function timestampCsv(rows: number): string {
 }
 
 test.describe('数据上传两种格式: step 自描述与通用时间戳', () => {
-  test('step 文件自描述上传成功，时间戳文件保持原路径', async ({ browser }) => {
+  test('step 文件自描述上传成功，时间戳文件保持原路径 @basic', async ({ browser }) => {
     const username = uniqueName('es-ddupload')
     const password = strongPassword('Init')
     const projectName = uniqueName('QA 上传格式项目')

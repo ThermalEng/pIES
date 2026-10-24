@@ -15,7 +15,7 @@ import { createEngineer } from './setup/api'
 // 场景 1: 登录 / 首登改密 / 退出 / 会话失效
 // ---------------------------------------------------------------------------
 
-test.describe('场景 1: 认证与会话', () => {
+test.describe('场景 1: 认证与会话 @basic', () => {
   test('登录、强制改密、退出、新窗口会话失效', async ({ browser }) => {
     // 独立用户(API 造数, 与被测 UI 隔离); forceChange 使首登强制改密
     const username = uniqueName('es-auth')
@@ -26,6 +26,8 @@ test.describe('场景 1: 认证与会话', () => {
 
     const context: BrowserContext = await browser.newContext()
     const page: Page = await context.newPage()
+    const runtimeErrors: string[] = []
+    page.on('pageerror', error => runtimeErrors.push(error.message))
     // 首登: 用初始密码登录 → 强制改密表单
     await page.goto('/login')
     await expect(page.getByRole('heading', { name: /登录|Sign in/i })).toBeVisible()
@@ -87,12 +89,9 @@ test.describe('场景 1: 认证与会话', () => {
     await expect(page.getByRole('button', { name: /退出登录|Logout/i })).toBeVisible()
     await context2.close()
 
-    // 控制台/网络错误检查
-    const errors: string[] = []
-    page.on('console', (msg) => {
-      if (msg.type() === 'error') errors.push(msg.text())
-    })
-    expect(errors).toEqual([])
+    // Monitor from before the first interaction, not after the tested actions.
+    // The deliberate expired-session HTTP response is tested above.
+    expect(runtimeErrors).toEqual([])
     await context.close()
   })
 })
@@ -101,7 +100,7 @@ test.describe('场景 1: 认证与会话', () => {
 // 场景 2: 创建项目并浏览全部工作台页面
 // ---------------------------------------------------------------------------
 
-test.describe('场景 2: 项目与页面导航', () => {
+test.describe('场景 2: 项目与页面导航 @basic', () => {
   test('创建项目并逐个访问工作台 7 个子页面', async ({ browser }) => {
     const username = uniqueName('es-proj')
     const password = strongPassword('Init')
@@ -147,8 +146,8 @@ test.describe('场景 2: 项目与页面导航', () => {
 
     const projectId = page.url().match(/\/projects\/(\d+)/)![1]
     session.assertNoErrors([
-      // 新建空项目尚未保存计算配置, 访问任务中心/配置页读取 404 为既有正常行为(计数锁定防漂移)。
-      { method: 'GET', path: `/api/projects/${projectId}/config`, status: 404, times: 3 },
+      // 空项目未保存配置时允许精确资源缺席, 不依赖页面缓存/请求合并的次数。
+      { method: 'GET', path: `/api/projects/${projectId}/config`, status: 404 },
     ])
     await context.close()
   })
@@ -158,7 +157,7 @@ test.describe('场景 2: 项目与页面导航', () => {
 // 场景 3: 建模 - 真实端口连接 + 错误连接诊断
 // ---------------------------------------------------------------------------
 
-test.describe('场景 3: 建模与连线', () => {
+test.describe('场景 3: 建模与连线 @basic', () => {
   test('拖拽添加热泵/电池/电网/负荷, 合法连接, 错误连接给出诊断', async ({ browser }) => {
     const username = uniqueName('es-model')
     const password = strongPassword('Init')
@@ -185,6 +184,7 @@ test.describe('场景 3: 建模与连线', () => {
     await page.getByRole('navigation', { name: /工作台|Workspace/i }).getByText('系统建模').click()
     await expect(page).toHaveURL(/\/model$/)
 
+    const projectId = page.url().match(/\/projects\/(\d+)/)![1]
     // 3a. 拖拽添加设备: 电网 / 电负荷 / 热泵 / 电池
     // 固定网格坐标避免节点重叠(随机坐标曾导致拖放落点重叠未添加)
     const canvas = page.locator('.mp-canvas-wrap')
@@ -211,11 +211,19 @@ test.describe('场景 3: 建模与连线', () => {
       await page.mouse.down()
       await page.mouse.move(canvasBox!.x + canvasBox!.width * fx, canvasBox!.y + canvasBox!.height * fy, { steps: 8 })
       await page.mouse.up()
-      // 等待设备节点出现在画布(拖拽后自动保存 1.2s 防抖)
-      await expect(page.locator('.react-flow__node', { hasText: typeName }).first()).toBeVisible({ timeout: 10_000 })
-      await expect(page.locator('.mp-save-state--saved, .wb-autosave--saved').first()).toBeVisible({ timeout: 15_000 })
-      // 等待视野跟随动画结束(fitView 300ms), 否则连线手势的句柄坐标在动画中漂移
-      await page.waitForTimeout(800)
+      // UI 节点可见且实际草稿已写入服务器, 不检查保存图标 CSS 或固定 sleep。
+      const node = page.locator('.react-flow__node', { hasText: typeName }).first()
+      await expect(node).toBeVisible({ timeout: 10_000 })
+      await expect.poll(async () => {
+        const response = await page.request.get(`/api/projects/${projectId}`)
+        if (!response.ok()) return -1
+        const view = await response.json()
+        return view.draft?.content?.model?.devices?.length ?? -1
+      }, { timeout: 15_000 }).toBe(spotIdx)
+      // ReactFlow 的 fitView 可能移动节点; 等几何稳定后再取连接端口位置。
+      const nodeHandle = await node.elementHandle()
+      expect(nodeHandle).toBeTruthy()
+      await nodeHandle!.waitForElementState('stable', { timeout: 10_000 })
     }
     await addDevice('电网连接')
     await addDevice('电负荷')
@@ -248,8 +256,7 @@ test.describe('场景 3: 建模与连线', () => {
     // 3c. 合法连接: 热泵热输出 → 热负荷热输入
     // 项目模型里没有热负荷节点(只加了 4 类); 先补加热负荷
     await addDevice('热负荷')
-    // 等待自动保存完成再连线
-    await expect(page.locator('.mp-save-state--saved, .wb-autosave--saved').first()).toBeVisible({ timeout: 15_000 })
+    // addDevice 已等待服务端实际保存及节点几何稳定, 无需样式态二次等待。
 
     const hpOut2 = hpNode.locator('.mp-handle--heat').last()
     const heatLoadNode = page.locator('.react-flow__node', { hasText: '热负荷' }).first()
@@ -266,7 +273,6 @@ test.describe('场景 3: 建模与连线', () => {
 
     // 3d. 服务端一致性(RR-P1-04): 2.0 连接只表达真实端点(设备名 + YAML 真实端口名),
     // 热泵 heat_out 输出 → 热负荷 heat_in 输入 —— 断言名称而非仅类型, 杜绝"端口猜错"
-    const projectId = page.url().match(/\/projects\/(\d+)/)![1]
     const viewResp = await page.request.get(`/api/projects/${projectId}`)
     expect(viewResp.ok()).toBeTruthy()
     const view = (await viewResp.json()) as {
@@ -289,8 +295,8 @@ test.describe('场景 3: 建模与连线', () => {
     expect(conn.to_device.length).toBeGreaterThan(0)
 
     session.assertNoErrors([
-      // 进项目读尚无保存的计算配置 404(既有行为, 计数锁定防漂移)。
-      { method: 'GET', path: `/api/projects/${projectId}/config`, status: 404, times: 1 },
+      // 未保存的计算配置可以被请求零次或多次; 其他 404 仍然严格报错。
+      { method: 'GET', path: `/api/projects/${projectId}/config`, status: 404 },
     ])
     await context.close()
   })

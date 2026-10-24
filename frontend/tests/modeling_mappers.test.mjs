@@ -73,19 +73,19 @@ check('范围: 无边界恒真', md.numberInRange(1e9, null) === true)
 const inputsRaw = {
   properties: {
     peak_power_kw: {
-      value: { type: 'number', unit: 'kW', valid_range: { minimum: 0, maximum: 10000000 }, default: 100 },
+      value: { type: 'number', unit: 'kW', valid_range: { minimum: 0, maximum: 10000000 } },
     },
     is_switchable: {
-      value: { type: 'boolean', default: false },
+      value: { type: 'boolean' },
     },
     label: {
-      value: { type: 'string', default: 'pump' },
+      value: { type: 'string' },
     },
   },
   interfaces: {
     electric_demand: {
       source: {
-        data_ref: { type: 'data_repeat', data_ref: 'typical_day_load' },
+        data_ref: { type: 'data_repeat' },
       },
     },
   },
@@ -103,12 +103,12 @@ const peakNode = propNode.children[0]
 const peakLeaf = peakNode.children[0]
 check('树: number 叶子路径', peakLeaf.path === 'properties.peak_power_kw.value')
 check('树: number 叶子单位', peakLeaf.unit === 'kW')
-check('树: number 叶子默认值', peakLeaf.default === 100)
+check('树: 禁止 number 模板默认值', peakLeaf.default === undefined)
 check('树: number 叶子范围', peakLeaf.valid_range && peakLeaf.valid_range.maximum === 10000000)
 check('树: boolean 叶子', propNode.children[1].children[0].type === 'boolean')
-check('树: string 叶子默认值', propNode.children[2].children[0].default === 'pump')
+check('树: 禁止 string 模板默认值', propNode.children[2].children[0].default === undefined)
 const dataNode = root[1].children[0].children[0].children[0]
-check('树: data_repeat 叶子与 data_ref', dataNode.type === 'data_repeat' && dataNode.data_ref === 'typical_day_load')
+check('树: data_repeat 不带模板数据引用', dataNode.type === 'data_repeat' && dataNode.data_ref === undefined)
 const arrayNode = root[2]
 check('树: array 节点与子项路径', arrayNode.type === 'array' && arrayNode.children[0].path === 'profile[]')
 check('树: array 子项 object 容器', arrayNode.children[0].type === 'object')
@@ -135,10 +135,10 @@ check('树: 非对象根抛 MapperError', (() => {
 // 表单初始值(defaultFormValues)
 // ---------------------------------------------------------------------------
 const defaults = md.defaultFormValues(root)
-check('表单: number 默认值转文本', defaults['properties.peak_power_kw.value'].text === '100')
+check('表单: number 需要用户显式填写', defaults['properties.peak_power_kw.value'].text === '')
 check('表单: boolean 默认值', defaults['properties.is_switchable.value'].checked === false)
-check('表单: string 默认值', defaults['properties.label.value'].text === 'pump')
-check('表单: data 初始为模板路径', defaults['interfaces.electric_demand.source.data_ref'].path === 'typical_day_load')
+check('表单: string 不隐式填值', defaults['properties.label.value'].text === '')
+check('表单: data 需要用户选择项目内 CSV', defaults['interfaces.electric_demand.source.data_ref'].path === '')
 check('表单: 无默认 number 初始空', (() => {
   const r = md.buildInputTree({ p: { v: { type: 'number', unit: '1' } } })
   const v = md.defaultFormValues(r)['p.v']
@@ -168,6 +168,7 @@ check('校验: 越界 number 报范围错误', (() => {
 check('校验: 合法值无错误', (() => {
   const values = md.defaultFormValues(root)
   values['properties.peak_power_kw.value'] = { kind: 'number', text: '150' }
+  values['interfaces.electric_demand.source.data_ref'] = { kind: 'data', path: 'data/load.csv' }
   return md.validateFormValues(root, values).length === 0
 })())
 check('校验: 数组元素空 number 定位到 P[0].x', (() => {
@@ -201,9 +202,12 @@ check('提交: 空 number 必填错误阻断提交', (() => {
   const result = md.formValuesToInputsOrErrors(root, values)
   return !result.ok && result.errors.some((e) => e.path === 'properties.peak_power_kw.value' && e.message_key === 'ies.modeling.form.err.required')
 })())
-check('提交: data 叶子直接提交项目相对路径', (() => {
-  const result = md.formValuesToInputsOrErrors(root, md.defaultFormValues(root))
-  return result.ok && result.inputs.interfaces.electric_demand.source.data_ref === 'typical_day_load'
+check('提交: data 叶子只提交用户选择的项目相对路径', (() => {
+  const values = md.defaultFormValues(root)
+  values['properties.peak_power_kw.value'] = { kind: 'number', text: '150' }
+  values['interfaces.electric_demand.source.data_ref'] = { kind: 'data', path: 'data/load.csv' }
+  const result = md.formValuesToInputsOrErrors(root, values)
+  return result.ok && result.inputs.interfaces.electric_demand.source.data_ref === 'data/load.csv'
 })())
 check('提交: 非法表单返回错误不产出树', (() => {
   const values = md.defaultFormValues(root)
@@ -459,7 +463,7 @@ check('ID: 空串拒绝', md.isValidDeviceId('') === false)
 
 const skeleton = md.buildYamlSkeleton()
 check('骨架: 顶层 schema', skeleton.includes('schema: ies.device-model'))
-check('骨架: schema_version 2.0.0', skeleton.includes('schema_version: "2.0.0"'))
+check('骨架: schema_version 2.1.0', skeleton.includes('schema_version: "2.1.0"'))
 check('骨架: 五顶层字段齐全', ['device:', 'properties: {}', 'interfaces: {}', 'equations:'].every((k) => skeleton.includes(k)))
 check('骨架: 空映射可直接提交后端校验(不产生 null 类型诊断)', !skeleton.includes('properties:\n') && !skeleton.includes('interfaces:\n'))
 check('骨架: 不含经济字段', !skeleton.includes('price') && !skeleton.includes('cost'))

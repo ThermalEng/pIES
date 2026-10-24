@@ -2,7 +2,7 @@
 2.开发过程中，需要较强模型的工作可交给codex完成，比如review，其他普通工作claude自己完成。
 3.不允许使用除/tmp、技能文件夹之外的文件夹的信息作为信息输入，不允许编辑除了/tmp文件夹和本文件夹外的其他内容。
 4.设计、开发、重构和审查必须先阅读并遵守 `manual/developer-guide/zh-CN/ARCHITECTURE_CONSTITUTION.md`；与开发过程文档、现有代码或兼容行为冲突时，以该宪法规定的效力顺序裁决。要修改宪法前，必须征得用户同意；不得静默修改。
-5.画布拖放、接口连接、参数设定等 GUI 功能统一使用 Docker 中的 Playwright 进行真实浏览器验收，不设人工检查例外。
+5.画布拖放、接口连接、参数设定等 GUI 功能统一使用 Docker 中的 Playwright 进行真实浏览器验收，不设人工检查例外。Agent 探索与本地/云端脚本回归的分工遵守 `manual/developer-guide/zh-CN/frontend.md`「浏览器探索与自动回归」；按变更范围测试，不要求每轮重新探索或执行全量。
 6.完成一个独立功能，review通过后就git提交，各子agent工作在独立工作树，避免丢失历史状态，提高合作效率。工作树必须建在主仓库内的持久目录；muse 与 claude 复用 `.claude/worktrees/`，每个 agent 使用独立子目录，不覆盖已有工作树。不得在 `.muse/` 或 `/tmp` 下新建开发工作树；`.muse/` 留给 Muse 自身配置，`/tmp` 仅用于可丢弃的测试与临时产物。迁移或恢复工作树前核对原分支、提交及未提交修改，不得因目录失效而删除开发历史。
 7.docker测试完成后，应及时清理测试生成的image（不包含基础镜像），防止占用磁盘空间。
 8.开发“模型与算法”、用户模型库、算法插件、共享园地或相应选择器前，必须先阅读 `manual/developer-guide/zh-CN/customization-center.md` 和 `docs/development/model-and-algorithm-ai-requirements.md`；实现必须按其中的切片顺序推进，不得把上传包运行期热加载到 API 或 Worker 进程。

@@ -37,9 +37,10 @@ export interface SessionContext {
   /** 断言页面上不存在未处理控制台错误与失败网络请求。
    *
    * 传入 expected 可声明“预期内 HTTP 噪声”(如空白项目读配置的 404):
-   * 须按 method + path + status 精确限定并给出确切次数;  harness 先用
-   * response 事件核对实际发生次数完全一致(多一次少一次都失败, 额外
-   * 请求在报错中全文可见), 再只消费对应条数的浏览器资源回显, 其余
+   * 须按 method + path + status 精确限定。若提供 times, harness 会验证
+   * 次数完全一致(供真正“一次性提交”等业务断言使用)；若省略 times,
+   * 允许该确切响应出现零次或多次, 只核销观察到的同 URL 失败回显。
+   * 额外路径/状态的请求不会被核销, 其余
    * 任何 console error / pageerror / 失败请求仍判失败。默认空数组 =
    * 历史零容忍行为。
    */
@@ -53,13 +54,13 @@ export interface SessionContext {
   registerExpectedAbort(method: string, url: string): void
 }
 
-/** 预期内 HTTP 噪声声明(method + 路径 + 状态 + 确切次数)。 */
+/** 预期内 HTTP 噪声声明；times 仅在次数有业务含义时填写。 */
 export interface ExpectedHttpNoise {
   method: string
   /** URL 路径部分全等匹配(不含 origin/query, 如 `/api/projects/7/config`)。 */
   path: string
   status: number
-  times: number
+  times?: number
 }
 
 /**
@@ -173,11 +174,13 @@ function attachMonitoring(session: SessionContext, page: Page): void {
       const matched = responses.filter(
         (r) => r.method === spec.method && r.path === spec.path && r.status === spec.status,
       )
-      // 次数必须完全一致: 缺失或额外同类请求都失败, 实际响应全文可见。
-      expect(
-        matched.length,
-        `预期响应 ${spec.method} ${spec.path} -> ${spec.status} 应恰好 ${spec.times} 次, 实际 ${matched.length} 次; 全部响应:\n${responses.map((r) => `${r.method} ${r.path} -> ${r.status}`).join('\n')}`,
-      ).toEqual(spec.times)
+      // Only enforce request count when the caller explicitly needs exact-once semantics.
+      if (spec.times !== undefined) {
+        expect(
+          matched.length,
+          `预期响应 ${spec.method} ${spec.path} -> ${spec.status} 应恰好 ${spec.times} 次, 实际 ${matched.length} 次; 全部响应:\n${responses.map((r) => `${r.method} ${r.path} -> ${r.status}`).join('\n')}`,
+        ).toEqual(spec.times)
+      }
       // 只消费核对过的回显: 同状态文本 + 同资源路径, 上限为核对次数。
       // 不在此处直接清空: 额外错误必然剩余并判失败。
       let budget = matched.length
