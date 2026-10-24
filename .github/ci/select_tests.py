@@ -88,6 +88,51 @@ ALIASES = {
 }
 
 
+# Explicit page-to-E2E contract. Pages have CamelCase names that ALIASES cannot
+# classify reliably (EconomicBindingsPage, DataPage, etc.).
+PAGE_SPECS = {
+    "AdminAuditPage.tsx": ("admin-audit.spec.ts",),
+    "AdminUsersPage.tsx": ("admin-help-lang.spec.ts",),
+    "ConfigPage.tsx": ("config-revision.spec.ts",),
+    "CustomizationPage.tsx": ("model-new.spec.ts",),
+    "DataPage.tsx": ("data-config-tasks.spec.ts", "data-preview-d5.spec.ts", "device-data-upload.spec.ts"),
+    "EconomicBindingsPage.tsx": ("economic-bindings-issue03.spec.ts",),
+    "ExportPage.tsx": ("excel-export-lang.spec.ts", "export-assessment-r7.spec.ts"),
+    "FinancePage.tsx": ("financial-evaluation.spec.ts",),
+    "HelpPage.tsx": ("admin-help-lang.spec.ts",),
+    "LoginPage.tsx": ("auth-navigation-model.spec.ts",),
+    "ModelPage.tsx": ("auth-navigation-model.spec.ts", "model-load-state.spec.ts"),
+    "PlanningPage.tsx": ("planning-issue05.spec.ts",),
+    "ProjectListPage.tsx": ("data-project-d3.spec.ts",),
+    "ProjectPage.tsx": ("data-project-d3.spec.ts",),
+    "ProjectsPage.tsx": ("data-project-d3.spec.ts",),
+    "ResultsPage.tsx": ("result-planning-solution.spec.ts",),
+    "SettingsPage.tsx": ("admin-help-lang.spec.ts",),
+    "TasksPage.tsx": ("task-selection.spec.ts", "task-draft-load.spec.ts"),
+    "ValidationPage.tsx": ("evaluation-empty-gate.spec.ts",),
+    "VersionsPage.tsx": ("project-versions.spec.ts",),
+    "WorkbenchPage.tsx": ("auth-navigation-model.spec.ts", "page-loading.spec.ts"),
+    "model/NewModelPage.tsx": ("model-new.spec.ts",),
+    "model/DeviceNode.tsx": ("model-new.spec.ts",),
+    "model/canvasModel.ts": ("auth-navigation-model.spec.ts", "model-new.spec.ts"),
+    "model/model.css": ("model-new.spec.ts",),
+    "model/text.ts": ("model-new.spec.ts",),
+    "uploadHeadScan.ts": ("device-data-upload.spec.ts",),
+    "workbench.css": ("page-loading.spec.ts",),
+    "workbench.tsx": ("auth-navigation-model.spec.ts", "page-loading.spec.ts"),
+}
+
+# A single source file can feed multiple subsystems. Keep these real consumers
+# targeted instead of widening every computation change to the full suite.
+GENERATOR_PROJECT_CONSUMERS = (
+    "test_vat_monthly.py",
+    "test_income_annual.py",
+    "test_npv_objective.py",
+    "test_planning_build.py",
+    "test_full_horizon_solve.py",
+)
+
+
 def inventory() -> tuple[set[str], set[str]]:
     return ({p.name for p in BACKEND_DIR.glob("test_*.py")},
             {p.name for p in E2E_DIR.glob("*.spec.ts")})
@@ -149,6 +194,9 @@ def pick(changed: list[str], full: bool = False) -> dict[str, str]:
                 backend.add(SMOKE_BACKEND)
                 browser.update(BROWSER_GROUPS.get(area, ()))
                 browser.add(SMOKE_BROWSER)
+            if path == "backend/iesplan/computation/generators/project.py":
+                backend.update(GENERATOR_PROJECT_CONSUMERS)
+                browser.update(("tax-chain.spec.ts", "result-planning-solution.spec.ts"))
         elif path in ("frontend/Dockerfile", "frontend/package.json", "frontend/package-lock.json"):
             browser.update((SMOKE_BROWSER, "page-loading.spec.ts"))
         elif path.startswith("frontend/tests/e2e/"):
@@ -162,6 +210,13 @@ def pick(changed: list[str], full: bool = False) -> dict[str, str]:
                 browser.update((SMOKE_BROWSER, name))
             elif path.endswith((".ts", ".json")) and not path.endswith("package-lock.json"):
                 browser_all = True  # shared harness changed
+        elif path.startswith("frontend/src/pages/"):
+            page = path.removeprefix("frontend/src/pages/")
+            selected = PAGE_SPECS.get(page)
+            if selected is None:
+                browser_all = True  # unmapped page must not silently fall back to loading smoke
+            else:
+                browser.update((SMOKE_BROWSER, *selected))
         elif path.startswith("frontend/src/"):
             area = find_area(path, "frontend/src/")
             if area is None and path.startswith("frontend/src/features/"):
@@ -212,6 +267,20 @@ def self_test() -> None:
     assert "s1-template-data-binding.spec.ts" in pick(["frontend/src/features/validation/api.ts"])["browser_specs"]
     assert "admin-audit.spec.ts" in pick(["frontend/src/features/admin-audit/api.ts"])["browser_specs"]
     assert "financial-evaluation.spec.ts" in pick(["frontend/src/pages/FinancePage.tsx"])["browser_specs"]
+    economic = pick(["frontend/src/pages/EconomicBindingsPage.tsx"])
+    assert economic["browser_specs"] == "economic-bindings-issue03.spec.ts infra.spec.ts"
+    data = pick(["frontend/src/pages/DataPage.tsx"])
+    assert "data-config-tasks.spec.ts" in data["browser_specs"]
+    assert "device-data-upload.spec.ts" in data["browser_specs"]
+    assert "economic-bindings-issue03.spec.ts" not in data["browser_specs"]
+    assert "page-loading.spec.ts" not in economic["browser_specs"]
+    generator = pick(["backend/iesplan/computation/generators/project.py"])
+    assert all("tests/" + test in generator["backend_tests"].split() for test in GENERATOR_PROJECT_CONSUMERS)
+    assert "tax-chain.spec.ts" in generator["browser_specs"]
+    assert len(generator["backend_tests"].split()) < 30  # scoped, never automatic full-suite
+    ordinary = pick(["backend/iesplan/computation/generators/mps.py"])
+    assert "tests/test_vat_monthly.py" not in ordinary["backend_tests"].split()
+    assert len(pick(["frontend/src/pages/NewUnmappedPage.tsx"])["browser_specs"].split()) > 40
     assert "tests/test_task_draft_load.py" in pick(["backend/tests/test_task_draft_load.py"])["backend_tests"]
     assert pick(["docs/reviews/notes.md"])["backend_run"] == "false"
     assert pick(["docs/reviews/notes.md"])["browser_run"] == "false"

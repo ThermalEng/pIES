@@ -94,6 +94,7 @@ jobs:
           printf 'Selected backend tests: %s\n' "${tests[*]}"
           docker compose run --rm --no-deps \
             --volume "$PWD/ci-artifacts/backend:/ci-artifacts" \
+            --volume "$PWD/manual:/manual:ro" \
             backend python -m pytest -q -ra "${tests[@]}" \
             --junitxml=/ci-artifacts/pytest.xml
 
