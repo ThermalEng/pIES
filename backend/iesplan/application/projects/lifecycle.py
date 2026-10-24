@@ -920,7 +920,7 @@ def _cmd_assembly_set_demand_bindings(content: dict, payload: dict) -> dict:
             "assembly.set_demand_bindings 需要 bindings 对象", code="PROJ-CMD-005"
         )
     content["demand_bindings"] = dict(bindings)
-    return content
+    return {"stored": True, "bindings": sorted(bindings)}
 
 
 def _cmd_task_set_working_inputs(content: dict, payload: dict) -> dict:
