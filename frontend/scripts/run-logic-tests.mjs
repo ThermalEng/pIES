@@ -37,16 +37,26 @@ for (const name of selected) {
     throw new Error(`Invalid or nonexistent frontend test: ${name}`)
 }
 let passed = 0
+const failed = []
 for (const name of selected) {
   console.log(`\n=== Frontend logic: ${name} ===`)
-  for (const [entry, outfile] of prereqs[name] || []) bundle(entry, outfile, 'cjs')
-  if (prereqs[name]) {
-    execute('node', [`tests/${name}`])
-  } else {
-    const target = `/tmp/${name}.mjs`
-    bundle(`tests/${name}`, target, 'esm')
-    execute('node', [target])
+  try {
+    for (const [entry, outfile] of prereqs[name] || []) bundle(entry, outfile, 'cjs')
+    if (prereqs[name]) {
+      execute('node', [`tests/${name}`])
+    } else {
+      const target = `/tmp/${name}.mjs`
+      bundle(`tests/${name}`, target, 'esm')
+      execute('node', [target])
+    }
+    passed++
+  } catch (error) {
+    failed.push(name)
+    console.error(`[FAIL] ${name}: ${error.message}`)
   }
-  passed++
 }
 console.log(`Frontend logic: ${passed}/${selected.length} files passed`)
+if (failed.length) {
+  console.error(`Failed files: ${failed.join(', ')}`)
+  process.exitCode = 1
+}
