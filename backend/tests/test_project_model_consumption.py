@@ -123,7 +123,7 @@ equations:
 #: 计算配置正文(与 test_wave2_c_tasks._CONFIG_BODY 同构)。
 CONFIG_BODY: dict = {
     "schema": "ies.calculation-config",
-    "schema_version": "2.1.0",
+    "schema_version": "2.0.0",
     "mode": "planning",
     "predictions": [],
     "generator": "ies.generator.highs_milp@3.4.0",
