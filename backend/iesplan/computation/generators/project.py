@@ -301,7 +301,11 @@ def finance_component_declarations(
     供 GeneratorProvider 写入 Bundle ``parameters.json``，由配套
     ResultAdapter 用同一次真实解求值发布，不重建财务模型。
     """
-    return _new_builder(artifact, models, materialized, finance, evaluation).finance_components()
+    builder = _new_builder(artifact, models, materialized, finance, evaluation)
+    if json.loads(artifact.canonical_text).get("demand_bindings"):
+        # 需量分量必须消费本次建模生成的精确峰值求解列。
+        builder.build()
+    return builder.finance_components()
 
 
 def step_series_declarations(
@@ -2391,6 +2395,7 @@ class _ProjectBuilder:
                     "variable_om": self._decl_negated(fields["variable"]),
                     "fixed_om": self._decl_negated(fields["fixed"]),
                     "maintenance": str(maint.get(year_no, Decimal("0"))),
+                    "demand_charge": self._decl_affine(fields["demand"]),
                     "net": self._decl_affine(fields["net"]),
                 }
             )
@@ -2438,8 +2443,30 @@ class _ProjectBuilder:
                     "tax": self._decl_affine(tax),
                 }
             )
+        demand_tax = self._demand_tax_factors()
+        monthly_demand: list[dict[str, object]] = []
+        for row in self._demand_rows:
+            peak_kw = _AffineAcc()
+            peak_kw.add_scaled(row["peak"], 0.001)
+            paid = _AffineAcc()
+            paid.add_scaled(
+                row["base_charge"],
+                demand_tax.get(row["charge_id"], (1.0, 0.0))[0],
+            )
+            monthly_demand.append({
+                "billing_id": row["billing_id"],
+                "charge_id": row["charge_id"],
+                "calendar_year": row["calendar_year"],
+                "calendar_month": row["calendar_month"],
+                "financial_year": row["financial_year"],
+                "peak_power": self._decl_affine(peak_kw),
+                "peak_unit": "kW",
+                "rate": row["rate"],
+                "charge": self._decl_affine(paid),
+            })
         out: dict[str, object] = {
             "currency": self.finance.currency,
+            "monthly_demand": monthly_demand,
             "construction_total": self._decl_affine(self._fact_construction),
             "annual_fixed_om": self._decl_affine(self._fact_fixed_om),
             "payments_applied": [
