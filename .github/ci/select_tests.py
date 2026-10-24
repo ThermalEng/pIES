@@ -242,6 +242,10 @@ def pick(changed: list[str], full: bool = False) -> dict[str, str]:
             elif name in backend_available:
                 backend.add(name)
                 backend.add(SMOKE_BACKEND)
+            elif path == "backend/tests/pg_init_concurrency_probe.py":
+                # Standalone two-process PostgreSQL probe, executed by cold_start.
+                startup = True
+                backend.update((SMOKE_BACKEND, "test_db_immutable_triggers.py"))
             elif path.endswith(".py"):
                 backend_all = True
         elif path.startswith("backend/iesplan/"):
@@ -281,6 +285,9 @@ def pick(changed: list[str], full: bool = False) -> dict[str, str]:
                 frontend_all = True
         elif path.startswith("frontend/tests/e2e/"):
             name = path.rsplit("/", 1)[-1]
+            if path == "frontend/tests/e2e/fixtures/session.ts":
+                browser.update((SMOKE_BROWSER, *BASIC_SPECS, "error-envelope.spec.ts"))
+                continue
             if name in (SPECIAL, "playwright.ext-device.config.ts", "docker-compose.ext-device.yml") or "device-catalog-external/" in path:
                 special = True
                 browser.add(SMOKE_BROWSER)
@@ -411,6 +418,12 @@ def self_test() -> None:
     assert pick([".github/ci/start-stack.sh"])["startup_run"] == "true"
     database = pick(["backend/iesplan/db.py"])
     assert database["startup_run"] == "true"
+    standalone_probe = pick(["backend/tests/pg_init_concurrency_probe.py"])
+    assert standalone_probe["startup_run"] == "true"
+    assert len(standalone_probe["backend_tests"].split()) < 8
+    fixture = pick(["frontend/tests/e2e/fixtures/session.ts"])
+    assert set(BASIC_SPECS) <= set(fixture["browser_specs"].split())
+    assert len(fixture["browser_specs"].split()) < 8
     assert "tests/test_db_immutable_triggers.py" in database["backend_tests"].split()
     assert "tests/test_protocol_baseline.py" not in database["backend_tests"].split()
     assert len(database["backend_tests"].split()) < 10
