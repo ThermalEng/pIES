@@ -651,9 +651,29 @@ class TestT2CashflowChain:
             "monthly": {"rate": {"value": "20", "unit": "CNY/kW"}},
         }
         user = make_user(db, "d2_demand_owner")
+        # Public data_full CSV: 2023/2024 (leap year), distinct calendar-month
+        # peaks in one operating year and alternating non-first peak positions.
+        # Month lengths imply candidate counts that are not powers of two.
+        import calendar
+
+        csv_lines = _full_csv(8760, 48.0, 8784, 96.0).decode("utf-8").splitlines()
+        data_start = csv_lines.index("step,electricity_demand") + 1
+        expected_peaks = []
+        cursor = 0
+        for year, baseline in ((2023, 48.0), (2024, 96.0)):
+            for month in range(1, 13):
+                steps = calendar.monthrange(year, month)[1] * 24
+                assert steps & (steps - 1), "月份候选数必须不是2的幂"
+                offset = 30 if month % 2 else steps - 2
+                peak = baseline + 3.0 * month
+                csv_lines[data_start + cursor + offset] = f"{cursor + offset},{peak}"
+                expected_peaks.append(peak)
+                cursor += steps
+        assert cursor == 8760 + 8784
+        variable_month_csv = ("\n".join(csv_lines) + "\n").encode("utf-8")
         pid = _prepare_t2_project(
             client, db, user,
-            _full_csv(8760, 48.0, 8784, 96.0),
+            variable_month_csv,
             2023, HP_BINDING, BASE_PLANNING, profile,
             demand_bindings={
                 "peak_meter": {
@@ -678,7 +698,7 @@ class TestT2CashflowChain:
             (year, month) for year in (2023, 2024) for month in range(1, 13)
         ]
         for index, row in enumerate(months):
-            peak = 48.0 if index < 12 else 96.0
+            peak = expected_peaks[index]
             assert row["billing_id"] == "peak_meter"
             assert row["charge_id"] == "monthly"
             assert row["peak_unit"] == "kW"
@@ -686,7 +706,9 @@ class TestT2CashflowChain:
             assert row["rate"] == {"value": "20", "unit": "CNY/kW"}
             assert float(row["peak_power"]) == pytest.approx(peak, abs=1e-5)
             assert float(row["charge"]) == pytest.approx(peak * 20, abs=1e-5)
-        for row, bill in zip(fin["annual_operation"], (11520.0, 23040.0)):
+        annual_bills = (sum(expected_peaks[:12]) * 20, sum(expected_peaks[12:]) * 20)
+        assert annual_bills[0] != annual_bills[1]
+        for row, bill in zip(fin["annual_operation"], annual_bills, strict=True):
             assert float(row["demand_charge"]) == pytest.approx(bill, abs=1e-5)
             assert float(row["net"]) == pytest.approx(
                 float(row["energy_net"]) - float(row["variable_om"])
