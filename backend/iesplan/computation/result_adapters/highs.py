@@ -1,6 +1,6 @@
-"""首个真实 ResultAdapterProvider：``ies.result-adapter.highs@3.0.0``。
+"""首个真实 ResultAdapterProvider：``ies.result-adapter.highs@4.0.0``。
 
-与 ``ies.generator.highs_milp@3.4.0`` 配套，在 2.0.0 主解/序列/度量
+与 ``ies.generator.highs_milp@4.0.0`` 配套，在 2.0.0 主解/序列/度量
 恢复基础上增加同次解结构化财务事实映射（映射协议改变故升版；仿射
 求值复用同一路径），解释其声明输出
 ``output/solution.sol``。该文件由求解 executable
