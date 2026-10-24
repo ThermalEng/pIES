@@ -151,12 +151,13 @@ test.describe('R7: 导出先评估再导出', () => {
     expect(excelPosts.length).toBe(1)
     const sentAssessmentId = (JSON.parse(excelPosts[0].body) as { assessment_id: number }).assessment_id
     expect(sentAssessmentId).toBeGreaterThan(0)
-    // GUI 登录后旧 API token 已失效, 重登拿新 token(既有用例同模式)。
-    const soloToken2 = await loginToken(soloCtx.request, soloUser, soloPass)
-    const listed = await requestJson(soloCtx.request, 'GET', `/api/projects/${soloPid}/tasks?limit=10`, undefined, soloToken2)
+    // 复用 GUI 浏览器上下文的 HttpOnly Cookie 只读查询；不得重新登录同一
+    // 账号触发会话接管，否则页面在途请求可能收到 401。
+    const listed = await requestJson(page.request, 'GET', `/api/projects/${soloPid}/tasks?limit=10`)
     const taskId: number = ((listed.items ?? []) as TaskListItem[])[0].id
+    expect(taskId).toBeTruthy()
     const assessments = await requestJson(
-      soloCtx.request, 'GET', `/api/projects/${soloPid}/tasks/${taskId}/result/assessments`, undefined, soloToken2,
+      page.request, 'GET', `/api/projects/${soloPid}/tasks/${taskId}/result/assessments`,
     )
     const items = (assessments.items ?? []) as Array<{ id: number }>
     // Worker 提交写 1 条＋显式重评估 1 条, 最新第一项即显式创建。
@@ -223,8 +224,9 @@ test.describe('R7: 导出先评估再导出', () => {
     await expect(page.locator('.ies-assess-item')).toHaveCount(1, { timeout: 30_000 })
 
     // 定向注入的两次 500 按真实任务 id 精确计数。
-    const soloTokenB = await loginToken(soloCtx.request, soloUser, soloPass)
-    const listedB = await requestJson(soloCtx.request, 'GET', `/api/projects/${soloPid}/tasks?limit=10`, undefined, soloTokenB)
+    // 两次预期 500 用同一 GUI 会话只读取得的真实任务 ID 核对，
+    // 不以再次 loginToken 撤销当前页面的会话。
+    const listedB = await requestJson(page.request, 'GET', `/api/projects/${soloPid}/tasks?limit=10`)
     const taskIdB: number = ((listedB.items ?? []) as TaskListItem[])[0].id
     expect(taskIdB).toBeTruthy()
     await soloCtx.close()
