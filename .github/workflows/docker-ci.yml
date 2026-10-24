@@ -158,7 +158,7 @@ jobs:
     env:
       BROWSER_SPECS: ${{ needs.select.outputs.browser_specs }}
       SPECIAL_DEVICE: ${{ needs.select.outputs.special_device }}
-      CI_TEST_DATA_DIR: ${{ runner.temp }}/pies-browser-${{ github.run_id }}
+      CI_TEST_DATA_DIR: ${{ github.workspace }}/.pies-ci-browser-${{ github.run_id }}
       COMPOSE_PROJECT_NAME: pies-ci-browser
     steps:
       - uses: actions/checkout@v4
