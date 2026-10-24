@@ -36,7 +36,8 @@ POWER_KW = 7.0 / 0.9
 
 def _inputs(*, resolution="1h", start_year=2024, rate="12",
             second_rate=None, bounded=True, empty=False, vat=False,
-            income=False, basis="tax_inclusive", deductible="1"):
+            income=False, basis="tax_inclusive", deductible="1",
+            dispatch=False):
     doc = _doc()
     doc["project_baseline"]["resolution"] = resolution
     doc["project_baseline"]["start_year"] = start_year
@@ -62,6 +63,47 @@ def _inputs(*, resolution="1h", start_year=2024, rate="12",
             "rate": {"value": second_rate, "unit": "CNY/kW"},
         }
     profile["profile"]["price_basis"] = basis
+    if dispatch:
+        # One real dispatch decision: costly local generator vs cheap utility.
+        # Demand cost drives utility consumption down in the same NPV solve.
+        doc["devices"]["gen1"] = {
+            "definition": {"id": "acme.device.grid"},
+            "asset_origin": "existing",
+            "properties": {}, "predefined_interfaces": {},
+        }
+        doc["connections"]["gen_link"] = {
+            "from": "gen1.supply", "to": "heater1.electricity_in",
+        }
+        doc["finance_binding"]["instances"]["gen1"] = {
+            "type": "costed", "finance_type": "local_generator",
+            "drivers": {
+                "throughput": {
+                    "interface": "supply", "aggregation": "integrate_positive",
+                },
+            },
+        }
+        profile["finance_types"]["local_generator"] = {
+            "period_variable_om": {
+                "linear": {
+                    "throughput": {
+                        "unit_cost": {"value": "1", "unit": "CNY/kWh"},
+                    },
+                },
+            },
+        }
+        profile["energy_prices"]["utility_energy"] = {
+            "carrier": "electricity", "direction": "purchase", "kind": "constant",
+            "value": {"value": "0.01", "unit": "CNY/kWh"},
+        }
+        doc["tariff_bindings"] = {
+            "utility": {
+                "price": "utility_energy", "instance": "grid1",
+                "interface": "supply", "aggregation": "integrate_positive",
+            },
+        }
+        doc["planning"]["objective"] = {
+            "sense": "maximize", "expression": "system.after_tax_npv",
+        }
     if vat or income:
         profile["taxes"]["demand_label"] = {
             "display_name": "Synthetic demand input", "tax_type": "value_added_tax",
@@ -116,6 +158,8 @@ def _inputs(*, resolution="1h", start_year=2024, rate="12",
         "load1": _contribution(LOAD_YAML),
         "grid1": _contribution(grid_yaml),
     }
+    if dispatch:
+        models["gen1"] = _contribution(grid_yaml)
     init_registry()
     result = validate_assembly_doc(
         doc, finance_snapshots={"obj-finance": finance}, device_documents=docs,
@@ -262,4 +306,41 @@ def test_demand_vat_gross_cash_and_income_scope(tmp_path, basis, deductible):
     )
     assert float(sealed["evaluation"]["npv"]) == pytest.approx(
         sum(float(x) for x in facts["annual_net_flows"]), abs=1e-4,
+    )
+
+
+def test_dispatch_changes_due_to_monthly_demand_cost(tmp_path):
+    """Exactly the same dispatch system; only demand rate changes.
+
+    No fee: cheap utility supplies the 7/0.9 kW load. With a 1000 CNY/kW
+    monthly fee, local generation at 1 CNY/kWh is cheaper than exposing
+    the utility peak over twelve months, and the optimal dispatch changes.
+    """
+    baseline, _, _ = _solved(
+        _inputs(start_year=2023, rate="0", dispatch=True),
+        tmp_path / "no_demand",
+    )
+    charged, _, _ = _solved(
+        _inputs(start_year=2023, rate="1000", dispatch=True),
+        tmp_path / "with_demand",
+    )
+    assert all(
+        float(row["peak_power"]) == pytest.approx(POWER_KW, abs=1e-4)
+        for row in baseline["monthly_demand"]
+    )
+    assert all(
+        float(row["peak_power"]) == pytest.approx(0.0, abs=1e-4)
+        for row in charged["monthly_demand"]
+    )
+    assert float(baseline["annual_operation"][0]["demand_charge"]) == 0.0
+    assert float(charged["annual_operation"][0]["demand_charge"]) == pytest.approx(
+        0.0, abs=1e-4,
+    )
+    # Dispatch changes costs: local variable cost becomes much larger and
+    # utility energy payment falls, both from one solved model per scenario.
+    assert float(charged["annual_operation"][0]["variable_om"]) > float(
+        baseline["annual_operation"][0]["variable_om"]
+    ) + 50_000
+    assert float(charged["annual_operation"][0]["energy_net"]) > float(
+        baseline["annual_operation"][0]["energy_net"]
     )
