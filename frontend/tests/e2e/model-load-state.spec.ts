@@ -80,7 +80,8 @@ test.describe('模型页读取状态', () => {
     const session = await createSession(page, userName, password)
 
     await page.getByText(projectName).click({ timeout: 30_000 })
-    await expect(page).toHaveURL(/\/projects\/\d+$/)
+    await expect(page).toHaveURL(/\/projects\/\d+\/tasks$/)
+    await expect(page.getByRole('button', { name: /提交任务|Submit task/i }).first()).toBeVisible()
     await page.getByRole('navigation', { name: /工作台|Workspace/i }).getByText(/系统建模|System Modeling/i).click({ timeout: 30_000 })
     await expect(page).toHaveURL(/\/model$/)
 
@@ -182,7 +183,8 @@ test.describe('模型页读取状态', () => {
 
     try {
       await page.getByText(projectName).click({ timeout: 30_000 })
-      await expect(page).toHaveURL(/\/projects\/\d+$/)
+      await expect(page).toHaveURL(/\/projects\/\d+\/tasks$/)
+      await expect(page.getByRole('button', { name: /提交任务|Submit task/i }).first()).toBeVisible()
       await page.getByRole('navigation', { name: /工作台|Workspace/i }).getByText(/系统建模|System Modeling/i).click({ timeout: 30_000 })
       await expect(page).toHaveURL(/\/model$/)
 
@@ -270,7 +272,8 @@ test.describe('模型页读取状态', () => {
     const session = await createSession(page, userName, password)
 
     await page.getByText(projectName).click({ timeout: 30_000 })
-    await expect(page).toHaveURL(/\/projects\/\d+$/)
+    await expect(page).toHaveURL(/\/projects\/\d+\/tasks$/)
+    await expect(page.getByRole('button', { name: /提交任务|Submit task/i }).first()).toBeVisible()
     await page.getByRole('navigation', { name: /工作台|Workspace/i }).getByText(/系统建模|System Modeling/i).click({ timeout: 30_000 })
     await expect(page).toHaveURL(/\/model$/)
     await expect(page.locator('.react-flow__node', { hasText: 'E2E heat_load' })).toBeVisible({ timeout: 60_000 })
@@ -378,7 +381,8 @@ test.describe('模型页读取状态', () => {
     const session = await createSession(page, userName, password)
 
     await page.getByText(projectName).click({ timeout: 30_000 })
-    await expect(page).toHaveURL(/\/projects\/\d+$/)
+    await expect(page).toHaveURL(/\/projects\/\d+\/tasks$/)
+    await expect(page.getByRole('button', { name: /提交任务|Submit task/i }).first()).toBeVisible()
     await page.getByRole('navigation', { name: /工作台|Workspace/i }).getByText(/系统建模|System Modeling/i).click({ timeout: 30_000 })
     await expect(page).toHaveURL(/\/model$/)
 
@@ -490,7 +494,8 @@ test.describe('模型页读取状态', () => {
     try {
       // A 页加载中(A 读挂起)。
       await page.getByText(projectA).click({ timeout: 30_000 })
-      await expect(page).toHaveURL(/\/projects\/\d+$/)
+      await expect(page).toHaveURL(/\/projects\/\d+\/tasks$/)
+      await expect(page.getByRole('button', { name: /提交任务|Submit task/i }).first()).toBeVisible()
       await page.getByRole('navigation', { name: /工作台|Workspace/i }).getByText(/系统建模|System Modeling/i).click({ timeout: 30_000 })
       await expect(page).toHaveURL(/\/model$/)
       await expect(page.getByText(/模型加载中|Loading model/)).toBeVisible({ timeout: 30_000 })
