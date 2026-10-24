@@ -28,6 +28,7 @@ BACKEND_GROUPS = {
     "finance": ("test_finance*.py", "test_financial*.py", "test_evaluation_cashflow*.py",
                 "test_vat_monthly.py", "test_income_annual.py"),
     "planning": ("test_planning_*.py", "test_linear_lowering.py", "test_npv_objective.py"),
+    "analysis": ("test_analysis.py", "test_wave1_analysis.py", "test_financial_display.py"),
     "computation": ("test_computation_boundary.py", "test_generator_registry.py",
                     "test_highs_milp_provider.py", "test_solver_runtime.py"),
     "results": ("test_results_api.py", "test_result_contract_registry.py", "test_highs_result_adapter.py"),
@@ -51,6 +52,7 @@ BROWSER_GROUPS = {
     "assembly": ("economic-bindings-issue03.spec.ts", "s1-template-data-binding.spec.ts"),
     "finance": ("economic-bindings-issue03.spec.ts", "financial-evaluation.spec.ts"),
     "planning": ("planning-issue05.spec.ts", "result-planning-solution.spec.ts"),
+    "analysis": ("result-planning-solution.spec.ts",),
     "computation": ("result-planning-solution.spec.ts",),
     "results": ("result-planning-solution.spec.ts", "result-switch-failure.spec.ts"),
     "tasks": ("task-draft-load.spec.ts", "task-selection.spec.ts"),
@@ -76,7 +78,8 @@ ALIASES = {
     "model": "modeling", "modeling": "modeling", "assembly": "assembly",
     "assembly_bindings": "assembly",
     "finance": "finance", "evaluation": "finance", "metrics": "finance",
-    "planning": "planning", "computation": "computation", "price_series": "datasets",
+    "planning": "planning", "analysis": "analysis", "computation": "computation",
+    "price_series": "datasets",
     "results": "results", "result": "results",
     "tasks": "tasks", "task": "tasks", "worker": "worker",
     "storage": "storage", "core": "core", "bootstrap": "bootstrap",
@@ -201,9 +204,11 @@ def self_test() -> None:
     assert pick([".github/workflows/docker-ci.yml"])["browser_specs"] == "infra.spec.ts"
     assert "test_finance.py" in pick(["backend/iesplan/finance/config.py"])["backend_tests"]
     assert "test_auth_api.py" in pick(["backend/iesplan/api/auth.py"])["backend_tests"]
+    assert "test_analysis.py" in pick(["backend/iesplan/analysis/metrics.py"])["backend_tests"]
     assert "economic-bindings-issue03.spec.ts" in pick(["frontend/src/features/finance/api.ts"])["browser_specs"]
     assert "model-new.spec.ts" in pick(["frontend/src/features/modeling/form.ts"])["browser_specs"]
     assert "economic-bindings-issue03.spec.ts" in pick(["frontend/src/features/assembly-bindings/api.ts"])["browser_specs"]
+    assert "s1-template-data-binding.spec.ts" in pick(["frontend/src/features/validation/api.ts"])["browser_specs"]
     assert "admin-audit.spec.ts" in pick(["frontend/src/features/admin-audit/api.ts"])["browser_specs"]
     assert "financial-evaluation.spec.ts" in pick(["frontend/src/pages/FinancePage.tsx"])["browser_specs"]
     assert "tests/test_task_draft_load.py" in pick(["backend/tests/test_task_draft_load.py"])["backend_tests"]
