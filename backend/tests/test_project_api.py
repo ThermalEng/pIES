@@ -29,6 +29,7 @@ from sqlalchemy.orm import Session, sessionmaker  # noqa: E402
 from sqlalchemy.pool import StaticPool  # noqa: E402
 
 from iesplan.api import projects as projects_api  # noqa: E402
+from iesplan.application.projects.content_objects import load_content_object  # noqa: E402
 from iesplan.api.deps import get_request_db  # noqa: E402
 from iesplan.config import settings  # noqa: E402
 from iesplan.core.contracts import ProjectBaseline  # noqa: E402
@@ -263,7 +264,7 @@ def test_project_lifecycle_flow(client: TestClient, db_session: Session) -> None
     assert version["source_draft_revision"] == 2
     assert version["parent_version_id"] is None
     # 版本内容 = 草稿领域内容 + 项目固化字段(币种/项目计算基线), 无命令簿记
-    vcontent = _load_content(db_session, version["content_object_id"])
+    vcontent = load_content_object(db_session, version["content_object_id"])
     assert vcontent["currency"] == "CNY"
     assert vcontent["project_baseline"] == {
         "resolution": "1h",
@@ -941,7 +942,7 @@ def test_issue04_demand_bindings_draft_receipts_remain_bounded_and_idempotent(
         assert reply["results"][0]["result"] == {"stored": True, "bindings": []}
         view = client.get(f"/api/projects/{pid}", headers=headers).json()
         assert view["draft"]["content"]["demand_bindings"] == {}
-        content = _load_content(db_session, view["draft"]["content_object_id"])
+        content = load_content_object(db_session, view["draft"]["content_object_id"])
         assert len(content["applied_commands"]) == index + 1
         for applied in content["applied_commands"].values():
             assert applied["result"] == {"stored": True, "bindings": []}
@@ -954,7 +955,7 @@ def test_issue04_demand_bindings_draft_receipts_remain_bounded_and_idempotent(
             assert retry.json()["results"][0]["status"] == "idempotent"
             assert retry.json()["results"][0]["result"] == reply["results"][0]["result"]
             after = client.get(f"/api/projects/{pid}", headers=headers).json()
-            assert _load_content(db_session, after["draft"]["content_object_id"]) == content
+            assert load_content_object(db_session, after["draft"]["content_object_id"]) == content
         revision = reply["revision"]
     # Five empty saves add five small ledger entries, not recursive draft snapshots.
     increments = [b - a for a, b in zip(sizes, sizes[1:])]
