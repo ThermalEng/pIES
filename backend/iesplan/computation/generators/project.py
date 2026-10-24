@@ -318,8 +318,8 @@ def finance_component_declarations(
 ) -> Mapping[str, Mapping[str, object]]:
     """财务分量求值声明（ident → unit/caliber/constant/terms）。
 
-    与 ``build_project_model`` 同一构造器、同一分量展开路径，只做
-    初始化与分量展开，不执行装配建模；同一输入恒得同一声明。
+    与 ``build_project_model`` 同一构造器、同一分量展开路径；存在需量
+    绑定时需生成真实峰值求解列，同一输入恒得同一声明。
     供 GeneratorProvider 写入 Bundle ``parameters.json``，由配套
     ResultAdapter 用同一次真实解求值发布，不重建财务模型。
     """
