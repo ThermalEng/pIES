@@ -175,8 +175,20 @@ def test_demand_bindings_validate_and_planning_symbol_and_freeze():
     with pytest.raises(InvalidRequestError) as exc:
         _check_demand_capabilities(result.artifact, "ies.generator.highs_milp@4.0.0", ("affine",))
     assert exc.value.code == "TASK-REQ-007"
-    assert exc.value.params["missing_capabilities"] == ["finance.monthly_demand"]
-    _check_demand_capabilities(result.artifact, "candidate-D2", ("finance.monthly_demand",))
+    assert exc.value.params["missing_capabilities"] == [
+        "finance.financial_facts", "finance.monthly_demand",
+    ]
+    with pytest.raises(InvalidRequestError) as missing_facts:
+        _check_demand_capabilities(
+            result.artifact, "candidate-D2", ("finance.monthly_demand",)
+        )
+    assert missing_facts.value.params["missing_capabilities"] == [
+        "finance.financial_facts"
+    ]
+    _check_demand_capabilities(
+        result.artifact, "candidate-D2",
+        ("finance.monthly_demand", "finance.financial_facts"),
+    )
 
 
 @pytest.mark.parametrize("mutate,reason", [
