@@ -259,11 +259,11 @@ class _StubRuntime:
                 attempt_id=attempt.attempt_id,
                 assembly_id=attempt.assembly_id,
                 calculation_config_id=attempt.calculation_config_id,
-                generator_ref="ies.generator.highs_milp@3.4.0",
+                generator_ref="ies.generator.highs_milp@4.0.0",
                 solver_ref="ies.solver.highs@1.7.2",
                 executor_ref="ies.executor.local_process@1.0.0",
                 executable_ref="ies.solver.highs@1.7.2",
-                result_adapter_ref="ies.result-adapter.highs@3.0.0",
+                result_adapter_ref="ies.result-adapter.highs@4.0.0",
                 status=self._status,
                 termination_reason=self._status,
             ),
@@ -316,7 +316,7 @@ class TestComputeChainEndToEnd:
         assert sealed["compute_result"]["receipt_id"] == sealed["receipt"]["receipt_id"]
         assert sealed["receipt"]["status"] == "succeeded"
         assert sealed["receipt"]["executable_ref"] == "ies.solver.highs@1.7.2"
-        assert sealed["bundle_manifest"]["bundle"]["generator"] == ("ies.generator.highs_milp@3.4.0")
+        assert sealed["bundle_manifest"]["bundle"]["generator"] == ("ies.generator.highs_milp@4.0.0")
         snapshot = worker_app.get_snapshot_record(db, task.calc_snapshot_id)
         assert snapshot is not None
         args = sealed["bundle_manifest"]["command"]["arguments"]
@@ -354,7 +354,7 @@ class TestComputeChainEndToEnd:
         assert task.business_outcome == "normal_completion"
         snapshot = worker_app.get_snapshot_record(db, task.calc_snapshot_id)
         assert snapshot is not None
-        assert snapshot.result_adapter == "ies.result-adapter.highs@3.0.0"
+        assert snapshot.result_adapter == "ies.result-adapter.highs@4.0.0"
 
         evidence = results_store.latest_evidence_for_task(db, task_id)
         assert evidence is not None
@@ -362,18 +362,18 @@ class TestComputeChainEndToEnd:
         assert sealed["outcome"] == "normal_completion"
         assert sealed["compute_result"]["math_status"] == "solved"
         assert sealed["receipt"]["bundle_id"] == f"snapshot-{snapshot.id}:attempt-{claim.attempt_id}"
-        assert sealed["bundle_manifest"]["bundle"]["generator"] == "ies.generator.highs_milp@3.4.0"
+        assert sealed["bundle_manifest"]["bundle"]["generator"] == "ies.generator.highs_milp@4.0.0"
 
         fin = sealed["financial_evaluation"]
         assert fin["schema"] == "ies.financial-evaluation"
-        assert fin["schema_version"] == "1.0.0"
+        assert fin["schema_version"] == "2.0.0"
         assert fin["currency"] == "CNY"
         assert set(fin) == {
             "schema", "schema_version", "status", "evaluation_years",
             "construction_period", "operation_years", "currency", "price_basis",
             "base_year", "profile_id", "discount_rate", "construction_total",
             "construction_total_unit", "annual_fixed_om", "payments_applied",
-            "annual_operation", "tax_cash", "annual_net_flows", "evaluation",
+            "annual_operation", "monthly_demand", "tax_cash", "annual_net_flows", "evaluation",
         }
         # K=0/E=1/N=1：单池 12 月 VAT 全零（无计费绑定，留抵恒零强制成立）。
         vat = fin["tax_cash"]["vat"]

@@ -73,7 +73,7 @@ def _finance_stub():
 
 
 def _seal(bundle, solution_raw, finance, snapshot):
-    """生产 Adapter（3.0.0）恢复 + 封存评价，返回（结果，封存）。"""
+    """生产 Adapter（4.0.0）恢复 + 封存评价，返回（结果，封存）。"""
     adapted = HIGHS_ADAPTER.adapt(
         _wrap_bundle({path: bundle.files[path] for path in SOLVER_FILES}),
         _receipt(result_adapter_ref=ADAPTER_REF),
@@ -125,7 +125,7 @@ def test_facts_mix_seal_matches_hand_and_objective(tmp_path) -> None:
     value, _, solution_raw = _solve_internal(bundle, tmp_path)
     adapted, sealed, facts = _seal(bundle, solution_raw, finance, _snapshot())
     assert sealed["schema"] == "ies.financial-evaluation"
-    assert sealed["schema_version"] == "1.0.0"
+    assert sealed["schema_version"] == "2.0.0"
     assert sealed["status"] == "evaluated"
     assert facts["currency"] == "CNY"
     # 公开形状：顶层键、tax_cash 嵌套、金额裸字符串、CF 顺序数组。
@@ -135,6 +135,7 @@ def test_facts_mix_seal_matches_hand_and_objective(tmp_path) -> None:
         "annual_fixed_om",
         "payments_applied",
         "annual_operation",
+        "monthly_demand",
         "tax_cash",
         "annual_net_flows",
     }
