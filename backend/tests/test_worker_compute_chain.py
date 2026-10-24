@@ -373,7 +373,7 @@ class TestComputeChainEndToEnd:
             "construction_period", "operation_years", "currency", "price_basis",
             "base_year", "profile_id", "discount_rate", "construction_total",
             "construction_total_unit", "annual_fixed_om", "payments_applied",
-            "annual_operation", "tax_cash", "annual_net_flows", "evaluation",
+            "annual_operation", "monthly_demand", "tax_cash", "annual_net_flows", "evaluation",
         }
         # K=0/E=1/N=1：单池 12 月 VAT 全零（无计费绑定，留抵恒零强制成立）。
         vat = fin["tax_cash"]["vat"]
