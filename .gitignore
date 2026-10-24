@@ -1,39 +1,37 @@
-# 临时在线开发快照：原规则暂时注释；本机私有/运行产物由 .git/info/exclude 排除。
-# 原规则版本：b5411bb。恢复时还需审查本次新增文件的跟踪状态。
 # 运行时数据(数据库、对象存储、日志)
-# data/
+data/
 # Python
-# __pycache__/
-# *.py[cod]
-# .venv/
-# venv/
-# .maestro/
-# .pytest_cache/
-# .mypy_cache/
-# .ruff_cache/
-# *.egg-info/
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.maestro/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
 # Node
-# node_modules/
-# dist/
+node_modules/
+dist/
 # IDE
-# .idea/
-# .vscode/
-# *.swp
+.idea/
+.vscode/
+*.swp
 # 本地设置
-# .claude/settings.local.json
-# frontend/public/help/manifest.json
-# frontend/tsconfig.tsbuildinfo
+.claude/settings.local.json
+frontend/public/help/manifest.json
+frontend/tsconfig.tsbuildinfo
 
 # 工作痕迹(整体不入库,仅本机保留,不得强制加入跟踪)
-# /docs/
-# CLAUDE.md
-# AGENTS.md
+/docs/
+CLAUDE.md
+AGENTS.md
 
 # uv(仅测试 agent 生成, 项目不用 uv 管理依赖)
-# uv.lock
+uv.lock
 
 # 装配契约随包发布的样例数据，不属于运行时 data/ 目录
-# !backend/iesplan/assembly/samples/data/
-# !backend/iesplan/assembly/samples/data/*.csv
-# /.claude/
-# /.opencode/
+!backend/iesplan/assembly/samples/data/
+!backend/iesplan/assembly/samples/data/*.csv
+/.claude/
+/.opencode/
