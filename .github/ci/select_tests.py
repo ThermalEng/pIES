@@ -164,9 +164,10 @@ def pick(changed: list[str], full: bool = False) -> dict[str, str]:
                 browser_all = True  # shared harness changed
         elif path.startswith("frontend/src/"):
             area = find_area(path, "frontend/src/")
-            if area is None:
-                area = "ui"  # shared UI, routing and CSS
-            browser.update((SMOKE_BROWSER, *BROWSER_GROUPS[area]))
+            if area is None and path.startswith("frontend/src/features/"):
+                browser_all = True  # new feature without test mapping: do not silently miss coverage
+            else:
+                browser.update((SMOKE_BROWSER, *BROWSER_GROUPS[area or "ui"]))
         elif path.startswith("frontend/"):
             # Non-app files: docs / generated metadata do not trigger a full browser suite.
             if path.endswith((".ts", ".tsx", ".js", ".mjs", ".css")):
@@ -215,6 +216,7 @@ def self_test() -> None:
     assert pick(["docs/reviews/notes.md"])["backend_run"] == "false"
     assert pick(["docs/reviews/notes.md"])["browser_run"] == "false"
     assert pick(["frontend/tests/e2e/device-yaml-extension.spec.ts"])["special_device"] == "true"
+    assert len(pick(["frontend/src/features/new-subsystem/Feature.tsx"])["browser_specs"].split()) > 40
     assert len(pick(["backend/iesplan/new_module/file.py"])["backend_tests"].split()) > 80
     assert len(pick([".github/ci/select_tests.py"], full=True)["browser_specs"].split()) > 40
     print("Selector self-test passed")
