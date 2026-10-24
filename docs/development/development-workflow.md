@@ -72,13 +72,16 @@ API 的一次业务动作应转交一个完整 application 用例。Worker 不�
 
 ## GitHub Actions 云端测试
 
-`.github/workflows/docker-ci.yml` 在面向 `master` 的 PR、合入 `master` 后以及手动触发时运行，使用 GitHub 托管的独立 Ubuntu Runner。所有项目依赖、编译和测试均在 Docker 内进行：
+`.github/workflows/docker-ci.yml` 在面向 `master` 的 PR、合入 `master` 后及手动触发时执行。先由 `.github/ci/select_tests.py` 根据 Git diff（PR 比较 base 与当前提交，push 比较前后提交）**选择受影响的后端模块测试和 Playwright 真实用户场景**；仅文档修改可跳过容器构建。路径映射和选择规则在 Docker 的 Python 容器内执行，并运行选择器自检。
 
-1. **Backend Pytest (Docker)**：构建 `backend` 镜像，在容器中运行 `python -m pytest -q -ra tests`，保存 JUnit XML；全局测试配置使用 SQLite/内存队列，要求 Docker Socket 或独立 PostgreSQL 线束的专项用例不因普通 CI 获得额外能力，跳过情况以 Pytest 报告为准。
-2. **Playwright Chromium (Docker)**：由 Compose 启动 PostgreSQL、Redis、Backend、I/O 与 Compute Worker 及 Web，然后通过独立 `e2e` 容器执行默认 Chromium 浏览器验收；默认配置排除需额外挂载设备目录的 `device-yaml-extension.spec.ts`，该专用用例仍按 E2E README 的独立覆盖命令运行。
-3. **诊断与清理**：失败时输出服务日志；上传 Pytest XML 与 Playwright HTML/trace/截图（有产物时）；结束时清理本次测试容器和构建镜像。每个 Job 使用独立全新 Runner，不与本地 `./data` 共享数据。
+- 后端变更：选择领域对应的 `backend/tests/test_*.py` 及 `test_smoke.py`，输出 JUnit XML；前端变化不强制跑全部后端。
+- 前端变更：选择相关业务 `*.spec.ts` 及 `infra.spec.ts`，在独立 Compose 服务中用 Chromium 模拟真实点击、输入、上传和保存；后端 API、计算及 Worker 的改动也对应选择关键 GUI 流程。
+- 单个测试文件变更：优先选择该测试和基础冒烟；CI 工作流自身变更只验证 Pytest 和 Playwright 的基础冒烟。
+- 特殊外部设备样例 / 用例变更：使用额外 Compose 挂载和专用 Playwright 配置执行，不能假装普通环境下已覆盖。
+- 新增、未识别的后端模块或顶层执行代码：保守地运行完整默认测试集，不通过模糊匹配静默忽略；无法获取有效 diff 时也执行完整默认套件。
+- 手动运行 `workflow_dispatch` 可设置 `full_suite=true` 强制完整默认套件，用于发布前回归或主审补充验证。
 
-云端浏览器测试使用 `.github/ci/docker-compose.yml` 覆盖后端 API 为单 worker，以避免空库并发初始化竞态；本地和生产的 `docker-compose.yml` 不变。CI 通过是合并前的自动化证据，不能取代本地对 PR 实现和契约的人工主审。首次新增工作流的运行结果应在 PR 的 Checks 页面确认，不能仅凭工作流文件存在就宣称测试通过。
+所有依赖安装、构建、测试在 Docker 内运行；使用 GitHub 的独立 Ubuntu Runner，分别输出后端 Pytest 报告、Playwright Trace / 截图 / HTML 报告，并在失败时输出 Compose 日志，完成后清理本次镜像和容器。云端 Compose 覆盖将空库 API 设为单 worker，避免双 worker 并发初始化竞态；不改变正式 `docker-compose.yml`。**定向通过只证明已选用例通过，不等于完整回归通过**，不取代本地人工主审。
 
 ## 端点实现：状态码与包装键选择
 
