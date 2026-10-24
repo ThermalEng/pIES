@@ -203,5 +203,16 @@ def init_db(trigger_statements: Iterable[str] | None = None) -> None:
       正式发布后的 schema 变更走版本化 migration(宪法 §11);
       种子管理员改由 application.identity.seed_builtin_admin 负责。
     """
-    Base.metadata.create_all(bind=engine)
-    deploy_trigger_statements(trigger_statements or ())
+    if engine.dialect.name != "postgresql":
+        Base.metadata.create_all(bind=engine)
+        return
+    # Every API/Worker process assembles the same database. Serialize schema
+    # creation and trigger installation across *all* entry points, including
+    # deployments that start several processes at once (not only CI).
+    # The transaction-scoped lock releases on either commit or exception.
+    with engine.begin() as conn:
+        conn.execute(sa_text("SELECT pg_advisory_xact_lock(174962, 1)"))
+        Base.metadata.create_all(bind=conn)
+        for stmt in trigger_statements or ():
+            if stmt and stmt.strip():
+                conn.execute(sa_text(stmt))
