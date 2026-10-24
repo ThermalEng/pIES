@@ -144,7 +144,7 @@ def _finance_payload(direction: str = "purchase", tariff_kind: str = "constant")
             "cost_method": "fixed_plus_linear",
         },
         "demand_charges": {},
-    "taxes": {},
+        "taxes": {},
         "credit_pools": {},
         "tax_rules": {},
         "finance_types": {
