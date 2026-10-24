@@ -62,6 +62,8 @@ docker compose up -d --build
 
 只修改纯文档时，至少构建帮助中心并检查目录、链接和 Markdown；修改后端模块时先运行模块测试，再运行与其相邻的 application/API/Worker 测试；修改数据库或对象生命周期时必须使用真实 PostgreSQL 和受控对象目录验证恢复。
 
+本地 Agent 的浏览器探索与云端脚本回归按[前端验收分工](frontend.md#浏览器探索与自动回归)执行。测试环境复用同一用例，使用独立 Compose 项目及数据目录，不与开发或生产数据混用；本地运行入口和 CI 只适配环境，不分别维护业务测试实现。日常按需选取测试，云端保留 `full_suite=true` 手动完整默认套件入口，执行结果注明其不包含的专项环境覆盖。
+
 Compose 服务承担不同职责：Web 提供静态前端，backend 处理同步 HTTP，compute/I/O Worker 执行相应任务，PostgreSQL 保存权威事实，Redis 保存可重建队列与进度。某个服务能够启动，不代表整体已经 ready。
 
 实现“算法插件”后，Compose 还必须提供独立 `plugin_runner` 服务。普通 Worker 只发送输入引用、租约上下文和资源限制，不向用户插件解释器暴露 Docker Socket、数据库、`./data`、仓库目录或业务秘密。runner 使用只读根文件系统、非 root 身份、临时工作目录和默认断网策略；依赖只从构建阶段批准的离线来源取得。具体 contract 见[模型与算法](customization-center.md)和[算法插件包](formats/algorithm-plugin-package.md)。
