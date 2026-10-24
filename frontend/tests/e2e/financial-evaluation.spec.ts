@@ -267,7 +267,8 @@ test.describe('T3: K1N2 财务评价确认/求解/结果/导出', () => {
     const page: Page = await context.newPage()
     const session = await createSession(page, username, password)
     await page.getByText(projectName).click({ timeout: 30_000 })
-    await expect(page).toHaveURL(/\/projects\/\d+$/)
+    await expect(page).toHaveURL(/\/projects\/\d+\/tasks$/)
+    await expect(page.getByRole('button', { name: /提交任务|Submit task/i }).first()).toBeVisible()
 
     // 确认 → 提交(评价确认块经 UI 填写, 无业务默认)
     await submitEvaluationViaUI(
@@ -379,7 +380,8 @@ test.describe('T3: K1N2 财务评价确认/求解/结果/导出', () => {
     const page: Page = await context.newPage()
     const session = await createSession(page, username, password)
     await page.getByText(projectName).click({ timeout: 30_000 })
-    await expect(page).toHaveURL(/\/projects\/\d+$/)
+    await expect(page).toHaveURL(/\/projects\/\d+\/tasks$/)
+    await expect(page.getByRole('button', { name: /提交任务|Submit task/i }).first()).toBeVisible()
 
     // 确认 → 提交(K=1/N=2/付款 0.6+0.4/无维护)。
     await submitEvaluationViaUI(page, '[]')
