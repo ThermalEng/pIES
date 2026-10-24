@@ -75,14 +75,14 @@ async function readDraftWorking(page: Page, projectId: number): Promise<Record<s
     : null
 }
 
-async function submitEvaluationViaUI(page: Page): Promise<void> {
+async function submitEvaluationViaUI(page: Page, minimal = false): Promise<void> {
   await page.getByRole('navigation', { name: /工作台|Workspace/i }).getByText('任务中心').click({ timeout: 30_000 })
   await page.getByRole('button', { name: /提交任务|Submit task/i }).first().click({ timeout: 30_000 })
   await page.locator('#task-type').selectOption('optimization')
-  await page.locator('#task-construction-period').fill('1')
-  await page.locator('#task-operation-years').fill('2')
+  await page.locator('#task-construction-period').fill(minimal ? '0' : '1')
+  await page.locator('#task-operation-years').fill(minimal ? '1' : '2')
   await page.locator('#task-discount-rate').fill('0.08')
-  await page.locator('#task-construction-payments').fill('[{"t": 0, "ratio": 0.6}, {"t": 1, "ratio": 0.4}]')
+  await page.locator('#task-construction-payments').fill(minimal ? '[]' : '[{"t": 0, "ratio": 0.6}, {"t": 1, "ratio": 0.4}]')
   await page.locator('#task-maintenance-expenses').fill('[]')
   // 数据集版本清单唯一权威是脚手架经 API 绑定的草稿 dataset_bindings（v1）；
   // 对话框不再做数据集选择（旧勾选后端从未消费，已删除）。
@@ -652,8 +652,8 @@ test.describe('全局任务选择：默认最新完成、无回退、显式提�
     // 空任务列表无表格行：以提交按钮可见作为页面就绪信号。
     await expect(page.getByRole('button', { name: /提交任务|Submit task/i }).first()).toBeVisible({ timeout: 30_000 })
 
-    // 提交 T1(N=2) 并等完成（直达需要证据包），任务 id 与包 id 从 UI 捕获。
-    await submitEvaluationViaUI(page)
+    // 直达故障只需一份真实证据包，选 K0/N1 最小可完成优化以减轻共享队列。
+    await submitEvaluationViaUI(page, true)
     await page.getByRole('navigation', { name: /工作台|Workspace/i }).getByText('任务中心').click({ timeout: 30_000 })
     await waitCompleted(page)
     await page.getByRole('navigation', { name: /工作台|Workspace/i }).getByText('结果分析').click({ timeout: 30_000 })
@@ -715,12 +715,12 @@ test.describe('全局任务选择：默认最新完成、无回退、显式提�
       // 成功后直达参数被清除并交还用户选择。
       await expect(page).toHaveURL(/\/results$/)
       expect(loadPosts.length).toBe(2)
-      // 重试成功：草稿为 T1 冻结值（数字 2）。
+      // 重试成功：草稿为 T1 冻结值（数字 1）。
       await expect
         .poll(async () => (await readDraftWorking(page, soloPid))?.operation_years ?? null, {
           timeout: 30_000,
         })
-        .toBe(2)
+        .toBe(1)
       expect(creates.length).toBe(2)
     } finally {
       await page.unroute('**/api/projects/*/tasks/*/load-draft')
