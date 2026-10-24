@@ -16,4 +16,6 @@ for round in 1 2 3; do
   docker compose -f docker-compose.yml -f .github/ci/docker-compose.yml down --remove-orphans
   # Files belong to this ephemeral runner and are not reused by later rounds.
 done
-docker compose -f docker-compose.yml -f .github/ci/docker-compose.yml down --remove-orphans --rmi local
+# Preserve the cached app image for the subsequent two-process PG proof; the
+# workflow cleanup step removes locally built images after both checks.
+docker compose -f docker-compose.yml -f .github/ci/docker-compose.yml down --remove-orphans
