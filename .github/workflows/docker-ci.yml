@@ -1,0 +1,177 @@
+name: Docker CI
+
+on:
+  pull_request:
+    branches: [master]
+    types: [opened, synchronize, reopened, ready_for_review]
+  push:
+    branches: [master]
+  workflow_dispatch:
+    inputs:
+      full_suite:
+        description: "Run all standard backend and Chromium tests (otherwise run changed areas)"
+        type: boolean
+        required: false
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docker-ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  select:
+    name: Select affected tests (Docker)
+    runs-on: ubuntu-latest
+    outputs:
+      backend_run: ${{ steps.plan.outputs.backend_run }}
+      backend_tests: ${{ steps.plan.outputs.backend_tests }}
+      browser_run: ${{ steps.plan.outputs.browser_run }}
+      browser_specs: ${{ steps.plan.outputs.browser_specs }}
+      special_device: ${{ steps.plan.outputs.special_device }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Determine changed files
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+        run: |
+          case "$EVENT_NAME" in
+            pull_request) base="$PR_BASE" ;;
+            push) base="$PUSH_BEFORE" ;;
+            workflow_dispatch) base="$(git rev-parse HEAD^ 2>/dev/null || true)" ;;
+          esac
+          if [[ -z "$base" || "$base" =~ ^0+$ ]] || ! git cat-file -e "${base}^{commit}"; then
+            printf '__FULL__\0' > "$RUNNER_TEMP/pies-changed.bin"
+          else
+            git diff --name-only --diff-filter=ACDMRT -z "$base" HEAD > "$RUNNER_TEMP/pies-changed.bin"
+          fi
+
+      - name: Select tests and validate selection rules in Docker
+        id: plan
+        env:
+          FULL_SUITE: ${{ inputs.full_suite && 'true' || 'false' }}
+        run: |
+          docker run --rm \
+            -v "$PWD:/repo:ro" \
+            -v "$RUNNER_TEMP:/out" \
+            -w /repo python:3.12-alpine \
+            python .github/ci/select_tests.py --self-test
+          docker run --rm \
+            -v "$PWD:/repo:ro" \
+            -v "$RUNNER_TEMP:/out" \
+            -w /repo python:3.12-alpine \
+            python .github/ci/select_tests.py \
+              --changed /out/pies-changed.bin \
+              --output /out/pies-plan.outputs \
+              --full "$FULL_SUITE"
+          cat "$RUNNER_TEMP/pies-plan.outputs" >> "$GITHUB_OUTPUT"
+
+  backend:
+    name: Backend Pytest (Docker)
+    needs: select
+    if: needs.select.outputs.backend_run == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build backend test image
+        run: docker compose build backend
+
+      - name: Run selected Pytest tests
+        env:
+          TEST_FILES: ${{ needs.select.outputs.backend_tests }}
+        run: |
+          mkdir -p ci-artifacts/backend
+          read -r -a tests <<< "$TEST_FILES"
+          printf 'Selected backend tests: %s\n' "${tests[*]}"
+          docker compose run --rm --no-deps \
+            --volume "$PWD/ci-artifacts/backend:/ci-artifacts" \
+            --volume "$PWD/manual:/manual:ro" \
+            backend python -m pytest -q -ra "${tests[@]}" \
+            --junitxml=/ci-artifacts/pytest.xml
+
+      - name: Upload Pytest report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-pytest
+          path: ci-artifacts/backend/pytest.xml
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Remove test containers and images
+        if: always()
+        run: docker compose down --remove-orphans --rmi local
+
+  browser:
+    name: Playwright Chromium (Docker)
+    needs: select
+    if: needs.select.outputs.browser_run == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      BROWSER_SPECS: ${{ needs.select.outputs.browser_specs }}
+      SPECIAL_DEVICE: ${{ needs.select.outputs.special_device }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build and start isolated application
+        run: |
+          if [[ "$SPECIAL_DEVICE" == "true" ]]; then
+            export PIES_EXT_DEVICE_DIR="$PWD/frontend/tests/e2e/device-catalog-external"
+            echo "PIES_EXT_DEVICE_DIR=$PIES_EXT_DEVICE_DIR" >> "$GITHUB_ENV"
+            docker compose -f docker-compose.yml -f .github/ci/docker-compose.yml \
+              -f frontend/tests/e2e/docker-compose.ext-device.yml \
+              up -d --build web backend io_worker compute_worker
+          else
+            docker compose -f docker-compose.yml -f .github/ci/docker-compose.yml \
+              up -d --build web backend io_worker compute_worker
+          fi
+
+      - name: Run selected real-browser scenarios
+        run: |
+          read -r -a specs <<< "$BROWSER_SPECS"
+          if [[ "$SPECIAL_DEVICE" == "true" ]]; then
+            docker compose -f docker-compose.yml -f .github/ci/docker-compose.yml \
+              -f frontend/tests/e2e/docker-compose.ext-device.yml \
+              --profile e2e run --rm --build e2e \
+              npx playwright test --project=chromium "${specs[@]}"
+            docker compose -f docker-compose.yml -f .github/ci/docker-compose.yml \
+              -f frontend/tests/e2e/docker-compose.ext-device.yml \
+              --profile e2e run --rm e2e \
+              npx playwright test --config playwright.ext-device.config.ts
+          else
+            docker compose -f docker-compose.yml -f .github/ci/docker-compose.yml \
+              --profile e2e run --rm --build e2e \
+              npx playwright test --project=chromium "${specs[@]}"
+          fi
+
+      - name: Show application diagnostics on failure
+        if: failure()
+        run: |
+          docker compose -f docker-compose.yml -f .github/ci/docker-compose.yml ps -a
+          docker compose -f docker-compose.yml -f .github/ci/docker-compose.yml \
+            logs --no-color --tail=200
+
+      - name: Upload Playwright traces, screenshots and HTML report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-chromium
+          path: frontend/tests/e2e/test-results/
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Remove test containers and images
+        if: always()
+        run: |
+          docker compose -f docker-compose.yml -f .github/ci/docker-compose.yml \
+            down --remove-orphans --rmi local

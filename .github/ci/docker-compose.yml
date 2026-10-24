@@ -1,0 +1,5 @@
+# CI only: avoid multi-process schema initialization races on a new database.
+# Production docker-compose.yml remains unchanged.
+services:
+  backend:
+    command: uvicorn iesplan.main:app --host 0.0.0.0 --port 8000 --workers 1
