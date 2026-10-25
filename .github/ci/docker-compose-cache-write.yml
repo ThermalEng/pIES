@@ -3,5 +3,6 @@
 services:
   backend:
     build:
+      context: ./backend
       cache_to:
         - type=gha,scope=pies-backend-py312-v1,mode=max,ignore-error=true,timeout=120s
