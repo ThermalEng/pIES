@@ -870,7 +870,7 @@ class _ProjectBuilder:
         """单个计费绑定的已带符号记账分量仿射式（逐点 ``price[t]×e[t]``）。
 
         ``constant`` 价格即每点同值的逐点计价（与 ``price×Σe[t]`` 结果
-        一致，语义仍为逐点）；``time_series`` 取第三项已物化价格区
+        一致，语义仍为逐点）；``time_series`` 和 ``monthly_daily`` 取第三项已物化价格区
         同 ``price_id`` 的全周期序列逐点相乘（长度/分辨率/单位由提交
         边界核对，此处只消费不复核）。符号按财务方向：
         ``purchase`` 为 ``+``、`sale` 为 ``-``；价格自身的正/零/负按
@@ -891,7 +891,7 @@ class _ProjectBuilder:
             )
             out.add_scaled(energy, sign * price_si)
             return out
-        if price.kind != "time_series":
+        if price.kind not in ("time_series", "monthly_daily"):
             raise LoweringUnsupportedError(
                 f"计费绑定 {binding_id!r} 的价格类型未知: {price.kind!r}"
             )

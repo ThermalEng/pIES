@@ -88,11 +88,11 @@ Bundle 规范化与原子发布
 
 显式财务目标入口按[装配规划契约](../formats/assembly-yaml.md#规划表达式中的财务分量标识符)识别。生成器以同一组建设、运行及财务关系构建逐年现金流表达式，再按冻结折现率组合 NPV 目标，不先求解另一税前方案。现金流保留建设付款时点、年度固定运维、实际运行量对应年度的可变运维与能源收支及维护清单，不把全期合计均摊为年值；税额关系按[财务模块](finance.md#税务参与规划与现金流)接入。
 
-`build_project_model` 把各项直接输入装配成项目级 `LinearModel`（变量声明、约束行、目标表达式与 min/max 方向）、单位映射与目标业务单位，不设包装层：按基线展开全部连续 `step`，实例与时步确定命名；技术关系经现有 lowerer 逐降（`t`/`t-1`、Big-M，有限界来自值域数值或实例额定引用）；公开原语 `step_duration` 以基线导出的 SI 秒注入；连接只定义连通性，按 carrier + 无向连通分量逐 step 生成一条母线守恒式（out/bidirectional 为正，in 为负），无边载体不建平衡式；负荷需求经可连接输入口与 serve 方程进入母线；规划目标/变量/约束与财务/计费分量按绑定展开；物理量归 SI、金额守币种；计费支持 constant 与 time_series（时变价格由第三项价格区逐点 `price[t]×e[t]` 计价，`constant` 同一逐点语义；未知价格类型明确拒绝）。`write_mps` 只序列化已完成的 `LinearModel`（稳定 ROWS/COLUMNS/RHS/BOUNDS/整数标记/OBJSENSE，目标常数以偏移量单独报告），同一模型逐字节相同。
+`build_project_model` 把各项直接输入装配成项目级 `LinearModel`（变量声明、约束行、目标表达式与 min/max 方向）、单位映射与目标业务单位，不设包装层：按基线展开全部连续 `step`，实例与时步确定命名；技术关系经现有 lowerer 逐降（`t`/`t-1`、Big-M，有限界来自值域数值或实例额定引用）；公开原语 `step_duration` 以基线导出的 SI 秒注入；连接只定义连通性，按 carrier + 无向连通分量逐 step 生成一条母线守恒式（out/bidirectional 为正，in 为负），无边载体不建平衡式；负荷需求经可连接输入口与 serve 方程进入母线；规划目标/变量/约束与财务/计费分量按绑定展开；物理量归 SI、金额守币种；计费支持 constant、time_series 与 monthly_daily（时变价格由第三项价格区逐点 `price[t]×e[t]` 计价，`constant` 同一逐点语义；未知价格类型明确拒绝）。`write_mps` 只序列化已完成的 `LinearModel`（稳定 ROWS/COLUMNS/RHS/BOUNDS/整数标记/OBJSENSE，目标常数以偏移量单独报告），同一模型逐字节相同。
 
 ## 首个内置 provider 与完整 Bundle 聚合
 
-首个内置 provider 为 `ies.generator.highs_milp@5.0.0`（见“首个内置链”）：mode 只要 `planning`、精度只要 `medium`、solver 只要 `ies.solver.highs@1.7.2`；options 只接受空对象；输出请求支持 `solution` 与 `metrics`（`metrics` 为 ResultAdapter 后处理请求，不对应求解器第二个原始文件，未知输出明确拒绝）；只消费装配实际绑定的 constant/time_series 计费价格（快照中未绑定的价格条目不触发拒绝），未知价格类型明确拒绝；`seed` 为 null 时使用固定种子 `0`，种子同时固定进求解命令与元数据，不读取随机全局状态。
+首个内置 provider 为 `ies.generator.highs_milp@5.0.0`（见“首个内置链”）：mode 只要 `planning`、精度只要 `medium`、solver 只要 `ies.solver.highs@1.7.2`；options 只接受空对象；输出请求支持 `solution` 与 `metrics`（`metrics` 为 ResultAdapter 后处理请求，不对应求解器第二个原始文件，未知输出明确拒绝）；只消费装配实际绑定的 constant/time_series/monthly_daily 计费价格（快照中未绑定的价格条目不触发拒绝），未知价格类型明确拒绝；`seed` 为 null 时使用固定种子 `0`，种子同时固定进求解命令与元数据，不读取随机全局状态。
 
 `generate` 返回唯一完整聚合：manifest（即 `bundle.yaml` 内容）加按规范相对路径索引的只读输入文件字节映射（`input/problem.mps` 与 `input/parameters.json`）。`input/parameters.json` 为最小规范 JSON 元数据，只保存 ResultAdapter 后续必需的 `unit_map`、`objective_offset`、`objective_unit`（目标业务单位，按编译期根量纲确定：金额取财务币种，无量纲取 `"1"`，单一物理量纲取 SI 基准单位）、财务分量求值声明 `components`（分量 ident → `{unit, caliber, constant, terms}`，与目标同一分量展开路径，不依赖目标写法）、请求 outputs、固定 seed、precision 与装配/引用追溯，不复制完整装配、模型与财务，不写 hash。结构化命令按真实 HiGHS CLI 语法逐项存储（非 shell），`time_limit_seconds` 同时进入硬资源声明与求解器选项且语义一致；同一组直接输入与 provider 版本逐字节相同，不写临时目录，不启动 solver。
 
@@ -173,6 +173,12 @@ Bundle 以规范 manifest 与全部输入文件作为身份，不另放随机 ID
 所得税关系依财务配置将计税基础、直线折旧及先到期先用的亏损结转纳入同次求解，所得税按对应财务年度进入现金流；折旧与亏损使用不作为现金支出重复扣除，税额与抵扣顺序不依赖规划目标压紧。
 
 生成器声明与模型同源的实际现金及税务事实，使配套适配器恢复完整年度现金流；已有财务分量和求解序列保持原有用途，不以新增通用分量口径或解析命名替代结构化财务映射。字段以[财务事实映射](../formats/solver-bundle.md#同次解财务事实映射)为准。
+
+## 月份日价格能力
+
+`finance.monthly_daily_prices` 表示生成器能够消费月份日价格已物化的完整运营期序列。只有实际计费绑定使用该来源时，提交才要求此能力；未使用条目不触发能力拒绝。内置 `ies.generator.highs_milp@5.0.0` 声明此能力，配套 `ies.result-adapter.highs@5.0.0`；来源扩展不改变既有财务事实输出形态。其他生成器精确版本是否支持按其公开能力声明判断，不依赖名称或版本字符串猜测。
+
+生成器保留来源类型，识别新来源后进入既有已物化价格逐点计价路径，不改写冻结财务为 `time_series`，不再展开公历规则、不读来源对象或重复核对点数。计价、VAT、所得税及财务结果继续消费同一逐点价格关系。
 
 ## 关联年度维护能力
 

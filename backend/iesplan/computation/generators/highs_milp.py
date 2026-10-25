@@ -88,6 +88,7 @@ DESCRIPTOR = GeneratorDescriptor(
         "finance.financial_facts",
         "finance.monthly_demand",
         "finance.affine_maintenance",
+        "finance.monthly_daily_prices",
     ),
     solvers=(SOLVER_REF,),
     executors=(EXECUTOR_REF,),
@@ -225,9 +226,9 @@ class HighsMilpProvider:
         for binding_id in sorted(bindings):
             price_id = bindings[binding_id]["price"]
             kind = finance.energy_prices[price_id].kind
-            if kind not in ("constant", "time_series"):
+            if kind not in ("constant", "time_series", "monthly_daily"):
                 raise ComputationUnavailableError(
-                    f"本 provider 只支持 constant/time_series 计费价格，计费绑定 "
+                    f"本 provider 只支持 constant/time_series/monthly_daily 计费价格，计费绑定 "
                     f"{binding_id!r} 的价格 {price_id!r} 为 {kind!r}",
                     reason="unsupported-tariff",
                 )

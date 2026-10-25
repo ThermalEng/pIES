@@ -59,7 +59,7 @@ ELEC_KW = LOAD_KW / EFFICIENCY
 def _finance_payload(*, refunds=(), opening="0", basis="tax_inclusive", rules="all", maintenance_tax=True):
     payload = {
         "schema": "ies.finance-profile",
-        "schema_version": "4.0.0",
+        "schema_version": "5.0.0",
         "profile": {
             "id": "vat-demo",
             "region": "CN-North",
