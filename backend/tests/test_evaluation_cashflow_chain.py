@@ -822,3 +822,95 @@ class TestT2CashflowChain:
             for index, flow in enumerate(fin["annual_net_flows"])
         )
         assert float(fin["evaluation"]["npv"]) == pytest.approx(hand_npv, rel=1e-7)
+
+
+# ---------------------------------------------------------------------------
+# 0.15 ISSUE-01: real public submit -> frozen worker -> HiGHS -> cashflow
+# ---------------------------------------------------------------------------
+
+
+def test_monthly_daily_real_task_uses_calendar_tariff_in_cashflow(
+    devices, client, db, engine, plane, tmp_path,
+) -> None:
+    """Actual solver cashflow independently reconciled to hourly month prices."""
+    from datetime import datetime, timedelta
+    from iesplan.storage import put_object
+    from iesplan.storage import list_refs
+
+    def day_object(prices: list[str]) -> str:
+        raw = (
+            "\n".join([
+                "# schema: ies.price-series",
+                "# schema_version: 1.0.0",
+                "# resolution: 1h",
+                "# unit: CNY/kWh",
+                "step,price",
+                *[f"{i},{value}" for i, value in enumerate(prices)],
+            ]) + "\n"
+        ).encode("utf-8")
+        return put_object(db, raw, "text/csv", "user_upload").oid
+
+    jan_values = ["0.25", "0", "-0.05"] + ["0.3"] * 21
+    jan_oid = day_object(jan_values)
+    feb_oid = day_object(["0.8"] * 24)
+    rest_oid = day_object(["0.1"] * 24)
+    refs = {month: jan_oid if month == 1 else feb_oid if month == 2 else rest_oid for month in range(1, 13)}
+    profile = _hp_demo_profile()
+    profile["profile"]["id"] = "t2-issue01-monthly"
+    profile["energy_prices"]["grid_import"] = {
+        "carrier": "electricity",
+        "direction": "purchase",
+        "kind": "monthly_daily",
+        "months": {
+            str(month): {
+                "ref": refs[month],
+                "series_meta": {"resolution": "1h", "point_count": 24, "unit": "CNY/kWh"},
+            }
+            for month in range(1, 13)
+        },
+    }
+    user = make_user(db, "t2_issue01_monthly_owner")
+    raw = _full_csv(8760, 48.0, 8784, 96.0)
+    pid = _prepare_t2_project(
+        client, db, user, raw, 2023, HP_BINDING, BASE_PLANNING, profile,
+    )
+    sealed = _solve(
+        client, db, engine, plane, pid, user,
+        _eval_k1n2(), "t2-issue01-monthly-real",
+    )
+    fin = sealed["financial_evaluation"]
+    assert fin["status"] == "evaluated"
+    assert fin["profile_id"] == "t2-issue01-monthly"
+    variables = sealed["compute_result"]["outputs"]["solution"]["variables"]
+    purchase_by_year = [0.0, 0.0]
+    daily_by_month = {
+        1: [float(value) for value in jan_values],
+        2: [0.8] * 24,
+        **{month: [0.1] * 24 for month in range(3, 13)},
+    }
+    for variable in variables:
+        name = str(variable["name"])
+        if not name.startswith("grid1__electricity_import__t"):
+            continue
+        t = int(name.rsplit("__t", 1)[1])
+        date = datetime(2023, 1, 1) + timedelta(hours=t)
+        purchase_by_year[date.year - 2023] += (
+            float(variable["value"]) * daily_by_month[date.month][date.hour]
+        )
+    assert purchase_by_year[0] != pytest.approx(purchase_by_year[1])
+    consumed = _year_sums(
+        variables, "hp1__electricity_in__t",
+        ((0, 8760), (8760, 17544)),
+    )
+    for offset in range(2):
+        manual_net = -purchase_by_year[offset] - 0.008 * consumed[offset] - 28.0 * 50.0
+        assert float(fin["annual_operation"][offset]["net"]) == pytest.approx(
+            manual_net, rel=1e-5, abs=0.02,
+        )
+        assert float(fin["evaluation"]["rows"][offset + 2]["net"]) == pytest.approx(
+            manual_net, rel=1e-5, abs=0.02,
+        )
+    # The data source is the original 1-day object; no full-term editable
+    # authority was created, and all 3 distinct bound OIDs are retained.
+    for oid in (jan_oid, feb_oid, rest_oid):
+        assert any(ref.ref_type == "snapshot_ref" for ref in list_refs(db, oid))
