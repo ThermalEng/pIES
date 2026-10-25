@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import json
+import posixpath
+import re
 from fnmatch import fnmatch
 from pathlib import Path
 
@@ -209,6 +212,153 @@ def find_area(path: str, prefix: str) -> str | None:
     return None
 
 
+# Scheduling estimates from 40158343340 / 40164581356 completed JUnit plus
+# timed-out lane 3's live per-node completion logs. No tests are excluded.
+# Unknown file cost remains an estimate, never a claim of measured runtime.
+BACKEND_SECONDS = {
+    "test_full_horizon_solve.py": 536,
+    "test_prediction_capability.py": 422,
+    "test_highs_readiness.py": 397,
+    "test_evaluation_cashflow_chain.py": 425,
+    "test_financial_facts.py": 160,
+    "test_vat_monthly.py": 95,
+    "test_issue04_d2.py": 91,
+    "test_package_configs.py": 45,
+    "test_config_revisions.py": 27,
+    "test_local_process.py": 22,
+    "test_npv_objective.py": 60,
+    "test_income_annual.py": 55,
+    "test_auth_api.py": 51,
+    "test_package_project_models.py": 40,
+    "test_project_api.py": 35,
+    "test_device_data_upload.py": 33,
+    "test_model_template_api.py": 25,
+    "test_dataset_api.py": 20,
+    "test_campus_project_chain.py": 140,
+    "test_isolated_runner.py": 1,
+}
+
+# The computation-chain file alone consumed ~35 minutes in the fourth-lane
+# full run (40164581356). Per-node timings from *completed* real-solver tests:
+# first success 14m08s / components 7m11s / two solves + evaluation 13m43s.
+# Keep both solver invocations, real devices, all assertions and negative cases.
+COMPUTATION_CHAIN_NODE_SECONDS = {
+    "test_chain_success_reports_business_result": 850,
+    "test_chain_success_reports_declared_components": 433,
+    "test_chain_two_solves_feed_yearly_evaluation": 825,
+    "test_chain_infeasible_model_reports_math_status": 8,
+    "test_gas_volume_driver_same_source_across_gates": 7,
+    "test_chain_policy_rejected_never_executes": 8,
+}
+BROWSER_SECONDS = {
+    "hourly-steps.spec.ts": 345, "task-draft-load.spec.ts": 220,
+    "task-selection.spec.ts": 220, "tax-chain.spec.ts": 145,
+    "financial-evaluation.spec.ts": 130, "export-assessment-r7.spec.ts": 110,
+    "hourly-r3.spec.ts": 110, "result-switch-failure.spec.ts": 80,
+    "evidence-r4.spec.ts": 90,
+}
+
+
+def computation_chain_nodes() -> set[str]:
+    """Derive every pytest node from the long-running chain file, not an allowlist.
+
+    A nodeid selects all parametrizations of that function. Unknown dynamic
+    collection falls back to the complete original file without dropping cases.
+    """
+    source = BACKEND_DIR / "test_computation_chain.py"
+    tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
+    nodes: set[str] = set()
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            if node.name == "pytest_generate_tests":
+                return set()
+            if node.name.startswith("test_"):
+                nodes.add(f"test_computation_chain.py::{node.name}")
+        elif isinstance(node, ast.ClassDef) and node.name.startswith("Test"):
+            for case in node.body:
+                if isinstance(case, (ast.FunctionDef, ast.AsyncFunctionDef)) and case.name.startswith("test_"):
+                    nodes.add(f"test_computation_chain.py::{node.name}::{case.name}")
+        elif isinstance(node, ast.ImportFrom) and any(
+            item.name.startswith("test_") or item.name == "*" for item in node.names
+        ):
+            return set()
+    return nodes
+
+
+def backend_test_units(files: set[str], lane_count: int) -> set[str]:
+    """Only this verified 35-minute chain may partition at testcase granularity."""
+    if lane_count != 4 or "test_computation_chain.py" not in files:
+        return set(files)
+    nodes = computation_chain_nodes()
+    return (files - {"test_computation_chain.py"}) | nodes if nodes else set(files)
+
+
+def assert_backend_coverage(files: set[str], groups: list[dict[str, str | int]]) -> None:
+    items = [test.removeprefix("tests/") for group in groups
+             for test in str(group["tests"]).split()]
+    assert len(items) == len(set(items)), "duplicate backend test or node"
+    assert {item.split("::")[0] for item in items} == files, "backend test file missing"
+    for filename in files:
+        selection = [item for item in items if item.split("::")[0] == filename]
+        if filename == "test_computation_chain.py" and len(selection) > 1:
+            assert set(selection) == computation_chain_nodes(), "missing chain node"
+        else:
+            assert selection == [filename], f"partial test file: {filename}"
+
+
+
+def balanced_shards(items: set[str], lanes: int, weights: dict[str, int],
+                    prefix: str = "") -> list[dict[str, str | int]]:
+    """Stable, lossless longest-processing-time-first file partition."""
+    if not items:
+        return [{"lane": 1, "tests": ""}]
+    groups: list[list[str]] = [[] for _ in range(min(lanes, len(items)))]
+    loads = [0] * len(groups)
+    for name in sorted(items, key=lambda n: (-weights.get(n, 25), n)):
+        at = min(range(len(groups)), key=lambda idx: (loads[idx], idx))
+        groups[at].append(name)
+        loads[at] += weights.get(name, 25)
+    result = [{"lane": i + 1, "tests": " ".join(prefix + name for name in sorted(group))}
+              for i, group in enumerate(groups)]
+    assert sorted(file for group in groups for file in group) == sorted(items)
+    return result
+
+
+def e2e_consumers(helper: str, available: set[str]) -> set[str]:
+    """Read real relative TS imports, including transitive helpers; fail closed.
+
+    Unknown shared test harness files still select all browser specs. This
+    dependency graph is rebuilt from the PR's checked-out files on each run.
+    """
+    root = "frontend/tests/e2e/"
+    target = helper.removeprefix(root)
+    reverse: dict[str, set[str]] = {}
+    for file in E2E_DIR.rglob("*.ts"):
+        rel = file.relative_to(E2E_DIR).as_posix()
+        contents = file.read_text(encoding="utf-8")
+        modules = re.findall(r"""(?:\bfrom\s+|\bimport\s*)['"]([.][^'"]+)['"]""",
+                             contents)
+        for module in modules:
+            base = posixpath.normpath(posixpath.join(posixpath.dirname(rel), module))
+            for resolved in (base + ".ts", base + ".tsx", base + ".js",
+                             base + "/index.ts", base + "/index.tsx", base):
+                if (E2E_DIR / resolved).is_file():
+                    reverse.setdefault(resolved, set()).add(rel)
+                    break
+    queue = [target]
+    reached = {target}
+    found: set[str] = set()
+    while queue:
+        for parent in reverse.get(queue.pop(), ()):
+            if parent in reached:
+                continue
+            reached.add(parent)
+            if parent in available:
+                found.add(parent)
+            queue.append(parent)
+    return found
+
+
 def pick(changed: list[str], full: bool = False) -> dict[str, str]:
     backend_available, browser_available, frontend_available = inventory()
     browser_available.discard(SPECIAL)
@@ -314,8 +464,15 @@ def pick(changed: list[str], full: bool = False) -> dict[str, str]:
                 browser.update((SMOKE_BROWSER, "device-data-csv-extension.spec.ts"))
             elif name in browser_available:
                 browser.update((SMOKE_BROWSER, name))
-            elif path.endswith((".ts", ".json")) and not path.endswith("package-lock.json"):
-                browser_all = True  # shared harness changed
+            elif path in ("frontend/tests/e2e/financial-scaffold.ts",
+                          "frontend/tests/e2e/setup/api.ts"):
+                consumers = e2e_consumers(path, browser_available)
+                if consumers:
+                    browser.update((SMOKE_BROWSER, *consumers))
+                else:
+                    browser_all = True  # no resolvable imports: never silently skip
+            elif path.endswith((".ts", ".tsx", ".js", ".json")) and not path.endswith("package-lock.json"):
+                browser_all = True  # other/unmapped shared harness stays fail-closed
         elif path.startswith("frontend/src/pages/"):
             page = path.removeprefix("frontend/src/pages/")
             selected = PAGE_SPECS.get(page)
@@ -388,18 +545,24 @@ def pick(changed: list[str], full: bool = False) -> dict[str, str]:
         backend.add(SMOKE_BACKEND)
     if browser and SMOKE_BROWSER not in browser:
         browser.add(SMOKE_BROWSER)
-    # Divide the selected browser specs over at most two isolated runners.
-    # A lone spec needs only one app build; multi-file suites use Playwright's
-    # file-level sharding (fullyParallel=false) instead of shared-state workers.
-    browser_total = 2 if len(browser) >= 2 else 1
-    browser_lanes = json.dumps(list(range(1, browser_total + 1)), separators=(",", ":"))
+    backend_count = 4 if len(backend) >= 16 else 2 if len(backend) >= 7 else 1
+    backend_units = backend_test_units(backend, backend_count)
+    case_weights = {f"test_computation_chain.py::{name}": seconds
+                    for name, seconds in COMPUTATION_CHAIN_NODE_SECONDS.items()}
+    backend_groups = balanced_shards(backend_units, backend_count,
+                                     {**BACKEND_SECONDS, **case_weights}, "tests/")
+    assert_backend_coverage(backend, backend_groups)
+    browser_count = 4 if len(browser) >= 20 else 2 if len(browser) >= 2 else 1
+    browser_groups = balanced_shards(browser, browser_count, BROWSER_SECONDS)
     return {
         "backend_run": str(bool(backend)).lower(),
         "backend_tests": " ".join("tests/" + name for name in sorted(backend)),
+        "backend_shards": json.dumps(backend_groups, separators=(",", ":")),
         "browser_run": str(bool(browser) or special).lower(),
         "browser_specs": " ".join(sorted(browser)),
-        "browser_lanes": browser_lanes,
-        "browser_total": str(browser_total),
+        "browser_lanes": json.dumps([part["lane"] for part in browser_groups], separators=(",", ":")),
+        "browser_shards": json.dumps(browser_groups, separators=(",", ":")),
+        "browser_total": str(len(browser_groups)),
         "frontend_run": str(bool(frontend)).lower(),
         "frontend_tests": " ".join(sorted(frontend)),
         "startup_run": str(startup).lower(),
@@ -408,23 +571,108 @@ def pick(changed: list[str], full: bool = False) -> dict[str, str]:
     }
 
 
+# CI changes are high-impact: verify both 4-lane schedulers and all
+# real assertions *automatically on the PR* before merge. Ordinary business
+# changes still use dependency-based selective testing.
+AUTO_FULL_PR_PATHS = frozenset({
+    ".github/workflows/docker-ci.yml",
+    ".github/ci/select_tests.py",
+    ".github/ci/start-stack.sh",
+    ".github/ci/docker-compose.yml",
+    ".github/ci/docker-compose-cache-read.yml",
+    ".github/ci/docker-compose-cache-write.yml",
+    "backend/Dockerfile",
+    "frontend/Dockerfile",
+    "frontend/tests/e2e/Dockerfile",
+    "frontend/tests/e2e/playwright.config.ts",
+})
+
+
+def require_full_suite(changed: list[str], event: str, requested: bool = False,
+                       pr_action: str = "") -> bool:
+    """Full only on explicit dispatch or the first critical CI PR review.
+
+    Subsequent PR synchronizations and every master push run affected tests;
+    a prior full-suite attempt remains visible even when failing.
+    """
+    if requested or "__FULL__" in changed:
+        return True
+    return (event == "pull_request"
+            and pr_action in {"opened", "ready_for_review"}
+            and any(path in AUTO_FULL_PR_PATHS for path in changed))
+
+
 def self_test() -> None:
-    # Exact shard cardinality: one selected spec -> one runner; two or
-    # more specs -> two runners. The aggregation gate cannot accept only one
-    # successful lane when two are selected.
+    # Full regression trigger is automatic; manual dispatch is *optional*.
+    assert require_full_suite([".github/ci/select_tests.py"], "pull_request", pr_action="opened")
+    assert require_full_suite([".github/workflows/docker-ci.yml"], "pull_request",
+                              pr_action="ready_for_review")
+    assert require_full_suite(["backend/Dockerfile"], "pull_request", pr_action="opened")
+    assert not require_full_suite([".github/ci/select_tests.py"], "pull_request",
+                                  pr_action="synchronize")
+    assert not require_full_suite(["backend/Dockerfile"], "push")
+    assert not require_full_suite([], "schedule")
+    assert require_full_suite(["README.md"], "workflow_dispatch", requested=True)
+    assert require_full_suite(["__FULL__"], "pull_request")
+    assert not require_full_suite(["frontend/tests/e2e/financial-scaffold.ts"], "pull_request")
+    assert not require_full_suite(["backend/iesplan/finance/config.py"], "pull_request")
+    assert not require_full_suite(["docs/readme.md"], "pull_request")
+    assert not require_full_suite(["docs/readme.md"], "workflow_dispatch")
+    # Selection is lossless, disjoint and deterministic for both matrices.
     one = pick(["frontend/tests/e2e/infra.spec.ts"])
     assert one["browser_specs"] == "infra.spec.ts"
-    assert one["browser_lanes"] == "[1]" and one["browser_total"] == "1"
+    assert one["browser_total"] == "1"
+    assert [x["tests"] for x in json.loads(one["browser_shards"])] == ["infra.spec.ts"]
     multi = pick(["frontend/src/components/ui/Button.tsx"])
     assert len(multi["browser_specs"].split()) >= 2
-    assert multi["browser_lanes"] == "[1,2]" and multi["browser_total"] == "2"
+    assert multi["browser_total"] == "2"
     all_specs = pick([".github/ci/select_tests.py"], full=True)
     assert len(all_specs["browser_specs"].split()) > 40
-    assert all_specs["browser_lanes"] == "[1,2]" and all_specs["browser_total"] == "2"
+    assert all_specs["browser_total"] == "4"
+    assert len(json.loads(all_specs["backend_shards"])) == 4
+    for plan in (one, multi, all_specs):
+        for field, shards in (("browser_specs", "browser_shards"),
+                              ("backend_tests", "backend_shards")):
+            picked = plan[field].split()
+            groups = json.loads(plan[shards])
+            partitioned = [n for group in groups for n in group["tests"].split()]
+            if field == "backend_tests":
+                assert_backend_coverage({name.removeprefix("tests/") for name in picked}, groups)
+            else:
+                assert sorted(picked) == sorted(partitioned)
+                assert len(partitioned) == len(set(partitioned))
+    chain_nodes = computation_chain_nodes()
+    assert len(chain_nodes) >= 6
+    assert set(COMPUTATION_CHAIN_NODE_SECONDS) <= {
+        node.rsplit("::", 1)[-1] for node in chain_nodes
+    }
+    full_units = {unit.removeprefix("tests/") for group in json.loads(all_specs["backend_shards"])
+                  for unit in group["tests"].split()}
+    assert chain_nodes <= full_units
+    assert "test_computation_chain.py" not in full_units
+    assert backend_test_units({"test_computation_chain.py"}, 1) == {"test_computation_chain.py"}
     docs = pick(["docs/reviews/style.md"])
-    assert docs["browser_run"] == "false" and docs["browser_lanes"] == "[1]"
+    assert docs["browser_run"] == "false" and docs["browser_total"] == "1"
     ext = pick(["frontend/tests/e2e/device-yaml-extension.spec.ts"])
-    assert ext["special_device"] == "true" and ext["browser_lanes"] == "[1]"
+    assert ext["special_device"] == "true" and ext["browser_total"] == "1"
+    # Real test-import graph, including transitive helper consumers.
+    scaffold = pick(["frontend/tests/e2e/financial-scaffold.ts"])
+    assert {"financial-evaluation.spec.ts", "hourly-steps.spec.ts",
+            "task-selection.spec.ts", "tax-chain.spec.ts",
+            "economic-bindings-issue03.spec.ts", SMOKE_BROWSER} <= set(
+                scaffold["browser_specs"].split())
+    assert len(scaffold["browser_specs"].split()) < len(inventory()[1]) - 1
+    common_api = pick(["frontend/tests/e2e/setup/api.ts"])
+    assert {"financial-evaluation.spec.ts", "task-selection.spec.ts",
+            SMOKE_BROWSER} <= set(common_api["browser_specs"].split())
+    assert len(common_api["browser_specs"].split()) <= len(inventory()[1]) - 1
+    assert len(pick(["frontend/tests/e2e/global-setup.ts"])["browser_specs"].split()) > 40
+    heavy = balanced_shards({"test_full_horizon_solve.py",
+                              "test_evaluation_cashflow_chain.py", "test_smoke.py"}, 2,
+                             BACKEND_SECONDS)
+    assert all("test_full_horizon_solve.py" not in part["tests"] or
+               "test_evaluation_cashflow_chain.py" not in part["tests"]
+               for part in heavy)
     assert pick([".github/workflows/docker-ci.yml"])["backend_tests"] == "tests/test_smoke.py"
     assert pick([".github/workflows/docker-ci.yml"])["browser_specs"] == "infra.spec.ts"
     assert "test_finance.py" in pick(["backend/iesplan/finance/config.py"])["backend_tests"]
@@ -539,6 +787,10 @@ def main() -> None:
     parser.add_argument("--changed", type=Path)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--full", choices=("true", "false"), default="false")
+    parser.add_argument("--event",
+                        choices=("pull_request", "push", "workflow_dispatch"),
+                        default="pull_request")
+    parser.add_argument("--pr-action", default="")
     args = parser.parse_args()
     if args.self_test:
         self_test()
@@ -546,9 +798,13 @@ def main() -> None:
     if not args.changed or not args.output:
         parser.error("--changed and --output are required")
     paths = [part.decode("utf-8") for part in args.changed.read_bytes().split(b"\0") if part]
-    result = pick(paths, full=args.full == "true")
+    full = require_full_suite(paths, args.event, requested=args.full == "true",
+                              pr_action=args.pr_action)
+    result = pick(paths, full=full)
+    result["full_suite"] = str(full).lower()
     args.output.write_text("".join(f"{key}={value}\n" for key, value in result.items()), encoding="utf-8")
     print("Changed paths:", paths)
+    print("CI event:", args.event, "automatic full suite:", full)
     print("Selected:", result)
 
 

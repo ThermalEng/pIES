@@ -189,24 +189,74 @@ def _iter_domain_files():
             yield domain, path
 
 
-#: 纯函数复用豁免(与 test_architecture_gates.ALLOWED_STATE_MODEL_REUSE 同义，
-#: 此处独立声明以免测试间相互导入)：metrics.validity/financial 仅依赖标准库
-#: 与 numpy 的纯词汇/纯函数，results 复用其枚举与纯函数而不是复制第二份
-#: 事实源（复用领域公开纯函数，避免复制第二份事实源；复制枚举值才是本测试要防的）。
-_PURE_METRICS_REUSE: frozenset[tuple[str, str]] = frozenset(
-    {
-        ("results", "iesplan.metrics.validity"),
-        ("results", "iesplan.metrics.financial"),
-    }
-)
+#: 仅承认两类公开不可变跨域复用；不允许引入整个子模块/域，
+#: 不允许其他文件或任意财务业务函数。实际域业务依赖继续交由本门禁阻断。
+_APPROVED_TASK_FINANCE_TYPES = frozenset({
+    "ConstructionPayment", "EvaluationInput", "MaintenanceExpense",
+})
+_APPROVED_RESULTS_METRICS_NAMES = frozenset({
+    "FinancialValidity", "IRRStatus", "OptimalityValidity",
+    "PhysicalValidity", "ReliabilityStatus", "ValidityLevel",
+    "financial_validity_from_irr", "from_db_value",
+    "summarize_four_dimensions",
+})
 
 
-def _is_pure_reuse(domain: str, mod: str) -> bool:
-    return any(
-        domain == owner and (mod == target or mod.startswith(target + "."))
-        for owner, target in _PURE_METRICS_REUSE
-    )
+def _is_approved_public_contract_import(
+    domain: str, path: Path, node: ast.AST,
+) -> bool:
+    if (
+        not isinstance(node, ast.ImportFrom)
+        or node.level != 0
+        or not node.names
+        or any(alias.name == "*" for alias in node.names)
+    ):
+        return False
+    if (
+        domain == "tasks"
+        and path.relative_to(_PKG_ROOT).as_posix() == "tasks/contracts.py"
+        and node.module == "iesplan.finance"
+    ):
+        return all(alias.name in _APPROVED_TASK_FINANCE_TYPES for alias in node.names)
+    if (
+        domain == "results"
+        and path.relative_to(_PKG_ROOT).as_posix() == "results/rules.py"
+        and node.module == "iesplan.metrics"
+    ):
+        return all(alias.name in _APPROVED_RESULTS_METRICS_NAMES for alias in node.names)
+    return False
 
+
+def test_approved_cross_domain_contract_imports_are_narrow() -> None:
+    """Only the actual owner, public facade and approved names can bypass purity."""
+    task_path = _PKG_ROOT / "tasks/contracts.py"
+    results_path = _PKG_ROOT / "results/rules.py"
+    def accepted(domain: str, path: Path, source: str) -> bool:
+        node = ast.parse(source).body[0]
+        return _is_approved_public_contract_import(domain, path, node)
+
+    assert accepted("tasks", task_path,
+                    "from iesplan.finance import ConstructionPayment, EvaluationInput, MaintenanceExpense")
+    assert accepted("results", results_path,
+                    "from iesplan.metrics import PhysicalValidity, summarize_four_dimensions")
+    for source in (
+        "from iesplan.finance import EvaluationInput, project_npv",
+        "from iesplan.finance.tax import EvaluationInput",
+        "from iesplan.finance import *",
+        "import iesplan.finance",
+    ):
+        assert not accepted("tasks", task_path, source), source
+    assert not accepted("tasks", _PKG_ROOT / "tasks/service.py",
+                        "from iesplan.finance import EvaluationInput")
+    for source in (
+        "from iesplan.metrics import PhysicalValidity, evaluate_project_investment",
+        "from iesplan.metrics.validity import PhysicalValidity",
+        "from iesplan.metrics import *",
+        "import iesplan.metrics",
+    ):
+        assert not accepted("results", results_path, source), source
+    assert not accepted("results", _PKG_ROOT / "results/other.py",
+                        "from iesplan.metrics import ValidityLevel")
 
 def test_domain_source_purity():
     """域源码纯度：无 ORM/跨层导入，无 commit/rollback；contracts 只靠标准库+core。
@@ -214,8 +264,7 @@ def test_domain_source_purity():
     顶层混合 models/ 已删除，任何对 iesplan.models.* 的导入（含各域
     persistence.py）一律经 _BANNED_PREFIXES 记违规，不再维护归属表清单；
     表归属事实由门禁 8 从当前目录推导（见 test_architecture_gates）。
-    另一例外是 _PURE_METRICS_REUSE 的纯词汇/纯函数复用（复用而非复制，
-    不记违规）。
+    仅允许由精确 importer 从公开门面复用经核对的不可变类型及纯函数。
     """
     violations: list[str] = []
     for domain, path in _iter_domain_files():
@@ -227,7 +276,9 @@ def test_domain_source_purity():
                 if mod == "__future__":
                     continue
                 if path.name == "contracts.py":
-                    # contracts 只允许标准库与 iesplan.core
+                    # contracts 只允许标准库、core 与指定的 finance 公开不可变类型
+                    if _is_approved_public_contract_import(domain, path, node):
+                        continue
                     if mod.startswith("iesplan.") and not mod.startswith("iesplan.core."):
                         violations.append(f"{domain}/{path.name}:{node.lineno}: {mod}")
                     continue
@@ -236,7 +287,7 @@ def test_domain_source_purity():
                         continue
                     if mod.split(".")[0] == "sqlalchemy":
                         continue
-                if _is_pure_reuse(domain, mod):
+                if _is_approved_public_contract_import(domain, path, node):
                     continue
                 bad = _db_connection_violation(mod, [a.name for a in node.names])
                 if bad is not None:
@@ -248,8 +299,6 @@ def test_domain_source_purity():
                         break
             elif isinstance(node, ast.Import):
                 for alias in node.names:
-                    if _is_pure_reuse(domain, alias.name):
-                        continue
                     if alias.name == "iesplan.db":
                         violations.append(
                             f"{domain}/{path.name}:{node.lineno}: import iesplan.db(整模块, 含连接)"
