@@ -257,7 +257,7 @@ def load_compute_inputs(
     materialized = materialize_non_predictive_series(
         artifact, resources, operation_years=operation_years
     )
-    prices = _materialize_price_series(db, artifact, finance)
+    prices = _materialize_price_series(db, artifact, finance, operation_years=operation_years)
     if prices:
         materialized = MaterializedSet(
             operation_years=materialized.operation_years,
@@ -272,39 +272,69 @@ def _materialize_price_series(
     db: Session,
     artifact: ValidatedAssemblyArtifact,
     finance: EffectiveFinanceConfig,
+    *,
+    operation_years: int,
 ) -> tuple[MaterializedPriceSeries, ...]:
-    """计费绑定实际引用的时变价格读冻结对象物化为全周期序列。
+    """Restore only tariff-bound price sources from the frozen finance revision.
 
-    只处理 canonical 计费绑定引用到的 ``kind == "time_series"`` 价格；
-    无引用即返回空（跳过，不建空序列）。提交边界已核对实长/分辨率/
-    单位，此处按可信流程读取：对象缺失或字节不可解析即实际错误可见，
-    不做完整性复核与重复领域校验。``ref`` 即冻结对象 oid。
+    Full-term series remain untouched. Monthly day sources are interpreted by
+    the actual Gregorian operating calendar, not by repeating an annual array.
+    Input validity belongs to the single submit boundary; these reads are
+    trusted and do not reparse the full upload protocol.
     """
     from iesplan.finance import read_trusted_price_values
+    from iesplan.finance.monthly_daily import expand_monthly_daily_prices
 
     doc = json.loads(artifact.canonical_text)
+    baseline = doc["project_baseline"]
     wanted: list[str] = []
     for binding_id in sorted(doc.get("tariff_bindings") or {}):
         price_id = (doc["tariff_bindings"][binding_id] or {}).get("price")
         price = (finance.energy_prices or {}).get(price_id)
-        if price is not None and price.kind == "time_series" and price_id not in wanted:
+        if price is not None and price.kind in ("time_series", "monthly_daily") and price_id not in wanted:
             wanted.append(price_id)
+    decoded: dict[str, tuple[float, ...]] = {}
+
+    def read_oid(oid: str) -> tuple[float, ...]:
+        if oid not in decoded:
+            decoded[oid] = read_trusted_price_values(get_object(db, oid))
+        return decoded[oid]
+
     out: list[MaterializedPriceSeries] = []
     for price_id in wanted:
         price = finance.energy_prices[price_id]
-        raw = get_object(db, price.ref)
-        # 可信流程最小解码（提交边界已唯一校验；损坏按实际读取错误可见，
-        # 不重跑 PRICE-CSV 输入诊断）：元数据取冻结声明，不读文件头。
-        values = read_trusted_price_values(raw)
-        meta = price.series_meta
+        if price.kind == "time_series":
+            values = read_oid(price.ref)
+            meta = price.series_meta
+            source = {"kind": "price_series", "object_id": price.ref}
+        else:
+            month_sources = price.months
+            curves = {
+                month: read_oid(month_sources[str(month)].ref)
+                for month in range(1, 13)
+            }
+            values = expand_monthly_daily_prices(
+                curves,
+                resolution=baseline["resolution"],
+                start_year=baseline["start_year"],
+                operation_years=operation_years,
+            )
+            meta = month_sources["1"].series_meta
+            source = {
+                "kind": "monthly_daily",
+                "months": {
+                    str(month): month_sources[str(month)].ref
+                    for month in range(1, 13)
+                },
+            }
         out.append(
             MaterializedPriceSeries(
                 price_id=price_id,
                 point_count=len(values),
-                resolution=meta.resolution if meta else "",
-                unit=meta.unit if meta else "",
+                resolution=meta.resolution,
+                unit=meta.unit,
                 values=values,
-                source={"kind": "price_series", "object_id": price.ref},
+                source=source,
             )
         )
     return tuple(out)
