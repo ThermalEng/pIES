@@ -259,7 +259,7 @@ class _StubRuntime:
                 attempt_id=attempt.attempt_id,
                 assembly_id=attempt.assembly_id,
                 calculation_config_id=attempt.calculation_config_id,
-                generator_ref="ies.generator.highs_milp@4.0.0",
+                generator_ref="ies.generator.highs_milp@4.1.0",
                 solver_ref="ies.solver.highs@1.7.2",
                 executor_ref="ies.executor.local_process@1.0.0",
                 executable_ref="ies.solver.highs@1.7.2",
@@ -316,7 +316,7 @@ class TestComputeChainEndToEnd:
         assert sealed["compute_result"]["receipt_id"] == sealed["receipt"]["receipt_id"]
         assert sealed["receipt"]["status"] == "succeeded"
         assert sealed["receipt"]["executable_ref"] == "ies.solver.highs@1.7.2"
-        assert sealed["bundle_manifest"]["bundle"]["generator"] == ("ies.generator.highs_milp@4.0.0")
+        assert sealed["bundle_manifest"]["bundle"]["generator"] == ("ies.generator.highs_milp@4.1.0")
         snapshot = worker_app.get_snapshot_record(db, task.calc_snapshot_id)
         assert snapshot is not None
         args = sealed["bundle_manifest"]["command"]["arguments"]
@@ -362,7 +362,7 @@ class TestComputeChainEndToEnd:
         assert sealed["outcome"] == "normal_completion"
         assert sealed["compute_result"]["math_status"] == "solved"
         assert sealed["receipt"]["bundle_id"] == f"snapshot-{snapshot.id}:attempt-{claim.attempt_id}"
-        assert sealed["bundle_manifest"]["bundle"]["generator"] == "ies.generator.highs_milp@4.0.0"
+        assert sealed["bundle_manifest"]["bundle"]["generator"] == "ies.generator.highs_milp@4.1.0"
 
         fin = sealed["financial_evaluation"]
         assert fin["schema"] == "ies.financial-evaluation"
