@@ -141,13 +141,14 @@ IRR 与 `normal、no_solution、multiple、degenerate、out_of_domain、numeric_
 
 Worker 对同次已求解结果计算一次评价，随结果载荷同一证据单元封存（`status` 为 `"evaluated"`）；未求解或缺解输出不写财务块。读取与导出只消费该封存事实，不重算、不读最新配置。金额均为十进制字符串（不舍入），单位独立字段：
 
-该封存块目标以 `schema: ies.financial-evaluation`、`schema_version: 2.0.0` 标识，新增必填需量月明细及年度费用。建设、付款、逐年运行及税务事实与完整现金流均来自适配器恢复的[同次解财务事实](../formats/solver-bundle.md#同次解财务事实映射)，原样投影，不在 application 按序列、成本规则或税务规则重算。`finance` 的既有评价纯函数仅对该完整现金流与冻结评价参数计算指标。税后NPV目标与评价值的一致性由定向测试证明，不新增运行期重复比对。
+该封存块以 `schema: ies.financial-evaluation`、`schema_version: 2.0.0` 标识，包含必填需量月明细及年度费用。建设、付款、逐年运行及税务事实与完整现金流均来自适配器恢复的[同次解财务事实](../formats/solver-bundle.md#同次解财务事实映射)，原样投影，不在 application 按序列、成本规则或税务规则重算。`finance` 的既有评价纯函数仅对该完整现金流与冻结评价参数计算指标。税后NPV目标与评价值的一致性由定向测试证明，不新增运行期重复比对。
 
 - `evaluation_years`／`construction_period`／`operation_years`：整数（K/N 回显冻结输入，供时轴映射展示）；
 - `currency`、`price_basis`、`base_year`、`profile_id`、`discount_rate`：冻结值原样；
 - `construction_total` + `construction_total_unit`、`annual_fixed_om`：十进制字符串；
 - `payments_applied`：`[{t, ratio, amount}]` 数组；`t` 为整数财务时点，`ratio`／`amount` 为十进制字符串；同一 `t` 可多笔，不设时点唯一；
-- `annual_operation`：`[{financial_year, energy_net, variable_om, fixed_om, maintenance, net}]` 数组；金额十进制字符串，`maintenance` 为该年逐项维护合计；
+- `annual_operation`：`[{financial_year, energy_net, variable_om, fixed_om, maintenance, demand_charge, net}]` 数组；金额十进制字符串，`maintenance` 为该年逐项维护合计，`demand_charge` 为当年需量费合计，`net` 已扣除各项费用一次；
+- `monthly_demand`：原样保留同次解的需量月明细；字段、金额与单位以[同次解财务事实](../formats/solver-bundle.md#同次解财务事实映射)为准。无绑定为空数组，零费率绑定仍保留真实峰值与零费用；
 - `tax_cash`、`annual_net_flows`：原样保留同次解财务事实中的结构与金额；数组单位由 `currency` 指定，年度现金流长度为 `evaluation_years+1`。空税则表示不适用，税务结算后的现金流仍完整存在；
 - `evaluation`：逐年明细与指标：`rows[{year, net, discounted, cumulative, cumulative_discounted}]`（金额字符串）；`npv`（字符串）+ `npv_unit`；`irr`（数或 null）+ `irr_status`（本页 IRR 状态枚举）；`static/dynamic_payback`（年数或 null）+ `_unit`（有值为 `"year"`）+ `_status`（`recovered`／`not_recovered`）。
 
