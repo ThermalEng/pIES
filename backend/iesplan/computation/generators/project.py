@@ -38,7 +38,6 @@ import math
 from collections import Counter
 from collections.abc import Mapping
 from datetime import datetime, timedelta
-from decimal import Decimal
 from types import MappingProxyType
 from typing import Any
 
@@ -66,12 +65,14 @@ from iesplan.core.contracts import (
 )
 from iesplan.core.contracts.baseline import TIMELINE_STEP_DURATION_VAR
 from iesplan.core.contracts.planning_expression import PlanningExpression
-from iesplan.core.units import dims_of, to_si
+from iesplan.core.units import dims_of, to_si, unit_meta
 from iesplan.finance import (
     ConstructionVatRule,
+    CostComponentShareTerm,
     EffectiveFinanceConfig,
     EvaluationInput,
     IncomeTaxRule,
+    ScaleUnitCostTerm,
     VatRule,
     annual_boundaries,
 )
@@ -125,6 +126,15 @@ def _to_internal(value: float, unit: str) -> float:
     if dims_of(unit) == Counter({"currency": 1}):
         return float(value)
     return to_si(float(value), unit)
+
+
+def _unit_cost_to_internal(value: float, unit: str) -> float:
+    """同币种单位费用按物理分母归一，币值不做无汇率的跨币种折算。
+
+    注册单位元数据给出复合单位的 SI 系数；财务入口已核对单价的
+    币种与模型一致，USD/kW 也只换算 kW→W 而保持美元金额。
+    """
+    return float(value) * float(unit_meta(unit)["to_si"])
 
 
 #: 单一物理量纲 → SI 基准单位符号（目标单位报告用；仅公开 dims_of 推导）。
@@ -378,6 +388,10 @@ class _ProjectBuilder:
         self._demand_totals: dict[str, _AffineAcc] = {}
         self._fact_cash: dict[int, _AffineAcc] = {}
         self._fact_annual: dict[int, dict[str, _AffineAcc]] = {}
+        #: 维护清单的 (评价年, 同年原始位置) → 唯一金额表达式；现金、
+        #: VAT、所得税和同次解声明均消费此表，不拆分组合支付。
+        self._maintenance_items: dict[tuple[int, int], _AffineAcc] = {}
+        self._maintenance_annual: dict[int, _AffineAcc] = {}
         self._fact_construction = _AffineAcc()
         self._fact_fixed_om = _AffineAcc()
         self._fact_payments: list[tuple[int, str, _AffineAcc]] = []
@@ -799,7 +813,13 @@ class _ProjectBuilder:
         if comp.fixed is not None:
             out.add_const(_money_to_internal(comp.fixed))
         for driver, cost in (comp.linear or {}).items():
-            coeff = _to_internal(float(cost.unit_cost.value), cost.unit_cost.unit)
+            # S2 的 upkeep 比例引用同一实例 upfront；美元建设单价只按
+            # 物理分母归一，不进行汇率换算。其他运维分量沿既有换算路径。
+            coeff = (
+                _unit_cost_to_internal(float(cost.unit_cost.value), cost.unit_cost.unit)
+                if component == "upfront_capex"
+                else _to_internal(float(cost.unit_cost.value), cost.unit_cost.unit)
+            )
             out.add_scaled(self._driver_affine(inst, driver, start, end), coeff)
         return out
 
@@ -1274,12 +1294,37 @@ class _ProjectBuilder:
         out.add_scaled(self._cost_affine(inst, "annual_fixed_om"), _YEAR_SECONDS)
         return out
 
-    def _maintenance_by_year(self) -> dict[int, float]:
-        """维护/换新按评价年归集（同年多笔累加，不复制现金清单）。"""
-        out: dict[int, float] = {}
+    def _retain_maintenance(self) -> None:
+        """冻结清单逐笔构造一次仿射付款，并按评价年求和。
+
+        属性接管复用 ``bound_prop``，未接管按该实例属性换算 SI；建设
+        比例只取当前实例的 upfront_capex 分量，既有资产只可贡献规模项。
+        所有引用/量纲/币种和成本存在性均已在公开提交边界核对。
+        """
+        positions: dict[int, int] = {}
         for entry in self.evaluation.maintenance_expenses:
-            out[entry.year] = out.get(entry.year, 0.0) + float(entry.amount)
-        return out
+            position = positions.get(entry.year, 0) + 1
+            positions[entry.year] = position
+            amount = _AffineAcc()
+            amount.add_const(float(entry.amount))
+            for term in entry.terms:
+                if isinstance(term, ScaleUnitCostTerm):
+                    factor = _unit_cost_to_internal(float(term.unit_cost.value), term.unit_cost.unit)
+                    planned = self.bound_prop.get((term.instance_id, term.property))
+                    if planned is not None:
+                        amount.add_term(planned, factor)
+                    else:
+                        amount.add_const(
+                            self._prop_const(term.instance_id, term.property) * factor
+                        )
+                elif isinstance(term, CostComponentShareTerm):
+                    amount.add_scaled(
+                        self._cost_affine(term.instance_id, "upfront_capex"),
+                        float(term.ratio),
+                    )
+            self._maintenance_items[(entry.year, position)] = amount
+            annual = self._maintenance_annual.setdefault(entry.year, _AffineAcc())
+            annual.add_scaled(amount, 1.0)
 
     def _year_cash(self, year: int) -> _AffineAcc:
         """评价年未折现现金累积（与目标同一表达式并行累积，同源声明用）"""
@@ -1324,7 +1369,6 @@ class _ProjectBuilder:
         price_markup, om_markup, construction_markup = self._vat_gross_markups()
         demand_tax = self._demand_tax_factors()
         construction = self._construction_affine(construction_markup or None)
-        maintenance = self._maintenance_by_year()
         baseline = self.doc["project_baseline"]
         bounds = annual_boundaries(
             baseline["resolution"], baseline["start_year"], evaluation.operation_years
@@ -1383,12 +1427,14 @@ class _ProjectBuilder:
             annual.add_scaled(variable, 1.0)
             annual.add_scaled(fixed, 1.0)
             annual.add_scaled(demand, -1.0)
-            annual.add_const(-maintenance.get(year_no, 0.0))
+            maintenance = self._maintenance_annual.get(year_no) or _AffineAcc()
+            annual.add_scaled(maintenance, -1.0)
             self._year_cash(year_no).add_scaled(annual, 1.0)
             self._fact_annual[year_no] = {
                 "energy": energy.snapshot(),
                 "variable": variable.snapshot(),
                 "fixed": fixed.snapshot(),
+                "maintenance": maintenance.snapshot(),
                 "demand": demand.snapshot(),
                 "net": annual.snapshot(),
             }
@@ -1551,19 +1597,14 @@ class _ProjectBuilder:
                                 self._cost_affine(inst, component, start, end), factor
                             )
             for entry in rule.maintenance_input_tax:
-                # 引用存在性与跨输入对应已由提交边界核对，此处按冻结
-                # 清单顺序取数，不复制金额。维护金额为实际含税付款，
+                # 引用存在性与跨输入对应已由提交边界核对；同一 (year,
+                # position) 直接消费逐笔金额。维护金额为实际含税付款，
                 # 恒按含税拆价计税，不随文件 price_basis 改变。
-                year_amounts = [
-                    float(item.amount)
-                    for item in self.evaluation.maintenance_expenses
-                    if item.year == entry.year
-                ]
                 factor = self._vat_gross_split_factor(entry.rate) * float(
                     entry.deductible_ratio.value
                 )
-                inp[12 * entry.year - 1].add_const(
-                    year_amounts[entry.position - 1] * factor
+                inp[12 * entry.year - 1].add_scaled(
+                    self._maintenance_items[(entry.year, entry.position)], factor
                 )
         for rule in pool_rules["construction"]:
             # 分量口径（仅 upfront_capex）与引用存在性已由公开财务入口
@@ -2036,14 +2077,11 @@ class _ProjectBuilder:
         for item in rule.deductible_maintenance.items:
             if item.year != year or not item.deductible:
                 continue
-            year_amounts = [
-                float(entry.amount)
-                for entry in self.evaluation.maintenance_expenses
-                if entry.year == item.year
-            ]
-            gross = year_amounts[item.position - 1]
             coef = maint_credit.get((item.year, item.position), 0.0)
-            base.add_const(-gross * (1.0 - coef))
+            base.add_scaled(
+                self._maintenance_items[(item.year, item.position)],
+                -(1.0 - coef),
+            )
         self._income_deduct_depreciation(
             base, rule, rule_id, year, credits[2], instances, var_bounds, location
         )
@@ -2408,9 +2446,6 @@ class _ProjectBuilder:
         同一输入恒得同一声明。
         """
         years = self.evaluation.evaluation_years
-        maint: dict[int, Decimal] = {}
-        for item in self.evaluation.maintenance_expenses:
-            maint[item.year] = maint.get(item.year, Decimal("0")) + Decimal(item.amount)
         annual_operation: list[dict[str, object]] = []
         for year_no in sorted(self._fact_annual):
             fields = self._fact_annual[year_no]
@@ -2420,7 +2455,7 @@ class _ProjectBuilder:
                     "energy_net": self._decl_affine(fields["energy"]),
                     "variable_om": self._decl_negated(fields["variable"]),
                     "fixed_om": self._decl_negated(fields["fixed"]),
-                    "maintenance": str(maint.get(year_no, Decimal("0"))),
+                    "maintenance": self._decl_affine(fields["maintenance"]),
                     "demand_charge": self._decl_affine(fields["demand"]),
                     "net": self._decl_affine(fields["net"]),
                 }
@@ -2551,6 +2586,8 @@ class _ProjectBuilder:
         self._build_bus_rows(buses)
         self._build_monthly_demand()
         self._build_planning_rows()
+        # VAT/所得税在现金目标构造之前使用同一逐笔维护表达式。
+        self._retain_maintenance()
         self._vat_cash = self._build_vat()
         self._income_cash = self._build_income()
         objective, objective_unit = self._build_objective()
