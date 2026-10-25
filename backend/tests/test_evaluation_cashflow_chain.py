@@ -384,7 +384,8 @@ def _eval_k1n2(maintenance=()):
     }
 
 
-def _solve(client, db, engine, plane, pid, user, evaluation, key, expected_revision=None):
+def _solve(client, db, engine, plane, pid, user, evaluation, key, expected_revision=None,
+           after_submit=None):
     from test_task_config_revision import _save_config  # noqa: E402
 
     rev = _save_config(client, pid, user, expected_revision=expected_revision)
@@ -398,6 +399,8 @@ def _solve(client, db, engine, plane, pid, user, evaluation, key, expected_revis
     )
     assert status == 201, body
     task_id = int(body["task"]["id"])
+    if after_submit is not None:
+        after_submit()
     claim = worker_app.acquire_attempt(db, task_id, "t2-e2e")
     assert claim is not None
     db.commit()
@@ -607,12 +610,34 @@ class TestT2CashflowChain:
         assert fin["evaluation"]["irr"] is None
 
     def test_maintenance_deducted_only_at_event_year(self, devices, client, db, engine, plane) -> None:
-        """同项目 + t=3 两笔维护(1000+2500.50): 合计只扣 CF[3] 一次,
-        CF[2] 与无维护一致, 不限制年份唯一, 不丢项。"""
+        """公开提交→Worker 真实 HiGHS→Adapter→封存：同年两笔组合维护。
+
+        规划最优容量 50kW，本课题建设额 50×2800=140000；
+        维护分别为 1000+12×50=1600、2500.50+0.01×140000=3900.50。
+        不增加整段求解次数：复用原有一次基线、一次维护的测试路径。
+        """
         raw = _full_csv(8760, 48.0, 8784, 96.0)
         owner = make_user(db, "t2_owner_b")
         pid = _prepare_t2_project(client, db, owner, raw, 2023, HP_BINDING, BASE_PLANNING, _hp_demo_profile())
         base = _solve(client, db, engine, plane, pid, owner, _eval_k1n2(), "t2-k1n2-base")
+
+        def change_current_draft_after_freeze():
+            view = client.get(f"/api/projects/{pid}", headers=_h(client, owner))
+            assert view.status_code == 200, view.text
+            updated = client.put(
+                f"/api/projects/{pid}/draft",
+                json={"expected_revision": view.json()["draft"]["revision"], "commands": [{
+                    "id": "s2-change-finance-after-freeze", "unit": "assembly",
+                    "type": "assembly.set_finance_binding",
+                    "payload": {"instances": {
+                        "grid1": {"type": "none"}, "load1": {"type": "none"},
+                        "hp1": {"type": "none"},
+                    }},
+                }]},
+                headers=_h(client, owner),
+            )
+            assert updated.status_code == 200, updated.text
+
         maint = _solve(
             client,
             db,
@@ -622,19 +647,32 @@ class TestT2CashflowChain:
             owner,
             _eval_k1n2(
                 [
-                    {"year": 3, "amount": "1000.00", "currency": "CNY"},
-                    {"year": 3, "amount": "2500.50", "currency": "CNY"},
+                    {"year": 3, "amount": "1000.00", "currency": "CNY", "terms": [
+                        {"kind": "scale_unit_cost", "instance_id": "hp1",
+                         "property": "rated_heat_kw",
+                         "unit_cost": {"value": "12", "unit": "CNY/kW"}},
+                    ]},
+                    {"year": 3, "amount": "2500.50", "currency": "CNY", "terms": [
+                        {"kind": "cost_component_share", "instance_id": "hp1",
+                         "component": "upfront_capex", "ratio": 0.01},
+                    ]},
                 ]
             ),
             "t2-k1n2-maint",
             expected_revision=1,
+            after_submit=change_current_draft_after_freeze,
         )
         base_rows = base["financial_evaluation"]["evaluation"]["rows"]
         maint_rows = maint["financial_evaluation"]["evaluation"]["rows"]
         assert float(maint_rows[2]["net"]) == pytest.approx(float(base_rows[2]["net"]), rel=1e-9)
-        assert float(maint_rows[3]["net"]) == pytest.approx(float(base_rows[3]["net"]) - 3500.50, rel=1e-9)
-        # 快照冻结已按 R2 规范化去尾零("1000.00"→"1000"), 两笔合计等值扣除。
-        assert maint["financial_evaluation"]["annual_operation"][1]["maintenance"] == "3500.5"
+        assert float(maint_rows[3]["net"]) == pytest.approx(float(base_rows[3]["net"]) - 5500.50, rel=1e-9)
+        financial = maint["financial_evaluation"]
+        assert float(financial["annual_operation"][1]["maintenance"]) == pytest.approx(5500.50)
+        assert float(financial["annual_operation"][0]["maintenance"]) == pytest.approx(0.0)
+        assert float(financial["annual_net_flows"][3]) == pytest.approx(float(maint_rows[3]["net"]))
+        npv = sum(Decimal(row["net"]) / Decimal(str(1 + RATE)) ** t
+                  for t, row in enumerate(maint_rows))
+        assert float(financial["evaluation"]["npv"]) == pytest.approx(float(npv), rel=1e-6)
 
     def test_k0_leap_first_mandatory_fixed(self, devices, client, db, engine, plane) -> None:
         """K0N2 闰年首年 + 必建固定费: CF=[-1150000,R1,R2], 年界 8784+8760。"""

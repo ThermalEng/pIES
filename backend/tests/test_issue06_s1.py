@@ -178,10 +178,10 @@ def test_assembly_reference_scope_currency_and_units() -> None:
 
 def test_affine_capability_only_required_for_nonempty_terms() -> None:
     plain = parse_evaluation_input(_input([{"year": 2, "amount": "10", "currency": "CNY"}]))
-    _check_maintenance_capability(plain, "ies.generator.highs_milp@4.0.0", ())
+    _check_maintenance_capability(plain, "ies.generator.highs_milp@5.0.0", ())
     affine = parse_evaluation_input(_input([_expense(_scale())]))
     with pytest.raises(InvalidRequestError) as raised:
-        _check_maintenance_capability(affine, "ies.generator.highs_milp@4.0.0", ())
+        _check_maintenance_capability(affine, "ies.generator.highs_milp@5.0.0", ())
     assert raised.value.code == "TASK-REQ-007"
     assert raised.value.params["missing_capabilities"] == ["finance.affine_maintenance"]
     _check_maintenance_capability(affine, "candidate", ("finance.affine_maintenance",))
@@ -210,7 +210,7 @@ def test_ordered_terms_frozen_roundtrip_and_identity() -> None:
     assert _evaluation_identity(original) != _evaluation_identity(reversed_terms)
 
 
-def test_public_submit_rejects_unsupported_affine_but_not_fixed(client, db) -> None:
+def test_public_submit_accepts_supported_affine_and_fixed(client, db) -> None:
     owner = make_user(db, "owner_issue06_gate")
     pid = _prepare_project(client, db, owner)
     rev = _save_config(client, pid, owner)
@@ -226,9 +226,7 @@ def test_public_submit_rejects_unsupported_affine_but_not_fixed(client, db) -> N
     fixed = submit([{"year": 2, "amount": "7.50", "currency": "CNY"}], "s1-fixed")
     assert fixed.status_code == 201, fixed.text
     affine = submit([_expense(_scale("bat1"))], "s1-affine")
-    assert affine.status_code == 400, affine.text
-    assert affine.json()["error"]["code"] == "TASK-REQ-007"
-    assert "finance.affine_maintenance" in affine.json()["error"]["params"]["missing_capabilities"]
+    assert affine.status_code == 201, affine.text
     bad_ref = submit([_expense(_scale("bat1", "ghost"))], "s1-bad-ref")
     assert bad_ref.status_code == 400, bad_ref.text
     assert bad_ref.json()["error"]["code"] == "TASK-REQ-015"

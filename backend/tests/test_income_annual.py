@@ -522,10 +522,36 @@ def _mix_bases(*, energy_credit=Decimal("1"), residual=Decimal("0")):
 
 
 def test_income_vat_mix_matches_hand_and_b0(tmp_path) -> None:
-    """VAT 与所得税混合真实处理：月链、B0 逐年、NPV 同源一致。"""
+    """VAT 与所得税同源组合维护：同年两笔独立抵扣身份、B0 亏损、NPV。"""
+    from dataclasses import replace
+
+    from iesplan.finance import (
+        CostComponentShareTerm,
+        MaintenanceUnitCost,
+        ScaleUnitCostTerm,
+    )
+
     artifact, models, materialized, finance, config, evaluation = _inputs(payload=_mix_payload())
+    # 原维护 (2,1) 可抵 VAT + 可扣所得税；(2,2) 均不可扣。
+    # 规模项 3×60=180，当前实例本课题 upfront_capex 6000×0.1=600。
+    extra = Decimal("780")
+    first, *remaining = evaluation.maintenance_expenses
+    evaluation = replace(evaluation, maintenance_expenses=(
+        replace(first, terms=(
+            ScaleUnitCostTerm(
+                kind="scale_unit_cost", instance_id="tank1", property="rated_kw",
+                unit_cost=MaintenanceUnitCost(value="3", unit="CNY/kW"),
+            ),
+            CostComponentShareTerm(
+                kind="cost_component_share", instance_id="tank1",
+                component="upfront_capex", ratio=0.1,
+            ),
+        )),
+        *remaining,
+    ))
     bundle = HIGHS_MILP_PROVIDER.generate(artifact, models, materialized, finance, config, evaluation)
     out, inp = _hand_monthly(con_ratio=Decimal("0.5"))
+    inp[12 * 2 - 1] += extra * GROSS_FACTOR
     paids, carries = _hand_chain(out, inp)
     value, solved, _ = _solve_internal(bundle, tmp_path)
     for month in range(1, 37):
@@ -534,6 +560,7 @@ def test_income_vat_mix_matches_hand_and_b0(tmp_path) -> None:
             float(carries[month - 1]), rel=1e-6
         )
     base_y1, base_y2, base_y3 = _mix_bases()
+    base_y2 -= extra * (Decimal("1") - GROSS_FACTOR)
     year1 = use_losses(taxable_base=base_y1, balances=(), year=1, carryforward_years=INC_CARRY_YEARS)
     assert year1.generated == Decimal("0")
     year2 = use_losses(
@@ -557,7 +584,8 @@ def test_income_vat_mix_matches_hand_and_b0(tmp_path) -> None:
     assert solved[f"{prefix}__gen__y2"] == pytest.approx(float(-base_y2), rel=1e-6)
     assert solved[f"{prefix}__profit__y3"] == pytest.approx(float(base_y3), rel=1e-6)
     assert solved[f"{prefix}__use__y3__v0"] == pytest.approx(float(-base_y2), rel=1e-6)
-    expected = _hand_npv_with_vat(paids) - tax / Decimal(str(1.0 + RATE)) ** 3
+    expected = (_hand_npv_with_vat(paids) - extra / Decimal(str(1.0 + RATE)) ** 2
+                - tax / Decimal(str(1.0 + RATE)) ** 3)
     assert value == pytest.approx(float(expected), rel=1e-6)
 
 

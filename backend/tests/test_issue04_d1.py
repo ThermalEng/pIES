@@ -173,7 +173,7 @@ def test_demand_bindings_validate_and_planning_symbol_and_freeze():
     # Reject unsupported D2 at the public task gate; even a valid, frozen D1
     # binding cannot result in an optimization which silently drops the bill.
     with pytest.raises(InvalidRequestError) as exc:
-        _check_demand_capabilities(result.artifact, "ies.generator.highs_milp@4.0.0", ("affine",))
+        _check_demand_capabilities(result.artifact, "ies.generator.highs_milp@5.0.0", ("affine",))
     assert exc.value.code == "TASK-REQ-007"
     assert exc.value.params["missing_capabilities"] == [
         "finance.financial_facts", "finance.monthly_demand",
@@ -221,7 +221,7 @@ def test_zero_demand_keeps_empty_contract_without_generator_capability():
     doc["planning"]["objective"] = {"sense": "minimize", "expression": "0 CNY"}
     result = _check(doc, eff)
     assert result.artifact is not None, [d.to_dict() for d in result.diagnostics]
-    _check_demand_capabilities(result.artifact, "ies.generator.highs_milp@4.0.0", ("affine",))
+    _check_demand_capabilities(result.artifact, "ies.generator.highs_milp@5.0.0", ("affine",))
 
 
 @pytest.mark.parametrize(

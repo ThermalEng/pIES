@@ -711,6 +711,8 @@ test.describe('D3: 税务主链(财务页→提交→求解→税额→评估→
     const task1 = ids[0]
     const finBefore = await fetchSealed(page, pid, task1)
     const finSecond = await fetchSealed(page, pid, ids[1])
+    expect(Number(finBefore.annual_operation[0].maintenance)).toBe(100)
+    expect(Number(finSecond.annual_operation[0].maintenance)).toBe(200)
 
     // 更改当前工作区画像后，任务仍读取各自的冻结财务快照。
     const changedProfile = taxProfile(`d3_switch_edited_${Date.now()}`)
@@ -737,12 +739,12 @@ test.describe('D3: 税务主链(财务页→提交→求解→税额→评估→
       return values
     }
     await selector.selectOption({ index: 0 })
-    await expect.poll(async () => (await annualTable()).join('|'), { timeout: 30_000 }).toContain(`− 100 − ${finBefore.annual_operation[0].demand_charge} =`)
+    await expect.poll(async () => (await annualTable()).join('|'), { timeout: 30_000 }).toContain(`− ${finBefore.annual_operation[0].maintenance} − ${finBefore.annual_operation[0].demand_charge} =`)
     await selector.selectOption({ index: 1 })
-    await expect.poll(async () => (await annualTable()).join('|'), { timeout: 30_000 }).toContain(`− 200 − ${finSecond.annual_operation[0].demand_charge} =`)
+    await expect.poll(async () => (await annualTable()).join('|'), { timeout: 30_000 }).toContain(`− ${finSecond.annual_operation[0].maintenance} − ${finSecond.annual_operation[0].demand_charge} =`)
     // 切回任务1：旧结果不变（与切换前封存逐项一致）。
     await selector.selectOption({ index: 0 })
-    await expect.poll(async () => (await annualTable()).join('|'), { timeout: 30_000 }).toContain(`− 100 − ${finBefore.annual_operation[0].demand_charge} =`)
+    await expect.poll(async () => (await annualTable()).join('|'), { timeout: 30_000 }).toContain(`− ${finBefore.annual_operation[0].maintenance} − ${finBefore.annual_operation[0].demand_charge} =`)
     const finAfter = await fetchSealed(page, pid, task1)
     expect(finAfter).toEqual(finBefore)
 

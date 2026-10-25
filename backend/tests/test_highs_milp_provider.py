@@ -439,7 +439,7 @@ def test_step_series_declared_from_variable_path() -> None:
     assert len(lengths) == 1
     metadata = json.loads(bundle.files["input/parameters.json"].decode("utf-8"))
     assert metadata["step_series"] == [dict(d) for d in decls]
-    assert metadata["generator"] == GENERATOR_REF == "ies.generator.highs_milp@4.1.0"
-    assert metadata["result_adapter"] == ADAPTER_REF == "ies.result-adapter.highs@4.0.0"
+    assert metadata["generator"] == GENERATOR_REF == "ies.generator.highs_milp@5.0.0"
+    assert metadata["result_adapter"] == ADAPTER_REF == "ies.result-adapter.highs@5.0.0"
     assert bundle.manifest.bundle["generator"] == GENERATOR_REF
     assert bundle.manifest.result_adapter == ADAPTER_REF

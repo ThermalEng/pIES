@@ -172,7 +172,7 @@ def test_facts_mix_seal_matches_hand_and_objective(tmp_path) -> None:
         pytest.approx(3600.0, rel=1e-6),
         pytest.approx(2400.0, rel=1e-6),
     ]
-    assert sealed["annual_operation"][0]["maintenance"] == "1500.50"
+    assert sealed["annual_operation"][0]["maintenance"] == "1500.5"
     flows = [float(value) for value in sealed["annual_net_flows"]]
     assert len(flows) == 4
     assert flows[0] == pytest.approx(-3600.0, rel=1e-6)
