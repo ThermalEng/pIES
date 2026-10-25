@@ -1,6 +1,6 @@
 # 财务 YAML 契约
 
-> 契约标识与版本：`ies.finance-profile@4.0.0`、`ies.finance-overrides@4.0.0`、`ies.effective-finance-config@4.0.0`。本版新增独立需量费及其税务引用；不接受旧字头或双轨解析。
+> 契约标识与版本：`ies.finance-profile@5.0.0`、`ies.finance-overrides@5.0.0`、`ies.effective-finance-config@5.0.0`。本版在保留独立需量费及税务引用的基础上新增月份日价格来源；新类型不能被旧消费者安全忽略，因此提升主版本，不接受旧字头或双轨解析。
 > 推荐文件名（项目包内固定名称）：`finance_profile.yaml`、`finance_overrides.yaml`、`effective_finance.yaml`
 > 文档状态：生效目标契约；本页只定义目标文件语义，不声明实现进度。
 
@@ -22,13 +22,13 @@ assembly / computation / 项目包（精确引用 Effective YAML）
 
 金额一律为 `{value, unit}` 原子：`value` 为十进制定点字符串（禁止 `float`、`NaN/Infinity`、`null`），`unit` 来自公共单位规范并经 `normalize_unit` 规范化；禁止部分金额（缺 `value` 或 `unit`）与 `null`。成本分量金额非负（允许 `0`，零费用类别、零固定成本均合法）。能源价格不设符号限制：允许有限正数、零与负数（见 `energy_prices` 行与「计价规则」）；禁止 NaN/Infinity。
 
-## `ies.finance-profile@4.0.0`
+## `ies.finance-profile@5.0.0`
 
 ### 完整示例
 
 ```yaml
 schema: ies.finance-profile
-schema_version: "4.0.0"
+schema_version: "5.0.0"
 profile:
   id: cn-north-demo
   region: CN-North
@@ -95,7 +95,7 @@ tax_rules: {}                  # 本例只有展示登记，没有启用税务�
 | 路径 | 必需 | 规则 |
 |---|---|---|
 | `schema` | 是 | 固定 `ies.finance-profile` |
-| `schema_version` | 是 | 固定 `"4.0.0"` |
+| `schema_version` | 是 | 固定 `"5.0.0"` |
 | `profile.id` | 是 | 稳定 ASCII 小写 ID（命名空间点分式、`lower_snake_case` 或短横线，同文件内保持一致），如 `cn-north-demo`；Overrides 与 Effective 沿用它做引用 |
 | `profile.region` | 是 | 地区标识（展示与追溯，不参与计算） |
 | `profile.currency` | 是 | `CNY` / `USD` |
@@ -111,7 +111,7 @@ tax_rules: {}                  # 本例只有展示登记，没有启用税务�
 | `energy_prices` | 是 | `price_id` → 价格条目。`price_id` 为稳定自定义名（`lower_snake_case`、不含 `__`、文件内唯一），同一载体可登记多个 price_id（不同方案/对象），新增载体或方案不需要改核心 schema |
 | `energy_prices.*.carrier` | 是 | 载体标识，必须来自公共载体词汇（与设备接口 `carrier` 同一词汇源；取值与规则以[设备模型 YAML](device-model-yaml.md)「interfaces」为准，本页不复制载体清单）；装配按它与接口载体相容性校验 |
 | `energy_prices.*.direction` | 是 | `purchase` / `sale` 二选一：显式会计方向。`purchase` 分量 = +raw_charge、`sale` 分量 = −raw_charge（`raw_charge = Σ price×energy`，定义见「计价规则」）；方向只由本字段决定，不靠 price_id 或键名后缀推断 |
-| `energy_prices.*` | 是 | 定价定义判别联合：`{kind: constant, value: Money}` 或 `{kind: time_series, ref, series_meta}`，二选一 |
+| `energy_prices.*` | 是 | 定价定义判别联合：`{kind: constant, value: Money}`、`{kind: time_series, ref, series_meta}` 或 `{kind: monthly_daily, months}`，三选一；月份来源见「月份日价格」 |
 | `energy_prices.*.value` | constant 必填 | 有限 Decimal，可正、可零、可负；单位量纲 = currency /（该 carrier 的能源单位量纲） |
 | `energy_prices.*.ref` | time_series 必填 | 对象引用：存储已有的不透明对象 ID（`oid`，随机对象 ID，不是内容 hash、路径或数据集版本），指向经校验、覆盖运营期全部点数的连续能源价格序列；年度价格不同直接在对应 step 给出不同值，不设逐年引用；序列值同样为有限 Decimal、允许零与负。`oid` 由价格文件经数据集上传入口校验落盘后在质量报告 `price_object_id` 中返回（格式见[价格序列 CSV](price-series-csv.md)）；Profile/Overrides 只存 `ref` + `series_meta`，不内联价格值；任务提交时以已确认运营时轴对实际对象做唯一一次覆盖/声明元数据核对并冻结引用 |
 | `energy_prices.*.series_meta` | time_series 必填 | 不可变时间元数据：`resolution`（15min/30min/1h）、`point_count`（整数，必须等于运营期总点数）、`unit`（无 `leap_year`，闰年由运行起始年逐年按公历推导）；运营期覆盖在任务提交边界核对（取得已确认运营年限 `operation_years` 后），不一致阻断且不重采样；Profile 不固定唯一项目分辨率 |
@@ -123,8 +123,41 @@ tax_rules: {}                  # 本例只有展示登记，没有启用税务�
 单位与范围校验：
 
 - 成本分量金额非负（允许 `0`）；每个线性分量的 `unit_cost` 单位与装配绑定的规范化 driver 单位相乘后必须得到 `currency`（upfront/period）或 `currency/year`（annual_fixed_om）量纲；
-- 能源价格为有限 Decimal（正、零、负均合法），单位量纲 = currency /（对应 carrier 的能源量纲）；constant 的 `value.unit` 与 time_series 的 `series_meta.unit` 必须一致；禁止 NaN/Infinity；
+- 能源价格为有限 Decimal（正、零、负均合法），单位量纲 = currency /（对应 carrier 的能源量纲）；constant 的 `value.unit`、time_series 的 `series_meta.unit` 与 monthly_daily 各月的 `series_meta.unit` 遵循同一价格单位，覆盖时保持不变；禁止 NaN/Infinity；
 - `taxes.*.applies_to` 引用的 price_id、`finance_types` 分量路径或 `demand_charges.<charge_id>` 必须存在；计算规则中的税率、可抵比例为 `0..1` 的 `{value, unit: "1"}` 原子。
+
+### 月份日价格
+
+`kind: monthly_daily` 表示不同自然月份使用各自的完整日价格曲线，并逐年沿用。`months` 必须恰含字符串键 `"1"` 至 `"12"`，各项为 `{ref, series_meta}`，字段沿用本页序列引用定义。多个自然月可以引用同一个对象，无需重复上传；不增加周期长度、起点、星期、节假日或优先级字段。
+
+每个来源是已有 `ies.price-series@1.0.0` 文件，`step` 从零开始表示日内位置；`series_meta.point_count` 按分辨率为完整一天的 96／48／24 点（15min／30min／1h）。所有月份的分辨率与项目一致，单位相同且与价格载体和财务币种相容。日曲线按实际运营公历年月选取，每天从曲线首点开始；2月29日使用二月曲线，跨月与跨年立即按新月份选取。不重采样、插值或循环整年数组；需要逐年差异时使用原样全期 `time_series`。
+
+Profile 登记／Overrides 保存校验文件内结构、十二月完整性和声明单位；引用到的实际来源与项目分辨率、实长和声明元数据在任务提交边界一次核对。上传只校验来源文件自身，不要求已知运营年限。任务冻结实际使用价格的完整月份映射及元数据，并为所有不同来源对象建立保留引用；未使用价格不因存在于目录就建立执行依赖。
+
+以下为完整的单个价格条目示例，可用于 Profile 的 `energy_prices.grid_import`；两个引用表示已上传的合成日曲线对象，不是程序默认值：
+
+```yaml
+carrier: electricity
+direction: purchase
+kind: monthly_daily
+months:
+  "1": {ref: "day-price-a", series_meta: {resolution: 1h, point_count: 24, unit: CNY/kWh}}
+  "2": {ref: "day-price-a", series_meta: {resolution: 1h, point_count: 24, unit: CNY/kWh}}
+  "3": {ref: "day-price-a", series_meta: {resolution: 1h, point_count: 24, unit: CNY/kWh}}
+  "4": {ref: "day-price-a", series_meta: {resolution: 1h, point_count: 24, unit: CNY/kWh}}
+  "5": {ref: "day-price-a", series_meta: {resolution: 1h, point_count: 24, unit: CNY/kWh}}
+  "6": {ref: "day-price-b", series_meta: {resolution: 1h, point_count: 24, unit: CNY/kWh}}
+  "7": {ref: "day-price-b", series_meta: {resolution: 1h, point_count: 24, unit: CNY/kWh}}
+  "8": {ref: "day-price-b", series_meta: {resolution: 1h, point_count: 24, unit: CNY/kWh}}
+  "9": {ref: "day-price-b", series_meta: {resolution: 1h, point_count: 24, unit: CNY/kWh}}
+  "10": {ref: "day-price-a", series_meta: {resolution: 1h, point_count: 24, unit: CNY/kWh}}
+  "11": {ref: "day-price-a", series_meta: {resolution: 1h, point_count: 24, unit: CNY/kWh}}
+  "12": {ref: "day-price-a", series_meta: {resolution: 1h, point_count: 24, unit: CNY/kWh}}
+```
+
+Worker 从冻结规则和来源确定性物化完整运营期价格，输出与 `time_series` 相同的已物化价格类型；不另存可编辑的展开结果，不改写冻结定价类型，不重复提交校验。Generator 只识别来源能力并消费已物化价格，沿用同一逐点计价和税务关系。来源映射与对象身份参与既有快照复用比较，不新增摘要字段。
+
+本来源不改变快照顶层结构，其版本沿用快照自身契约；不因嵌套财务版本变化额外提升快照主版本。价格 CSV、装配、CalculationConfig、Bundle、ComputeResult 与封存财务结果结构不变。
 
 ### 税目登记
 
@@ -248,7 +281,7 @@ demand_charges:
     rate: {value: "20", unit: CNY/kW}  # 合成示例；每自然月适用，不是默认费率
 ```
 
-每项费率适用于全部运营自然月。本契约不包含周期价格或费率年表；需要变化费率时另行定义公开载体，不能私自复用运行步价格序列。需量费不属于 `energy_prices` 或设备 O&M，是否生效由装配显式绑定决定；目录中未绑定的条目不产生费用。
+每项费率适用于全部运营自然月。本节不包含需量费率月表或年表；能源的月份日价格不用于需量费率。需要变化需量费率时另行定义公开载体，不能私自复用运行步价格序列。需量费不属于 `energy_prices` 或设备 O&M，是否生效由装配显式绑定决定；目录中未绑定的条目不产生费用。
 
 Overrides 可用 `demand_charges.<charge_id>.rate` 原子替换 Profile 已有费率，币种与单位保持一致，不新增或删除费项；未覆盖内容原样进入 Effective。
 
@@ -260,13 +293,13 @@ Overrides 可用 `demand_charges.<charge_id>.rate` 原子替换 Profile 已有�
 - Overrides 对既有 `demand_input_tax` 条目按 `charge` 匹配，只覆盖税率与可抵比例，不改变范围；`demand_cost` 是 Profile 的范围，不允许覆盖。
 - 需量费沿用 `price_basis`：含税口径不重复加税，不含税口径按明确税率形成实际付款。未声明的税额与抵扣不自动生成；同一需量费税基不能重复抵扣或扣除，实际现金只支出一次。
 
-## `ies.finance-overrides@4.0.0`
+## `ies.finance-overrides@5.0.0`
 
 ### 完整示例
 
 ```yaml
 schema: ies.finance-overrides
-schema_version: "4.0.0"
+schema_version: "5.0.0"
 profile_ref:
   id: cn-north-demo
 finance_types:
@@ -292,11 +325,11 @@ energy_prices:
 
 | 路径 | 规则 |
 |---|---|
-| `schema` / `schema_version` | 固定 `ies.finance-overrides` / `"4.0.0"` |
+| `schema` / `schema_version` | 固定 `ies.finance-overrides` / `"5.0.0"` |
 | `profile_ref` | 必填 `{id}`：与目标 Profile 的 `id` 一致（文本文件按字头校验，不做内容摘要） |
 | `finance_types` | 只允许覆盖目标 Profile **已存在** 的 `finance_type`；禁止新增或删除 `finance_type` |
 | `finance_types.*` | 只允许按 Profile 实际存在的叶子路径整体替换 `Money` 原子：`<分量>.fixed`（如 `upfront_capex.fixed`）替换为 `{value, unit}`；`<分量>.linear.<driver>.unit_cost` 替换为 `{value, unit}`。被替换叶子必须已在 Profile 声明；禁止新增或删除分量、`fixed` 节点或 `driver`（`driver` 集合不可增删）、禁止改分量类型与 `cost_method`、禁止改 `unit`（规范化后必须与 Profile 相同）；替换值必须为完整 `{value, unit}` 原子，禁止部分金额与 `null`；成本金额非负 |
-| `energy_prices` | 只允许覆盖 Profile **已存在** 的 `price_id`，禁止新增或删除 `price_id`。每个条目的 `energy_prices.<price_id>` 只写定价定义：`{kind: constant, value}` 或 `{kind: time_series, ref, series_meta}`（与 Profile 原 kind 无关）；`carrier` 与 `direction` 由 Profile 继承，在 Overrides 中出现即拒绝；`value.unit`（constant）或 `series_meta.unit`（time_series）必须与 Profile 原项相同；`time_series` 的 `ref` 为存储不透明对象 ID（`oid`，与 Profile 侧同一口径），指向经校验、覆盖全周期全部点数的价格序列对象，`series_meta` 必须完整并可与 Profile 引用不同序列；不允许部分混合替换（如只换 `ref` 保留旧 `series_meta`，或只换 kind 不带全量字段） |
+| `energy_prices` | 只允许覆盖 Profile **已存在** 的 `price_id`，禁止新增或删除。每个条目完整替换 `constant`／`time_series`／`monthly_daily` 中的一种定价定义，与原 kind 无关；`carrier` 与 `direction` 由 Profile 继承，Overrides 不得填写。替换后价格单位与 Profile 原项相同；序列来源必须带完整引用与元数据。`monthly_daily` 必须一次给齐十二月，不按月份继承或拼接；同样不允许只换 ref、部分元数据或仅改 kind |
 | `tax_rules` | 只覆盖 Profile 已有规则的参数：税率／可抵比例 Money 原子、折旧年限／残值／起始运营年（按已有 asset 对应）、亏损结转年限。in_tax／out_tax／om_input_tax 的稀疏条目按 price／for 对应已有对象，只替换已有 rate／deductible_ratio。维护进项列表、所得税逐项维护列表及 opening_losses 按完整列表替换；建设确认 schedule 可整表替换，method 保持不变 |
 | `credit_pools` | 只覆盖已有池的 opening_credit 原子或 refunds 完整列表；不可新增／删除池或改变 receivable_policy |
 | 禁改字段 | 顶层 profile、currency、base_year、price_basis、cost_method、taxes，价格条目 carrier／direction，规则 id／kind／label_ref／方法／计税范围／池归属不允许覆盖；不得新增／删除规则。列表中的项目维护项绑定不属于改变规则结构 |
@@ -308,7 +341,7 @@ energy_prices:
 
 ```yaml
 schema: ies.finance-overrides
-schema_version: "4.0.0"
+schema_version: "5.0.0"
 profile_ref: {id: cn-north-demo}
 tax_rules:
   operating_vat:
@@ -322,7 +355,7 @@ tax_rules:
         - {year: 2, position: 2, deductible: false}
 ```
 
-## `ies.effective-finance-config@4.0.0`
+## `ies.effective-finance-config@5.0.0`
 
 ### 完整示例
 
@@ -330,7 +363,7 @@ tax_rules:
 
 ```yaml
 schema: ies.effective-finance-config
-schema_version: "4.0.0"
+schema_version: "5.0.0"
 profile_id: cn-north-demo
 currency: CNY
 base_year: 2025
@@ -402,7 +435,7 @@ tax_rules: {}
 
 ```yaml
 schema: ies.finance-overrides
-schema_version: "4.0.0"
+schema_version: "5.0.0"
 profile_ref:
   id: <profile-id>
 ```
@@ -436,7 +469,7 @@ period_energy_sale(b)     = −raw_charge(b)         # direction: sale
 - 每个计量绑定产出的 `period_energy_purchase`/`period_energy_sale` 是**已带符号的记账贡献**（currency）：`purchase` 分量 = +raw_charge（正购电价时为正，成本向），`sale` 分量 = −raw_charge（正售电价时为负，收益以负值自动抵减成本）。分量负号是记账符号，不是把物理能量取负，能量序列本身始终非负；
 - 规划表达式对已签名分量**统一使用加法**（见装配最小结构示例的 `… + export_meter__period_energy_sale`），不再书写额外负号；sale 的收益性体现在分量自身的负值上，不依赖目标写法；
 - 价格允许有限正、零、负值：零电价合法；负价自然按该方向反转——负购电价使 `purchase` 分量为负（为用电付费抵减成本），负售电价使 `sale` 分量为正（为上网付费成为成本），不需要额外规则；
-- `time_series` 价格按每点取价后与同点能量相乘再求和；`constant` 价格每点相同，结果等于 `price × Σ_t e[t]`，但语义仍是逐点计价，不允许把“先对时变价格做总量聚合再与总能量相乘”当作等价算法；
+- `time_series` 原样全期价格和 `monthly_daily` 已物化价格均按每点取价后与同点能量相乘再求和；`constant` 每点同价，结果等于 `price × Σ_t e[t]`，但语义仍是逐点计价，不允许把“先聚合时变价格再与总能量相乘”当作等价算法；
 - 价格序列与能量序列必须同分辨率、同点数、`step` 一一对应（由项目基线与装配校验保证，不匹配阻断且不重采样）；
 - 量纲：价格单位（currency / 能源单位）× `e[t]`（能源量）→ `currency`，逐点乘积与求和保持同一币种。
 
