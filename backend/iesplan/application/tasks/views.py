@@ -315,7 +315,7 @@ def task_inputs(
     闸门拒绝缺件快照, 此处不复核)。
     """
     from iesplan import project as project_domain
-    from iesplan.application.projects.content_objects import load_content_object
+    from iesplan.application.projects import load_content_object
 
     ensure_access(db, user, project_id, "view")
     task = ensure_task_belongs(db, project_id, task_id)
