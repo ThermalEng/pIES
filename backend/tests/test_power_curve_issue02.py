@@ -70,6 +70,9 @@ def _finance() -> EffectiveFinanceConfig:
         "finance_types": {},
         "energy_prices": {},
         "demand_charges": {},
+        "taxes": {},
+        "credit_pools": {},
+        "tax_rules": {},
     })
 
 
