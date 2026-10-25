@@ -29,6 +29,7 @@ from typing import Final
 
 from iesplan.core.diagnostics import Diagnostic, make_diag
 from iesplan.core.units import UnitError, normalize_unit
+from iesplan.finance.monthly_daily import DAY_POINTS
 
 # ---------------------------------------------------------------------------
 # 契约常量
@@ -347,11 +348,10 @@ class DailyPriceSource:
         if not isinstance(self.ref, str) or not self.ref.strip():
             raise FinanceTripletError("monthly_daily.ref 必须为非空字符串")
         # Each source is one complete day, not one operation year or horizon.
-        daily_counts = {"15min": 96, "30min": 48, "1h": 24}
-        if self.series_meta.point_count != daily_counts[self.series_meta.resolution]:
+        expected = DAY_POINTS[self.series_meta.resolution]
+        if self.series_meta.point_count != expected:
             raise FinanceTripletError(
-                f"monthly_daily.series_meta.point_count 必须是完整一天 "
-                f"({daily_counts[self.series_meta.resolution]})"
+                f"monthly_daily.series_meta.point_count 必须是完整一天 ({expected})"
             )
 
     def to_dict(self) -> dict:
