@@ -335,7 +335,7 @@ def test_load_draft_writes_working_evaluation_and_params(client: TestClient, db:
         {"t": 0, "ratio": "0.6"},
         {"t": 1, "ratio": "0.4"},
     ]
-    assert working["maintenance_expenses"] == [{"year": 2, "amount": "10.5", "currency": "CNY"}]
+    assert working["maintenance_expenses"] == [{"year": 2, "amount": "10.5", "currency": "CNY", "terms": []}]
     assert working["task_params"] == {"priority": 3}
     # 服务端确认人/时间不进入工作副本（重提时由服务端重写）。
     assert "confirmed_by" not in working
@@ -404,6 +404,28 @@ def test_task_set_working_inputs_command(client: TestClient, db: Session) -> Non
     version = created.json()["version"]
     content = load_content_object(db, int(version["content_object_id"]))
     assert "task_working_inputs" not in content
+
+
+def test_issue06_affine_working_list_keeps_payment_and_term_order(client: TestClient, db: Session) -> None:
+    """尚未具备生成器能力时，工作区仍可原样保存有序关联维护草稿。"""
+    owner = make_user(db, "owner_issue06_working")
+    pid = _prepare_project(client, db, owner)
+    entries = [
+        {"year": 2, "amount": "0", "currency": "CNY", "terms": [
+            {"kind": "scale_unit_cost", "instance_id": "bat1", "property": "capacity_kwh",
+             "unit_cost": {"value": "2.5", "unit": "CNY/kWh"}},
+            {"kind": "cost_component_share", "instance_id": "bat1",
+             "component": "upfront_capex", "ratio": 0.15},
+        ]},
+        {"year": 2, "amount": "33", "currency": "CNY", "terms": []},
+    ]
+    working = {"task_type": "calc", "maintenance_expenses": entries}
+    status, body = _put_draft(client, pid, owner, [{
+        "id": "issue06-working-1", "project_id": pid, "unit": "task",
+        "type": "task.set_working_inputs", "payload": {"working": working},
+    }])
+    assert status == 200, body
+    assert _draft_content(client, pid, owner)["task_working_inputs"]["maintenance_expenses"] == entries
 
 
 def test_task_list_completion_fields(client: TestClient, db: Session) -> None:
