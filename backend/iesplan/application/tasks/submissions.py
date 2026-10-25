@@ -684,6 +684,9 @@ def _assemble_snapshot(
     _check_demand_capabilities(
         artifact, calc_config.get("generator"), generator_capabilities
     )
+    _check_monthly_daily_capabilities(
+        artifact, effective, calc_config.get("generator"), generator_capabilities
+    )
     # 提交边界维护币种核对(本次闸门实际消费的不可变快照口径; 不一致阻断):
     # 维护清单币种须与有效财务配置一致, 空清单直接通过。
     for expense in evaluation.maintenance_expenses:
@@ -918,24 +921,55 @@ def _check_tax_capabilities(
     )
 
 
-def _used_price_oids(artifact: Any, effective: EffectiveFinanceConfig) -> list[str]:
-    """规范文本计费绑定实际使用的时变价格 oid（按绑定 id 稳定排序去重）。
+def _check_monthly_daily_capabilities(
+    artifact: Any,
+    effective: EffectiveFinanceConfig,
+    generator_ref: object,
+    capabilities: tuple[str, ...],
+) -> None:
+    """Require calendar daily price support only for actually tariff-bound IDs."""
+    if "finance.monthly_daily_prices" in capabilities:
+        return
+    bindings = json.loads(artifact.canonical_text).get("tariff_bindings") or {}
+    fields = [
+        f"tariff_bindings.{key}"
+        for key in sorted(bindings)
+        if (effective.energy_prices or {}).get(bindings[key].get("price")) is not None
+        and effective.energy_prices[bindings[key]["price"]].kind == "monthly_daily"
+    ]
+    if fields:
+        raise InvalidRequestError(
+            "所选生成器不支持自然月份日价格，不忽略已绑定来源",
+            code="TASK-REQ-007",
+            params={
+                "generator": generator_ref,
+                "missing_capabilities": ["finance.monthly_daily_prices"],
+                "fields": fields,
+            },
+            location={"object_type": "task", "field": fields[0]},
+        )
 
-    只含 canonical tariff_bindings 引用到的 kind == "time_series" 价格；
-    未绑定条目不建引用。调用时提交覆盖核对已通过，对象存在且可读。
-    """
+
+def _used_price_oids(artifact: Any, effective: EffectiveFinanceConfig) -> list[str]:
+    """Distinct frozen object refs actually used by canonical tariff bindings."""
     canonical = json.loads(artifact.canonical_text)
     oids: list[str] = []
     for binding_id in sorted(canonical.get("tariff_bindings") or {}):
-        entry = (canonical.get("tariff_bindings") or {}).get(binding_id)
+        entry = canonical["tariff_bindings"][binding_id]
         if not isinstance(entry, Mapping):
             continue
         price = (effective.energy_prices or {}).get(entry.get("price"))
-        if price is None or price.kind != "time_series":
+        if price is None:
             continue
-        ref = price.ref
-        if isinstance(ref, str) and ref and ref not in oids:
-            oids.append(ref)
+        if price.kind == "time_series":
+            refs = (price.ref,)
+        elif price.kind == "monthly_daily":
+            refs = (price.months[str(month)].ref for month in range(1, 13))
+        else:
+            continue
+        for ref in refs:
+            if isinstance(ref, str) and ref and ref not in oids:
+                oids.append(ref)
     return oids
 
 
@@ -946,85 +980,104 @@ def _check_submit_coverage(
     evaluation: Mapping[str, Any],
     effective: EffectiveFinanceConfig,
 ) -> None:
-    """提交边界时变价格运营期覆盖核对(任务提交边界唯一位置)。
+    """The unique upload-object/metadata and horizon validation at submit.
 
-    消费已签发规范文本的基线/计费绑定(不重跑装配校验)与装配闸门本次
-    实际消费的不可变 Effective 财务快照(调用方传入, 此处不另行按引用
-    二次解析); 期望点数由运行起始年 + 已确认运营年限 + 分辨率推导,
-    不一致 → 400 TASK-REQ-017(见 tasks 域 ``check_tariff_horizon_coverage``)。
-    时变价格另读冻结对象实字节做唯一一次覆盖/声明元数据核对（此前只
-    核过声明元数据，未读过实字节）：对象缺失/不可解析/实长不等/文件
-    分辨率或单位与声明元数据不一致 → 400 TASK-REQ-017；``constant``
-    价格无对象，不参与核对。
+    Only actually tariff-bound prices are consulted. Whole-term time_series
+    requires the exact horizon; monthly_daily each source requires exactly one
+    complete day. Frozen declaration metadata must match real CSV bytes and the
+    project resolution. Reused object IDs are parsed once; declared metadata
+    is compared separately for each referring month.
     """
     from iesplan.finance import parse_price_series_file
+    from iesplan.finance.monthly_daily import DAY_POINTS
     from iesplan.storage.contracts import ObjectCorruptError
 
     canonical = json.loads(artifact.canonical_text)
     baseline = canonical.get("project_baseline") or {}
+    resolution = baseline["resolution"]
+    bindings = canonical.get("tariff_bindings") or {}
+    price_catalog = effective.energy_prices or {}
     series = {
         price_id: {
             "kind": price.kind,
-            "resolution": price.series_meta.resolution if price.series_meta else None,
             "point_count": price.series_meta.point_count if price.series_meta else None,
         }
-        for price_id, price in (effective.energy_prices or {}).items()
+        for price_id, price in price_catalog.items()
     }
     _check_tariff_horizon_coverage(
-        baseline_resolution=baseline.get("resolution"),
-        baseline_start_year=baseline.get("start_year"),
+        baseline_resolution=resolution,
+        baseline_start_year=baseline["start_year"],
         operation_years=evaluation["operation_years"],
-        tariff_bindings=canonical.get("tariff_bindings") or {},
+        tariff_bindings=bindings,
         price_series=series,
     )
-    expected = horizon_point_count(
-        baseline.get("resolution"), baseline.get("start_year"),
-        evaluation["operation_years"],
+    expected_horizon = horizon_point_count(
+        resolution, baseline["start_year"], evaluation["operation_years"],
     )
-    for binding_id in sorted(canonical.get("tariff_bindings") or {}):
-        entry = (canonical.get("tariff_bindings") or {}).get(binding_id)
-        if not isinstance(entry, Mapping):
+    parsed_objects: dict[str, Any] = {}
+    for binding_id in sorted(bindings):
+        price_id = bindings[binding_id]["price"]
+        price = price_catalog.get(price_id)
+        if price is None or price.kind == "constant":
             continue
-        price = (effective.energy_prices or {}).get(entry.get("price"))
-        if price is None or price.kind != "time_series":
+        if price.kind == "time_series":
+            refs_meta = (("time_series", price.ref, price.series_meta, expected_horizon),)
+        elif price.kind == "monthly_daily":
+            refs_meta = tuple(
+                (str(month), price.months[str(month)].ref,
+                 price.months[str(month)].series_meta, DAY_POINTS[resolution])
+                for month in range(1, 13)
+            )
+        else:
             continue
-        try:
-            raw = get_object(db, price.ref)
-        except (NotFoundError, ObjectCorruptError):
-            raise InvalidRequestError(
-                "时变价格冻结对象缺失, 无法核对全期覆盖",
-                code="TASK-REQ-017",
-                params={
-                    "binding_id": binding_id, "price": entry.get("price"),
-                    "reason": "object_unavailable",
-                },
-                location={"object_type": "tariff_binding", "object_id": str(binding_id)},
-            ) from None
-        parsed, parse_diags = parse_price_series_file(raw)
-        if parsed is None or any(d.blocking for d in parse_diags):
-            raise InvalidRequestError(
-                "时变价格冻结对象不可解析, 无法核对全期覆盖",
-                code="TASK-REQ-017",
-                params={"binding_id": binding_id, "price": entry.get("price"), "reason": "object_unparsable"},
-                location={"object_type": "tariff_binding", "object_id": str(binding_id)},
-            )
-        meta = price.series_meta
-        if (
-            len(parsed.values) != expected
-            or parsed.meta.resolution != (meta.resolution if meta else None)
-            or parsed.meta.unit != (meta.unit if meta else None)
-        ):
-            raise InvalidRequestError(
-                "时变价格序列未覆盖评价全期(实长/分辨率/单位与声明不一致)",
-                code="TASK-REQ-017",
-                params={
-                    "binding_id": binding_id,
-                    "price": entry.get("price"),
-                    "series_point_count": len(parsed.values),
-                    "expected_point_count": expected,
-                },
-                location={"object_type": "tariff_binding", "object_id": str(binding_id)},
-            )
+        for month, oid, declared, expected_points in refs_meta:
+            field = f"tariff_bindings.{binding_id}.price"
+            if oid not in parsed_objects:
+                try:
+                    raw = get_object(db, oid)
+                except (NotFoundError, ObjectCorruptError):
+                    raise InvalidRequestError(
+                        "价格来源对象不存在或不可读取",
+                        code="TASK-REQ-017",
+                        params={"binding_id": binding_id, "price": price_id,
+                                "month": month, "reason": "object_unavailable"},
+                        location={"object_type": "tariff_binding",
+                                  "object_id": str(binding_id), "field": field},
+                    ) from None
+                parsed, diagnostics = parse_price_series_file(raw)
+                if parsed is None or any(d.blocking for d in diagnostics):
+                    raise InvalidRequestError(
+                        "价格来源对象内容不可解析",
+                        code="TASK-REQ-017",
+                        params={"binding_id": binding_id, "price": price_id,
+                                "month": month, "reason": "object_unparsable"},
+                        location={"object_type": "tariff_binding",
+                                  "object_id": str(binding_id), "field": field},
+                    )
+                parsed_objects[oid] = parsed
+            parsed = parsed_objects[oid]
+            if (
+                len(parsed.values) != expected_points
+                or declared.point_count != expected_points
+                or declared.resolution != resolution
+                or parsed.meta.resolution != declared.resolution
+                or parsed.meta.unit != declared.unit
+            ):
+                raise InvalidRequestError(
+                    "价格来源长度／分辨率／单位与冻结声明或运营时轴不相容",
+                    code="TASK-REQ-017",
+                    params={
+                        "binding_id": binding_id, "price": price_id, "month": month,
+                        "series_point_count": len(parsed.values),
+                        "declared_point_count": declared.point_count,
+                        "expected_point_count": expected_points,
+                        "source_resolution": parsed.meta.resolution,
+                        "project_resolution": resolution,
+                        "source_unit": parsed.meta.unit, "declared_unit": declared.unit,
+                    },
+                    location={"object_type": "tariff_binding",
+                              "object_id": str(binding_id), "field": field},
+                )
 
 
 def _export_finance_for(
