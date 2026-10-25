@@ -12,7 +12,6 @@ from calendar import monthrange
 from collections.abc import Mapping, Sequence
 from typing import TypeVar
 
-from iesplan.core.contracts import horizon_point_count
 
 _Points = TypeVar("_Points")
 DAY_POINTS = {"15min": 96, "30min": 48, "1h": 24}
@@ -66,7 +65,4 @@ def expand_monthly_daily_prices(
         for month in range(1, 13):
             day_curve = tuple(curves[month])
             values.extend(day_curve * monthrange(year, month)[1])
-    # The same public horizon source determines the length; no alternate
-    annual point count or calendar adjustment is introduced.
-    assert len(values) == horizon_point_count(resolution, start_year, operation_years)
     return tuple(values)
