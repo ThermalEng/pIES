@@ -545,7 +545,7 @@ def _store_doc() -> dict:
     """
     return {
         "schema": "ies.assembly",
-        "schema_version": "4.0.0",
+        "schema_version": "5.0.0",
         "assembly": {"id": "mini-store", "name": "无序列储能"},
         "project_baseline": {
             "resolution": "1h", "start_year": START_YEAR, "scenario_mode": "single",
