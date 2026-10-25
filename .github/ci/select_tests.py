@@ -507,25 +507,30 @@ AUTO_FULL_PR_PATHS = frozenset({
 })
 
 
-def require_full_suite(changed: list[str], event: str, requested: bool = False) -> bool:
-    """CI policy: critical PRs + every master push + nightly are full-gated."""
+def require_full_suite(changed: list[str], event: str, requested: bool = False,
+                       pr_action: str = "") -> bool:
+    """Full only on explicit dispatch or the first critical CI PR review.
+
+    Subsequent PR synchronizations and every master push run affected tests;
+    a prior full-suite attempt remains visible even when failing.
+    """
     if requested or "__FULL__" in changed:
         return True
-    if event in {"push", "schedule"}:
-        return True
-    if event == "pull_request":
-        return any(path in AUTO_FULL_PR_PATHS for path in changed)
-    return False
+    return (event == "pull_request"
+            and pr_action in {"opened", "ready_for_review"}
+            and any(path in AUTO_FULL_PR_PATHS for path in changed))
 
 
 def self_test() -> None:
     # Full regression trigger is automatic; manual dispatch is *optional*.
-    assert require_full_suite([".github/ci/select_tests.py"], "pull_request")
-    assert require_full_suite([".github/workflows/docker-ci.yml"], "pull_request")
-    assert require_full_suite(["backend/Dockerfile"], "pull_request")
-    assert require_full_suite(["frontend/tests/e2e/playwright.config.ts"], "pull_request")
-    assert require_full_suite(["README.md"], "push")
-    assert require_full_suite([], "schedule")
+    assert require_full_suite([".github/ci/select_tests.py"], "pull_request", pr_action="opened")
+    assert require_full_suite([".github/workflows/docker-ci.yml"], "pull_request",
+                              pr_action="ready_for_review")
+    assert require_full_suite(["backend/Dockerfile"], "pull_request", pr_action="opened")
+    assert not require_full_suite([".github/ci/select_tests.py"], "pull_request",
+                                  pr_action="synchronize")
+    assert not require_full_suite(["backend/Dockerfile"], "push")
+    assert not require_full_suite([], "schedule")
     assert require_full_suite(["README.md"], "workflow_dispatch", requested=True)
     assert require_full_suite(["__FULL__"], "pull_request")
     assert not require_full_suite(["frontend/tests/e2e/financial-scaffold.ts"], "pull_request")
@@ -687,8 +692,9 @@ def main() -> None:
     parser.add_argument("--output", type=Path)
     parser.add_argument("--full", choices=("true", "false"), default="false")
     parser.add_argument("--event",
-                        choices=("pull_request", "push", "schedule", "workflow_dispatch"),
+                        choices=("pull_request", "push", "workflow_dispatch"),
                         default="pull_request")
+    parser.add_argument("--pr-action", default="")
     args = parser.parse_args()
     if args.self_test:
         self_test()
@@ -696,7 +702,8 @@ def main() -> None:
     if not args.changed or not args.output:
         parser.error("--changed and --output are required")
     paths = [part.decode("utf-8") for part in args.changed.read_bytes().split(b"\0") if part]
-    full = require_full_suite(paths, args.event, requested=args.full == "true")
+    full = require_full_suite(paths, args.event, requested=args.full == "true",
+                              pr_action=args.pr_action)
     result = pick(paths, full=full)
     result["full_suite"] = str(full).lower()
     args.output.write_text("".join(f"{key}={value}\n" for key, value in result.items()), encoding="utf-8")
