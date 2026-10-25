@@ -980,7 +980,7 @@ class TestGeneratorEmptySeriesHorizon:
         finance = merge_effective(FinanceProfile.from_dict(payload), None)
         config = CalculationConfig(
             mode="planning",
-            generator="ies.generator.highs_milp@4.0.0",
+            generator="ies.generator.highs_milp@5.0.0",
             solver="ies.solver.highs@1.7.2",
             precision="medium",
             time_limit_seconds=600,

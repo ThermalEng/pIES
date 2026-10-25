@@ -92,7 +92,7 @@ Bundle 规范化与原子发布
 
 ## 首个内置 provider 与完整 Bundle 聚合
 
-首个内置 provider 为 `ies.generator.highs_milp@4.0.0`（见“首个内置链”裁定目标）：mode 只要 `planning`、精度只要 `medium`、solver 只要 `ies.solver.highs@1.7.2`；options 只接受空对象；输出请求支持 `solution` 与 `metrics`（`metrics` 为 ResultAdapter 后处理请求，不对应求解器第二个原始文件，未知输出明确拒绝）；只消费装配实际绑定的 constant/time_series 计费价格（快照中未绑定的价格条目不触发拒绝），未知价格类型明确拒绝；`seed` 为 null 时使用固定种子 `0`，种子同时固定进求解命令与元数据，不读取随机全局状态。
+首个内置 provider 为 `ies.generator.highs_milp@5.0.0`（见“首个内置链”）：mode 只要 `planning`、精度只要 `medium`、solver 只要 `ies.solver.highs@1.7.2`；options 只接受空对象；输出请求支持 `solution` 与 `metrics`（`metrics` 为 ResultAdapter 后处理请求，不对应求解器第二个原始文件，未知输出明确拒绝）；只消费装配实际绑定的 constant/time_series 计费价格（快照中未绑定的价格条目不触发拒绝），未知价格类型明确拒绝；`seed` 为 null 时使用固定种子 `0`，种子同时固定进求解命令与元数据，不读取随机全局状态。
 
 `generate` 返回唯一完整聚合：manifest（即 `bundle.yaml` 内容）加按规范相对路径索引的只读输入文件字节映射（`input/problem.mps` 与 `input/parameters.json`）。`input/parameters.json` 为最小规范 JSON 元数据，只保存 ResultAdapter 后续必需的 `unit_map`、`objective_offset`、`objective_unit`（目标业务单位，按编译期根量纲确定：金额取财务币种，无量纲取 `"1"`，单一物理量纲取 SI 基准单位）、财务分量求值声明 `components`（分量 ident → `{unit, caliber, constant, terms}`，与目标同一分量展开路径，不依赖目标写法）、请求 outputs、固定 seed、precision 与装配/引用追溯，不复制完整装配、模型与财务，不写 hash。结构化命令按真实 HiGHS CLI 语法逐项存储（非 shell），`time_limit_seconds` 同时进入硬资源声明与求解器选项且语义一致；同一组直接输入与 provider 版本逐字节相同，不写临时目录，不启动 solver。
 
@@ -160,23 +160,23 @@ Bundle 以规范 manifest 与全部输入文件作为身份，不另放随机 ID
 7. 用 fake runtime 验证 Bundle contract，用真实 solver 容器做独立集成验证；
 8. 注册 provider 并验证缺依赖、重复 ID 和半失败不会发布。
 
-## 首个内置链（已裁定目标）
+## 首个内置链
 
-首个内置 provider 为 `ies.generator.highs_milp@4.0.0`，兼容求解器 `ies.solver.highs@1.7.2`，结构化命令执行器前向引用 `ies.executor.local_process@1.0.0`，结果适配器前向引用 `ies.result-adapter.highs@4.0.0`。技术模型支持可证明的仿射关系，以及有限非负上下界下 `x*y=0` 的确定性二进制 Big-M 转换；设备状态仅允许 `t` 与 `t-1`；公开规划变量为连续变量。生成器可为受支持的互斥关系及[财务税务关系](finance.md#求解能力边界)引入必要的内部离散变量，所需界由业务参数和变量边界推导。电池“规划容量参与 SOC 分母”一类双线性明确不支持。
+首个内置 provider 为 `ies.generator.highs_milp@5.0.0`，兼容求解器 `ies.solver.highs@1.7.2`，结构化命令执行器前向引用 `ies.executor.local_process@1.0.0`，结果适配器前向引用 `ies.result-adapter.highs@5.0.0`。技术模型支持可证明的仿射关系，以及有限非负上下界下 `x*y=0` 的确定性二进制 Big-M 转换；设备状态仅允许 `t` 与 `t-1`；公开规划变量为连续变量。生成器可为受支持的互斥关系及[财务税务关系](finance.md#求解能力边界)引入必要的内部离散变量，所需界由业务参数和变量边界推导。电池“规划容量参与 SOC 分母”一类双线性明确不支持。
 
-生成器 `3.0.0` 将独立评价确认列为必需生成输入，不保留旧调用签名或默认评价值。通用 Bundle manifest 未变；结果适配协议按实际输出变化独立版本化，不因生成器输入变化而同步升版。
+独立评价确认是必需生成输入，不提供默认评价值。生成器、结果适配协议与通用 Bundle manifest 分别按自身契约独立版本化。
 
-新增显式全周期 NPV 目标的能力版本为 `ies.generator.highs_milp@3.1.0`；直接输入形状不变，既有目标语义不变。该目标的数学定义不表示尚未实现的税额关系已获支持；未支持关系仍明确拒绝。仅增加目标能力不改变通用 Bundle 或结果适配协议。
+显式全周期 NPV 目标消费完整现金流；金额及期间以财务契约为准。未支持的计算关系在公开提交边界明确拒绝。
 
-增值税关系的能力版本为 `ies.generator.highs_milp@3.2.0`：按财务文件声明构建经营进销项、建设进项及共享抵扣池的连续月度状态，将实缴与退款到账纳入同次 NPV 目标；进项确认、财务年度映射及终期余额以财务契约为准。金额系数预合并，余额和分段税额由精确约束确定，不依赖目标函数压紧。该能力不包含所得税，不改变通用 Bundle 或结果适配协议；业务税务输出由配套结果协议另行声明。
+增值税关系按财务文件声明构建经营进销项、建设进项及共享抵扣池的连续月度状态，将实缴与退款到账纳入同次 NPV 目标；进项确认、财务年度映射及终期余额以财务契约为准。金额系数预合并，余额和分段税额由精确约束确定，不依赖目标函数压紧。
 
-所得税关系的目标能力版本为 `ies.generator.highs_milp@3.3.0`：依财务配置将计税基础、直线折旧及先到期先用的亏损结转纳入同次求解，所得税按对应财务年度进入现金流。金额与期间语义以财务契约为准；折旧与亏损使用不作为现金支出重复扣除，税额与抵扣顺序不依赖规划目标压紧。直接输入与通用 Bundle 协议不变，税务结果发布按实际输出另行版本化。
+所得税关系依财务配置将计税基础、直线折旧及先到期先用的亏损结转纳入同次求解，所得税按对应财务年度进入现金流；折旧与亏损使用不作为现金支出重复扣除，税额与抵扣顺序不依赖规划目标压紧。
 
-同次解财务事实的目标能力版本为 `ies.generator.highs_milp@4.0.0`，配套 `ies.result-adapter.highs@4.0.0`。生成器声明与模型同源的实际现金及税务事实，使适配器恢复完整年度现金流；已有财务分量和求解序列保持原有用途，不以新增通用分量口径或解析命名替代结构化财务映射。字段以[财务事实映射](../formats/solver-bundle.md#同次解财务事实映射)为准。
+生成器声明与模型同源的实际现金及税务事实，使配套适配器恢复完整年度现金流；已有财务分量和求解序列保持原有用途，不以新增通用分量口径或解析命名替代结构化财务映射。字段以[财务事实映射](../formats/solver-bundle.md#同次解财务事实映射)为准。
 
 ## 关联年度维护能力
 
-关联年度维护的目标能力为 `finance.affine_maintenance`，由配套 `ies.generator.highs_milp@5.0.0` 与 `ies.result-adapter.highs@5.0.0` 完整支持后发布。金额输入见[年度维护金额来源](../contracts.md#年度维护金额来源)，同次解声明见[关联维护金额协议](../formats/solver-bundle.md#关联维护金额协议)。该能力覆盖确定项与规模／建设成本关联项，以及同源现金、税务和结果恢复；不以仅支持经营现金流冒充完整支持。不需要关联项的输入不要求此能力，尚未交付的能力不得提前登记。
+生成器声明 `finance.affine_maintenance`，并与配套适配器共同完成金额恢复，表示支持规模／建设成本关联维护金额及同源现金、税务和结果恢复。金额输入见[年度维护金额来源](../contracts.md#年度维护金额来源)，同次解声明见[关联维护金额协议](../formats/solver-bundle.md#关联维护金额协议)。提交含关联项时必须核对该完整能力；仅确定金额的输入不要求此能力。
 
 ## 失败语义
 

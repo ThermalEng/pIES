@@ -456,6 +456,7 @@ export const messagesZh: Record<string, string> = {
   'ies.task.construction_payments_placeholder': '[{"t": 0, "ratio": 0.6}, {"t": 1, "ratio": 0.4}]（比例合计须为 1）',
   'ies.task.maintenance_expenses': '维护/换新支出(JSON)',
   'ies.task.maintenance_expenses_placeholder': '[{"year": 3, "amount": "1000.00", "currency": "CNY"}]（无支出填 []）',
+  'ies.task.maintenance_expenses_hint': '每笔可将确定金额 amount 与有序 terms 组合：规模项 kind=scale_unit_cost（instance_id、property、unit_cost.value/unit），建设成本比例项 kind=cost_component_share（instance_id、component=upfront_capex、ratio）。纯关联金额填 amount="0"；同年多笔保留清单顺序。实例 ID 和属性须来自本项目装配。',
   'ies.task.discount_rate': '折现率(小数, 如 0.08)',
   'ies.task.evaluation_hint': '建设期(非负整数年，显式 0 合法)与运营年限(正整数)提交时必填、无默认值；付款比例与维护清单为显式 JSON，形态由后端核对；确认人/确认时间由服务端记录并冻结进快照',
   'ies.task.evaluation_invalid': '请填写建设期(非负整数)、运营年限(正整数)、0..1 区间内折现率与合法付款/维护 JSON(均必填)',
