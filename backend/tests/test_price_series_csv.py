@@ -512,3 +512,108 @@ def test_complete_materialized_carries_prices() -> None:
     assert [p.price_id for p in completed.prices] == ["pv_export"]
     assert completed.prices[0].values == (0.4, 0.45)
     assert len(completed.series) == 1
+
+
+# ---------------------------------------------------------------------------
+# 0.15 ISSUE-01: declared month/day sources at the real submit and worker edges
+# ---------------------------------------------------------------------------
+
+def _monthly_effective(refs: dict[int, str], *, resolution: str = "1h"):
+    payload = _profile_payload()
+    count = {"1h": 24, "30min": 48, "15min": 96}[resolution]
+    payload["energy_prices"]["pv_export"] = {
+        "carrier": "electricity",
+        "direction": "sale",
+        "kind": "monthly_daily",
+        "months": {
+            str(month): {
+                "ref": refs[month],
+                "series_meta": {"resolution": resolution, "point_count": count, "unit": "CNY/kWh"},
+            }
+            for month in range(1, 13)
+        },
+    }
+    return merge_effective(FinanceProfile.from_dict(payload), None)
+
+
+def _daily_ref(db, tmp_path, price: str, *, count: int = 24, resolution: str = "1h", unit: str = "CNY/kWh") -> str:
+    from iesplan.config import settings
+    settings.data_dir = tmp_path
+    meta = [
+        "# schema: ies.price-series", "# schema_version: 1.0.0",
+        f"# resolution: {resolution}", f"# unit: {unit}",
+    ]
+    raw = _price_bytes(_hourly_rows([price], count), meta=meta)
+    return put_object(db, raw, "text/csv", "user_upload").oid
+
+
+def test_monthly_submit_and_worker_use_frozen_calendar_and_shared_refs(db, tmp_path) -> None:
+    from iesplan.application.tasks.submissions import _used_price_oids
+    from iesplan.application.worker.compute_cases import _materialize_price_series
+    from iesplan.core.contracts import horizon_point_count
+
+    jan = _daily_ref(db, tmp_path, "0.1")
+    feb = _daily_ref(db, tmp_path, "-0.2")
+    refs = {month: jan for month in range(1, 13)}
+    refs[2] = feb
+    effective = _monthly_effective(refs)
+    art = _artifact()
+    # Only used price IDs contribute source refs; shared months keep a single oid.
+    assert _used_price_oids(art, effective) == [jan, feb]
+    _check_submit_coverage(db=db, artifact=art, evaluation={"operation_years": 3}, effective=effective)
+    prices = _materialize_price_series(db, art, effective, operation_years=3)
+    assert len(prices) == 1
+    values = prices[0].values
+    assert prices[0].source["kind"] == "monthly_daily"
+    assert prices[0].source["months"]["2"] == feb
+    assert len(values) == horizon_point_count("1h", 2026, 3)
+    # Jan / leap February 2028: no shift into March when crossing a leap day.
+    assert values[0] == 0.1
+    assert values[31 * 24] == -0.2
+    start_2028 = (365 + 365) * 24
+    leap_day = start_2028 + (31 + 28) * 24
+    assert values[leap_day:leap_day + 24] == (-0.2,) * 24
+    assert values[leap_day + 24] == 0.1
+
+
+@pytest.mark.parametrize("problem, reason", [
+    ("short", "expected_point_count"),
+    ("resolution", "project_resolution"),
+    ("unit", "source_unit"),
+    ("missing_oid", "reason"),
+])
+def test_monthly_submit_rejects_bad_sources_with_017(db, tmp_path, problem: str, reason: str) -> None:
+    if problem == "short":
+        oid = _daily_ref(db, tmp_path, "0.1", count=23)
+    elif problem == "resolution":
+        oid = _daily_ref(db, tmp_path, "0.1", count=48, resolution="30min")
+    elif problem == "unit":
+        oid = _daily_ref(db, tmp_path, "0.1", unit="USD/kWh")
+    else:
+        oid = "0" * 64
+    effective = _monthly_effective({month: oid for month in range(1, 13)})
+    with pytest.raises(InvalidRequestError) as exc_info:
+        _check_submit_coverage(
+            db=db, artifact=_artifact(), evaluation={"operation_years": 1}, effective=effective
+        )
+    assert exc_info.value.code == "TASK-REQ-017"
+    assert reason in exc_info.value.params
+    assert exc_info.value.params["month"] == "1"
+
+
+def test_monthly_capability_required_only_for_bound_price() -> None:
+    from iesplan.application.tasks.submissions import _check_monthly_daily_capabilities
+    refs = {month: "frozen" for month in range(1, 13)}
+    effective = _monthly_effective(refs)
+    with pytest.raises(InvalidRequestError) as exc:
+        _check_monthly_daily_capabilities(_artifact(), effective, "unsupported@1", ())
+    assert exc.value.code == "TASK-REQ-007"
+    assert exc.value.params["missing_capabilities"] == ["finance.monthly_daily_prices"]
+    _check_monthly_daily_capabilities(
+        _artifact(), effective, "supported@1", ("finance.monthly_daily_prices",)
+    )
+    unused = SimpleNamespace(canonical_text=json.dumps({
+        "project_baseline": {"resolution": "1h", "start_year": 2026},
+        "tariff_bindings": {"grid": {"price": "grid_import"}},
+    }))
+    _check_monthly_daily_capabilities(unused, effective, "unsupported@1", ())

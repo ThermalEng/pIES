@@ -70,7 +70,7 @@ DEPR_LIFE = 10
 def _gen_finance_payload(*, opening=(), carry_years=INC_CARRY_YEARS):
     return {
         "schema": "ies.finance-profile",
-        "schema_version": "4.0.0",
+        "schema_version": "5.0.0",
         "profile": {
             "id": "income-gen",
             "region": "CN-North",

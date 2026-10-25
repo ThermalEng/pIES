@@ -57,7 +57,7 @@ equations:
 function overridesPayload(profileId: string, price: string): Record<string, unknown> {
   return {
     schema: 'ies.finance-overrides',
-    schema_version: '4.0.0',
+    schema_version: '5.0.0',
     profile_ref: { id: profileId },
     energy_prices: {
       grid_import: { kind: 'constant', value: { value: price, unit: 'CNY/kWh' } },

@@ -334,7 +334,7 @@ const BATTERY_COMMAND = {
 function financeProfile(profileId: string): Record<string, unknown> {
   return {
     schema: 'ies.finance-profile',
-    schema_version: '4.0.0',
+    schema_version: '5.0.0',
     profile: {
       id: profileId,
       region: 'CN-North',

@@ -56,7 +56,7 @@ const taxProfileTemplate = {
     region: '合成税务验收区',
   },
   schema: 'ies.finance-profile',
-  schema_version: '4.0.0',
+  schema_version: '5.0.0',
   tax_rules: {
     building_vat: {
       confirmation: { method: 'payment_period' },

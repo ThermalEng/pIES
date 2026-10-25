@@ -54,7 +54,7 @@ export default function DemandRateEditor({ mode, text, onChange, disabled = fals
     // Overrides have an existing empty-document state (404); start its canonical
     // authoring envelope, preserving the exact Profile identity selected by user.
     const base = doc ?? (mode === 'overrides' && profileId ? {
-      schema: 'ies.finance-overrides', schema_version: '4.0.0', profile_ref: { id: profileId },
+      schema: 'ies.finance-overrides', schema_version: '5.0.0', profile_ref: { id: profileId },
     } : null)
     if (!base) {
       setMessage(pt('ies.finance.demand_document_first'))

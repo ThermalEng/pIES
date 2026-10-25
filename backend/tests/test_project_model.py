@@ -134,7 +134,7 @@ def _finance_payload(direction: str = "purchase", tariff_kind: str = "constant")
         }
     return {
         "schema": "ies.finance-profile",
-        "schema_version": "4.0.0",
+        "schema_version": "5.0.0",
         "profile": {
             "id": "cn-north-demo",
             "region": "CN-North",
