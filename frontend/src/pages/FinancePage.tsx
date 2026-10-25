@@ -34,6 +34,7 @@ import { translateError, useI18n } from '../i18n'
 import { pt } from '../i18n/pageMessages'
 import { ApiError } from '../types'
 import DemandRateEditor from '../features/finance/components/DemandRateEditor'
+import MonthlyDailyPriceEditor from '../features/finance/components/MonthlyDailyPriceEditor'
 
 export interface FinancePageProps {
   projectId?: number
@@ -406,6 +407,7 @@ export default function FinancePage(props: FinancePageProps) {
             />
           </FormField>
           <DemandRateEditor mode="profile" text={registerText} onChange={setRegisterText} disabled={registering} />
+          <MonthlyDailyPriceEditor mode="profile" text={registerText} onChange={setRegisterText} disabled={registering} />
           <div style={{ marginTop: 'var(--ies-space-2)' }}>
             <Button onClick={() => void registerDoc()} loading={registering} disabled={registering}>
               {pt('ies.finance.register_btn')}
@@ -440,6 +442,15 @@ export default function FinancePage(props: FinancePageProps) {
             disabled={overridesLocked}
             profileId={boundId}
             profileCharges={(boundProfile?.demand_charges ?? {}) as Record<string, { rate: { value: string; unit: string } }>} />
+          <MonthlyDailyPriceEditor mode="overrides" text={overridesText} onChange={setOverridesText}
+            disabled={overridesLocked}
+            profileId={boundId}
+            profilePrices={(boundProfile?.energy_prices ?? {}) as Record<string, {
+              kind: string; carrier?: string; direction?: string;
+              value?: { value: string; unit: string };
+              ref?: string; series_meta?: { resolution: string; point_count: number; unit: string };
+              months?: Record<string, { ref: string; series_meta: { resolution: string; point_count: number; unit: string } }>;
+            }>} />
           <div className="ies-flex" style={{ marginTop: 'var(--ies-space-2)', gap: 'var(--ies-space-2)' }}>
             <Button onClick={() => void saveOverridesDoc()} loading={savingOverrides} disabled={overridesLocked}>
               {pt('ies.finance.save_btn')}
