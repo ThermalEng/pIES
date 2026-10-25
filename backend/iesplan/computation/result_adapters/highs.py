@@ -1,6 +1,6 @@
-"""首个真实 ResultAdapterProvider：``ies.result-adapter.highs@3.0.0``。
+"""首个真实 ResultAdapterProvider：``ies.result-adapter.highs@4.0.0``。
 
-与 ``ies.generator.highs_milp@3.4.0`` 配套，在 2.0.0 主解/序列/度量
+与 ``ies.generator.highs_milp@4.0.0`` 配套，在 2.0.0 主解/序列/度量
 恢复基础上增加同次解结构化财务事实映射（映射协议改变故升版；仿射
 求值复用同一路径），解释其声明输出
 ``output/solution.sol``。该文件由求解 executable
@@ -53,7 +53,7 @@ from iesplan.computation.result_adapter import ResultAdapterDescriptor
 from iesplan.core.units import UnitError, dims_of, from_si
 
 ADAPTER_ID = "ies.result-adapter.highs"
-ADAPTER_VERSION = "3.0.0"
+ADAPTER_VERSION = "4.0.0"
 ADAPTER_REF = f"{ADAPTER_ID}@{ADAPTER_VERSION}"
 
 DESCRIPTOR = ResultAdapterDescriptor(
@@ -554,6 +554,7 @@ def _recover_financial_facts(
                 "variable_om": amount(entry["variable_om"], "annual_operation"),
                 "fixed_om": amount(entry["fixed_om"], "annual_operation"),
                 "maintenance": entry["maintenance"],
+                "demand_charge": amount(entry["demand_charge"], "annual_operation"),
                 "net": amount(entry["net"], "annual_operation"),
             }
             for entry in decl["annual_operation"]
@@ -611,6 +612,20 @@ def _recover_financial_facts(
                 for entry in decl["tax_cash"]["loss_balances"]
             ],
         },
+        "monthly_demand": [
+            {
+                "billing_id": entry["billing_id"],
+                "charge_id": entry["charge_id"],
+                "calendar_year": entry["calendar_year"],
+                "calendar_month": entry["calendar_month"],
+                "financial_year": entry["financial_year"],
+                "peak_power": amount(entry["peak_power"], "monthly_demand.peak_power"),
+                "peak_unit": entry["peak_unit"],
+                "rate": dict(entry["rate"]),
+                "charge": amount(entry["charge"], "monthly_demand.charge"),
+            }
+            for entry in decl["monthly_demand"]
+        ],
         "annual_net_flows": [
             amount(node, "annual_net_flows")
             for node in decl["annual_net_flows"]

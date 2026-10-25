@@ -184,7 +184,8 @@ test.describe('场景 12: 新建项目模型(真实后端模板与 YAML)', () =>
     await page.getByRole('button', { name: /确认|Confirm/i }).click()
     await expect(page.getByText(projectName)).toBeVisible()
     await page.getByText(projectName).click()
-    await expect(page).toHaveURL(/\/projects\/\d+$/)
+    await expect(page).toHaveURL(/\/projects\/\d+\/tasks$/)
+    await expect(page.getByRole('button', { name: /提交任务|Submit task/i }).first()).toBeVisible()
     const projectId = page.url().match(/\/projects\/(\d+)/)![1]
     // 模板数据输入: 项目内 CSV 版本(真实数据 API 前置造数, 断言见保存后的表单/回执)。
     const dataPath = await uploadAndBindData(page, projectId, `${templateDeviceId}_1`)

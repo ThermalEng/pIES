@@ -43,6 +43,7 @@ interface SealedAnnualOperation {
   variable_om: string
   fixed_om: string
   maintenance: string
+  demand_charge: string
   net: string
 }
 interface SealedEvaluation {
@@ -198,7 +199,7 @@ function expectSealedCardMatches(snapshot: SealedCardSnapshot, fin: SealedEvalua
   expect(snapshot.annualRows.map((r) => r.value)).toEqual(
     fin.annual_operation.map(
       (a) =>
-        `${a.energy_net} − ${a.variable_om} − ${a.fixed_om} − ${a.maintenance} = ${a.net} ${fin.currency}`,
+        `${a.energy_net} − ${a.variable_om} − ${a.fixed_om} − ${a.maintenance} − ${a.demand_charge} = ${a.net} ${fin.currency}`,
     ),
   )
   expect(snapshot.cfRows.map((r) => r.label)).toEqual(ev.rows.map((r) => `CF[t=${r.year}]`))
@@ -267,7 +268,8 @@ test.describe('T3: K1N2 财务评价确认/求解/结果/导出', () => {
     const page: Page = await context.newPage()
     const session = await createSession(page, username, password)
     await page.getByText(projectName).click({ timeout: 30_000 })
-    await expect(page).toHaveURL(/\/projects\/\d+$/)
+    await expect(page).toHaveURL(/\/projects\/\d+\/tasks$/)
+    await expect(page.getByRole('button', { name: /提交任务|Submit task/i }).first()).toBeVisible()
 
     // 确认 → 提交(评价确认块经 UI 填写, 无业务默认)
     await submitEvaluationViaUI(
@@ -282,6 +284,7 @@ test.describe('T3: K1N2 财务评价确认/求解/结果/导出', () => {
     await expect(page.getByText(/t=K\+j/).first()).toBeVisible()
     // 会话内读取封存卡实际展示(与 HTTP oracle 的对账在其后完成)。
     const snapshot = await captureSealedCard(page)
+    await expect(page.getByText(/未绑定需量计量点|No demand meter was bound/i)).toBeVisible()
 
     // 导出页: Excel 报告下载并落盘, 供下载内容验证消费同一封存事实。
     await page.getByRole('navigation', { name: /工作台|Workspace/i }).getByText('导出').click({ timeout: 30_000 })
@@ -303,6 +306,7 @@ test.describe('T3: K1N2 财务评价确认/求解/结果/导出', () => {
       apiCtx.request, 'GET', `/api/projects/${pid}/tasks/${taskId}/result`, undefined, token2,
     )
     const fin = result.result.financial_evaluation as SealedEvaluation
+    expect((fin as SealedEvaluation & { monthly_demand: unknown[] }).monthly_demand).toEqual([])
     expect(fin.status).toBe('evaluated')
     expect(fin.evaluation_years).toBe(3)
     expect(fin.construction_period).toBe(1)
@@ -379,7 +383,8 @@ test.describe('T3: K1N2 财务评价确认/求解/结果/导出', () => {
     const page: Page = await context.newPage()
     const session = await createSession(page, username, password)
     await page.getByText(projectName).click({ timeout: 30_000 })
-    await expect(page).toHaveURL(/\/projects\/\d+$/)
+    await expect(page).toHaveURL(/\/projects\/\d+\/tasks$/)
+    await expect(page.getByRole('button', { name: /提交任务|Submit task/i }).first()).toBeVisible()
 
     // 确认 → 提交(K=1/N=2/付款 0.6+0.4/无维护)。
     await submitEvaluationViaUI(page, '[]')

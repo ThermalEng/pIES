@@ -230,7 +230,9 @@ test.describe('场景 11: 视口与键盘', () => {
     await row.focus()
     await expect(row).toBeFocused()
     await page.keyboard.press('Enter')
-    await expect(page).toHaveURL(/\/projects\/\d+$/)
+    await expect(page).toHaveURL(/\/projects\/\d+\/tasks$/)
+    await expect(page.getByRole('button', { name: /提交任务|Submit task/i }).first()).toBeVisible()
+    const projectId = page.url().match(/\/projects\/(\d+)\/tasks$/)![1]
 
     // 返回列表, 验证登录表单/对话框键盘可达
     await page.goto('/')
@@ -240,7 +242,10 @@ test.describe('场景 11: 视口与键盘', () => {
     await page.keyboard.press('Escape')
     await expect(page.getByLabel(/名称|Name/i)).not.toBeVisible()
 
-    session.assertNoErrors()
+    // Newly created projects have no calculation config; only this exact 404 is expected.
+    session.assertNoErrors([
+      { method: 'GET', path: `/api/projects/${projectId}/config`, status: 404 },
+    ])
     await context.close()
   })
 

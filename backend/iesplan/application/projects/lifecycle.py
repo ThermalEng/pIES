@@ -651,7 +651,7 @@ def _validate_device_type_ref(db: Session, content: dict, payload: dict) -> None
         return
     except NotFoundError:
         pass
-    from iesplan.application.models.project_devices import project_device_type_ids
+    from iesplan.application.models import project_device_type_ids
 
     if type_id in project_device_type_ids(db, content):
         return
@@ -912,6 +912,17 @@ def _cmd_assembly_set_tariff_bindings(content: dict, payload: dict) -> dict:
     return {"stored": True, "bindings": sorted(bindings)}
 
 
+def _cmd_assembly_set_demand_bindings(content: dict, payload: dict) -> dict:
+    """Replace the whole explicit monthly demand meter section."""
+    bindings = payload.get("bindings")
+    if not isinstance(bindings, dict):
+        raise InvalidRequestError(
+            "assembly.set_demand_bindings 需要 bindings 对象", code="PROJ-CMD-005"
+        )
+    content["demand_bindings"] = dict(bindings)
+    return {"stored": True, "bindings": sorted(bindings)}
+
+
 def _cmd_task_set_working_inputs(content: dict, payload: dict) -> dict:
     """暂存任务提交工作输入(任务对话框可编辑态的草稿侧副本)。
 
@@ -949,6 +960,7 @@ _COMMAND_HANDLERS.update(
         "project.set_extensions": _cmd_project_set_extensions,
         "assembly.set_finance_binding": _cmd_assembly_set_finance_binding,
         "assembly.set_tariff_bindings": _cmd_assembly_set_tariff_bindings,
+        "assembly.set_demand_bindings": _cmd_assembly_set_demand_bindings,
         "task.set_working_inputs": _cmd_task_set_working_inputs,
     }
 )

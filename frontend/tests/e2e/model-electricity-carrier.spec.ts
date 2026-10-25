@@ -27,7 +27,8 @@ test.describe('电力载能连接与改名', () => {
     await page.getByRole('button', { name: /确认|Confirm/i }).click()
     await expect(page.getByText(projectName)).toBeVisible({ timeout: 30_000 })
     await page.getByText(projectName).click()
-    await expect(page).toHaveURL(/\/projects\/\d+$/)
+    await expect(page).toHaveURL(/\/projects\/\d+\/tasks$/)
+    await expect(page.getByRole('button', { name: /提交任务|Submit task/i }).first()).toBeVisible()
     const projectId = page.url().match(/\/projects\/(\d+)/)![1]
 
     await page.getByRole('navigation', { name: /工作台|Workspace/i }).getByText('系统建模').click()

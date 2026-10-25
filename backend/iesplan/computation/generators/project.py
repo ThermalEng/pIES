@@ -49,7 +49,7 @@ from iesplan.computation.generators.linear import (
     LinearModel,
     LinearVariable,
     LoweringUnsupportedError,
-    _mutex_big_m,
+    lower_mutex,
     lower_planning_constraint,
     lower_planning_expression,
     lower_relation,
@@ -95,6 +95,7 @@ _COMPONENT_CALIBER = {
     "period_variable_om": "period",
     "period_energy_purchase": "period",
     "period_energy_sale": "period",
+    "period_demand_charge": "period",
 }
 
 
@@ -252,9 +253,31 @@ def build_project_model_with_facts(
     完全一致，第四项为 ``financial_facts`` 结构化声明（格式页映射表为
     唯一正文，供配套适配器用同一次主解恢复，不重建模型）。
     """
+    model, unit_map, objective_unit, facts, _, _ = build_project_model_package(
+        artifact, models, materialized, finance, config, evaluation
+    )
+    return model, unit_map, objective_unit, facts
+
+
+def build_project_model_package(
+    artifact: ValidatedAssemblyArtifact,
+    models: Mapping[str, DeviceMathContribution],
+    materialized: MaterializedSet,
+    finance: EffectiveFinanceConfig,
+    config: CalculationConfig,
+    evaluation: EvaluationInput,
+) -> tuple[
+    LinearModel, Mapping[str, str], str, Mapping[str, object],
+    Mapping[str, Mapping[str, object]], tuple[Mapping[str, object], ...],
+]:
+    """一次建模取得 MPS、财务事实、分量与时序声明，不重复展开月峰。"""
     builder = _new_builder(artifact, models, materialized, finance, evaluation)
     model, unit_map, objective_unit = builder.build()
-    return model, unit_map, objective_unit, builder.financial_facts()
+    return (
+        model, unit_map, objective_unit,
+        builder.financial_facts(), builder.finance_components(),
+        builder.step_series(),
+    )
 
 
 def _new_builder(
@@ -295,12 +318,16 @@ def finance_component_declarations(
 ) -> Mapping[str, Mapping[str, object]]:
     """财务分量求值声明（ident → unit/caliber/constant/terms）。
 
-    与 ``build_project_model`` 同一构造器、同一分量展开路径，只做
-    初始化与分量展开，不执行装配建模；同一输入恒得同一声明。
+    与 ``build_project_model`` 同一构造器、同一分量展开路径；存在需量
+    绑定时需生成真实峰值求解列，同一输入恒得同一声明。
     供 GeneratorProvider 写入 Bundle ``parameters.json``，由配套
     ResultAdapter 用同一次真实解求值发布，不重建财务模型。
     """
-    return _new_builder(artifact, models, materialized, finance, evaluation).finance_components()
+    builder = _new_builder(artifact, models, materialized, finance, evaluation)
+    if json.loads(artifact.canonical_text).get("demand_bindings"):
+        # 需量分量必须消费本次建模生成的精确峰值求解列。
+        builder.build()
+    return builder.finance_components()
 
 
 def step_series_declarations(
@@ -346,6 +373,9 @@ class _ProjectBuilder:
         self._income_cash: _AffineAcc | None = None
         #: 同源财务事实留存（与目标同一表达式/循环内并行累积，供
         #: ``financial_facts`` 声明；键与结构见格式页映射表）。
+        self._demand_peaks: dict[tuple[str, str, int], _AffineAcc] = {}
+        self._demand_rows: list[dict[str, Any]] = []
+        self._demand_totals: dict[str, _AffineAcc] = {}
         self._fact_cash: dict[int, _AffineAcc] = {}
         self._fact_annual: dict[int, dict[str, _AffineAcc]] = {}
         self._fact_construction = _AffineAcc()
@@ -570,6 +600,9 @@ class _ProjectBuilder:
                 if dev_id == inst:
                     refs.add(iface_id)
         for binding in (self.doc.get("tariff_bindings") or {}).values():
+            if binding.get("instance") == inst:
+                refs.add(binding["interface"])
+        for binding in (self.doc.get("demand_bindings") or {}).values():
             if binding.get("instance") == inst:
                 refs.add(binding["interface"])
         instances = (self.doc.get("finance_binding") or {}).get("instances") or {}
@@ -894,6 +927,111 @@ class _ProjectBuilder:
             for step in range(start, stop)
         ]
 
+    def _build_monthly_demand(self) -> None:
+        """精确月最大功率：二元编码选择实际峰值点，不依赖目标函数。
+
+        peak>=所有逐点功率；被编码索引选中的点强制 peak<=power[t]。
+        未选中的点由实例真实功率上下界 U-L[t] 放松。索引被限制
+        0..n-1，故一个且仅有一个真实点被选中，峰值严格等于月最大值。
+        不满足有限盒界的实例在实际构模时拒绝，不猜 Big-M 或 epsilon。
+        物化的功率输入无需变量，其真实峰值是直接常量。
+        """
+        spans = self._vat_month_spans()
+        baseline_year = self.doc["project_baseline"]["start_year"]
+        construction = self.evaluation.construction_period
+        bindings = self.doc.get("demand_bindings") or {}
+        for billing_id, binding in sorted(bindings.items()):
+            instance = binding["instance"]
+            interface = binding["interface"]
+            charge_id = binding["charge"]
+            rate = self.finance.demand_charges[charge_id].rate
+            rate_si = _money_to_internal(rate)
+            total = _AffineAcc()
+            for month, start, end in spans:
+                key = (instance, interface, month)
+                peak = self._demand_peaks.get(key)
+                if peak is None:
+                    peak = _AffineAcc()
+                    if (instance, interface) in self.series:
+                        values = self._series_si(
+                            instance, interface, self.models[instance]
+                        )[start:end]
+                        peak.add_const(max(values))
+                    else:
+                        names = [
+                            self._tech_name(instance, interface, t)
+                            for t in range(start, end)
+                        ]
+                        candidates = [self.variables[name] for name in names]
+                        if any(
+                            variable.lower is None or variable.upper is None
+                            for variable in candidates
+                        ):
+                            raise LoweringUnsupportedError(
+                                f"需量绑定 {billing_id!r} 计量点 "
+                                f"{instance}.{interface} 的月 {month} 缺实际有限界"
+                            )
+                        upper = max(float(var.upper) for var in candidates)
+                        lower = max(float(var.lower) for var in candidates)
+                        peak_name = f"{instance}__{interface}__demand_peak_m{month}"
+                        self._declare(peak_name, lower, upper, "continuous", None)
+                        peak.add_term(peak_name, 1.0)
+                        bit_count = (len(names) - 1).bit_length()
+                        bits = [
+                            self._declare(
+                                f"{peak_name}__bit{bit}", 0.0, 1.0, "binary", None
+                            )
+                            for bit in range(bit_count)
+                        ]
+                        if bits:
+                            valid = _AffineAcc()
+                            for bit, flag in enumerate(bits):
+                                valid.add_term(flag, float(1 << bit))
+                            self.rows.append(LinearConstraint(
+                                name=f"{peak_name}__valid",
+                                expression=valid.freeze(), sense="le",
+                                rhs=float(len(names) - 1),
+                            ))
+                        for offset, variable in enumerate(candidates):
+                            floor = _AffineAcc()
+                            floor.add_term(peak_name, 1.0)
+                            floor.add_term(variable.name, -1.0)
+                            self.rows.append(LinearConstraint(
+                                name=f"{peak_name}__floor_{offset}",
+                                expression=floor.freeze(), sense="ge", rhs=0.0,
+                            ))
+                            slack = upper - float(variable.lower)
+                            select = floor.snapshot()
+                            ones = 0
+                            for bit, flag in enumerate(bits):
+                                if offset & (1 << bit):
+                                    select.add_term(flag, slack)
+                                    ones += 1
+                                else:
+                                    select.add_term(flag, -slack)
+                            self.rows.append(LinearConstraint(
+                                name=f"{peak_name}__select_{offset}",
+                                expression=select.freeze(), sense="le",
+                                rhs=slack * ones,
+                            ))
+                    self._demand_peaks[key] = peak
+                base_charge = _AffineAcc()
+                base_charge.add_scaled(peak, rate_si)
+                total.add_scaled(base_charge, 1.0)
+                operating_month = month - 12 * construction - 1
+                self._demand_rows.append({
+                    "billing_id": billing_id,
+                    "charge_id": charge_id,
+                    "calendar_year": baseline_year + operating_month // 12,
+                    "calendar_month": operating_month % 12 + 1,
+                    "financial_year": (month - 1) // 12 + 1,
+                    "month": month,
+                    "peak": peak,
+                    "base_charge": base_charge,
+                    "rate": rate.to_dict(),
+                })
+            self._demand_totals[billing_id] = total
+
     def _ident_affine(self, ident: str) -> _AffineAcc:
         """规划财务标识符 → 仿射式（`<前缀>__<分量>` 首个 __ 切分）。"""
         prefix, _, component = ident.partition("__")
@@ -914,6 +1052,12 @@ class _ProjectBuilder:
                     f"财务标识符 {ident!r} 的分量未声明"
                 )
             return self._cost_affine(prefix, component)
+        if prefix in (self.doc.get("demand_bindings") or {}):
+            if component != "period_demand_charge":
+                raise LoweringUnsupportedError(
+                    f"需量标识符 {ident!r} 的分量后缀非法"
+                )
+            return self._demand_totals[prefix].snapshot()
         tariff = self.doc.get("tariff_bindings") or {}
         if prefix in tariff:
             expected = _tariff_suffix(_binding_direction(self, prefix))
@@ -947,6 +1091,8 @@ class _ProjectBuilder:
         for binding_id in sorted(self.doc.get("tariff_bindings") or {}):
             suffix = _tariff_suffix(_binding_direction(self, binding_id))
             symbols[f"{binding_id}__{suffix}"] = Counter({"currency": 1})
+        for billing_id in sorted(self.doc.get("demand_bindings") or {}):
+            symbols[f"{billing_id}__period_demand_charge"] = Counter({"currency": 1})
         for var_name, var in self.plan_vars.items():
             unit = var.get("unit")
             if unit is None:
@@ -988,6 +1134,8 @@ class _ProjectBuilder:
         for binding_id in (self.doc.get("tariff_bindings") or {}):
             suffix = _tariff_suffix(_binding_direction(self, binding_id))
             names.add(f"{binding_id}__{suffix}")
+        for billing_id in self.doc.get("demand_bindings") or {}:
+            names.add(f"{billing_id}__period_demand_charge")
         return names
 
     def _component_unit(self, component: str) -> str:
@@ -1034,6 +1182,13 @@ class _ProjectBuilder:
                 "caliber": _COMPONENT_CALIBER[component],
                 "constant": affine.constant,
                 "terms": dict(sorted(affine.terms.items())),
+            }
+        for billing_id, amount in sorted(self._demand_totals.items()):
+            out[f"{billing_id}__period_demand_charge"] = {
+                "unit": self.finance.currency,
+                "caliber": "period",
+                "constant": amount.constant,
+                "terms": dict(sorted(amount.terms.items())),
             }
         return MappingProxyType(out)
 
@@ -1088,6 +1243,25 @@ class _ProjectBuilder:
                 finance_type, _, _ = rule.for_path.partition(".")
                 construction[finance_type] = 1.0 + float(rule.rate.value)
         return prices, oms, construction
+
+    def _demand_tax_factors(self) -> dict[str, tuple[float, float]]:
+        """费项→(实际付款加成, 可抵进项占基本账单比例)。
+
+        不含税口径先全额加税再形成现金；含税口径先拆出进项。
+        未声明进项的费项既不臆测税率也不臆测抵扣资格。
+        """
+        out: dict[str, tuple[float, float]] = {}
+        for rule in self.finance.tax_rules.values():
+            if not isinstance(rule, VatRule):
+                continue
+            for entry in rule.demand_input_tax:
+                rate = float(entry.rate.value)
+                gross = 1.0 + rate if self.finance.price_basis == "tax_exclusive" else 1.0
+                deductible = self._vat_gross_factor(entry.rate) * float(
+                    entry.deductible_ratio.value
+                )
+                out[entry.charge] = (gross, deductible)
+        return out
 
     def _annual_fixed_om_annual(self, inst: str) -> _AffineAcc:
         """单个实例年固定 O&M 的年金额仿射式（每年全额）。
@@ -1148,6 +1322,7 @@ class _ProjectBuilder:
         """
         evaluation = self.evaluation
         price_markup, om_markup, construction_markup = self._vat_gross_markups()
+        demand_tax = self._demand_tax_factors()
         construction = self._construction_affine(construction_markup or None)
         maintenance = self._maintenance_by_year()
         baseline = self.doc["project_baseline"]
@@ -1168,7 +1343,13 @@ class _ProjectBuilder:
             energy = _AffineAcc()
             variable = _AffineAcc()
             fixed = _AffineAcc()
+            demand = _AffineAcc()
             annual = _AffineAcc()
+            for row in self._demand_rows:
+                if row["financial_year"] == year_no:
+                    demand.add_scaled(
+                        row["base_charge"], demand_tax.get(row["charge_id"], (1.0, 0.0))[0]
+                    )
             for binding_id in sorted(bindings):
                 price_id = bindings[binding_id]["price"]
                 energy.add_scaled(
@@ -1201,12 +1382,14 @@ class _ProjectBuilder:
             annual.add_scaled(energy, 1.0)
             annual.add_scaled(variable, 1.0)
             annual.add_scaled(fixed, 1.0)
+            annual.add_scaled(demand, -1.0)
             annual.add_const(-maintenance.get(year_no, 0.0))
             self._year_cash(year_no).add_scaled(annual, 1.0)
             self._fact_annual[year_no] = {
                 "energy": energy.snapshot(),
                 "variable": variable.snapshot(),
                 "fixed": fixed.snapshot(),
+                "demand": demand.snapshot(),
                 "net": annual.snapshot(),
             }
             if index == 0:
@@ -1308,6 +1491,13 @@ class _ProjectBuilder:
         bindings = self.doc.get("tariff_bindings") or {}
         instances = (self.doc.get("finance_binding") or {}).get("instances") or {}
         for rule in pool_rules["vat"]:
+            for entry in rule.demand_input_tax:
+                factor = self._vat_gross_factor(entry.rate) * float(
+                    entry.deductible_ratio.value
+                )
+                for row in self._demand_rows:
+                    if row["charge_id"] == entry.charge:
+                        inp[row["month"] - 1].add_scaled(row["base_charge"], factor)
             for entry in rule.in_tax:
                 factor = self._vat_gross_factor(entry.rate) * float(
                     entry.deductible_ratio.value
@@ -1525,7 +1715,7 @@ class _ProjectBuilder:
                     carry_name, lower=0.0, upper=cumulative_hi,
                 )
                 if paid_hi > 0.0 and cumulative_hi > 0.0:
-                    mutex = _mutex_big_m(
+                    mutex = lower_mutex(
                         f"vat__{pool_id}__m{month}",
                         (paid_name, 0),
                         (carry_name, 0),
@@ -1831,6 +2021,12 @@ class _ProjectBuilder:
                     base.add_scaled(
                         self._tariff_affine(binding_id, start, end), -(markup - coef)
                     )
+            demand_tax = self._demand_tax_factors()
+            for row in self._demand_rows:
+                if row["financial_year"] != year or row["charge_id"] not in rule.demand_cost:
+                    continue
+                gross, credit = demand_tax.get(row["charge_id"], (1.0, 0.0))
+                base.add_scaled(row["base_charge"], -(gross - credit))
             for for_path in rule.annual_om:
                 self._income_deduct_om(base, for_path, None, om_credit, instances)
             for for_path in rule.variable_om:
@@ -1962,7 +2158,7 @@ class _ProjectBuilder:
                 equation.add_scaled(base, -1.0)
                 constrain(f"inc__{rule_id}__eq__y{year}", equation, "eq", 0.0)
                 if profit_hi > 0.0 and gen_hi > 0.0:
-                    mutex = _mutex_big_m(
+                    mutex = lower_mutex(
                         f"inc__{rule_id}__m{year}",
                         (profit_name, 0),
                         (gen_name, 0),
@@ -2161,10 +2357,14 @@ class _ProjectBuilder:
         ``series_id`` 为 ``{instance}.{variable}``，Bundle 内稳定唯一，
         消费者不得拆解。只做初始化与变量声明展开，不执行装配建模。
         """
-        buses = self._compute_buses()
-        bus_flows = self._bus_flow_index(buses)
-        for inst in sorted(self.devices):
-            self._declare_instance_statics(inst, bus_flows.get(inst, frozenset()))
+        # 单次包构造在 build() 后调用，此时步列已声明；不得再次
+        # _declare_instance_statics，否则步列会被重复追加，破坏时序长度。
+        # 兼容此公开辅助函数的独立调用（未执行 build 的新构造器）。
+        if not self._step_columns:
+            buses = self._compute_buses()
+            bus_flows = self._bus_flow_index(buses)
+            for inst in sorted(self.devices):
+                self._declare_instance_statics(inst, bus_flows.get(inst, frozenset()))
         out: list[Mapping[str, object]] = []
         for inst, local in sorted(self._step_columns):
             out.append({
@@ -2221,6 +2421,7 @@ class _ProjectBuilder:
                     "variable_om": self._decl_negated(fields["variable"]),
                     "fixed_om": self._decl_negated(fields["fixed"]),
                     "maintenance": str(maint.get(year_no, Decimal("0"))),
+                    "demand_charge": self._decl_affine(fields["demand"]),
                     "net": self._decl_affine(fields["net"]),
                 }
             )
@@ -2268,8 +2469,30 @@ class _ProjectBuilder:
                     "tax": self._decl_affine(tax),
                 }
             )
+        demand_tax = self._demand_tax_factors()
+        monthly_demand: list[dict[str, object]] = []
+        for row in self._demand_rows:
+            peak_kw = _AffineAcc()
+            peak_kw.add_scaled(row["peak"], 0.001)
+            paid = _AffineAcc()
+            paid.add_scaled(
+                row["base_charge"],
+                demand_tax.get(row["charge_id"], (1.0, 0.0))[0],
+            )
+            monthly_demand.append({
+                "billing_id": row["billing_id"],
+                "charge_id": row["charge_id"],
+                "calendar_year": row["calendar_year"],
+                "calendar_month": row["calendar_month"],
+                "financial_year": row["financial_year"],
+                "peak_power": self._decl_affine(peak_kw),
+                "peak_unit": "kW",
+                "rate": row["rate"],
+                "charge": self._decl_affine(paid),
+            })
         out: dict[str, object] = {
             "currency": self.finance.currency,
+            "monthly_demand": monthly_demand,
             "construction_total": self._decl_affine(self._fact_construction),
             "annual_fixed_om": self._decl_affine(self._fact_fixed_om),
             "payments_applied": [
@@ -2326,6 +2549,7 @@ class _ProjectBuilder:
             )
             self._build_relations(inst, statics)
         self._build_bus_rows(buses)
+        self._build_monthly_demand()
         self._build_planning_rows()
         self._vat_cash = self._build_vat()
         self._income_cash = self._build_income()
@@ -2351,5 +2575,6 @@ def _money_to_internal(money: Any) -> float:
 __all__ = [
     "build_project_model",
     "build_project_model_with_facts",
+    "build_project_model_package",
     "finance_component_declarations",
 ]

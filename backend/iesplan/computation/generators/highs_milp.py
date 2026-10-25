@@ -29,11 +29,7 @@ from iesplan.assembly.contracts import ValidatedAssemblyArtifact
 from iesplan.computation.errors import ComputationUnavailableError
 from iesplan.computation.generators.descriptor import GeneratorDescriptor
 from iesplan.computation.generators.mps import write_mps
-from iesplan.computation.generators.project import (
-    build_project_model_with_facts,
-    finance_component_declarations,
-    step_series_declarations,
-)
+from iesplan.computation.generators.project import build_project_model_package
 from iesplan.computation.protocols import (
     CalculationConfig,
     SolverBundle,
@@ -45,12 +41,12 @@ from iesplan.finance import EffectiveFinanceConfig, EvaluationInput
 from iesplan.modeling import DeviceMathContribution
 
 GENERATOR_ID = "ies.generator.highs_milp"
-GENERATOR_VERSION = "3.4.0"
+GENERATOR_VERSION = "4.0.0"
 GENERATOR_REF = f"{GENERATOR_ID}@{GENERATOR_VERSION}"
 SOLVER_REF = "ies.solver.highs@1.7.2"
 EXECUTOR_REF = "ies.executor.local_process@1.0.0"
 ADAPTER_REF = HIGHS_ADAPTER_REF
-ASSEMBLY_SCHEMA_VERSION = "3.0.0"
+ASSEMBLY_SCHEMA_VERSION = "4.0.0"
 
 #: seed 为 null 时 descriptor 明示的固定种子。
 FIXED_SEED = 0
@@ -88,6 +84,7 @@ DESCRIPTOR = GeneratorDescriptor(
         "finance.income_tax",
         "finance.credit_pools",
         "finance.financial_facts",
+        "finance.monthly_demand",
     ),
     solvers=(SOLVER_REF,),
     executors=(EXECUTOR_REF,),
@@ -141,12 +138,12 @@ class HighsMilpProvider:
         """
         self._check_capabilities(artifact, config, finance)
         seed = config.seed if config.seed is not None else FIXED_SEED
-        model, unit_map, objective_unit, facts = build_project_model_with_facts(
-            artifact, models, materialized, finance, config, evaluation
+        model, unit_map, objective_unit, facts, components, series = (
+            build_project_model_package(
+                artifact, models, materialized, finance, config, evaluation
+            )
         )
         mps_text, offset = write_mps(model)
-        components = finance_component_declarations(artifact, models, materialized, finance, evaluation)
-        series = step_series_declarations(artifact, models, materialized, finance, evaluation)
         metadata = self._metadata(
             artifact,
             unit_map,
@@ -255,7 +252,7 @@ class HighsMilpProvider:
         step_series 为可发布步序列声明（与建变量同一路径形成），供配套
         适配器用同一次真实解恢复统一序列发布；无步变量时为空数组。
         financial_facts 为与目标同源的结构化财务事实映射（格式页映射表
-        为唯一正文），供配套 3.0.0 适配器用同一次主解恢复发布；消费者
+        为唯一正文），供配套 4.0.0 适配器用同一次主解恢复发布；消费者
         不得拆解其中求解列引用。
         """
         doc = json.loads(artifact.canonical_text)

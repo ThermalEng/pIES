@@ -30,6 +30,8 @@ jobs:
       backend_tests: ${{ steps.plan.outputs.backend_tests }}
       browser_run: ${{ steps.plan.outputs.browser_run }}
       browser_specs: ${{ steps.plan.outputs.browser_specs }}
+      browser_lanes: ${{ steps.plan.outputs.browser_lanes }}
+      browser_total: ${{ steps.plan.outputs.browser_total }}
       frontend_run: ${{ steps.plan.outputs.frontend_run }}
       frontend_tests: ${{ steps.plan.outputs.frontend_tests }}
       startup_run: ${{ steps.plan.outputs.startup_run }}
@@ -171,17 +173,27 @@ jobs:
         if: always()
         run: docker compose down --remove-orphans --rmi local
 
+  # Each Playwright lane owns a *separate* runner, Compose project, Postgres,
+  # Redis and E2E globalSetup. Never run multiple browser workers against the
+  # same seeded database. A single selected spec gets only one lane.
   browser:
-    name: Playwright Chromium (Docker)
+    name: Playwright Chromium lane ${{ matrix.lane }}/${{ needs.select.outputs.browser_total }} (Docker)
     needs: select
     if: needs.select.outputs.browser_run == 'true'
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        lane: ${{ fromJSON(needs.select.outputs.browser_lanes) }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
       BROWSER_SPECS: ${{ needs.select.outputs.browser_specs }}
+      BROWSER_LANE: ${{ matrix.lane }}
+      BROWSER_TOTAL: ${{ needs.select.outputs.browser_total }}
       SPECIAL_DEVICE: ${{ needs.select.outputs.special_device }}
-      CI_TEST_DATA_DIR: ${{ github.workspace }}/.pies-ci-browser-${{ github.run_id }}
-      COMPOSE_PROJECT_NAME: pies-ci-browser
+      CI_TEST_DATA_DIR: ${{ github.workspace }}/.pies-ci-browser-${{ github.run_id }}-${{ matrix.lane }}
+      COMPOSE_PROJECT_NAME: pies-ci-browser-${{ matrix.lane }}
     steps:
       - uses: actions/checkout@v4
 
@@ -196,19 +208,30 @@ jobs:
       - name: Run selected real-browser scenarios
         run: |
           read -r -a specs <<< "$BROWSER_SPECS"
+          [[ "${#specs[@]}" -gt 0 ]] || { echo "::error::Browser selected but no specs provided"; exit 1; }
+          echo "Playwright lane $BROWSER_LANE/$BROWSER_TOTAL, specs: ${specs[*]}"
+          # --shard partitions files (fullyParallel=false, workers=1).
+          # Both runners run isolated globalSetup; all selected tests must
+          # pass in exactly one lane, with no global --grep that drops specs.
           if [[ "$SPECIAL_DEVICE" == "true" ]]; then
             docker compose -f docker-compose.yml -f .github/ci/docker-compose.yml \
               -f frontend/tests/e2e/docker-compose.ext-device.yml \
               --profile e2e run --rm --build e2e \
-              npx playwright test --project=chromium "${specs[@]}"
-            docker compose -f docker-compose.yml -f .github/ci/docker-compose.yml \
-              -f frontend/tests/e2e/docker-compose.ext-device.yml \
-              --profile e2e run --rm e2e \
-              npx playwright test --config playwright.ext-device.config.ts
+              npx playwright test --project=chromium \
+                --shard="$BROWSER_LANE/$BROWSER_TOTAL" "${specs[@]}"
+            # Special-device suite is a separate config/testIgnore override;
+            # run it exactly once, only after lane 1's normal spec shard.
+            if [[ "$BROWSER_LANE" == "1" ]]; then
+              docker compose -f docker-compose.yml -f .github/ci/docker-compose.yml \
+                -f frontend/tests/e2e/docker-compose.ext-device.yml \
+                --profile e2e run --rm e2e \
+                npx playwright test --config playwright.ext-device.config.ts
+            fi
           else
             docker compose -f docker-compose.yml -f .github/ci/docker-compose.yml \
               --profile e2e run --rm --build e2e \
-              npx playwright test --project=chromium "${specs[@]}"
+              npx playwright test --project=chromium \
+                --shard="$BROWSER_LANE/$BROWSER_TOTAL" "${specs[@]}"
           fi
 
       - name: Show application diagnostics on failure
@@ -222,7 +245,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: playwright-chromium
+          name: playwright-chromium-lane-${{ matrix.lane }}
           path: frontend/tests/e2e/test-results/
           if-no-files-found: warn
           retention-days: 14
@@ -271,6 +294,8 @@ jobs:
           check "PostgreSQL concurrent init" "$PG_REQUIRED" "$PG_RESULT"
           check "Frontend logic" "$LOGIC_REQUIRED" "$LOGIC_RESULT"
           check "Backend Pytest" "$BACKEND_REQUIRED" "$BACKEND_RESULT"
-          check "Browser" "$BROWSER_REQUIRED" "$BROWSER_RESULT"
+          # GitHub's needs.browser.result aggregates the matrix: all selected
+          # lanes must succeed, while browser_run=false skips the entire job.
+          check "Browser matrix (all selected lanes)" "$BROWSER_REQUIRED" "$BROWSER_RESULT"
           echo "All required jobs passed; intentionally omitted jobs were skipped."
 

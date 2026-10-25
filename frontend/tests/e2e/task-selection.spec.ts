@@ -75,14 +75,14 @@ async function readDraftWorking(page: Page, projectId: number): Promise<Record<s
     : null
 }
 
-async function submitEvaluationViaUI(page: Page): Promise<void> {
+async function submitEvaluationViaUI(page: Page, minimal = false): Promise<void> {
   await page.getByRole('navigation', { name: /工作台|Workspace/i }).getByText('任务中心').click({ timeout: 30_000 })
   await page.getByRole('button', { name: /提交任务|Submit task/i }).first().click({ timeout: 30_000 })
   await page.locator('#task-type').selectOption('optimization')
-  await page.locator('#task-construction-period').fill('1')
-  await page.locator('#task-operation-years').fill('2')
+  await page.locator('#task-construction-period').fill(minimal ? '0' : '1')
+  await page.locator('#task-operation-years').fill(minimal ? '1' : '2')
   await page.locator('#task-discount-rate').fill('0.08')
-  await page.locator('#task-construction-payments').fill('[{"t": 0, "ratio": 0.6}, {"t": 1, "ratio": 0.4}]')
+  await page.locator('#task-construction-payments').fill(minimal ? '[{"t": 0, "ratio": 1}]' : '[{"t": 0, "ratio": 0.6}, {"t": 1, "ratio": 0.4}]')
   await page.locator('#task-maintenance-expenses').fill('[]')
   // 数据集版本清单唯一权威是脚手架经 API 绑定的草稿 dataset_bindings（v1）；
   // 对话框不再做数据集选择（旧勾选后端从未消费，已删除）。
@@ -121,6 +121,44 @@ async function readSelectedIds(page: Page): Promise<{ taskId: number; packageId:
 test.describe('全局任务选择：默认最新完成、无回退、显式提交才建任务', () => {
   test.setTimeout(900_000)
 
+  // Real solver jobs must not leak into later tests, including when a test fails.
+  let cleanup: { username: string; password: string; projectId: number } | null = null
+  const terminal = new Set(['completed', 'failed', 'cancelled', 'timed_out'])
+  test.beforeEach(() => { cleanup = null })
+  test.afterEach(async ({ browser }) => {
+    const owner = cleanup
+    cleanup = null
+    if (!owner) return
+    const api = await browser.newContext({ baseURL: APP })
+    try {
+      // The GUI session superseded the setup token. Re-authenticate only once
+      // assertions have finished, to preserve the browser session under test.
+      const token = await loginToken(api.request, owner.username, owner.password)
+      const path = `/api/projects/${owner.projectId}/tasks`
+      const list = async (): Promise<{ items: Array<{ id: number; status: string }> }> =>
+        requestJson(api.request, 'GET', `${path}?limit=100`, undefined, token)
+      for (const row of (await list()).items) {
+        if (terminal.has(row.status)) continue
+        try {
+          await requestJson(api.request, 'POST', `${path}/${row.id}/cancel`, {
+            reason: 'e2e_end_of_scenario_cleanup',
+          }, token)
+        } catch (error) {
+          // Racing with a completion is fine only when the task is terminal.
+          const detail = await requestJson(
+            api.request, 'GET', `${path}/${row.id}`, undefined, token,
+          ) as { task: { status: string } }
+          if (!terminal.has(detail.task.status)) throw error
+        }
+      }
+      await expect.poll(async () =>
+        (await list()).items.filter(row => !terminal.has(row.status)).map(row => row.id),
+      { timeout: 60_000, intervals: [500, 1000, 2000] }).toEqual([])
+    } finally {
+      await api.close()
+    }
+  })
+
   test('零建任务；冻结视图与切换水合；未完成无回退且导出禁用；切换绑定；项目隔离；默认最新完成', async ({
     browser,
   }) => {
@@ -132,6 +170,7 @@ test.describe('全局任务选择：默认最新完成、无回退、显式提�
     await createEngineer(soloCtx.request, soloUser, soloPass)
     const soloToken = await loginToken(soloCtx.request, soloUser, soloPass)
     const soloPid = await scaffoldProject(requestJson, soloCtx.request, soloToken, projectName, tag)
+    cleanup = { username: soloUser, password: soloPass, projectId: soloPid }
     const pre = await requestJson(soloCtx.request, 'POST', `/api/projects/${soloPid}/validation/run`, {}, soloToken)
     expect((pre.report?.diagnostics ?? []).filter((d: { blocking: boolean }) => d.blocking)).toEqual([])
     // 项目切换隔离用的空项目 B（无任务；同一用户，脚手架走公开 API）。
@@ -310,7 +349,8 @@ test.describe('全局任务选择：默认最新完成、无回退、显式提�
     const soloCtx = await browser.newContext({ baseURL: APP })
     await createEngineer(soloCtx.request, soloUser, soloPass)
     const soloToken = await loginToken(soloCtx.request, soloUser, soloPass)
-    await scaffoldProject(requestJson, soloCtx.request, soloToken, projectName, tag)
+    const soloPid = await scaffoldProject(requestJson, soloCtx.request, soloToken, projectName, tag)
+    cleanup = { username: soloUser, password: soloPass, projectId: soloPid }
 
     const context: BrowserContext = await browser.newContext()
     const page: Page = await context.newPage()
@@ -362,6 +402,7 @@ test.describe('全局任务选择：默认最新完成、无回退、显式提�
     await createEngineer(soloCtx.request, soloUser, soloPass)
     const soloToken = await loginToken(soloCtx.request, soloUser, soloPass)
     const soloPid = await scaffoldProject(requestJson, soloCtx.request, soloToken, projectName, tag)
+    cleanup = { username: soloUser, password: soloPass, projectId: soloPid }
 
     const context: BrowserContext = await browser.newContext()
     const page: Page = await context.newPage()
@@ -477,6 +518,7 @@ test.describe('全局任务选择：默认最新完成、无回退、显式提�
     await createEngineer(soloCtx.request, soloUser, soloPass)
     const soloToken = await loginToken(soloCtx.request, soloUser, soloPass)
     const soloPid = await scaffoldProject(requestJson, soloCtx.request, soloToken, projectName, tag)
+    cleanup = { username: soloUser, password: soloPass, projectId: soloPid }
 
     const context: BrowserContext = await browser.newContext()
     const page: Page = await context.newPage()
@@ -598,6 +640,7 @@ test.describe('全局任务选择：默认最新完成、无回退、显式提�
     await createEngineer(soloCtx.request, soloUser, soloPass)
     const soloToken = await loginToken(soloCtx.request, soloUser, soloPass)
     const soloPid = await scaffoldProject(requestJson, soloCtx.request, soloToken, projectName, tag)
+    cleanup = { username: soloUser, password: soloPass, projectId: soloPid }
 
     const context: BrowserContext = await browser.newContext()
     const page: Page = await context.newPage()
@@ -609,20 +652,22 @@ test.describe('全局任务选择：默认最新完成、无回退、显式提�
     // 空任务列表无表格行：以提交按钮可见作为页面就绪信号。
     await expect(page.getByRole('button', { name: /提交任务|Submit task/i }).first()).toBeVisible({ timeout: 30_000 })
 
-    // 提交 T1(N=2) 并等完成（直达需要证据包），任务 id 与包 id 从 UI 捕获。
-    await submitEvaluationViaUI(page)
+    // 直达故障只需一份真实证据包，选 K0/N1 最小可完成优化以减轻共享队列。
+    await submitEvaluationViaUI(page, true)
     await page.getByRole('navigation', { name: /工作台|Workspace/i }).getByText('任务中心').click({ timeout: 30_000 })
     await waitCompleted(page)
     await page.getByRole('navigation', { name: /工作台|Workspace/i }).getByText('结果分析').click({ timeout: 30_000 })
     const t1 = await readSelectedIds(page)
-    // 提交 T2(N=5，未完成）：全局选择跟随 T2，直达 T1 即为一次切换。
+    // T2 只需不同的冻结输入以验证直达切换。保持 K0/N1 的最小可完成求解，
+    // 用折现率 0.09 与 T1(0.08)区分，避免 N5 占用共享 Worker 并拖慢取消。
     await page.getByRole('navigation', { name: /工作台|Workspace/i }).getByText('任务中心').click({ timeout: 30_000 })
     await page.getByRole('button', { name: /提交任务|Submit task/i }).first().click({ timeout: 30_000 })
     await expect(page.getByRole('dialog')).toBeVisible({ timeout: 30_000 })
     // 对话框应水合 T1 冻结类型（optimization）；若此处为 calc，说明水合异常，
     // 直接失败而非继续一次语义不明的提交。
     await expectField(page, '#task-type', 'optimization')
-    await page.locator('#task-operation-years').fill('5')
+    await expectField(page, '#task-operation-years', '1')
+    await page.locator('#task-discount-rate').fill('0.09')
     const submitBtn2 = page.getByRole('button', { name: /提交任务|Submit task/i }).last()
     await expect(submitBtn2).toBeEnabled({ timeout: 10_000 })
     await submitBtn2.click({ timeout: 30_000 })
@@ -630,7 +675,8 @@ test.describe('全局任务选择：默认最新完成、无回退、显式提�
     expect(creates.length).toBe(2)
     // 直达前草稿即 T2 时代工作输入（失败后须原样不变）。
     const beforeWorking = await readDraftWorking(page, soloPid)
-    expect(beforeWorking?.operation_years).toBe('5')
+    expect(beforeWorking?.operation_years).toBe('1')
+    expect(beforeWorking?.discount_rate).toBe('0.09')
 
     // 只让第一份载入 500；其余放行（供显式重试成功）。
     let failedOnce = false
@@ -656,7 +702,7 @@ test.describe('全局任务选择：默认最新完成、无回退、显式提�
       expect((await errAlert.textContent())?.trim().length).toBeGreaterThan(0)
       await page.waitForTimeout(2000)
       expect(loadPosts.length).toBe(1)
-      // 草稿/选择不变：仍为直达前 T2 工作输入，未混入 T1；无成功 flash。
+      // 草稿/选择不变：仍为 T2 的 0.09 折现率，未混入 T1 的 0.08；无成功 flash。
       expect(await readDraftWorking(page, soloPid)).toEqual(beforeWorking)
       await expect(page.getByRole('status').filter({ hasText: /载入工作草稿/ })).toHaveCount(0)
       // 显式重试：恢复响应后用户刷新同一条直达链接（仅 T1 有证据包，
@@ -672,12 +718,17 @@ test.describe('全局任务选择：默认最新完成、无回退、显式提�
       // 成功后直达参数被清除并交还用户选择。
       await expect(page).toHaveURL(/\/results$/)
       expect(loadPosts.length).toBe(2)
-      // 重试成功：草稿为 T1 冻结值（数字 2）。
+      // 重试成功：草稿为 T1 冻结值（N=1、折现率 0.08）。
       await expect
         .poll(async () => (await readDraftWorking(page, soloPid))?.operation_years ?? null, {
           timeout: 30_000,
         })
-        .toBe(2)
+        .toBe(1)
+      await expect
+        .poll(async () => (await readDraftWorking(page, soloPid))?.discount_rate ?? null, {
+          timeout: 30_000,
+        })
+        .toBe(0.08)
       expect(creates.length).toBe(2)
     } finally {
       await page.unroute('**/api/projects/*/tasks/*/load-draft')

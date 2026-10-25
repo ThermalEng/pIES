@@ -61,7 +61,7 @@ AUX_BASE = "acme.device.package_aux_load"
 
 SINK_YAML = """
 schema: ies.device-model
-schema_version: "2.0.0"
+schema_version: "2.1.0"
 device:
   id: acme.device.consumption_load
   names:
@@ -91,7 +91,7 @@ equations:
 
 AUX_YAML = """
 schema: ies.device-model
-schema_version: "2.0.0"
+schema_version: "2.1.0"
 device:
   id: acme.device.package_aux_load
   names:

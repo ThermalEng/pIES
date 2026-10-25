@@ -25,8 +25,10 @@ from sqlalchemy.orm import Session, sessionmaker  # noqa: E402
 from sqlalchemy.pool import StaticPool  # noqa: E402
 from test_full_horizon_solve import (  # noqa: E402
     _craft_full_version,
+    _craft_series_version,
     _create_dated_project,
     _full_csv,
+    _heat_demand_csv,
 )
 from test_tasks_api import (  # noqa: E402
     _bind_and_freeze,
@@ -95,7 +97,7 @@ def _hp_demo_profile() -> dict:
 
 FIXED_PROFILE: dict = {
     "schema": "ies.finance-profile",
-    "schema_version": "3.0.0",
+    "schema_version": "4.0.0",
     "profile": {
         "id": "t2-fixed-demo",
         "region": "CN-North",
@@ -123,6 +125,7 @@ FIXED_PROFILE: dict = {
             "value": {"value": "0.7", "unit": "CNY/kWh"},
         },
     },
+    "demand_charges": {},
     "taxes": {},
     "credit_pools": {},
     "tax_rules": {},
@@ -155,6 +158,8 @@ def _prepare_t2_project(
     planning: dict,
     profile: dict | None = None,
     with_existing_hp: bool = False,
+    demand_bindings: dict | None = None,
+    with_heat_load: bool = False,
 ) -> int:
     """T2 执行项目: grid1 + data_full 负荷 + 必建热泵 + 购电计费绑定。
 
@@ -172,6 +177,13 @@ def _prepare_t2_project(
         config_cases.register_finance_profile(db, dict(profile), user.id)
         config_cases.set_project_finance_profile(db, pid, profile["profile"]["id"], user.id)
     vid = _craft_full_version(db, client, pid, user, "load1全期", raw)
+    heat_vid = (
+        _craft_series_version(
+            db, client, pid, user, "heat-load-two-year",
+            _heat_demand_csv(), "heat_demand", "kW",
+        )
+        if with_heat_load else None
+    )
     view = client.get(f"/api/projects/{pid}", headers=_h(client, user)).json()
     commands = [
         {
@@ -244,6 +256,40 @@ def _prepare_t2_project(
             },
         },
     ]
+    if heat_vid is not None:
+        # Real demand on the heat outlet closes the heat-pump energy balance;
+        # the electric load remains a distinct, monthly-variable meter load.
+        commands += [
+            {
+                "id": "c-bind-heat-load",
+                "unit": "dataset", "type": "dataset.bind",
+                "payload": {"dataset_version_id": heat_vid, "role": "input"},
+            },
+            {
+                "id": "fixture-declare-heat-load",
+                "unit": "model", "type": "model.upsert_device",
+                "payload": {
+                    "name": "heat_load1", "device_type": "ies.device.heat_load",
+                    "kind": "new",
+                    "params": {
+                        "peak_heat_kw": 200,
+                        "heat_demand": {
+                            "mode": "data_full", "dataset_version_id": heat_vid,
+                        },
+                    },
+                    "position": {"x": 2.0, "y": 2.0},
+                },
+            },
+            {
+                "id": "fixture-connect-hp-heat-load",
+                "unit": "model", "type": "model.upsert_connection",
+                "payload": {
+                    "name": "c-hp-heat-load",
+                    "from_device": "hp1", "from_port": "heat_out",
+                    "to_device": "heat_load1", "to_port": "heat_in",
+                },
+            },
+        ]
     if with_existing_hp:
         commands += [
             {
@@ -284,31 +330,41 @@ def _prepare_t2_project(
         "load1": {"type": "none"},
         "hp1": dict(hp_binding),
     }
+    if heat_vid is not None:
+        instances["heat_load1"] = {"type": "none"}
     if with_existing_hp:
         instances["hp_old"] = dict(hp_binding)
     view = client.get(f"/api/projects/{pid}", headers=_h(client, user)).json()
     revision = _declare_assembly_sections(client, pid, user, view["draft"]["revision"], instances)
+    billing_commands = [
+        {
+            "id": "c-tariff-bind",
+            "unit": "assembly",
+            "type": "assembly.set_tariff_bindings",
+            "payload": {
+                "bindings": {
+                    "grid_import": {
+                        "price": "grid_import",
+                        "instance": "grid1",
+                        "interface": "electricity_import",
+                        "aggregation": "integrate_positive",
+                    }
+                }
+            },
+        },
+    ]
+    if demand_bindings is not None:
+        billing_commands.append({
+            "id": "c-demand-bind",
+            "unit": "assembly",
+            "type": "assembly.set_demand_bindings",
+            "payload": {"bindings": demand_bindings},
+        })
     resp = client.put(
         f"/api/projects/{pid}/draft",
         json={
             "expected_revision": revision,
-            "commands": [
-                {
-                    "id": "c-tariff-bind",
-                    "unit": "assembly",
-                    "type": "assembly.set_tariff_bindings",
-                    "payload": {
-                        "bindings": {
-                            "grid_import": {
-                                "price": "grid_import",
-                                "instance": "grid1",
-                                "interface": "electricity_import",
-                                "aggregation": "integrate_positive",
-                            }
-                        }
-                    },
-                }
-            ],
+            "commands": billing_commands,
         },
         headers=_h(client, user),
     )
@@ -349,7 +405,21 @@ def _solve(client, db, engine, plane, pid, user, evaluation, key, expected_revis
     def factory() -> Session:
         return sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)()
 
-    assert runner.run_task(factory, claim, worker_id="t2-e2e", compute=plane) == "completed"
+    run_status = runner.run_task(factory, claim, worker_id="t2-e2e", compute=plane)
+    if run_status != "completed":
+        # Use persisted public task diagnostics, including the solver receipt
+        # error recorded by Worker; never infer timeout from wall time alone.
+        from iesplan.tasks.persistence import list_diagnostics  # noqa: E402
+
+        with factory() as failure_db:
+            diagnostics = [
+                {"code": d.code, "level": d.level, "message": d.message}
+                for d in list_diagnostics(failure_db, task_id)
+            ]
+        pytest.fail(
+            f"Worker task {task_id} returned {run_status!r}; "
+            f"persisted diagnostics={diagnostics!r}"
+        )
     task_row = db.execute(select(Task).where(Task.id == task_id)).scalar_one()
     assert task_row.status == "completed"
     assert task_row.business_outcome == "normal_completion"
@@ -630,3 +700,125 @@ class TestT2CashflowChain:
             bounds=((0, 8760), (8760, 17544)),
             variable_rate=0.008,
         )
+
+    def test_d2_demand_monthly_full_worker_chain(
+        self, devices, client, db, engine, plane
+    ) -> None:
+        """真实提交→Worker→HiGHS→Adapter→封存: K1N2、跨年闰年、月账单、NPV。"""
+        profile = _hp_demo_profile()
+        profile["profile"]["id"] = "d2-demand-full-chain"
+        profile["demand_charges"] = {
+            "monthly": {"rate": {"value": "20", "unit": "CNY/kW"}},
+        }
+        user = make_user(db, "d2_demand_owner")
+        # Public data_full CSV: 2023/2024 (leap year), distinct calendar-month
+        # peaks in one operating year and alternating non-first peak positions.
+        # Month lengths imply candidate counts that are not powers of two.
+        import calendar
+
+        csv_lines = _full_csv(8760, 48.0, 8784, 96.0).decode("utf-8").splitlines()
+        data_start = csv_lines.index("step,electricity_demand") + 1
+        expected_peaks = []
+        cursor = 0
+        for year, baseline in ((2023, 48.0), (2024, 96.0)):
+            for month in range(1, 13):
+                steps = calendar.monthrange(year, month)[1] * 24
+                assert steps & (steps - 1), "月份候选数必须不是2的幂"
+                offset = 30 if month % 2 else steps - 2
+                peak = baseline + 3.0 * month
+                csv_lines[data_start + cursor + offset] = f"{cursor + offset},{peak}"
+                expected_peaks.append(peak)
+                cursor += steps
+        assert cursor == 8760 + 8784
+        variable_month_csv = ("\n".join(csv_lines) + "\n").encode("utf-8")
+        pid = _prepare_t2_project(
+            client, db, user,
+            variable_month_csv,
+            2023, HP_BINDING, BASE_PLANNING, profile,
+            with_heat_load=True,
+            demand_bindings={
+                "peak_meter": {
+                    "charge": "monthly",
+                    "instance": "grid1",
+                    "interface": "electricity_import",
+                },
+            },
+        )
+        sealed = _solve(
+            client, db, engine, plane, pid, user, _eval_k1n2(), "d2-demand-worker"
+        )
+        fin = sealed["financial_evaluation"]
+        facts = sealed["compute_result"]["outputs"]["financial_facts"]
+        assert fin["schema_version"] == "2.0.0"
+        assert fin["construction_period"] == 1
+        assert fin["operation_years"] == 2
+        # Real heat-pump planning decision (not a placeholder): its rated
+        # thermal capacity must serve the 62.5 kW second-year heat load.
+        solution = sealed["compute_result"]["outputs"]["solution"]
+        hp_cap = next(
+            float(v["value"]) for v in solution["variables"]
+            if v["name"] == "hp_cap"
+        )
+        assert hp_cap == pytest.approx(62.5, abs=1e-5)
+        assert float(fin["construction_total"]) == pytest.approx(
+            2800 * 62.5, abs=1e-4
+        )
+        assert float(fin["annual_fixed_om"]) == pytest.approx(
+            28 * 62.5, abs=1e-4
+        )
+        months = fin["monthly_demand"]
+        assert len(months) == 24
+        assert facts["monthly_demand"] == months
+        assert [(r["calendar_year"], r["calendar_month"]) for r in months] == [
+            (year, month) for year in (2023, 2024) for month in range(1, 13)
+        ]
+        for index, row in enumerate(months):
+            # 2023 heat=30kW, 2024 heat=62.5kW, COP=3.5.
+            # Both the electric load and heat-pump import reach the grid meter.
+            peak = expected_peaks[index] + (30.0 if index < 12 else 62.5) / 3.5
+            assert row["billing_id"] == "peak_meter"
+            assert row["charge_id"] == "monthly"
+            assert row["peak_unit"] == "kW"
+            assert row["financial_year"] == (2 if index < 12 else 3)
+            assert row["rate"] == {"value": "20", "unit": "CNY/kW"}
+            assert float(row["peak_power"]) == pytest.approx(peak, abs=1e-5)
+            assert float(row["charge"]) == pytest.approx(peak * 20, abs=1e-5)
+        annual_bills = (
+            (sum(expected_peaks[:12]) + 12 * 30.0 / 3.5) * 20,
+            (sum(expected_peaks[12:]) + 12 * 62.5 / 3.5) * 20,
+        )
+        heat_energy = (30.0 / 3.5 * 8760, 62.5 / 3.5 * 8784)
+        expected_energy = (
+            -(48.0 * 8760 + 3.0 * sum(range(1, 13)) + heat_energy[0]) * PRICE,
+            -(96.0 * 8784 + 3.0 * sum(range(1, 13)) + heat_energy[1]) * PRICE,
+        )
+        assert annual_bills[0] != annual_bills[1]
+        for year_index, (row, bill, energy) in enumerate(zip(
+            fin["annual_operation"], annual_bills, expected_energy, strict=True
+        )):
+            assert float(row["energy_net"]) == pytest.approx(energy, abs=1e-4)
+            assert float(row["variable_om"]) == pytest.approx(
+                heat_energy[year_index] * 0.008, abs=1e-4
+            )
+            assert float(row["fixed_om"]) == pytest.approx(
+                28 * 62.5, abs=1e-4
+            )
+            assert float(row["demand_charge"]) == pytest.approx(bill, abs=1e-5)
+            assert float(row["net"]) == pytest.approx(
+                float(row["energy_net"]) - float(row["variable_om"])
+                - float(row["fixed_om"]) - float(row["maintenance"]) - bill,
+                abs=1e-4,
+            )
+            assert float(fin["annual_net_flows"][row["financial_year"]]) == pytest.approx(
+                float(row["net"]), abs=1e-4,
+            )
+        assert fin["tax_cash"]["vat"] == []
+        assert fin["tax_cash"]["income"] == []
+        c = float(fin["construction_total"])
+        assert float(fin["annual_net_flows"][0]) == pytest.approx(-0.6 * c)
+        assert float(fin["annual_net_flows"][1]) == pytest.approx(-0.4 * c)
+        hand_npv = sum(
+            float(flow) / (1 + RATE) ** index
+            for index, flow in enumerate(fin["annual_net_flows"])
+        )
+        assert float(fin["evaluation"]["npv"]) == pytest.approx(hand_npv, rel=1e-7)

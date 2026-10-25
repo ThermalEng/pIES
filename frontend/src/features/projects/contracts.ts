@@ -86,6 +86,13 @@ export interface TariffBindingDto {
   aggregation: 'integrate_positive' | 'sum_positive'
 }
 
+/** Explicit natural-month demand meter; independent of energy tariffs. */
+export interface DemandBindingDto {
+  charge: string
+  instance: string
+  interface: string
+}
+
 // ---------------------------------------------------------------------------
 // 项目视图(含草稿摘要与内容)
 // ---------------------------------------------------------------------------
@@ -128,6 +135,8 @@ export interface DraftContentDto {
   finance_binding?: { instances: Record<string, CostBindingDto> }
   /** assembly.set_tariff_bindings: omitted until explicitly saved. */
   tariff_bindings?: Record<string, TariffBindingDto>
+  /** assembly.set_demand_bindings: empty object means no demand meters. */
+  demand_bindings?: Record<string, DemandBindingDto>
   task_working_inputs?: Record<string, unknown> | null
   [key: string]: unknown
 }

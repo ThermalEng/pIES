@@ -113,7 +113,7 @@ test.describe('0.15 外部数据 CSV: data_repeat step 文件公开消费链', (
         schema_version: '2.0.0',
         mode: 'planning',
         predictions: [],
-        generator: 'ies.generator.highs_milp@3.4.0',
+        generator: 'ies.generator.highs_milp@4.0.0',
         solver: 'ies.solver.highs@1.7.2',
         precision: 'medium',
         convergence: null,
@@ -130,7 +130,8 @@ test.describe('0.15 外部数据 CSV: data_repeat step 文件公开消费链', (
     const page: Page = await context.newPage()
     const session = await createSession(page, username, password)
     await page.getByText(projectName).click()
-    await expect(page).toHaveURL(/\/projects\/\d+$/)
+    await expect(page).toHaveURL(/\/projects\/\d+\/tasks$/)
+    await expect(page.getByRole('button', { name: /提交任务|Submit task/i }).first()).toBeVisible()
     await page.getByRole('navigation', { name: /工作台|Workspace/i }).getByText('数据管理').click()
     await expect(page).toHaveURL(/\/data$/)
     await page.getByRole('button', { name: /上传数据|Upload/ }).first().click()
@@ -222,7 +223,7 @@ test.describe('0.15 外部数据 CSV: data_repeat step 文件公开消费链', (
           id: 'csv-calc', unit: 'config', type: 'config.patch',
           payload: {
             mode: 'fixed_operation',
-            generator: 'ies.generator.highs_milp@3.4.0',
+            generator: 'ies.generator.highs_milp@4.0.0',
             solver: 'ies.solver.highs@1.7.2',
             time_axis: { resolution: '1h', start: '2025-01-01T00:00:00Z' },
           },
@@ -296,7 +297,7 @@ test.describe('0.15 外部数据 CSV: data_repeat step 文件公开消费链', (
         schema_version: '2.0.0',
         mode: 'planning',
         predictions: [],
-        generator: 'ies.generator.highs_milp@3.4.0',
+        generator: 'ies.generator.highs_milp@4.0.0',
         solver: 'ies.solver.highs@1.7.2',
         precision: 'medium',
         convergence: null,
@@ -442,6 +443,7 @@ test.describe('0.15 外部数据 CSV: data_repeat step 文件公开消费链', (
       variable_om: string
       fixed_om: string
       maintenance: string
+      demand_charge: string
       net: string
     }
     expect(annualRows.map((r) => r.label)).toEqual(
@@ -449,7 +451,7 @@ test.describe('0.15 外部数据 CSV: data_repeat step 文件公开消费链', (
     )
     expect(annualRows.map((r) => r.value)).toEqual(
       (fin.annual_operation as SealedAnnual[]).map(
-        (a) => `${a.energy_net} − ${a.variable_om} − ${a.fixed_om} − ${a.maintenance} = ${a.net} ${fin.currency}`,
+        (a) => `${a.energy_net} − ${a.variable_om} − ${a.fixed_om} − ${a.maintenance} − ${a.demand_charge} = ${a.net} ${fin.currency}`,
       ),
     )
     expectClose(Number(annualRows[0].value.split('−')[0].trim()), ENERGY_NET_CNY, 0.5)

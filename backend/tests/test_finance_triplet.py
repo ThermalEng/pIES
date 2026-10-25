@@ -1,4 +1,4 @@
-"""财务三件套(finance-yaml@3.0.0)契约切片测试: FinanceProfile / Overrides / Effective 与确定性合并器。
+"""财务三件套(finance-yaml@4.0.0)契约切片测试: FinanceProfile / Overrides / Effective 与确定性合并器。
 
 0.6.5 条目 1(契约)的首个可验收切片。覆盖:
 - Profile: 完整示例往返、金额 Decimal 纪律(float/int/NaN/Infinity/null 拒绝)、
@@ -36,7 +36,7 @@ from iesplan.finance.triplet import (
 def _profile_payload() -> dict:
     return {
         "schema": "ies.finance-profile",
-        "schema_version": "3.0.0",
+        "schema_version": "4.0.0",
         "profile": {
             "id": "cn-north-demo",
             "region": "CN-North",
@@ -95,6 +95,7 @@ def _profile_payload() -> dict:
                 "value": {"value": "0.35", "unit": "CNY/kWh"},
             },
         },
+        "demand_charges": {},
         "taxes": {
             "grid_import_vat": {
                 "display_name": "购电增值税",
@@ -114,7 +115,7 @@ def _profile() -> FinanceProfile:
 def _overrides_payload(profile: FinanceProfile) -> dict:
     return {
         "schema": "ies.finance-overrides",
-        "schema_version": "3.0.0",
+        "schema_version": "4.0.0",
         "profile_ref": {"id": profile.profile_id},
         "finance_types": {
             "pv_system": {

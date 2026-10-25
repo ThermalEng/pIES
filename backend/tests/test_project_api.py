@@ -29,6 +29,7 @@ from sqlalchemy.orm import Session, sessionmaker  # noqa: E402
 from sqlalchemy.pool import StaticPool  # noqa: E402
 
 from iesplan.api import projects as projects_api  # noqa: E402
+from iesplan.application.projects.content_objects import load_content_object  # noqa: E402
 from iesplan.api.deps import get_request_db  # noqa: E402
 from iesplan.config import settings  # noqa: E402
 from iesplan.core.contracts import ProjectBaseline  # noqa: E402
@@ -263,7 +264,7 @@ def test_project_lifecycle_flow(client: TestClient, db_session: Session) -> None
     assert version["source_draft_revision"] == 2
     assert version["parent_version_id"] is None
     # 版本内容 = 草稿领域内容 + 项目固化字段(币种/项目计算基线), 无命令簿记
-    vcontent = _load_content(db_session, version["content_object_id"])
+    vcontent = load_content_object(db_session, version["content_object_id"])
     assert vcontent["currency"] == "CNY"
     assert vcontent["project_baseline"] == {
         "resolution": "1h",
@@ -913,3 +914,51 @@ def test_project_count_uses_aggregate_query(client: TestClient, db_session: Sess
     assert counts[u1.id] == 2
     assert counts[u2.id] == 1
     assert "GROUP BY" in queries[0].upper()
+
+
+def test_issue04_demand_bindings_draft_receipts_remain_bounded_and_idempotent(
+    client: TestClient, db_session: Session,
+) -> None:
+    """D1 review: the real PUT command must never embed the full draft in its ledger."""
+    owner = make_user(db_session, "d1_receipt_owner")
+    headers = _h(client, owner)
+    pid = _create_project(client, owner, "D1 receipt bounded test")
+    endpoint = f"/api/projects/{pid}/draft"
+    original = client.get(f"/api/projects/{pid}", headers=headers).json()
+    revision = original["draft"]["revision"]
+    sizes = []
+    for index in range(5):
+        cmd = {
+            "id": f"d1-repeat-{index}",
+            "unit": "assembly",
+            "type": "assembly.set_demand_bindings",
+            "payload": {"bindings": {}},
+        }
+        request = {"expected_revision": revision, "commands": [cmd]}
+        put = client.put(endpoint, headers=headers, json=request)
+        assert put.status_code == 200, put.text
+        reply = put.json()
+        assert reply["revision"] == revision + 1
+        assert reply["results"][0]["result"] == {"stored": True, "bindings": []}
+        view = client.get(f"/api/projects/{pid}", headers=headers).json()
+        assert view["draft"]["content"]["demand_bindings"] == {}
+        content = load_content_object(db_session, view["draft"]["content_object_id"])
+        assert len(content["applied_commands"]) == index + 1
+        for applied in content["applied_commands"].values():
+            assert applied["result"] == {"stored": True, "bindings": []}
+        sizes.append(len(json.dumps(content, ensure_ascii=False)))
+        if index == 0:
+            # Retry stale expected_revision + same idempotency key, no new draft.
+            retry = client.put(endpoint, headers=headers, json=request)
+            assert retry.status_code == 200, retry.text
+            assert retry.json()["revision"] == reply["revision"]
+            assert retry.json()["results"][0]["status"] == "idempotent"
+            assert retry.json()["results"][0]["result"] == reply["results"][0]["result"]
+            after = client.get(f"/api/projects/{pid}", headers=headers).json()
+            assert load_content_object(db_session, after["draft"]["content_object_id"]) == content
+        revision = reply["revision"]
+    # Five empty saves add five small ledger entries, not recursive draft snapshots.
+    increments = [b - a for a, b in zip(sizes, sizes[1:])]
+    assert increments
+    assert max(increments) <= 2 * min(increments)
+    assert sizes[-1] < sizes[0] + 1000

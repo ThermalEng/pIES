@@ -105,7 +105,7 @@ test.describe('0.15 外部数据 CSV: 合法来源声明经任务中心 GUI 提�
         schema_version: '2.0.0',
         mode: 'planning',
         predictions: [],
-        generator: 'ies.generator.highs_milp@3.4.0',
+        generator: 'ies.generator.highs_milp@4.0.0',
         solver: 'ies.solver.highs@1.7.2',
         precision: 'medium',
         convergence: null,
@@ -122,7 +122,8 @@ test.describe('0.15 外部数据 CSV: 合法来源声明经任务中心 GUI 提�
     const page1: Page = await context1.newPage()
     const uploadSession = await createSession(page1, username, password)
     await page1.getByText(projectName).click()
-    await expect(page1).toHaveURL(/\/projects\/\d+$/)
+    await expect(page1).toHaveURL(/\/projects\/\d+\/tasks$/)
+    await expect(page1.getByRole('button', { name: /提交任务|Submit task/i }).first()).toBeVisible()
     await page1.getByRole('navigation', { name: /工作台|Workspace/i }).getByText('数据管理').click()
     await expect(page1).toHaveURL(/\/data$/)
     await page1.getByRole('button', { name: /上传数据|Upload/ }).first().click()
@@ -216,7 +217,7 @@ test.describe('0.15 外部数据 CSV: 合法来源声明经任务中心 GUI 提�
           id: 'guicsv-calc', unit: 'config', type: 'config.patch',
           payload: {
             mode: 'fixed_operation',
-            generator: 'ies.generator.highs_milp@3.4.0',
+            generator: 'ies.generator.highs_milp@4.0.0',
             solver: 'ies.solver.highs@1.7.2',
             time_axis: { resolution: '1h', start: '2025-01-01T00:00:00Z' },
           },
@@ -290,7 +291,7 @@ test.describe('0.15 外部数据 CSV: 合法来源声明经任务中心 GUI 提�
         schema_version: '2.0.0',
         mode: 'planning',
         predictions: [],
-        generator: 'ies.generator.highs_milp@3.4.0',
+        generator: 'ies.generator.highs_milp@4.0.0',
         solver: 'ies.solver.highs@1.7.2',
         precision: 'medium',
         convergence: null,
@@ -307,7 +308,8 @@ test.describe('0.15 外部数据 CSV: 合法来源声明经任务中心 GUI 提�
     const page2: Page = await context2.newPage()
     const submitSession = await createSession(page2, username, password)
     await page2.getByText(projectName).click({ timeout: 30_000 })
-    await expect(page2).toHaveURL(/\/projects\/\d+$/)
+    await expect(page2).toHaveURL(/\/projects\/\d+\/tasks$/)
+    await expect(page2.getByRole('button', { name: /提交任务|Submit task/i }).first()).toBeVisible()
     await page2.getByRole('navigation', { name: /工作台|Workspace/i }).getByText('任务中心').click({ timeout: 30_000 })
     await page2.getByRole('button', { name: /提交任务|Submit task/i }).first().click({ timeout: 30_000 })
     await page2.locator('#task-type').selectOption('optimization')

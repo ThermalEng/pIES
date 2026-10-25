@@ -34,6 +34,8 @@ export interface ScaffoldOptions {
   scenario?: ScaffoldScenario
   /** 画像 finance_types(默认 heat_pump_system); 'pv_export' 场景用 pv_system。 */
   financeTypes?: Record<string, unknown>
+  /** Fixture-level registered demand charge catalogue; edited project overrides go through GUI. */
+  demandCharges?: Record<string, { rate: { value: string; unit: string } }>
 }
 
 /** 'pv_export' 场景的财务类别(光伏按 kWp 计建设费与年固定 O&M)。 */
@@ -83,7 +85,7 @@ export function financeProfile(
 ): Record<string, unknown> {
   return {
     schema: 'ies.finance-profile',
-    schema_version: '3.0.0',
+    schema_version: '4.0.0',
     profile: {
       id: profileId,
       region: 'CN-North',
@@ -102,8 +104,9 @@ export function financeProfile(
       },
       ...extraEnergyPrices,
     },
+    demand_charges: {},
     taxes: {},
-    // 3.0.0 必需显式节(空 = 无税务计算, 既有非税路径不变)。
+    // 4.0.0 必需显式节(空 = 无税务计算, 既有非税路径不变)。
     credit_pools: {},
     tax_rules: {},
   }
@@ -178,7 +181,7 @@ function heatPumpDevices(includeElectricLoad: boolean): unknown[] {
       id: 'e2e-calc', unit: 'config', type: 'config.patch',
       payload: {
         mode: 'fixed_operation',
-        generator: 'ies.generator.highs_milp@3.4.0',
+        generator: 'ies.generator.highs_milp@4.0.0',
         solver: 'ies.solver.highs@1.7.2',
         time_axis: { resolution: '1h', start: '2025-01-01T00:00:00Z' },
       },
@@ -275,7 +278,7 @@ function pvExportDevices(): unknown[] {
       id: 'e2e-calc', unit: 'config', type: 'config.patch',
       payload: {
         mode: 'fixed_operation',
-        generator: 'ies.generator.highs_milp@3.4.0',
+        generator: 'ies.generator.highs_milp@4.0.0',
         solver: 'ies.solver.highs@1.7.2',
         time_axis: { resolution: '1h', start: '2025-01-01T00:00:00Z' },
       },
@@ -344,8 +347,10 @@ export async function scaffoldProject(
       ...(opts.extraEnergyPrices ?? {}),
     }
     : (opts.extraEnergyPrices ?? {})
+  const profile = financeProfile(profileId, energyPrices, financeTypes)
+  profile.demand_charges = opts.demandCharges ?? {}
   await requestJson(api, 'POST', '/api/finance-profiles', {
-    finance_profile: financeProfile(profileId, energyPrices, financeTypes),
+    finance_profile: profile,
   }, token)
   await requestJson(api, 'PUT', `/api/projects/${pid}/finance-profile`, {
     profile_ref: { id: profileId },
@@ -428,7 +433,7 @@ export async function scaffoldProject(
       schema_version: '2.0.0',
       mode: 'planning',
       predictions: [],
-      generator: 'ies.generator.highs_milp@3.4.0',
+      generator: 'ies.generator.highs_milp@4.0.0',
       solver: 'ies.solver.highs@1.7.2',
       precision: 'medium',
       convergence: null,

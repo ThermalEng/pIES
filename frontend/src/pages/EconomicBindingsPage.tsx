@@ -1,5 +1,5 @@
 /**
- * ISSUE-03: explicit instance cost and metered price bindings.
+ * Explicit instance cost, metered energy and natural-month demand bindings.
  * No financial assumptions or device-to-finance inference. Both complete
  * sections are saved together through the existing optimistic draft commands.
  */
@@ -9,7 +9,7 @@ import { Link } from 'react-router-dom'
 
 import { Alert, Button, Card, FormField, Input, Select, Spinner } from '../components/ui'
 import { getBindingDraft, saveBindings } from '../features/assembly-bindings'
-import type { BindingDraft, CostBindingDto, DriverTargetDto, TariffBindingDto } from '../features/assembly-bindings'
+import type { BindingDraft, CostBindingDto, DriverTargetDto, TariffBindingDto, DemandBindingDto } from '../features/assembly-bindings'
 import { getEffectiveFinance } from '../features/finance'
 import { listDeviceTypes } from '../features/modeling'
 import { ApiError } from '../types'
@@ -39,9 +39,17 @@ type TariffRow = {
   interfaceId: string
   aggregation: Aggregation
 }
+type DemandRow = {
+  id: number
+  billingId: string
+  charge: string
+  instance: string
+  interfaceId: string
+}
 type EffectiveCatalog = {
   financeTypes: Record<string, Record<string, unknown>>
   prices: Record<string, { carrier: string; direction: string }>
+  demandCharges: Record<string, { rate: { value: string; unit: string } }>
 }
 
 const AGGREGATIONS: Exclude<Aggregation, ''>[] = ['integrate_positive', 'sum_positive']
@@ -78,6 +86,7 @@ export default function EconomicBindingsPage() {
   const [costs, setCosts] = useState<CostRow[]>([])
   const [orphans, setOrphans] = useState<string[]>([])
   const [tariffs, setTariffs] = useState<TariffRow[]>([])
+  const [demands, setDemands] = useState<DemandRow[]>([])
   const [busy, setBusy] = useState<'save' | 'reload' | null>(null)
   const [conflict, setConflict] = useState(false)
   const [notice, setNotice] = useState<string | null>(null)
@@ -116,6 +125,13 @@ export default function EconomicBindingsPage() {
       interfaceId: binding.interface,
       aggregation: binding.aggregation,
     })))
+    setDemands(Object.entries(draft.demands).map(([billingId, binding]) => ({
+      id: newId(),
+      billingId,
+      charge: binding.charge,
+      instance: binding.instance,
+      interfaceId: binding.interface,
+    })))
     setRevision(draft.revision)
     setConflict(false)
     setNotice(null)
@@ -137,6 +153,7 @@ export default function EconomicBindingsPage() {
     setCatalog(effective ? {
       financeTypes: effective.effective_finance_config.finance_types as EffectiveCatalog['financeTypes'],
       prices: effective.effective_finance_config.energy_prices as EffectiveCatalog['prices'],
+      demandCharges: effective.effective_finance_config.demand_charges as EffectiveCatalog['demandCharges'],
     } : null)
     applyDraft(draft)
   }
@@ -168,7 +185,11 @@ export default function EconomicBindingsPage() {
     setTariffs((all) => all.map((r) => r.id === id ? { ...r, ...change } : r))
   }
 
-  function buildPayload(): { instances: Record<string, CostBindingDto>; tariffs: Record<string, TariffBindingDto> } | null {
+  function updateDemand(id: number, change: Partial<DemandRow>) {
+    setDemands((all) => all.map((r) => r.id === id ? { ...r, ...change } : r))
+  }
+
+  function buildPayload(): { instances: Record<string, CostBindingDto>; tariffs: Record<string, TariffBindingDto>; demands: Record<string, DemandBindingDto> } | null {
     if (orphans.length > 0) {
       setFormError(pt('ies.bindings.orphans_error'))
       return null
@@ -212,9 +233,19 @@ export default function EconomicBindingsPage() {
         aggregation: row.aggregation,
       }
     }
+    const demandBindings: Record<string, DemandBindingDto> = {}
+    for (const row of demands) {
+      const name = row.billingId.trim()
+      if (!name || !row.charge || !row.instance || !row.interfaceId || Object.hasOwn(demandBindings, name)
+        || Object.hasOwn(instances, name) || Object.hasOwn(bindings, name)) {
+        setFormError(pt('ies.bindings.demand_invalid'))
+        return null
+      }
+      demandBindings[name] = { charge: row.charge, instance: row.instance, interface: row.interfaceId }
+    }
     setFormError(null)
     setFormDetail(null)
-    return { instances, tariffs: bindings }
+    return { instances, tariffs: bindings, demands: demandBindings }
   }
 
   async function save() {
@@ -225,7 +256,7 @@ export default function EconomicBindingsPage() {
     setNotice(null)
     setConflict(false)
     try {
-      await saveBindings(projectId, revision, payload.instances, payload.tariffs)
+      await saveBindings(projectId, revision, payload.instances, payload.tariffs, payload.demands)
       // Read back the actual saved draft, not a locally fabricated saved state.
       const draft = await getBindingDraft(projectId)
       applyDraft(draft)
@@ -407,6 +438,53 @@ export default function EconomicBindingsPage() {
           })}
           <div style={{ marginTop: 'var(--ies-space-3)' }}>
             <Button variant="secondary" onClick={() => setTariffs((all) => [...all, { id: newId(), bindingId: '', price: '', instance: '', interfaceId: '', aggregation: '' }])}>{pt('ies.bindings.add_tariff')}</Button>
+          </div>
+        </Card>
+
+        <Card title={pt('ies.bindings.demand_title')}>
+          <p>{pt('ies.bindings.demand_help')}</p>
+          {demands.length === 0 && <p>{pt('ies.bindings.demand_empty')}</p>}
+          {demands.map((row) => {
+            const spec = deviceSpec(row.instance)
+            // Public descriptor supplies identity, carrier, direction and unit;
+            // assembly remains authoritative for power dimension and nonnegativity.
+            const ports = (spec?.ports ?? []).filter((p) => p.direction === 'out' && p.energy_carrier === 'electricity')
+            return (
+              <div key={row.id} style={{ borderTop: '1px solid var(--ies-color-border)', marginTop: 'var(--ies-space-3)', paddingTop: 'var(--ies-space-3)' }}>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(175px, 1fr))', gap: 'var(--ies-space-2)' }}>
+                  <FormField label={pt('ies.bindings.demand_id')} htmlFor={'demand-id-' + row.id} required>
+                    <Input id={'demand-id-' + row.id} value={row.billingId} onChange={(e) => updateDemand(row.id, { billingId: e.target.value })} />
+                  </FormField>
+                  <FormField label={pt('ies.bindings.demand_charge')} htmlFor={'demand-charge-' + row.id} required>
+                    <Select id={'demand-charge-' + row.id} value={row.charge} onChange={(e) => updateDemand(row.id, { charge: e.target.value })}>
+                      <option value="">{pt('ies.bindings.choose')}</option>
+                      {row.charge && !Object.hasOwn(catalog?.demandCharges ?? {}, row.charge) && <option value={row.charge}>{row.charge}</option>}
+                      {Object.entries(catalog?.demandCharges ?? {}).sort(([a], [b]) => a.localeCompare(b)).map(([charge, item]) =>
+                        <option key={charge} value={charge}>{charge} ({item.rate.value} {item.rate.unit})</option>)}
+                    </Select>
+                  </FormField>
+                  <FormField label={pt('ies.bindings.instance')} htmlFor={'demand-instance-' + row.id} required>
+                    <Select id={'demand-instance-' + row.id} value={row.instance} onChange={(e) => updateDemand(row.id, { instance: e.target.value, interfaceId: '' })}>
+                      <option value="">{pt('ies.bindings.choose')}</option>
+                      {row.instance && !devices.some((d) => d.name === row.instance) && <option value={row.instance}>{row.instance}</option>}
+                      {devices.map((d) => <option key={d.name} value={d.name}>{d.name}</option>)}
+                    </Select>
+                  </FormField>
+                  <FormField label={pt('ies.bindings.demand_interface')} htmlFor={'demand-interface-' + row.id} required>
+                    <Select id={'demand-interface-' + row.id} value={row.interfaceId} onChange={(e) => updateDemand(row.id, { interfaceId: e.target.value })}>
+                      <option value="">{pt('ies.bindings.choose')}</option>
+                      {row.interfaceId && !ports.some((p) => p.name === row.interfaceId) && <option value={row.interfaceId}>{row.interfaceId}</option>}
+                      {ports.map((p) => <option key={p.name} value={p.name}>{p.name} ({p.unit ?? '—'})</option>)}
+                    </Select>
+                  </FormField>
+                </div>
+                {row.instance && ports.length === 0 && <p>{pt('ies.bindings.demand_no_ports')}</p>}
+                <Button size="sm" variant="secondary" onClick={() => setDemands((all) => all.filter((v) => v.id !== row.id))}>{pt('ies.bindings.remove')}</Button>
+              </div>
+            )
+          })}
+          <div style={{ marginTop: 'var(--ies-space-3)' }}>
+            <Button variant="secondary" onClick={() => setDemands((all) => [...all, { id: newId(), billingId: '', charge: '', instance: '', interfaceId: '' }])}>{pt('ies.bindings.add_demand')}</Button>
           </div>
         </Card>
       </fieldset>

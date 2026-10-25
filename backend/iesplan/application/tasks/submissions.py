@@ -49,7 +49,7 @@ from iesplan import modeling as modeling_domain
 from iesplan import project as project_domain
 from iesplan import results as results_domain
 from iesplan import tasks as tasks_domain
-from iesplan.application.models.project_devices import (
+from iesplan.application.models import (
     load_project_device_base_ids,
     load_project_device_documents,
 )
@@ -681,6 +681,9 @@ def _assemble_snapshot(
     _check_tax_capabilities(
         calc_config.get("generator"), generator_capabilities, effective
     )
+    _check_demand_capabilities(
+        artifact, calc_config.get("generator"), generator_capabilities
+    )
     # 提交边界维护币种核对(本次闸门实际消费的不可变快照口径; 不一致阻断):
     # 维护清单币种须与有效财务配置一致, 空清单直接通过。
     for expense in evaluation.maintenance_expenses:
@@ -829,6 +832,27 @@ def _check_tax_evaluation_refs(
                         "field": f"effective_finance.credit_pools.{pool_id}.refunds",
                     },
                 )
+
+
+def _check_demand_capabilities(artifact: Any, generator_ref: object, capabilities: tuple[str, ...]) -> None:
+    """实际需量绑定须同时具备精确月峰和同次财务事实恢复能力。
+
+    仅消费已签发装配与已解析生成器描述符；闲置费项不要求支持。
+    """
+    bindings = json.loads(artifact.canonical_text)["demand_bindings"]
+    required = {"finance.monthly_demand", "finance.financial_facts"}
+    missing = sorted(required.difference(capabilities)) if bindings else []
+    if missing:
+        raise InvalidRequestError(
+            "所选生成器缺自然月需量及同次财务事实能力；不忽略费用",
+            code="TASK-REQ-007",
+            params={
+                "generator": generator_ref,
+                "missing_capabilities": missing,
+                "fields": [f"demand_bindings.{key}" for key in sorted(bindings)],
+            },
+            location={"object_type": "task", "field": f"demand_bindings.{sorted(bindings)[0]}"},
+        )
 
 
 def _check_tax_capabilities(
@@ -1144,6 +1168,7 @@ def _assembly_gate(
         finance=finance,
         finance_binding=content.get("finance_binding"),
         tariff_bindings=content.get("tariff_bindings"),
+        demand_bindings=content.get("demand_bindings"),
         planning=planning,
         finance_snapshots=finance_snapshots,
         operation_years=operation_years,

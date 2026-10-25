@@ -96,7 +96,8 @@ test.describe('D3: 项目主体加载三态', () => {
     // 阶段一: 主体挂起期间只转圈, 无可写表单、无伪默认信息。
     try {
       await page.getByText(projectName).click({ timeout: 30_000 })
-      await expect(page).toHaveURL(/\/projects\/\d+$/)
+      await expect(page).toHaveURL(/\/projects\/\d+\/tasks$/)
+      await expect(page.getByRole('button', { name: /提交任务|Submit task/i }).first()).toBeVisible()
       await page.getByRole('navigation', { name: /工作台|Workspace/i }).getByText('数据管理').click({ timeout: 30_000 })
       await expect(page).toHaveURL(/\/data$/)
       await expect.poll(async () => entered, { timeout: 30_000 }).toBe(true)

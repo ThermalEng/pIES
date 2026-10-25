@@ -121,7 +121,7 @@ interface SealedEvaluation {
   base_year: number
   discount_rate: number
   payments_applied: Array<{ t: number; ratio: string; amount: string }>
-  annual_operation: Array<{ financial_year: number; energy_net: string; variable_om: string; fixed_om: string; maintenance: string; net: string }>
+  annual_operation: Array<{ financial_year: number; energy_net: string; variable_om: string; fixed_om: string; maintenance: string; demand_charge: string; net: string }>
   tax_cash: {
     vat: Array<{ pool: string; month: number; paid: string; refund_claimed: string; refund_arrived: string; carry: string }>
     refunds: Array<{ pool: string; period: number; arrival_period: number; amount: string }>
@@ -402,7 +402,7 @@ function expectedExcelFinancialPairs(fin: SealedEvaluation): Array<[string, stri
       `运营年第 ${i + 1} 年(t=${item.financial_year}) / Year ${i + 1}`,
       `能源 ${item.energy_net} − 可变 ${item.variable_om} ` +
         `− 固定 ${item.fixed_om} − 维护 ${item.maintenance} ` +
-        `= 净额 ${item.net} ${ccy}`,
+        `− 需量 ${item.demand_charge} = 净额 ${item.net} ${ccy}`,
     ])
   }
   for (const item of fin.evaluation.rows) {
@@ -497,7 +497,8 @@ test.describe('D3: 税务主链(财务页→提交→求解→税额→评估→
     const session = await createSession(page, username, password)
 
     await page.getByText(projectName).click({ timeout: 30_000 })
-    await expect(page).toHaveURL(/\/projects\/\d+$/)
+    await expect(page).toHaveURL(/\/projects\/\d+\/tasks$/)
+    await expect(page.getByRole('button', { name: /提交任务|Submit task/i }).first()).toBeVisible()
 
     // 税画像经财务页 UI 登记/引用(被测财务步骤)，规划目标选择现有税后 NPV。
     const profile = taxProfile(`d3_tax_${Date.now()}`)
@@ -688,7 +689,8 @@ test.describe('D3: 税务主链(财务页→提交→求解→税额→评估→
     const page: Page = await context.newPage()
     const session = await createSession(page, username, password)
     await page.getByText(projectName).click({ timeout: 30_000 })
-    await expect(page).toHaveURL(/\/projects\/\d+$/)
+    await expect(page).toHaveURL(/\/projects\/\d+\/tasks$/)
+    await expect(page.getByRole('button', { name: /提交任务|Submit task/i }).first()).toBeVisible()
     const profile = taxProfile(`d3_switch_${Date.now()}`)
     await registerAndBindTaxProfile(page, profile)
     await saveAfterTaxPlanningObjective(page, pid)
@@ -708,6 +710,7 @@ test.describe('D3: 税务主链(财务页→提交→求解→税额→评估→
     expect(ids.length).toBe(2)
     const task1 = ids[0]
     const finBefore = await fetchSealed(page, pid, task1)
+    const finSecond = await fetchSealed(page, pid, ids[1])
 
     // 更改当前工作区画像后，任务仍读取各自的冻结财务快照。
     const changedProfile = taxProfile(`d3_switch_edited_${Date.now()}`)
@@ -734,12 +737,12 @@ test.describe('D3: 税务主链(财务页→提交→求解→税额→评估→
       return values
     }
     await selector.selectOption({ index: 0 })
-    await expect.poll(async () => (await annualTable()).join('|'), { timeout: 30_000 }).toContain('− 100 =')
+    await expect.poll(async () => (await annualTable()).join('|'), { timeout: 30_000 }).toContain(`− 100 − ${finBefore.annual_operation[0].demand_charge} =`)
     await selector.selectOption({ index: 1 })
-    await expect.poll(async () => (await annualTable()).join('|'), { timeout: 30_000 }).toContain('− 200 =')
+    await expect.poll(async () => (await annualTable()).join('|'), { timeout: 30_000 }).toContain(`− 200 − ${finSecond.annual_operation[0].demand_charge} =`)
     // 切回任务1：旧结果不变（与切换前封存逐项一致）。
     await selector.selectOption({ index: 0 })
-    await expect.poll(async () => (await annualTable()).join('|'), { timeout: 30_000 }).toContain('− 100 =')
+    await expect.poll(async () => (await annualTable()).join('|'), { timeout: 30_000 }).toContain(`− 100 − ${finBefore.annual_operation[0].demand_charge} =`)
     const finAfter = await fetchSealed(page, pid, task1)
     expect(finAfter).toEqual(finBefore)
 
@@ -761,7 +764,8 @@ test.describe('D3: 税务主链(财务页→提交→求解→税额→评估→
     const page: Page = await context.newPage()
     const session = await createSession(page, username, password)
     await page.getByText(projectName).click({ timeout: 30_000 })
-    await expect(page).toHaveURL(/\/projects\/\d+$/)
+    await expect(page).toHaveURL(/\/projects\/\d+\/tasks$/)
+    await expect(page.getByRole('button', { name: /提交任务|Submit task/i }).first()).toBeVisible()
     await page.getByRole('navigation', { name: /工作台|Workspace/i }).getByText('导出').click({ timeout: 30_000 })
     await expect(page).toHaveURL(/\/export$/)
     // 无可用结果：显示缺结果引导，不发起下载。

@@ -639,13 +639,13 @@ def build_financial_evaluation(
     finance: EffectiveFinanceConfig,
     result: ComputeResult,
 ) -> dict[str, object] | None:
-    """同次解财务事实 → 封存评价(ies.financial-evaluation@1.0.0)。
+    """同次解财务事实 → 封存评价(ies.financial-evaluation@2.0.0)。
 
     只处理已求解且含 solution 输出的结果; 其余状态返回 None(调用方
     不写财务块, 不把不可行/缺证据结果伪装为有现金流的方案, 缺块语义
     沿既有 ``financial_absence``)。本函数只投影适配器恢复的同次解财务
     事实并调用 finance 既有评价纯函数, 不重建税基/VAT/亏损算法, 不读
-    DB/最新配置, 不重跑提交校验: 配套 3.0.0 事实缺件即实际结构错误
+    DB/最新配置, 不重跑提交校验: 配套 4.0.0 事实缺件即实际结构错误
     直接可见失败, 不补空、不回退。
     """
     from decimal import Decimal
@@ -683,7 +683,7 @@ def build_financial_evaluation(
     )
     return {
         "schema": "ies.financial-evaluation",
-        "schema_version": "1.0.0",
+        "schema_version": "2.0.0",
         "status": "evaluated",
         "evaluation_years": years,
         # K/N 回显冻结输入(展示时轴映射用, 不做第二权威读取)。
@@ -709,10 +709,12 @@ def build_financial_evaluation(
                 "variable_om": entry["variable_om"],
                 "fixed_om": entry["fixed_om"],
                 "maintenance": entry["maintenance"],
+                "demand_charge": entry["demand_charge"],
                 "net": entry["net"],
             }
             for entry in facts["annual_operation"]
         ],
+        "monthly_demand": thaw_json_value(facts["monthly_demand"]),
         # 同次解税务事实原样投影(结构与金额不重算、不改写)。
         "tax_cash": tax_cash,
         # 完整税后现金流 CF[0..E](与目标同一模型表达式，未折现)。

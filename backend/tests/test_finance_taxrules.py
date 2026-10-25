@@ -31,7 +31,7 @@ from iesplan.tasks.contracts import InvalidRequestError
 def _base_profile() -> dict:
     return {
         "schema": "ies.finance-profile",
-        "schema_version": "3.0.0",
+        "schema_version": "4.0.0",
         "profile": {
             "id": "cn-north-demo",
             "region": "CN-North",
@@ -68,6 +68,7 @@ def _base_profile() -> dict:
                 "value": {"value": "0.4", "unit": "CNY/kWh"},
             },
         },
+        "demand_charges": {},
         "taxes": {
             "vat_label": {
                 "display_name": "合成增值税",
@@ -156,7 +157,7 @@ def _base_profile() -> dict:
 def _base_overrides(profile: FinanceProfile) -> dict:
     return {
         "schema": "ies.finance-overrides",
-        "schema_version": "3.0.0",
+        "schema_version": "4.0.0",
         "profile_ref": {"id": profile.profile_id},
         "tax_rules": {
             "operating_vat": {
@@ -308,7 +309,7 @@ def test_explicit_schedule_method_and_replace() -> None:
     overrides = FinanceOverrides.from_dict(
         {
             "schema": "ies.finance-overrides",
-            "schema_version": "3.0.0",
+            "schema_version": "4.0.0",
             "profile_ref": {"id": profile.profile_id},
             "tax_rules": {"building_vat": {"confirmation": {"schedule": [{"period": 2, "ratio": "1"}]}}},
         },
@@ -329,7 +330,7 @@ def test_payment_period_schedule_override_rejected() -> None:
         FinanceOverrides.from_dict(
             {
                 "schema": "ies.finance-overrides",
-                "schema_version": "3.0.0",
+                "schema_version": "4.0.0",
                 "profile_ref": {"id": profile.profile_id},
                 "tax_rules": {"building_vat": {"confirmation": {"schedule": [{"period": 2, "ratio": "1"}]}}},
             },
@@ -387,7 +388,7 @@ def test_override_method_scope_pool_changes_rejected() -> None:
     profile = FinanceProfile.from_dict(_base_profile())
     base = {
         "schema": "ies.finance-overrides",
-        "schema_version": "3.0.0",
+        "schema_version": "4.0.0",
         "profile_ref": {"id": profile.profile_id},
     }
     cases = [

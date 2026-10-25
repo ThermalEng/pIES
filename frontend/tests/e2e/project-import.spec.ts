@@ -26,7 +26,7 @@ const SINK_TYPE_FINAL = `${SINK_TYPE}_1`
 const SINK_LABEL = '消费链负荷'
 const SINK_NAME = 'userload'
 const SINK_YAML = `schema: ies.device-model
-schema_version: "2.0.0"
+schema_version: "2.1.0"
 device:
   id: acme.device.consumption_load
   names:
@@ -57,7 +57,7 @@ equations:
 function overridesPayload(profileId: string, price: string): Record<string, unknown> {
   return {
     schema: 'ies.finance-overrides',
-    schema_version: '1.0.0',
+    schema_version: '4.0.0',
     profile_ref: { id: profileId },
     energy_prices: {
       grid_import: { kind: 'constant', value: { value: price, unit: 'CNY/kWh' } },
