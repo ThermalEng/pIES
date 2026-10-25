@@ -24,12 +24,72 @@ class ConstructionPayment:
 
 
 @dataclass(frozen=True, slots=True)
+class MaintenanceUnitCost:
+    """单位费用（十进制定点金额系数及显式复合单位）。"""
+
+    value: str
+    unit: str
+
+
+@dataclass(frozen=True, slots=True)
+class ScaleUnitCostTerm:
+    """实例规模属性乘以单位费用；规划接管由生成器按实例解析。"""
+
+    kind: str
+    instance_id: str
+    property: str
+    unit_cost: MaintenanceUnitCost
+
+
+@dataclass(frozen=True, slots=True)
+class CostComponentShareTerm:
+    """实例本课题建设成本总分量的比例。"""
+
+    kind: str
+    instance_id: str
+    component: str
+    ratio: float
+
+
+MaintenanceTerm = ScaleUnitCostTerm | CostComponentShareTerm
+
+
+@dataclass(frozen=True, slots=True)
 class MaintenanceExpense:
-    """单项维护/换新支出(财务发生年 + 十进制金额 + 币种)。"""
+    """单笔维护/换新支出；确定金额与有序关联项是同一笔支付。"""
 
     year: int
     amount: str  # Decimal 定点字符串, 非负
     currency: str
+    terms: tuple[MaintenanceTerm, ...] = ()
+
+
+def maintenance_term_from_frozen(entry: Mapping[str, Any]) -> MaintenanceTerm:
+    """冻结项直接恢复类型，不重做公开提交边界校验。"""
+    if entry["kind"] == "scale_unit_cost":
+        return ScaleUnitCostTerm(
+            kind=entry["kind"], instance_id=entry["instance_id"],
+            property=entry["property"],
+            unit_cost=MaintenanceUnitCost(**entry["unit_cost"]),
+        )
+    return CostComponentShareTerm(
+        kind=entry["kind"], instance_id=entry["instance_id"],
+        component=entry["component"], ratio=entry["ratio"],
+    )
+
+
+def maintenance_term_to_dict(term: MaintenanceTerm) -> dict[str, Any]:
+    """保留有序关联项的公开结构，用于同一冻结块与工作区恢复。"""
+    if isinstance(term, ScaleUnitCostTerm):
+        return {
+            "kind": term.kind, "instance_id": term.instance_id,
+            "property": term.property,
+            "unit_cost": {"value": term.unit_cost.value, "unit": term.unit_cost.unit},
+        }
+    return {
+        "kind": term.kind, "instance_id": term.instance_id,
+        "component": term.component, "ratio": term.ratio,
+    }
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,7 +131,10 @@ class EvaluationInput:
                 for entry in frozen["construction_payments"]
             ),
             maintenance_expenses=tuple(
-                MaintenanceExpense(year=entry["year"], amount=entry["amount"], currency=entry["currency"])
+                MaintenanceExpense(
+                    year=entry["year"], amount=entry["amount"], currency=entry["currency"],
+                    terms=tuple(maintenance_term_from_frozen(term) for term in entry["terms"]),
+                )
                 for entry in frozen["maintenance_expenses"]
             ),
         )

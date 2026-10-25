@@ -18,9 +18,13 @@
 from __future__ import annotations
 
 from iesplan.finance.confirmation import (
+    CostComponentShareTerm,
     ConstructionPayment,
     EvaluationInput,
     MaintenanceExpense,
+    MaintenanceUnitCost,
+    ScaleUnitCostTerm,
+    maintenance_term_to_dict,
 )
 from iesplan.finance.evaluation import (
     EVALUATION_SCHEMA,
@@ -146,6 +150,10 @@ __all__ = [
     "ConstructionPayment",
     "EvaluationInput",
     "MaintenanceExpense",
+    "MaintenanceUnitCost",
+    "ScaleUnitCostTerm",
+    "CostComponentShareTerm",
+    "maintenance_term_to_dict",
     # evaluation(0.10-D 纯评价切片)
     "EVALUATION_SCHEMA",
     "EVALUATION_VERSION",
