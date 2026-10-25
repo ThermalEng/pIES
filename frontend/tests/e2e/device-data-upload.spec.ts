@@ -73,7 +73,7 @@ test.describe('数据上传两种格式: step 自描述与通用时间戳', () =
         schema_version: '2.0.0',
         mode: 'planning',
         predictions: [],
-        generator: 'ies.generator.highs_milp@4.0.0',
+        generator: 'ies.generator.highs_milp@5.0.0',
         solver: 'ies.solver.highs@1.7.2',
         precision: 'medium',
         convergence: null,

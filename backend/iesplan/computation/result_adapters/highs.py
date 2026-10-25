@@ -1,6 +1,6 @@
-"""首个真实 ResultAdapterProvider：``ies.result-adapter.highs@4.0.0``。
+"""首个真实 ResultAdapterProvider：``ies.result-adapter.highs@5.0.0``。
 
-与 ``ies.generator.highs_milp@4.0.0`` 配套，在 2.0.0 主解/序列/度量
+与 ``ies.generator.highs_milp@5.0.0`` 配套，在 2.0.0 主解/序列/度量
 恢复基础上增加同次解结构化财务事实映射（映射协议改变故升版；仿射
 求值复用同一路径），解释其声明输出
 ``output/solution.sol``。该文件由求解 executable
@@ -53,7 +53,7 @@ from iesplan.computation.result_adapter import ResultAdapterDescriptor
 from iesplan.core.units import UnitError, dims_of, from_si
 
 ADAPTER_ID = "ies.result-adapter.highs"
-ADAPTER_VERSION = "4.0.0"
+ADAPTER_VERSION = "5.0.0"
 ADAPTER_REF = f"{ADAPTER_ID}@{ADAPTER_VERSION}"
 
 DESCRIPTOR = ResultAdapterDescriptor(
@@ -527,7 +527,8 @@ def _recover_financial_facts(
     """结构化财务事实声明 → 同次主解业务事实（格式页映射表为唯一正文）。
 
     只恢复业务事实，不重算税务、不猜列名、不改写期间；字面量（身份、
-    期间、比例、维护金额）原样透传，金额为十进制字符串。内部可信声明
+    期间、比例）原样透传，维护金额与其他金额均从主解仿射恢复为十进制
+    字符串。内部可信声明
     直接取值，缺件自然可见失败，不设默认掩盖。
     """
     currency = decl["currency"]
@@ -553,7 +554,7 @@ def _recover_financial_facts(
                 "energy_net": amount(entry["energy_net"], "annual_operation"),
                 "variable_om": amount(entry["variable_om"], "annual_operation"),
                 "fixed_om": amount(entry["fixed_om"], "annual_operation"),
-                "maintenance": entry["maintenance"],
+                "maintenance": amount(entry["maintenance"], "annual_operation.maintenance"),
                 "demand_charge": amount(entry["demand_charge"], "annual_operation"),
                 "net": amount(entry["net"], "annual_operation"),
             }

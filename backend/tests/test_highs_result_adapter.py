@@ -1,4 +1,4 @@
-"""ies.result-adapter.highs@4.0.0 聚焦行为测试。
+"""ies.result-adapter.highs@5.0.0 聚焦行为测试。
 
 V1 夹具为 Docker 内真实求解垫片（``ies-highs-solver``，highspy 1.7.2）
 逐字节产出，断言前已核对：
@@ -149,7 +149,7 @@ def _parameters(
         "assembly": {"id": "assembly-7", "schema_version": "2.0.0"},
         "components": {} if components is None else components,
         "financial_facts": _facts(),
-        "generator": "ies.generator.highs_milp@4.0.0",
+        "generator": "ies.generator.highs_milp@5.0.0",
         "objective_offset": offset,
         "objective_unit": objective_unit,
         "outputs": ["solution", "metrics"] if outputs is None else outputs,
@@ -171,7 +171,7 @@ def _bundle(files: dict | None = None) -> SolverBundle:
         }
     manifest = SolverBundleManifest(
         bundle={
-            "generator": "ies.generator.highs_milp@4.0.0",
+            "generator": "ies.generator.highs_milp@5.0.0",
             "solver": "ies.solver.highs@1.7.2",
         },
         inputs=[{"path": path, "media_type": "application/octet-stream"} for path in sorted(files)],
@@ -201,7 +201,7 @@ def _receipt(**kwargs) -> ExecutionReceipt:
     kwargs.setdefault("assembly_id", "assembly-7")
     kwargs.setdefault("calculation_config_id", "config-7")
     kwargs.setdefault("attempt_id", "attempt-7")
-    kwargs.setdefault("generator_ref", "ies.generator.highs_milp@4.0.0")
+    kwargs.setdefault("generator_ref", "ies.generator.highs_milp@5.0.0")
     kwargs.setdefault("solver_ref", "ies.solver.highs@1.7.2")
     kwargs.setdefault("executor_ref", "ies.executor.local_process@1.0.0")
     kwargs.setdefault("executable_ref", "ies.solver.highs@1.7.2")
@@ -222,7 +222,7 @@ def _adapt(bundle_files, receipt, solution: bytes | None) -> ComputeResult:
 def test_identity_and_registry() -> None:
     """公开身份与独立原子注册（精确引用选中，无回退）。"""
     assert isinstance(HIGHS_ADAPTER, HighsResultAdapter)
-    assert HIGHS_ADAPTER.ref == ADAPTER_REF == "ies.result-adapter.highs@4.0.0"
+    assert HIGHS_ADAPTER.ref == ADAPTER_REF == "ies.result-adapter.highs@5.0.0"
     assert HIGHS_ADAPTER.descriptor.ref == ADAPTER_REF
     assert HIGHS_ADAPTER.available() is True
     registry = build_result_adapter_registry([HIGHS_ADAPTER])
@@ -633,7 +633,9 @@ def test_monthly_demand_facts_recovered_from_same_primal() -> None:
     doc = json.loads(_parameters().decode("utf-8"))
     zero = {"constant": 0.0, "terms": {}}
     charge = {"constant": 0.0, "terms": {"x": 0.03}}
-    negative = {"constant": 0.0, "terms": {"x": -0.03}}
+    # 同一次主解：月需量费 90 + 维护 12 + 0.5×3000 = 1602。
+    maintenance = {"constant": 12.0, "terms": {"x": 0.5}}
+    negative = {"constant": -12.0, "terms": {"x": -0.53}}
     doc["financial_facts"]["monthly_demand"] = [{
         "billing_id": "real_meter", "charge_id": "fee",
         "calendar_year": 2024, "calendar_month": 2, "financial_year": 2,
@@ -643,7 +645,7 @@ def test_monthly_demand_facts_recovered_from_same_primal() -> None:
     }]
     doc["financial_facts"]["annual_operation"] = [{
         "financial_year": 2, "energy_net": zero, "variable_om": zero,
-        "fixed_om": zero, "maintenance": "0", "demand_charge": charge,
+        "fixed_om": zero, "maintenance": maintenance, "demand_charge": charge,
         "net": negative,
     }]
     doc["financial_facts"]["annual_net_flows"] = [zero, zero, negative]
@@ -661,5 +663,6 @@ def test_monthly_demand_facts_recovered_from_same_primal() -> None:
     assert month["charge"] == "90.0"
     assert month["rate"] == {"value": "30", "unit": "CNY/kW"}
     assert facts["annual_operation"][0]["demand_charge"] == "90.0"
-    assert facts["annual_operation"][0]["net"] == "-90.0"
-    assert facts["annual_net_flows"][-1] == "-90.0"
+    assert facts["annual_operation"][0]["maintenance"] == "1512.0"
+    assert facts["annual_operation"][0]["net"] == "-1602.0"
+    assert facts["annual_net_flows"][-1] == "-1602.0"
