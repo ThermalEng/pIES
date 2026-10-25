@@ -177,7 +177,7 @@ jobs:
           docker compose run --rm --no-deps \
             --volume "$PWD/ci-artifacts/backend:/ci-artifacts" \
             --volume "$PWD/manual:/manual:ro" \
-            backend python -m pytest -q -ra "${tests[@]}" \
+            backend python -m pytest -vv -ra --durations=20 "${tests[@]}" \
             --junitxml=/ci-artifacts/pytest.xml
 
       - name: Upload Pytest report

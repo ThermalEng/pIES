@@ -211,16 +211,29 @@ def find_area(path: str, prefix: str) -> str | None:
     return None
 
 
-# Historical CI timings (October 2026), rounded per file; only schedule work.
-# Never remove tests based on weight. Unmeasured files get a nonzero fallback.
+# Whole-file timing estimates from completed full-suite JUnit shards, October 2026.
+# These values ONLY schedule work; no tests are excluded or marked optional.
+# Completed full-suite lanes 1/2/3 from Actions 40158343340.
+# Lane 4 exceeded its 45-minute deadline with no JUnit; campus/isolated-runner
+# weights below remain placeholders, not empirical measurements.
 BACKEND_SECONDS = {
-    "test_full_horizon_solve.py": 540,
-    "test_evaluation_cashflow_chain.py": 320,
-    "test_issue04_d2.py": 230,
+    "test_full_horizon_solve.py": 535,
+    "test_prediction_capability.py": 435,
+    "test_highs_readiness.py": 330,
+    "test_evaluation_cashflow_chain.py": 330,
+    "test_financial_facts.py": 160,
+    "test_vat_monthly.py": 95,
+    "test_issue04_d2.py": 95,
+    "test_npv_objective.py": 60,
+    "test_income_annual.py": 55,
+    "test_auth_api.py": 45,
+    "test_package_project_models.py": 40,
+    "test_project_api.py": 35,
+    "test_device_data_upload.py": 33,
+    "test_model_template_api.py": 25,
+    "test_dataset_api.py": 20,
     "test_campus_project_chain.py": 140,
-    "test_highs_milp_provider.py": 100,
-    "test_generator_registry.py": 100,
-    "test_worker_compute_chain.py": 110,
+    "test_isolated_runner.py": 110,
 }
 BROWSER_SECONDS = {
     "hourly-steps.spec.ts": 345, "task-draft-load.spec.ts": 220,

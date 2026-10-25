@@ -94,6 +94,7 @@ PROFILE_PAYLOAD: dict = {
             },
         },
     },
+    "demand_charges": {},
     "energy_prices": {
         "grid_import": {
             "carrier": "electricity",
