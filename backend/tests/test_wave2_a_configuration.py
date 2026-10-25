@@ -71,7 +71,7 @@ BASELINE = {
 
 PROFILE_PAYLOAD: dict = {
     "schema": "ies.finance-profile",
-    "schema_version": "4.0.0",
+    "schema_version": "5.0.0",
     "profile": {
         "id": "cn-north-demo",
         "region": "CN-North",
@@ -112,7 +112,7 @@ PROFILE_PAYLOAD: dict = {
 def _overrides_payload(profile: FinanceProfile) -> dict:
     return {
         "schema": "ies.finance-overrides",
-        "schema_version": "4.0.0",
+        "schema_version": "5.0.0",
         "profile_ref": {"id": profile.profile_id},
         "finance_types": {
             "pv_system": {
