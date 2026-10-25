@@ -24,7 +24,7 @@ def test_assemble_api_full_context() -> None:
     assert ctx.device_registry is not None
     assert ctx.generator_registry is not None
     assert [d.ref for d in ctx.generator_registry.snapshot()] == [
-        "ies.generator.highs_milp@3.4.0"
+        "ies.generator.highs_milp@4.0.0"
     ]
     assert len(ctx.generator_registry) == 1
     health = ctx.health()
@@ -48,7 +48,7 @@ def test_assemble_worker_subsets() -> None:
     assert compute.result_adapter_registry is not None
     assert [
         d.ref for d in compute.result_adapter_registry.snapshot()
-    ] == ["ies.result-adapter.highs@3.0.0"]
+    ] == ["ies.result-adapter.highs@4.0.0"]
     assert compute.solver_runtime is not None
     policy = compute.deployment_policy
     assert policy is not None
