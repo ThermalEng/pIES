@@ -15,7 +15,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Cache Python dependencies independently of application source changes.
 # Still install the real package wheel with bundled catalogs and schemas.
 COPY pyproject.toml LICENSE ./
-RUN python -c "import tomllib; p=tomllib.load(open('pyproject.toml','rb')); open('/tmp/pies-deps.txt','w').write('\\n'.join(p['project']['dependencies']+p['project']['optional-dependencies']['dev']))" \
+RUN python -c "import tomllib; p=tomllib.load(open('pyproject.toml','rb')); open('/tmp/pies-deps.txt','w').write('\n'.join(p['project']['dependencies']+p['project']['optional-dependencies']['dev']))" \
     && pip install --upgrade pip \
     && pip install -r /tmp/pies-deps.txt
 COPY iesplan ./iesplan
