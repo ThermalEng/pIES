@@ -1,0 +1,8 @@
+# Exactly one browser runner may export this scope per workflow run.
+# Limit export time and never turn cache storage failure into a false red CI.
+services:
+  backend:
+    build:
+      context: ./backend
+      cache_to:
+        - type=gha,scope=pies-backend-py312-v1,mode=max,ignore-error=true,timeout=120s

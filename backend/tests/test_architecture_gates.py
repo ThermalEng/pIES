@@ -694,6 +694,25 @@ def test_public_entry_exemption_is_exact() -> None:
     )
 
 
+# One approved immutable cross-domain contract: task snapshots reuse the
+# three value objects owned by finance's public facade. No business functions,
+# wildcard imports or implementation modules are exempt.
+_FINANCE_CONFIRMATION_VALUES = frozenset({
+    "ConstructionPayment", "EvaluationInput", "MaintenanceExpense",
+})
+
+
+def _is_task_finance_value_import(mod: str, node: ast.AST) -> bool:
+    return (
+        mod == "iesplan.tasks.contracts"
+        and isinstance(node, ast.ImportFrom)
+        and node.level == 0
+        and node.module == "iesplan.finance"
+        and bool(node.names)
+        and all(alias.name in _FINANCE_CONFIRMATION_VALUES for alias in node.names)
+    )
+
+
 def _iter_domain_imports(
     scan_root: Path,
     forbidden: frozenset[str],
@@ -712,6 +731,8 @@ def _iter_domain_imports(
     for path, mod in _iter_modules(scan_root, pkg_root):
         tree = ast.parse(path.read_text(encoding="utf-8"))
         for node in ast.walk(tree):
+            if own_top == "tasks" and _is_task_finance_value_import(mod, node):
+                continue
             targets: list[str] = []
             if isinstance(node, ast.Import):
                 targets.extend(a.name for a in node.names)
@@ -799,6 +820,40 @@ def test_no_forbidden_cross_domain_deps():
     """架构门禁 14: 禁止领域间直接业务依赖(跨域组合只归 application)。"""
     detected = _find_cross_domain_behavior_imports()
     assert not detected, f"领域间直接业务依赖: {sorted(detected)}"
+
+def test_tasks_finance_confirmation_exemption_is_exact(tmp_path: Path) -> None:
+    """Allow only the three public immutable values, never finance behavior."""
+    pkg_root = tmp_path / "iesplan"
+    task_root = pkg_root / "tasks"
+    task_root.mkdir(parents=True)
+    contract = task_root / "contracts.py"
+
+    def forbidden_imports() -> set[tuple[str, str]]:
+        return _iter_domain_imports(
+            task_root, _BUSINESS_DOMAIN_PACKAGES, own_top="tasks",
+            pkg_root=pkg_root, exempt=ALLOWED_STATE_MODEL_REUSE,
+        )
+
+    contract.write_text(
+        "from iesplan.finance import ConstructionPayment, EvaluationInput, MaintenanceExpense\n",
+        encoding="utf-8",
+    )
+    assert forbidden_imports() == set()
+    for bad in (
+        "from iesplan.finance import EvaluationInput, project_npv\n",
+        "from iesplan.finance import evaluate_project_investment\n",
+        "from iesplan.finance.hourly import FinancialResult\n",
+        "from iesplan.finance import *\n",
+        "import iesplan.finance\n",
+    ):
+        contract.write_text(bad, encoding="utf-8")
+        assert forbidden_imports() == {("iesplan.tasks.contracts", "finance")}, bad
+    contract.write_text("from iesplan.finance import EvaluationInput\n", encoding="utf-8")
+    (task_root / "other.py").write_text(
+        "from iesplan.finance import EvaluationInput\n", encoding="utf-8",
+    )
+    assert forbidden_imports() == {("iesplan.tasks.other", "finance")}
+
 
 
 def test_worker_no_compute_penetration():

@@ -609,36 +609,49 @@ def test_api_upload_range_blocked(client: TestClient, session: Session) -> None:
     assert any(d["code"] == "RES-RANGE-001" and d["location"]["field"] == "t_ambient" for d in diagnostics)
 
 
-def test_api_upload_unknown_device_model_ignored(client: TestClient, session: Session) -> None:
-    """CSV 元信息 device_model 行不再做注册校验(upload_descriptor 1.0 机制已退役,
-    DATA-META-009 无发射点): 数据集↔设备绑定在草稿绑定时校验; 内容合法的上传
-    成功(201), 未知模型行被忽略。"""
+def test_api_upload_obsolete_device_model_metadata_rejected(client: TestClient, session: Session) -> None:
+    """The current 2.1 step format accepts valid data, but rejects obsolete metadata.
+
+    Unknown device_model is no longer silently ignored; device-to-dataset
+    binding is validated at the draft assembly boundary.
+    """
     user = make_user(session, "alice")
     proj = _make_project(session, user)
     session.commit()
     ds_id = _create_dataset_via_api(client, session, proj.id, user)
 
-    body_lines = make_csv("1h", n=8760).decode("utf-8").splitlines(keepends=True)
-    meta_csv = (
-        "# schema: ies.device-data\n"
-        "# schema_version: 1.0.0\n"
-        "# dataset_id: unknown_model_upload\n"
-        "# device_model: ies.device.nonexistent@1.0.0\n"
-        "# series_mode: timeline\n"
-        "# resolution: 1h\n"
-        "# timestamp_mode: fixed_offset\n"
-        "# fixed_utc_offset_minutes: 480\n"
-        "# unit.e_load: kWh\n"
-        + "".join(body_lines)
-    )
+    metadata = [
+        "# schema: ies.device-data",
+        "# schema_version: 2.1.0",
+        "# dataset_id: valid_step_upload",
+        "# device_id: ies.device.electric_load",
+        "# source_mode: data_repeat",
+        "# resolution: 1h",
+        "# unit.electricity_demand: kW",
+    ]
+    rows = ["step,electricity_demand", *(f"{i},48" for i in range(24))]
+    valid_csv = ("\n".join([*metadata, *rows]) + "\n").encode("utf-8")
     resp = client.post(
         f"/api/projects/{proj.id}/datasets/{ds_id}/versions",
-        data={"resolution": "1h"},
-        files={"file": ("meta.csv", meta_csv.encode("utf-8"), "text/csv")},
+        data={"resolution": "1h", "utc_offset_minutes": "480"},
+        files={"file": ("valid-step.csv", valid_csv, "text/csv")},
         headers=login_headers(client, user),
     )
     assert resp.status_code == 201, resp.text
     assert resp.json()["dataset_version"]["version_no"] == 1
+
+    obsolete_csv = ("\n".join([
+        *metadata, "# device_model: ies.device.nonexistent@1.0.0", *rows,
+    ]) + "\n").encode("utf-8")
+    rejected = client.post(
+        f"/api/projects/{proj.id}/datasets/{ds_id}/versions",
+        data={"resolution": "1h", "utc_offset_minutes": "480"},
+        files={"file": ("obsolete-meta.csv", obsolete_csv, "text/csv")},
+        headers=login_headers(client, user),
+    )
+    assert rejected.status_code == 400, rejected.text
+    diagnostics = rejected.json()["error"]["params"]["diagnostics"]
+    assert any(d["code"] == "DATA-META-002" for d in diagnostics)
     assert session.query(DatasetVersion).count() == 1
 
 

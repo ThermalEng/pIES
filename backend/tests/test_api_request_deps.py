@@ -146,5 +146,7 @@ def test_worker_requires_explicit_session_factory() -> None:
 def test_worker_holds_explicit_session_factory() -> None:
     """显式传入的工厂被 Worker 持有(组合根装配来源)。"""
     sentinel = object()
-    worker = Worker(worker_type="compute", session_factory=sentinel)
+    compute_plane = object()
+    worker = Worker(worker_type="compute", session_factory=sentinel, compute=compute_plane)
     assert worker.session_factory is sentinel
+    assert worker.compute is compute_plane
