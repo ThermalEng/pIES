@@ -37,10 +37,48 @@ function parseDoc(text: string): Json | null {
   }
 }
 
-function priceCatalog(doc: Json | null): Record<string, Price> {
+/** UI-shape gate only: unfinished hand-written JSON must remain untouched.
+ * Domain constraints (units, valid refs and operational horizon) stay on the
+ * backend. Never coerce a malformed price entry into an empty catalogue.
+ */
+function isObject(value: unknown): value is Json {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+}
+
+function isSeriesMeta(value: unknown): boolean {
+  return isObject(value)
+    && typeof value.resolution === 'string'
+    && typeof value.point_count === 'number'
+    && typeof value.unit === 'string'
+}
+
+function priceCatalog(doc: Json | null): Record<string, Price> | null {
   const raw = doc?.energy_prices
-  return raw && typeof raw === 'object' && !Array.isArray(raw)
-    ? raw as Record<string, Price> : {}
+  if (raw === undefined) return {}
+  if (!isObject(raw)) return null
+  for (const entry of Object.values(raw)) {
+    if (!isObject(entry)) return null
+    if (entry.kind === 'constant') {
+      if (!isObject(entry.value)
+        || typeof entry.value.value !== 'string'
+        || typeof entry.value.unit !== 'string') return null
+    } else if (entry.kind === 'time_series') {
+      if (typeof entry.ref !== 'string' || !isSeriesMeta(entry.series_meta)) return null
+    } else if (entry.kind === 'monthly_daily') {
+      if (!isObject(entry.months) || Object.keys(entry.months).length !== MONTHS.length) return null
+      if (MONTHS.some(month => {
+        const source = entry.months as Json
+        const item = source[month]
+        return !isObject(item)
+          || typeof item.ref !== 'string'
+          || !isSeriesMeta(item.series_meta)
+      })) return null
+    } else {
+      // No structured controls for a missing/unknown kind in a draft.
+      return null
+    }
+  }
+  return raw as Record<string, Price>
 }
 
 function priceUnit(item: Price): string {
@@ -66,9 +104,12 @@ export default function MonthlyDailyPriceEditor({
   mode, text, onChange, disabled = false, profileId, profilePrices = {},
 }: Props) {
   const doc = parseDoc(text)
-  const valid = !text.trim() || doc !== null
   const specified = priceCatalog(doc)
-  const candidates = mode === 'profile' ? specified : profilePrices
+  const boundPrices = priceCatalog({ energy_prices: profilePrices })
+  const valid = (!text.trim() || doc !== null) && specified !== null && boundPrices !== null
+  const candidates: Record<string, Price> = valid
+    ? (mode === 'profile' ? specified ?? {} : boundPrices ?? {})
+    : {}
 
   function replace(id: string, next: Price | null) {
     if (disabled || !valid) return
@@ -78,10 +119,13 @@ export default function MonthlyDailyPriceEditor({
       profile_ref: { id: profileId },
     } : null)
     if (!base) return
-    const catalog: Record<string, Price> = { ...priceCatalog(base) }
+    const parsedCatalog = priceCatalog(base)
+    if (!parsedCatalog) return
+    const catalog: Record<string, Price> = { ...parsedCatalog }
     if (next === null) delete catalog[id]
     else if (mode === 'profile') {
-      const original = specified[id]
+      const original = specified?.[id]
+      if (!original) return
       catalog[id] = { carrier: original.carrier, direction: original.direction, ...next }
     } else {
       catalog[id] = next
@@ -112,8 +156,8 @@ export default function MonthlyDailyPriceEditor({
       style={{ marginTop: 'var(--ies-space-3)', padding: 'var(--ies-space-3)', border: '1px solid var(--ies-color-border)', borderRadius: 8 }}>
       <h3>能源价格来源：常数／全期序列／月份日曲线</h3>
       <p style={{ fontSize: 'var(--ies-fs-sm)' }}>月份日曲线使用已上传的价格对象 ID；完整配置 1—12 月，每日重用且闰日使用二月曲线。覆盖时整项替换，不按月继承。</p>
-      {!valid && <Alert variant="error">请先修正 JSON 格式，再使用价格编辑器。</Alert>}
-      {!Object.keys(candidates).length && <p>请先填写画像的能源价格条目，或选择项目画像。</p>}
+      {!valid && <Alert variant="error">价格 JSON 条目结构不完整，请在文本框中修正后继续编辑；当前草稿会原样保留。</Alert>}
+      {valid && !Object.keys(candidates).length && <p>请先填写画像的能源价格条目，或选择项目画像。</p>}
       {Object.entries(candidates).sort(([a], [b]) => a.localeCompare(b)).map(([id, baseline]) => {
         const isOverridden = mode === 'overrides' && Object.hasOwn(specified, id)
         const current = isOverridden ? specified[id] : baseline
