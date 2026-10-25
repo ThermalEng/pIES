@@ -36,6 +36,7 @@ from iesplan.finance.evaluation import (
     evaluate_project_investment,
 )
 from iesplan.finance.hourly import FinancialResult, compute_financials, compute_lcoe, compute_payback
+from iesplan.finance.monthly_daily import DAY_POINTS, expand_monthly_daily_prices
 from iesplan.finance.metrics import (
     IRRStatus,
     build_equity_cashflows,
@@ -232,6 +233,9 @@ __all__ = [
     "DIRECTION_VALUES",
     "KIND_VALUES",
     "RESOLUTION_VALUES",
+    # 公历月份日曲线(供 application/Worker 通过财务门面消费，唯一实现与常量)
+    "DAY_POINTS",
+    "expand_monthly_daily_prices",
     # 价格序列 CSV(ies.price-series@1.0.0; 0.12-F3a 契约切片)
     "PRICE_SERIES_SCHEMA_ID",
     "PRICE_SERIES_SCHEMA_VERSION",
