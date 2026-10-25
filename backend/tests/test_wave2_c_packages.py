@@ -305,8 +305,10 @@ def test_export_excel_usecase(client: TestClient, db: Session) -> None:
 
 
 def _sealed_k1n2() -> dict:
-    """最小 K1N2 封存评价块(展示用, 含同年双维护已合计; 当前 1.0.0 形态)。"""
+    """最小 K1N2 2.0.0 封存评价块(展示用, 双维护已合计)。"""
     return {
+        "schema": "ies.financial-evaluation",
+        "schema_version": "2.0.0",
         "status": "evaluated",
         "evaluation_years": 3,
         "construction_period": 1,
@@ -325,13 +327,14 @@ def _sealed_k1n2() -> dict:
         "annual_operation": [
             {
                 "financial_year": 2, "energy_net": "10000", "variable_om": "100",
-                "fixed_om": "1400", "maintenance": "0", "net": "8500",
+                "fixed_om": "1400", "maintenance": "0", "demand_charge": "0", "net": "8500",
             },
             {
                 "financial_year": 3, "energy_net": "12000", "variable_om": "120",
-                "fixed_om": "1400", "maintenance": "3500.50", "net": "6979.50",
+                "fixed_om": "1400", "maintenance": "3500.50", "demand_charge": "0", "net": "6979.50",
             },
         ],
+        "monthly_demand": [],
         "annual_net_flows": ["-84000.0", "-56000.0", "8500", "6979.50"],
         # 无税展示夹具: 五个数组显式为空(合法"不适用"), 不用缺字段伪装。
         "tax_cash": {
@@ -388,6 +391,50 @@ def test_export_excel_renders_sealed_financial_evaluation(
     assert "CF[t=0]" in text and "CF[t=3]" in text
     assert "净现值 NPV" in text and "-123020.31" in text
     assert "no_solution" in text and "not_recovered" in text
+    wb = load_workbook(io.BytesIO(new_bytes))
+    assert wb["需量月账单"].cell(row=3, column=1).value == "无计量绑定 / No demand meter bindings"
+
+
+def test_export_excel_consumes_frozen_monthly_demand_with_units_and_ids(
+    client: TestClient, db: Session
+) -> None:
+    """保存的月费/年度费均原样写表；零费率绑定仍保留真实峰。"""
+    owner = _user(db, "d3_xls_demand")
+    pid = _project(client, owner, "D3 月需量")
+    vid = _version(client, owner, pid)
+    fin = _sealed_k1n2()
+    fin["annual_operation"][0]["demand_charge"] = "125.00"
+    fin["annual_operation"][0]["net"] = "8375.00"
+    fin["monthly_demand"] = [
+        {
+            "billing_id": "site_import", "charge_id": "peak_fee",
+            "calendar_year": 2025, "calendar_month": 1, "financial_year": 2,
+            "peak_power": "12.5", "peak_unit": "kW",
+            "rate": {"value": "10", "unit": "CNY/kW"}, "charge": "125.00",
+        },
+        {
+            "billing_id": "zero_meter", "charge_id": "zero_fee",
+            "calendar_year": 2025, "calendar_month": 2, "financial_year": 2,
+            "peak_power": "20.25", "peak_unit": "kW",
+            "rate": {"value": "0", "unit": "CNY/kW"}, "charge": "0",
+        },
+    ]
+    content = json.dumps({"financial_evaluation": fin}, ensure_ascii=False).encode()
+    ep_id, a_id = _seed_evidence(db, pid, vid, owner.id, content_text=content)
+    user = identity_domain.get_user(db, owner.id)
+    wb = load_workbook(io.BytesIO(transfers_uc.export_excel(db, user, pid, ep_id, a_id)))
+    sheet = wb["需量月账单"]
+    expected = [
+        ["site_import", "peak_fee", 2025, 1, 2, "12.5", "kW", "10", "CNY/kW", "125.00", "CNY"],
+        ["zero_meter", "zero_fee", 2025, 2, 2, "20.25", "kW", "0", "CNY/kW", "0", "CNY"],
+    ]
+    assert [[sheet.cell(row=i, column=j).value for j in range(1, 12)] for i in (3, 4)] == expected
+    summary = "\n".join(str(c.value) for row in wb["财务摘要"] for c in row)
+    assert "需量 125.00" in summary
+    assert "= 净额 8375.00 CNY" in summary
+    assert "需量 0" in summary
+    overview = "\n".join(str(c.value) for row in wb["报告总览"] for c in row)
+    assert "计算任务 / Task ID" in overview
 
 
 

@@ -13,8 +13,10 @@ from iesplan.application.results.writes import _financial_absence
 
 
 def _sealed() -> dict:
-    """K1N2 封存评价块(当前 1.0.0 形态: tax_cash 与 annual_net_flows 必填)。"""
+    """K1N2 封存评价块(当前 2.0.0 形态, 无需量绑定)。"""
     return {
+        "schema": "ies.financial-evaluation",
+        "schema_version": "2.0.0",
         "status": "evaluated",
         "evaluation_years": 3,
         "construction_period": 1,
@@ -33,13 +35,14 @@ def _sealed() -> dict:
         "annual_operation": [
             {
                 "financial_year": 2, "energy_net": "10000", "variable_om": "100",
-                "fixed_om": "1400", "maintenance": "0", "net": "8500",
+                "fixed_om": "1400", "maintenance": "0", "demand_charge": "0", "net": "8500",
             },
             {
                 "financial_year": 3, "energy_net": "12000", "variable_om": "120",
-                "fixed_om": "1400", "maintenance": "3500.50", "net": "6979.50",
+                "fixed_om": "1400", "maintenance": "3500.50", "demand_charge": "0", "net": "6979.50",
             },
         ],
+        "monthly_demand": [],
         "annual_net_flows": ["-84000.0", "-56000.0", "8500", "6979.50"],
         # 无税展示夹具: 五个数组显式为空(合法"不适用"), 不用缺字段伪装。
         "tax_cash": {

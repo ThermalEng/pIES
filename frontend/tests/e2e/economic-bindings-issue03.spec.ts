@@ -49,7 +49,7 @@ test('cost and tariff GUI: no inferred cost, atomic draft save, reload, 409 pres
   await expect(page.locator('input[id^="tariff-id-"]')).toHaveCount(0)
 
   // No implicit type:none, costed finance_type, or metering from the device model.
-  await page.getByRole('button', { name: /保存成本与计费绑定|Save cost & tariff bindings/i }).click()
+  await page.getByRole('button', { name: /保存成本、能源与需量绑定|Save cost, energy & demand bindings/i }).click()
   await expect(page.getByText(/尚未明确成本参与方式|Choose cost participation/)).toBeVisible()
   await page.locator('#binding-mode-grid1').selectOption('none')
   await page.locator('#binding-mode-hp1').selectOption('costed')
@@ -86,7 +86,7 @@ test('cost and tariff GUI: no inferred cost, atomic draft save, reload, 409 pres
     }
     await route.continue()
   })
-  await page.getByRole('button', { name: /保存成本与计费绑定|Save cost & tariff bindings/i }).click()
+  await page.getByRole('button', { name: /保存成本、能源与需量绑定|Save cost, energy & demand bindings/i }).click()
   await saveStarted
   await expect(page.locator('#binding-mode-grid1')).toBeDisabled()
   await expect(page.locator('input[id^="tariff-interface-"]')).toBeDisabled()
@@ -123,12 +123,12 @@ test('cost and tariff GUI: no inferred cost, atomic draft save, reload, 409 pres
   await second.locator('select[id^="tariff-instance-"]').last().selectOption('grid1')
   await second.locator('input[id^="tariff-interface-"]').last().fill('electricity_import')
   await second.locator('select[id^="tariff-agg-"]').last().selectOption('integrate_positive')
-  await second.getByRole('button', { name: /保存成本与计费绑定|Save cost & tariff bindings/i }).click()
+  await second.getByRole('button', { name: /保存成本、能源与需量绑定|Save cost, energy & demand bindings/i }).click()
   await expect(second.getByText(/绑定已保存|Bindings saved/)).toBeVisible()
   await second.close()
 
   await page.locator('input[id^="tariff-id-"]').fill('edited_meter')
-  await page.getByRole('button', { name: /保存成本与计费绑定|Save cost & tariff bindings/i }).click()
+  await page.getByRole('button', { name: /保存成本、能源与需量绑定|Save cost, energy & demand bindings/i }).click()
   await expect(page.getByText(/草稿修订冲突|draft revision|修改|conflict/i).first()).toBeVisible()
   await expect(page.locator('input[id^="tariff-id-"]')).toHaveValue('edited_meter')
   await page.getByRole('button', { name: /重载最新草稿|Reload latest draft/i }).click()
@@ -194,7 +194,7 @@ test('empty model: explicitly remove orphan cost and tariff bindings, then persi
   await page.goto('/projects/' + pid + '/bindings')
   await expect(page.locator('#binding-mode-grid1')).toHaveCount(0)
   await expect(page.locator('input[id^="tariff-id-"]')).toHaveValue('import_meter')
-  const saveButton = page.getByRole('button', { name: /保存成本与计费绑定|Save cost & tariff bindings/i })
+  const saveButton = page.getByRole('button', { name: /保存成本、能源与需量绑定|Save cost, energy & demand bindings/i })
   // A model with zero devices can still persist an explicit cleanup.
   await expect(saveButton).toBeEnabled()
   await saveButton.click()
