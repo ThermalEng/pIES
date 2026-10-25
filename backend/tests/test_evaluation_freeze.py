@@ -1,4 +1,4 @@
-"""0.12-T1 定向测试: 评价确认提交闸门 + 快照 4.0.0 冻结 + 运营期覆盖核对。
+"""评价确认提交闸门 + 快照 5.0.0 冻结 + 运营期覆盖核对。
 
 - 提交边界类型化解析(``parse_evaluation_input``): 顶层 ``evaluation`` 块
   必填六字段, 缺失/形态非法 → 400 TASK-REQ-015(无默认值); 评价年限含
@@ -417,7 +417,7 @@ def _k1n2(rate=0.08):
 def test_snapshot_freezes_evaluation_and_identity(  # noqa: F811
     client, db, factory
 ) -> None:
-    """快照 4.0.0: evaluation 块冻结时轴/付款/维护/确认人/时间; 任一不同 → 新快照。"""
+    """快照 5.0.0: evaluation 块冻结时轴/付款/维护/确认人/时间; 任一不同 → 新快照。"""
     from auth_helpers import make_user
     from test_task_config_revision import _prepare_project, _save_config
 
@@ -440,7 +440,7 @@ def test_snapshot_freezes_evaluation_and_identity(  # noqa: F811
     first = _submit_eval(_k1n2(), "eval-snap-1")
     snap = tasks_domain.get_snapshot(factory(), first["calc_snapshot_id"])
     assert snap is not None
-    assert snap.schema_version == "4.0.0"
+    assert snap.schema_version == "5.0.0"
     frozen = jsonable(dict(snap.calc_config_snapshot))
     assert "evaluation" not in frozen
     assert "evaluation" not in frozen.get("task_params", {})
@@ -453,7 +453,7 @@ def test_snapshot_freezes_evaluation_and_identity(  # noqa: F811
         {"t": 0, "ratio": "0.6"}, {"t": 1, "ratio": "0.4"},
     ]
     assert evaluation["maintenance_expenses"] == [
-        {"year": 3, "amount": "1000", "currency": "CNY"},
+        {"year": 3, "amount": "1000", "currency": "CNY", "terms": []},
     ]
     assert evaluation["confirmed_by"] == owner.id
     assert evaluation["confirmed_at"]

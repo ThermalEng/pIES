@@ -666,8 +666,8 @@ def test_from_frozen_restores_typed_facts_in_order() -> None:
             "discount_rate": 0.05,
             "construction_payments": [{"t": 0, "ratio": "0.4"}, {"t": 1, "ratio": "0.6"}],
             "maintenance_expenses": [
-                {"year": 2, "amount": "100", "currency": "CNY"},
-                {"year": 3, "amount": "50", "currency": "CNY"},
+                {"year": 2, "amount": "100", "currency": "CNY", "terms": []},
+                {"year": 3, "amount": "50", "currency": "CNY", "terms": []},
             ],
             "confirmed_by": 7,
             "confirmed_at": "2026-01-01T00:00:00",
@@ -2000,7 +2000,7 @@ class TestConstructionPeriodSubmitFreeze:
         ).scalar_one()
         snap = task_store.get_snapshot(db, task_row.calc_snapshot_id)
         assert snap is not None
-        assert snap.schema_version == "4.0.0"
+        assert snap.schema_version == "5.0.0"
         frozen = dict(snap.evaluation)
         assert frozen["evaluation_years"] == 3
         assert frozen["construction_period"] == 1
@@ -2009,7 +2009,7 @@ class TestConstructionPeriodSubmitFreeze:
             {"t": 0, "ratio": "0.6"}, {"t": 1, "ratio": "0.4"},
         ]
         assert [dict(entry) for entry in frozen["maintenance_expenses"]] == [
-            {"year": 2, "amount": "500", "currency": "CNY"},
+            {"year": 2, "amount": "500", "currency": "CNY", "terms": ()},
         ]
         assert frozen["confirmed_by"] == user.id
         assert frozen["confirmed_at"]
