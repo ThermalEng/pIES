@@ -6,19 +6,25 @@ on:
     types: [opened, synchronize, reopened, ready_for_review]
   push:
     branches: [master]
+  # GitHub schedules this workflow from the default branch after merge.
+  # Automatically run a complete Docker suite every morning (UTC).
+  schedule:
+    - cron: '23 6 * * *'
   workflow_dispatch:
     inputs:
       full_suite:
-        description: "Run all standard backend and Chromium tests (otherwise run changed areas)"
+        description: "Run all standard backend and Chromium tests (PR and scheduled policies run automatically)"
         type: boolean
         required: false
-        default: false
+        default: true
 
 permissions:
   contents: read
 
 concurrency:
-  group: docker-ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  # A scheduled full regression must not cancel a coincident master push
+  # regression. Same-PR updates still cancel superseded attempts.
+  group: docker-ci-${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -26,6 +32,7 @@ jobs:
     name: Select affected tests (Docker)
     runs-on: ubuntu-latest
     outputs:
+      full_suite: ${{ steps.plan.outputs.full_suite }}
       backend_run: ${{ steps.plan.outputs.backend_run }}
       backend_tests: ${{ steps.plan.outputs.backend_tests }}
       backend_shards: ${{ steps.plan.outputs.backend_shards }}
@@ -54,6 +61,8 @@ jobs:
             pull_request) base="$PR_BASE" ;;
             push) base="$PUSH_BEFORE" ;;
             workflow_dispatch) base="$(git rev-parse HEAD^ 2>/dev/null || true)" ;;
+            schedule) printf '__FULL__\\0' > "$RUNNER_TEMP/pies-changed.bin"; exit 0 ;;
+            *) echo "::error::Unsupported GitHub event: $EVENT_NAME"; exit 1 ;;
           esac
           if [[ -z "$base" || "$base" =~ ^0+$ ]] || ! git cat-file -e "${base}^{commit}"; then
             printf '__FULL__\0' > "$RUNNER_TEMP/pies-changed.bin"
@@ -65,6 +74,7 @@ jobs:
         id: plan
         env:
           FULL_SUITE: ${{ inputs.full_suite && 'true' || 'false' }}
+          EVENT_NAME: ${{ github.event_name }}
         run: |
           docker run --rm \
             -v "$PWD:/repo:ro" \
@@ -78,6 +88,7 @@ jobs:
             python .github/ci/select_tests.py \
               --changed /out/pies-changed.bin \
               --output /out/pies-plan.outputs \
+              --event "$EVENT_NAME" \
               --full "$FULL_SUITE"
           cat "$RUNNER_TEMP/pies-plan.outputs" >> "$GITHUB_OUTPUT"
 
