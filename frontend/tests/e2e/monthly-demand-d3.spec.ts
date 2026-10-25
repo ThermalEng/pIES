@@ -8,9 +8,27 @@ import os from 'node:os'
 import path from 'node:path'
 import zlib from 'node:zlib'
 import { test, expect } from '@playwright/test'
+import type { Page } from '@playwright/test'
 import { createSession, strongPassword, uniqueName } from './fixtures'
 import { createEngineer, loginToken, requestJson } from './setup/api'
 import { APP, financeProfile, scaffoldProject } from './financial-scaffold'
+
+/** Read/prepare data using the active browser session; API setup bearer tokens
+ * are revoked when the same user logs into the real GUI. Never re-login during
+ * GUI acceptance, as doing so would invalidate the GUI session instead. */
+async function browserJson<T>(page: Page, method: 'GET' | 'POST' | 'PUT', url: string, body?: unknown): Promise<T> {
+  return page.evaluate(async ({ method, url, body }) => {
+    const response = await fetch(url, {
+      method,
+      credentials: 'include',
+      headers: body === undefined ? undefined : { 'Content-Type': 'application/json' },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    })
+    const text = await response.text()
+    if (!response.ok) throw new Error(`${method} ${url} -> ${response.status}: ${text.slice(0, 500)}`)
+    return (text ? JSON.parse(text) : null) as T
+  }, { method, url, body })
+}
 
 type Month = {
   billing_id: string; charge_id: string; calendar_year: number; calendar_month: number
@@ -67,7 +85,7 @@ test.describe('D3 natural-month demand GUI → task → export', () => {
     await page.getByRole('button', { name: /引用\/切换|Reference \/ switch/i }).click()
     await page.reload()
     await expect(page.getByText(new RegExp(`当前引用|Current reference`))).toBeVisible()
-    const bound = await requestJson(api.request, 'GET', `/api/projects/${pid}/finance-profile`, undefined, token)
+    const bound = await browserJson<{ finance_profile: { demand_charges: unknown } }>(page, 'GET', `/api/projects/${pid}/finance-profile`)
     expect(bound.finance_profile.demand_charges).toEqual({ peak_charge: { rate: { value: '18', unit: 'CNY/kW' } } })
     session.assertNoErrors()
     await context.close()
@@ -103,7 +121,7 @@ test.describe('D3 natural-month demand GUI → task → export', () => {
     await expect(page.getByText(/覆盖已保存|Overrides saved/i)).toBeVisible()
     await page.reload()
     await expect(page.getByRole('textbox', { name: 'peak_fee (CNY/kW)' })).toHaveValue('20')
-    const effective = await requestJson(api.request, 'GET', `/api/projects/${pid}/effective-finance`, undefined, token)
+    const effective = await browserJson<{ effective_finance_config: { demand_charges: Record<string, { rate: { value: string; unit: string } }> } }>(page, 'GET', `/api/projects/${pid}/effective-finance`)
     expect(effective.effective_finance_config.demand_charges.peak_fee.rate).toEqual({ value: '20', unit: 'CNY/kW' })
     expect(effective.effective_finance_config.demand_charges.zero_fee.rate.value).toBe('0')
 
@@ -139,20 +157,20 @@ test.describe('D3 natural-month demand GUI → task → export', () => {
     await page.reload()
     await expect(page.getByRole('textbox', { name: '需量绑定 ID' }).first()).toHaveValue('main_meter')
     await expect(page.getByRole('textbox', { name: '需量绑定 ID' }).last()).toHaveValue('zero_meter')
-    const draft = await requestJson(api.request, 'GET', `/api/projects/${pid}`, undefined, token)
+    const draft = await browserJson<{ draft: { revision: number; content: { demand_bindings: unknown } } }>(page, 'GET', `/api/projects/${pid}`)
     expect(draft.draft.content.demand_bindings).toEqual({
       main_meter: { charge: 'peak_fee', instance: 'grid1', interface: 'electricity_import' },
       zero_meter: { charge: 'zero_fee', instance: 'grid1', interface: 'electricity_import' },
     })
 
     // Rebind planning to the new Effective, then freeze actual saved GUI draft.
-    await requestJson(api.request, 'PUT', `/api/projects/${pid}/planning-config`, {
+    await browserJson(page, 'PUT', `/api/projects/${pid}/planning-config`, {
       planning_config: originalPlanning.planning_config, expected_revision: null,
-    }, token)
-    await requestJson(api.request, 'POST', `/api/projects/${pid}/versions`, {
+    })
+    await browserJson(page, 'POST', `/api/projects/${pid}/versions`, {
       name: 'D3 需量配置', reason: 'snapshot_freeze', expected_revision: draft.draft.revision,
-    }, token)
-    const precheck = await requestJson(api.request, 'POST', `/api/projects/${pid}/validation/run`, {}, token)
+    })
+    const precheck = await browserJson<{ report: { diagnostics: Array<{ blocking: boolean }> } }>(page, 'POST', `/api/projects/${pid}/validation/run`, {})
     expect((precheck.report?.diagnostics ?? []).filter((d: { blocking: boolean }) => d.blocking)).toEqual([])
 
     // Submit and wait through the real task UI (one full Gregorian operating year).
@@ -169,9 +187,9 @@ test.describe('D3 natural-month demand GUI → task → export', () => {
     await expect(page.getByRole('link', { name: /查看结果|View results/i })).toBeVisible({ timeout: 600_000 })
     await page.getByRole('link', { name: /查看结果|View results/i }).click()
 
-    const listed = await requestJson(api.request, 'GET', `/api/projects/${pid}/tasks?limit=10`, undefined, token)
+    const listed = await browserJson<{ items: Array<{ id: number }> }>(page, 'GET', `/api/projects/${pid}/tasks?limit=10`)
     const taskId: number = listed.items[0].id
-    const result = await requestJson(api.request, 'GET', `/api/projects/${pid}/tasks/${taskId}/result`, undefined, token)
+    const result = await browserJson<{ result: { financial_evaluation: { monthly_demand: Month[]; annual_operation: Array<{ demand_charge: string }>; currency: string }; evidence: { id: number } } }>(page, 'GET', `/api/projects/${pid}/tasks/${taskId}/result`)
     const fin = result.result.financial_evaluation
     const months: Month[] = fin.monthly_demand
     expect(months).toHaveLength(24)
@@ -200,6 +218,13 @@ test.describe('D3 natural-month demand GUI → task → export', () => {
     expect(fin.annual_operation[0].demand_charge).toBeTruthy()
     expect(Number(fin.annual_operation[0].demand_charge)).toBeGreaterThan(0)
 
+    // Excel requires an existing immutable system assessment of this exact
+    // evidence; perform it in the real Results dialog (no implicit bypass).
+    await page.getByRole('button', { name: /重新评估|Reassess/i }).click()
+    const assessmentDialog = page.getByRole('dialog')
+    await assessmentDialog.getByRole('button', { name: /重新运行系统评估|Rerun system assessment/i }).click()
+    await expect(assessmentDialog).toBeHidden()
+
     const seenExports: number[] = []
     page.on('request', (req) => {
       if (req.method() === 'POST' && new URL(req.url()).pathname.endsWith('/exports/excel')) {
@@ -208,7 +233,7 @@ test.describe('D3 natural-month demand GUI → task → export', () => {
       }
     })
     const pending = page.waitForEvent('download', { timeout: 120_000 })
-    await page.getByRole('button', { name: /导出 Excel 报告|Export Excel report/i }).click()
+    await page.getByRole('button', { name: /导出 Excel|Export Excel/i }).click()
     const download = await pending
     const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'pies-d3-')), 'report.xlsx')
     await download.saveAs(file)
