@@ -87,7 +87,14 @@ test.describe('D3 natural-month demand GUI → task → export', () => {
     await expect(page.getByText(new RegExp(`当前引用|Current reference`))).toBeVisible()
     const bound = await browserJson<{ finance_profile: { demand_charges: unknown } }>(page, 'GET', `/api/projects/${pid}/finance-profile`)
     expect(bound.finance_profile.demand_charges).toEqual({ peak_charge: { rate: { value: '18', unit: 'CNY/kW' } } })
-    session.assertNoErrors()
+    // The unbound finance page legitimately probes three absent resources
+    // before the profile is registered/bound. Only these exact GET 404s are
+    // expected; unrelated console errors and network failures still fail.
+    session.assertNoErrors([
+      { method: 'GET', path: `/api/projects/${pid}/finance-profile`, status: 404 },
+      { method: 'GET', path: `/api/projects/${pid}/finance-overrides`, status: 404 },
+      { method: 'GET', path: `/api/projects/${pid}/effective-finance`, status: 404 },
+    ])
     await context.close()
     await api.close()
   })
@@ -208,7 +215,11 @@ test.describe('D3 natural-month demand GUI → task → export', () => {
         expect(Number(row.charge)).toBe(0)
       }
     }
-    const demandTable = page.getByRole('table').filter({ has: page.getByRole('columnheader', { name: /月峰功率|Monthly peak power/i }) })
+    // Locate the real sealed monthly-bill table by its bound meter identity,
+    // rather than assuming an i18n header label (the actual column is “峰值”).
+    const demandTable = page.getByRole('table').filter({
+      has: page.getByRole('cell', { name: 'main_meter', exact: true }),
+    })
     await expect(demandTable.getByRole('row')).toHaveCount(25)
     for (const row of months) {
       const line = demandTable.getByRole('row').filter({ hasText: `${row.calendar_year}-${String(row.calendar_month).padStart(2, '0')}` }).filter({ hasText: row.billing_id })
