@@ -135,7 +135,7 @@ test.describe('D3 natural-month demand GUI → task → export', () => {
     const clear = page.getByRole('button', { name: /清空覆盖|Clear overrides/i })
     const revert = page.getByRole('button', { name: /撤销项目覆盖|Revert override/i })
     const select = page.locator('#finance-profile-select')
-    const bind = page.getByRole('button', { name: /引用\\/切换|Reference \\/ switch/i })
+    const bind = page.getByRole('button', { name: /引用|Reference/i })
     await expect(rate).toBeEnabled()
 
     // Make a real first GUI save, so the clear action has an active revision.
@@ -206,7 +206,7 @@ test.describe('D3 natural-month demand GUI → task → export', () => {
       expected_revision: saved.revision,
     })
     await save.click()
-    const reload = page.getByRole('button', { name: /重载最新草稿|Reload latest draft/i })
+    const reload = page.getByRole('button', { name: /版本冲突.*重新加载|Version conflict, reload/i })
     await expect(reload).toBeVisible()
     await expect(rate).toHaveValue('40')
     expect(JSON.parse(await raw.inputValue()).demand_charges.peak_fee.rate.value).toBe('40')
