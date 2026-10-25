@@ -8,6 +8,16 @@ if [[ "${SPECIAL_DEVICE:-false}" == "true" ]]; then
   : "${PIES_EXT_DEVICE_DIR:?Set PIES_EXT_DEVICE_DIR for external-device scenario}"
   compose+=(-f frontend/tests/e2e/docker-compose.ext-device.yml)
 fi
+if [[ "${CI_DOCKER_CACHE:-false}" == "true" ]]; then
+  [[ "${GITHUB_ACTIONS:-false}" == "true" ]] || {
+    echo "Remote build cache is CI-only" >&2
+    exit 2
+  }
+  compose+=(-f .github/ci/docker-compose-cache-read.yml)
+  if [[ "${CI_DOCKER_CACHE_WRITE:-false}" == "true" ]]; then
+    compose+=(-f .github/ci/docker-compose-cache-write.yml)
+  fi
+fi
 # Start just the API and its healthy DB/Redis dependencies. This initializes
 # the schema and seeds the admin before either background worker enters.
 docker compose "${compose[@]}" up -d --build --wait backend

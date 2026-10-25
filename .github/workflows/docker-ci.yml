@@ -151,8 +151,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build backend test image
-        run: docker compose build backend
+      - name: Set up Docker Buildx for dependency cache
+        uses: docker/setup-buildx-action@v3
+      - name: Expose GitHub Actions cache runtime
+        uses: crazy-max/ghaction-github-runtime@v4
+      - name: Build backend test image (read-only remote cache)
+        run: |
+          docker compose -f docker-compose.yml \
+            -f .github/ci/docker-compose-cache-read.yml build backend
 
       - name: Run selected Pytest tests
         env:
@@ -199,10 +205,20 @@ jobs:
       BROWSER_LANE: ${{ matrix.shard.lane }}
       BROWSER_TOTAL: ${{ needs.select.outputs.browser_total }}
       SPECIAL_DEVICE: ${{ needs.select.outputs.special_device }}
+      CI_DOCKER_CACHE: "true"
+      # Only lane 1 exports the shared backend cache, preventing multi-lane
+      # writes to the same scope. Other runners only read it.
+      CI_DOCKER_CACHE_WRITE: ${{ matrix.shard.lane == 1 && 'true' || 'false' }}
       CI_TEST_DATA_DIR: ${{ github.workspace }}/.pies-ci-browser-${{ github.run_id }}-${{ matrix.shard.lane }}
       COMPOSE_PROJECT_NAME: pies-ci-browser-${{ matrix.shard.lane }}
     steps:
       - uses: actions/checkout@v4
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Set up Docker Compose with cache support
+        uses: docker/setup-compose-action@v2
+      - name: Expose GitHub Actions cache runtime
+        uses: crazy-max/ghaction-github-runtime@v4
 
       - name: Build and start isolated application
         run: |

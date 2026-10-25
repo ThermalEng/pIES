@@ -1,0 +1,17 @@
+# CI-only BuildKit/GitHub Actions cache. Not part of production Compose.
+# Data volumes and tests are deliberately NEVER stored in this cache.
+# Cache is scoped to the heavyweight Python dependencies; nginx/Vite and
+# Playwright are cheaper to rebuild than their cache restore/transfer overhead.
+services:
+  backend:
+    build:
+      cache_from:
+        - type=gha,scope=pies-backend-py312-v1
+  io_worker:
+    build:
+      cache_from:
+        - type=gha,scope=pies-backend-py312-v1
+  compute_worker:
+    build:
+      cache_from:
+        - type=gha,scope=pies-backend-py312-v1
