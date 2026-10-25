@@ -1274,10 +1274,14 @@ export default function TasksPage() {
               id="task-maintenance-expenses"
               value={form.maintenanceExpenses}
               placeholder={t('ies.task.maintenance_expenses_placeholder')}
-              rows={2}
+              aria-describedby="task-maintenance-expenses-hint"
+              rows={3}
               onChange={(e) => updateForm({ ...form, maintenanceExpenses: e.target.value })}
             />
           </FormField>
+          <p id="task-maintenance-expenses-hint" className="ies-form-message" style={{ marginBottom: 'var(--ies-space-2)' }}>
+            {t('ies.task.maintenance_expenses_hint')}
+          </p>
         </fieldset>
 
         {form.type === 'uncertainty' ? (

@@ -113,7 +113,7 @@ extensions: {}
 
 配套生成器在 `parameters.json` 的 `financial_facts` 声明结构化财务事实映射，ResultAdapter 使用同一次主解恢复为 `ComputeResult.outputs.financial_facts`。声明复用既有仿射求值方式，包含明确字段、业务身份、期间、单位与求解列引用；消费者不拆解分量键、序列 ID 或列名。现金流声明与规划目标中的现金表达式同源，不重新建立税务模型。声明不复制完整财务配置，也不是新的用户公式语言。
 
-以下为配套生成器 `ies.generator.highs_milp@4.0.0` 与适配器 `ies.result-adapter.highs@4.0.0` 的目标业务输出：
+以下为配套生成器 `ies.generator.highs_milp@5.0.0` 与适配器 `ies.result-adapter.highs@5.0.0` 的业务输出：
 
 | 字段 | 语义 |
 | --- | --- |
@@ -131,15 +131,15 @@ extensions: {}
 
 `t`、`month`、`year`、`period`、`arrival_period`、`last_usable_year` 及日历／评价年、日历月均为整数；`ratio` 与金额均为十进制字符串。期间映射以财务契约为准，池与规则保持显式身份，共享池不得按规则重复计入。没有适用规则时对应数组为空，含义为不适用；适用规则的零税额、零余额显式发布，不省略为未知。无税则的完整现金流仍须声明并恢复，不以缺映射冒充零税。
 
-需量费与能源电量费分列，不重复包含于 `energy_net` 或 O&M。月明细按 `(billing_id, calendar_year, calendar_month)` 排序，年度正费用与净额在模型中同源产生；适配器只恢复声明，不重新取 max、重新计税或扣费。此目标随 `ies.financial-evaluation@2.0.0` 封存（新增必填月明细与年度分量），生成器／适配器为本节列出的 `4.0.0` 配套；不改通用 Bundle、ComputeResult 或快照顶层版本，不在旧结果上注入新字段。
+需量费与能源电量费分列，不重复包含于 `energy_net` 或 O&M。月明细按 `(billing_id, calendar_year, calendar_month)` 排序，年度正费用与净额在模型中同源产生；适配器只恢复声明，不重新取 max、重新计税或扣费。财务结果按 `ies.financial-evaluation@2.0.0` 封存，生成器／适配器使用本节列出的配套版本；公开年度金额形态不因内部关联维护声明而改变，不在旧结果上注入新字段。
 
 该块随已请求的 `solution` 且存在可用数学解时发布；未请求solution或无可用解时缺席。它不增加 CalculationConfig 输出词汇，不改变 ComputeResult 顶层身份与状态或通用 Bundle manifest。适配器只恢复业务事实，不重算税务、猜列名或改写期间；内部可信声明不增加重复结构、摘要或完整性复核。
 
 ### 关联维护金额协议
 
-以下为生效目标契约，尚未实现。配套 `ies.generator.highs_milp@5.0.0` 与 `ies.result-adapter.highs@5.0.0` 将内部 `financial_facts.annual_operation[].maintenance` 声明从固定金额字符串改为既有 `{constant, terms}` 仿射节点；即使是确定金额也使用常数节点。适配器按同一次主解求值，公开输出仍为十进制金额字符串。该必需声明形态的破坏性变化提升配套主版本，不保留字符串／节点双轨解释。
+配套生成器与适配器使用 `{constant, terms}` 仿射节点声明内部 `financial_facts.annual_operation[].maintenance`；即使是确定金额也使用常数节点。适配器按同一次主解求值，公开输出仍为十进制金额字符串，不保留字符串／节点双轨解释。
 
-维护现金、进项税与所得税扣除均来自同一逐笔金额表达式，年度维护与净额声明保持同源。公开财务结果不增加逐笔来源字段，`ies.financial-evaluation` 仍为 `2.0.0`；通用 Bundle、ComputeResult、solver 与 executor 协议不变。此目标不改写上文 `4.0.0` 的既有声明语义。
+维护现金、进项税与所得税扣除均来自同一逐笔金额表达式，年度维护与净额声明保持同源。公开财务结果不增加逐笔来源字段，`ies.financial-evaluation` 仍为 `2.0.0`；通用 Bundle、ComputeResult、solver 与 executor 协议不变。
 
 ## 运行时职责
 
