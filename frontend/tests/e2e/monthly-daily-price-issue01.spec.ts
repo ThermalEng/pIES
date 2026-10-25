@@ -5,7 +5,7 @@
 import { test, expect } from '@playwright/test'
 import { createSession, uniqueName, strongPassword } from './fixtures'
 import { createEngineer, loginToken, requestJson } from './setup/api'
-import { APP, scaffoldProject } from './financial-scaffold'
+import { APP, financeProfile, scaffoldProject } from './financial-scaffold'
 
 function dayCsv(price: string): Buffer {
   return Buffer.from([
@@ -173,4 +173,101 @@ test.describe('ISSUE-01 月份日曲线财务页面与真实计费', () => {
     await context.close()
     await api.close()
   })
+  test('手工编辑不完整的合法 JSON 不崩溃：保留原文、提示、修正后编辑并保存', async ({ browser }) => {
+    const username = uniqueName('issue01-partial')
+    const password = strongPassword('Init')
+    const profileId = uniqueName('issue01-bound')
+    const projectName = uniqueName('ISSUE-01 草稿容错')
+    const api = await browser.newContext({ baseURL: APP })
+    await createEngineer(api.request, username, password)
+    const token = await loginToken(api.request, username, password)
+    const pid = await scaffoldProject(requestJson, api.request, token, projectName, profileId)
+
+    const context = await browser.newContext()
+    const page = await context.newPage()
+    const session = await createSession(page, username, password)
+    await page.goto(`${APP}/projects/${pid}/finance`)
+
+    // A syntactically valid JSON document can be incomplete while typed by a
+    // human. Never convert a null price into an empty catalogue or clobber it.
+    const profileDoc = page.locator('#finance-profile-doc')
+    const partialProfile = JSON.stringify({
+      schema: 'ies.finance-profile',
+      schema_version: '5.0.0',
+      energy_prices: { grid_import: null },
+    })
+    await profileDoc.fill(partialProfile)
+    await expect(page.getByRole('alert').filter({ hasText: /价格 JSON 条目结构不完整/ }))
+      .toBeVisible()
+    await expect(profileDoc).toHaveValue(partialProfile)
+    await expect(page.locator('#profile-price-grid_import-kind')).toHaveCount(0)
+    // FinancePage must remain live and the raw textbox independently editable.
+    await expect(page.locator('#finance-overrides-doc')).toBeVisible()
+
+    const newProfileId = uniqueName('issue01-repaired-profile')
+    await profileDoc.fill(JSON.stringify(financeProfile(newProfileId)))
+    const profileKind = page.locator('#profile-price-grid_import-kind')
+    await expect(profileKind).toHaveValue('constant')
+    await profileKind.selectOption('monthly_daily')
+    await page.locator('#profile-price-grid_import-month-1').fill('synthetic-day-ref')
+    await page.getByRole('button', { name: /全部月份引用一月曲线/ }).first().click()
+    await expect(page.locator('#profile-price-grid_import-month-12')).toHaveValue('synthetic-day-ref')
+    await page.getByRole('button', { name: /^登记$|^Register$/ }).click()
+    await expect(page.getByText(/登记成功|Registered and added/i)).toBeVisible()
+
+    // Existing project Overrides can likewise be temporarily set to null
+    // without crashing or replacing the invalid raw text with defaults.
+    const overridesDoc = page.locator('#finance-overrides-doc')
+    const current = JSON.parse(await overridesDoc.inputValue())
+    const nullDraft = JSON.stringify({
+      ...current,
+      energy_prices: { grid_import: null },
+    })
+    await overridesDoc.fill(nullDraft)
+    await expect(page.getByRole('alert').filter({ hasText: /价格 JSON 条目结构不完整/ }))
+      .toBeVisible()
+    await expect(overridesDoc).toHaveValue(nullDraft)
+    await expect(page.locator('#overrides-price-grid_import-kind')).toHaveCount(0)
+
+    const nestedDraft = JSON.stringify({
+      ...current,
+      energy_prices: { grid_import: { kind: 'monthly_daily', months: { '1': null } } },
+    })
+    await overridesDoc.fill(nestedDraft)
+    await expect(page.getByRole('alert').filter({ hasText: /价格 JSON 条目结构不完整/ }))
+      .toBeVisible()
+    await expect(overridesDoc).toHaveValue(nestedDraft)
+
+    // Repair by typing a valid document, resume structured editing, and use
+    // the original API save/readback path. No model or synthetic GUI mock.
+    await overridesDoc.fill(JSON.stringify({
+      ...current,
+      energy_prices: {
+        grid_import: {
+          kind: 'constant',
+          value: { value: '0.55', unit: 'CNY/kWh' },
+        },
+      },
+    }))
+    const overrideKind = page.locator('#overrides-price-grid_import-kind')
+    await expect(overrideKind).toHaveValue('constant')
+    await overrideKind.selectOption('monthly_daily')
+    await page.locator('#overrides-price-grid_import-month-1').fill('synthetic-day-ref')
+    await page.getByRole('button', { name: /全部月份引用一月曲线/ }).last().click()
+    const put = page.waitForResponse(r =>
+      r.url().includes(`/projects/${pid}/finance-overrides`) && r.request().method() === 'PUT')
+    await page.getByRole('button', { name: /保存覆盖|Save overrides/i }).click()
+    expect((await put).status()).toBe(200)
+    await page.reload()
+    await expect(page.locator('#overrides-price-grid_import-kind')).toHaveValue('monthly_daily')
+    await expect(page.locator('#overrides-price-grid_import-month-12')).toHaveValue('synthetic-day-ref')
+    const saved = JSON.parse(await page.locator('#finance-overrides-doc').inputValue())
+    expect(saved.energy_prices.grid_import.kind).toBe('monthly_daily')
+    expect(Object.keys(saved.energy_prices.grid_import.months)).toHaveLength(12)
+
+    session.assertNoErrors()
+    await context.close()
+    await api.close()
+  })
+
 })
