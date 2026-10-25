@@ -241,6 +241,7 @@ def _gate_repeat_artifact():
             }
         },
         tariff_bindings=dict(_EXPORT_TARIFF),
+        demand_bindings={},
         finance_snapshots=_finance_snapshots(),
         planning=dict(_EXPORT_PLANNING),
         dataset_contents=contents,

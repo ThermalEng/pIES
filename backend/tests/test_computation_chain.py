@@ -14,8 +14,10 @@ ies.solver.highs@1.7.2 垫片执行并签发回执；注册表按回执固定引
 from __future__ import annotations
 
 import json
+import logging
 import math
 from pathlib import Path
+from time import perf_counter
 
 import pytest
 
@@ -60,6 +62,24 @@ SAMPLES = HERE.parent / "iesplan" / "assembly" / "samples"
 PROBLEM_PATH = "input/problem.mps"
 PARAMETERS_PATH = "input/parameters.json"
 SOLUTION_PATH = "output/solution.sol"
+
+_STAGE_LOG = logging.getLogger("pies.ci.computation_chain")
+
+
+def _timed(stage: str, action, *args, **kwargs):
+    """Real work only: report stage duration even when a stage raises."""
+    started = perf_counter()
+    try:
+        return action(*args, **kwargs)
+    finally:
+        _STAGE_LOG.warning("CI_STAGE %s seconds=%.3f", stage, perf_counter() - started)
+
+
+def _mps_dot(order: list[str], coefficients: dict[str, float], primals: list[float]) -> float:
+    """Independent MPS objective check without quadratic repeated list scans."""
+    indices = {name: i for i, name in enumerate(order)}
+    assert len(indices) == len(order), "MPS primal column identifiers must be unique"
+    return sum(coefficients[name] * primals[indices[name]] for name in coefficients)
 
 
 def _campus_evaluation():
@@ -242,14 +262,15 @@ def _mps_columns_and_objective(raw: bytes) -> tuple[list[str], dict[str, float]]
 
 def test_chain_success_reports_business_result() -> None:
     """成功链：求解→回执→解释，业务数值/单位/追溯一致且确定。"""
-    bundle = _generate_bundle(_campus_inputs())
+    inputs = _timed("business.inputs", _campus_inputs)
+    bundle = _timed("business.generate_bundle", _generate_bundle, inputs)
     assert bundle.manifest.command["executable"] == HIGHS_EXECUTABLE_REF
     parameters = json.loads(bundle.files[PARAMETERS_PATH].decode("utf-8"))
     unit_map = parameters["unit_map"]
     assert parameters["objective_unit"] == "CNY"
 
     runtime = _runtime()
-    receipt, collected = runtime.run(bundle, _attempt("ok"))
+    receipt, collected = _timed("business.solve_first", runtime.run, bundle, _attempt("ok"))
     assert receipt.status == "succeeded"
     assert receipt.exit_code == 0
     assert receipt.executor_ref == EXECUTOR_REF
@@ -258,7 +279,7 @@ def test_chain_success_reports_business_result() -> None:
     assert receipt.executor_ref == EXECUTOR_REF
     assert set(collected) == {SOLUTION_PATH}
 
-    result = _adapt(bundle, receipt, collected)
+    result = _timed("business.adapt", _adapt, bundle, receipt, collected)
     assert result.execution_status == "completed"
     assert result.math_status == "solved"
     assert result.bundle_id == receipt.bundle_id
@@ -270,10 +291,14 @@ def test_chain_success_reports_business_result() -> None:
     assert [item["unit"] for item in solution["variables"]] == list(unit_map.values())
 
     # 独立复算：MPS 目标行点乘主解 + offset == 报告目标（业务数值保真）。
-    file_objective, primals = _parse_v1_solution(collected[SOLUTION_PATH])
-    order, mps_coeffs = _mps_columns_and_objective(bundle.files[PROBLEM_PATH])
+    file_objective, primals = _timed(
+        "business.parse_solution", _parse_v1_solution, collected[SOLUTION_PATH]
+    )
+    order, mps_coeffs = _timed(
+        "business.parse_mps", _mps_columns_and_objective, bundle.files[PROBLEM_PATH]
+    )
     assert len(primals) == len(order)
-    dot = sum(mps_coeffs[name] * primals[order.index(name)] for name in mps_coeffs)
+    dot = _timed("business.independent_objective", _mps_dot, order, mps_coeffs, primals)
     assert dot + parameters["objective_offset"] == pytest.approx(
         solution["objective_value"], rel=1e-9
     )
@@ -282,7 +307,9 @@ def test_chain_success_reports_business_result() -> None:
     )
 
     # 确定性：同一 Bundle 再跑一次，解字节与业务输出一致。
-    _, collected_again = runtime.run(bundle, _attempt("ok2"))
+    _, collected_again = _timed(
+        "business.solve_second", runtime.run, bundle, _attempt("ok2")
+    )
     assert collected_again[SOLUTION_PATH] == collected[SOLUTION_PATH]
 
 
@@ -525,10 +552,11 @@ def test_chain_success_reports_declared_components() -> None:
     objective == upfront + annual×1年 + pv1__period_variable_om
       + import_meter__period_energy_purchase。
     """
-    bundle = _generate_bundle(_campus_inputs())
+    inputs = _timed("components.inputs", _campus_inputs)
+    bundle = _timed("components.generate_bundle", _generate_bundle, inputs)
     runtime = _runtime()
-    receipt, collected = runtime.run(bundle, _attempt("comp"))
-    result = _adapt(bundle, receipt, collected)
+    receipt, collected = _timed("components.solve", runtime.run, bundle, _attempt("comp"))
+    result = _timed("components.adapt", _adapt, bundle, receipt, collected)
     assert result.math_status == "solved"
     solution = result.outputs["solution"]
     components = _solution_components(solution)
@@ -601,11 +629,11 @@ def test_chain_two_solves_feed_yearly_evaluation() -> None:
     不同，否则即复制单年结果。campus 样例无正净流，如实断言无解/
     未回收，不虚构收入。
     """
-    inputs1 = _campus_inputs()
-    bundle1 = _generate_bundle(inputs1)
+    inputs1 = _timed("yearly.inputs_one", _campus_inputs)
+    bundle1 = _timed("yearly.generate_one", _generate_bundle, inputs1)
     runtime = _runtime()
-    receipt1, collected1 = runtime.run(bundle1, _attempt("yr1"))
-    solution1 = _adapt(bundle1, receipt1, collected1).outputs["solution"]
+    receipt1, collected1 = _timed("yearly.solve_one", runtime.run, bundle1, _attempt("yr1"))
+    solution1 = _timed("yearly.adapt_one", _adapt, bundle1, receipt1, collected1).outputs["solution"]
 
     finance_source = (
         SAMPLES / "finance" / "campus.effective-finance.yaml"
@@ -616,9 +644,12 @@ def test_chain_two_solves_feed_yearly_evaluation() -> None:
         finance_source.replace(anchor, "      value: '0.5'\n", 1)
     )
     artifact, models, materialized, _finance, config, evaluation = inputs1
-    bundle2 = _generate_bundle((artifact, models, materialized, finance2, config, evaluation))
-    receipt2, collected2 = runtime.run(bundle2, _attempt("yr2"))
-    solution2 = _adapt(bundle2, receipt2, collected2).outputs["solution"]
+    bundle2 = _timed(
+        "yearly.generate_two", _generate_bundle,
+        (artifact, models, materialized, finance2, config, evaluation),
+    )
+    receipt2, collected2 = _timed("yearly.solve_two", runtime.run, bundle2, _attempt("yr2"))
+    solution2 = _timed("yearly.adapt_two", _adapt, bundle2, receipt2, collected2).outputs["solution"]
 
     invest, net1 = _yearly_flows(solution1)
     invest2, net2 = _yearly_flows(solution2)

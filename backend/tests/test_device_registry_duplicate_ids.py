@@ -21,7 +21,7 @@ from iesplan.devices.loader import load_all_devices
 
 _DEVICE_TMPL = """\
 schema: ies.device-model
-schema_version: "2.0.0"
+schema_version: "2.1.0"
 device:
   id: {device_id}
   names:

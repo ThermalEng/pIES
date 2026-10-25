@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
     inputs:
       full_suite:
-        description: "Run all standard backend and Chromium tests (otherwise run changed areas)"
+        description: "Explicit full backend and Chromium suite (otherwise select affected tests)"
         type: boolean
         required: false
         default: false
@@ -26,11 +26,14 @@ jobs:
     name: Select affected tests (Docker)
     runs-on: ubuntu-latest
     outputs:
+      full_suite: ${{ steps.plan.outputs.full_suite }}
       backend_run: ${{ steps.plan.outputs.backend_run }}
       backend_tests: ${{ steps.plan.outputs.backend_tests }}
+      backend_shards: ${{ steps.plan.outputs.backend_shards }}
       browser_run: ${{ steps.plan.outputs.browser_run }}
       browser_specs: ${{ steps.plan.outputs.browser_specs }}
       browser_lanes: ${{ steps.plan.outputs.browser_lanes }}
+      browser_shards: ${{ steps.plan.outputs.browser_shards }}
       browser_total: ${{ steps.plan.outputs.browser_total }}
       frontend_run: ${{ steps.plan.outputs.frontend_run }}
       frontend_tests: ${{ steps.plan.outputs.frontend_tests }}
@@ -52,6 +55,7 @@ jobs:
             pull_request) base="$PR_BASE" ;;
             push) base="$PUSH_BEFORE" ;;
             workflow_dispatch) base="$(git rev-parse HEAD^ 2>/dev/null || true)" ;;
+            *) echo "::error::Unsupported GitHub event: $EVENT_NAME"; exit 1 ;;
           esac
           if [[ -z "$base" || "$base" =~ ^0+$ ]] || ! git cat-file -e "${base}^{commit}"; then
             printf '__FULL__\0' > "$RUNNER_TEMP/pies-changed.bin"
@@ -63,6 +67,8 @@ jobs:
         id: plan
         env:
           FULL_SUITE: ${{ inputs.full_suite && 'true' || 'false' }}
+          EVENT_NAME: ${{ github.event_name }}
+          PR_ACTION: ${{ github.event.action }}
         run: |
           docker run --rm \
             -v "$PWD:/repo:ro" \
@@ -76,6 +82,8 @@ jobs:
             python .github/ci/select_tests.py \
               --changed /out/pies-changed.bin \
               --output /out/pies-plan.outputs \
+              --event "$EVENT_NAME" \
+              --pr-action "$PR_ACTION" \
               --full "$FULL_SUITE"
           cat "$RUNNER_TEMP/pies-plan.outputs" >> "$GITHUB_OUTPUT"
 
@@ -136,20 +144,33 @@ jobs:
           bash .github/ci/test-frontend-logic.sh "${tests[@]}"
 
   backend:
-    name: Backend Pytest (Docker)
+    name: Backend Pytest lane ${{ matrix.shard.lane }} (Docker)
     needs: select
     if: needs.select.outputs.backend_run == 'true'
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        shard: ${{ fromJSON(needs.select.outputs.backend_shards) }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build backend test image
-        run: docker compose build backend
+      - name: Set up Docker Buildx for dependency cache
+        uses: docker/setup-buildx-action@v3
+      # Backend always uses the gha cache-from overlay, even on tiny suites.
+      # All readers need the ACTIONS_CACHE_URL/TOKEN runtime credentials.
+      - name: Expose GitHub Actions cache runtime
+        uses: crazy-max/ghaction-github-runtime@v4
+      - name: Build backend test image (read-only remote cache)
+        run: |
+          docker compose -f docker-compose.yml \
+            -f .github/ci/docker-compose-cache-read.yml build backend
 
       - name: Run selected Pytest tests
         env:
-          TEST_FILES: ${{ needs.select.outputs.backend_tests }}
+          TEST_FILES: ${{ matrix.shard.tests }}
         run: |
           mkdir -p ci-artifacts/backend
           read -r -a tests <<< "$TEST_FILES"
@@ -157,14 +178,14 @@ jobs:
           docker compose run --rm --no-deps \
             --volume "$PWD/ci-artifacts/backend:/ci-artifacts" \
             --volume "$PWD/manual:/manual:ro" \
-            backend python -m pytest -q -ra "${tests[@]}" \
+            backend python -m pytest -vv -ra --durations=20 --log-cli-level=WARNING "${tests[@]}" \
             --junitxml=/ci-artifacts/pytest.xml
 
       - name: Upload Pytest report
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: backend-pytest
+          name: backend-pytest-lane-${{ matrix.shard.lane }}
           path: ci-artifacts/backend/pytest.xml
           if-no-files-found: warn
           retention-days: 14
@@ -177,25 +198,40 @@ jobs:
   # Redis and E2E globalSetup. Never run multiple browser workers against the
   # same seeded database. A single selected spec gets only one lane.
   browser:
-    name: Playwright Chromium lane ${{ matrix.lane }}/${{ needs.select.outputs.browser_total }} (Docker)
+    name: Playwright Chromium lane ${{ matrix.shard.lane }}/${{ needs.select.outputs.browser_total }} (Docker)
     needs: select
     if: needs.select.outputs.browser_run == 'true'
     strategy:
       fail-fast: false
-      max-parallel: 2
+      max-parallel: 4
       matrix:
-        lane: ${{ fromJSON(needs.select.outputs.browser_lanes) }}
+        shard: ${{ fromJSON(needs.select.outputs.browser_shards) }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
-      BROWSER_SPECS: ${{ needs.select.outputs.browser_specs }}
-      BROWSER_LANE: ${{ matrix.lane }}
+      BROWSER_SPECS: ${{ matrix.shard.tests }}
+      BROWSER_LANE: ${{ matrix.shard.lane }}
       BROWSER_TOTAL: ${{ needs.select.outputs.browser_total }}
       SPECIAL_DEVICE: ${{ needs.select.outputs.special_device }}
-      CI_TEST_DATA_DIR: ${{ github.workspace }}/.pies-ci-browser-${{ github.run_id }}-${{ matrix.lane }}
-      COMPOSE_PROJECT_NAME: pies-ci-browser-${{ matrix.lane }}
+      # On small suites, Buildx/remote cache setup costs more than it saves.
+      # Enable remote layer cache only for the expensive 4-lane browser suite.
+      CI_DOCKER_CACHE: ${{ needs.select.outputs.browser_total == '4' && 'true' || 'false' }}
+      # Only lane 1 exports the shared backend cache, preventing multi-lane
+      # writes to the same scope on master push. PRs only read the
+      # default-branch cache, preventing untrusted PR cache poisoning.
+      CI_DOCKER_CACHE_WRITE: ${{ matrix.shard.lane == 1 && github.event_name == 'push' && github.ref == 'refs/heads/master' && 'true' || 'false' }}
+      CI_TEST_DATA_DIR: ${{ github.workspace }}/.pies-ci-browser-${{ github.run_id }}-${{ matrix.shard.lane }}
+      COMPOSE_PROJECT_NAME: pies-ci-browser-${{ matrix.shard.lane }}
     steps:
       - uses: actions/checkout@v4
+      - name: Set up Docker Buildx
+        if: needs.select.outputs.browser_total == '4'
+        uses: docker/setup-buildx-action@v3
+      - name: Set up Docker Compose with cache support
+        if: needs.select.outputs.browser_total == '4'
+        uses: docker/setup-compose-action@v2
+      - name: Expose GitHub Actions cache runtime
+        uses: crazy-max/ghaction-github-runtime@v4
 
       - name: Build and start isolated application
         run: |
@@ -210,15 +246,14 @@ jobs:
           read -r -a specs <<< "$BROWSER_SPECS"
           [[ "${#specs[@]}" -gt 0 ]] || { echo "::error::Browser selected but no specs provided"; exit 1; }
           echo "Playwright lane $BROWSER_LANE/$BROWSER_TOTAL, specs: ${specs[*]}"
-          # --shard partitions files (fullyParallel=false, workers=1).
-          # Both runners run isolated globalSetup; all selected tests must
-          # pass in exactly one lane, with no global --grep that drops specs.
+          # Selector assigns each complete spec file to exactly one runner.
+          # Each isolated deployment keeps a single Playwright worker.
+          # No --grep or --shard; the explicit file list is authoritative.
           if [[ "$SPECIAL_DEVICE" == "true" ]]; then
             docker compose -f docker-compose.yml -f .github/ci/docker-compose.yml \
               -f frontend/tests/e2e/docker-compose.ext-device.yml \
               --profile e2e run --rm --build e2e \
-              npx playwright test --project=chromium \
-                --shard="$BROWSER_LANE/$BROWSER_TOTAL" "${specs[@]}"
+              npx playwright test --project=chromium "${specs[@]}"
             # Special-device suite is a separate config/testIgnore override;
             # run it exactly once, only after lane 1's normal spec shard.
             if [[ "$BROWSER_LANE" == "1" ]]; then
@@ -230,8 +265,7 @@ jobs:
           else
             docker compose -f docker-compose.yml -f .github/ci/docker-compose.yml \
               --profile e2e run --rm --build e2e \
-              npx playwright test --project=chromium \
-                --shard="$BROWSER_LANE/$BROWSER_TOTAL" "${specs[@]}"
+              npx playwright test --project=chromium "${specs[@]}"
           fi
 
       - name: Show application diagnostics on failure
@@ -245,7 +279,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: playwright-chromium-lane-${{ matrix.lane }}
+          name: playwright-chromium-lane-${{ matrix.shard.lane }}
           path: frontend/tests/e2e/test-results/
           if-no-files-found: warn
           retention-days: 14
@@ -293,7 +327,7 @@ jobs:
           check "Cold-start matrix (all 3)" "$COLD_REQUIRED" "$COLD_RESULT"
           check "PostgreSQL concurrent init" "$PG_REQUIRED" "$PG_RESULT"
           check "Frontend logic" "$LOGIC_REQUIRED" "$LOGIC_RESULT"
-          check "Backend Pytest" "$BACKEND_REQUIRED" "$BACKEND_RESULT"
+          check "Backend Pytest matrix (all shards)" "$BACKEND_REQUIRED" "$BACKEND_RESULT"
           # GitHub's needs.browser.result aggregates the matrix: all selected
           # lanes must succeed, while browser_run=false skips the entire job.
           check "Browser matrix (all selected lanes)" "$BROWSER_REQUIRED" "$BROWSER_RESULT"

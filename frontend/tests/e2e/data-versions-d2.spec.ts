@@ -106,7 +106,7 @@ test.describe('D2: 版本加载失败可见', () => {
     await page.locator('tr', { hasText: dsA1Name }).getByRole('button', { name: '版本列表' }).click({ timeout: 30_000 })
     const dialog = page.getByRole('dialog')
     await expect(dialog.getByText(verBadge)).toBeVisible({ timeout: 30_000 })
-    await expect(dialog.getByText(verResolution)).toBeVisible({ timeout: 30_000 })
+    await expect(dialog.getByText(verResolution, { exact: true })).toBeVisible({ timeout: 30_000 })
     // 页眉图标关闭与页脚文字关闭同名, 取页脚确认按钮。
     await dialog.getByRole('button', { name: '关闭' }).last().click({ timeout: 30_000 })
     await expect(dialog).toBeHidden({ timeout: 30_000 })
