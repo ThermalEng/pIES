@@ -651,7 +651,7 @@ def _validate_device_type_ref(db: Session, content: dict, payload: dict) -> None
         return
     except NotFoundError:
         pass
-    from iesplan.application.models.project_devices import project_device_type_ids
+    from iesplan.application.models import project_device_type_ids
 
     if type_id in project_device_type_ids(db, content):
         return

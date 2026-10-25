@@ -49,7 +49,7 @@ from iesplan import modeling as modeling_domain
 from iesplan import project as project_domain
 from iesplan import results as results_domain
 from iesplan import tasks as tasks_domain
-from iesplan.application.models.project_devices import (
+from iesplan.application.models import (
     load_project_device_base_ids,
     load_project_device_documents,
 )

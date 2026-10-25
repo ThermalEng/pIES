@@ -36,8 +36,10 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from iesplan import audit as audit_domain
+from iesplan import configuration as configuration_domain
 from iesplan import dataset as dataset_domain
 from iesplan import project as project_domain
+from iesplan.application.models import load_project_device_documents
 from iesplan.assembly import parse_predefined_source_declaration
 from iesplan.audit.contracts import AuditRecord
 from iesplan.core.diagnostics import (
@@ -54,13 +56,11 @@ from iesplan.core.diagnostics import (
     make_diag,
 )
 from iesplan.core.errors import AppError, NotFoundError
-from iesplan.application.models.project_devices import load_project_device_documents
 from iesplan.devices import DeviceModelDocument as DeviceTypeSpec
 from iesplan.devices import get_device as get_device_type
 from iesplan.devices.contracts2 import PropertySpec
 from iesplan.identity.contracts import UserRecord
 from iesplan.project.contracts import ProjectRecord
-from iesplan import configuration as configuration_domain
 from iesplan.storage import add_ref, find_refs_by_owner, get_object, put_object
 
 # ---------------------------------------------------------------------------
