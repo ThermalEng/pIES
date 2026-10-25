@@ -69,6 +69,9 @@ test('select curve model, edit capacity, bind unit-output dataset and reopen', a
   await expect(palette.locator('[aria-label*="光伏"]')).toBeVisible()
 
   const canvas = page.locator('.mp-canvas-wrap')
+  // 目录含 11 类设备，目标条目可能位于可滚动面板视口外；
+  // 与已有 @basic 拖放验收一致，先真实滚动再执行 HTML5 拖拽。
+  await curve.scrollIntoViewIfNeeded()
   const from = await curve.boundingBox()
   const to = await canvas.boundingBox()
   expect(from && to).toBeTruthy()
@@ -105,6 +108,9 @@ test('select curve model, edit capacity, bind unit-output dataset and reopen', a
   await expect(page.getByRole('spinbutton', { name: 'installed_capacity_kw (kW)' })).toHaveValue('240')
   await expect(page.locator('#mp-source-mode-unit_output')).toHaveValue('data_repeat')
   await expect(page.locator('#mp-source-version-unit_output')).toHaveValue(String(versionId))
-  session.assertNoErrors()
+  session.assertNoErrors([
+    // 未保存计算配置的工作台请求属于预期 404，其他错误仍严格拦截。
+    { method: 'GET', path: `/api/projects/${projectId}/config`, status: 404 },
+  ])
   await context.close()
 })
