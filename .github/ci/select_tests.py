@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import posixpath
+import re
 from fnmatch import fnmatch
 from pathlib import Path
 
@@ -209,6 +211,78 @@ def find_area(path: str, prefix: str) -> str | None:
     return None
 
 
+# Historical CI timings (October 2026), rounded per file; only schedule work.
+# Never remove tests based on weight. Unmeasured files get a nonzero fallback.
+BACKEND_SECONDS = {
+    "test_full_horizon_solve.py": 540,
+    "test_evaluation_cashflow_chain.py": 320,
+    "test_issue04_d2.py": 230,
+    "test_campus_project_chain.py": 140,
+    "test_highs_milp_provider.py": 100,
+    "test_generator_registry.py": 100,
+    "test_worker_compute_chain.py": 110,
+}
+BROWSER_SECONDS = {
+    "hourly-steps.spec.ts": 345, "task-draft-load.spec.ts": 220,
+    "task-selection.spec.ts": 220, "tax-chain.spec.ts": 145,
+    "financial-evaluation.spec.ts": 130, "export-assessment-r7.spec.ts": 110,
+    "hourly-r3.spec.ts": 110, "result-switch-failure.spec.ts": 80,
+    "evidence-r4.spec.ts": 90,
+}
+
+
+def balanced_shards(items: set[str], lanes: int, weights: dict[str, int],
+                    prefix: str = "") -> list[dict[str, str | int]]:
+    """Stable, lossless longest-processing-time-first file partition."""
+    if not items:
+        return [{"lane": 1, "tests": ""}]
+    groups: list[list[str]] = [[] for _ in range(min(lanes, len(items)))]
+    loads = [0] * len(groups)
+    for name in sorted(items, key=lambda n: (-weights.get(n, 25), n)):
+        at = min(range(len(groups)), key=lambda idx: (loads[idx], idx))
+        groups[at].append(name)
+        loads[at] += weights.get(name, 25)
+    result = [{"lane": i + 1, "tests": " ".join(prefix + name for name in sorted(group))}
+              for i, group in enumerate(groups)]
+    assert sorted(file for group in groups for file in group) == sorted(items)
+    return result
+
+
+def e2e_consumers(helper: str, available: set[str]) -> set[str]:
+    """Read real relative TS imports, including transitive helpers; fail closed.
+
+    Unknown shared test harness files still select all browser specs. This
+    dependency graph is rebuilt from the PR's checked-out files on each run.
+    """
+    root = "frontend/tests/e2e/"
+    target = helper.removeprefix(root)
+    reverse: dict[str, set[str]] = {}
+    for file in E2E_DIR.rglob("*.ts"):
+        rel = file.relative_to(E2E_DIR).as_posix()
+        contents = file.read_text(encoding="utf-8")
+        modules = re.findall(r"""(?:\\bfrom\\s+|\\bimport\\s*)['"]([.][^'"]+)['"]""",
+                             contents)
+        for module in modules:
+            base = posixpath.normpath(posixpath.join(posixpath.dirname(rel), module))
+            for resolved in (base + ".ts", base + ".tsx", base + ".js",
+                             base + "/index.ts", base + "/index.tsx", base):
+                if (E2E_DIR / resolved).is_file():
+                    reverse.setdefault(resolved, set()).add(rel)
+                    break
+    queue = [target]
+    reached = {target}
+    found: set[str] = set()
+    while queue:
+        for parent in reverse.get(queue.pop(), ()):
+            if parent in reached:
+                continue
+            reached.add(parent)
+            if parent in available:
+                found.add(parent)
+            queue.append(parent)
+    return found
+
+
 def pick(changed: list[str], full: bool = False) -> dict[str, str]:
     backend_available, browser_available, frontend_available = inventory()
     browser_available.discard(SPECIAL)
@@ -314,8 +388,15 @@ def pick(changed: list[str], full: bool = False) -> dict[str, str]:
                 browser.update((SMOKE_BROWSER, "device-data-csv-extension.spec.ts"))
             elif name in browser_available:
                 browser.update((SMOKE_BROWSER, name))
-            elif path.endswith((".ts", ".json")) and not path.endswith("package-lock.json"):
-                browser_all = True  # shared harness changed
+            elif path in ("frontend/tests/e2e/financial-scaffold.ts",
+                          "frontend/tests/e2e/setup/api.ts"):
+                consumers = e2e_consumers(path, browser_available)
+                if consumers:
+                    browser.update((SMOKE_BROWSER, *consumers))
+                else:
+                    browser_all = True  # no resolvable imports: never silently skip
+            elif path.endswith((".ts", ".tsx", ".js", ".json")) and not path.endswith("package-lock.json"):
+                browser_all = True  # other/unmapped shared harness stays fail-closed
         elif path.startswith("frontend/src/pages/"):
             page = path.removeprefix("frontend/src/pages/")
             selected = PAGE_SPECS.get(page)
@@ -388,18 +469,19 @@ def pick(changed: list[str], full: bool = False) -> dict[str, str]:
         backend.add(SMOKE_BACKEND)
     if browser and SMOKE_BROWSER not in browser:
         browser.add(SMOKE_BROWSER)
-    # Divide the selected browser specs over at most two isolated runners.
-    # A lone spec needs only one app build; multi-file suites use Playwright's
-    # file-level sharding (fullyParallel=false) instead of shared-state workers.
-    browser_total = 2 if len(browser) >= 2 else 1
-    browser_lanes = json.dumps(list(range(1, browser_total + 1)), separators=(",", ":"))
+    backend_count = 4 if len(backend) >= 16 else 2 if len(backend) >= 7 else 1
+    backend_groups = balanced_shards(backend, backend_count, BACKEND_SECONDS, "tests/")
+    browser_count = 4 if len(browser) >= 20 else 2 if len(browser) >= 2 else 1
+    browser_groups = balanced_shards(browser, browser_count, BROWSER_SECONDS)
     return {
         "backend_run": str(bool(backend)).lower(),
         "backend_tests": " ".join("tests/" + name for name in sorted(backend)),
+        "backend_shards": json.dumps(backend_groups, separators=(",", ":")),
         "browser_run": str(bool(browser) or special).lower(),
         "browser_specs": " ".join(sorted(browser)),
-        "browser_lanes": browser_lanes,
-        "browser_total": str(browser_total),
+        "browser_lanes": json.dumps([part["lane"] for part in browser_groups], separators=(",", ":")),
+        "browser_shards": json.dumps(browser_groups, separators=(",", ":")),
+        "browser_total": str(len(browser_groups)),
         "frontend_run": str(bool(frontend)).lower(),
         "frontend_tests": " ".join(sorted(frontend)),
         "startup_run": str(startup).lower(),
@@ -409,22 +491,46 @@ def pick(changed: list[str], full: bool = False) -> dict[str, str]:
 
 
 def self_test() -> None:
-    # Exact shard cardinality: one selected spec -> one runner; two or
-    # more specs -> two runners. The aggregation gate cannot accept only one
-    # successful lane when two are selected.
+    # Selection is lossless, disjoint and deterministic for both matrices.
     one = pick(["frontend/tests/e2e/infra.spec.ts"])
     assert one["browser_specs"] == "infra.spec.ts"
-    assert one["browser_lanes"] == "[1]" and one["browser_total"] == "1"
+    assert one["browser_total"] == "1"
+    assert [x["tests"] for x in json.loads(one["browser_shards"])] == ["infra.spec.ts"]
     multi = pick(["frontend/src/components/ui/Button.tsx"])
     assert len(multi["browser_specs"].split()) >= 2
-    assert multi["browser_lanes"] == "[1,2]" and multi["browser_total"] == "2"
+    assert multi["browser_total"] == "2"
     all_specs = pick([".github/ci/select_tests.py"], full=True)
     assert len(all_specs["browser_specs"].split()) > 40
-    assert all_specs["browser_lanes"] == "[1,2]" and all_specs["browser_total"] == "2"
+    assert all_specs["browser_total"] == "4"
+    assert len(json.loads(all_specs["backend_shards"])) == 4
+    for plan in (one, multi, all_specs):
+        for field, shards in (("browser_specs", "browser_shards"),
+                              ("backend_tests", "backend_shards")):
+            picked = plan[field].split()
+            partitioned = [n for part in json.loads(plan[shards]) for n in part["tests"].split()]
+            assert sorted(picked) == sorted(partitioned) and len(partitioned) == len(set(partitioned))
     docs = pick(["docs/reviews/style.md"])
-    assert docs["browser_run"] == "false" and docs["browser_lanes"] == "[1]"
+    assert docs["browser_run"] == "false" and docs["browser_total"] == "1"
     ext = pick(["frontend/tests/e2e/device-yaml-extension.spec.ts"])
-    assert ext["special_device"] == "true" and ext["browser_lanes"] == "[1]"
+    assert ext["special_device"] == "true" and ext["browser_total"] == "1"
+    # Real test-import graph, including transitive helper consumers.
+    scaffold = pick(["frontend/tests/e2e/financial-scaffold.ts"])
+    assert {"financial-evaluation.spec.ts", "hourly-steps.spec.ts",
+            "task-selection.spec.ts", "tax-chain.spec.ts",
+            "economic-bindings-issue03.spec.ts", SMOKE_BROWSER} <= set(
+                scaffold["browser_specs"].split())
+    assert len(scaffold["browser_specs"].split()) < len(inventory()[1]) - 1
+    common_api = pick(["frontend/tests/e2e/setup/api.ts"])
+    assert {"financial-evaluation.spec.ts", "task-selection.spec.ts",
+            SMOKE_BROWSER} <= set(common_api["browser_specs"].split())
+    assert len(common_api["browser_specs"].split()) <= len(inventory()[1]) - 1
+    assert len(pick(["frontend/tests/e2e/global-setup.ts"])["browser_specs"].split()) > 40
+    heavy = balanced_shards({"test_full_horizon_solve.py",
+                              "test_evaluation_cashflow_chain.py", "test_smoke.py"}, 2,
+                             BACKEND_SECONDS)
+    assert all("test_full_horizon_solve.py" not in part["tests"] or
+               "test_evaluation_cashflow_chain.py" not in part["tests"]
+               for part in heavy)
     assert pick([".github/workflows/docker-ci.yml"])["backend_tests"] == "tests/test_smoke.py"
     assert pick([".github/workflows/docker-ci.yml"])["browser_specs"] == "infra.spec.ts"
     assert "test_finance.py" in pick(["backend/iesplan/finance/config.py"])["backend_tests"]
