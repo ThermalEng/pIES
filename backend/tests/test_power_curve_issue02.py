@@ -111,7 +111,7 @@ devices:
     asset_origin: new
     properties:
       max_import_power_kw:
-        value: 0
+        value: 1000
         unit: kW
       max_export_power_kw:
         value: 1000
