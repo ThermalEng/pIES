@@ -260,7 +260,7 @@ def e2e_consumers(helper: str, available: set[str]) -> set[str]:
     for file in E2E_DIR.rglob("*.ts"):
         rel = file.relative_to(E2E_DIR).as_posix()
         contents = file.read_text(encoding="utf-8")
-        modules = re.findall(r"""(?:\\bfrom\\s+|\\bimport\\s*)['"]([.][^'"]+)['"]""",
+        modules = re.findall(r"""(?:\bfrom\s+|\bimport\s*)['"]([.][^'"]+)['"]""",
                              contents)
         for module in modules:
             base = posixpath.normpath(posixpath.join(posixpath.dirname(rel), module))
