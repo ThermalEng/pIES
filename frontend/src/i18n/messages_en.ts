@@ -446,6 +446,7 @@ export const messagesEn: Record<string, string> = {
   'ies.task.construction_payments_placeholder': '[{"t": 0, "ratio": 0.6}, {"t": 1, "ratio": 0.4}] (ratios must sum to 1)',
   'ies.task.maintenance_expenses': 'Maintenance/renewal expenses (JSON)',
   'ies.task.maintenance_expenses_placeholder': '[{"year": 3, "amount": "1000.00", "currency": "CNY"}] (use [] when none)',
+  'ies.task.maintenance_expenses_hint': 'Each payment may combine fixed amount with ordered terms: scale_unit_cost (instance_id, property, unit_cost.value/unit), or cost_component_share (instance_id, component=upfront_capex, ratio). Use amount="0" for terms only. Keep same-year payments in list order. Use instance IDs and properties from this project assembly.',
   'ies.task.discount_rate': 'Discount rate (decimal, e.g. 0.08)',
   'ies.task.evaluation_hint': 'Construction period (non-negative integer years, explicit 0 allowed) and operating years (positive integer) are required with no defaults; payment ratios and maintenance lists are explicit JSON validated server-side; confirmer/time is recorded server-side and frozen into the snapshot',
   'ies.task.evaluation_invalid': 'Enter a construction period (non-negative integer), operating years (positive integer), a discount rate within 0..1 and valid payment/maintenance JSON (all required)',
