@@ -609,7 +609,7 @@ def test_api_upload_range_blocked(client: TestClient, session: Session) -> None:
     assert any(d["code"] == "RES-RANGE-001" and d["location"]["field"] == "t_ambient" for d in diagnostics)
 
 
-def test_api_upload_unknown_device_model_ignored(client: TestClient, session: Session) -> None:
+def test_api_upload_obsolete_device_model_metadata_rejected(client: TestClient, session: Session) -> None:
     """The current 2.1 step format accepts valid data, but rejects obsolete metadata.
 
     Unknown device_model is no longer silently ignored; device-to-dataset

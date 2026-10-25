@@ -71,7 +71,7 @@ BASELINE = {
 
 PROFILE_PAYLOAD: dict = {
     "schema": "ies.finance-profile",
-    "schema_version": "1.0.0",
+    "schema_version": "4.0.0",
     "profile": {
         "id": "cn-north-demo",
         "region": "CN-North",
@@ -87,7 +87,7 @@ PROFILE_PAYLOAD: dict = {
                 "linear": {"capacity_kw": {"unit_cost": {"value": "3500", "unit": "CNY/kW"}}},
             },
             "annual_fixed_om": {
-                "linear": {"capacity_kw": {"unit_cost": {"value": "35", "unit": "CNY/kW/a"}}},
+                "linear": {"capacity_kw": {"unit_cost": {"value": "35", "unit": "CNY/kW·a"}}},
             },
             "period_variable_om": {
                 "linear": {"generated_kwh": {"unit_cost": {"value": "0.01", "unit": "CNY/kWh"}}},
@@ -104,13 +104,15 @@ PROFILE_PAYLOAD: dict = {
         },
     },
     "taxes": {},
+    "credit_pools": {},
+    "tax_rules": {},
 }
 
 
 def _overrides_payload(profile: FinanceProfile) -> dict:
     return {
         "schema": "ies.finance-overrides",
-        "schema_version": "1.0.0",
+        "schema_version": "4.0.0",
         "profile_ref": {"id": profile.profile_id},
         "finance_types": {
             "pv_system": {
