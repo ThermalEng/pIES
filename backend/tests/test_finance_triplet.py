@@ -36,7 +36,7 @@ from iesplan.finance.triplet import (
 def _profile_payload() -> dict:
     return {
         "schema": "ies.finance-profile",
-        "schema_version": "4.0.0",
+        "schema_version": "5.0.0",
         "profile": {
             "id": "cn-north-demo",
             "region": "CN-North",
@@ -115,7 +115,7 @@ def _profile() -> FinanceProfile:
 def _overrides_payload(profile: FinanceProfile) -> dict:
     return {
         "schema": "ies.finance-overrides",
-        "schema_version": "4.0.0",
+        "schema_version": "5.0.0",
         "profile_ref": {"id": profile.profile_id},
         "finance_types": {
             "pv_system": {
