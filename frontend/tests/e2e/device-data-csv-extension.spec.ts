@@ -443,6 +443,7 @@ test.describe('0.15 外部数据 CSV: data_repeat step 文件公开消费链', (
       variable_om: string
       fixed_om: string
       maintenance: string
+      demand_charge: string
       net: string
     }
     expect(annualRows.map((r) => r.label)).toEqual(
@@ -450,7 +451,7 @@ test.describe('0.15 外部数据 CSV: data_repeat step 文件公开消费链', (
     )
     expect(annualRows.map((r) => r.value)).toEqual(
       (fin.annual_operation as SealedAnnual[]).map(
-        (a) => `${a.energy_net} − ${a.variable_om} − ${a.fixed_om} − ${a.maintenance} = ${a.net} ${fin.currency}`,
+        (a) => `${a.energy_net} − ${a.variable_om} − ${a.fixed_om} − ${a.maintenance} − ${a.demand_charge} = ${a.net} ${fin.currency}`,
       ),
     )
     expectClose(Number(annualRows[0].value.split('−')[0].trim()), ENERGY_NET_CNY, 0.5)

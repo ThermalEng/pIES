@@ -1805,7 +1805,7 @@ def _is_sealed_evaluation(section: Any) -> bool:
 def _sealed_tax_rows(fin: dict[str, Any], ccy: str) -> list[tuple[str, Any]]:
     """同次解税务事实与税后现金流明细行（封存原样消费，不重算、不截断）。
 
-    封存块 ``ies.financial-evaluation@1.0.0`` 的 ``tax_cash`` 与
+    封存块 ``ies.financial-evaluation@2.0.0`` 的 ``tax_cash`` 与
     ``annual_net_flows`` 必填：直接消费字段，不为缺字段的旧块做静默
     兼容（缺字段即契约违例，按实际错误暴露，不补空税务）。合法空数组
     仍显式记“无适用规则”，不用空表掩盖。
@@ -1911,6 +1911,7 @@ def _sealed_evaluation_rows(fin: dict[str, Any]) -> list[tuple[str, Any]]:
                 f"运营年第 {index + 1} 年(t={item['financial_year']}) / Year {index + 1}",
                 f"能源 {item['energy_net']} − 可变 {item['variable_om']} "
                 f"− 固定 {item['fixed_om']} − 维护 {item['maintenance']} "
+                f"− 需量 {item['demand_charge']} "
                 f"= 净额 {item['net']} {ccy}",
             )
         )
@@ -1949,6 +1950,30 @@ def _sealed_evaluation_rows(fin: dict[str, Any]) -> list[tuple[str, Any]]:
         else:
             rows.append((f"{label} / {key} payback", f"— / {evaluation[f'{key}_status']}"))
     return rows
+
+
+def _write_sealed_monthly_demand(ws, fin: dict[str, Any]) -> None:
+    """只抄录同次解封存的月账单；不取 max、不乘费率或汇总年费。"""
+    _set_sheet_title(ws, "自然月需量账单", "Monthly Demand Bills")
+    headers = (
+        "计量绑定 / Billing ID", "费项 / Charge ID", "公历年 / Calendar year",
+        "公历月 / Calendar month", "财务年 / Financial year",
+        "月峰值 / Peak", "峰值单位 / Peak unit", "费率 / Rate",
+        "费率单位 / Rate unit", "月费用 / Charge", "币种 / Currency",
+    )
+    for col, header in enumerate(headers, 1):
+        ws.cell(row=2, column=col, value=header)
+    if not fin["monthly_demand"]:
+        ws.cell(row=3, column=1, value="无计量绑定 / No demand meter bindings")
+    for row_no, item in enumerate(fin["monthly_demand"], 3):
+        values = (
+            item["billing_id"], item["charge_id"], item["calendar_year"],
+            item["calendar_month"], item["financial_year"], item["peak_power"],
+            item["peak_unit"], item["rate"]["value"], item["rate"]["unit"],
+            item["charge"], fin["currency"],
+        )
+        for col, value in enumerate(values, 1):
+            ws.cell(row=row_no, column=col, value=_excel_safe(value))
 
 
 def export_excel(
@@ -1991,9 +2016,11 @@ def export_excel(
             location={"object_type": "result_assessments", "object_id": assessment_id},
         )
     snapshot = tasks_domain.get_snapshot(db, evidence.calc_snapshot_id) if evidence.calc_snapshot_id else None
+    # Equipment and version metadata belong to the exported task snapshot,
+    # never the project's subsequently edited/current version.
     version = (
-        project_domain.get_version(db, project_id, project.current_version_id)
-        if project.current_version_id
+        project_domain.get_version(db, project_id, snapshot.project_version_id)
+        if snapshot is not None
         else None
     )
     version_content: dict = {}
@@ -2050,6 +2077,7 @@ def export_excel(
     algorithm = calc_config.get("algorithm") or calc_config.get("solver")
     overview.append(("算法 / Algorithm", algorithm or "—"))
     overview.append(("结果状态 / Result status", task.status))
+    overview.append(("计算任务 / Task ID", task.id))
     overview.append(("业务结局 / Business outcome", task.business_outcome or "—"))
     overview.append(("证据包状态 / Evidence status", evidence.status))
     overview.append(("关联标识 / Reference", f"evidence_package={evidence.id}, assessment={assessment.id}"))
@@ -2175,6 +2203,10 @@ def export_excel(
         else:
             rows = _section_rows(section)
         _write_kv(ws_s, rows if rows else [("无摘要数据 / No summary data", "—")])
+
+        if sheet_name == "财务摘要" and _is_sealed_evaluation(section):
+            demand_sheet = wb.create_sheet("需量月账单")
+            _write_sealed_monthly_demand(demand_sheet, section)
 
     buf = io.BytesIO()
     wb.save(buf)

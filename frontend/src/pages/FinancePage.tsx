@@ -33,6 +33,7 @@ import { Alert, Button, Card, FormField, Select, Spinner, Textarea } from '../co
 import { translateError, useI18n } from '../i18n'
 import { pt } from '../i18n/pageMessages'
 import { ApiError } from '../types'
+import DemandRateEditor from '../features/finance/components/DemandRateEditor'
 
 export interface FinancePageProps {
   projectId?: number
@@ -80,6 +81,7 @@ export default function FinancePage(props: FinancePageProps) {
   const [options, setOptions] = useState<FinanceProfileOption[]>([])
   const [boundId, setBoundId] = useState<string | null>(null)
   const [boundRegion, setBoundRegion] = useState('')
+  const [boundProfile, setBoundProfile] = useState<Record<string, unknown> | null>(null)
   const [selectedId, setSelectedId] = useState('')
   const [binding, setBinding] = useState(false)
   const [registerText, setRegisterText] = useState('')
@@ -137,11 +139,13 @@ export default function FinancePage(props: FinancePageProps) {
         const current = typeof profile?.id === 'string' ? (profile.id as string) : ''
         setBoundId(current || null)
         setBoundRegion(typeof row.region === 'string' ? (row.region as string) : '')
+        setBoundProfile(doc)
         setSelectedId((prev) => prev || current)
       } catch (err) {
         if (err instanceof ApiError && err.status === 404) {
           setBoundId(null)
           setBoundRegion('')
+          setBoundProfile(null)
         } else {
           throw err
         }
@@ -177,12 +181,14 @@ export default function FinancePage(props: FinancePageProps) {
           const current = typeof profile?.id === 'string' ? (profile.id as string) : ''
           setBoundId(current || null)
           setBoundRegion(typeof row.region === 'string' ? (row.region as string) : '')
+          setBoundProfile(doc)
           setSelectedId(current)
         } catch (err) {
           if (cancelled) return
           if (err instanceof ApiError && err.status === 404) {
             setBoundId(null)
             setBoundRegion('')
+            setBoundProfile(null)
           } else {
             throw err
           }
@@ -220,6 +226,7 @@ export default function FinancePage(props: FinancePageProps) {
       const doc = res.finance_profile as Record<string, unknown>
       const profile = doc.profile as Record<string, unknown> | undefined
       setBoundId(typeof profile?.id === 'string' ? (profile.id as string) : selectedId)
+      setBoundProfile(doc)
       await refreshOverlays(projectIdNum)
       setPlanningHint(true)
       setNotice({ kind: 'success', text: pt('ies.finance.bound_ok', { id: selectedId }) })
@@ -391,6 +398,7 @@ export default function FinancePage(props: FinancePageProps) {
               placeholder={pt('ies.finance.profile_doc_placeholder')}
             />
           </FormField>
+          <DemandRateEditor mode="profile" text={registerText} onChange={setRegisterText} />
           <div style={{ marginTop: 'var(--ies-space-2)' }}>
             <Button onClick={() => void registerDoc()} loading={registering} disabled={registering}>
               {pt('ies.finance.register_btn')}
@@ -420,6 +428,9 @@ export default function FinancePage(props: FinancePageProps) {
               placeholder={pt('ies.finance.overrides_doc_placeholder')}
             />
           </FormField>
+          <DemandRateEditor mode="overrides" text={overridesText} onChange={setOverridesText}
+            profileId={boundId}
+            profileCharges={(boundProfile?.demand_charges ?? {}) as Record<string, { rate: { value: string; unit: string } }>} />
           <div className="ies-flex" style={{ marginTop: 'var(--ies-space-2)', gap: 'var(--ies-space-2)' }}>
             <Button onClick={() => void saveOverridesDoc()} loading={savingOverrides} disabled={savingOverrides}>
               {pt('ies.finance.save_btn')}
