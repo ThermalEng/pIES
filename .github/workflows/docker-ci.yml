@@ -207,8 +207,9 @@ jobs:
       SPECIAL_DEVICE: ${{ needs.select.outputs.special_device }}
       CI_DOCKER_CACHE: "true"
       # Only lane 1 exports the shared backend cache, preventing multi-lane
-      # writes to the same scope. Other runners only read it.
-      CI_DOCKER_CACHE_WRITE: ${{ matrix.shard.lane == 1 && 'true' || 'false' }}
+      # writes to the same scope on master push. PRs only read the
+      # default-branch cache, preventing untrusted PR cache poisoning.
+      CI_DOCKER_CACHE_WRITE: ${{ matrix.shard.lane == 1 && github.event_name == 'push' && github.ref == 'refs/heads/master' && 'true' || 'false' }}
       CI_TEST_DATA_DIR: ${{ github.workspace }}/.pies-ci-browser-${{ github.run_id }}-${{ matrix.shard.lane }}
       COMPOSE_PROJECT_NAME: pies-ci-browser-${{ matrix.shard.lane }}
     steps:
