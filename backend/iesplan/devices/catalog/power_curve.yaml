@@ -1,0 +1,36 @@
+schema: ies.device-model
+schema_version: "2.1.0"
+device:
+  id: ies.device.power_curve
+  names:
+    zh-CN: 单位装机出力（电）
+    en-US: Capacity-normalized Electric Output
+properties:
+  installed_capacity_kw:
+    value: 100
+    unit: kW
+    valid_range:
+      minimum: 0
+      maximum: 1000000
+interfaces:
+  unit_output:
+    type: predefined
+    carrier: electricity
+    # 每 1 kW 装机的 kW 出力，即 kW/kW，数值上为无量纲。
+    # 如 0.35 表示每 kW 装机产生 0.35 kW；不依赖辐照或温度。
+    unit: "1"
+    valid_range:
+      minimum: 0
+      maximum: null
+  electric_out:
+    type: out
+    carrier: electricity
+    unit: kW
+    valid_range:
+      minimum: 0
+      maximum: null
+equations:
+  variables: {}
+  relations:
+    - id: normalized_generation
+      expression: "electric_out[t] = installed_capacity_kw * unit_output[t]"

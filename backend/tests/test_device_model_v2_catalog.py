@@ -24,6 +24,7 @@ EXPECTED_IDS = {
     "ies.device.cooling_load",
     "ies.device.heat_pump",
     "ies.device.pv",
+    "ies.device.power_curve",
     "ies.device.gas_boiler",
     "ies.device.electric_chiller",
     "ies.device.transport_pipe",
@@ -51,9 +52,9 @@ def _no_source_in_interfaces(doc) -> bool:
 
 
 class TestCatalogFilesExist:
-    def test_catalog_has_ten_yamls(self):
+    def test_catalog_has_eleven_yamls(self):
         files = sorted(p.name for p in CATALOG.glob("*.yaml"))
-        assert len(files) == 10, f"期望 10 个设备文件，实际 {files}"
+        assert len(files) == 11, f"期望 11 个设备文件，实际 {files}"
         assert "prices.yaml" not in files
         assert not any("migration" in n for n in files)
         assert list(CATALOG.glob("*.csv")) == []

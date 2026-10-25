@@ -1531,7 +1531,7 @@ function DeviceSidebar({
                 <div className="mp-source" key={port.name} data-testid={`mp-source-${port.name}`}>
                   <div className="mp-param__head">
                     <span className="mp-param__name">{port.name}</span>
-                    <span className="mp-param__unit">{port.energy_carrier}</span>
+                    <span className="mp-param__unit">{port.unit ?? port.energy_carrier}</span>
                   </div>
                   <Select
                     id={`mp-source-mode-${port.name}`}

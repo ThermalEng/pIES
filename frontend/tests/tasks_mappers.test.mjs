@@ -153,7 +153,7 @@ function summary(over = {}) {
     calc_config_snapshot: { mode: 'planning' },
     device_models: { hp1: {} },
     evaluation: { evaluation_years: 2 },
-    schema_version: '4.0.0',
+    schema_version: '5.0.0',
     random_seed: null,
   }
   const full = tk.taskInputsFromServer({
@@ -163,7 +163,7 @@ function summary(over = {}) {
       frozen_refs: { planning_revision: 9, finance_profile_id: 'rg', finance_revision: 2 },
     },
   })
-  check('冻结快照透传', full.snapshot !== null && full.snapshot.schema_version === '4.0.0' && full.snapshot.dataset_version_ids.length === 2)
+  check('冻结快照透传', full.snapshot !== null && full.snapshot.schema_version === '5.0.0' && full.snapshot.dataset_version_ids.length === 2)
   check('冻结引用透传', full.frozen_refs.planning_revision === 9 && full.frozen_refs.finance_profile_id === 'rg')
   const none = tk.taskInputsFromServer({
     inputs: {
@@ -222,6 +222,23 @@ const PAYMENTS = JSON.stringify([{ t: 0, ratio: '0.6' }, { t: 1, ratio: '0.4' }]
   check('运营年限 <1 拒绝', tk.parseEvaluation(badN) === null)
   const badJ = { ...f, constructionPayments: 'not-json' }
   check('付款非 JSON 拒绝', tk.parseEvaluation(badJ) === null)
+}
+// ISSUE-06 S1: JSON 维护关联项在工作态、提交态与载入态保留同年顺序。
+{
+  const expenses = [
+    { year: 2, amount: '0', currency: 'CNY', terms: [
+      { kind: 'scale_unit_cost', instance_id: 'bat1', property: 'capacity_kwh', unit_cost: { value: '3.25', unit: 'CNY/kWh' } },
+      { kind: 'cost_component_share', instance_id: 'bat1', component: 'upfront_capex', ratio: 0.2 },
+    ] },
+    { year: 2, amount: '100', currency: 'CNY', terms: [] },
+  ]
+  const f = { ...tk.DEFAULT_FORM, constructionPeriod: '0', operationYears: '2', discountRate: '0.08', constructionPayments: '[{"t":0,"ratio":1}]', maintenanceExpenses: JSON.stringify(expenses) }
+  const parsed = tk.parseEvaluation(f)
+  check('关联项提交保持有序列表', parsed !== null && JSON.stringify(parsed.maintenance_expenses) === JSON.stringify(expenses))
+  const working = tk.workingOfForm(f)
+  check('编辑态原文无损保存', working.maintenance_expenses === f.maintenanceExpenses)
+  const restored = tk.formFromWorking({ ...working, maintenance_expenses: expenses })
+  check('冻结列表载入再次提交不丢关联项', JSON.stringify(tk.parseEvaluation(restored)?.maintenance_expenses) === JSON.stringify(expenses))
 }
 // 13. 提交装配
 {
