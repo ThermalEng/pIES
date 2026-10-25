@@ -41,7 +41,7 @@ from iesplan.finance import EffectiveFinanceConfig, EvaluationInput
 from iesplan.modeling import DeviceMathContribution
 
 GENERATOR_ID = "ies.generator.highs_milp"
-GENERATOR_VERSION = "4.0.0"
+GENERATOR_VERSION = "4.1.0"
 GENERATOR_REF = f"{GENERATOR_ID}@{GENERATOR_VERSION}"
 SOLVER_REF = "ies.solver.highs@1.7.2"
 EXECUTOR_REF = "ies.executor.local_process@1.0.0"
@@ -85,6 +85,7 @@ DESCRIPTOR = GeneratorDescriptor(
         "finance.credit_pools",
         "finance.financial_facts",
         "finance.monthly_demand",
+        "finance.monthly_daily_prices",
     ),
     solvers=(SOLVER_REF,),
     executors=(EXECUTOR_REF,),
@@ -222,9 +223,9 @@ class HighsMilpProvider:
         for binding_id in sorted(bindings):
             price_id = bindings[binding_id]["price"]
             kind = finance.energy_prices[price_id].kind
-            if kind not in ("constant", "time_series"):
+            if kind not in ("constant", "time_series", "monthly_daily"):
                 raise ComputationUnavailableError(
-                    f"本 provider 只支持 constant/time_series 计费价格，计费绑定 "
+                    f"本 provider 只支持 constant/time_series/monthly_daily 计费价格，计费绑定 "
                     f"{binding_id!r} 的价格 {price_id!r} 为 {kind!r}",
                     reason="unsupported-tariff",
                 )
