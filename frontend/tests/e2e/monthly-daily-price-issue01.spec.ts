@@ -30,6 +30,9 @@ test.describe('ISSUE-01 月份日曲线财务页面与真实计费', () => {
     await createEngineer(api.request, username, password)
     const token = await loginToken(api.request, username, password)
     const pid = await scaffoldProject(requestJson, api.request, token, projectName, profileId)
+    const originalPlanning = await requestJson(
+      api.request, 'GET', `/api/projects/${pid}/planning-config`, undefined, token,
+    )
     const ds = await requestJson(api.request, 'POST', `/api/projects/${pid}/datasets`, {
       name: 'synthetic-daily-prices',
     }, token)
@@ -98,6 +101,33 @@ test.describe('ISSUE-01 月份日曲线财务页面与真实计费', () => {
     expect(Object.keys(saved.months).sort((a, b) => Number(a) - Number(b)))
       .toEqual(Array.from({ length: 12 }, (_, i) => String(i + 1)))
     expect(saved.months['2'].ref).toBe(febRef)
+
+    // Rebind the unchanged planning model to the new Effective finance revision
+    // and freeze the saved project state, following the actual public task flow.
+    await page.evaluate(async ({ projectId, planning }) => {
+      async function apiCall(method: string, path: string, body?: unknown) {
+        const response = await fetch(path, {
+          method, credentials: 'include',
+          headers: body === undefined ? undefined : { 'Content-Type': 'application/json' },
+          body: body === undefined ? undefined : JSON.stringify(body),
+        })
+        const text = await response.text()
+        if (!response.ok) throw new Error(`${method} ${path}: ${response.status} ${text.slice(0, 500)}`)
+        return JSON.parse(text)
+      }
+      await apiCall('PUT', `/api/projects/${projectId}/planning-config`, {
+        planning_config: planning.planning_config, expected_revision: null,
+      })
+      const draft = await apiCall('GET', `/api/projects/${projectId}`)
+      await apiCall('POST', `/api/projects/${projectId}/versions`, {
+        name: 'ISSUE-01 月份价格冻结',
+        reason: 'snapshot_freeze',
+        expected_revision: draft.draft.revision,
+      })
+      const check = await apiCall('POST', `/api/projects/${projectId}/validation/run`, {})
+      const blocking = (check.report?.diagnostics ?? []).filter((d: { blocking: boolean }) => d.blocking)
+      if (blocking.length) throw new Error('Validation blockers: ' + JSON.stringify(blocking))
+    }, { projectId: pid, planning: originalPlanning })
 
     // Actual public submit and Worker path: K=0, N=1, 2025 non-leap.
     await page.goto(`${APP}/projects/${pid}/tasks`)
