@@ -28,6 +28,7 @@ export type {
   CostBindingDto,
   DriverTargetDto,
   TariffBindingDto,
+  DemandBindingDto,
   DraftCommandDto,
   DraftCommandInput,
   DraftContentConnectionDto,

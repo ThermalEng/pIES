@@ -1,3 +1,3 @@
 export { getBindingDraft, saveBindings } from './api'
 export type { BindingDraft } from './api'
-export type { CostBindingDto, DriverTargetDto, TariffBindingDto } from '../projects'
+export type { CostBindingDto, DriverTargetDto, TariffBindingDto, DemandBindingDto } from '../projects'

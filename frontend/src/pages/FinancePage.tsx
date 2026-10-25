@@ -33,6 +33,7 @@ import { Alert, Button, Card, FormField, Select, Spinner, Textarea } from '../co
 import { translateError, useI18n } from '../i18n'
 import { pt } from '../i18n/pageMessages'
 import { ApiError } from '../types'
+import DemandRateEditor from '../features/finance/components/DemandRateEditor'
 
 export interface FinancePageProps {
   projectId?: number
@@ -80,6 +81,7 @@ export default function FinancePage(props: FinancePageProps) {
   const [options, setOptions] = useState<FinanceProfileOption[]>([])
   const [boundId, setBoundId] = useState<string | null>(null)
   const [boundRegion, setBoundRegion] = useState('')
+  const [boundProfile, setBoundProfile] = useState<Record<string, unknown> | null>(null)
   const [selectedId, setSelectedId] = useState('')
   const [binding, setBinding] = useState(false)
   const [registerText, setRegisterText] = useState('')
@@ -137,11 +139,13 @@ export default function FinancePage(props: FinancePageProps) {
         const current = typeof profile?.id === 'string' ? (profile.id as string) : ''
         setBoundId(current || null)
         setBoundRegion(typeof row.region === 'string' ? (row.region as string) : '')
+        setBoundProfile(doc)
         setSelectedId((prev) => prev || current)
       } catch (err) {
         if (err instanceof ApiError && err.status === 404) {
           setBoundId(null)
           setBoundRegion('')
+          setBoundProfile(null)
         } else {
           throw err
         }
@@ -177,12 +181,14 @@ export default function FinancePage(props: FinancePageProps) {
           const current = typeof profile?.id === 'string' ? (profile.id as string) : ''
           setBoundId(current || null)
           setBoundRegion(typeof row.region === 'string' ? (row.region as string) : '')
+          setBoundProfile(doc)
           setSelectedId(current)
         } catch (err) {
           if (cancelled) return
           if (err instanceof ApiError && err.status === 404) {
             setBoundId(null)
             setBoundRegion('')
+            setBoundProfile(null)
           } else {
             throw err
           }
@@ -203,9 +209,13 @@ export default function FinancePage(props: FinancePageProps) {
 
   if (pid === undefined) return null
   const projectIdNum: number = pid
+  // Any operation which re-reads the same Overrides document must lock both
+  // JSON and structured inputs until the entire save/delete/bind + GET settles.
+  const overridesLocked = savingOverrides || binding || loading
 
   /** 引用/切换画像: 成功提示规划失效(不重建), 失败保留选择。 */
   async function bindSelected(): Promise<void> {
+    if (savingOverrides || binding || loading) return
     if (!selectedId) {
       setFieldError(pt('ies.finance.profile_required'))
       setFieldDetail(null)
@@ -220,6 +230,7 @@ export default function FinancePage(props: FinancePageProps) {
       const doc = res.finance_profile as Record<string, unknown>
       const profile = doc.profile as Record<string, unknown> | undefined
       setBoundId(typeof profile?.id === 'string' ? (profile.id as string) : selectedId)
+      setBoundProfile(doc)
       await refreshOverlays(projectIdNum)
       setPlanningHint(true)
       setNotice({ kind: 'success', text: pt('ies.finance.bound_ok', { id: selectedId }) })
@@ -261,6 +272,7 @@ export default function FinancePage(props: FinancePageProps) {
 
   /** 保存覆盖: 失败保留输入; 409 仅提示冲突, 由用户主动重载。 */
   async function saveOverridesDoc(): Promise<void> {
+    if (savingOverrides || binding || loading) return
     const parsed = parseJsonField(overridesText)
     if (parsed.error || parsed.value === null) {
       setFieldError(parsed.error ?? pt('ies.finance.invalid_json'))
@@ -290,7 +302,7 @@ export default function FinancePage(props: FinancePageProps) {
 
   /** 清空覆盖: 回退 Profile 裸合并; 无覆盖时禁用。 */
   async function clearOverrides(): Promise<void> {
-    if (overridesRevision === null) return
+    if (overridesLocked || overridesRevision === null) return
     setSavingOverrides(true)
     setFieldError(null)
     setFieldDetail(null)
@@ -358,6 +370,7 @@ export default function FinancePage(props: FinancePageProps) {
           <FormField label={pt('ies.finance.profile_select')} htmlFor="finance-profile-select">
             <Select
               id="finance-profile-select"
+              disabled={overridesLocked}
               value={selectedId}
               onChange={(e) => setSelectedId(e.target.value)}
             >
@@ -370,7 +383,7 @@ export default function FinancePage(props: FinancePageProps) {
             </Select>
           </FormField>
           <div style={{ marginTop: 'var(--ies-space-2)' }}>
-            <Button onClick={() => void bindSelected()} loading={binding} disabled={binding || !selectedId}>
+            <Button onClick={() => void bindSelected()} loading={binding} disabled={overridesLocked || !selectedId}>
               {pt('ies.finance.profile_bind')}
             </Button>
           </div>
@@ -385,12 +398,14 @@ export default function FinancePage(props: FinancePageProps) {
           <FormField label={pt('ies.finance.profile_doc')} htmlFor="finance-profile-doc">
             <Textarea
               id="finance-profile-doc"
+              disabled={registering}
               rows={10}
               value={registerText}
               onChange={(e) => setRegisterText(e.target.value)}
               placeholder={pt('ies.finance.profile_doc_placeholder')}
             />
           </FormField>
+          <DemandRateEditor mode="profile" text={registerText} onChange={setRegisterText} disabled={registering} />
           <div style={{ marginTop: 'var(--ies-space-2)' }}>
             <Button onClick={() => void registerDoc()} loading={registering} disabled={registering}>
               {pt('ies.finance.register_btn')}
@@ -414,26 +429,31 @@ export default function FinancePage(props: FinancePageProps) {
           <FormField label={pt('ies.finance.overrides_doc')} htmlFor="finance-overrides-doc">
             <Textarea
               id="finance-overrides-doc"
+              disabled={overridesLocked}
               rows={10}
               value={overridesText}
               onChange={(e) => setOverridesText(e.target.value)}
               placeholder={pt('ies.finance.overrides_doc_placeholder')}
             />
           </FormField>
+          <DemandRateEditor mode="overrides" text={overridesText} onChange={setOverridesText}
+            disabled={overridesLocked}
+            profileId={boundId}
+            profileCharges={(boundProfile?.demand_charges ?? {}) as Record<string, { rate: { value: string; unit: string } }>} />
           <div className="ies-flex" style={{ marginTop: 'var(--ies-space-2)', gap: 'var(--ies-space-2)' }}>
-            <Button onClick={() => void saveOverridesDoc()} loading={savingOverrides} disabled={savingOverrides}>
+            <Button onClick={() => void saveOverridesDoc()} loading={savingOverrides} disabled={overridesLocked}>
               {pt('ies.finance.save_btn')}
             </Button>
             <Button
               variant="secondary"
               onClick={() => void clearOverrides()}
               loading={savingOverrides}
-              disabled={savingOverrides || overridesRevision === null}
+              disabled={overridesLocked || overridesRevision === null}
             >
               {pt('ies.finance.clear_btn')}
             </Button>
             {overridesConflict ? (
-              <Button variant="secondary" onClick={() => void reloadAll(projectIdNum)}>
+              <Button variant="secondary" disabled={overridesLocked} onClick={() => void reloadAll(projectIdNum)}>
                 {pt('ies.finance.conflict_reload')}
               </Button>
             ) : null}

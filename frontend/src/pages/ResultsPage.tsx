@@ -1663,7 +1663,7 @@ function FinancialEvaluationCard({ fin }: { fin: FinancialEvaluationBlock }) {
                 <tr key={a.financial_year}>
                   <td>{t('ies.result.fin_year_row', { j: i + 1, year: a.financial_year })}</td>
                   <td>
-                    {a.energy_net} − {a.variable_om} − {a.fixed_om} − {a.maintenance} = {a.net} {ccy}
+                    {a.energy_net} − {a.variable_om} − {a.fixed_om} − {a.maintenance} − {a.demand_charge} = {a.net} {ccy}
                   </td>
                 </tr>
               ))}
@@ -1671,6 +1671,41 @@ function FinancialEvaluationCard({ fin }: { fin: FinancialEvaluationBlock }) {
           </table>
         </div>
       ) : null}
+      <div style={{ marginTop: 'var(--ies-space-3)' }}>
+        <h3 style={{ fontSize: 'var(--ies-fs-sm)', fontWeight: 700, marginBottom: 'var(--ies-space-2)' }}>
+          {t('ies.result.fin_demand_monthly')}
+        </h3>
+        {fin.monthly_demand.length === 0 ? (
+          <p>{t('ies.result.fin_demand_unbound')}</p>
+        ) : (
+          <div style={{ overflowX: 'auto' }}>
+            <table className="ies-metric-table">
+              <thead><tr>
+                <th>{t('ies.result.fin_demand_binding')}</th>
+                <th>{t('ies.result.fin_demand_charge')}</th>
+                <th>{t('ies.result.fin_demand_month')}</th>
+                <th>{t('ies.result.fin_demand_year')}</th>
+                <th>{t('ies.result.fin_demand_peak')}</th>
+                <th>{t('ies.result.fin_demand_rate')}</th>
+                <th>{t('ies.result.fin_demand_amount')}</th>
+              </tr></thead>
+              <tbody>
+                {fin.monthly_demand.map((r) => (
+                  <tr key={`${r.billing_id}-${r.calendar_year}-${r.calendar_month}`}>
+                    <td>{r.billing_id}</td><td>{r.charge_id}</td>
+                    <td>{r.calendar_year}-{String(r.calendar_month).padStart(2, '0')}</td>
+                    <td>{r.financial_year}</td>
+                    <td>{r.peak_power} {r.peak_unit}</td>
+                    <td>{r.rate.value} {r.rate.unit}</td>
+                    <td>{r.charge} {ccy}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            <p>{t('ies.result.fin_demand_zero_note')}</p>
+          </div>
+        )}
+      </div>
       <TaxCashSections fin={fin} />
       {fin.annual_net_flows.length > 0 ? (
         <div style={{ marginTop: 'var(--ies-space-3)' }}>

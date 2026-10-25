@@ -852,7 +852,21 @@ export interface FinancialEvaluationYear {
   variable_om: string
   fixed_om: string
   maintenance: string
+  demand_charge: string
   net: string
+}
+
+/** One frozen solved meter bill for one natural calendar month (no recomputation). */
+export interface FinancialMonthlyDemand {
+  billing_id: string
+  charge_id: string
+  calendar_year: number
+  calendar_month: number
+  financial_year: number
+  peak_power: string
+  peak_unit: string
+  rate: { value: string; unit: string }
+  charge: string
 }
 
 export interface FinancialEvaluationRow {
@@ -927,6 +941,7 @@ export interface FinancialEvaluationBlock {
   annual_fixed_om: string
   payments_applied: FinancialEvaluationPayment[]
   annual_operation: FinancialEvaluationYear[]
+  monthly_demand: FinancialMonthlyDemand[]
   tax_cash: FinancialTaxCash
   annual_net_flows: string[]
   evaluation: {

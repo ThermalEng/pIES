@@ -7,7 +7,7 @@
 
 from __future__ import annotations
 
-from iesplan.application.models import model_save, project_devices, selector
+from iesplan.application.models import model_save, selector
 from iesplan.application.models.model_save import (
     MODEL_MEDIA_TYPE,
     delete_project_model,
@@ -15,6 +15,11 @@ from iesplan.application.models.model_save import (
     save_project_model,
     save_project_model_in_transaction,
     validate_candidate,
+)
+from iesplan.application.models.project_devices import (
+    load_project_device_base_ids,
+    load_project_device_documents,
+    project_device_type_ids,
 )
 from iesplan.application.models.selector import (
     list_device_types,
@@ -27,8 +32,10 @@ __all__ = [
     "get_project_models",
     "list_device_types",
     "list_project_device_types",
+    "load_project_device_base_ids",
+    "load_project_device_documents",
     "model_save",
-    "project_devices",
+    "project_device_type_ids",
     "save_project_model",
     "save_project_model_in_transaction",
     "selector",

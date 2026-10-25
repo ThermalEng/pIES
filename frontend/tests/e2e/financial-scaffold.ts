@@ -34,6 +34,8 @@ export interface ScaffoldOptions {
   scenario?: ScaffoldScenario
   /** 画像 finance_types(默认 heat_pump_system); 'pv_export' 场景用 pv_system。 */
   financeTypes?: Record<string, unknown>
+  /** Fixture-level registered demand charge catalogue; edited project overrides go through GUI. */
+  demandCharges?: Record<string, { rate: { value: string; unit: string } }>
 }
 
 /** 'pv_export' 场景的财务类别(光伏按 kWp 计建设费与年固定 O&M)。 */
@@ -345,8 +347,10 @@ export async function scaffoldProject(
       ...(opts.extraEnergyPrices ?? {}),
     }
     : (opts.extraEnergyPrices ?? {})
+  const profile = financeProfile(profileId, energyPrices, financeTypes)
+  profile.demand_charges = opts.demandCharges ?? {}
   await requestJson(api, 'POST', '/api/finance-profiles', {
-    finance_profile: financeProfile(profileId, energyPrices, financeTypes),
+    finance_profile: profile,
   }, token)
   await requestJson(api, 'PUT', `/api/projects/${pid}/finance-profile`, {
     profile_ref: { id: profileId },

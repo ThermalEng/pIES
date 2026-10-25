@@ -116,6 +116,7 @@ WRAPPER_KEYS: dict[str, frozenset[str]] = {
         {"template", "document", "diagnostics"}
     ),  # application.model_templates.get_template_detail
     "save_template_draft_endpoint": frozenset({"template"}),
+    "validate_template_yaml_endpoint": frozenset({"diagnostics", "valid"}),
     "validate_template_endpoint": frozenset({"diagnostics", "valid"}),
     "publish_template_endpoint": frozenset({"duplicate", "revision"}),
     "disable_template_endpoint": frozenset({"template"}),
