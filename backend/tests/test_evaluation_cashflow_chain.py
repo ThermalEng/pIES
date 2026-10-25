@@ -914,3 +914,28 @@ def test_monthly_daily_real_task_uses_calendar_tariff_in_cashflow(
     # authority was created, and all 3 distinct bound OIDs are retained.
     for oid in (jan_oid, feb_oid, rest_oid):
         assert any(ref.ref_type == "snapshot_ref" for ref in list_refs(db, oid))
+    # Historical task restores its original finance revision/refs even after
+    # editing the current project's prices to a different source kind.
+    from iesplan.tasks import persistence as tasks_store
+    from iesplan.application import configuration as config_cases
+    task = db.execute(
+        select(Task).where(Task.project_id == pid)
+    ).scalars().first()
+    assert task is not None and task.calc_snapshot_id is not None
+    snapshot = tasks_store.get_snapshot(db, task.calc_snapshot_id)
+    assert snapshot is not None
+    frozen_old = worker_app.load_compute_inputs(db, pid, snapshot)[2].prices[0]
+    config_cases.save_finance_overrides(db, pid, {
+        "schema": "ies.finance-overrides",
+        "schema_version": "5.0.0",
+        "profile_ref": {"id": profile["profile"]["id"]},
+        "energy_prices": {"grid_import": {
+            "kind": "constant",
+            "value": {"value": "99", "unit": "CNY/kWh"},
+        }},
+    }, None, user.id)
+    restored = worker_app.load_compute_inputs(db, pid, snapshot)[2].prices[0]
+    assert restored.values == frozen_old.values
+    assert restored.source == frozen_old.source
+    assert restored.source["months"]["2"] == feb_oid
+
