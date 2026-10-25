@@ -135,6 +135,12 @@ extensions: {}
 
 该块随已请求的 `solution` 且存在可用数学解时发布；未请求solution或无可用解时缺席。它不增加 CalculationConfig 输出词汇，不改变 ComputeResult 顶层身份与状态或通用 Bundle manifest。适配器只恢复业务事实，不重算税务、猜列名或改写期间；内部可信声明不增加重复结构、摘要或完整性复核。
 
+### 关联维护金额协议
+
+以下为生效目标契约，尚未实现。配套 `ies.generator.highs_milp@5.0.0` 与 `ies.result-adapter.highs@5.0.0` 将内部 `financial_facts.annual_operation[].maintenance` 声明从固定金额字符串改为既有 `{constant, terms}` 仿射节点；即使是确定金额也使用常数节点。适配器按同一次主解求值，公开输出仍为十进制金额字符串。该必需声明形态的破坏性变化提升配套主版本，不保留字符串／节点双轨解释。
+
+维护现金、进项税与所得税扣除均来自同一逐笔金额表达式，年度维护与净额声明保持同源。公开财务结果不增加逐笔来源字段，`ies.financial-evaluation` 仍为 `2.0.0`；通用 Bundle、ComputeResult、solver 与 executor 协议不变。此目标不改写上文 `4.0.0` 的既有声明语义。
+
 ## 运行时职责
 
 SolverRuntime 是求解器无关的受控执行层，只负责：
