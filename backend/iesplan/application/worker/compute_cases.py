@@ -282,8 +282,7 @@ def _materialize_price_series(
     Input validity belongs to the single submit boundary; these reads are
     trusted and do not reparse the full upload protocol.
     """
-    from iesplan.finance import read_trusted_price_values
-    from iesplan.finance.monthly_daily import expand_monthly_daily_prices
+    from iesplan.finance import expand_monthly_daily_prices, read_trusted_price_values
 
     doc = json.loads(artifact.canonical_text)
     baseline = doc["project_baseline"]
