@@ -9,11 +9,21 @@ from decimal import Decimal
 import pytest
 
 from iesplan.core.contracts import horizon_point_count
+from iesplan.finance import (
+    DAY_POINTS as EXPORTED_DAY_POINTS,
+    expand_monthly_daily_prices as exported_expand_monthly_daily_prices,
+)
 from iesplan.finance.monthly_daily import (
     DAY_POINTS,
     check_monthly_daily_curves,
     expand_monthly_daily_prices,
 )
+
+
+def test_application_calendar_entrypoints_are_exported_by_finance_facade():
+    # One implementation / points table, not an application-side duplication.
+    assert EXPORTED_DAY_POINTS is DAY_POINTS
+    assert exported_expand_monthly_daily_prices is expand_monthly_daily_prices
 
 
 def curves(n: int):
