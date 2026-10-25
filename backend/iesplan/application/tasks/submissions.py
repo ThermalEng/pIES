@@ -1072,7 +1072,7 @@ def _check_submit_coverage(
     is compared separately for each referring month.
     """
     from iesplan.finance import parse_price_series_file
-    from iesplan.finance.monthly_daily import DAY_POINTS
+    from iesplan.finance import DAY_POINTS
     from iesplan.storage.contracts import ObjectCorruptError
 
     canonical = json.loads(artifact.canonical_text)
