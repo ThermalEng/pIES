@@ -61,7 +61,7 @@ jobs:
             pull_request) base="$PR_BASE" ;;
             push) base="$PUSH_BEFORE" ;;
             workflow_dispatch) base="$(git rev-parse HEAD^ 2>/dev/null || true)" ;;
-            schedule) printf '__FULL__\\0' > "$RUNNER_TEMP/pies-changed.bin"; exit 0 ;;
+            schedule) printf '__FULL__\0' > "$RUNNER_TEMP/pies-changed.bin"; exit 0 ;;
             *) echo "::error::Unsupported GitHub event: $EVENT_NAME"; exit 1 ;;
           esac
           if [[ -z "$base" || "$base" =~ ^0+$ ]] || ! git cat-file -e "${base}^{commit}"; then
