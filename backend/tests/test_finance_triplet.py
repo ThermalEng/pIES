@@ -509,3 +509,99 @@ def test_effective_from_yaml_rejects_non_effective_document():
         effective_from_yaml("schema: ies.finance-profile\nschema_version: \"3.0.0\"\n")
     with pytest.raises(FinanceTripletError):
         effective_from_yaml("not: a-mapping-with-schema\n")
+
+
+# ---------------------------------------------------------------------------
+# 0.15 ISSUE-01: explicitly frozen 12-month daily price source
+# ---------------------------------------------------------------------------
+
+def _monthly_daily_source(*, ref_prefix: str = "daily", resolution: str = "1h", unit: str = "CNY/kWh") -> dict:
+    count = {"15min": 96, "30min": 48, "1h": 24}[resolution]
+    return {
+        "kind": "monthly_daily",
+        "months": {
+            str(month): {
+                "ref": f"{ref_prefix}-{month % 3}",
+                "series_meta": {"resolution": resolution, "point_count": count, "unit": unit},
+            }
+            for month in range(1, 13)
+        },
+    }
+
+
+def test_monthly_daily_profile_and_effective_roundtrip_deep_freeze() -> None:
+    payload = _profile_payload()
+    original = payload["energy_prices"]["grid_import"]
+    payload["energy_prices"]["grid_import"] = {
+        "carrier": original["carrier"], "direction": original["direction"],
+        **_monthly_daily_source(),
+    }
+    profile = FinanceProfile.from_dict(payload)
+    assert profile.to_dict() == payload
+    price = profile.energy_prices["grid_import"]
+    assert price.months["1"].ref == price.months["4"].ref
+    with pytest.raises(TypeError):
+        price.months["1"] = price.months["2"]  # type: ignore[index]
+    effective = merge_effective(profile, None)
+    assert EffectiveFinanceConfig.from_dict(effective.to_dict()).to_dict() == effective.to_dict()
+    payload["energy_prices"]["grid_import"]["months"]["1"]["ref"] = "replaced-current"
+    assert effective.energy_prices["grid_import"].months["1"].ref != "replaced-current"
+
+
+@pytest.mark.parametrize("mutation, message", [
+    ("missing", "missing"),
+    ("extra", "extra"),
+    ("short_day", "完整一天"),
+    ("wrong_unit", "unit 必须一致"),
+    ("no_ref", "ref 必须为非空字符串"),
+    ("extra_field", "必须且只能"),
+])
+def test_monthly_daily_rejects_incomplete_or_conflicting_sources(mutation: str, message: str) -> None:
+    payload = _profile_payload()
+    base = payload["energy_prices"]["grid_import"]
+    price = {"carrier": base["carrier"], "direction": base["direction"], **_monthly_daily_source()}
+    months = price["months"]
+    if mutation == "missing":
+        del months["12"]
+    elif mutation == "extra":
+        months["13"] = dict(months["1"])
+    elif mutation == "short_day":
+        months["2"]["series_meta"]["point_count"] = 23
+    elif mutation == "wrong_unit":
+        months["2"]["series_meta"]["unit"] = "USD/kWh"
+    elif mutation == "no_ref":
+        months["2"]["ref"] = ""
+    elif mutation == "extra_field":
+        price["ref"] = "other"
+    payload["energy_prices"]["grid_import"] = price
+    with pytest.raises(FinanceTripletError, match=message):
+        FinanceProfile.from_dict(payload)
+
+
+def test_monthly_daily_override_entire_source_and_cross_kind() -> None:
+    from copy import deepcopy
+
+    profile = FinanceProfile.from_dict(_profile_payload())
+    before = profile.energy_prices["grid_import"].to_dict()
+    override = {
+        "schema": "ies.finance-overrides",
+        "schema_version": "5.0.0",
+        "profile_ref": {"id": profile.profile_id},
+        "energy_prices": {"grid_import": _monthly_daily_source()},
+    }
+    parsed = FinanceOverrides.from_dict(override, profile=profile)
+    merged = merge_effective(profile, parsed)
+    assert merged.energy_prices["grid_import"].kind == "monthly_daily"
+    assert merged.energy_prices["grid_import"].direction == before["direction"]
+    assert merged.energy_prices["grid_import"].months["1"].ref == "daily-1"
+    assert FinanceOverrides.from_dict(parsed.to_dict(), profile=profile).to_dict() == parsed.to_dict()
+    changed = deepcopy(override)
+    changed["energy_prices"]["grid_import"]["months"]["1"]["ref"] = "second"
+    assert merge_effective(profile, FinanceOverrides.from_dict(changed, profile=profile)).to_dict() != merged.to_dict()
+    invalid = deepcopy(override)
+    del invalid["energy_prices"]["grid_import"]["months"]["2"]
+    with pytest.raises(FinanceTripletError, match="missing"):
+        FinanceOverrides.from_dict(invalid, profile=profile)
+    change_kind = deepcopy(override)
+    change_kind["energy_prices"]["grid_import"] = {"kind": "constant", "value": before["value"]}
+    assert merge_effective(profile, FinanceOverrides.from_dict(change_kind, profile=profile)).energy_prices["grid_import"].kind == "constant"
