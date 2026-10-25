@@ -88,7 +88,7 @@ def _hand_const() -> float:
 def _finance_payload() -> dict:
     return {
         "schema": "ies.finance-profile",
-        "schema_version": "4.0.0",
+        "schema_version": "5.0.0",
         "profile": {
             "id": "npv-demo",
             "region": "CN-North",
@@ -662,7 +662,7 @@ equations:
 def _choice_finance_payload() -> dict:
     return {
         "schema": "ies.finance-profile",
-        "schema_version": "4.0.0",
+        "schema_version": "5.0.0",
         "profile": {
             "id": "npv-choice",
             "region": "CN-North",
