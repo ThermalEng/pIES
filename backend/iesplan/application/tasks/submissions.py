@@ -835,19 +835,20 @@ def _check_tax_evaluation_refs(
 
 
 def _check_demand_capabilities(artifact: Any, generator_ref: object, capabilities: tuple[str, ...]) -> None:
-    """D1: fail at task submission until the selected provider declares D2 support.
+    """实际需量绑定须同时具备精确月峰和同次财务事实恢复能力。
 
-    Read the already-issued canonical assembly rather than the mutable draft.
-    Unbound demand rate catalogue entries do not trigger a compute requirement.
+    仅消费已签发装配与已解析生成器描述符；闲置费项不要求支持。
     """
     bindings = json.loads(artifact.canonical_text)["demand_bindings"]
-    if bindings and "finance.monthly_demand" not in capabilities:
+    required = {"finance.monthly_demand", "finance.financial_facts"}
+    missing = sorted(required.difference(capabilities)) if bindings else []
+    if missing:
         raise InvalidRequestError(
-            "所选生成器尚不支持自然月需量计费；任务未提交且费用不会被忽略",
+            "所选生成器缺自然月需量及同次财务事实能力；不忽略费用",
             code="TASK-REQ-007",
             params={
                 "generator": generator_ref,
-                "missing_capabilities": ["finance.monthly_demand"],
+                "missing_capabilities": missing,
                 "fields": [f"demand_bindings.{key}" for key in sorted(bindings)],
             },
             location={"object_type": "task", "field": f"demand_bindings.{sorted(bindings)[0]}"},
