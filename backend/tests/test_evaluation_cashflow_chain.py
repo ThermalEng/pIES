@@ -917,7 +917,6 @@ def test_monthly_daily_real_task_uses_calendar_tariff_in_cashflow(
     # Historical task restores its original finance revision/refs even after
     # editing the current project's prices to a different source kind.
     from iesplan.tasks import persistence as tasks_store
-    from iesplan.application import configuration as config_cases
     task = db.execute(
         select(Task).where(Task.project_id == pid)
     ).scalars().first()
@@ -925,15 +924,35 @@ def test_monthly_daily_real_task_uses_calendar_tariff_in_cashflow(
     snapshot = tasks_store.get_snapshot(db, task.calc_snapshot_id)
     assert snapshot is not None
     frozen_old = worker_app.load_compute_inputs(db, pid, snapshot)[2].prices[0]
-    config_cases.save_finance_overrides(db, pid, {
-        "schema": "ies.finance-overrides",
-        "schema_version": "5.0.0",
-        "profile_ref": {"id": profile["profile"]["id"]},
-        "energy_prices": {"grid_import": {
-            "kind": "constant",
-            "value": {"value": "99", "unit": "CNY/kWh"},
-        }},
-    }, None, user.id)
+
+    # Binding a Profile creates its initial empty Overrides revision. Read the
+    # actual public revision and submit it as the optimistic-lock precondition;
+    # None is valid only before the very first Overrides revision exists.
+    headers = _h(client, user)
+    current = client.get(f"/api/projects/{pid}/finance-overrides", headers=headers)
+    assert current.status_code == 200, current.text
+    expected_revision = current.json()["revision"]
+    assert isinstance(expected_revision, int)
+    updated = client.put(
+        f"/api/projects/{pid}/finance-overrides",
+        json={
+            "finance_overrides": {
+                "schema": "ies.finance-overrides",
+                "schema_version": "5.0.0",
+                "profile_ref": {"id": profile["profile"]["id"]},
+                "energy_prices": {"grid_import": {
+                    "kind": "constant",
+                    "value": {"value": "99", "unit": "CNY/kWh"},
+                }},
+            },
+            "expected_revision": expected_revision,
+        },
+        headers=headers,
+    )
+    assert updated.status_code == 200, updated.text
+    assert updated.json()["revision"] > expected_revision
+    # A current override cannot mutate the historical computation's frozen
+    # Effective finance lineage, monthly map, or retained source references.
     restored = worker_app.load_compute_inputs(db, pid, snapshot)[2].prices[0]
     assert restored.values == frozen_old.values
     assert restored.source == frozen_old.source
