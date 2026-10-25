@@ -154,6 +154,7 @@ jobs:
       - name: Set up Docker Buildx for dependency cache
         uses: docker/setup-buildx-action@v3
       - name: Expose GitHub Actions cache runtime
+        if: needs.select.outputs.browser_total == '4'
         uses: crazy-max/ghaction-github-runtime@v4
       - name: Build backend test image (read-only remote cache)
         run: |
@@ -205,7 +206,9 @@ jobs:
       BROWSER_LANE: ${{ matrix.shard.lane }}
       BROWSER_TOTAL: ${{ needs.select.outputs.browser_total }}
       SPECIAL_DEVICE: ${{ needs.select.outputs.special_device }}
-      CI_DOCKER_CACHE: "true"
+      # On small suites, Buildx/remote cache setup costs more than it saves.
+      # Enable remote layer cache only for the expensive 4-lane browser suite.
+      CI_DOCKER_CACHE: ${{ needs.select.outputs.browser_total == '4' && 'true' || 'false' }}
       # Only lane 1 exports the shared backend cache, preventing multi-lane
       # writes to the same scope on master push. PRs only read the
       # default-branch cache, preventing untrusted PR cache poisoning.
@@ -215,8 +218,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Set up Docker Buildx
+        if: needs.select.outputs.browser_total == '4'
         uses: docker/setup-buildx-action@v3
       - name: Set up Docker Compose with cache support
+        if: needs.select.outputs.browser_total == '4'
         uses: docker/setup-compose-action@v2
       - name: Expose GitHub Actions cache runtime
         uses: crazy-max/ghaction-github-runtime@v4
