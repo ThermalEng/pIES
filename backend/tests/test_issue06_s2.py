@@ -78,7 +78,15 @@ def _builder(
             }}}
             for name, cost in (("same", "200"), ("alternative", "220"))
         },
-        "energy_prices": {}, "demand_charges": {},
+        # 财务画像契约要求至少一个合法价格；本测试仅研究维护费用，
+        # 故用未被 tariff_bindings 引用的价格，不引入任何能源现金流。
+        "energy_prices": {
+            "unused_purchase": {
+                "carrier": "electricity", "direction": "purchase", "kind": "constant",
+                "value": {"value": "0.1", "unit": f"{currency}/kWh"},
+            },
+        },
+        "demand_charges": {},
         "taxes": ({
             "vat_tag": {"display_name": "维护增值税", "tax_type": "vat", "applies_to": "same.upfront_capex"},
             "income_tag": {"display_name": "维护所得税", "tax_type": "income_tax", "applies_to": "same.upfront_capex"},
