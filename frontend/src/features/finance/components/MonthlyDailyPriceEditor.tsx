@@ -105,6 +105,9 @@ export default function MonthlyDailyPriceEditor({
 }: Props) {
   const doc = parseDoc(text)
   const specified = priceCatalog(doc)
+  // Only valid drafts render editable candidates; keep a non-null catalog for
+  // type-safe lookup without altering or replacing invalid JSON text.
+  const safeSpecified: Record<string, Price> = specified ?? {}
   const boundPrices = priceCatalog({ energy_prices: profilePrices })
   const valid = (!text.trim() || doc !== null) && specified !== null && boundPrices !== null
   const candidates: Record<string, Price> = valid
@@ -159,8 +162,8 @@ export default function MonthlyDailyPriceEditor({
       {!valid && <Alert variant="error">价格 JSON 条目结构不完整，请在文本框中修正后继续编辑；当前草稿会原样保留。</Alert>}
       {valid && !Object.keys(candidates).length && <p>请先填写画像的能源价格条目，或选择项目画像。</p>}
       {Object.entries(candidates).sort(([a], [b]) => a.localeCompare(b)).map(([id, baseline]) => {
-        const isOverridden = mode === 'overrides' && Object.hasOwn(specified, id)
-        const current = isOverridden ? specified[id] : baseline
+        const isOverridden = mode === 'overrides' && Object.hasOwn(safeSpecified, id)
+        const current = isOverridden ? safeSpecified[id] : baseline
         const kindValue = mode === 'overrides' && !isOverridden ? 'inherit' : current.kind
         const own = mode === 'profile' || isOverridden
         const monthlyEntry = own && current.kind === 'monthly_daily' ? current : null
