@@ -12,7 +12,7 @@
 |---|---|---|---|
 | [设备模型 YAML](formats/device-model-yaml.md) | `*.device.yaml` | 描述设备身份、非时变技术常量、序列接口和声明式方程 | 设备目录、GUI schema、装配与技术模型校验 |
 | [设备数据 CSV](formats/device-data-csv.md) | `*.data.csv` | 提供带 step、采样间隔、单位和来源语义的设备序列数据 | 数据导入器、装配校验、计算阶段序列物化 |
-| [价格序列 CSV](formats/price-series-csv.md) | `*.price.csv` | 提供与全期时轴同轴的能源价格序列（`step` 从 0 连续，价格为有限 Decimal，正/零/负均可） | 数据导入器（同上传入口）、任务提交覆盖核对、计算阶段价格物化 |
+| [价格序列 CSV](formats/price-series-csv.md) | `*.price.csv` | 提供能源全期价格或月份规则引用的完整日曲线（`step` 从 0 连续，价格为有限 Decimal，正/零/负均可） | 数据导入器（同上传入口）、任务提交来源核对、计算阶段价格物化 |
 | [地区 FinanceProfile YAML](formats/finance-yaml.md) | `*.finance-profile.yaml` / `finance_profile.yaml` | 注册地区财务基准：成本分量、能源价格、税务规则与抵扣池 | 财务合并器与装配校验 |
 | [项目 FinanceOverrides YAML](formats/finance-yaml.md) | `*.finance-overrides.yaml` / `finance_overrides.yaml` | 引用 `FinanceProfile {id}`，稀疏覆盖既有成本、定价和税务参数 | 财务合并器 |
 | [有效财务快照](formats/finance-yaml.md) | `*.effective-finance.yaml` / `effective_finance.yaml` | 合并器确定性产物：来源标识与完整成本、价格、规则及抵扣池 | 装配校验、计算生成与求解 |
