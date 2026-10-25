@@ -9,6 +9,7 @@ type Props = {
   mode: 'profile' | 'overrides'
   text: string
   onChange: (text: string) => void
+  disabled?: boolean
   profileId?: string | null
   profileCharges?: Catalog
 }
@@ -37,7 +38,7 @@ function readCharges(doc: Record<string, unknown> | null): Catalog | null {
   return source as Catalog
 }
 
-export default function DemandRateEditor({ mode, text, onChange, profileId, profileCharges = {} }: Props) {
+export default function DemandRateEditor({ mode, text, onChange, disabled = false, profileId, profileCharges = {} }: Props) {
   const [newId, setNewId] = useState('')
   const [newRate, setNewRate] = useState('')
   const [message, setMessage] = useState<string | null>(null)
@@ -49,6 +50,7 @@ export default function DemandRateEditor({ mode, text, onChange, profileId, prof
     : Object.values(profileCharges)[0]?.rate.unit.split('/')[0] ?? '—'
 
   function replaceCharges(next: Catalog) {
+    if (disabled) return
     // Overrides have an existing empty-document state (404); start its canonical
     // authoring envelope, preserving the exact Profile identity selected by user.
     const base = doc ?? (mode === 'overrides' && profileId ? {
@@ -63,6 +65,7 @@ export default function DemandRateEditor({ mode, text, onChange, profileId, prof
   }
 
   function editRate(id: string, value: string, unit: string) {
+    if (disabled) return
     const next = { ...charges }
     if (mode === 'overrides' && value === '') delete next[id]
     else next[id] = { rate: { value, unit } }
@@ -86,10 +89,10 @@ export default function DemandRateEditor({ mode, text, onChange, profileId, prof
               <FormField label={`${id} (${unit})`} htmlFor={`${mode}-demand-${id}`}>
                 <Input id={`${mode}-demand-${id}`} value={value}
                   placeholder={mode === 'overrides' ? `${pt('ies.finance.demand_inherit')}: ${entry.rate.value}` : undefined}
-                  onChange={(e) => editRate(id, e.target.value, unit)} disabled={!!text.trim() && (!doc || !validCharges)} />
+                  onChange={(e) => editRate(id, e.target.value, unit)} disabled={disabled || (!!text.trim() && (!doc || !validCharges))} />
               </FormField>
             </div>
-            <Button variant="secondary" size="sm" disabled={!!text.trim() && (!doc || !validCharges)}
+            <Button variant="secondary" size="sm" disabled={disabled || (!!text.trim() && (!doc || !validCharges))}
               onClick={() => { const next = { ...charges }; delete next[id]; replaceCharges(next) }}>
               {pt(mode === 'profile' ? 'ies.finance.demand_remove' : 'ies.finance.demand_revert')}
             </Button>
@@ -99,12 +102,12 @@ export default function DemandRateEditor({ mode, text, onChange, profileId, prof
       {mode === 'profile' && (
         <div className="ies-flex" style={{ marginTop: 'var(--ies-space-3)', alignItems: 'end', flexWrap: 'wrap', gap: 'var(--ies-space-2)' }}>
           <FormField label={pt('ies.finance.demand_id')} htmlFor="finance-demand-new-id">
-            <Input id="finance-demand-new-id" value={newId} onChange={(e) => setNewId(e.target.value)} />
+            <Input id="finance-demand-new-id" value={newId} onChange={(e) => setNewId(e.target.value)} disabled={disabled} />
           </FormField>
           <FormField label={`${pt('ies.finance.demand_rate')} (${currency}/kW)`} htmlFor="finance-demand-new-rate">
-            <Input id="finance-demand-new-rate" value={newRate} onChange={(e) => setNewRate(e.target.value)} />
+            <Input id="finance-demand-new-rate" value={newRate} onChange={(e) => setNewRate(e.target.value)} disabled={disabled} />
           </FormField>
-          <Button variant="secondary" disabled={!!text.trim() && (!doc || !validCharges)} onClick={() => {
+          <Button variant="secondary" disabled={disabled || (!!text.trim() && (!doc || !validCharges))} onClick={() => {
             const id = newId.trim()
             if (!id || !newRate || currency === '—' || Object.hasOwn(charges, id)) {
               setMessage(pt('ies.finance.demand_add_invalid'))

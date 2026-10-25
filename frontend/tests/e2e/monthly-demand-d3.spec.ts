@@ -99,6 +99,175 @@ test.describe('D3 natural-month demand GUI → task → export', () => {
     await api.close()
   })
 
+
+  test('overrides save/readback and profile switch lock both editors; 409 keeps edits until explicit reload', async ({ browser }) => {
+    const username = uniqueName('d3-lock')
+    const password = strongPassword('Init')
+    const api = await browser.newContext({ baseURL: APP })
+    await createEngineer(api.request, username, password)
+    const token = await loginToken(api.request, username, password)
+    const firstId = uniqueName('d3-lock-first')
+    const secondId = uniqueName('d3-lock-second')
+    const firstProfile = financeProfile(firstId)
+    firstProfile.demand_charges = { peak_fee: { rate: { value: '12', unit: 'CNY/kW' } } }
+    const secondProfile = financeProfile(secondId)
+    secondProfile.demand_charges = { peak_fee: { rate: { value: '6', unit: 'CNY/kW' } } }
+    for (const profile of [firstProfile, secondProfile]) {
+      await requestJson(api.request, 'POST', '/api/finance-profiles', { finance_profile: profile }, token)
+    }
+    const created = await requestJson(api.request, 'POST', '/api/projects', {
+      name: uniqueName('D3 在途覆盖'), baseline_resolution: '1h',
+      baseline_start_year: 2025, baseline_scenario_mode: 'single',
+    }, token)
+    const pid: number = created.project.id
+    await requestJson(api.request, 'PUT', `/api/projects/${pid}/finance-profile`, {
+      profile_ref: { id: firstId },
+    }, token)
+
+    const context = await browser.newContext()
+    const page = await context.newPage()
+    const session = await createSession(page, username, password)
+    await page.goto(`${APP}/projects/${pid}/finance`)
+    const overridesPath = `/api/projects/${pid}/finance-overrides`
+    const rate = page.getByRole('textbox', { name: 'peak_fee (CNY/kW)' })
+    const raw = page.locator('#finance-overrides-doc')
+    const save = page.getByRole('button', { name: /保存覆盖|Save overrides/i })
+    const clear = page.getByRole('button', { name: /清空覆盖|Clear overrides/i })
+    const revert = page.getByRole('button', { name: /撤销项目覆盖|Revert override/i })
+    const select = page.locator('#finance-profile-select')
+    const bind = page.getByRole('button', { name: /引用\\/切换|Reference \\/ switch/i })
+    await expect(rate).toBeEnabled()
+
+    // Make a real first GUI save, so the clear action has an active revision.
+    await rate.fill('20')
+    await save.click()
+    await expect(page.getByText(/覆盖已保存|Overrides saved/i)).toBeVisible()
+    await expect(rate).toHaveValue('20')
+    await expect(clear).toBeEnabled()
+
+    // Withhold the actual PUT, then the actual GET re-read separately. Nothing
+    // is mocked or fabricated: both requests continue to the real backend.
+    let releasePut!: () => void
+    let releaseRead!: () => void
+    const heldPut = new Promise<void>((resolve) => { releasePut = resolve })
+    const heldRead = new Promise<void>((resolve) => { releaseRead = resolve })
+    let putEntered = false
+    let readEntered = false
+    let holdNextRead = false
+    await page.route(`**${overridesPath}`, async (route) => {
+      if (route.request().method() === 'PUT') {
+        putEntered = true
+        await heldPut
+        holdNextRead = true
+      } else if (route.request().method() === 'GET' && holdNextRead) {
+        readEntered = true
+        holdNextRead = false
+        await heldRead
+      }
+      await route.continue()
+    })
+    await rate.fill('30')
+    await save.click()
+    await expect.poll(() => putEntered).toBe(true)
+    await expect(rate).toBeDisabled()
+    await expect(raw).toBeDisabled()
+    await expect(revert).toBeDisabled()
+    await expect(clear).toBeDisabled()
+    await expect(select).toBeDisabled()
+    await expect(bind).toBeDisabled()
+    expect(JSON.parse(await raw.inputValue()).demand_charges.peak_fee.rate.value).toBe('30')
+
+    releasePut()
+    await expect.poll(() => readEntered).toBe(true)
+    await expect(rate).toBeDisabled()
+    await expect(raw).toBeDisabled()
+    await expect(revert).toBeDisabled()
+    await expect(select).toBeDisabled()
+    releaseRead()
+    await expect(save).toBeEnabled()
+    await expect(rate).toHaveValue('30')
+    await expect(raw).toBeEnabled()
+    await expect(revert).toBeEnabled()
+    await expect(select).toBeEnabled()
+    await page.unroute(`**${overridesPath}`)
+    const saved = await browserJson<{ revision: number; finance_overrides: Record<string, unknown> }>(
+      page, 'GET', overridesPath,
+    )
+    expect((saved.finance_overrides.demand_charges as { peak_fee: { rate: { value: string } } }).peak_fee.rate.value).toBe('30')
+
+    // A concurrent update creates a real 409. UI retains the unsaved edit and
+    // reloads the newer backend document ONLY on explicit user action.
+    await rate.fill('40')
+    await browserJson(page, 'PUT', overridesPath, {
+      finance_overrides: {
+        ...saved.finance_overrides,
+        demand_charges: { peak_fee: { rate: { value: '35', unit: 'CNY/kW' } } },
+      },
+      expected_revision: saved.revision,
+    })
+    await save.click()
+    const reload = page.getByRole('button', { name: /重载最新草稿|Reload latest draft/i })
+    await expect(reload).toBeVisible()
+    await expect(rate).toHaveValue('40')
+    expect(JSON.parse(await raw.inputValue()).demand_charges.peak_fee.rate.value).toBe('40')
+    await reload.click()
+    await expect(rate).toHaveValue('35')
+
+    // Profile switch also replaces this same document. Lock both edit paths
+    // until the switch PUT AND its ensuing GET re-read complete.
+    let releaseBind!: () => void
+    let releaseSwitchRead!: () => void
+    const heldBind = new Promise<void>((resolve) => { releaseBind = resolve })
+    const heldSwitchRead = new Promise<void>((resolve) => { releaseSwitchRead = resolve })
+    let bindEntered = false
+    let switchReadEntered = false
+    let armSwitchRead = false
+    await page.route(`**/api/projects/${pid}/finance-profile`, async (route) => {
+      if (route.request().method() === 'PUT') {
+        bindEntered = true
+        await heldBind
+        armSwitchRead = true
+      }
+      await route.continue()
+    })
+    await page.route(`**${overridesPath}`, async (route) => {
+      if (route.request().method() === 'GET' && armSwitchRead) {
+        switchReadEntered = true
+        armSwitchRead = false
+        await heldSwitchRead
+      }
+      await route.continue()
+    })
+    await select.selectOption(secondId)
+    await bind.click()
+    await expect.poll(() => bindEntered).toBe(true)
+    await expect(rate).toBeDisabled()
+    await expect(raw).toBeDisabled()
+    await expect(revert).toBeDisabled()
+    await expect(select).toBeDisabled()
+    await expect(save).toBeDisabled()
+    releaseBind()
+    await expect.poll(() => switchReadEntered).toBe(true)
+    await expect(rate).toBeDisabled()
+    await expect(raw).toBeDisabled()
+    await expect(revert).toBeDisabled()
+    releaseSwitchRead()
+    await expect(page.locator('dd').filter({ hasText: secondId }).first()).toBeVisible()
+    await expect(rate).toBeEnabled()
+    await expect(raw).toBeEnabled()
+    await expect(select).toBeEnabled()
+    await expect(bind).toBeEnabled()
+
+    // A real revision conflict is the only expected non-successful write.
+    // Switches may produce the legitimate no-overrides GET 404.
+    session.assertNoErrors([
+      { method: 'PUT', path: overridesPath, status: 409, times: 1 },
+      { method: 'GET', path: overridesPath, status: 404 },
+    ])
+    await context.close()
+    await api.close()
+  })
+
   test('structured rate/explicit meters persist and completed task publishes identical bills', async ({ browser }) => {
     const name = uniqueName('d3-demand')
     const password = strongPassword('Init')
