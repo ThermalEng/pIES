@@ -609,11 +609,27 @@ export interface EvaluationConstructionPayment {
   ratio: number
 }
 
-/** 评价确认维护条目(公开输入形态: year 对应 CF[year], amount 为十进制定点字符串, 禁止 JSON number)。 */
+/** 维护金额关联项(有序；组合项仍属于同一笔维护付款)。 */
+export type EvaluationMaintenanceTerm =
+  | {
+      kind: 'scale_unit_cost'
+      instance_id: string
+      property: string
+      unit_cost: { value: string; unit: string }
+    }
+  | {
+      kind: 'cost_component_share'
+      instance_id: string
+      component: 'upfront_capex'
+      ratio: number
+    }
+
+/** 评价确认维护条目(固定金额可为 "0"，关联项可省略；冻结统一为 terms 列表)。 */
 export interface EvaluationMaintenanceExpense {
   year: number
   amount: string
   currency: string
+  terms?: EvaluationMaintenanceTerm[]
 }
 
 export interface TaskCreateInput {

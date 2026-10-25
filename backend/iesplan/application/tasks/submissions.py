@@ -82,6 +82,8 @@ from iesplan.core.diagnostics import (
 from iesplan.core.errors import AppError, ConflictError, NotFoundError
 from iesplan.core.idgen import new_id
 from iesplan.core.jsonutil import jsonable
+from iesplan.core.units import UnitError, dims_of, normalize_unit
+from iesplan.finance import maintenance_term_to_dict as finance_term_to_dict
 from iesplan.identity.contracts import UserRecord
 from iesplan.project.contracts import ProjectRecord, ProjectVersionRecord
 from iesplan.storage import (
@@ -638,6 +640,7 @@ def _assemble_snapshot(
                 "year": expense.year,
                 "amount": expense.amount,
                 "currency": expense.currency,
+                "terms": [finance_term_to_dict(term) for term in expense.terms],
             }
             for expense in evaluation.maintenance_expenses
         ],
@@ -668,6 +671,7 @@ def _assemble_snapshot(
     )
     assert gate.artifact is not None
     artifact = gate.artifact
+    device_models = _freeze_device_models(artifact, gate.device_documents)
     # 提交边界运营期覆盖核对(装配不核对点数; 已确认运营年限后在此阻断):
     # 规范文本基线 + 冻结财务快照时变序列点数 == 运营期总点数。
     _check_submit_coverage(db=db, artifact=artifact, evaluation=frozen_evaluation, effective=effective)
@@ -687,25 +691,9 @@ def _assemble_snapshot(
     _check_monthly_daily_capabilities(
         artifact, effective, calc_config.get("generator"), generator_capabilities
     )
-    # 提交边界维护币种核对(本次闸门实际消费的不可变快照口径; 不一致阻断):
-    # 维护清单币种须与有效财务配置一致, 空清单直接通过。
-    for expense in evaluation.maintenance_expenses:
-        if expense.currency != effective.currency:
-            raise InvalidRequestError(
-                "维护/换新支出币种须与有效财务配置一致",
-                code="TASK-REQ-015",
-                params={
-                    "year": expense.year,
-                    "currency": expense.currency,
-                    "effective_currency": effective.currency,
-                },
-                location={
-                    "object_type": "task",
-                    "field": "evaluation.maintenance_expenses",
-                },
-            )
+    _check_maintenance_refs(evaluation, artifact, device_models, effective)
+    _check_maintenance_capability(evaluation, calc_config.get("generator"), generator_capabilities)
     receipt = artifact.receipt.to_dict()
-    device_models = _freeze_device_models(artifact, gate.device_documents)
     # 预测输入冻结核对(B5-1 双向匹配 + B5-2 算法相容): 失败不建快照。
     _check_prediction_inputs(
         json.loads(artifact.canonical_text), calc_config, project_id,
@@ -755,6 +743,101 @@ def _assemble_snapshot(
     for oid in price_oids:
         add_ref(db, oid, "snapshot_ref", snapshot.id, purpose="快照冻结时变价格")
     return snapshot
+
+
+def _check_maintenance_refs(
+    evaluation: _EvaluationInput, artifact: Any,
+    device_models: Mapping[str, Any], effective: EffectiveFinanceConfig,
+) -> None:
+    """提交边界关联项引用及量纲核对；只消费本次签发的装配事实。
+
+    property 由同次冻结的逐实例数学贡献证明；规划接管及 finance_binding
+    由规范装配声明，不读取当前草稿或按 finance_type 反推实例。
+    """
+    from iesplan.finance import CostComponentShareTerm, ScaleUnitCostTerm
+
+    doc = json.loads(artifact.canonical_text)
+    devices = doc["devices"]
+    bindings = doc["finance_binding"]["instances"]
+    planned = {
+        (var["device_ref"], var["parameter"])
+        for var in (doc["planning"].get("variables") or {}).values()
+    }
+    for idx, expense in enumerate(evaluation.maintenance_expenses):
+        root = f"evaluation.maintenance_expenses[{idx}]"
+
+        def fail(field: str, reason: str, **params: Any) -> None:
+            raise InvalidRequestError(
+                reason, code="TASK-REQ-015", params=params,
+                location={"object_type": "task", "field": field},
+            )
+
+        if expense.currency != effective.currency:
+            fail(f"{root}.currency", "维护币种须与有效财务配置一致",
+                 currency=expense.currency, effective_currency=effective.currency)
+        for pos, term in enumerate(expense.terms):
+            field = f"{root}.terms[{pos}]"
+            if term.instance_id not in devices:
+                fail(f"{field}.instance_id", "维护关联实例不存在", instance_id=term.instance_id)
+            if isinstance(term, ScaleUnitCostTerm):
+                prop = device_models[term.instance_id]["variables"].get(term.property)
+                if prop is None or prop["kind"] != "property":
+                    fail(f"{field}.property", "维护规模引用须为该实例的标量属性",
+                         instance_id=term.instance_id, property=term.property)
+                source = (devices[term.instance_id].get("properties") or {}).get(term.property, prop)
+                scalar = source.get("value")
+                if isinstance(scalar, bool) or not isinstance(scalar, (int, float)):
+                    fail(f"{field}.property", "维护规模属性须为数值标量",
+                         instance_id=term.instance_id, property=term.property)
+                if (term.instance_id, term.property) not in planned and scalar < 0:
+                    fail(f"{field}.property", "未被规划接管的维护规模属性须非负",
+                         instance_id=term.instance_id, property=term.property)
+                prop_unit = prop["unit"]
+                unit = term.unit_cost.unit
+                try:
+                    actual = normalize_unit(unit)
+                    expected = dims_of(effective.currency)
+                    expected.subtract(dims_of(prop_unit))
+                    matches = (
+                        {key: value for key, value in dims_of(actual).items() if value}
+                        == {key: value for key, value in expected.items() if value}
+                    )
+                except UnitError:
+                    matches = False
+                    actual = unit
+                # 量纲相同的 USD/kW 与 CNY/kW 仍不能自动换汇。
+                currencies = re.findall(r"(?<![A-Za-z])(?:CNY|USD)(?![A-Za-z])", actual)
+                if not matches or currencies != [effective.currency]:
+                    fail(f"{field}.unit_cost.unit", "维护单位费用须为本项目币种/该实例属性单位",
+                         unit=unit, property_unit=prop_unit, currency=effective.currency)
+            elif isinstance(term, CostComponentShareTerm):
+                binding = bindings[term.instance_id]
+                ft = (effective.finance_types.get(binding.get("finance_type"))
+                      if binding["type"] == "costed" else None)
+                if (
+                    devices[term.instance_id]["asset_origin"] != "new"
+                    or ft is None or ft.upfront_capex is None
+                ):
+                    fail(f"{field}.component", "实例不产生本课题 upfront_capex 总分量",
+                         instance_id=term.instance_id, component=term.component)
+
+
+def _check_maintenance_capability(
+    evaluation: _EvaluationInput, generator_ref: object, capabilities: tuple[str, ...],
+) -> None:
+    """关联金额必须由所选生成器完整支持；纯确定金额无需新能力。"""
+    fields = [
+        f"evaluation.maintenance_expenses[{idx}].terms"
+        for idx, expense in enumerate(evaluation.maintenance_expenses) if expense.terms
+    ]
+    if fields and "finance.affine_maintenance" not in capabilities:
+        raise InvalidRequestError(
+            "所选生成器尚不支持维护关联金额（现金、税务与恢复须同次求解）",
+            code="TASK-REQ-007",
+            params={"generator": generator_ref,
+                    "missing_capabilities": ["finance.affine_maintenance"], "fields": fields},
+            location={"object_type": "task", "field": fields[0]},
+        )
 
 
 def _check_tax_evaluation_refs(
