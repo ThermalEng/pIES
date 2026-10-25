@@ -49,7 +49,7 @@ from iesplan.computation.generators.linear import (
     LinearModel,
     LinearVariable,
     LoweringUnsupportedError,
-    _mutex_big_m,
+    lower_mutex,
     lower_planning_constraint,
     lower_planning_expression,
     lower_relation,
@@ -1715,7 +1715,7 @@ class _ProjectBuilder:
                     carry_name, lower=0.0, upper=cumulative_hi,
                 )
                 if paid_hi > 0.0 and cumulative_hi > 0.0:
-                    mutex = _mutex_big_m(
+                    mutex = lower_mutex(
                         f"vat__{pool_id}__m{month}",
                         (paid_name, 0),
                         (carry_name, 0),
@@ -2158,7 +2158,7 @@ class _ProjectBuilder:
                 equation.add_scaled(base, -1.0)
                 constrain(f"inc__{rule_id}__eq__y{year}", equation, "eq", 0.0)
                 if profit_hi > 0.0 and gen_hi > 0.0:
-                    mutex = _mutex_big_m(
+                    mutex = lower_mutex(
                         f"inc__{rule_id}__m{year}",
                         (profit_name, 0),
                         (gen_name, 0),

@@ -46,6 +46,7 @@ __all__ = [
     "LinearVariable",
     "LoweredRelation",
     "lower_expression",
+    "lower_mutex",
     "lower_planning_constraint",
     "lower_planning_expression",
     "lower_relation",
@@ -569,7 +570,7 @@ def _single_var_product(
     return None
 
 
-def _mutex_big_m(
+def lower_mutex(
     name: str,
     x_key: tuple[str, int],
     y_key: tuple[str, int],
@@ -734,7 +735,7 @@ def lower_relation(
     factor, (x_key, _), (y_key, _) = split
     if factor == 0:
         return LoweredRelation(constraints=(), variables=())
-    return _mutex_big_m(relation.id, x_key, y_key, checked)
+    return lower_mutex(relation.id, x_key, y_key, checked)
 
 
 def lower_planning_expression(

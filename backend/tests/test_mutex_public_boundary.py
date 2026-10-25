@@ -1,18 +1,23 @@
-"""Focused red reproduction for the project generator's private lowering import.
+"""The shared mutex lowering is public and retains finite-bound semantics."""
 
-The general architecture gate remains authoritative. Keep this reproduction
-until the public lowering boundary and its numerical regressions are verified.
-"""
-from test_architecture_gates import _find_private_symbol_imports
+from iesplan.computation.generators import lower_mutex
 
 
-def test_project_generator_uses_public_lowering_boundary():
-    violations = [
-        item for item in _find_private_symbol_imports()
-        if item[0] == "iesplan.computation.generators.project"
-    ]
-    assert not violations, (
-        "Expose the shared lowering operation through its owner public API; "
-        "preserve finite-bound mutex semantics without compatibility aliases: "
-        f"{violations}"
+def test_public_mutex_lowering_uses_each_actual_finite_bound() -> None:
+    lowered = lower_mutex(
+        "tax_net", ("paid", 0), ("carry", 0),
+        {"paid": ("var", 0.0, 12.5), "carry": ("var", 0.0, 37.0)},
     )
+    (binary,) = lowered.variables
+    assert (binary.name, binary.lower, binary.upper, binary.kind) == (
+        "tax_net__mutex", 0.0, 1.0, "binary",
+    )
+    rows = {row.name: row for row in lowered.constraints}
+    assert dict(rows["tax_net__mutex_x"].expression.terms) == {
+        ("paid", 0): 1.0, (binary.name, 0): -12.5,
+    }
+    assert (rows["tax_net__mutex_x"].sense, rows["tax_net__mutex_x"].rhs) == ("le", 0.0)
+    assert dict(rows["tax_net__mutex_y"].expression.terms) == {
+        ("carry", 0): 1.0, (binary.name, 0): 37.0,
+    }
+    assert (rows["tax_net__mutex_y"].sense, rows["tax_net__mutex_y"].rhs) == ("le", 37.0)
