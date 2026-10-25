@@ -273,7 +273,7 @@ def _materialize_price_series(
     artifact: ValidatedAssemblyArtifact,
     finance: EffectiveFinanceConfig,
     *,
-    operation_years: int,
+    operation_years: int | None = None,
 ) -> tuple[MaterializedPriceSeries, ...]:
     """Restore only tariff-bound price sources from the frozen finance revision.
 
