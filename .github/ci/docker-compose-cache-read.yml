@@ -5,13 +5,16 @@
 services:
   backend:
     build:
+      context: ./backend
       cache_from:
         - type=gha,scope=pies-backend-py312-v1
   io_worker:
     build:
+      context: ./backend
       cache_from:
         - type=gha,scope=pies-backend-py312-v1
   compute_worker:
     build:
+      context: ./backend
       cache_from:
         - type=gha,scope=pies-backend-py312-v1
