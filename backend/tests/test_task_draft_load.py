@@ -43,6 +43,7 @@ from iesplan.api import tasks as tasks_api  # noqa: E402
 from iesplan.api.config import config_router  # noqa: E402
 from iesplan.api.deps import get_request_db  # noqa: E402
 from iesplan.application.projects.content_objects import load_content_object  # noqa: E402
+from iesplan.application.tasks import submissions as submissions_application  # noqa: E402
 from iesplan.db import Base  # noqa: E402
 from iesplan.main import create_app  # noqa: E402
 from iesplan.results import create_evidence  # noqa: E402
@@ -286,8 +287,20 @@ def test_load_draft_task_without_snapshot_400(client: TestClient, db: Session) -
     assert db.query(Task).filter_by(project_id=pid).count() == 1
 
 
-def test_load_draft_writes_working_evaluation_and_params(client: TestClient, db: Session) -> None:
+def test_load_draft_writes_working_evaluation_and_params(
+    client: TestClient, db: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """载入写工作输入：评价确认块可编辑态 + 任务级参数整体替换，去确认人/时间。"""
+    # 测试仅注入未来能力声明以验证冻结/恢复，不代表生产生成器已经支持关联维护。
+    original_resolve = submissions_application._resolve_execution_refs
+
+    def _with_future_capability(*args, **kwargs):
+        adapter, executor, capabilities = original_resolve(*args, **kwargs)
+        return adapter, executor, (*capabilities, "finance.affine_maintenance")
+
+    monkeypatch.setattr(
+        submissions_application, "_resolve_execution_refs", _with_future_capability
+    )
     owner = make_user(db, "owner_loaddraft_f")
     pid = _prepare_project(client, db, owner)
     rev = _save_config(client, pid, owner)
@@ -297,7 +310,17 @@ def test_load_draft_writes_working_evaluation_and_params(client: TestClient, db:
         "operation_years": 2,
         "discount_rate": 0.06,
         "construction_payments": [{"t": 0, "ratio": 0.6}, {"t": 1, "ratio": 0.4}],
-        "maintenance_expenses": [{"year": 2, "amount": "10.50", "currency": "CNY"}],
+        "maintenance_expenses": [{
+            "year": 2,
+            "amount": "0",
+            "currency": "CNY",
+            "terms": [{
+                "kind": "scale_unit_cost",
+                "instance_id": "bat1",
+                "property": "capacity_kwh",
+                "unit_cost": {"value": "0.25", "unit": "CNY/kWh"},
+            }],
+        }],
     }
     status, body = _submit_task(
         client,
@@ -335,7 +358,17 @@ def test_load_draft_writes_working_evaluation_and_params(client: TestClient, db:
         {"t": 0, "ratio": "0.6"},
         {"t": 1, "ratio": "0.4"},
     ]
-    assert working["maintenance_expenses"] == [{"year": 2, "amount": "10.5", "currency": "CNY"}]
+    assert working["maintenance_expenses"] == [{
+        "year": 2,
+        "amount": "0",
+        "currency": "CNY",
+        "terms": [{
+            "kind": "scale_unit_cost",
+            "instance_id": "bat1",
+            "property": "capacity_kwh",
+            "unit_cost": {"value": "0.25", "unit": "CNY/kWh"},
+        }],
+    }]
     assert working["task_params"] == {"priority": 3}
     # 服务端确认人/时间不进入工作副本（重提时由服务端重写）。
     assert "confirmed_by" not in working
@@ -343,6 +376,34 @@ def test_load_draft_writes_working_evaluation_and_params(client: TestClient, db:
     # 冻结快照本身未被载入改动（确认块仍带确认人/时间）。
     assert snap["evaluation"]["confirmed_by"] == owner.id
     assert isinstance(snap["evaluation"]["confirmed_at"], str)
+
+    # 后续编辑工作区不会改写已提交任务的历史冻结关联项。
+    edited_working = dict(working)
+    edited_working["maintenance_expenses"] = [{
+        **working["maintenance_expenses"][0],
+        "terms": [{
+            **working["maintenance_expenses"][0]["terms"][0],
+            "unit_cost": {"value": "99", "unit": "CNY/kWh"},
+        }],
+    }]
+    status, body = _put_draft(
+        client,
+        pid,
+        owner,
+        [{
+            "id": "e2e-working-maintenance-edit",
+            "project_id": pid,
+            "unit": "task",
+            "type": "task.set_working_inputs",
+            "payload": {"working": edited_working},
+        }],
+    )
+    assert status == 200, body
+    assert _draft_content(client, pid, owner)["task_working_inputs"] == edited_working
+    snapshot_after_edit = client.get(
+        f"/api/projects/{pid}/tasks/{task_id}/inputs", headers=_h(client, owner)
+    ).json()["inputs"]["snapshot"]
+    assert snapshot_after_edit["evaluation"] == frozen
 
 
 def test_task_set_working_inputs_command(client: TestClient, db: Session) -> None:

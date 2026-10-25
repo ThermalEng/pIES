@@ -24,12 +24,99 @@ class ConstructionPayment:
 
 
 @dataclass(frozen=True, slots=True)
+class MaintenanceUnitCost:
+    """维护规模单价(十进制定点字符串 + 公共单位)。"""
+
+    value: str
+    unit: str
+
+    def to_frozen(self) -> dict[str, str]:
+        return {"value": self.value, "unit": self.unit}
+
+
+@dataclass(frozen=True, slots=True)
+class MaintenanceScaleUnitCost:
+    """单价乘指定实例的有效技术属性。"""
+
+    instance_id: str
+    property: str
+    unit_cost: MaintenanceUnitCost
+
+    def to_frozen(self) -> dict[str, Any]:
+        return {
+            "kind": "scale_unit_cost",
+            "instance_id": self.instance_id,
+            "property": self.property,
+            "unit_cost": self.unit_cost.to_frozen(),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class MaintenanceCostComponentShare:
+    """指定新建实例本课题建设成本总分量的比例。"""
+
+    instance_id: str
+    component: str
+    ratio: str  # Decimal 定点字符串, 0..1
+
+    def to_frozen(self) -> dict[str, str]:
+        return {
+            "kind": "cost_component_share",
+            "instance_id": self.instance_id,
+            "component": self.component,
+            "ratio": self.ratio,
+        }
+
+
+MaintenanceTerm = MaintenanceScaleUnitCost | MaintenanceCostComponentShare
+
+
+def _maintenance_term_from_frozen(entry: Mapping[str, Any]) -> MaintenanceTerm:
+    """恢复快照中的维护关联项；不为旧快照或未知种类提供兼容回退。"""
+    kind = entry["kind"]
+    if kind == "scale_unit_cost":
+        unit_cost = entry["unit_cost"]
+        return MaintenanceScaleUnitCost(
+            instance_id=entry["instance_id"],
+            property=entry["property"],
+            unit_cost=MaintenanceUnitCost(value=unit_cost["value"], unit=unit_cost["unit"]),
+        )
+    if kind == "cost_component_share":
+        return MaintenanceCostComponentShare(
+            instance_id=entry["instance_id"],
+            component=entry["component"],
+            ratio=entry["ratio"],
+        )
+    raise ValueError(f"未知维护金额关联项种类: {kind!r}")
+
+
+@dataclass(frozen=True, slots=True)
 class MaintenanceExpense:
-    """单项维护/换新支出(财务发生年 + 十进制金额 + 币种)。"""
+    """单项维护/换新支出(发生年、确定金额加项、币种及有序关联项)。"""
 
     year: int
-    amount: str  # Decimal 定点字符串, 非负
+    amount: str  # Decimal 定点字符串, 非负；纯关联金额使用 "0"
     currency: str
+    terms: tuple[MaintenanceTerm, ...] = ()
+
+    def to_frozen(self) -> dict[str, Any]:
+        """输出快照规范形态；terms 始终显式存在且保持用户顺序。"""
+        return {
+            "year": self.year,
+            "amount": self.amount,
+            "currency": self.currency,
+            "terms": [term.to_frozen() for term in self.terms],
+        }
+
+    @classmethod
+    def from_frozen(cls, entry: Mapping[str, Any]) -> MaintenanceExpense:
+        """从 5.0.0 冻结形态恢复；terms 缺失时显式失败，不兼容旧快照。"""
+        return cls(
+            year=entry["year"],
+            amount=entry["amount"],
+            currency=entry["currency"],
+            terms=tuple(_maintenance_term_from_frozen(term) for term in entry["terms"]),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,7 +158,7 @@ class EvaluationInput:
                 for entry in frozen["construction_payments"]
             ),
             maintenance_expenses=tuple(
-                MaintenanceExpense(year=entry["year"], amount=entry["amount"], currency=entry["currency"])
+                MaintenanceExpense.from_frozen(entry)
                 for entry in frozen["maintenance_expenses"]
             ),
         )

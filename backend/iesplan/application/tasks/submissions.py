@@ -32,7 +32,7 @@ import shutil
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NoReturn
 from uuid import UUID, uuid4
 
 if TYPE_CHECKING:
@@ -80,6 +80,8 @@ from iesplan.core.diagnostics import (
     TASK_QUEUED,
 )
 from iesplan.core.errors import AppError, ConflictError, NotFoundError
+from iesplan.core.units import canonical_of, dims_of, normalize_unit
+from iesplan.finance import MaintenanceCostComponentShare, MaintenanceScaleUnitCost
 from iesplan.core.idgen import new_id
 from iesplan.core.jsonutil import jsonable
 from iesplan.identity.contracts import UserRecord
@@ -586,6 +588,246 @@ def _check_prediction_inputs(
     return len(bound)
 
 
+def _maintenance_term_reject(
+    message: str, field: str, params: Mapping[str, Any] | None = None
+) -> NoReturn:
+    raise InvalidRequestError(
+        message,
+        code="TASK-REQ-015",
+        params=dict(params or {}),
+        location={"object_type": "task", "field": field},
+    )
+
+
+def _check_maintenance_term_references(
+    evaluation: _EvaluationInput,
+    artifact: Any,
+    device_documents: Mapping[str, Any],
+    effective: Any,
+) -> None:
+    """核对维护关联项对冻结装配/财务事实的引用，不复制装配规则校验。"""
+    if not any(expense.terms for expense in evaluation.maintenance_expenses):
+        return
+    try:
+        assembly = json.loads(artifact.canonical_text)
+    except (TypeError, ValueError) as exc:
+        _maintenance_term_reject(
+            "无法读取已签发的装配事实，不能校验年度维护关联金额",
+            "evaluation.maintenance_expenses",
+            {"reason": str(exc)},
+        )
+    devices = assembly.get("devices")
+    if not isinstance(devices, Mapping):
+        _maintenance_term_reject(
+            "已签发装配事实缺少实例映射，不能校验年度维护关联金额",
+            "evaluation.maintenance_expenses",
+        )
+    planning = assembly.get("planning") or {}
+    variables_raw = planning.get("variables", {}) if isinstance(planning, Mapping) else {}
+    if isinstance(variables_raw, Mapping):
+        planning_variables = tuple(variables_raw.values())
+    elif isinstance(variables_raw, (list, tuple)):
+        planning_variables = tuple(variables_raw)
+    else:
+        planning_variables = ()
+    finance_binding = assembly.get("finance_binding") or {}
+    finance_instances = (
+        finance_binding.get("instances", {})
+        if isinstance(finance_binding, Mapping)
+        else {}
+    )
+
+    for expense_index, expense in enumerate(evaluation.maintenance_expenses):
+        for term_index, term in enumerate(expense.terms):
+            field = (
+                f"evaluation.maintenance_expenses[{expense_index}]"
+                f".terms[{term_index}]"
+            )
+            instance = devices.get(term.instance_id)
+            if not isinstance(instance, Mapping):
+                _maintenance_term_reject(
+                    f"{field}.instance_id 未指向已签发装配中的实例",
+                    field,
+                    {"instance_id": term.instance_id},
+                )
+
+            if isinstance(term, MaintenanceScaleUnitCost):
+                definition = instance.get("definition") or {}
+                device_id = (
+                    definition.get("id") if isinstance(definition, Mapping) else None
+                )
+                device_document = device_documents.get(device_id)
+                model_properties = (
+                    device_document.get("properties", {})
+                    if isinstance(device_document, Mapping)
+                    else {}
+                )
+                property_definition = (
+                    model_properties.get(term.property)
+                    if isinstance(model_properties, Mapping)
+                    else None
+                )
+                if not isinstance(property_definition, Mapping):
+                    _maintenance_term_reject(
+                        f"{field}.property 未声明为该实例设备的技术属性",
+                        field,
+                        {"instance_id": term.instance_id, "property": term.property},
+                    )
+                instance_properties = instance.get("properties") or {}
+                instance_property = (
+                    instance_properties.get(term.property)
+                    if isinstance(instance_properties, Mapping)
+                    else None
+                )
+                planned = any(
+                    isinstance(variable, Mapping)
+                    and variable.get("device_ref") == term.instance_id
+                    and variable.get("parameter") == term.property
+                    for variable in planning_variables
+                )
+                if not planned and (
+                    not isinstance(instance_property, Mapping)
+                    or "value" not in instance_property
+                    or instance_property.get("value") is None
+                ):
+                    _maintenance_term_reject(
+                        f"{field}.property 未被规划接管，且冻结实例未显式给出属性值；"
+                        "不回退设备默认值",
+                        field,
+                        {"instance_id": term.instance_id, "property": term.property},
+                    )
+                property_unit = (
+                    instance_property.get("unit")
+                    if isinstance(instance_property, Mapping)
+                    else None
+                )
+                if not isinstance(property_unit, str) or not property_unit.strip():
+                    property_unit = property_definition.get("unit")
+                if not isinstance(property_unit, str) or not property_unit.strip():
+                    _maintenance_term_reject(
+                        f"{field}.property 缺少可验证的属性单位",
+                        field,
+                        {"instance_id": term.instance_id, "property": term.property},
+                    )
+                try:
+                    normalized_cost_unit = normalize_unit(term.unit_cost.unit).replace(
+                        " ", ""
+                    )
+                    expected_currency_unit = canonical_of(expense.currency)
+                    cost_dimensions = dims_of(term.unit_cost.unit)
+                    property_dimensions = dims_of(property_unit)
+                    currency_dimensions = dims_of(expense.currency)
+                except (AppError, TypeError, ValueError) as exc:
+                    _maintenance_term_reject(
+                        f"{field}.unit_cost.unit 或实例属性单位不是可识别单位",
+                        field,
+                        {
+                            "unit_cost_unit": term.unit_cost.unit,
+                            "property_unit": property_unit,
+                            "reason": str(exc),
+                        },
+                    )
+                combined_dimensions: dict[str, int] = {}
+                for dimensions in (cost_dimensions, property_dimensions):
+                    for dimension, power in dimensions.items():
+                        combined_dimensions[dimension] = (
+                            combined_dimensions.get(dimension, 0) + power
+                        )
+                combined_dimensions = {
+                    dimension: power
+                    for dimension, power in combined_dimensions.items()
+                    if power
+                }
+                expected_dimensions = {
+                    dimension: power
+                    for dimension, power in currency_dimensions.items()
+                    if power
+                }
+                currency_numerator_matches = (
+                    normalized_cost_unit == expected_currency_unit
+                    or normalized_cost_unit.startswith(expected_currency_unit + "/")
+                )
+                if (
+                    combined_dimensions != expected_dimensions
+                    or not currency_numerator_matches
+                ):
+                    _maintenance_term_reject(
+                        f"{field}.unit_cost.unit 与实例属性单位相乘后必须得到 "
+                        f"{expense.currency} 币种量纲",
+                        field,
+                        {
+                            "unit_cost_unit": term.unit_cost.unit,
+                            "property_unit": property_unit,
+                            "currency": expense.currency,
+                        },
+                    )
+                continue
+
+            if isinstance(term, MaintenanceCostComponentShare):
+                if instance.get("asset_origin") != "new":
+                    _maintenance_term_reject(
+                        f"{field} 只能引用本课题新建设备，不能把既有设备沉没投资计入维护费",
+                        field,
+                        {
+                            "instance_id": term.instance_id,
+                            "asset_origin": instance.get("asset_origin"),
+                        },
+                    )
+                binding = (
+                    finance_instances.get(term.instance_id)
+                    if isinstance(finance_instances, Mapping)
+                    else None
+                )
+                if not isinstance(binding, Mapping) or binding.get("type") != "costed":
+                    _maintenance_term_reject(
+                        f"{field} 引用的实例没有已签发的 costed 财务绑定",
+                        field,
+                        {"instance_id": term.instance_id},
+                    )
+                finance_type_id = binding.get("finance_type")
+                finance_types = getattr(effective, "finance_types", {})
+                finance_type = (
+                    finance_types.get(finance_type_id)
+                    if isinstance(finance_types, Mapping)
+                    else None
+                )
+                component = (
+                    finance_type.get(term.component)
+                    if isinstance(finance_type, Mapping)
+                    else getattr(finance_type, term.component, None)
+                )
+                if component is None:
+                    _maintenance_term_reject(
+                        f"{field} 未引用到该实例有效财务类型中的 "
+                        f"{term.component} 总分量",
+                        field,
+                        {
+                            "instance_id": term.instance_id,
+                            "finance_type": finance_type_id,
+                            "component": term.component,
+                        },
+                    )
+
+
+def _check_affine_maintenance_capabilities(
+    evaluation: _EvaluationInput,
+    generator_name: str,
+    generator_capabilities: tuple[str, ...],
+) -> None:
+    if not any(expense.terms for expense in evaluation.maintenance_expenses):
+        return
+    required = "finance.affine_maintenance"
+    if required in set(generator_capabilities):
+        return
+    raise InvalidRequestError(
+        "所选生成器尚不支持年度维护关联金额；请移除 terms，或等待关联维护的现金流、"
+        "税务与结果恢复能力完整接通",
+        code="TASK-REQ-007",
+        params={"generator": generator_name, "required_capability": required},
+        location={"object_type": "task", "field": "evaluation.maintenance_expenses"},
+    )
+
+
 def _assemble_snapshot(
     db: Session,
     project_id: int,
@@ -634,11 +876,7 @@ def _assemble_snapshot(
             for payment in evaluation.construction_payments
         ],
         "maintenance_expenses": [
-            {
-                "year": expense.year,
-                "amount": expense.amount,
-                "currency": expense.currency,
-            }
+            expense.to_frozen()
             for expense in evaluation.maintenance_expenses
         ],
         "confirmed_by": actor.id,
@@ -701,6 +939,14 @@ def _assemble_snapshot(
                     "field": "evaluation.maintenance_expenses",
                 },
             )
+    _check_maintenance_term_references(
+        evaluation, artifact, gate.device_documents, effective
+    )
+    _check_affine_maintenance_capabilities(
+        evaluation,
+        str(calc_config.get("generator", "")),
+        generator_capabilities,
+    )
     receipt = artifact.receipt.to_dict()
     device_models = _freeze_device_models(artifact, gate.device_documents)
     # 预测输入冻结核对(B5-1 双向匹配 + B5-2 算法相容): 失败不建快照。

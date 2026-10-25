@@ -1,4 +1,4 @@
-"""0.12-T1 定向测试: 评价确认提交闸门 + 快照 4.0.0 冻结 + 运营期覆盖核对。
+"""0.12-T1 定向测试: 评价确认提交闸门 + 快照 5.0.0 冻结 + 运营期覆盖核对。
 
 - 提交边界类型化解析(``parse_evaluation_input``): 顶层 ``evaluation`` 块
   必填六字段, 缺失/形态非法 → 400 TASK-REQ-015(无默认值); 评价年限含
@@ -417,7 +417,7 @@ def _k1n2(rate=0.08):
 def test_snapshot_freezes_evaluation_and_identity(  # noqa: F811
     client, db, factory
 ) -> None:
-    """快照 4.0.0: evaluation 块冻结时轴/付款/维护/确认人/时间; 任一不同 → 新快照。"""
+    """快照 5.0.0: 维护 terms 显式冻结；任一有效输入不同 → 新快照。"""
     from auth_helpers import make_user
     from test_task_config_revision import _prepare_project, _save_config
 
@@ -440,7 +440,7 @@ def test_snapshot_freezes_evaluation_and_identity(  # noqa: F811
     first = _submit_eval(_k1n2(), "eval-snap-1")
     snap = tasks_domain.get_snapshot(factory(), first["calc_snapshot_id"])
     assert snap is not None
-    assert snap.schema_version == "4.0.0"
+    assert snap.schema_version == "5.0.0"
     frozen = jsonable(dict(snap.calc_config_snapshot))
     assert "evaluation" not in frozen
     assert "evaluation" not in frozen.get("task_params", {})
@@ -453,13 +453,15 @@ def test_snapshot_freezes_evaluation_and_identity(  # noqa: F811
         {"t": 0, "ratio": "0.6"}, {"t": 1, "ratio": "0.4"},
     ]
     assert evaluation["maintenance_expenses"] == [
-        {"year": 3, "amount": "1000", "currency": "CNY"},
+        {"year": 3, "amount": "1000", "currency": "CNY", "terms": []},
     ]
     assert evaluation["confirmed_by"] == owner.id
     assert evaluation["confirmed_at"]
 
-    # 同输入复用快照
-    replay = _submit_eval(_k1n2(), "eval-snap-2")
+    # terms 省略与显式空列表规范化为同一冻结形态，复用同一快照
+    replay_input = _k1n2()
+    replay_input["maintenance_expenses"][0]["terms"] = []
+    replay = _submit_eval(replay_input, "eval-snap-2")
     assert replay["calc_snapshot_id"] == first["calc_snapshot_id"]
     # 折现率不同 → 复用身份不同 → 新快照
     other = _submit_eval(_k1n2(rate=0.05), "eval-snap-3")
@@ -524,6 +526,38 @@ def test_snapshot_maintenance_currency_mismatch_blocked_015(  # noqa: F811
     assert resp.json()["error"]["code"] == "TASK-REQ-015"
 
 
+
+
+def test_affine_maintenance_rejected_without_generator_capability(  # noqa: F811
+    client, db,
+) -> None:
+    """生产生成器未声明 finance.affine_maintenance 时，关联维护必须在提交边界拒收。"""
+    from auth_helpers import make_user
+    from test_task_config_revision import _prepare_project, _save_config
+
+    owner = make_user(db, "owner_affine_maintenance_gate")
+    pid = _prepare_project(client, db, owner, name="关联维护能力门禁项目")
+    rev = _save_config(client, pid, owner)
+    payload = _k1n2()
+    payload["maintenance_expenses"] = [{
+        "year": 3,
+        "amount": "0",
+        "currency": "CNY",
+        "terms": [{
+            "kind": "scale_unit_cost",
+            "instance_id": "bat1",
+            "property": "capacity_kwh",
+            "unit_cost": {"value": "2.5", "unit": "CNY/kWh"},
+        }],
+    }]
+    response = _post(
+        client, pid, owner, {"config_revision": rev},
+        "eval-affine-maintenance-gate", evaluation=payload,
+    )
+    assert response.status_code == 400, response.text
+    assert response.json()["error"]["code"] == "TASK-REQ-007"
+
+
 def test_snapshot_reuse_identity_includes_confirmer() -> None:
     """复用身份含确认人(防错归)、含新冻结字段，不含确认时间(否则复用永不命中)。"""
     from iesplan.application.tasks.submissions import _evaluation_identity
@@ -532,7 +566,9 @@ def test_snapshot_reuse_identity_includes_confirmer() -> None:
         "evaluation_years": 3, "construction_period": 1, "operation_years": 2,
         "discount_rate": 0.08,
         "construction_payments": [{"t": 0, "ratio": "0.6"}],
-        "maintenance_expenses": [{"year": 3, "amount": "1000", "currency": "CNY"}],
+        "maintenance_expenses": [
+            {"year": 3, "amount": "1000", "currency": "CNY", "terms": []}
+        ],
         "confirmed_by": 7, "confirmed_at": "2026-10-09T00:00:00+00:00",
     }
     same_user = dict(base, confirmed_at="2026-10-10T00:00:00+00:00")
@@ -541,7 +577,22 @@ def test_snapshot_reuse_identity_includes_confirmer() -> None:
     other_pay = dict(
         base, construction_payments=[{"t": 0, "ratio": "1"}]
     )
+    other_terms = dict(
+        base,
+        maintenance_expenses=[{
+            "year": 3,
+            "amount": "1000",
+            "currency": "CNY",
+            "terms": [{
+                "kind": "scale_unit_cost",
+                "instance_id": "bat1",
+                "property": "capacity_kwh",
+                "unit_cost": {"value": "2", "unit": "CNY/kWh"},
+            }],
+        }],
+    )
     assert _evaluation_identity(same_user) == _evaluation_identity(base)
     assert _evaluation_identity(other_user) != _evaluation_identity(base)
     assert _evaluation_identity(other_period) != _evaluation_identity(base)
     assert _evaluation_identity(other_pay) != _evaluation_identity(base)
+    assert _evaluation_identity(other_terms) != _evaluation_identity(base)

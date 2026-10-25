@@ -31,7 +31,10 @@ from iesplan.core.errors import AppError, ConflictError, NotFoundError
 from iesplan.finance import (
     ConstructionPayment,
     EvaluationInput,
+    MaintenanceCostComponentShare,
     MaintenanceExpense,
+    MaintenanceScaleUnitCost,
+    MaintenanceUnitCost,
 )
 
 #: 幂等键格式(字母/数字/._:-, 1-128 位)。任务域唯一权威:
@@ -115,11 +118,11 @@ def _freeze_snapshot_value(value: object) -> object:
 #: 3.0.0 新增必填 evaluation 确认块(评价年限/折现率/确认人/确认时间,
 #: 0.12-F1): 快照复用身份包含年限/折现率, 不同即新快照; 确认人/确认时间
 #: 只冻结存档, 不参与复用判定。
-#: 4.0.0 评价确认块改为建设期/运营期/付款/维护冻结(0.12-T1): 评价年限
+#: 5.0.0 维护清单冻结有序关联项 terms；不兼容读取 4.0.0 快照
 #: 含建设期(``evaluation_years == construction_period + operation_years``);
 #: 运行点数/物化/预测/生成一律用 ``operation_years``; 复用身份包含新冻结
 #: 字段(确认时间除外); 不保留旧字段语义或双轨读取。
-SNAPSHOT_SCHEMA_VERSION: str = "4.0.0"
+SNAPSHOT_SCHEMA_VERSION: str = "5.0.0"
 
 
 #: 评价确认输入合法键(任务提交边界唯一权威; 未知键拒绝, 不静默忽略)。
@@ -211,6 +214,109 @@ def _as_fixed_str(d: Decimal) -> str:
     if text in ("-0", ""):
         text = "0"
     return text
+
+
+def _parse_maintenance_term(
+    raw: object, field: str
+) -> MaintenanceScaleUnitCost | MaintenanceCostComponentShare:
+    """解析一项有序、类型化的年度维护金额关联。field 不含 evaluation. 前缀。"""
+    location = f"evaluation.{field}"
+    if not isinstance(raw, Mapping):
+        raise _evaluation_fail(
+            f"{location} 须为类型化关联项字典",
+            {"term": raw},
+            location,
+        )
+    kind = raw.get("kind")
+    if kind == "scale_unit_cost":
+        if set(raw) != {"kind", "instance_id", "property", "unit_cost"}:
+            raise _evaluation_fail(
+                f"{location} 须恰含 kind、instance_id、property 与 unit_cost",
+                {"term": dict(raw)},
+                location,
+            )
+        instance_id = raw.get("instance_id")
+        property_name = raw.get("property")
+        if not isinstance(instance_id, str) or not instance_id.strip():
+            raise _evaluation_fail(
+                f"{location}.instance_id 须为非空实例引用",
+                {"instance_id": instance_id},
+                f"{location}.instance_id",
+            )
+        if not isinstance(property_name, str) or not property_name.strip():
+            raise _evaluation_fail(
+                f"{location}.property 须为非空技术属性引用",
+                {"property": property_name},
+                f"{location}.property",
+            )
+        unit_cost_raw = raw.get("unit_cost")
+        if not isinstance(unit_cost_raw, Mapping) or set(unit_cost_raw) != {"value", "unit"}:
+            raise _evaluation_fail(
+                f"{location}.unit_cost 须恰含 value 与 unit",
+                {"unit_cost": unit_cost_raw},
+                f"{location}.unit_cost",
+            )
+        value = _as_decimal(
+            unit_cost_raw.get("value"),
+            f"{field}.unit_cost.value",
+            allow_str=True,
+        )
+        if value < 0:
+            raise _evaluation_fail(
+                f"{location}.unit_cost.value 须为非负十进制金额",
+                {"value": unit_cost_raw.get("value")},
+                f"{location}.unit_cost.value",
+            )
+        unit = unit_cost_raw.get("unit")
+        if not isinstance(unit, str) or not unit.strip():
+            raise _evaluation_fail(
+                f"{location}.unit_cost.unit 须为非空单位字符串",
+                {"unit": unit},
+                f"{location}.unit_cost.unit",
+            )
+        return MaintenanceScaleUnitCost(
+            instance_id=instance_id,
+            property=property_name,
+            unit_cost=MaintenanceUnitCost(value=_as_fixed_str(value), unit=unit),
+        )
+    if kind == "cost_component_share":
+        if set(raw) != {"kind", "instance_id", "component", "ratio"}:
+            raise _evaluation_fail(
+                f"{location} 须恰含 kind、instance_id、component 与 ratio",
+                {"term": dict(raw)},
+                location,
+            )
+        instance_id = raw.get("instance_id")
+        component = raw.get("component")
+        if not isinstance(instance_id, str) or not instance_id.strip():
+            raise _evaluation_fail(
+                f"{location}.instance_id 须为非空实例引用",
+                {"instance_id": instance_id},
+                f"{location}.instance_id",
+            )
+        if component != "upfront_capex":
+            raise _evaluation_fail(
+                f"{location}.component 目前仅支持 upfront_capex",
+                {"component": component},
+                f"{location}.component",
+            )
+        ratio = _as_decimal(raw.get("ratio"), f"{field}.ratio", allow_str=False)
+        if ratio < 0 or ratio > 1:
+            raise _evaluation_fail(
+                f"{location}.ratio 须位于 0..1",
+                {"ratio": raw.get("ratio")},
+                f"{location}.ratio",
+            )
+        return MaintenanceCostComponentShare(
+            instance_id=instance_id,
+            component=component,
+            ratio=_as_fixed_str(ratio),
+        )
+    raise _evaluation_fail(
+        f"{location}.kind 不受支持",
+        {"kind": kind},
+        f"{location}.kind",
+    )
 
 
 def parse_evaluation_input(raw: Mapping[str, Any] | None) -> EvaluationInput:
@@ -361,9 +467,11 @@ def parse_evaluation_input(raw: Mapping[str, Any] | None) -> EvaluationInput:
                 {"entry": entry},
                 field,
             )
-        if set(entry) != {"year", "amount", "currency"}:
+        if not {"year", "amount", "currency"}.issubset(entry) or set(entry) - {
+            "year", "amount", "currency", "terms"
+        }:
             raise _evaluation_fail(
-                f"{field} 须恰含 year、amount 与 currency",
+                f"{field} 须含 year、amount、currency，且仅可选 terms",
                 {"entry": dict(entry)},
                 field,
             )
@@ -392,7 +500,25 @@ def parse_evaluation_input(raw: Mapping[str, Any] | None) -> EvaluationInput:
                 {"currency": currency},
                 f"{field}.currency",
             )
-        maintenance.append(MaintenanceExpense(year=year, amount=_as_fixed_str(amount), currency=currency))
+        terms_raw = entry.get("terms", [])
+        if not isinstance(terms_raw, (list, tuple)):
+            raise _evaluation_fail(
+                f"{field}.terms 须为有序关联项清单",
+                {"terms": terms_raw},
+                f"{field}.terms",
+            )
+        terms = tuple(
+            _parse_maintenance_term(term, f"maintenance_expenses[{index}].terms[{term_index}]")
+            for term_index, term in enumerate(terms_raw)
+        )
+        maintenance.append(
+            MaintenanceExpense(
+                year=year,
+                amount=_as_fixed_str(amount),
+                currency=currency,
+                terms=terms,
+            )
+        )
     return EvaluationInput(
         evaluation_years=years,
         construction_period=period,
