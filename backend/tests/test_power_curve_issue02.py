@@ -151,6 +151,7 @@ outputs:
   series:
     - curve1.electric_out
   metrics: []
+extensions: {}
 """
 
 
