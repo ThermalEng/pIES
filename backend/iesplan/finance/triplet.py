@@ -37,13 +37,13 @@ from iesplan.core.units import UnitError, normalize_unit
 SCHEMA_PROFILE: Final[str] = "ies.finance-profile"
 SCHEMA_OVERRIDES: Final[str] = "ies.finance-overrides"
 SCHEMA_EFFECTIVE: Final[str] = "ies.effective-finance-config"
-SCHEMA_VERSION: Final[str] = "4.0.0"
+SCHEMA_VERSION: Final[str] = "5.0.0"
 
 CURRENCIES: Final[tuple[str, ...]] = ("CNY", "USD")
 PRICE_BASIS_VALUES: Final[tuple[str, ...]] = ("tax_inclusive", "tax_exclusive")
 COST_METHOD_VALUES: Final[tuple[str, ...]] = ("fixed_plus_linear",)
 DIRECTION_VALUES: Final[tuple[str, ...]] = ("purchase", "sale")
-KIND_VALUES: Final[tuple[str, ...]] = ("constant", "time_series")
+KIND_VALUES: Final[tuple[str, ...]] = ("constant", "time_series", "monthly_daily")
 RESOLUTION_VALUES: Final[tuple[str, ...]] = ("15min", "30min", "1h")
 
 #: finance_type 分量(时间口径与量纲见 finance-yaml.md「时间口径与分量」)。
@@ -337,8 +337,59 @@ class SeriesMeta:
         )
 
 @dataclass(frozen=True, slots=True)
+class DailyPriceSource:
+    """One uploaded complete-day ies.price-series source, reusable across months."""
+
+    ref: str
+    series_meta: SeriesMeta
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.ref, str) or not self.ref.strip():
+            raise FinanceTripletError("monthly_daily.ref 必须为非空字符串")
+        # Each source is one complete day, not one operation year or horizon.
+        daily_counts = {"15min": 96, "30min": 48, "1h": 24}
+        if self.series_meta.point_count != daily_counts[self.series_meta.resolution]:
+            raise FinanceTripletError(
+                f"monthly_daily.series_meta.point_count 必须是完整一天 "
+                f"({daily_counts[self.series_meta.resolution]})"
+            )
+
+    def to_dict(self) -> dict:
+        return {"ref": self.ref, "series_meta": self.series_meta.to_dict()}
+
+    @classmethod
+    def from_dict(cls, mapping: object) -> DailyPriceSource:
+        if not isinstance(mapping, Mapping) or set(mapping) != {"ref", "series_meta"}:
+            raise FinanceTripletError("monthly_daily 月份条目必须且只能包含 ref/series_meta")
+        return cls(
+            ref=mapping["ref"],
+            series_meta=SeriesMeta.from_dict(mapping["series_meta"]),
+        )
+
+
+def _parse_monthly_sources(value: object) -> Mapping[str, DailyPriceSource]:
+    if not isinstance(value, Mapping):
+        raise FinanceTripletError("monthly_daily.months 必须为映射")
+    expected = {str(m) for m in range(1, 13)}
+    missing, extra = expected - set(value), set(value) - expected
+    if missing or extra:
+        raise FinanceTripletError(
+            f"monthly_daily.months 必须恰含字符串月份 1..12, "
+            f"missing={sorted(missing)}, extra={sorted(extra)}"
+        )
+    sources = {
+        str(month): DailyPriceSource.from_dict(value[str(month)])
+        for month in range(1, 13)
+    }
+    unit = sources["1"].series_meta.unit
+    if any(source.series_meta.unit != unit for source in sources.values()):
+        raise FinanceTripletError("monthly_daily 各月份 series_meta.unit 必须一致")
+    return MappingProxyType(sources)
+
+
+@dataclass(frozen=True, slots=True)
 class EnergyPrice:
-    """能源价格条目(price_id 值): 判别联合 constant{value} / time_series{ref, series_meta}。"""
+    """Energy tariff: mutually exclusive constant / time_series / monthly_daily."""
 
     carrier: str
     direction: str
@@ -346,6 +397,7 @@ class EnergyPrice:
     value: Money | None = None
     ref: str | None = None
     series_meta: SeriesMeta | None = None
+    months: Mapping[str, DailyPriceSource] | None = None
 
     def __post_init__(self) -> None:
         _validate_local_id(self.carrier, "energy_price.carrier")
@@ -354,34 +406,39 @@ class EnergyPrice:
         if self.kind not in KIND_VALUES:
             raise FinanceTripletError(f"kind 非法: {self.kind!r}")
         if self.kind == "constant":
-            if self.value is None or self.ref is not None or self.series_meta is not None:
+            if self.value is None or any((self.ref is not None, self.series_meta is not None, self.months is not None)):
                 raise FinanceTripletError("constant 必须且只能含 value")
-        else:
-            if self.value is not None or self.ref is None or self.series_meta is None:
+        elif self.kind == "time_series":
+            if self.value is not None or self.ref is None or self.series_meta is None or self.months is not None:
                 raise FinanceTripletError("time_series 必须且只能含 ref 与 series_meta")
             if not isinstance(self.ref, str) or not self.ref.strip():
                 raise FinanceTripletError("energy_price.ref 必须为非空字符串")
+        else:
+            if self.value is not None or self.ref is not None or self.series_meta is not None or self.months is None:
+                raise FinanceTripletError("monthly_daily 必须且只能含 months")
+            # Deep-freeze even when constructed directly rather than via from_dict.
+            frozen = _parse_monthly_sources({
+                month: item.to_dict() if isinstance(item, DailyPriceSource) else item
+                for month, item in self.months.items()
+            })
+            object.__setattr__(self, "months", frozen)
 
     def to_dict(self) -> dict:
         out: dict = {"carrier": self.carrier, "direction": self.direction, "kind": self.kind}
         if self.kind == "constant":
-            value = self.value
-            if value is None:
-                raise FinanceTripletError("constant 缺少 value(内部状态非法)")
-            out["value"] = value.to_dict()
-        else:
-            meta = self.series_meta
-            if meta is None or self.ref is None:
-                raise FinanceTripletError("time_series 缺少 ref/series_meta(内部状态非法)")
+            out["value"] = self.value.to_dict()
+        elif self.kind == "time_series":
             out["ref"] = self.ref
-            out["series_meta"] = meta.to_dict()
+            out["series_meta"] = self.series_meta.to_dict()
+        else:
+            out["months"] = {month: self.months[month].to_dict() for month in (str(m) for m in range(1, 13))}
         return out
 
     @classmethod
     def from_dict(cls, mapping: object) -> EnergyPrice:
         if not isinstance(mapping, Mapping):
             raise FinanceTripletError("energy_price 必须是字典")
-        unknown = set(mapping) - {"carrier", "direction", "kind", "value", "ref", "series_meta"}
+        unknown = set(mapping) - {"carrier", "direction", "kind", "value", "ref", "series_meta", "months"}
         if unknown:
             raise FinanceTripletError(f"energy_price 未知字段: {sorted(unknown)}")
         missing = {"carrier", "direction", "kind"} - set(mapping)
@@ -390,28 +447,23 @@ class EnergyPrice:
         kind = str(mapping["kind"])
         if kind not in KIND_VALUES:
             raise FinanceTripletError(f"kind 非法: {kind!r}")
+        common = {
+            "carrier": _validate_local_id(mapping["carrier"], "carrier"),
+            "direction": str(mapping["direction"]),
+            "kind": kind,
+        }
         if kind == "constant":
-            if "value" not in mapping:
-                raise FinanceTripletError("constant 必须含 value")
-            if "ref" in mapping or "series_meta" in mapping:
-                raise FinanceTripletError("constant 不允许 ref/series_meta")
-            return cls(
-                carrier=_validate_local_id(mapping["carrier"], "carrier"),
-                direction=str(mapping["direction"]),
-                kind=kind,
-                value=Money.from_dict(mapping["value"], allow_negative=True, field="value"),
-            )
-        if "ref" not in mapping or "series_meta" not in mapping:
-            raise FinanceTripletError("time_series 必须含 ref 与 series_meta")
-        if "value" in mapping:
-            raise FinanceTripletError("time_series 不允许 value")
-        return cls(
-            carrier=_validate_local_id(mapping["carrier"], "carrier"),
-            direction=str(mapping["direction"]),
-            kind=kind,
-            ref=str(mapping["ref"]).strip(),
-            series_meta=SeriesMeta.from_dict(mapping["series_meta"]),
-        )
+            if set(mapping) != {"carrier", "direction", "kind", "value"}:
+                raise FinanceTripletError("constant 必须且只能含 value")
+            return cls(**common, value=Money.from_dict(mapping["value"], allow_negative=True, field="value"))
+        if kind == "time_series":
+            if set(mapping) != {"carrier", "direction", "kind", "ref", "series_meta"}:
+                raise FinanceTripletError("time_series 必须且只能含 ref 与 series_meta")
+            return cls(**common, ref=mapping["ref"], series_meta=SeriesMeta.from_dict(mapping["series_meta"]))
+        if set(mapping) != {"carrier", "direction", "kind", "months"}:
+            raise FinanceTripletError("monthly_daily 必须且只能含 months")
+        return cls(**common, months=_parse_monthly_sources(mapping["months"]))
+
 
 @dataclass(frozen=True, slots=True)
 class DemandCharge:
@@ -1321,7 +1373,7 @@ def _check_price_unit(currency: str, price_id: str, price: EnergyPrice) -> None:
             raise FinanceTripletError(
                 f"energy_price {price_id} constant unit {unit!r} 必须以 {currency_prefix} 开头"
             )
-    else:
+    elif price.kind == "time_series":
         meta = price.series_meta
         if meta is None:
             raise FinanceTripletError(f"energy_price {price_id} 缺 series_meta(内部状态非法)")
@@ -1330,6 +1382,14 @@ def _check_price_unit(currency: str, price_id: str, price: EnergyPrice) -> None:
             raise FinanceTripletError(
                 f"energy_price {price_id} series_meta.unit {unit!r} 必须以 {currency_prefix} 开头"
             )
+    else:
+        for month, source in price.months.items():
+            unit = source.series_meta.unit
+            if not unit.startswith(currency_prefix):
+                raise FinanceTripletError(
+                    f"energy_price {price_id} months.{month}.series_meta.unit "
+                    f"{unit!r} 必须以 {currency_prefix} 开头"
+                )
 
 # ---------------------------------------------------------------------------
 # FinanceProfile(地区财务基准, 人工 authoring)
@@ -1897,7 +1957,7 @@ def _validate_price_override(
         raise FinanceTripletError(
             f"energy_prices.{price_id} 禁止出现 carrier/direction, 由 Profile 继承"
         )
-    unknown = set(price_val) - {"kind", "value", "ref", "series_meta"}
+    unknown = set(price_val) - {"kind", "value", "ref", "series_meta", "months"}
     if unknown:
         raise FinanceTripletError(f"energy_prices.{price_id} 未知字段: {sorted(unknown)}")
     if "kind" not in price_val:
@@ -1912,15 +1972,17 @@ def _validate_price_override(
             price_value = prof_price.value
             if price_value is not None:
                 prof_unit = price_value.unit
-        else:
+        elif prof_price.kind == "time_series":
             price_meta = prof_price.series_meta
             if price_meta is not None:
                 prof_unit = price_meta.unit
+        else:
+            prof_unit = prof_price.months["1"].series_meta.unit
     if kind == "constant":
         if "value" not in price_val:
             raise FinanceTripletError(f"energy_prices.{price_id} constant 缺少 value")
-        if "ref" in price_val or "series_meta" in price_val:
-            raise FinanceTripletError(f"energy_prices.{price_id} constant 不允许 ref/series_meta")
+        if "ref" in price_val or "series_meta" in price_val or "months" in price_val:
+            raise FinanceTripletError(f"energy_prices.{price_id} constant 不允许 ref/series_meta/months")
         if price_val["value"] is None:
             raise FinanceTripletError(f"energy_prices.{price_id}.value 禁止 null")
         money = Money.from_dict(
@@ -1931,12 +1993,20 @@ def _validate_price_override(
         if prof_unit is not None:
             _check_same_unit(money.unit, prof_unit, f"energy_prices.{price_id}")
         return {"kind": "constant", "value": money.to_dict()}
-    if "ref" not in price_val or "series_meta" not in price_val:
-        raise FinanceTripletError(f"energy_prices.{price_id} time_series 必须含 ref 与 series_meta")
-    if "value" in price_val:
-        raise FinanceTripletError(f"energy_prices.{price_id} time_series 不允许 value")
-    ref = str(price_val["ref"]).strip()
-    if not ref:
+    if kind == "monthly_daily":
+        if set(price_val) != {"kind", "months"}:
+            raise FinanceTripletError(f"energy_prices.{price_id} monthly_daily 必须且只能含 months")
+        sources = _parse_monthly_sources(price_val["months"])
+        if prof_unit is not None:
+            _check_same_unit(sources["1"].series_meta.unit, prof_unit, f"energy_prices.{price_id}")
+        return {
+            "kind": "monthly_daily",
+            "months": {month: src.to_dict() for month, src in sources.items()},
+        }
+    if set(price_val) != {"kind", "ref", "series_meta"}:
+        raise FinanceTripletError(f"energy_prices.{price_id} time_series 必须且只能含 ref 与 series_meta")
+    ref = price_val["ref"]
+    if not isinstance(ref, str) or not ref.strip():
         raise FinanceTripletError(f"energy_prices.{price_id}.ref 必须为非空字符串")
     meta = SeriesMeta.from_dict(price_val["series_meta"])
     if prof_unit is not None:
@@ -2506,13 +2576,11 @@ def merge_effective(profile: FinanceProfile, overrides: FinanceOverrides | None)
                 value=Money.from_dict(price_override_dict["value"], allow_negative=True),
             )
         else:
-            merged_ep[price_id] = EnergyPrice(
-                carrier=prof_price.carrier,
-                direction=prof_price.direction,
-                kind="time_series",
-                ref=str(price_override_dict["ref"]),
-                series_meta=SeriesMeta.from_dict(price_override_dict["series_meta"]),
-            )
+            merged_ep[price_id] = EnergyPrice.from_dict({
+                "carrier": prof_price.carrier,
+                "direction": prof_price.direction,
+                **price_override_dict,
+            })
 
     # ---- demand_charges: only existing Profile rates may be overridden ----
     merged_demand = dict(profile.demand_charges)
