@@ -241,6 +241,49 @@ def test_both_sides_non_affine_unsupported() -> None:
         lower_relation(relation, symbols, step=0)
 
 
+
+@pytest.mark.parametrize(
+    ("charge_upper", "discharge_upper"),
+    [(0.0, 23.0), (23.0, 0.0), (0.0, 0.0), (0.0, None), (None, 0.0)],
+)
+@pytest.mark.parametrize("swapped", [False, True])
+def test_mutex_proven_zero_bound_is_tautology(
+    charge_upper: float | None, discharge_upper: float | None, swapped: bool,
+) -> None:
+    # Both operand orders, both zero positions, both zero, and absent opposite M.
+    original = _relation(MUTEX_YAML, "exclusivity")
+    if swapped:
+        ast = RelationAst(
+            id="exclusivity", output=original.output,
+            lhs_root=BinaryNode(
+                op="*", left=RefNode(name="discharge", offset=0),
+                right=RefNode(name="charge", offset=0),
+            ),
+            rhs_root=NumberNode(value=0),
+            lhs_refs=(), rhs_refs=(),
+        )
+        relation = MathRelation(id="exclusivity", output=original.output, ast=ast)
+    else:
+        relation = original
+    symbols = {
+        "charge": ("var", 0.0, charge_upper),
+        "discharge": ("var", 0.0, discharge_upper),
+    }
+    lowered = lower_relation(relation, symbols, step=1)
+    assert lowered.variables == ()
+    assert lowered.constraints == ()
+
+
+def test_mutex_zero_upper_without_proven_lower_is_not_tautology() -> None:
+    relation = _relation(MUTEX_YAML, "exclusivity")
+    with pytest.raises(LoweringUnsupportedError, match="非负不可证"):
+        lower_relation(
+            relation,
+            {"charge": ("var", None, 0.0),
+             "discharge": ("var", 0.0, None)},
+        )
+
+
 def test_mutex_without_upper_bound_unsupported() -> None:
     relation = _relation(MUTEX_YAML, "exclusivity")
     symbols = {

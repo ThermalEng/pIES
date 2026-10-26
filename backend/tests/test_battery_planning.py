@@ -180,9 +180,10 @@ def test_true_optimized_capacity_no_default_upper_bound(battery, tmp_path):
 
 
 def test_zero_capacity_has_no_free_initial_energy(battery, tmp_path):
-    # 额定功率为正，容量规划强制为 0：物理能量和充放电必须全为零。
-    # A 路互斥降级尚不接受功率上界为 0；不在 B 路复制该修复。
-    b = _rows(battery, power=6, soc=0.75)
+    # A 已合入：零容量和零功率上界都应可行，无虚构初始能量。
+    # 只消费主线互斥通用能力，不在 B 中复制降级实现。
+    b = _rows(battery, power=0, soc=0.75)
+    assert not any("__mutex" in name for name in b.variables)
     primal = _solve(b, tmp_path, force_zero=True)
     assert primal["battery_size"] == pytest.approx(0, abs=1e-6)
     for step in (0, 1):

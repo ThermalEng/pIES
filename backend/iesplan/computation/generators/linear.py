@@ -12,8 +12,9 @@
   求值；加减、常数乘/除降为仿射；
 - relation 的 ``t=0`` 状态引用取 ``initial`` 初值，``t>0`` 仅支持
   ``t-1``（``t-2`` 在设备发布边界已拒绝，此处不再接受）；
-- ``x*y=0`` 互斥：仅当 x/y 均非负且具有有限上界时引入稳定命名的
-  binary 与两条 Big-M 约束；缺上界/非负不可证即明确不支持；
+- ``x*y=0`` 互斥：任一因子有有效的零上下界时恒真；否则仅当
+  x/y 均非负且具有有限正上界时引入稳定命名的 binary 与两条
+  Big-M 约束；缺上界/非负不可证即明确不支持；
 - 其余（变量×变量、变量作除数、非常数幂、函数/if/bool、
   严格不等式等）一律 ``LoweringUnsupportedError``，不近似、不回退。
 
@@ -581,16 +582,25 @@ def lower_mutex(
     y_key: tuple[str, int],
     symbols: Mapping[str, SymbolEntry],
 ) -> LoweredRelation:
-    """``x*y=0``（非负、有限上界）→ binary + 两条 Big-M 约束。
+    """``x*y=0``：已证明任一因子恒零即恒真，否则精确 Big-M 降级。
 
-    互斥语义只依赖两个非负基础变量是否为零：乘积上的非零常数因子
-    不改变可行域，约束一律按基础变量及其上界生成（系数恒为正）。
+    零界判定只使用有效上下界，不假设缺失下界为零。非退化互斥
+    仍要求两个基础变量均非负且具有有限正上界；非零常数因子
+    不改变可行域，Big-M 约束系数一律按基础变量生成。
     """
-    bounds: dict[tuple[str, int], float] = {}
+    entries: dict[tuple[str, int], SymbolEntry] = {}
     for key in (x_key, y_key):
         entry = _resolve_symbol(key[0], symbols)
         if entry[0] != "var":
             raise LoweringUnsupportedError(f"互斥项 {key[0]!r} 不是变量")
+        entries[key] = entry
+
+    # 先检查双方：另一因子即使没有互斥所需上界，也不能阻止恒零证明。
+    if any(entry[1] == 0 and entry[2] == 0 for entry in entries.values()):
+        return LoweredRelation()
+
+    bounds: dict[tuple[str, int], float] = {}
+    for key, entry in entries.items():
         lower, upper = entry[1], entry[2]
         if lower is None or lower < 0:
             raise LoweringUnsupportedError(
