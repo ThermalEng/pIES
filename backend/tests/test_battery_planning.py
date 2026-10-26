@@ -128,6 +128,7 @@ def test_generic_interval_tightening_preserves_binary_and_unknown_bounds():
         "s": LinearVariable("s", lower=0, upper=None),
         "b": LinearVariable("b", lower=0, upper=1, kind="binary"),
         "size": LinearVariable("size", lower=0, upper=None),
+        "free": LinearVariable("free", lower=0, upper=None),
     }
     rows = [
         LinearConstraint("finite_x", LinearExpression(
@@ -135,7 +136,7 @@ def test_generic_interval_tightening_preserves_binary_and_unknown_bounds():
             constant=-15,
         ), sense="eq", rhs=0),
         LinearConstraint("unknown_size", LinearExpression(
-            terms=((("s", 0), 1), (("size", 0), -2),
+            terms=((("free", 0), 1), (("size", 0), -2),
                    (("x", 0), 1)),
         ), sense="eq", rhs=0),
     ]
