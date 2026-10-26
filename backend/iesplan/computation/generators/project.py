@@ -435,6 +435,154 @@ def _tighten_nonnegative_equality_bounds(
     return tuple(bounded.values())
 
 
+
+def _state_mutex_envelope_rows(
+    variables: tuple[LinearVariable, ...],
+    rows: list[LinearConstraint],
+) -> tuple[LinearConstraint, ...]:
+    """原等式+真二元互斥+有限状态界蕴涵的局部凸包有效不等式。
+
+    不识别设备名、状态名或具体关系名。只有确认现有 Big-M 两行
+    确实使一对非负流不可同时非零，且状态等式只包含这两个流和
+    相邻时间同一状态，才生成四种严格有效的能量头寸界。
+    未给状态有限界、容量仍由规划接管时不会假定额外最大值。
+    """
+    by_name = {var.name: var for var in variables}
+    mutex_rows: dict[str, dict[str, str]] = {}
+    for row in rows:
+        if row.sense != "le" or row.expression.constant != 0:
+            continue
+        if len(row.expression.terms) != 2:
+            continue
+        binary_terms = [
+            (key[0], coeff) for key, coeff in row.expression.terms
+            if key[1] == 0 and key[0] in by_name
+            and by_name[key[0]].kind == "binary"
+        ]
+        if len(binary_terms) != 1:
+            continue
+        binary, b_coeff = binary_terms[0]
+        others = [
+            (key[0], coeff) for key, coeff in row.expression.terms
+            if key[1] == 0 and key[0] != binary
+        ]
+        if len(others) != 1:
+            continue
+        flow, flow_coeff = others[0]
+        candidate = by_name.get(flow)
+        if (
+            flow_coeff != 1 or candidate is None
+            or candidate.lower is None or candidate.lower < 0
+            or candidate.kind != "continuous"
+        ):
+            continue
+        if b_coeff < 0 and row.rhs == 0 and candidate.upper == -b_coeff:
+            mutex_rows.setdefault(binary, {})["up"] = flow
+        if b_coeff > 0 and row.rhs == b_coeff and candidate.upper == b_coeff:
+            mutex_rows.setdefault(binary, {})["down"] = flow
+
+    peer: dict[str, str] = {}
+    for entry in mutex_rows.values():
+        if set(entry) == {"up", "down"} and entry["up"] != entry["down"]:
+            x, y = entry["up"], entry["down"]
+            # 同一连续流若参与多个独立互斥，拒绝推断其唯一对应者。
+            if x not in peer and y not in peer:
+                peer[x], peer[y] = y, x
+
+    def timed(name: str) -> tuple[str, int] | None:
+        base, marker, index = name.rpartition("__t")
+        if marker and base and index.isdecimal():
+            return base, int(index)
+        return None
+
+    extra: list[LinearConstraint] = []
+    for row in rows:
+        if row.sense != "eq" or len(row.expression.terms) not in (3, 4):
+            continue
+        coeffs = {key[0]: coeff for key, coeff in row.expression.terms if key[1] == 0}
+        if len(coeffs) != len(row.expression.terms):
+            continue
+        matches = [
+            (x, y) for x, y in peer.items()
+            if x < y and x in coeffs and y in coeffs
+        ]
+        if len(matches) != 1:
+            continue
+        x, y = matches[0]
+        rest = {name: coef for name, coef in coeffs.items() if name not in (x, y)}
+        current = previous = None
+        initial: float | None = None
+        if len(rest) == 2 and row.rhs == row.expression.constant:
+            state_names = [(name, timed(name)) for name in rest]
+            for current_name, stamp in state_names:
+                if stamp is None or stamp[1] < 1:
+                    continue
+                previous_name = next(
+                    (name for name, s in state_names
+                     if s == (stamp[0], stamp[1] - 1)), None
+                )
+                if previous_name is not None and rest[current_name] == -rest[previous_name]:
+                    current, previous = current_name, previous_name
+                    break
+        elif len(rest) == 1:
+            (name, a), = rest.items()
+            if timed(name) is not None and timed(name)[1] == 0 and a != 0:
+                current = name
+                initial = (row.rhs - row.expression.constant) / a
+                if not math.isfinite(initial):
+                    current = None
+        if current is None:
+            continue
+        a = rest[current]
+        if a == 0 or current not in by_name or (
+            previous is not None and previous not in by_name
+        ):
+            continue
+        p, q = -coeffs[x] / a, coeffs[y] / a
+        if p <= 0 or q <= 0:
+            x, y = y, x
+            p, q = -coeffs[x] / a, coeffs[y] / a
+            if p <= 0 or q <= 0:
+                continue
+        state = by_name[current]
+        prev_lower = by_name[previous].lower if previous is not None else initial
+        prev_upper = by_name[previous].upper if previous is not None else initial
+        prefix = row.name + "__mutex_envelope"
+        # 充电期间 d=0；放电期间 c=0。以下均对两种整数模式成立。
+        if state.upper is not None and prev_upper is not None and prev_upper <= state.upper:
+            charge_terms = [((x, 0), p)]
+            if previous is not None:
+                charge_terms.append(((previous, 0), 1.0))
+            extra.append(LinearConstraint(
+                prefix + "__charge_before",
+                LinearExpression(tuple(sorted(charge_terms))), "le",
+                state.upper - (initial if previous is None else 0.0),
+            ))
+        if state.lower is not None and prev_lower is not None and prev_lower >= state.lower:
+            discharge_terms = [((y, 0), -q)]
+            if previous is not None:
+                discharge_terms.append(((previous, 0), 1.0))
+            extra.append(LinearConstraint(
+                prefix + "__discharge_before",
+                LinearExpression(tuple(sorted(discharge_terms))), "ge",
+                state.lower - (initial if previous is None else 0.0),
+            ))
+        if state.lower is not None and prev_lower is not None and state.lower >= prev_lower:
+            extra.append(LinearConstraint(
+                prefix + "__charge_after",
+                LinearExpression(tuple(sorted((
+                    ((current, 0), 1.0), ((x, 0), -p),
+                )))), "ge", prev_lower,
+            ))
+        if state.upper is not None and prev_upper is not None and state.upper <= prev_upper:
+            extra.append(LinearConstraint(
+                prefix + "__discharge_after",
+                LinearExpression(tuple(sorted((
+                    ((current, 0), 1.0), ((y, 0), q),
+                )))), "le", prev_upper,
+            ))
+    return tuple(extra)
+
 class _ProjectBuilder:
     """项目级构造的内部编排（实例方法只传 derived 状态，直接输入只进厂）。"""
 
@@ -2671,9 +2819,11 @@ class _ProjectBuilder:
         self._vat_cash = self._build_vat()
         self._income_cash = self._build_income()
         objective, objective_unit = self._build_objective()
+        bounded = _tighten_nonnegative_equality_bounds(self.variables, self.rows)
+        envelope = _state_mutex_envelope_rows(bounded, self.rows)
         model = LinearModel(
-            variables=_tighten_nonnegative_equality_bounds(self.variables, self.rows),
-            constraints=tuple(self.rows),
+            variables=bounded,
+            constraints=tuple(self.rows) + envelope,
             objective=objective.freeze(),
             sense=self.doc["planning"]["objective"]["sense"],
         )
