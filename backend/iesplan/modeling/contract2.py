@@ -682,7 +682,7 @@ def _initial_dimensions(node: object, properties: Mapping[str, Any]):
             return left
         if node.op in ("*", "/"):
             factor = 1 if node.op == "*" else -1
-            result = left + Counter()  # copy without Counter subtraction's positive-only semantics
+            result = Counter(dict(left))  # preserve negative dimension powers
             for key, power in right.items():
                 result[key] += factor * power
                 if result[key] == 0:

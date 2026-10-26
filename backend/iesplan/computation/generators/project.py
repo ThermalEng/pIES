@@ -48,6 +48,7 @@ from iesplan.computation.generators.linear import (
     LinearModel,
     LinearVariable,
     LoweringUnsupportedError,
+    lower_expression,
     lower_mutex,
     lower_planning_constraint,
     lower_planning_expression,
