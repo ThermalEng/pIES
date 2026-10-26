@@ -55,12 +55,12 @@ def check_demand_bindings(doc, snapshot, registry, diags) -> None:
         elif (
             spec.type != "out" or spec.carrier != "electricity"
             or dict(dims_of(spec.unit)) != {"power": 1}
-            or not _nonnegative_instance_lower_bound(spec, device, descriptor)
+            or not nonnegative_instance_lower_bound(spec, device, descriptor)
         ):
             fail(billing_id, "requires_nonnegative_electric_power_out")
 
 
-def _nonnegative_instance_lower_bound(spec, instance: Mapping, descriptor) -> bool:
+def nonnegative_instance_lower_bound(spec, instance: Mapping, descriptor) -> bool:
     """Resolve actual instance-bound property references, not just their existence.
 
     An otherwise valid instance property may be negative even though an interface

@@ -393,13 +393,13 @@ def _contribution(yaml_text: str):
     return built.contribution
 
 
-def _device_docs(*, heater_yaml: str = HEATER_YAML):
+def _device_docs(*, heater_yaml: str = HEATER_YAML, grid_yaml: str = GRID_YAML):
     docs = {}
     for device_id, yaml_text in (
         ("acme.device.heater", heater_yaml),
         ("acme.device.tank", TANK_YAML),
         ("acme.device.load", LOAD_YAML),
-        ("acme.device.grid", GRID_YAML),
+        ("acme.device.grid", grid_yaml),
     ):
         result = parse_device_model_v2(yaml_load(yaml_text), file="test.yaml")
         assert result.ok, result.diagnostics
@@ -451,13 +451,17 @@ def _inputs(
         doc["tariff_bindings"]["export_meter"].update(
             instance="grid1", interface="supply"
         )
+    # VAT exact piecewise relations need finite physical bounds on every
+    # metered flow. This synthetic source declares the same 100 kW cap as
+    # the receiving heater; the production generator does not guess a cap.
+    grid_yaml = GRID_YAML.replace("maximum: null", "maximum: 100") if sale_at_source else GRID_YAML
     if objective is not None:
         doc["planning"]["objective"] = objective
     models = {
         "heater1": _contribution(heater_yaml),
         "tank1": _contribution(TANK_YAML),
         "load1": _contribution(LOAD_YAML),
-        "grid1": _contribution(GRID_YAML),
+        "grid1": _contribution(grid_yaml),
     }
     if payload is None:
         payload = _finance_payload(
@@ -472,7 +476,7 @@ def _inputs(
     result = validate_assembly_doc(
         doc,
         finance_snapshots={"obj-finance": finance},
-        device_documents=_device_docs(heater_yaml=heater_yaml),
+        device_documents=_device_docs(heater_yaml=heater_yaml, grid_yaml=grid_yaml),
     )
     assert result.artifact is not None, [d.to_dict() for d in result.diagnostics]
     materialized = materialize_non_predictive_series(result.artifact, {}, operation_years=2)

@@ -14,7 +14,7 @@ from typing import Any, Mapping
 
 from iesplan.assembly.diags import ASM_TAR_INVALID
 from iesplan.assembly.diags import make_asm_diag as make_diag
-from iesplan.assembly.rules.demand import _nonnegative_instance_lower_bound
+from iesplan.assembly.rules.demand import nonnegative_instance_lower_bound
 from iesplan.core.diagnostics import Diagnostic
 from iesplan.core.units import dims_of
 from iesplan.finance import EffectiveFinanceConfig, EnergyPrice
@@ -154,7 +154,7 @@ def check_tariff_bindings(
                 },
             )
             continue
-        if not _nonnegative_instance_lower_bound(ispec, dev, descriptor):
+        if not nonnegative_instance_lower_bound(ispec, dev, descriptor):
             _tar_fail(
                 diags, field, "interface_not_nonnegative",
                 {
