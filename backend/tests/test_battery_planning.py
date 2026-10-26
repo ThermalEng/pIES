@@ -279,7 +279,7 @@ def test_initial_expression_public_input_rejects_unit_conflict():
     result = build_math_contribution(parsed.document)
     assert not result.ok
     assert result.contribution is None
-    assert any("量纲" in d.message or "单位" in d.message for d in result.diagnostics)
+    assert any("量纲" in d.params.get("detail", "") or "单位" in d.params.get("detail", "") for d in result.diagnostics)
 
 
 def test_planned_capacity_capex_and_dated_maintenance_recover_from_one_solution(

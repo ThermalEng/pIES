@@ -242,10 +242,10 @@ def validate_equations(
                 if not isinstance(expression, str) or not expression.strip():
                     raise ParseError(f"equations.variables.{vid}.initial.expression 必须是非空表达式")
                 try:
-                    names, offsets = reference_atoms(expression, f"{vid}.initial")
+                    names, _offsets = reference_atoms(expression, f"{vid}.initial")
                 except EquationSyntaxError as exc:
                     raise ParseError(str(exc)) from exc
-                if any(name not in properties for name in names) or any(offset for offset in offsets):
+                if any(name not in properties for name in names) or "[" in expression or "]" in expression:
                     raise ParseError(f"equations.variables.{vid}.initial.expression 只允许不带时间索引的 properties")
             else:
                 raise ParseError(f"equations.variables.{vid}.initial 只能声明 property_ref 或 expression")
