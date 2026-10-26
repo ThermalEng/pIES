@@ -792,7 +792,7 @@ function VersionsDialog({
   projectId?: number
   open: boolean
   onClose: () => void
-  onChanged: () => void
+  onChanged: (bound: boolean) => Promise<void>
 }) {
   const { t } = useI18n()
   const [selected, setSelected] = useState<DatasetVersion | null>(null)
@@ -813,7 +813,7 @@ function VersionsDialog({
       } else {
         await unbindVersion(projectId, v.id)
       }
-      onChanged()
+      await onChanged(bind)
     } catch (err) {
       setActionError(errorMessage(err))
     } finally {
@@ -1002,6 +1002,8 @@ export function DataPage() {
   const [templateBusy, setTemplateBusy] = useState(false)
   const [refreshTick, setRefreshTick] = useState(0)
   const [busyBind, setBusyBind] = useState<number | null>(null)
+  // 只记录本次写入已成功但权威项目草稿读回失败的恢复阶段，不缓存绑定事实。
+  const [bindingReadFailed, setBindingReadFailed] = useState(false)
 
   useEffect(() => {
     let cancelled = false
@@ -1044,6 +1046,25 @@ export function DataPage() {
     return vs.length > 0 ? vs.reduce((a, b) => (a.version_no >= b.version_no ? a : b)) : undefined
   }
 
+  async function confirmBindingWrite(bound: boolean) {
+    const result = await refreshDetailed()
+    if (result.projectError) {
+      setBindingReadFailed(true)
+      return
+    }
+    setBindingReadFailed(false)
+    setNotice({ kind: 'success', text: bound ? pt('ies.data.bound_ok') : pt('ies.data.unbound_ok') })
+  }
+
+  async function retryBindingRead() {
+    // 不发送 dataset.bind/unbind；只刷新 WorkbenchProvider 的权威项目视图。
+    const result = await refreshDetailed()
+    if (!result.projectError) {
+      setBindingReadFailed(false)
+      setNotice({ kind: 'success', text: pt('ies.data.binding_read_ok') })
+    }
+  }
+
   /** 快速绑定最新版本(表格行内操作)。 */
   async function bindLatest(ds: Dataset) {
     if (pid === undefined || busyBind !== null) return
@@ -1053,8 +1074,7 @@ export function DataPage() {
     setNotice(null)
     try {
       await bindVersion(pid, v.id, ds.id)
-      setNotice({ kind: 'success', text: pt('ies.data.bound_ok') })
-      setRefreshTick((x) => x + 1)
+      await confirmBindingWrite(true)
     } catch (err) {
       setNotice({ kind: 'error', text: errorMessage(err) })
     } finally {
@@ -1090,9 +1110,11 @@ export function DataPage() {
     // 数据列表/版本错误仍归本页 D2 入口, 不误接为项目重试。
     return (
       <div className="ies-page-placeholder">
-        <Alert variant="error" title={t('ies.common.load_failed', { reason: projectError })} />
-        <Button variant="secondary" onClick={() => void refreshDetailed()}>
-          {t('ies.common.retry')}
+        <Alert variant="error" title={bindingReadFailed ? pt('ies.data.binding_write_read_failed') : t('ies.common.load_failed', { reason: projectError })}>
+          {bindingReadFailed ? projectError : null}
+        </Alert>
+        <Button variant="secondary" onClick={() => void (bindingReadFailed ? retryBindingRead() : refreshDetailed())}>
+          {bindingReadFailed ? pt('ies.data.retry_binding_read') : t('ies.common.retry')}
         </Button>
       </div>
     )
@@ -1270,7 +1292,7 @@ export function DataPage() {
         projectId={pid}
         open={versionsTarget !== null}
         onClose={() => setVersionsTarget(null)}
-        onChanged={() => setRefreshTick((x) => x + 1)}
+        onChanged={confirmBindingWrite}
       />
       <PreviewDialog dataset={previewTarget} projectId={pid} open={previewTarget !== null} onClose={() => setPreviewTarget(null)} />
     </div>

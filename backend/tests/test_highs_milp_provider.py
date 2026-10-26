@@ -230,13 +230,12 @@ def _config_with(**kwargs) -> CalculationConfig:
 
 
 def test_generate_rejects_unknown_outputs() -> None:
-    """未知输出请求是明确的用户请求错误，不忽略（门禁后特有检查）。"""
+    """未知输出请求在 descriptor 通用门禁拒绝，不进入 Bundle 生成。"""
     artifact, models, materialized, finance, config, evaluation = _campus_inputs(
         outputs=["solution", "trace"]
     )
-    provider = build_registry((HIGHS_MILP_PROVIDER,)).resolve(config)
-    with pytest.raises(ValueError, match="不支持的输出请求"):
-        provider.generate(artifact, models, materialized, finance, config, evaluation)
+    with pytest.raises(ComputationUnavailableError, match="不支持所选 outputs"):
+        build_registry((HIGHS_MILP_PROVIDER,)).resolve(config)
 
 
 def test_generate_accepts_bound_time_series_with_prices() -> None:
@@ -344,6 +343,7 @@ def _fake_descriptor(ref: str):
         },
         assembly_schema_version="2.0.0",
         modes=("planning",),
+        outputs=("solution",),
         precisions=("medium",),
         solvers=(SOLVER_REF,),
         executors=(EXECUTOR_REF,),

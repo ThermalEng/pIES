@@ -660,8 +660,8 @@ def test_submit_rejects_tax_rules_without_provider_capabilities(
     from test_config_revisions import _tax_profile_payload
 
     from iesplan.application import configuration as config_cases
-    from iesplan.computation.errors import ComputationUnavailableError
     from iesplan.computation.generators.descriptor import GeneratorDescriptor
+    from iesplan.computation.generators.registry import GeneratorRegistry
 
     stub_ref = "ies.generator.stub@1.0.0"
     stub_descriptor = GeneratorDescriptor(
@@ -670,6 +670,7 @@ def test_submit_rejects_tax_rules_without_provider_capabilities(
         options_schema={"type": "object", "additionalProperties": False},
         assembly_schema_version="2.0",
         modes=("planning",),
+        outputs=("solution",),
         precisions=("medium",),
         solvers=("ies.solver.highs@1.7.2",),
         executors=("ies.executor.local_process@1.0.0",),
@@ -678,11 +679,6 @@ def test_submit_rejects_tax_rules_without_provider_capabilities(
         seed_semantics="测试合成 provider，无税务能力标记",
     )
     assert stub_descriptor.capabilities == ()
-
-    def _get(ref: str):
-        if ref == stub_ref:
-            return SimpleNamespace(descriptor=stub_descriptor)
-        raise ComputationUnavailableError(f"未知生成器: {ref}", reason="no-generator")
 
     settings.data_dir = tmp_path
     app = create_app()
@@ -696,7 +692,7 @@ def test_submit_rejects_tax_rules_without_provider_capabilities(
     app.dependency_overrides[get_request_db] = _override_request_db
     with TestClient(app, raise_server_exceptions=False) as stub_client:
         app.state.bootstrap_context = SimpleNamespace(
-            generator_registry=SimpleNamespace(get=_get),
+            generator_registry=GeneratorRegistry({stub_ref: SimpleNamespace(descriptor=stub_descriptor)}),
             predictor_registry=None,
         )
         owner = make_user(db, "owner_stubgate")

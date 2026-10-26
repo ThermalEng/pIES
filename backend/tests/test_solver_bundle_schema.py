@@ -63,6 +63,7 @@ def _descriptor(**kwargs) -> GeneratorDescriptor:
     kwargs.setdefault("assembly_schema_version", "1.0")
     kwargs.setdefault("modes", ("planning",))
     kwargs.setdefault("precisions", ("low", "medium", "high"))
+    kwargs.setdefault("outputs", ("solution",))
     kwargs.setdefault("solvers", (SOLVER,))
     kwargs.setdefault(
         "options_schema",
