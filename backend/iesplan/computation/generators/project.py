@@ -359,6 +359,58 @@ def step_series_declarations(
     return _new_builder(artifact, models, materialized, finance, evaluation).step_series()
 
 
+def _tighten_nonnegative_equality_bounds(
+    variables: Mapping[str, LinearVariable],
+    rows: list[LinearConstraint],
+) -> tuple[LinearVariable, ...]:
+    """从两变量等式和非负松弛项推导有限界，不添加物理约束。
+
+    a*x + b*s + c == rhs，s >= 0、s 无有限上界，则
+    x = (rhs-c)/a - (b/a)*s；依据斜率可推导 x 的一侧界。
+    不处理带规划容量的多变量等式，亦不添加容量默认上界。
+    """
+    bounded = dict(variables)
+    for row in rows:
+        terms = row.expression.terms
+        if row.sense != "eq" or len(terms) != 2:
+            continue
+        for index in (0, 1):
+            (target_key, a), (slack_key, b) = terms[index], terms[1 - index]
+            if (
+                target_key[1] != 0 or slack_key[1] != 0
+                or a == 0 or b == 0
+                or target_key[0] not in bounded or slack_key[0] not in bounded
+            ):
+                continue
+            target = bounded[target_key[0]]
+            slack = bounded[slack_key[0]]
+            if (
+                target.kind != "continuous" or slack.kind != "continuous"
+                or slack.lower != 0 or slack.upper is not None
+            ):
+                continue
+            endpoint = (row.rhs - row.expression.constant) / a
+            if not math.isfinite(endpoint):
+                continue
+            if -b / a > 0:
+                if target.lower is not None and endpoint <= target.lower:
+                    continue
+                if target.upper is not None and endpoint > target.upper:
+                    continue  # 保留真实不可行性由求解器报告
+                bounded[target.name] = LinearVariable(
+                    target.name, endpoint, target.upper, target.kind
+                )
+            else:
+                if target.upper is not None and endpoint >= target.upper:
+                    continue
+                if target.lower is not None and endpoint < target.lower:
+                    continue
+                bounded[target.name] = LinearVariable(
+                    target.name, target.lower, endpoint, target.kind
+                )
+    return tuple(bounded.values())
+
+
 class _ProjectBuilder:
     """项目级构造的内部编排（实例方法只传 derived 状态，直接输入只进厂）。"""
 
@@ -2596,7 +2648,7 @@ class _ProjectBuilder:
         self._income_cash = self._build_income()
         objective, objective_unit = self._build_objective()
         model = LinearModel(
-            variables=tuple(self.variables.values()),
+            variables=_tighten_nonnegative_equality_bounds(self.variables, self.rows),
             constraints=tuple(self.rows),
             objective=objective.freeze(),
             sense=self.doc["planning"]["objective"]["sense"],

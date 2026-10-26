@@ -14,7 +14,9 @@ from iesplan.computation.generators.linear import (
     LinearConstraint, LinearExpression, LinearModel,
 )
 from iesplan.computation.generators.mps import write_mps
-from iesplan.computation.generators.project import _ProjectBuilder
+from iesplan.computation.generators.project import (
+    _ProjectBuilder, _tighten_nonnegative_equality_bounds,
+)
 from iesplan.devices import init_registry, list_devices
 from iesplan.devices.contracts2 import canonical_bytes, from_dict, to_dict
 from iesplan.devices.parser2 import parse_device_model_v2
@@ -104,6 +106,28 @@ def test_fixed_capacity_hand_energy_and_efficiency(battery):
     assert b.unit_map["cell__charge__t0"] == "kW"
 
 
+def test_fixed_energy_bounds_deduced_without_changing_physics(battery):
+    # C=20 kWh、SOC=[.1,.9] => 同一解的 E 在 7.2..64.8 MJ。
+    # 保留原两条方程、非负辅助变量、原业务单位及结果列。
+    b = _rows(battery, capacity=20, power=6)
+    inferred = {v.name: v for v in _tighten_nonnegative_equality_bounds(b.variables, b.rows)}
+    assert len(inferred) == len(b.variables)
+    for step in (0, 1):
+        energy = inferred[f"cell__stored_energy__t{step}"]
+        assert energy.lower == pytest.approx(7_200_000)
+        assert energy.upper == pytest.approx(64_800_000)
+        assert f"cell__above_minimum__t{step}" in inferred
+        assert f"cell__below_maximum__t{step}" in inferred
+
+
+def test_planned_energy_bounds_do_not_invent_capacity_limit(battery):
+    b = _rows(battery, power=6)
+    inferred = {v.name: v for v in _tighten_nonnegative_equality_bounds(b.variables, b.rows)}
+    assert inferred["battery_size"].upper is None
+    for step in (0, 1):
+        assert inferred[f"cell__stored_energy__t{step}"].upper is None
+
+
 def test_planned_capacity_power_and_soc_boundaries_are_affine(battery):
     b = _rows(battery)
     first = _row(b, "cell__energy_update__t0")
@@ -143,7 +167,8 @@ def _solve(b, tmp_path, *, demand_w=0, force_zero=False):
         terms=((("battery_size", 0), 1),) if "battery_size" in b.variables else ()
     )
     model = LinearModel(
-        variables=tuple(b.variables.values()), constraints=tuple(rows),
+        variables=_tighten_nonnegative_equality_bounds(b.variables, rows),
+        constraints=tuple(rows),
         objective=obj, sense="minimize",
     )
     problem, offset = write_mps(model)
