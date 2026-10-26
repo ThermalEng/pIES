@@ -193,6 +193,7 @@ def _iter_domain_files():
 #: 不允许其他文件或任意财务业务函数。实际域业务依赖继续交由本门禁阻断。
 _APPROVED_TASK_FINANCE_TYPES = frozenset({
     "ConstructionPayment", "EvaluationInput", "MaintenanceExpense",
+    "MaintenanceUnitCost", "ScaleUnitCostTerm", "CostComponentShareTerm",
 })
 _APPROVED_RESULTS_METRICS_NAMES = frozenset({
     "FinancialValidity", "IRRStatus", "OptimalityValidity",
@@ -236,7 +237,13 @@ def test_approved_cross_domain_contract_imports_are_narrow() -> None:
         return _is_approved_public_contract_import(domain, path, node)
 
     assert accepted("tasks", task_path,
-                    "from iesplan.finance import ConstructionPayment, EvaluationInput, MaintenanceExpense")
+                    "from iesplan.finance import ConstructionPayment, EvaluationInput, MaintenanceExpense, "
+                    "MaintenanceUnitCost, ScaleUnitCostTerm, CostComponentShareTerm")
+    from iesplan import finance
+    for name in _APPROVED_TASK_FINANCE_TYPES:
+        value_type = getattr(finance, name)
+        assert dataclasses.is_dataclass(value_type)
+        assert value_type.__dataclass_params__.frozen, name
     assert accepted("results", results_path,
                     "from iesplan.metrics import PhysicalValidity, summarize_four_dimensions")
     for source in (

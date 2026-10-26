@@ -695,10 +695,11 @@ def test_public_entry_exemption_is_exact() -> None:
 
 
 # One approved immutable cross-domain contract: task snapshots reuse the
-# three value objects owned by finance's public facade. No business functions,
+# value objects owned by finance's public facade. No business functions,
 # wildcard imports or implementation modules are exempt.
 _FINANCE_CONFIRMATION_VALUES = frozenset({
     "ConstructionPayment", "EvaluationInput", "MaintenanceExpense",
+    "MaintenanceUnitCost", "ScaleUnitCostTerm", "CostComponentShareTerm",
 })
 
 
@@ -822,7 +823,7 @@ def test_no_forbidden_cross_domain_deps():
     assert not detected, f"领域间直接业务依赖: {sorted(detected)}"
 
 def test_tasks_finance_confirmation_exemption_is_exact(tmp_path: Path) -> None:
-    """Allow only the three public immutable values, never finance behavior."""
+    """Allow only the public immutable values, never finance behavior."""
     pkg_root = tmp_path / "iesplan"
     task_root = pkg_root / "tasks"
     task_root.mkdir(parents=True)
@@ -835,7 +836,8 @@ def test_tasks_finance_confirmation_exemption_is_exact(tmp_path: Path) -> None:
         )
 
     contract.write_text(
-        "from iesplan.finance import ConstructionPayment, EvaluationInput, MaintenanceExpense\n",
+        "from iesplan.finance import ConstructionPayment, EvaluationInput, MaintenanceExpense, "
+        "MaintenanceUnitCost, ScaleUnitCostTerm, CostComponentShareTerm\n",
         encoding="utf-8",
     )
     assert forbidden_imports() == set()
