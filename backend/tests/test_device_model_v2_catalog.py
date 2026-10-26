@@ -47,7 +47,7 @@ def _parse(text: str, file: str = "test.yaml"):
 
 
 def _no_source_in_interfaces(doc) -> bool:
-    """2.1.0: interface 不得承载项目来源（source 字段已移除，恒为真）。"""
+    """2.2.0: interface 不得承载项目来源（source 字段已移除，恒为真）。"""
     return True
 
 
@@ -70,7 +70,7 @@ class TestSixFieldsAndNoLegacy:
         for yaml_path in sorted(CATALOG.glob("*.yaml")):
             raw = _load_raw(yaml_path)
             assert raw.get("schema") == "ies.device-model"
-            assert raw.get("schema_version") == "2.1.0"
+            assert raw.get("schema_version") == "2.2.0"
             for field in ("device", "properties", "interfaces", "equations"):
                 assert field in raw
             for banned in BANNED_TOP_FIELDS:
@@ -96,18 +96,25 @@ class TestDeviceSpecificContracts:
     def test_battery_bidirectional_and_soc(self):
         doc = self._doc("ies.device.battery")
         assert doc.interfaces["electricity"].type == "bidirectional"
-        assert "soc" in doc.equations.variables and doc.equations.variables["soc"].initial_property_ref == "initial_soc"
+        energy = doc.equations.variables["stored_energy"]
+        assert energy.unit == "kWh"
+        assert energy.initial_expression == "initial_soc * capacity_kwh"
+        assert energy.valid_range == (0, None)
         assert doc.properties["cycle_life"].unit == "1"
         exprs = {r.id: r.expression for r in doc.equations.relations}
         assert "charge[t] * discharge[t] = 0" in exprs["charge_discharge_exclusivity"]
-        assert "step_duration" in exprs["soc_update"] and "capacity_kwh" in exprs["soc_update"]
+        assert "step_duration" in exprs["energy_update"]
+        assert "/ capacity_kwh" not in exprs["energy_update"]
+        assert exprs["minimum_energy"] == "above_minimum[t] = stored_energy[t] - min_soc * capacity_kwh"
+        assert exprs["maximum_energy"] == "below_maximum[t] = max_soc * capacity_kwh - stored_energy[t]"
         assert _no_source_in_interfaces(doc)
 
     def test_grid_import_out_export_in(self):
         doc = self._doc("ies.device.grid_connection")
         assert doc.interfaces["electricity_import"].type == "out"
         assert doc.interfaces["electricity_export"].type == "in"
-        assert any("electricity_import[t] * electricity_export[t] = 0" in e for e in (r.expression for r in doc.equations.relations))
+        exprs = {r.id: r.expression for r in doc.equations.relations}
+        assert exprs["import_export_exclusivity"] == "electricity_export[t] * electricity_import[t] = 0"
         assert _no_source_in_interfaces(doc)
 
     def test_loads_predefined_kw(self):
@@ -171,7 +178,7 @@ class TestDeviceSpecificContracts:
 PER_DEVICE_VALID = {
     "ies.device.battery": """
 schema: ies.device-model
-schema_version: "2.1.0"
+schema_version: "2.2.0"
 device: {id: ies.device.battery, names: {zh-CN: 电池, en-US: Battery}}
 properties:
   capacity_kwh: {value: 800, unit: kWh, valid_range: {minimum: 0, maximum: 10000000}}
@@ -194,7 +201,7 @@ equations:
 """,
     "ies.device.grid_connection": """
 schema: ies.device-model
-schema_version: "2.1.0"
+schema_version: "2.2.0"
 device: {id: ies.device.grid_connection, names: {zh-CN: 电网, en-US: Grid}}
 properties: {}
 interfaces:
@@ -204,7 +211,7 @@ equations: {variables: {}, relations: [{id: excl, expression: "electricity_impor
 """,
     "ies.device.electric_load": """
 schema: ies.device-model
-schema_version: "2.1.0"
+schema_version: "2.2.0"
 device: {id: ies.device.electric_load, names: {zh-CN: 电负荷, en-US: Electric Load}}
 properties: {}
 interfaces:
@@ -213,7 +220,7 @@ equations: {variables: {}, relations: []}
 """,
     "ies.device.heat_load": """
 schema: ies.device-model
-schema_version: "2.1.0"
+schema_version: "2.2.0"
 device: {id: ies.device.heat_load, names: {zh-CN: 热负荷, en-US: Heat Load}}
 properties: {}
 interfaces:
@@ -222,7 +229,7 @@ equations: {variables: {}, relations: []}
 """,
     "ies.device.cooling_load": """
 schema: ies.device-model
-schema_version: "2.1.0"
+schema_version: "2.2.0"
 device: {id: ies.device.cooling_load, names: {zh-CN: 冷负荷, en-US: Cooling Load}}
 properties: {}
 interfaces:
@@ -231,7 +238,7 @@ equations: {variables: {}, relations: []}
 """,
     "ies.device.heat_pump": """
 schema: ies.device-model
-schema_version: "2.1.0"
+schema_version: "2.2.0"
 device: {id: ies.device.heat_pump, names: {zh-CN: 热泵, en-US: Heat Pump}}
 properties:
   cop: {value: 3.0, unit: "1", valid_range: {minimum: 2, maximum: 6.5}}
@@ -243,7 +250,7 @@ equations: {variables: {}, relations: [{id: conv, expression: "heat_out[t] = ele
 """,
     "ies.device.pv": """
 schema: ies.device-model
-schema_version: "2.1.0"
+schema_version: "2.2.0"
 device: {id: ies.device.pv, names: {zh-CN: 光伏, en-US: PV}}
 properties:
   rated_capacity_kwp: {value: 50, unit: kWp, valid_range: {minimum: 0, maximum: 1000000}}
@@ -257,7 +264,7 @@ equations: {variables: {}, relations: [{id: gen, expression: "electric_out[t] = 
 """,
     "ies.device.gas_boiler": """
 schema: ies.device-model
-schema_version: "2.1.0"
+schema_version: "2.2.0"
 device: {id: ies.device.gas_boiler, names: {zh-CN: 锅炉, en-US: Boiler}}
 properties:
   rated_heat_kw: {value: 400, unit: kW, valid_range: {minimum: 0, maximum: 1000000}}
@@ -270,7 +277,7 @@ equations: {variables: {}, relations: [{id: gen, expression: "heat_out[t] = gas_
 """,
     "ies.device.electric_chiller": """
 schema: ies.device-model
-schema_version: "2.1.0"
+schema_version: "2.2.0"
 device: {id: ies.device.electric_chiller, names: {zh-CN: 冷机, en-US: Chiller}}
 properties:
   rated_cooling_kw: {value: 400, unit: kW, valid_range: {minimum: 0, maximum: 1000000}}
@@ -282,7 +289,7 @@ equations: {variables: {}, relations: [{id: gen, expression: "cool_out[t] = elec
 """,
     "ies.device.transport_pipe": """
 schema: ies.device-model
-schema_version: "2.1.0"
+schema_version: "2.2.0"
 device: {id: ies.device.transport_pipe, names: {zh-CN: 管道, en-US: Pipe}}
 properties:
   loss_rate: {value: 0.03, unit: "1", valid_range: {minimum: 0, maximum: 0.5}}
@@ -296,7 +303,7 @@ equations: {variables: {}, relations: [{id: loss, expression: "heat_out[t] = hea
 PER_DEVICE_INVALID = [
     ("ies.device.grid-wrong-type", """
 schema: ies.device-model
-schema_version: "2.1.0"
+schema_version: "2.2.0"
 device: {id: ies.device.grid_connection, names: {zh-CN: 电网, en-US: Grid}}
 properties: {}
 interfaces:
@@ -306,7 +313,7 @@ equations: {variables: {}, relations: []}
 """, "type 必须是"),
     ("ies.device.heat_pump-with-finance", """
 schema: ies.device-model
-schema_version: "2.1.0"
+schema_version: "2.2.0"
 device: {id: ies.device.heat_pump, names: {zh-CN: 热泵, en-US: HP}}
 properties: {cop: {value: 3.2, unit: "1", valid_range: {minimum: 2, maximum: 6}}}
 interfaces:
@@ -317,7 +324,7 @@ finance_type: acme.finance.hp
 """, "was unexpected"),
     ("ies.device.pipe-with-delay", """
 schema: ies.device-model
-schema_version: "2.1.0"
+schema_version: "2.2.0"
 device: {id: ies.device.transport_pipe, names: {zh-CN: 管道, en-US: Pipe}}
 properties: {loss_rate: {value: 0.02, unit: "1", valid_range: {minimum: 0, maximum: 0.5}}}
 interfaces:
@@ -328,7 +335,7 @@ delay_steps: 1
 """, "delay_steps"),
     ("ies.device.electric_load-annual", """
 schema: ies.device-model
-schema_version: "2.1.0"
+schema_version: "2.2.0"
 device: {id: ies.device.electric_load, names: {zh-CN: 电负荷, en-US: Load}}
 properties: {}
 interfaces:
@@ -346,7 +353,7 @@ class TestPerDeviceValidStructures:
         assert r.ok, f"{device_id} 合法结构应通过: {[d.params.get('detail') for d in r.diagnostics]}"
         assert r.document is not None and r.document.device is not None
         assert r.document.device.id == device_id
-        # 2.1.0: 所有 interface 都不承载项目来源（source 字段已移除）
+        # 2.2.0: 所有 interface 都不承载项目来源（source 字段已移除）
 
 
 class TestPerDeviceInvalidStructures:

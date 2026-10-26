@@ -232,7 +232,7 @@ function collectDefaults(node: InputNode, out: Record<string, FormFieldValue>): 
   if (node.unsupported) return
   switch (node.type) {
     case 'number':
-      // 2.1.0: 模板不提供默认值, 由用户必填。
+      // 2.2.0: 模板不提供默认值, 由用户必填。
       out[node.path] = { kind: 'number', text: '' }
       break
     case 'boolean':
@@ -646,11 +646,11 @@ export function isValidDeviceId(id: string): boolean {
   return DEVICE_ID_PATTERN.test(id)
 }
 
-/** 标准 ies.device-model 2.1.0 YAML 骨架(直接创建页初始内容)。 */
+/** 标准 ies.device-model 2.2.0 YAML 骨架(直接创建页初始内容)。 */
 export function buildYamlSkeleton(): string {
   return [
     'schema: ies.device-model',
-    'schema_version: "2.1.0"',
+    'schema_version: "2.2.0"',
     '',
     'device:',
     '  id: your.namespace.device_id',

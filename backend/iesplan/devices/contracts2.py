@@ -1,7 +1,7 @@
-"""`ies.device-model` 2.1.0 公开契约：深度不可变值对象与唯一规范化。
+"""`ies.device-model` 2.2.0 公开契约：深度不可变值对象与唯一规范化。
 
 对应格式标准 [device-model-yaml.md](../../../manual/developer-guide/zh-CN/formats/device-model-yaml.md)
-与包内 `schema/device-model-2.1.0.contract.md`。
+与包内 `schema/device-model-2.2.0.contract.md`。
 
 顶层只允许 `schema/schema_version/device/properties/interfaces/equations`；
 模板额外允许顶层 `inputs`（见 ``DeviceModelTemplate``）。设备不声明独立语义版本，
@@ -21,7 +21,7 @@ from typing import Any, Mapping
 
 #: 统一文件契约标识与版本
 SCHEMA_ID = "ies.device-model"
-SCHEMA_VERSION = "2.1.0"
+SCHEMA_VERSION = "2.2.0"
 
 #: 模板 inputs 叶子类型（标量 + 预定义数据 + 结构容器）
 INPUT_SCALAR_TYPES: tuple[str, ...] = ("number", "boolean", "string")
@@ -119,6 +119,7 @@ class EquationVariable:
     unit: str
     valid_range: tuple[float | None, float | None] | None = None
     initial_property_ref: str | None = None
+    initial_expression: str | None = None
     minimum_property_ref: str | None = None
     maximum_property_ref: str | None = None
 
@@ -143,7 +144,7 @@ class Equations:
 
 @dataclass(frozen=True, slots=True)
 class DeviceModelDocument:
-    """一份 ``ies.device-model`` 2.1.0 设备的深度不可变文档。
+    """一份 ``ies.device-model`` 2.2.0 设备的深度不可变文档。
 
     ``inputs`` 仅在模板（未实例化阶段）存在；普通模型为 ``None``。
     """
@@ -224,6 +225,8 @@ def to_dict(document: DeviceModelDocument) -> dict[str, Any]:
                    if v.valid_range is not None else {}),
                 **({"initial": {"property_ref": v.initial_property_ref}}
                    if v.initial_property_ref is not None else {}),
+                **({"initial": {"expression": v.initial_expression}}
+                   if v.initial_expression is not None else {}),
             }
             for vid, v in document.equations.variables.items()
         },
@@ -288,6 +291,7 @@ def from_dict(raw: Mapping[str, Any]) -> DeviceModelDocument:
                 unit=str(item["unit"]),
                 valid_range=_valid_range_of(item.get("valid_range")),
                 initial_property_ref=(item.get("initial") or {}).get("property_ref"),
+                initial_expression=(item.get("initial") or {}).get("expression"),
             )
             for vid, item in (equations_raw.get("variables") or {}).items()
         }
@@ -312,7 +316,7 @@ def canonical_receipt(document: DeviceModelDocument) -> dict[str, Any]:
     return {
         "schema": SCHEMA_ID,
         "schema_version": document.schema_version,
-        "canonicalizer": "ies.device-model.canonical@2.1.0",
+        "canonicalizer": "ies.device-model.canonical@2.2.0",
         "device_id": document.device.id if document.device is not None else None,
         "property_count": len(document.properties),
         "interface_count": len(document.interfaces),

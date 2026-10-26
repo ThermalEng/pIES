@@ -12,7 +12,7 @@ import { createEngineer, loginToken, requestJson } from './setup/api'
 import { APP, scaffoldProject } from './financial-scaffold'
 
 const TEMPLATE_HEAD = `schema: ies.device-model
-schema_version: "2.1.0"
+schema_version: "2.2.0"
 device:
   id: __DEVICE_ID__
   names:

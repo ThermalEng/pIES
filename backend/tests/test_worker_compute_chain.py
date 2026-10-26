@@ -556,7 +556,7 @@ class TestSingleUnitSeal:
         assert _stored_object_count(db) == before
 
     def test_hourly_sealed_from_declared_series(
-        self, client: TestClient, db: Session, engine: Engine, plane
+        self, client: TestClient, db: Session, engine: Engine, plane, monkeypatch
     ) -> None:
         """统一序列封存闭环：声明 → 同次求解 → hourly 对象 → 引用。
 
@@ -565,6 +565,10 @@ class TestSingleUnitSeal:
         每步值等于同次解变量在声明列的值（声明驱动对照，不拆列名）；
         至少一个序列非常恒（真实求解，非存根常量）；对象有证据包引用挂接。
         """
+        # 合成输入经原有 HTTP 提交：初始电量为零，首步必须充电至显式
+        # 最小 SOC。这样至少一条状态/流量序列必变化，不依赖零目标任意选解。
+        from assembly_fixture import FIXTURE_BATTERY_PARAMS
+        monkeypatch.setitem(FIXTURE_BATTERY_PARAMS, "initial_soc", 0)
         task_id = _submit_calc_task(client, db, dict(_CONFIG_BODY), dict(PLANNING_BODY))
         claim = _claim(db, task_id)
         assert _run(engine, claim, plane) == "completed"

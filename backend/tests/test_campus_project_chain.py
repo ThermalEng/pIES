@@ -148,14 +148,14 @@ def test_load_demand_enters_model(chain) -> None:
 
 
 def test_step_duration_seconds_applied(chain) -> None:
-    """step_duration 以 SI 秒进入状态递推（1h → 3600，容量 400kWh）。"""
+    """能量状态以 SI 焦耳递推，步长为秒（1h → 3600，容量 400kWh）。"""
     model = chain["model"]
-    row = _row(model, "bat1__soc_update__t0")
+    row = _row(model, "bat1__energy_update__t0")
     coeffs = _coeffs(row.expression)
-    assert coeffs["bat1__soc__t0"] == 1.0
-    assert coeffs["bat1__charge__t0"] == pytest.approx(-0.95 * 3600 / 1.44e9)
-    assert coeffs["bat1__discharge__t0"] == pytest.approx(3600 / 0.95 / 1.44e9)
-    assert row.expression.constant == pytest.approx(-0.5)
+    assert coeffs["bat1__stored_energy__t0"] == 1.0
+    assert coeffs["bat1__charge__t0"] == pytest.approx(-0.95 * 3600)
+    assert coeffs["bat1__discharge__t0"] == pytest.approx(3600 / 0.95)
+    assert row.expression.constant == pytest.approx(-0.5 * 1.44e9)
 
 
 def test_real_exclusivity_bounded(chain) -> None:

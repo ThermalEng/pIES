@@ -25,7 +25,7 @@
 import type { DeviceKind, InterfaceDirection } from '../../types'
 
 // ---------------------------------------------------------------------------
-// 模板 inputs(与后端 TemplateInputSpec / device-model-2.1.0.schema.json 对应)
+// 模板 inputs(与后端 TemplateInputSpec / device-model-2.2.0.schema.json 对应)
 // ---------------------------------------------------------------------------
 
 /** 模板 inputs 叶子类型: 标量 + 预定义数据(含 data_full)。 */
