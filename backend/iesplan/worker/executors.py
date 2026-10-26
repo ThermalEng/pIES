@@ -37,8 +37,15 @@ class TaskCancelled(Exception):
         super().__init__(f"任务已取消(阶段: {stage})")
 
 
+class TaskTimedOut(Exception):
+    """执行隔离层已终止超时工作，待提交独立超时终态。"""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
+
+
 class EngineRunError(Exception):
-    """引擎执行失败(含隔离子进程超时/异常)。"""
+    """引擎确定性失败（不含已明确终止的取消、超时与隔离）。"""
 
 
 class LeaseFenced(Exception):
@@ -78,12 +85,12 @@ class RunContext:
     def checkpoint(self, stage: str) -> None:
         """取消检查点: 每阶段检查任务是否 cancelling（见宪法 §12）。
 
-        取消信号(Redis cancel 键)或停止事件置位 → 抛 TaskCancelled。
+        用户取消与租约/Worker 停止是不同控制流，均阻断后续写回。
         """
-        if self.stop_event is not None and self.stop_event.is_set():
-            raise TaskCancelled(stage)
         if _cancel_signal(self.task.id):
             raise TaskCancelled(stage)
+        if self.stop_event is not None and self.stop_event.is_set():
+            raise LeaseFenced()
 
 
 def _cancel_signal(task_id: int) -> bool:

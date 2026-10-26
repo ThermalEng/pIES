@@ -1193,6 +1193,47 @@ def test_cancel_flow(client: TestClient, db: Session) -> None:
     assert error["message_key"] == "ies.diag.task.cancel_denied"
 
 
+def test_running_cancel_signal_is_published_after_commit(
+    client: TestClient, db: Session, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """公开取消信号不可抢跑权威 cancelling 提交；幂等重试可补发信号。"""
+    owner = make_user(db, "cancel_commit_order")
+    pid = _prepare_project(client, db, owner)
+    rev = _save_config(client, pid, owner)
+    _, body = _submit_task(
+        client, pid, owner, config={"config_revision": rev},
+        idempotency_key="cancel-commit-order",
+    )
+    task_id = body["task"]["id"]
+    _claim(db, task_id)
+
+    actual_set_cancel = tasks_domain.set_cancel
+    published: list[tuple[bool, str]] = []
+
+    def record_signal(cancel_id: int, reason: str) -> None:
+        # endpoint 和 fixture 共享 db；真正提交后没有活跃事务。
+        before_query_in_transaction = db.in_transaction()
+        status = db.get(Task, cancel_id).status
+        published.append((before_query_in_transaction, status))
+        actual_set_cancel(cancel_id, reason)
+
+    monkeypatch.setattr(tasks_domain, "set_cancel", record_signal)
+    route = f"/api/projects/{pid}/tasks/{task_id}/cancel"
+    resp = client.post(route, headers=_h(client, owner))
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["cancel_status"] == "cancelling"
+    assert published == [(False, "cancelling")]
+
+    # 可重建信号丢失后，同一个 cancelling 请求应补发。
+    queue.clear_cancel(task_id)
+    resp = client.post(route, headers=_h(client, owner))
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["cancel_status"] == "cancelling"
+    assert published[-1] == (False, "cancelling")
+    assert len(published) == 2
+    assert queue.get_cancel(task_id) == "user_cancel"
+
+
 # ---------------------------------------------------------------------------
 # 重试(复用同一快照)
 # ---------------------------------------------------------------------------

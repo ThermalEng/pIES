@@ -11,7 +11,9 @@ MPS 无法承载目标常数项：返回 ``(文本, 目标偏移量)``，偏移�
 
 from __future__ import annotations
 
+from iesplan.computation.errors import ComputationUnavailableError
 from iesplan.computation.generators.linear import LinearModel
+from iesplan.computation.protocols import StopProbe, read_stop_reason
 
 #: 目标行名 / RHS 集名 / BOUNDS 集名 / 模型名（固定，保确定性）。
 _OBJECTIVE_ROW = "OBJ"
@@ -29,13 +31,21 @@ def _num(value: float) -> str:
     return repr(float(value))
 
 
-def write_mps(model: LinearModel) -> tuple[str, float]:
+def write_mps(model: LinearModel, *, stop: StopProbe | None = None) -> tuple[str, float]:
     """序列化项目级线性模型为 free-format MPS 文本与目标偏移量。"""
     if not isinstance(model, LinearModel):
         raise TypeError("model 须为 LinearModel")
+    def checkpoint() -> None:
+        reason = read_stop_reason(stop)
+        if reason is not None:
+            raise ComputationUnavailableError("MPS 生成已停止", reason=reason)
+
+    checkpoint()
     lines: list[str] = [f"NAME          {_MODEL_NAME}", "ROWS"]
     lines.append(f" N  {_OBJECTIVE_ROW}")
-    for row in model.constraints:
+    for index, row in enumerate(model.constraints):
+        if index % 128 == 0:
+            checkpoint()
         lines.append(f" {_SENSE_ROWS[row.sense]}  {row.name}")
     lines.append("COLUMNS")
     columns: dict[str, list[tuple[str, float]]] = {
@@ -44,12 +54,16 @@ def write_mps(model: LinearModel) -> tuple[str, float]:
     for key, coeff in model.objective.terms:
         if coeff != 0:
             columns[key[0]].append((_OBJECTIVE_ROW, coeff))
-    for row in model.constraints:
+    for index, row in enumerate(model.constraints):
+        if index % 128 == 0:
+            checkpoint()
         for key, value in row.expression.terms:
             if value != 0:
                 columns[key[0]].append((row.name, value))
     in_integer = False
-    for var in model.variables:
+    for var_index, var in enumerate(model.variables):
+        if var_index % 128 == 0:
+            checkpoint()
         if not columns[var.name]:
             # 无系数变量仍需占列：COLUMNS 缺列会导致解列数与
             # unit_map 交接不一致。显式零元数学等价，目标行恒存在。
@@ -73,12 +87,16 @@ def write_mps(model: LinearModel) -> tuple[str, float]:
     if in_integer:
         lines.append("    INTEND    'MARKER'                 'INTEND'")
     lines.append("RHS")
-    for row in model.constraints:
+    for index, row in enumerate(model.constraints):
+        if index % 128 == 0:
+            checkpoint()
         rhs = row.rhs - row.expression.constant
         if rhs != 0:
             lines.append(f"    {_RHS_NAME}  {row.name}  {_num(rhs)}")
     lines.append("BOUNDS")
-    for var in model.variables:
+    for index, var in enumerate(model.variables):
+        if index % 128 == 0:
+            checkpoint()
         if var.kind == "binary" and var.lower == 0.0 and var.upper == 1.0:
             lines.append(f" BV       {_BOUND_NAME}  {var.name}")
             continue

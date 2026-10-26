@@ -138,6 +138,24 @@ def _resolved_generate(*args, **kwargs):
     )
 
 
+@pytest.mark.parametrize("reason", ["cancelled", "fenced"])
+def test_generator_cooperatively_stops_during_model_build(reason: str) -> None:
+    """真实生成器在模型展开中消费停止探针，不等整个 Bundle 完工。"""
+    inputs = _campus_inputs()
+    calls = 0
+
+    def stop() -> str | None:
+        nonlocal calls
+        calls += 1
+        return reason if calls >= 3 else None
+
+    provider = build_registry((HIGHS_MILP_PROVIDER,)).resolve(inputs[4])
+    with pytest.raises(ComputationUnavailableError) as exc:
+        provider.generate_with_stop(*inputs, stop=stop)
+    assert exc.value.reason == reason
+    assert calls >= 3
+
+
 def test_campus_generate_full_bundle() -> None:
     """campus 生成完整聚合：manifest/文件/command/输出声明互相一致。"""
     bundle, _ = _resolved_generate()

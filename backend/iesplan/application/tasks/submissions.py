@@ -1792,14 +1792,15 @@ def _finish_attempt(
 
 def _cancel_task(
     db: Session, task_id: int, reason: str = "user_cancel", actor_id: int | None = None
-) -> TaskRecord:
+) -> tuple[TaskRecord, tuple[int, ...]]:
     """取消任务。
 
     - 终态 → 409 CancelDeniedError;
     - queued(未运行) → 直接 cancelled, 出队;
-    - running → cancelling(权威) + 广播取消信号; 批量父任务传播到未完成子任务
+    - running → cancelling(权威); 批量父任务传播到未完成子任务
       (queued 子任务直接取消, running 子任务进 cancelling);
-    - cancelling → 幂等返回。
+    - cancelling → 幂等返回。返回待广播的 ID，提交后再发信号，避免 Worker
+      在权威事务提交前停止而无法收拢 attempt/租约/槽位。
     """
     task = _get_task(db, task_id)
     if task.status in TERMINAL_STATUSES:
@@ -1811,12 +1812,16 @@ def _cancel_task(
     if task.status == "queued":
         task = tasks_domain.set_task_status(db, task.id, "cancelled")
         tasks_domain.remove(task.id, POOL_BY_TYPE[task.type])
-        return task
+        return task, ()
     if task.status == "cancelling":
-        return task  # 取消已发起, 幂等
+        # 重复请求也可修复上次事务已提交、但停止信号发布失败的情况。
+        children = tasks_domain.list_child_tasks(db, task_id)
+        return task, (task.id,) + tuple(
+            child.id for child in children if child.status == "cancelling"
+        )
 
     task = tasks_domain.set_task_status(db, task.id, "cancelling")
-    tasks_domain.set_cancel(task.id, reason)
+    signals = [task.id]
     # 批量传播: uncertainty 父任务 → 未完成子任务
     children = tasks_domain.list_child_tasks(db, task_id)
     for child in children:
@@ -1827,21 +1832,23 @@ def _cancel_task(
             tasks_domain.remove(child.id, POOL_BY_TYPE[child.type])
         else:
             tasks_domain.set_task_status(db, child.id, "cancelling")  # 运行中子任务由 Worker 收拢
-            tasks_domain.set_cancel(child.id, reason)
-    return task
+            signals.append(child.id)
+    return task, tuple(signals)
 
 
 def cancel_task(
     db: Session, task_id: int, reason: str = "user_cancel", actor_id: int | None = None
 ) -> TaskRecord:
-    """取消任务用例; 本层拥有事务提交/回滚。"""
+    """先提交权威状态，再发布可重建的停止信号。"""
     try:
-        result = _cancel_task(db, task_id, reason=reason, actor_id=actor_id)
+        result, signals = _cancel_task(db, task_id, reason=reason, actor_id=actor_id)
         db.commit()
-        return result
     except Exception:
         db.rollback()
         raise
+    for signal_task_id in signals:
+        tasks_domain.set_cancel(signal_task_id, reason)
+    return result
 
 
 def _acknowledge_cancel(db: Session, task_id: int) -> TaskRecord:

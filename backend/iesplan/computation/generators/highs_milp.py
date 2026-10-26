@@ -36,6 +36,8 @@ from iesplan.computation.protocols import (
     CalculationConfig,
     SolverBundle,
     SolverBundleManifest,
+    StopProbe,
+    read_stop_reason,
 )
 from iesplan.computation.result_adapters.highs import ADAPTER_REF as HIGHS_ADAPTER_REF
 from iesplan.computation.sequences import MaterializedSet
@@ -130,6 +132,8 @@ class HighsMilpProvider:
         finance: EffectiveFinanceConfig,
         config: CalculationConfig,
         evaluation: EvaluationInput,
+        *,
+        stop: StopProbe | None = None,
     ) -> SolverBundle:
         """由直接输入生成完整 SolverBundle 聚合。
 
@@ -142,13 +146,16 @@ class HighsMilpProvider:
         同一组直接输入与本 provider 版本恒得逐字节相同的聚合。
         """
         self._check_capabilities(artifact, config, finance)
+        self._check_stop(stop)
         seed = config.seed if config.seed is not None else FIXED_SEED
         model, unit_map, objective_unit, facts, components, series = (
             build_project_model_package(
-                artifact, models, materialized, finance, config, evaluation
+                artifact, models, materialized, finance, config, evaluation, stop=stop,
             )
         )
-        mps_text, offset = write_mps(model)
+        self._check_stop(stop)
+        mps_text, offset = write_mps(model, stop=stop)
+        self._check_stop(stop)
         metadata = self._metadata(
             artifact,
             unit_map,
@@ -200,6 +207,28 @@ class HighsMilpProvider:
                 PARAMETERS_PATH: metadata,
             },
         )
+
+    def generate_with_stop(
+        self,
+        artifact: ValidatedAssemblyArtifact,
+        models: Mapping[str, DeviceMathContribution],
+        materialized: MaterializedSet,
+        finance: EffectiveFinanceConfig,
+        config: CalculationConfig,
+        evaluation: EvaluationInput,
+        *,
+        stop: StopProbe,
+    ) -> SolverBundle:
+        """生成器自愿提供的可停止扩展，不改变稳定 generate 协议。"""
+        return self.generate(
+            artifact, models, materialized, finance, config, evaluation, stop=stop,
+        )
+
+    @staticmethod
+    def _check_stop(stop: StopProbe | None) -> None:
+        reason = read_stop_reason(stop)
+        if reason is not None:
+            raise ComputationUnavailableError("生成阶段已停止", reason=reason)
 
     def _check_capabilities(
         self,

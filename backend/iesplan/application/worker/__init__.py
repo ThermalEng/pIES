@@ -43,6 +43,7 @@ from iesplan.application.worker.attempt_cases import (
     renew_attempt_lease,
     report_attempt_progress,
     submit_attempt_result,
+    timeout_attempt,
 )
 from iesplan.application.worker.compute_cases import (
     HOURLY_OBJECT_PATH,
@@ -145,6 +146,7 @@ __all__ = [
     "seal_output_objects",
     "slot_available",
     "submit_attempt_result",
+    "timeout_attempt",
     "verify_lease",
 ]
 
