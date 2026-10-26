@@ -80,6 +80,127 @@ test.describe('场景 4: 数据上传 / 质量报告 / 绑定', () => {
   })
 })
 
+test.describe('PR #26: 两份数据集绑定状态与读回失败恢复', () => {
+  test('逐项 GUI 绑定、刷新一致、读回失败仅重读、不重复提交', async ({ browser }) => {
+    test.setTimeout(180_000)
+    const username = uniqueName('es-bind-refresh')
+    const password = strongPassword('Init')
+    const projectName = uniqueName('QA 双数据绑定项目')
+    const firstName = uniqueName('sample-first')
+    const secondName = uniqueName('sample-second')
+
+    const setup = await browser.newContext({ baseURL: process.env.E2E_APP_URL ?? 'http://web:80' })
+    await createEngineer(setup.request, username, password)
+    const token = await loginToken(setup.request, username, password)
+    const created = await requestJson(setup.request, 'POST', '/api/projects', {
+      name: projectName, baseline_resolution: '1h', baseline_start_year: 2026,
+      baseline_scenario_mode: 'single',
+    }, token)
+    const projectId = created.project?.id ?? created.id
+    await requestJson(setup.request, 'PUT', `/api/projects/${projectId}/config`, {
+      calculation_config: {
+        schema: 'ies.calculation-config', schema_version: '2.0.0',
+        mode: 'planning', predictions: [], generator: 'ies.generator.highs_milp@5.0.0',
+        solver: 'ies.solver.highs@1.7.2', precision: 'medium', convergence: null,
+        time_limit_seconds: 600, options: {}, seed: null, outputs: ['solution'],
+      },
+      expected_revision: null,
+    }, token)
+    await setup.close()
+
+    const context = await browser.newContext()
+    const page = await context.newPage()
+    const session = await createSession(page, username, password)
+    await page.getByText(projectName).click()
+    await page.getByRole('navigation', { name: /工作台|Workspace/i }).getByText('数据管理').click()
+    await expect(page).toHaveURL(/\/data$/)
+
+    async function addSample(name: string) {
+      await page.getByRole('button', { name: /内置样例数据|Built-in sample data/i }).click()
+      const dialog = page.getByRole('dialog')
+      await dialog.locator('#sample-name').fill(name)
+      await dialog.getByRole('button', { name: /生成并上传|Generate & upload/i }).click()
+      await expect(dialog.getByText(/已通过校验|Validation passed/i).first()).toBeVisible({ timeout: 60_000 })
+      await dialog.getByRole('button', { name: /^确定$|^OK$/i }).click()
+      await expect(page.getByRole('row').filter({ hasText: name })).toBeVisible()
+    }
+
+    const row = (name: string) => page.getByRole('row').filter({ hasText: name })
+    const bound = /^已绑定$|^Bound$/i
+    const unbound = /^未绑定$|^Unbound$/i
+    const bind = /绑定到项目|Bind to project/i
+
+    await addSample(firstName)
+    await addSample(secondName)
+    await expect(row(firstName).getByText(unbound)).toBeVisible()
+    await expect(row(secondName).getByText(unbound)).toBeVisible()
+
+    await row(firstName).getByRole('button', { name: bind }).click()
+    await expect(row(firstName).getByText(bound)).toBeVisible()
+    await expect(row(firstName).getByRole('button', { name: bind })).toBeDisabled()
+    await expect(row(secondName).getByText(unbound)).toBeVisible()
+    await expect(row(secondName).getByRole('button', { name: bind })).toBeEnabled()
+
+    await page.reload()
+    await expect(row(firstName).getByText(bound)).toBeVisible()
+    await expect(row(secondName).getByText(unbound)).toBeVisible()
+
+    // 只拦第二次真实绑定成功后的首个项目 GET；被测 PUT 由用户点击产生。
+    let draftWrites = 0
+    let failNextRead = false
+    let failedReads = 0
+    page.on('response', (response) => {
+      if (response.request().method() === 'PUT' &&
+          new URL(response.url()).pathname === `/api/projects/${projectId}/draft` &&
+          response.status() === 200) {
+        draftWrites += 1
+        failNextRead = true
+      }
+    })
+    await page.route(`**/api/projects/${projectId}`, (route) => {
+      if (route.request().method() === 'GET' && failNextRead) {
+        failNextRead = false
+        failedReads += 1
+        return route.fulfill({ status: 503, contentType: 'application/json', body: '{"error":"synthetic read failure"}' })
+      }
+      return route.continue()
+    })
+
+    await row(secondName).getByRole('button', { name: bind }).click()
+    await expect(page.getByText(/写入成功.*读回失败|was saved, but reading project state failed/i)).toBeVisible()
+    const retry = page.getByRole('button', { name: /只重读项目绑定状态|Retry reading project bindings only/i })
+    await expect(retry).toBeVisible()
+    await expect(page.getByRole('button', { name: bind })).toHaveCount(0)
+    expect(draftWrites).toBe(1)
+    expect(failedReads).toBe(1)
+
+    await retry.click()
+    await expect(row(firstName).getByText(bound)).toBeVisible()
+    await expect(row(secondName).getByText(bound)).toBeVisible()
+    await expect(row(firstName).getByRole('button', { name: bind })).toBeDisabled()
+    await expect(row(secondName).getByRole('button', { name: bind })).toBeDisabled()
+    expect(draftWrites).toBe(1)
+
+    // 来源版本弹窗使用同一权威项目草稿，不因仅刷新数据列表而滞后。
+    for (const name of [firstName, secondName]) {
+      await row(name).getByRole('button', { name: /版本|Versions/i }).click()
+      const dialog = page.getByRole('dialog')
+      await expect(dialog.getByText(bound)).toBeVisible()
+      await expect(dialog.getByRole('button', { name: /解除绑定|Unbind/i })).toBeVisible()
+      await dialog.getByRole('button', { name: /关闭|Close/i }).click()
+    }
+
+    await page.reload()
+    await expect(row(firstName).getByText(bound)).toBeVisible()
+    await expect(row(secondName).getByText(bound)).toBeVisible()
+    expect(draftWrites).toBe(1)
+    session.assertNoErrors([
+      { method: 'GET', path: `/api/projects/${projectId}`, status: 503, times: 1 },
+    ])
+    await context.close()
+  })
+})
+
 /* 场景 5(旧 1.0 财务配置控件: #cfg-discount / 保存默认 / 校验配置按钮)
  * 已删除: 0.12-A1 移除了自由形态配置与 /validate、/default 端点,
  * 对应验收由 config-revision.spec.ts 的新 UI 覆盖, 此处不再保留

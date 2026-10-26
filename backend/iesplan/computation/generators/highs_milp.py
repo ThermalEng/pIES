@@ -73,6 +73,7 @@ DESCRIPTOR = GeneratorDescriptor(
     generator_id=GENERATOR_ID,
     version=GENERATOR_VERSION,
     options_schema=dict(_EMPTY_OPTIONS_SCHEMA),
+    outputs=SUPPORTED_OUTPUTS,
     assembly_schema_version=ASSEMBLY_SCHEMA_VERSION,
     modes=("planning",),
     precisions=("medium",),
@@ -135,7 +136,7 @@ class HighsMilpProvider:
         第三项为已完成物化的集合（上游构成，此处信任，不复核）。冻结
         评价确认为独立必需输入（无默认值；上游从同一任务冻结块恢复，
         不读最新草稿）。通用选择门禁已由 ``GeneratorRegistry.resolve``
-        完成，此处信任；依次执行本 provider 特有检查（outputs/实际绑定
+        完成，此处信任；只执行本 provider 特有检查（实际绑定
         tariff，不匹配即明确拒绝）→ ``build_project_model`` + ``write_mps``
         （数学超出 lowerer 能力即明确不支持）→ manifest + 文件字节原子组装。
         同一组直接输入与本 provider 版本恒得逐字节相同的聚合。
@@ -208,19 +209,12 @@ class HighsMilpProvider:
     ) -> None:
         """本 provider 特有检查（通用门禁已由 registry 完成，此处信任）。
 
-        未知输出请求为用户计算请求错误(``ValueError``)，明确拒绝，不忽略。
-        计费价格限制只看装配实际绑定的价格：快照中未被绑定的价格条目
+        outputs 已由 descriptor 公共门禁校验。计费价格限制只看装配实际绑定的价格：快照中未被绑定的价格条目
         不进入数学，不触发拒绝；``constant`` 与 ``time_series`` 均支持
         （时变价格由第三项价格区逐点计价），未知类型明确拒绝。
         税务关系能力判断唯一在建模边界（未知类型不忽略、不半生成，
         提交边界 007 先行），此处不复制。
         """
-        for name in config.outputs:
-            if name not in SUPPORTED_OUTPUTS:
-                raise ValueError(
-                    f"不支持的输出请求: {name!r}（本 provider 只支持 "
-                    f"{list(SUPPORTED_OUTPUTS)!r}，未知输出不忽略）"
-                )
         doc = json.loads(artifact.canonical_text)
         bindings = doc.get("tariff_bindings") or {}
         for binding_id in sorted(bindings):

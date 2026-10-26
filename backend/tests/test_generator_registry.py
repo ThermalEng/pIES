@@ -58,6 +58,7 @@ def _descriptor(**kwargs) -> GeneratorDescriptor:
     kwargs.setdefault("version", "1.0.0")
     kwargs.setdefault("modes", ("planning",))
     kwargs.setdefault("precisions", ("low", "medium", "high"))
+    kwargs.setdefault("outputs", ("solution", "metrics"))
     kwargs.setdefault("solvers", (SOLVER,))
     kwargs.setdefault("options_schema", dict(_OPTIONS_SCHEMA))
     kwargs.setdefault("resource_limits", {"timeout_seconds": 600})
@@ -114,6 +115,7 @@ def test_descriptor_ref_and_solver_support() -> None:
     dumped = desc.to_dict()
     assert dumped["generator_id"] == "acme.generator"
     assert dumped["solvers"] == [SOLVER]
+    assert dumped["outputs"] == ["solution", "metrics"]
 
 
 def test_descriptor_rejects_bad_identity() -> None:
@@ -126,6 +128,8 @@ def test_descriptor_rejects_bad_identity() -> None:
         _descriptor(result_adapter="not-a-ref")
     with pytest.raises(ValueError, match="capabilities"):
         _descriptor(capabilities=("",))
+    with pytest.raises(ValueError, match="outputs"):
+        _descriptor(outputs=())
 
 
 def test_check_provider_ref_id_syntax() -> None:
@@ -268,6 +272,14 @@ def test_resolve_checks_mode_and_precision() -> None:
     with pytest.raises(ComputationUnavailableError) as exc_info:
         narrow.resolve(_config(precision="medium"))
     assert exc_info.value.reason == "incompatible-precision"
+
+
+def test_resolve_checks_declared_outputs_without_bundle() -> None:
+    registry = build_registry([_provider(outputs=("trace",))])
+    assert registry.resolve(_config(outputs=["trace"])).ref == GENERATOR
+    with pytest.raises(ComputationUnavailableError) as exc_info:
+        registry.resolve(_config(outputs=["solution", "trace"]))
+    assert exc_info.value.reason == "incompatible-outputs"
 
 
 def test_descriptor_rejects_non_schema_options() -> None:

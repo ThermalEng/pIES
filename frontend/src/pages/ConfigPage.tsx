@@ -250,6 +250,14 @@ export default function ConfigPage(props: ConfigPageProps) {
       applyBody(saved.calculation_config, saved.revision)
       setNotice({ kind: 'success', text: pt('ies.config.saved_ok', { revision: saved.revision }) })
     } catch (err) {
+      // 后端按已选生成器公开 descriptor 返回字段定位。保留整份编辑态，
+      // 总览与字段旁同时展示，不把静态不相容留到任务运行后才发现。
+      if (err instanceof ApiError && err.status === 422 && err.location?.field) {
+        const field = err.location.field
+        if (['generator', 'mode', 'precision', 'solver', 'outputs', 'options'].includes(field)) {
+          setFieldErrors({ [field]: errorMessage(err) })
+        }
+      }
       if (err instanceof ApiError && err.status === 409) {
         // 他人已保存新 revision: 保留当前表单编辑, 仅提示冲突,
         // 由用户决定是否主动重载(重载将覆盖未提交编辑)

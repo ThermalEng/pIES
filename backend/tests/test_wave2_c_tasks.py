@@ -273,7 +273,7 @@ def test_submit_compute_task_snapshot_replay_and_reuse(
     owner = _user(db, "w2c_owner_opt")
     pid = _project(client, owner, "w2c-proj-opt")
     _declare_optimization_ready(client, db, owner, pid)
-    saved = save_calculation_config_case(db, owner, pid, dict(_CONFIG_BODY), None)
+    saved = save_calculation_config_case(db, owner, pid, dict(_CONFIG_BODY), None, generator_registry=_registry(client))
     rev = saved["revision"]
 
     task, flags = tasks_uc.submit_task(
@@ -338,7 +338,7 @@ def test_submit_without_frozen_refs_fails_explicitly(
 
     owner = _user(db, "w2c_owner_noref")
     pid = _project(client, owner, "w2c-proj-noref")
-    saved = save_calculation_config_case(db, owner, pid, dict(_CONFIG_BODY), None)
+    saved = save_calculation_config_case(db, owner, pid, dict(_CONFIG_BODY), None, generator_registry=_registry(client))
     rev = saved["revision"]
     with pytest.raises(InvalidRequestError):
         tasks_uc.submit_task(
@@ -397,7 +397,7 @@ def test_restore_version_keeps_frozen_pins(client: TestClient, db: Session) -> N
     device_ref, _ = _declare_optimization_ready(client, db, owner, pid)
     from iesplan.application.configuration.calc_config import save_calculation_config_case
 
-    saved = save_calculation_config_case(db, owner, pid, dict(_CONFIG_BODY), None)
+    saved = save_calculation_config_case(db, owner, pid, dict(_CONFIG_BODY), None, generator_registry=_registry(client))
     task, _ = tasks_uc.submit_task(
         db, owner, pid, "optimization",
         config={"config_revision": saved["revision"]}, evaluation={
@@ -571,7 +571,7 @@ def test_restore_version_without_finance_clears_pointers(
 
     from iesplan.application.configuration.calc_config import save_calculation_config_case
 
-    saved = save_calculation_config_case(db, owner, pid, dict(_CONFIG_BODY), None)
+    saved = save_calculation_config_case(db, owner, pid, dict(_CONFIG_BODY), None, generator_registry=_registry(client))
     # 引用合法但财务/规划引用已清空 → 仍明确失败(装配门禁, 非绑定问题)
     with pytest.raises(InvalidRequestError):
         tasks_uc.submit_task(
@@ -736,7 +736,7 @@ def test_retry_terminal_task_consistent(client: TestClient, db: Session, engine:
     owner = _user(db, "w2c_owner_retry")
     pid = _project(client, owner, "w2c-proj-retry")
     _declare_optimization_ready(client, db, owner, pid)
-    saved = save_calculation_config_case(db, owner, pid, dict(_CONFIG_BODY), None)
+    saved = save_calculation_config_case(db, owner, pid, dict(_CONFIG_BODY), None, generator_registry=_registry(client))
     rev = saved["revision"]
 
     t1, _ = tasks_uc.submit_task(

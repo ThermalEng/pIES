@@ -670,6 +670,7 @@ def test_submit_rejects_tax_rules_without_provider_capabilities(
         options_schema={"type": "object", "additionalProperties": False},
         assembly_schema_version="2.0",
         modes=("planning",),
+        outputs=("solution",),
         precisions=("medium",),
         solvers=("ies.solver.highs@1.7.2",),
         executors=("ies.executor.local_process@1.0.0",),

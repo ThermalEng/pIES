@@ -468,7 +468,7 @@ def test_snapshot_freezes_project_model_math(
     revision = _declare_assembly(
         client, owner, pid, revision, {"load2": {"type": "none"}, "gas1": {"type": "none"}}
     )
-    saved = save_calculation_config_case(db, owner, pid, dict(CONFIG_BODY), None)
+    saved = save_calculation_config_case(db, owner, pid, dict(CONFIG_BODY), None, generator_registry=_registry(client))
 
     task, flags = tasks_uc.submit_task(
         db,

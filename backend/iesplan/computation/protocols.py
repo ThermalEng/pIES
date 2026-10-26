@@ -148,7 +148,7 @@ class GeneratorProvider(Protocol):
         财务年限权威。调用方只传入已签发 artifact; provider
         信任上游装配与应用边界已完成的签发与内容确认, 不复核。通用选择
         门禁(generator/mode/精度/solver/options)由 ``GeneratorRegistry.resolve``
-        完成，不在此重复；本方法只做 provider 特有检查(outputs/实际绑定
+        完成，不在此重复；本方法只做 provider 特有检查(实际绑定
         tariff)，不匹配即明确拒绝。数学超出降级能力时抛 lowerer 的明确
         不支持错误。不写临时目录，不返回并列结构。
         """

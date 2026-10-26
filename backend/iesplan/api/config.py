@@ -67,7 +67,11 @@ def save_config_endpoint(
     predictor_registry = (
         getattr(bootstrap, "predictor_registry", None) if bootstrap is not None else None
     )
+    generator_registry = (
+        getattr(bootstrap, "generator_registry", None) if bootstrap is not None else None
+    )
     return config_cases.save_calculation_config_case(
         db, user, project_id, body.calculation_config, body.expected_revision,
         predictor_registry=predictor_registry,
+        generator_registry=generator_registry,
     )

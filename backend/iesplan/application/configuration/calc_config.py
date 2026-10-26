@@ -85,6 +85,7 @@ def save_calculation_config_case(
     calculation_config: dict[str, Any],
     expected_revision: int | None,
     predictor_registry: Any | None = None,
+    generator_registry: Any | None = None,
 ) -> dict[str, Any]:
     """保存计算配置（用户输入入口唯一校验；成功追加不可变 revision）。
 
@@ -105,6 +106,46 @@ def save_calculation_config_case(
             blocking=True,
             message_key="ies.error.data_validation_failed",
             params={"detail": str(exc)},
+        )
+        err.http_status = 422
+        raise err from exc
+    if generator_registry is None:
+        raise AppError("生成器目录未装配，计算配置不可保存", params={"project_id": project_id})
+    try:
+        # 只解析公开 descriptor / options schema；不生成 Bundle 或复制数学检查。
+        generator_registry.resolve(validated)
+    except ComputationUnavailableError as exc:
+        fields = {
+            "no-provider": "generator",
+            "incompatible-mode": "mode",
+            "incompatible-precision": "precision",
+            "incompatible-solver": "solver",
+            "incompatible-outputs": "outputs",
+        }
+        field = fields[exc.reason]
+        if field == "generator":
+            supported = [item.ref for item in generator_registry.snapshot()]
+        else:
+            descriptor = generator_registry.get(validated.generator).descriptor
+            supported = list(getattr(descriptor, {
+                "mode": "modes", "precision": "precisions",
+                "solver": "solvers", "outputs": "outputs",
+            }[field]))
+        err = AppError(
+            str(exc), code="CONFIG-VAL-001", blocking=True,
+            message_key=f"ies.config.unsupported_{field}",
+            params={"value": ", ".join(getattr(validated, field)) if field == "outputs" else getattr(validated, field),
+                    "supported": ", ".join(supported)},
+            location={"object_type": "calculation_config", "object_id": project_id, "field": field},
+        )
+        err.http_status = 422
+        raise err from exc
+    except ValueError as exc:
+        err = AppError(
+            "计算选项校验失败", code="CONFIG-VAL-001", blocking=True,
+            message_key="ies.config.invalid_options",
+            params={"detail": str(exc)},
+            location={"object_type": "calculation_config", "object_id": project_id, "field": "options"},
         )
         err.http_status = 422
         raise err from exc
