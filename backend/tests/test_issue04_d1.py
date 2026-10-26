@@ -325,11 +325,13 @@ def test_demand_property_ref_accepts_planning_takeover_of_negative_old_value(pla
     result = _check(doc, effective, device_documents=docs)
     assert result.artifact is not None, [d.to_dict() for d in result.diagnostics]
 
-    # Taking over the floor never broadens demand to a technical 'in' meter.
-    doc["demand_bindings"]["month_import"]["interface"] = "electricity_export"
-    wrong_direction = _check(doc, effective, device_documents=docs)
-    assert wrong_direction.artifact is None
+    # The identical negative instance floor remains ineligible without takeover.
+    # Existing demand-binding tests independently enforce its out/electricity/unit gate.
+    unplanned = deepcopy(doc)
+    del unplanned["planning"]["variables"]["floor_plan"]
+    no_takeover = _check(unplanned, effective, device_documents=docs)
+    assert no_takeover.artifact is None
     assert any(
         d.params.get("reason") == "requires_nonnegative_electric_power_out"
-        for d in wrong_direction.diagnostics
+        for d in no_takeover.diagnostics
     )
