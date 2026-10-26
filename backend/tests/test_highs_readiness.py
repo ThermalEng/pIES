@@ -386,6 +386,51 @@ def _run_tiny_mps(tmp_path, mps_text: str) -> tuple[str, dict]:
     return completed.stderr, _parse_solution(content)
 
 
+
+def test_real_highs_zero_export_with_unbounded_opposite(tmp_path) -> None:
+    """A synthetic zero-export balance solves without a surplus mutex binary.
+
+    The balance row remains independent of the tautological mutual exclusion.
+    Docker CI provides the real pinned HiGHS executable.
+    """
+    from iesplan.computation.generators.linear import lower_mutex
+
+    zero_mutex = lower_mutex(
+        "no_simultaneous_flow", ("export", 0), ("import", 0),
+        {"export": ("var", 0.0, 0.0), "import": ("var", 0.0, None)},
+    )
+    assert zero_mutex.variables == ()
+    assert zero_mutex.constraints == ()
+    model = LinearModel(
+        variables=(
+            LinearVariable("export", lower=0.0, upper=0.0),
+            LinearVariable("import", lower=0.0, upper=None),
+            LinearVariable("served", lower=3.0, upper=3.0),
+        ),
+        constraints=zero_mutex.constraints + (
+            LinearConstraint(
+                name="flow_balance",
+                expression=LinearExpression(terms=(
+                    (("import", 0), 1.0),
+                    (("export", 0), -1.0),
+                    (("served", 0), -1.0),
+                )),
+                sense="eq", rhs=0.0,
+            ),
+        ),
+        objective=LinearExpression(terms=((("import", 0), 1.0),)),
+    )
+    assert [row.name for row in model.constraints] == ["flow_balance"]
+    assert all(var.kind == "continuous" for var in model.variables)
+    mps_text, _ = write_mps(model)
+    assert "no_simultaneous_flow__mutex" not in mps_text
+    _, facts = _run_tiny_mps(tmp_path, mps_text)
+    assert facts["model_status"] == "HighsModelStatus.kOptimal"
+    assert int(facts["num_columns"]) == 3
+    assert facts["primals"] == pytest.approx([0.0, 3.0, 3.0])
+    assert float(facts["objective_value"]) == pytest.approx(3.0)
+
+
 class TestUnboundedLowerFiniteUpperHighs:
     """无下界＋有限上界的 MPS 表达与真实 HiGHS 行为。
 
