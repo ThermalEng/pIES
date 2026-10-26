@@ -27,6 +27,7 @@ submit_attempt_result / fail_attempt / cancel_attempt 带 token 完成
 from __future__ import annotations
 
 import logging
+import time
 import traceback
 from collections.abc import Callable, Mapping
 from typing import Any
@@ -593,17 +594,36 @@ def _handle_cancel(
             completed = worker_app.count_completed_samples(db, task.id)
         if completed > 0:
             outcome = "partial_batch"
-    try:
-        with factory() as db:
-            worker_app.cancel_attempt(db, claim, outcome=outcome)
-        return "cancelled"
-    except worker_app.LeaseRejectedError:
-        logger.warning("取消收拢遭租约隔离，停止写回: task=%s", task.id)
-        return "lease_rejected"
-    except AppError as exc:
-        # 取消竞态: 任务已终态(以先落终态者为准, 03 §6.1 规则 4)
-        logger.info("取消竞态忽略: task=%s (%s)", task.id, exc)
-        return "cancelled"
+    for retry in range(6):
+        try:
+            with factory() as db:
+                worker_app.cancel_attempt(db, claim, outcome=outcome)
+            return "cancelled"
+        except worker_app.LeaseRejectedError:
+            logger.warning("取消收拢遭租约隔离，停止写回: task=%s", task.id)
+            return "lease_rejected"
+        except AppError as exc:
+            # 只有权威终态才可认定取消/完成竞态已落定；不得看到 Redis
+            # 信号便返回 cancelled 而遗留 running attempt 与占用的槽位。
+            with factory() as db:
+                latest = worker_app.get_task_record(db, task.id)
+            if latest is not None and latest.status in (
+                "completed", "failed", "cancelled", "timed_out",
+            ):
+                logger.info("取消与终态竞态: task=%s status=%s", task.id, latest.status)
+                return latest.status
+            if retry < 5:
+                time.sleep(0.05)  # 仅异常路径短暂等候并发状态事务提交
+                continue
+            logger.error(
+                "取消信号与权威任务状态不一致: task=%s status=%s error=%s",
+                task.id, latest.status if latest is not None else "missing", exc,
+            )
+            return _handle_failure(
+                factory, ctx, claim,
+                EngineRunError("停止信号与权威取消状态不一致，执行已停止"),
+            )
+    raise AssertionError("取消收拢循环未返回")
 
 
 def _handle_failure(

@@ -37,7 +37,7 @@ from worker_testkit import setup_environment  # noqa: E402
 from iesplan.application import worker as worker_app  # noqa: E402
 from iesplan.core.diagnostics import TASK_SOLVE_FAILED  # noqa: E402
 from iesplan.db import Base  # noqa: E402
-from iesplan.tasks.persistence import Task, TaskDiagnostic, TaskLease  # noqa: E402
+from iesplan.tasks.persistence import Task, TaskAttempt, TaskDiagnostic, TaskLease  # noqa: E402
 from iesplan.results import (  # noqa: E402
     ASSESSMENT_RULE_VERSION,
     EVIDENCE_COMPLETE,
@@ -487,6 +487,22 @@ class TestWorkerExecutionGuards:
         view = _task_view(db, task.id)
         assert view is not None and view.status == "cancelled", view
         assert queue.get_cancel(task.id) is None  # 取消信号已清除
+
+    def test_uncommitted_cancel_signal_cannot_leave_running_attempt(
+        self, db: Session, env: dict[str, Any], factory,
+    ):
+        """模拟缓存信号抢跑/失配：不能报告已取消却留 running 与槽位。"""
+        task = _add_task(db, env, "report")
+        claim = _claim_task(db, task.id)
+        queue.set_cancel(task.id, "early-cancel")
+        db.commit()  # 权威任务并未进入 cancelling
+
+        assert runner.run_task(factory, claim, worker_id="cw-early") == "failed"
+        db.expire_all()
+        assert db.get(Task, task.id).status == "failed"
+        attempt = db.get(TaskAttempt, claim.attempt_id)
+        assert attempt is not None and attempt.status == "failed"
+        assert worker_app.slot_available(db, "io")
 
     def test_cancel_signal_after_lease_loss_cannot_claim_cancelled(
         self, db: Session, env: dict[str, Any], factory,
