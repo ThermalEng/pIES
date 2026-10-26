@@ -6,18 +6,17 @@ HiGHS 真实求解仅在 GitHub Actions Docker 环境运行；本文件不运行
 from __future__ import annotations
 
 import subprocess
-from fractions import Fraction
 
 import pytest
 
 from iesplan.computation import HIGHS_ADAPTER_PATH
 from iesplan.computation.generators.linear import (
-    LinearConstraint, LinearExpression, LinearModel, LinearVariable,
+    LinearConstraint,
+    LinearExpression,
+    LinearModel,
 )
 from iesplan.computation.generators.mps import write_mps
-from iesplan.computation.generators.project import (
-    _ProjectBuilder, _tighten_nonnegative_equality_bounds,
-)
+from iesplan.computation.generators.project import _ProjectBuilder
 from iesplan.devices import init_registry, list_devices
 from iesplan.devices.contracts2 import canonical_bytes, from_dict, to_dict
 from iesplan.devices.parser2 import parse_device_model_v2
@@ -107,135 +106,6 @@ def test_fixed_capacity_hand_energy_and_efficiency(battery):
     assert b.unit_map["cell__charge__t0"] == "kW"
 
 
-def test_fixed_energy_bounds_deduced_without_changing_physics(battery):
-    # C=20 kWh、SOC=[.1,.9] => 同一解的 E 在 7.2..64.8 MJ。
-    # 保留原两条方程、非负辅助变量、原业务单位及结果列。
-    b = _rows(battery, capacity=20, power=6)
-    inferred = {v.name: v for v in _tighten_nonnegative_equality_bounds(b.variables, b.rows)}
-    assert len(inferred) == len(b.variables)
-    for step in (0, 1):
-        energy = inferred[f"cell__stored_energy__t{step}"]
-        # SOC guarantees these bounds, and dynamics may tighten them further.
-        assert energy.lower is not None
-        assert energy.upper is not None
-        assert energy.lower >= 7_200_000 - 1e-5
-        assert energy.upper <= 64_800_000 + 1e-5
-        assert energy.lower <= energy.upper
-        assert _row(b, f"cell__minimum_energy__t{step}").sense == "eq"
-        assert _row(b, f"cell__maximum_energy__t{step}").sense == "eq"
-        assert f"cell__above_minimum__t{step}" in inferred
-        assert f"cell__below_maximum__t{step}" in inferred
-
-
-def test_generic_interval_tightening_preserves_binary_and_unknown_bounds():
-    variables = {
-        "x": LinearVariable("x", lower=0, upper=None),
-        "s": LinearVariable("s", lower=0, upper=None),
-        "b": LinearVariable("b", lower=0, upper=1, kind="binary"),
-        "size": LinearVariable("size", lower=0, upper=None),
-        "free": LinearVariable("free", lower=0, upper=None),
-    }
-    rows = [
-        LinearConstraint("finite_x", LinearExpression(
-            terms=((("s", 0), 1), (("x", 0), 1)),
-            constant=-15,
-        ), sense="eq", rhs=0),
-        LinearConstraint("unknown_size", LinearExpression(
-            terms=((("free", 0), 1), (("size", 0), -2),
-                   (("x", 0), 1)),
-        ), sense="eq", rhs=0),
-    ]
-    inferred = {v.name: v for v in _tighten_nonnegative_equality_bounds(variables, rows)}
-    assert inferred["x"].upper == pytest.approx(15)
-    assert inferred["x"].lower == 0
-    assert inferred["size"].upper is None
-    assert inferred["b"].kind == "binary"
-    assert (inferred["b"].lower, inferred["b"].upper) == (0, 1)
-
-
-def test_interval_tightening_retains_exact_cancellation_feasible_zero():
-    """主审复现：float 累加会把 1e16 + 1 - 1e16 丢成 0。
-
-    原约束 a+b+c+x=1、a=1e16、b=1、c=-1e16，x=0
-    以有理数算术严格满足等式；预处理绝不可使 x.lower > 0。
-    """
-    variables = {
-        "a": LinearVariable("a", 1e16, 1e16),
-        "b": LinearVariable("b", 1, 1),
-        "c": LinearVariable("c", -1e16, -1e16),
-        "x": LinearVariable("x", 0, None),
-    }
-    row = LinearConstraint(
-        "exact_cancellation",
-        LinearExpression(terms=tuple(
-            ((name, 0), 1.0) for name in ("a", "b", "c", "x")
-        )),
-        sense="eq", rhs=1,
-    )
-    exact_lhs = sum((Fraction(variables[n].lower) for n in ("a", "b", "c")), Fraction(0))
-    assert exact_lhs == Fraction(row.rhs)
-    inferred = {
-        v.name: v for v in _tighten_nonnegative_equality_bounds(variables, [row])
-    }
-    assert inferred["x"].lower <= 0
-    assert inferred["x"].upper >= 0
-    assert inferred["x"].lower == 0
-    assert inferred["x"].upper == 0
-
-
-def test_interval_tightening_mixed_sign_and_rational_endpoints():
-    """混合符号+大值消去；上界 1/3 须朝 +inf 舍入。"""
-    variables = {
-        "a": LinearVariable("a", 1e16, 1e16),
-        "b": LinearVariable("b", 1, 2),
-        "c": LinearVariable("c", 1e16, 1e16),
-        "x": LinearVariable("x", 0, None),
-    }
-    # a + b - c - 3*x = 1 -> x = (b-1)/3 ∈ [0,1/3]。
-    row = LinearConstraint(
-        "mixed_sign",
-        LinearExpression(terms=(
-            (("a", 0), 1.0), (("b", 0), 1.0),
-            (("c", 0), -1.0), (("x", 0), -3.0),
-        )),
-        sense="eq", rhs=1,
-    )
-    inferred = {
-        v.name: v for v in _tighten_nonnegative_equality_bounds(variables, [row])
-    }
-    assert inferred["x"].lower <= 0
-    assert inferred["x"].upper is not None
-    assert Fraction(inferred["x"].upper) >= Fraction(1, 3)
-    assert inferred["x"].upper < 0.34
-
-    # 另一方向：-2/3 不可被向零舍入；不假定某一侧原本有界。
-    variables["x"] = LinearVariable("x", None, None)
-    negative = LinearConstraint(
-        "negative_endpoints",
-        LinearExpression(terms=(
-            (("a", 0), 1.0), (("b", 0), 1.0),
-            (("c", 0), -1.0), (("x", 0), 3.0),
-        )),
-        sense="eq", rhs=0,
-    )
-    inferred = {
-        v.name: v for v in _tighten_nonnegative_equality_bounds(variables, [negative])
-    }
-    assert inferred["x"].lower is not None
-    assert inferred["x"].upper is not None
-    assert Fraction(inferred["x"].lower) <= Fraction(-2, 3)
-    assert Fraction(inferred["x"].upper) >= Fraction(-1, 3)
-
-
-
-def test_planned_energy_bounds_do_not_invent_capacity_limit(battery):
-    b = _rows(battery, power=6)
-    inferred = {v.name: v for v in _tighten_nonnegative_equality_bounds(b.variables, b.rows)}
-    assert inferred["battery_size"].upper is None
-    for step in (0, 1):
-        assert inferred[f"cell__stored_energy__t{step}"].upper is None
-
-
 def test_planned_capacity_power_and_soc_boundaries_are_affine(battery):
     b = _rows(battery)
     first = _row(b, "cell__energy_update__t0")
@@ -275,8 +145,7 @@ def _solve(b, tmp_path, *, demand_w=0, force_zero=False):
         terms=((("battery_size", 0), 1),) if "battery_size" in b.variables else ()
     )
     model = LinearModel(
-        variables=_tighten_nonnegative_equality_bounds(b.variables, rows),
-        constraints=tuple(rows),
+        variables=tuple(b.variables.values()), constraints=tuple(rows),
         objective=obj, sense="minimize",
     )
     problem, offset = write_mps(model)
@@ -328,8 +197,9 @@ def test_zero_capacity_has_no_free_initial_energy(battery, tmp_path):
 
 def test_cost_and_annual_maintenance_use_the_same_planned_size(battery):
     # Financial quantities must use the same capacity variable as energy constraints.
-    from iesplan.finance import FinanceProfile, merge_effective
     from test_npv_objective import _finance_payload
+
+    from iesplan.finance import FinanceProfile, merge_effective
 
     payload = _finance_payload()
     profile = payload["finance_types"]["sys1"]
@@ -412,7 +282,10 @@ def test_initial_expression_public_input_rejects_unit_conflict():
     result = build_math_contribution(parsed.document)
     assert not result.ok
     assert result.contribution is None
-    assert any("量纲" in d.params.get("detail", "") or "单位" in d.params.get("detail", "") for d in result.diagnostics)
+    assert any(
+        "量纲" in d.params.get("detail", "") or "单位" in d.params.get("detail", "")
+        for d in result.diagnostics
+    )
 
 
 def test_planned_capacity_capex_and_dated_maintenance_recover_from_one_solution(
@@ -421,13 +294,19 @@ def test_planned_capacity_capex_and_dated_maintenance_recover_from_one_solution(
     # 同一真实 HiGHS 主解 C=10 kWh → CAPEX=500 CNY；
     # 第 2 年维护 = 20 CNY 固定 + 3 CNY/kWh×10 kWh + 10%×CAPEX = 100 CNY。
     # 第 3 年未安排维护：不能把年度固定 O&M 误充 maintenance_expenses。
+    from test_npv_objective import _finance_payload
+
     from iesplan.computation.result_adapters.highs import _recover_financial_facts
     from iesplan.finance import (
-        ConstructionPayment, CostComponentShareTerm, EvaluationInput,
-        FinanceProfile, MaintenanceExpense, MaintenanceUnitCost,
-        ScaleUnitCostTerm, merge_effective,
+        ConstructionPayment,
+        CostComponentShareTerm,
+        EvaluationInput,
+        FinanceProfile,
+        MaintenanceExpense,
+        MaintenanceUnitCost,
+        ScaleUnitCostTerm,
+        merge_effective,
     )
-    from test_npv_objective import _finance_payload
 
     payload = _finance_payload()
     profile = payload["finance_types"]["sys1"]
@@ -514,6 +393,7 @@ def test_storage_screen_uses_state_declaration_not_variable_name(
     initial_ref, initial_expression, port_type, expected,
 ):
     from types import SimpleNamespace
+
     from iesplan.assembly.rules.solvability import _has_storage_state
 
     state = SimpleNamespace(

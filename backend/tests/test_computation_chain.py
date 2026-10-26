@@ -1,6 +1,6 @@
 """0.10-C 组合链契约测试：artifact → Bundle → receipt → result。
 
-真实 campus 装配经公开入口（装配校验、设备贡献、物化序列、财务、
+全年功能场景及显式启用的原始 campus 调度性能场景经公开入口（装配校验、设备贡献、物化序列、财务、
 计算配置）生成 Bundle；真实 SolverRuntime + LocalProcessProvider +
 ies.solver.highs@1.7.2 垫片执行并签发回执；注册表按回执固定引用
 选中真实 ResultAdapter 解释。不断言大模型手算最优值，只断言：
@@ -47,6 +47,8 @@ from iesplan.computation.generators.highs_milp import (
 )
 from iesplan.computation.result_adapters.highs import HIGHS_ADAPTER
 from iesplan.computation.runtime import validate_highs_arguments
+from iesplan.core.yamlmini import dump as yaml_dump
+from iesplan.core.yamlmini import load as yaml_load
 from iesplan.devices import init_registry, list_devices
 from iesplan.finance import (
     IRREvaluationStatus,
@@ -152,10 +154,21 @@ def _campus_evaluation():
     )
 
 
-def _campus_inputs():
-    """真实 campus 直接输入（与 generator/readiness 测试同一来源）。"""
+def _campus_inputs(*, dispatch=True):
+    """Public campus input; functional variant explicitly installs zero storage/export.
+
+    No model, time step, calendar coverage or objective is removed. Positive
+    storage planning is independently solved in test_battery_planning; this
+    variant checks the generator/runtime/adapter contracts, not MILP throughput.
+    """
     init_registry()
     text = (SAMPLES / "valid" / "campus.assembly.yaml").read_text(encoding="utf-8")
+    if not dispatch:
+        source = yaml_load(text)
+        source["devices"]["grid"]["properties"]["max_export_power_kw"]["value"] = 0
+        source["devices"]["bat1"]["properties"]["capacity_kwh"]["value"] = 0
+        source["devices"]["bat1"]["properties"]["rated_power_kw"]["value"] = 0
+        text = yaml_dump(source)
     validated = validate_assembly_text(text, package_dir=SAMPLES)
     assert validated.ok, [(d.code, d.params) for d in validated.diagnostics if d.blocking]
     artifact = validated.artifact
@@ -209,6 +222,27 @@ def _generate_bundle(inputs):
     bundle = provider.generate(artifact, models, materialized, finance, config, evaluation)
     _diagnose_mps(bundle, "campus")
     return bundle
+
+
+@pytest.mark.parametrize("dispatch", [False, True], ids=["functional", "original_dispatch"])
+def test_campus_scenarios_retain_models_calendar_and_explicit_bounds(dispatch):
+    """Generation coverage includes the original MILP even without a long solve."""
+    inputs = _campus_inputs(dispatch=dispatch)
+    artifact, models, materialized, _, config, evaluation = inputs
+    doc = json.loads(artifact.canonical_text)
+    assert set(models) == {"grid", "pv1", "bat1", "hp1", "elec_load", "heat_load"}
+    assert all(series.point_count == 8760 for series in materialized.series)
+    assert evaluation.operation_years == 1
+    assert config.time_limit_seconds == 600
+    assert doc["devices"]["bat1"]["properties"]["capacity_kwh"]["value"] == (400 if dispatch else 0)
+    assert doc["devices"]["bat1"]["properties"]["rated_power_kw"]["value"] == (200 if dispatch else 0)
+    assert doc["devices"]["grid"]["properties"]["max_export_power_kw"]["value"] == (200 if dispatch else 0)
+    bundle = _generate_bundle(inputs)
+    binary_count = sum(
+        line.split()[0] == "BV" for line in bundle.files[PROBLEM_PATH].decode().splitlines()
+        if line.split()
+    )
+    assert binary_count == (17520 if dispatch else 0)
 
 
 def _runtime(policy=None) -> SolverRuntime:
@@ -319,84 +353,11 @@ def _mps_columns_and_objective(raw: bytes) -> tuple[list[str], dict[str, float]]
 
 
 
-def test_campus_equal_input_bound_propagation_ab_diagnostic(monkeypatch) -> None:
-    """04c7a30-style off versus c9a35fe-style on: same campus, solver and resources.
-
-    This is a deliberately short *diagnostic*, never proof of 600-second
-    convergence or a replacement for the four full-year successful-chain tests.
-    Git comparison confirms the intervening production model difference is only
-    _tighten_nonnegative_equality_bounds; earlier envelope cuts were reverted.
-    """
-    from dataclasses import replace
-
-    from iesplan.computation.generators import project as project_generator
-
-    raw_inputs = _timed("ab.inputs", _campus_inputs)
-    artifact, models, materialized, finance, config, evaluation = raw_inputs
-    # Two identical, full 8760-step physical models. Only diagnostic timeout
-    # is short; all production success tests retain their 600-second limit.
-    diag_config = replace(config, time_limit_seconds=120)
-    inputs = (artifact, models, materialized, finance, diag_config, evaluation)
-
-    # Equivalent to 04c7a30's generator build (without the later optional
-    # interval propagation). The production B SOC bounds and mutex remain.
-    with monkeypatch.context() as patch:
-        patch.setattr(
-            project_generator, "_tighten_nonnegative_equality_bounds",
-            lambda variables, rows: tuple(variables.values()),
-        )
-        original = _timed("ab.generate_without_propagation", _generate_bundle, inputs)
-    current = _timed("ab.generate_with_propagation", _generate_bundle, inputs)
-
-    original_mps = original.files[PROBLEM_PATH].decode("utf-8")
-    current_mps = current.files[PROBLEM_PATH].decode("utf-8")
-    old_body, separator, old_bounds = original_mps.partition("\nBOUNDS\n")
-    new_body, new_separator, new_bounds = current_mps.partition("\nBOUNDS\n")
-    assert separator == new_separator == "\nBOUNDS\n"
-    assert old_body == new_body, "physical constraints, rows and objective must match"
-    old_bound_text, tail_sep, old_footer = old_bounds.partition("\nOBJSENSE\n")
-    new_bound_text, new_tail_sep, new_footer = new_bounds.partition("\nOBJSENSE\n")
-    assert tail_sep == new_tail_sep == "\nOBJSENSE\n"
-    assert old_footer == new_footer, "objective sense must be unchanged"
-    assert original.files[PARAMETERS_PATH] == current.files[PARAMETERS_PATH]
-    assert original.manifest.command == current.manifest.command
-    _STAGE_LOG.warning(
-        "CI_AB identical_physics=true limit_seconds=120 seed=0 "
-        "unpropagated_bytes=%d propagated_bytes=%d "
-        "unpropagated_bound_lines=%d propagated_bound_lines=%d bounds_equal=%s",
-        len(original_mps), len(current_mps),
-        len(old_bound_text.splitlines()), len(new_bound_text.splitlines()),
-        old_bound_text == new_bound_text,
-    )
-
-    runtime = _runtime()
-    for variant, bundle in (
-        ("04c7_no_interval_propagation", original),
-        ("c9_exact_interval_propagation", current),
-    ):
-        receipt, _outputs = _timed(
-            f"ab.solve.{variant}", runtime.run, bundle, _attempt(f"ab-{variant}")
-        )
-        progress = [
-            line.strip() for line in receipt.stdout.splitlines()
-            if "%" in line and ("inf" in line or "L " in line or "Gap" in line)
-        ]
-        _STAGE_LOG.warning(
-            "CI_AB variant=%s solver_status=%s termination=%s exit_code=%s "
-            "progress_head=%r progress_tail=%r stderr_tail=%r",
-            variant, receipt.status, receipt.termination_reason, receipt.exit_code,
-            progress[:3], progress[-8:], receipt.stderr[-1200:],
-        )
-        # A 120-second run can legitimately time out without disproving
-        # feasibility. Do not turn this diagnostic into an optimality gate.
-        assert receipt.status in {"succeeded", "timed_out"}, (
-            variant, receipt.status, receipt.termination_reason, receipt.stderr[-1200:]
-        )
 
 
-def test_chain_success_reports_business_result() -> None:
+def test_chain_success_reports_business_result(campus_dispatch_case) -> None:
     """成功链：求解→回执→解释，业务数值/单位/追溯一致且确定。"""
-    inputs = _timed("business.inputs", _campus_inputs)
+    inputs = _timed("business.inputs", _campus_inputs, dispatch=campus_dispatch_case)
     bundle = _timed("business.generate_bundle", _generate_bundle, inputs)
     assert bundle.manifest.command["executable"] == HIGHS_EXECUTABLE_REF
     parameters = json.loads(bundle.files[PARAMETERS_PATH].decode("utf-8"))
@@ -442,9 +403,11 @@ def test_chain_success_reports_business_result() -> None:
     )
 
     # 确定性：同一 Bundle 再跑一次，解字节与业务输出一致。
-    _, collected_again = _timed(
+    receipt_again, collected_again = _timed(
         "business.solve_second", runtime.run, bundle, _attempt("ok2")
     )
+    _report_solver_receipt("business.solve_second", receipt_again)
+    assert receipt_again.status == "succeeded", receipt_again.termination_reason
     assert collected_again[SOLUTION_PATH] == collected[SOLUTION_PATH]
 
 
@@ -678,7 +641,7 @@ def _solution_components(solution) -> dict:
     return {name: dict(entry) for name, entry in solution["components"].items()}
 
 
-def test_chain_success_reports_declared_components() -> None:
+def test_chain_success_reports_declared_components(campus_dispatch_case) -> None:
     """成功链发布声明财务分量：键/单位/口径与同解交叉核对一致。
 
     campus 手算关系（发布值均为业务单位）：
@@ -687,7 +650,7 @@ def test_chain_success_reports_declared_components() -> None:
     objective == upfront + annual×1年 + pv1__period_variable_om
       + import_meter__period_energy_purchase。
     """
-    inputs = _timed("components.inputs", _campus_inputs)
+    inputs = _timed("components.inputs", _campus_inputs, dispatch=campus_dispatch_case)
     bundle = _timed("components.generate_bundle", _generate_bundle, inputs)
     runtime = _runtime()
     receipt, collected = _timed("components.solve", runtime.run, bundle, _attempt("comp"))
@@ -756,7 +719,7 @@ def _yearly_flows(solution) -> tuple[float, float]:
     return -upfront, -annual_cost
 
 
-def test_chain_two_solves_feed_yearly_evaluation() -> None:
+def test_chain_two_solves_feed_yearly_evaluation(campus_dispatch_case) -> None:
     """两份独立真实求解作为评价输入：无复制，指标与明细同源。
 
     仅为契约测试数据组织，不是产品级多年编排：第二年用不同冻结财务
@@ -766,7 +729,7 @@ def test_chain_two_solves_feed_yearly_evaluation() -> None:
     不同，否则即复制单年结果。campus 样例无正净流，如实断言无解/
     未回收，不虚构收入。
     """
-    inputs1 = _timed("yearly.inputs_one", _campus_inputs)
+    inputs1 = _timed("yearly.inputs_one", _campus_inputs, dispatch=campus_dispatch_case)
     bundle1 = _timed("yearly.generate_one", _generate_bundle, inputs1)
     runtime = _runtime()
     receipt1, collected1 = _timed("yearly.solve_one", runtime.run, bundle1, _attempt("yr1"))
