@@ -464,12 +464,11 @@ def _state_mutex_envelope_rows(
     variables: tuple[LinearVariable, ...],
     rows: list[LinearConstraint],
 ) -> tuple[LinearConstraint, ...]:
-    """原等式+真二元互斥+有限状态界蕴涵的局部凸包有效不等式。
+    """从严格非负的二元互斥及状态递推推出数值保守的有效不等式。
 
-    不识别设备名、状态名或具体关系名。只有确认现有 Big-M 两行
-    确实使一对非负流不可同时非零，且状态等式只包含这两个流和
-    相邻时间同一状态，才生成四种严格有效的能量头寸界。
-    未给状态有限界、容量仍由规划接管时不会假定额外最大值。
+    不以业务设备名判型；只有识别完整的既有 Big-M 互斥和相邻状态
+    等式才使用。导出系数和 RHS 使用精确有理数，中间不舍入；
+    最终系数朝约束宽松方向舍入、RHS 向外舍入，不裁剪原整数可行集。
     """
     by_name = {var.name: var for var in variables}
     mutex_rows: dict[str, dict[str, str]] = {}
@@ -509,7 +508,6 @@ def _state_mutex_envelope_rows(
     for entry in mutex_rows.values():
         if set(entry) == {"up", "down"} and entry["up"] != entry["down"]:
             x, y = entry["up"], entry["down"]
-            # 同一连续流若参与多个独立互斥，拒绝推断其唯一对应者。
             if x not in peer and y not in peer:
                 peer[x], peer[y] = y, x
 
@@ -535,7 +533,7 @@ def _state_mutex_envelope_rows(
         x, y = matches[0]
         rest = {name: coef for name, coef in coeffs.items() if name not in (x, y)}
         current = previous = None
-        initial: float | None = None
+        initial: Fraction | None = None
         if len(rest) == 2 and row.rhs == row.expression.constant:
             state_names = [(name, timed(name)) for name in rest]
             for current_name, stamp in state_names:
@@ -552,60 +550,96 @@ def _state_mutex_envelope_rows(
             (name, a), = rest.items()
             if timed(name) is not None and timed(name)[1] == 0 and a != 0:
                 current = name
-                initial = (row.rhs - row.expression.constant) / a
-                if not math.isfinite(initial):
-                    current = None
+                initial = (
+                    Fraction(row.rhs) - Fraction(row.expression.constant)
+                ) / Fraction(a)
         if current is None:
             continue
-        a = rest[current]
+        a = Fraction(rest[current])
         if a == 0 or current not in by_name or (
             previous is not None and previous not in by_name
         ):
             continue
-        p, q = -coeffs[x] / a, coeffs[y] / a
+        p, q = -Fraction(coeffs[x]) / a, Fraction(coeffs[y]) / a
         if p <= 0 or q <= 0:
             x, y = y, x
-            p, q = -coeffs[x] / a, coeffs[y] / a
+            p, q = -Fraction(coeffs[x]) / a, Fraction(coeffs[y]) / a
             if p <= 0 or q <= 0:
                 continue
+        # 四个有效不等式的两种流都非负。减小正的 p/q 系数只会
+        # 让 <= 行左侧减小，或让 >= 行左侧增大，方向均是放松。
+        p_safe = _outward_exact_bound(p, lower=True)
+        q_safe = _outward_exact_bound(q, lower=True)
+        if p_safe is None or q_safe is None:
+            continue
         state = by_name[current]
-        prev_lower = by_name[previous].lower if previous is not None else initial
-        prev_upper = by_name[previous].upper if previous is not None else initial
+        if previous is not None:
+            prev_var = by_name[previous]
+            prev_lower = None if prev_var.lower is None else Fraction(prev_var.lower)
+            prev_upper = None if prev_var.upper is None else Fraction(prev_var.upper)
+        else:
+            prev_lower = prev_upper = initial
+        state_lower = None if state.lower is None else Fraction(state.lower)
+        state_upper = None if state.upper is None else Fraction(state.upper)
         prefix = row.name + "__mutex_envelope"
-        # 充电期间 d=0；放电期间 c=0。以下均对两种整数模式成立。
-        if state.upper is not None and prev_upper is not None and prev_upper <= state.upper:
-            charge_terms = [((x, 0), p)]
-            if previous is not None:
-                charge_terms.append(((previous, 0), 1.0))
-            extra.append(LinearConstraint(
-                prefix + "__charge_before",
-                LinearExpression(tuple(sorted(charge_terms))), "le",
-                state.upper - (initial if previous is None else 0.0),
-            ))
-        if state.lower is not None and prev_lower is not None and prev_lower >= state.lower:
-            discharge_terms = [((y, 0), -q)]
-            if previous is not None:
-                discharge_terms.append(((previous, 0), 1.0))
-            extra.append(LinearConstraint(
-                prefix + "__discharge_before",
-                LinearExpression(tuple(sorted(discharge_terms))), "ge",
-                state.lower - (initial if previous is None else 0.0),
-            ))
-        if state.lower is not None and prev_lower is not None and state.lower >= prev_lower:
-            extra.append(LinearConstraint(
-                prefix + "__charge_after",
-                LinearExpression(tuple(sorted((
-                    ((current, 0), 1.0), ((x, 0), -p),
-                )))), "ge", prev_lower,
-            ))
-        if state.upper is not None and prev_upper is not None and state.upper <= prev_upper:
-            extra.append(LinearConstraint(
-                prefix + "__discharge_after",
-                LinearExpression(tuple(sorted((
-                    ((current, 0), 1.0), ((y, 0), q),
-                )))), "le", prev_upper,
-            ))
+        if (
+            state_upper is not None and prev_upper is not None
+            and prev_upper <= state_upper
+        ):
+            rhs = _outward_exact_bound(
+                state_upper - (initial if previous is None else Fraction(0)),
+                lower=False,
+            )
+            if rhs is not None:
+                terms = [((x, 0), p_safe)]
+                if previous is not None:
+                    terms.append(((previous, 0), 1.0))
+                extra.append(LinearConstraint(
+                    prefix + "__charge_before",
+                    LinearExpression(tuple(sorted(terms))), "le", rhs,
+                ))
+        if (
+            state_lower is not None and prev_lower is not None
+            and prev_lower >= state_lower
+        ):
+            rhs = _outward_exact_bound(
+                state_lower - (initial if previous is None else Fraction(0)),
+                lower=True,
+            )
+            if rhs is not None:
+                terms = [((y, 0), -q_safe)]
+                if previous is not None:
+                    terms.append(((previous, 0), 1.0))
+                extra.append(LinearConstraint(
+                    prefix + "__discharge_before",
+                    LinearExpression(tuple(sorted(terms))), "ge", rhs,
+                ))
+        if (
+            state_lower is not None and prev_lower is not None
+            and state_lower >= prev_lower
+        ):
+            rhs = _outward_exact_bound(prev_lower, lower=True)
+            if rhs is not None:
+                extra.append(LinearConstraint(
+                    prefix + "__charge_after",
+                    LinearExpression(tuple(sorted((
+                        ((current, 0), 1.0), ((x, 0), -p_safe),
+                    )))), "ge", rhs,
+                ))
+        if (
+            state_upper is not None and prev_upper is not None
+            and state_upper <= prev_upper
+        ):
+            rhs = _outward_exact_bound(prev_upper, lower=False)
+            if rhs is not None:
+                extra.append(LinearConstraint(
+                    prefix + "__discharge_after",
+                    LinearExpression(tuple(sorted((
+                        ((current, 0), 1.0), ((y, 0), q_safe),
+                    )))), "le", rhs,
+                ))
     return tuple(extra)
+
 
 class _ProjectBuilder:
     """项目级构造的内部编排（实例方法只传 derived 状态，直接输入只进厂）。"""

@@ -176,6 +176,55 @@ def test_mutex_state_envelope_is_implied_and_tightens_fractional_modes(battery):
                 assert lhs >= row.rhs - 1e-5
 
 
+def test_mutex_envelope_coefficients_round_toward_feasible_region():
+    """用系数 5/7 的精确整数可行解检验 derived cut 不得变严。
+
+    7*E - 5*charge + 5*discharge=0，充电 7、放电 0、E=5
+    是严格的原约束可行解。float(5/7) 会向上舍入，若直接把
+    该系数用于 charge_before，则错误排除 E=5 的可行点。
+    """
+    variables = (
+        LinearVariable("cell__charge__t0", 0, 7),
+        LinearVariable("cell__discharge__t0", 0, 7),
+        LinearVariable("cell__energy__t0", 0, 5),
+        LinearVariable("mutex_b", 0, 1, "binary"),
+    )
+    rows = [
+        LinearConstraint("a_mutex",
+            LinearExpression(terms=(
+                (("cell__charge__t0", 0), 1.0), (("mutex_b", 0), -7.0),
+            )), sense="le", rhs=0),
+        LinearConstraint("b_mutex",
+            LinearExpression(terms=(
+                (("cell__discharge__t0", 0), 1.0), (("mutex_b", 0), 7.0),
+            )), sense="le", rhs=7),
+        LinearConstraint("cell__energy_update__t0",
+            LinearExpression(terms=(
+                (("cell__charge__t0", 0), -5.0),
+                (("cell__discharge__t0", 0), 5.0),
+                (("cell__energy__t0", 0), 7.0),
+            )), sense="eq", rhs=0),
+    ]
+    cuts = _state_mutex_envelope_rows(variables, rows)
+    assert cuts
+    solution = {
+        "cell__charge__t0": Fraction(7),
+        "cell__discharge__t0": Fraction(0),
+        "cell__energy__t0": Fraction(5),
+    }
+    for cut in cuts:
+        lhs = sum((
+            Fraction(coef) * solution[name]
+            for (name, _), coef in cut.expression.terms
+        ), Fraction(cut.expression.constant))
+        rhs = Fraction(cut.rhs)
+        if cut.sense == "le":
+            assert lhs <= rhs, cut.name
+        else:
+            assert lhs >= rhs, cut.name
+
+
+
 def test_generic_interval_tightening_preserves_binary_and_unknown_bounds():
     variables = {
         "x": LinearVariable("x", lower=0, upper=None),
