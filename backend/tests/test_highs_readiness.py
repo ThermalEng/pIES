@@ -10,6 +10,7 @@ ResultAdapter，不解释求解业务状态；不声称网络/CPU/内存/OOM/身
 from __future__ import annotations
 
 import json
+import logging
 import math
 import subprocess
 from pathlib import Path
@@ -325,6 +326,12 @@ def test_end_to_end_campus_bundle() -> None:
     mps_bytes = bundle.files[PROBLEM_PATH]
     assert mps_bytes.startswith(b"NAME") and len(mps_bytes) > 100
     receipt, outputs = _runtime().run(bundle, _attempt())
+    if receipt.status != "succeeded":
+        logging.getLogger("pies.ci.highs_readiness").warning(
+            "CI_SOLVER readiness status=%s reason=%s stdout_head=%r stdout_tail=%r stderr=%r",
+            receipt.status, receipt.termination_reason,
+            receipt.stdout[:1500], receipt.stdout[-6500:], receipt.stderr[-1500:],
+        )
     assert receipt.status == "succeeded"
     assert receipt.executor_ref == EXECUTOR_REF
     assert receipt.executable_ref == HIGHS_EXECUTABLE_REF
