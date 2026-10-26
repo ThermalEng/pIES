@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import json
 import math
+from fractions import Fraction
 from collections import Counter
 from collections.abc import Mapping
 from datetime import datetime, timedelta
@@ -359,16 +360,36 @@ def step_series_declarations(
     return _new_builder(artifact, models, materialized, finance, evaluation).step_series()
 
 
+def _outward_exact_bound(value: Fraction, *, lower: bool) -> float | None:
+    """将精确有理端点向可表示的浮点外侧舍入。
+
+    端点超过可表示范围时不生成有限界（返回 None）；这比引入错误界
+    安全。仅在最末端转换一次；所有累加、相减和除法先以有理数精确执行。
+    """
+    try:
+        rounded = float(value)
+    except OverflowError:
+        return None
+    if not math.isfinite(rounded):
+        return None
+    represented = Fraction.from_float(rounded)
+    if lower and represented > value:
+        rounded = math.nextafter(rounded, -math.inf)
+    elif not lower and represented < value:
+        rounded = math.nextafter(rounded, math.inf)
+    return rounded if math.isfinite(rounded) else None
+
+
 def _tighten_nonnegative_equality_bounds(
     variables: Mapping[str, LinearVariable],
     rows: list[LinearConstraint],
 ) -> tuple[LinearVariable, ...]:
-    """以原等式和现有变量界做保守区间传播，不增删技术方程。
+    """按浮点模型系数的精确值作保守有理区间传播，不增删原等式。
 
-    对 a*x + Σ(b_i*y_i) + c = rhs，使用其余 y_i 的有限区间求 x
-    的必然上下界。不能证明的界保持 None；不假定缺失容量上界，
-    不动 binary 种类和界（MPS 的 BV 编码须保持精确 0/1）。
-    浮点计算的推导端点向外取一 ULP，避免舍入引入意外收紧。
+    a*x + Σ(b_i*y_i) + c = rhs，每项界端点在精确有理域累加，
+    最后向外舍入成有限 float。不能证明的上下界保持 None，
+    保留未知规划容量上界及现有 binary，不收紧用户配置范围。
+    特别防止 1e16+1-1e16 的中间浮点消去造成错误的可行域裁剪。
     """
     bounded = dict(variables)
     for _pass in range(2):
@@ -379,17 +400,21 @@ def _tighten_nonnegative_equality_bounds(
             terms = row.expression.terms
             if not 1 < len(terms) <= 4:
                 continue
-            constant = row.rhs - row.expression.constant
-            for index, (target_key, coeff) in enumerate(terms):
+            # 把各个原始 float 当作精确有理输入；不在此处改变既有
+            # 计算/降低阶段已冻结的线性系数或模型方程。
+            residual = Fraction(row.rhs) - Fraction(row.expression.constant)
+            coefficients = tuple(Fraction(coeff) for _, coeff in terms)
+            for index, (target_key, _) in enumerate(terms):
                 name, offset = target_key
+                coeff = coefficients[index]
                 if offset != 0 or coeff == 0 or name not in bounded:
                     continue
                 target = bounded[name]
                 if target.kind != "continuous":
                     continue
-                others_min = others_max = 0.0
+                others_min = others_max = Fraction(0)
                 min_finite = max_finite = True
-                for j, (other_key, other_coeff) in enumerate(terms):
+                for j, (other_key, _) in enumerate(terms):
                     if j == index:
                         continue
                     other_name, other_offset = other_key
@@ -397,44 +422,43 @@ def _tighten_nonnegative_equality_bounds(
                         min_finite = max_finite = False
                         break
                     other = bounded[other_name]
+                    other_coeff = coefficients[j]
                     small = other.lower if other_coeff > 0 else other.upper
                     large = other.upper if other_coeff > 0 else other.lower
                     if small is None:
                         min_finite = False
                     else:
-                        others_min += other_coeff * small
+                        others_min += other_coeff * Fraction(small)
                     if large is None:
                         max_finite = False
                     else:
-                        others_max += other_coeff * large
+                        others_max += other_coeff * Fraction(large)
                 lower = target.lower
                 upper = target.upper
-                if (max_finite if coeff > 0 else min_finite):
-                    other_extreme = others_max if coeff > 0 else others_min
-                    candidate = (constant - other_extreme) / coeff
-                    if math.isfinite(candidate):
-                        candidate = math.nextafter(candidate, -math.inf)
-                        if (lower is None or candidate > lower) and (
-                            upper is None or candidate <= upper
-                        ):
-                            lower = candidate
-                if (min_finite if coeff > 0 else max_finite):
-                    other_extreme = others_min if coeff > 0 else others_max
-                    candidate = (constant - other_extreme) / coeff
-                    if math.isfinite(candidate):
-                        candidate = math.nextafter(candidate, math.inf)
-                        if (upper is None or candidate < upper) and (
-                            lower is None or candidate >= lower
-                        ):
-                            upper = candidate
+                if max_finite if coeff > 0 else min_finite:
+                    extreme = others_max if coeff > 0 else others_min
+                    candidate = _outward_exact_bound(
+                        (residual - extreme) / coeff, lower=True,
+                    )
+                    if candidate is not None and (
+                        lower is None or candidate > lower
+                    ) and (upper is None or candidate <= upper):
+                        lower = candidate
+                if min_finite if coeff > 0 else max_finite:
+                    extreme = others_min if coeff > 0 else others_max
+                    candidate = _outward_exact_bound(
+                        (residual - extreme) / coeff, lower=False,
+                    )
+                    if candidate is not None and (
+                        upper is None or candidate < upper
+                    ) and (lower is None or candidate >= lower):
+                        upper = candidate
                 if lower != target.lower or upper != target.upper:
                     bounded[name] = LinearVariable(name, lower, upper, target.kind)
                     changed = True
         if not changed:
             break
     return tuple(bounded.values())
-
-
 
 def _state_mutex_envelope_rows(
     variables: tuple[LinearVariable, ...],

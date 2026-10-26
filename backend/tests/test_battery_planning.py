@@ -6,6 +6,7 @@ HiGHS 真实求解仅在 GitHub Actions Docker 环境运行；本文件不运行
 from __future__ import annotations
 
 import subprocess
+from fractions import Fraction
 
 import pytest
 
@@ -199,6 +200,81 @@ def test_generic_interval_tightening_preserves_binary_and_unknown_bounds():
     assert inferred["size"].upper is None
     assert inferred["b"].kind == "binary"
     assert (inferred["b"].lower, inferred["b"].upper) == (0, 1)
+
+
+def test_interval_tightening_retains_exact_cancellation_feasible_zero():
+    """主审复现：float 累加会把 1e16 + 1 - 1e16 丢成 0。
+
+    原约束 a+b+c+x=1、a=1e16、b=1、c=-1e16，x=0
+    以有理数算术严格满足等式；预处理绝不可使 x.lower > 0。
+    """
+    variables = {
+        "a": LinearVariable("a", 1e16, 1e16),
+        "b": LinearVariable("b", 1, 1),
+        "c": LinearVariable("c", -1e16, -1e16),
+        "x": LinearVariable("x", 0, None),
+    }
+    row = LinearConstraint(
+        "exact_cancellation",
+        LinearExpression(terms=tuple(
+            ((name, 0), 1.0) for name in ("a", "b", "c", "x")
+        )),
+        sense="eq", rhs=1,
+    )
+    exact_lhs = sum((Fraction(variables[n].lower) for n in ("a", "b", "c")), Fraction(0))
+    assert exact_lhs == Fraction(row.rhs)
+    inferred = {
+        v.name: v for v in _tighten_nonnegative_equality_bounds(variables, [row])
+    }
+    assert inferred["x"].lower <= 0
+    assert inferred["x"].upper >= 0
+    assert inferred["x"].lower == 0
+    assert inferred["x"].upper == 0
+
+
+def test_interval_tightening_mixed_sign_and_rational_endpoints():
+    """混合符号+大值消去；上界 1/3 须朝 +inf 舍入。"""
+    variables = {
+        "a": LinearVariable("a", 1e16, 1e16),
+        "b": LinearVariable("b", 1, 2),
+        "c": LinearVariable("c", 1e16, 1e16),
+        "x": LinearVariable("x", 0, None),
+    }
+    # a + b - c - 3*x = 1 -> x = (b-1)/3 ∈ [0,1/3]。
+    row = LinearConstraint(
+        "mixed_sign",
+        LinearExpression(terms=(
+            (("a", 0), 1.0), (("b", 0), 1.0),
+            (("c", 0), -1.0), (("x", 0), -3.0),
+        )),
+        sense="eq", rhs=1,
+    )
+    inferred = {
+        v.name: v for v in _tighten_nonnegative_equality_bounds(variables, [row])
+    }
+    assert inferred["x"].lower <= 0
+    assert inferred["x"].upper is not None
+    assert Fraction(inferred["x"].upper) >= Fraction(1, 3)
+    assert inferred["x"].upper < 0.34
+
+    # 另一方向：-2/3 不可被向零舍入；不假定某一侧原本有界。
+    variables["x"] = LinearVariable("x", None, None)
+    negative = LinearConstraint(
+        "negative_endpoints",
+        LinearExpression(terms=(
+            (("a", 0), 1.0), (("b", 0), 1.0),
+            (("c", 0), -1.0), (("x", 0), 3.0),
+        )),
+        sense="eq", rhs=0,
+    )
+    inferred = {
+        v.name: v for v in _tighten_nonnegative_equality_bounds(variables, [negative])
+    }
+    assert inferred["x"].lower is not None
+    assert inferred["x"].upper is not None
+    assert Fraction(inferred["x"].lower) <= Fraction(-2, 3)
+    assert Fraction(inferred["x"].upper) >= Fraction(-1, 3)
+
 
 
 def test_planned_energy_bounds_do_not_invent_capacity_limit(battery):
