@@ -190,6 +190,39 @@ def test_zero_capacity_has_no_free_initial_energy(battery, tmp_path):
         assert primal[f"cell__discharge__t{step}"] == pytest.approx(0, abs=1e-6)
 
 
-def test_unsupported_unbounded_mutex_is_not_bypassed(battery):
+def test_cost_and_annual_maintenance_use_the_same_planned_size(battery):
+    # Financial quantities must use the same capacity variable as energy constraints.
+    from iesplan.finance import FinanceProfile, merge_effective
+    from test_npv_objective import _finance_payload
+
+    payload = _finance_payload()
+    profile = payload["finance_types"]["sys1"]
+    profile["upfront_capex"]["linear"]["cap"]["unit_cost"] = {
+        "value": "50", "unit": "CNY/kWh",
+    }
+    profile["annual_fixed_om"]["linear"]["cap"]["unit_cost"] = {
+        "value": "12", "unit": "CNY/kWh/a",
+    }
+    b = _rows(battery, power=6)
+    b.finance = merge_effective(FinanceProfile.from_dict(payload), None)
+    b.doc["finance_binding"]["instances"]["cell"] = {
+        "type": "costed", "finance_type": "sys1",
+        "drivers": {
+            "cap": {"property": "capacity_kwh"},
+            "thr": {"interface": "electricity", "aggregation": "integrate_positive"},
+        },
+    }
+    components = b.finance_components()
+    for field in ("upfront_capex", "annual_fixed_om"):
+        component = components[f"cell__{field}"]
+        assert component["constant"] == 0
+        terms = component["terms"]
+        assert len(terms) == 1
+        assert terms[0][0] == "battery_size"
+        assert terms[0][1] > 0
+
+
+def test_power_plan_with_explicit_finite_input_bound(battery):
+    # A route's unbounded Big-M fallback is deliberately out of scope.
     b = _rows(battery, capacity=0, power=None)
     assert b.variables["battery_kw"].upper == 6000
