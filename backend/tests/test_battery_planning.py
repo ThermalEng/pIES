@@ -16,7 +16,8 @@ from iesplan.computation.generators.linear import (
 from iesplan.computation.generators.mps import write_mps
 from iesplan.computation.generators.project import _ProjectBuilder
 from iesplan.devices import init_registry, list_devices
-from iesplan.devices.contracts2 import from_dict, to_dict
+from iesplan.devices.contracts2 import canonical_bytes, from_dict, to_dict
+from iesplan.devices.parser2 import parse_device_model_v2
 from iesplan.modeling import build_math_contribution
 from iesplan.modeling.contract2 import contribution_from_dict, contribution_to_dict
 
@@ -222,6 +223,143 @@ def test_cost_and_annual_maintenance_use_the_same_planned_size(battery):
         assert len(terms) == 1
         assert set(terms) == {"battery_size"}
         assert terms["battery_size"] > 0
+
+
+
+def test_initial_expression_public_input_and_frozen_roundtrip(battery):
+    # 真实公共设备 parser 入口；不是私有 builder 手工构造可信 MathVariable。
+    init_registry()
+    document = next(d for d in list_devices() if d.device.id == "ies.device.battery")
+    raw = to_dict(document)
+    parsed = parse_device_model_v2(raw, file="battery-public.yaml")
+    assert parsed.ok, parsed.diagnostics
+    assert parsed.document.equations.variables["stored_energy"].initial_expression == (
+        "initial_soc * capacity_kwh"
+    )
+    frozen = from_dict(to_dict(parsed.document))
+    assert canonical_bytes(frozen) == canonical_bytes(parsed.document)
+    rebuilt = build_math_contribution(frozen)
+    assert rebuilt.ok, rebuilt.diagnostics
+    restored = contribution_from_dict(contribution_to_dict(rebuilt.contribution))
+    assert restored.variables["stored_energy"].initial_ast == (
+        rebuilt.contribution.variables["stored_energy"].initial_ast
+    )
+
+
+@pytest.mark.parametrize("initial", [
+    {"expression": ""},
+    {"expression": "missing_capacity * initial_soc"},
+    {"expression": "capacity_kwh[t] * initial_soc"},
+    {"expression": "capacity_kwh * charge[t]"},
+    {"expression": "capacity_kwh * initial_soc", "property_ref": "capacity_kwh"},
+])
+def test_initial_expression_public_input_rejects_invalid_forms(initial):
+    init_registry()
+    document = next(d for d in list_devices() if d.device.id == "ies.device.battery")
+    raw = to_dict(document)
+    raw["equations"]["variables"]["stored_energy"]["initial"] = initial
+    parsed = parse_device_model_v2(raw, file="invalid-initial.yaml")
+    assert not parsed.ok
+    assert parsed.document is None
+    assert parsed.diagnostics
+
+
+def test_initial_expression_public_input_rejects_unit_conflict():
+    init_registry()
+    document = next(d for d in list_devices() if d.device.id == "ies.device.battery")
+    raw = to_dict(document)
+    raw["equations"]["variables"]["stored_energy"]["initial"] = {
+        "expression": "initial_soc + capacity_kwh"
+    }
+    parsed = parse_device_model_v2(raw, file="bad-unit-initial.yaml")
+    # 公开结构解析器与公共建模器共同构成入模校验；不能让非法量纲入模。
+    if not parsed.ok:
+        assert parsed.diagnostics
+        return
+    result = build_math_contribution(parsed.document)
+    assert not result.ok
+    assert result.contribution is None
+    assert any("量纲" in d.message or "单位" in d.message for d in result.diagnostics)
+
+
+def test_planned_capacity_capex_and_dated_maintenance_recover_from_one_solution(
+    battery, tmp_path,
+):
+    # 同一真实 HiGHS 主解 C=10 kWh → CAPEX=500 CNY；
+    # 第 2 年维护 = 20 CNY 固定 + 3 CNY/kWh×10 kWh + 10%×CAPEX = 100 CNY。
+    # 第 3 年未安排维护：不能把年度固定 O&M 误充 maintenance_expenses。
+    from iesplan.computation.result_adapters.highs import _recover_financial_facts
+    from iesplan.finance import (
+        ConstructionPayment, CostComponentShareTerm, EvaluationInput,
+        FinanceProfile, MaintenanceExpense, MaintenanceUnitCost,
+        ScaleUnitCostTerm, merge_effective,
+    )
+    from test_npv_objective import _finance_payload
+
+    payload = _finance_payload()
+    profile = payload["finance_types"]["sys1"]
+    profile["upfront_capex"]["linear"]["cap"]["unit_cost"] = {
+        "value": "50", "unit": "CNY/kWh",
+    }
+    profile["annual_fixed_om"]["linear"]["cap"]["unit_cost"] = {
+        "value": "12", "unit": "CNY/kWh/a",
+    }
+    profile.pop("period_variable_om")  # 只验证容量、建设、年费与指定年维护。
+
+    b = _rows(battery, discharge_efficiency=1, power=6)
+    b.finance = merge_effective(FinanceProfile.from_dict(payload), None)
+    b.doc["finance_binding"]["instances"]["cell"] = {
+        "type": "costed", "finance_type": "sys1",
+        "drivers": {"cap": {"property": "capacity_kwh"}},
+    }
+    b.doc["project_baseline"] = {
+        "resolution": "1h", "start_year": 2026, "scenario_mode": "single",
+    }
+    b.evaluation = EvaluationInput(
+        evaluation_years=3, construction_period=1, operation_years=2,
+        discount_rate=0.0,
+        construction_payments=(ConstructionPayment(t=0, ratio="1"),),
+        maintenance_expenses=(
+            MaintenanceExpense(
+                year=2, amount="20", currency="CNY", terms=(
+                    ScaleUnitCostTerm(
+                        kind="scale_unit_cost", instance_id="cell",
+                        property="capacity_kwh",
+                        unit_cost=MaintenanceUnitCost(value="3", unit="CNY/kWh"),
+                    ),
+                    CostComponentShareTerm(
+                        kind="cost_component_share", instance_id="cell",
+                        component="upfront_capex", ratio=0.1,
+                    ),
+                ),
+            ),
+        ),
+    )
+    # 复用生产 builder 的建设/维护同源仿射声明，不构造第二套财务算法。
+    b._retain_maintenance()
+    b._retain_operating_facts()
+    declared = b.financial_facts()
+    assert declared["annual_operation"][0]["financial_year"] == 2
+    assert declared["annual_operation"][1]["financial_year"] == 3
+
+    primal = _solve(b, tmp_path, demand_w=4000)
+    assert primal["battery_size"] == pytest.approx(36_000_000, abs=1)
+    # 复用生产 HiGHS 适配器的财务事实恢复：列值来自上述同一次主解。
+    restored = _recover_financial_facts(
+        declared, {name: index for index, name in enumerate(primal)},
+        list(primal.values()),
+    )
+    assert restored["currency"] == "CNY"
+    assert float(restored["construction_total"]) == pytest.approx(500, abs=1e-5)
+    assert restored["payments_applied"][0]["t"] == 0
+    assert float(restored["payments_applied"][0]["amount"]) == pytest.approx(500, abs=1e-5)
+    annual = {row["financial_year"]: row for row in restored["annual_operation"]}
+    assert set(annual) == {2, 3}
+    assert float(annual[2]["maintenance"]) == pytest.approx(100, abs=1e-5)
+    assert float(annual[3]["maintenance"]) == pytest.approx(0, abs=1e-5)
+    # 常年固定 O&M 与指定年维护为独立业务事实。
+    assert float(annual[2]["fixed_om"]) == pytest.approx(120, abs=1e-5)
+    assert float(annual[3]["fixed_om"]) == pytest.approx(120, abs=1e-5)
 
 
 def test_power_plan_with_explicit_finite_input_bound(battery):
