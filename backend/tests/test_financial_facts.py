@@ -185,6 +185,46 @@ def test_facts_mix_seal_matches_hand_and_objective(tmp_path) -> None:
     assert sealed["annual_net_flows"] == list(facts["annual_net_flows"])
 
 
+def test_source_out_sale_uses_only_its_meter_and_preserves_tax_seal(tmp_path) -> None:
+    """Out-side sale is a declared transaction, not a sum of receiving inputs.
+
+    A single electrical edge exposes both source.out and consumer.in with
+    identical physical flows. Moving the settlement binding to source.out
+    must preserve VAT, income tax, cash flow and the frozen evaluation, while
+    the component declaration must name only the requested source interface.
+    """
+    reference = None
+    for at_source in (False, True):
+        artifact, models, materialized, finance, config, evaluation = _inputs(
+            payload=_mix_payload(), sale_at_source=at_source
+        )
+        bundle = HIGHS_MILP_PROVIDER.generate(
+            artifact, models, materialized, finance, config, evaluation
+        )
+        metadata = json.loads(bundle.files["input/parameters.json"])
+        terms = metadata["components"]["export_meter__period_energy_sale"]["terms"]
+        port = "grid1__supply" if at_source else "heater1__electricity_in"
+        assert len(terms) == 17520
+        assert all(key.startswith(f"{port}__t") for key in terms)
+        assert terms[f"{port}__t0"] == pytest.approx(0.00005)
+        _, _, raw_solution = _solve_internal(bundle, tmp_path)
+        adapted, sealed, facts = _seal(bundle, raw_solution, finance, _snapshot())
+        assert sealed["tax_cash"] == facts["tax_cash"]
+        assert sealed["annual_net_flows"] == facts["annual_net_flows"]
+        assert float(sealed["annual_operation"][0]["energy_net"]) != 0
+        assert adapted.outputs["solution"]["objective_value"] == pytest.approx(
+            float(sealed["evaluation"]["npv"]), rel=1e-6
+        )
+        if reference is None:
+            reference = sealed
+        else:
+            for part in ("annual_operation", "annual_net_flows", "tax_cash"):
+                _assert_facts_close(sealed[part], reference[part])
+            assert float(sealed["evaluation"]["npv"]) == pytest.approx(
+                float(reference["evaluation"]["npv"]), rel=1e-6
+            )
+
+
 def test_facts_gross_net_equivalence(tmp_path) -> None:
     """等价含税/净额陈述：两解封存事实与 NPV 互相一致。"""
     incl_payload, excl_payload, export_values = _equiv_payloads()

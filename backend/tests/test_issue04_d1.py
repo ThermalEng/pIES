@@ -293,3 +293,49 @@ def test_demand_property_ref_default_is_used_without_override():
         d.params.get("reason") == "requires_nonnegative_electric_power_out"
         for d in result.diagnostics
     )
+
+
+@pytest.mark.parametrize("planning_lower", ["0", None])
+def test_demand_property_ref_accepts_planning_takeover_of_negative_old_value(planning_lower):
+    """Shared effective-floor check preserves demand's electricity/out contract."""
+    from iesplan.devices.parser2 import parse_device_model_v2
+
+    raw = yaml_load(
+        (DIR.parent.parent / "devices" / "catalog" / "grid_connection.yaml").read_text("utf-8")
+    )
+    raw["properties"]["import_floor_kw"] = {
+        "value": 1, "unit": "kW",
+        "valid_range": {"minimum": -10, "maximum": 10},
+    }
+    raw["interfaces"]["electricity_import"]["valid_range"]["minimum"] = {
+        "property_ref": "import_floor_kw",
+    }
+    parsed = parse_device_model_v2(raw, file="synthetic-demand-grid.yaml")
+    assert parsed.ok, [d.to_dict() for d in parsed.diagnostics]
+
+    doc, effective = _assembly()
+    doc["devices"]["grid"]["properties"]["import_floor_kw"] = {
+        "value": -1, "unit": "kW",
+    }
+    doc["planning"]["variables"]["floor_plan"] = {
+        "device_ref": "grid", "parameter": "import_floor_kw", "unit": "kW",
+        "lower_bound": planning_lower, "upper_bound": "1",
+    }
+    docs = {"ies.device.grid_connection": parsed.document}
+    result = _check(doc, effective, device_documents=docs)
+    assert result.artifact is not None, [d.to_dict() for d in result.diagnostics]
+
+    # The identical negative instance floor remains ineligible without takeover.
+    # Existing demand-binding tests independently enforce its out/electricity/unit gate.
+    # Validation materializes resource content into its input tree; a fresh
+    # assembly is required for an independent public-entry comparison.
+    unplanned, _ = _assembly()
+    unplanned["devices"]["grid"]["properties"]["import_floor_kw"] = {
+        "value": -1, "unit": "kW",
+    }
+    no_takeover = _check(unplanned, effective, device_documents=docs)
+    assert no_takeover.artifact is None
+    assert any(
+        d.params.get("reason") == "requires_nonnegative_electric_power_out"
+        for d in no_takeover.diagnostics
+    )
