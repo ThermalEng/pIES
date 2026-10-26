@@ -442,8 +442,15 @@ def _inputs(
     maintenance_tax=True,
     payload=None,
     export_values=None,
+    sale_at_source=False,
 ):
     doc = _doc(tank_origin=tank_origin)
+    if sale_at_source:
+        # Explicit sale at the electricity source's out port, not at the
+        # receiving device's in port. Both carry the same flow on this edge.
+        doc["tariff_bindings"]["export_meter"].update(
+            instance="grid1", interface="supply"
+        )
     if objective is not None:
         doc["planning"]["objective"] = objective
     models = {

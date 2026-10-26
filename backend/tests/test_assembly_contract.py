@@ -945,15 +945,28 @@ class TestTariffGates:
         )
         self._reason(text, "interface_unknown")
 
-    def test_direction_flow_mismatch_blocked(self, init_registry):
-        # purchase 计量须经 out 接口流出计量设备；export 为 in 接口
-        text = _load("campus.assembly.yaml").replace(
-            "    interface: electricity_import", "    interface: electricity_export", 1
+    @pytest.mark.parametrize(
+        ("binding", "interface"),
+        [
+            ("import_meter", "electricity_import"),  # out + purchase
+            ("import_meter", "electricity_export"),  # in + purchase
+            ("export_meter", "electricity_import"),  # out + sale
+            ("export_meter", "electricity_export"),  # in + sale
+        ],
+    )
+    def test_technical_direction_independent_of_purchase_sale(
+        self, init_registry, binding, interface
+    ):
+        text = _load("campus.assembly.yaml")
+        previous = (
+            "electricity_import" if binding == "import_meter" else "electricity_export"
         )
-        self._reason(text, "direction_flow_mismatch")
+        text = text.replace(f"    interface: {previous}", f"    interface: {interface}", 1)
+        result = _validate_campus(text)
+        assert result.artifact is not None, [d.to_dict() for d in result.diagnostics]
 
     def test_carrier_mismatch_blocked(self, init_registry):
-        # electricity 价格绑到 heat 接口(hp1.heat_out 为 out，方向先通过)
+        # electricity 价格绑到 heat 接口：方向自由，载体仍阻断
         text = _load("campus.assembly.yaml").replace(
             "    instance: grid\n    interface: electricity_import",
             "    instance: hp1\n    interface: heat_out",
@@ -965,6 +978,14 @@ class TestTariffGates:
         text = _load("campus.assembly.yaml").replace(
             "    instance: grid\n    interface: electricity_import",
             "    instance: pv1\n    interface: solar_irradiance",
+            1,
+        )
+        self._reason(text, "interface_not_meterable")
+
+    def test_bidirectional_net_interface_not_meterable(self, init_registry):
+        text = _load("campus.assembly.yaml").replace(
+            "    instance: grid\n    interface: electricity_import",
+            "    instance: bat1\n    interface: electricity",
             1,
         )
         self._reason(text, "interface_not_meterable")

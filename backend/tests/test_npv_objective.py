@@ -289,7 +289,7 @@ def _doc(
             }
         },
         "tariff_bindings": {
-            # 计量边界：purchase 对 out 口，sale 对 in 口。
+            # 明确选定两个计量端口；价格购售符号不从技术 in/out 推导。
             "import_meter": {
                 "price": "heat_import",
                 "instance": "heater1",
@@ -733,7 +733,7 @@ def _choice_doc(objective: dict, *, cap_bounds: tuple[str, str] = ("0", "10")) -
             }
         },
         "tariff_bindings": {
-            # 计量边界：sale 对 in 口（计量分接与出力同值）。
+            # 此例在 in 口显式售电（计量分接与出力同值）；out 口也合法。
             "meter": {
                 "price": "gen_sale",
                 "instance": "gen1",
