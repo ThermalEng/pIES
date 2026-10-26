@@ -660,8 +660,8 @@ def test_submit_rejects_tax_rules_without_provider_capabilities(
     from test_config_revisions import _tax_profile_payload
 
     from iesplan.application import configuration as config_cases
-    from iesplan.computation.errors import ComputationUnavailableError
     from iesplan.computation.generators.descriptor import GeneratorDescriptor
+    from iesplan.computation.generators.registry import GeneratorRegistry
 
     stub_ref = "ies.generator.stub@1.0.0"
     stub_descriptor = GeneratorDescriptor(
@@ -670,6 +670,7 @@ def test_submit_rejects_tax_rules_without_provider_capabilities(
         options_schema={"type": "object", "additionalProperties": False},
         assembly_schema_version="2.0",
         modes=("planning",),
+        outputs=("solution",),
         precisions=("medium",),
         solvers=("ies.solver.highs@1.7.2",),
         executors=("ies.executor.local_process@1.0.0",),
@@ -678,11 +679,6 @@ def test_submit_rejects_tax_rules_without_provider_capabilities(
         seed_semantics="测试合成 provider，无税务能力标记",
     )
     assert stub_descriptor.capabilities == ()
-
-    def _get(ref: str):
-        if ref == stub_ref:
-            return SimpleNamespace(descriptor=stub_descriptor)
-        raise ComputationUnavailableError(f"未知生成器: {ref}", reason="no-generator")
 
     settings.data_dir = tmp_path
     app = create_app()
@@ -696,7 +692,7 @@ def test_submit_rejects_tax_rules_without_provider_capabilities(
     app.dependency_overrides[get_request_db] = _override_request_db
     with TestClient(app, raise_server_exceptions=False) as stub_client:
         app.state.bootstrap_context = SimpleNamespace(
-            generator_registry=SimpleNamespace(get=_get),
+            generator_registry=GeneratorRegistry({stub_ref: SimpleNamespace(descriptor=stub_descriptor)}),
             predictor_registry=None,
         )
         owner = make_user(db, "owner_stubgate")
@@ -1195,6 +1191,47 @@ def test_cancel_flow(client: TestClient, db: Session) -> None:
     error = resp.json()["error"]
     assert error["code"] == "TASK-CANCEL-001"
     assert error["message_key"] == "ies.diag.task.cancel_denied"
+
+
+def test_running_cancel_signal_is_published_after_commit(
+    client: TestClient, db: Session, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """公开取消信号不可抢跑权威 cancelling 提交；幂等重试可补发信号。"""
+    owner = make_user(db, "cancel_commit_order")
+    pid = _prepare_project(client, db, owner)
+    rev = _save_config(client, pid, owner)
+    _, body = _submit_task(
+        client, pid, owner, config={"config_revision": rev},
+        idempotency_key="cancel-commit-order",
+    )
+    task_id = body["task"]["id"]
+    _claim(db, task_id)
+
+    actual_set_cancel = tasks_domain.set_cancel
+    published: list[tuple[bool, str]] = []
+
+    def record_signal(cancel_id: int, reason: str) -> None:
+        # endpoint 和 fixture 共享 db；真正提交后没有活跃事务。
+        before_query_in_transaction = db.in_transaction()
+        status = db.get(Task, cancel_id).status
+        published.append((before_query_in_transaction, status))
+        actual_set_cancel(cancel_id, reason)
+
+    monkeypatch.setattr(tasks_domain, "set_cancel", record_signal)
+    route = f"/api/projects/{pid}/tasks/{task_id}/cancel"
+    resp = client.post(route, headers=_h(client, owner))
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["cancel_status"] == "cancelling"
+    assert published == [(False, "cancelling")]
+
+    # 可重建信号丢失后，同一个 cancelling 请求应补发。
+    queue.clear_cancel(task_id)
+    resp = client.post(route, headers=_h(client, owner))
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["cancel_status"] == "cancelling"
+    assert published[-1] == (False, "cancelling")
+    assert len(published) == 2
+    assert queue.get_cancel(task_id) == "user_cancel"
 
 
 # ---------------------------------------------------------------------------

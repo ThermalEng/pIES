@@ -27,6 +27,7 @@ submit_attempt_result / fail_attempt / cancel_attempt 带 token 完成
 from __future__ import annotations
 
 import logging
+import time
 import traceback
 from collections.abc import Callable, Mapping
 from typing import Any
@@ -42,7 +43,9 @@ from iesplan.core.diagnostics import (
 )
 from iesplan.core.errors import AppError
 from iesplan.worker import executors
-from iesplan.worker.executors import EngineRunError, LeaseFenced, RunContext, TaskCancelled
+from iesplan.worker.executors import (
+    EngineRunError, LeaseFenced, RunContext, TaskCancelled, TaskTimedOut,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -73,33 +76,37 @@ class InvalidTaskTypeError(AppError):
 
 
 def _stop_probe(ctx: RunContext):
-    """停止探针: 未停止 → None；用户取消 → cancelled；其余停止 → fenced。
+    """停止探针: 独立查询用户取消；租约/Worker 停止 → fenced。
 
-    其余停止只可能是租约失效（续租失败置位）或进程退出：租约隔离必须
-    记 fenced，不得记 cancelled。探针内取消查询走可重建队列视图，不持
-    有数据库会话。
+    未设置 stop_event 时也必须消费用户取消。其余停止只可能是租约
+    失效（续租失败置位）或进程退出：隔离必须记 fenced，不得误写
+    cancelled。探针内查询走可重建队列视图，不持数据库会话。
     """
 
     def probe():
-        if ctx.stop_event is None or not ctx.stop_event.is_set():
-            return None
         if worker_app.cancel_requested(ctx.task.id):
             return "cancelled"
-        return "fenced"
+        if ctx.stop_event is not None and ctx.stop_event.is_set():
+            return "fenced"
+        return None
 
     return probe
 
 
 def _raise_for_receipt_status(receipt: Any) -> None:
-    """回执状态分流：取消 → TaskCancelled；隔离 → LeaseFenced；成功 → 通过。
+    """回执分流：取消、超时、隔离各自独立；成功直接通过。
 
     租约隔离（fenced）绝不能走取消路径：不得报告取消，不得写终态。
-    非成功非取消非隔离一律 EngineRunError（结构化失败，不伪装成功）。
+    其他非成功回执走 EngineRunError（结构化失败，不伪装成功）。
     """
     if receipt.status == "cancelled":
         raise TaskCancelled("solve")
     if receipt.status == "fenced":
         raise LeaseFenced()
+    if receipt.status == "timed_out":
+        raise TaskTimedOut(
+            f"求解执行超时(receipt={receipt.receipt_id}): {receipt.error}"
+        )
     if receipt.status != "succeeded":
         raise EngineRunError(
             f"求解执行未成功(status={receipt.status}, "
@@ -135,13 +142,14 @@ def _solve_round(
 ) -> tuple[Any, Any, Any, Any]:
     """单轮求解: 生成 → 执行(含回执分流) → 适配 → 业务结局。
 
-    每轮回执独立判定: cancelled → TaskCancelled, fenced → LeaseFenced
-    (不写终态), 非成功/不可映射 → EngineRunError。生成后与回执判定后
+    每轮回执独立判定: cancelled → TaskCancelled, timed_out → TaskTimedOut,
+    fenced → LeaseFenced（不写终态）, 其他非成功/不可映射 → EngineRunError。生成后与回执判定后
     分别写进度（判定前不写 execute 进度）。评价确认逐轮透传同一冻结值，
     不读最新草稿。返回 (bundle, receipt, collected, result, outcome)。
     """
     bundle = worker_app.generate_bundle(
-        plane, snapshot, artifact, models, materialized, finance, config, evaluation)
+        plane, snapshot, artifact, models, materialized, finance, config, evaluation,
+        stop=_stop_probe(ctx))
     ctx.progress(40.0, "generate", None)
     receipt, collected = worker_app.execute_bundle(
         plane=plane, bundle=bundle, attempt=attempt, stop=_stop_probe(ctx),
@@ -213,6 +221,7 @@ def _execute_compute(ctx: RunContext) -> tuple[dict, dict]:
         artifact, models, materialized, finance, config, evaluation = worker_app.load_compute_inputs(
             db, task.project_id, snapshot
         )
+    ctx.checkpoint("materialize")
     ctx.progress(10.0, "materialize", None)
     predicted: tuple = ()
     predicted_series: tuple = ()
@@ -513,9 +522,13 @@ def run_task(
     def _report_progress(percent: float, stage: str, detail: dict | None) -> None:
         # 每次进度各自新短会话短事务, 提交后即刻对其他会话可见
         with factory() as progress_db:
-            worker_app.report_attempt_progress(
+            accepted = worker_app.report_attempt_progress(
                 progress_db, claim.attempt_id, claim.lease_token,
                 task.id, percent, stage, detail,
+            )
+        if not accepted:
+            raise worker_app.LeaseRejectedError(
+                "进度上报遭租约拒绝", params={"attempt_id": claim.attempt_id},
             )
 
     ctx = RunContext(
@@ -524,7 +537,9 @@ def run_task(
         progress_fn=_report_progress, compute=compute,
     )
     try:
+        ctx.checkpoint("start")
         payload, output_files = dispatch(ctx)
+        ctx.checkpoint("submit")
         # 完成路径要求显式合法 outcome: 缺字段默认成功已删除, 缺失/非法
         # 即确定性失败, 绝不落成功(合法集合归 tasks 域所有)。
         outcome = payload.get("outcome")
@@ -540,9 +555,22 @@ def run_task(
         return "fenced"
     except TaskCancelled as exc:
         return _handle_cancel(factory, ctx, claim, exc.stage)
+    except TaskTimedOut as exc:
+        try:
+            with factory() as db:
+                worker_app.timeout_attempt(db, claim, message=str(exc))
+        except worker_app.LeaseRejectedError:
+            return "lease_rejected"
+        return "timed_out"
+    except worker_app.ComputationUnavailableError as exc:
+        if exc.reason == "cancelled":
+            return _handle_cancel(factory, ctx, claim, "generate")
+        if exc.reason == "fenced":
+            return "fenced"
+        return _handle_failure(factory, ctx, claim, exc)
     except (
         worker_app.LeaseRejectedError, SnapshotInputError, EngineRunError,
-        AppError, worker_app.ComputationUnavailableError,
+        AppError,
     ) as exc:
         return _handle_failure(factory, ctx, claim, exc)
     except Exception as exc:  # noqa: BLE001 - 尝试边界: 任何未预期异常落确定性失败
@@ -566,14 +594,36 @@ def _handle_cancel(
             completed = worker_app.count_completed_samples(db, task.id)
         if completed > 0:
             outcome = "partial_batch"
-    try:
-        with factory() as db:
-            worker_app.cancel_attempt(db, claim, outcome=outcome)
-        return "cancelled"
-    except AppError as exc:
-        # 取消竞态: 任务已终态(以先落终态者为准, 03 §6.1 规则 4)
-        logger.info("取消竞态忽略: task=%s (%s)", task.id, exc)
-        return "cancelled"
+    for retry in range(6):
+        try:
+            with factory() as db:
+                worker_app.cancel_attempt(db, claim, outcome=outcome)
+            return "cancelled"
+        except worker_app.LeaseRejectedError:
+            logger.warning("取消收拢遭租约隔离，停止写回: task=%s", task.id)
+            return "lease_rejected"
+        except AppError as exc:
+            # 只有权威终态才可认定取消/完成竞态已落定；不得看到 Redis
+            # 信号便返回 cancelled 而遗留 running attempt 与占用的槽位。
+            with factory() as db:
+                latest = worker_app.get_task_record(db, task.id)
+            if latest is not None and latest.status in (
+                "completed", "failed", "cancelled", "timed_out",
+            ):
+                logger.info("取消与终态竞态: task=%s status=%s", task.id, latest.status)
+                return latest.status
+            if retry < 5:
+                time.sleep(0.05)  # 仅异常路径短暂等候并发状态事务提交
+                continue
+            logger.error(
+                "取消信号与权威任务状态不一致: task=%s status=%s error=%s",
+                task.id, latest.status if latest is not None else "missing", exc,
+            )
+            return _handle_failure(
+                factory, ctx, claim,
+                EngineRunError("停止信号与权威取消状态不一致，执行已停止"),
+            )
+    raise AssertionError("取消收拢循环未返回")
 
 
 def _handle_failure(

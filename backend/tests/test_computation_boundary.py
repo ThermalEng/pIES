@@ -165,6 +165,7 @@ class _GeneratorOnly:
             },
             assembly_schema_version="1.0",
             modes=("planning",),
+            outputs=("solution",),
             precisions=("medium",),
             solvers=("ies.solver.highs@1.7.2",),
             result_adapter="acme.result-adapter@1.0.0",

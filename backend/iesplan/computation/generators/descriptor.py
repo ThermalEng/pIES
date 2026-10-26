@@ -82,6 +82,7 @@ class GeneratorDescriptor:
     generator_id: str
     version: str
     options_schema: Mapping[str, object]
+    outputs: tuple[str, ...]
     assembly_schema_version: str = ""
     modes: tuple[str, ...] = ()
     precisions: tuple[str, ...] = ()
@@ -106,6 +107,7 @@ class GeneratorDescriptor:
             check_provider_ref(solver_ref, "solvers")
         object.__setattr__(self, "solvers", solvers)
         for attr in (
+            "outputs",
             "capabilities",
             "executors",
             "equation_contracts",
@@ -127,6 +129,8 @@ class GeneratorDescriptor:
                 f"{self.precisions!r}"
             )
         object.__setattr__(self, "precisions", precisions)
+        if not self.outputs:
+            raise ValueError("outputs 须为非空能力集合")
         if not self.result_adapter:
             raise ValueError(
                 "result_adapter 不得为空：descriptor 必须声明配套结果适配器"
@@ -163,6 +167,7 @@ class GeneratorDescriptor:
             "assembly_schema_version": self.assembly_schema_version,
             "modes": list(self.modes),
             "precisions": list(self.precisions),
+            "outputs": list(self.outputs),
             "capabilities": list(self.capabilities),
             "solvers": list(self.solvers),
             "executors": list(self.executors),

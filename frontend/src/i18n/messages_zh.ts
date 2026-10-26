@@ -378,6 +378,12 @@ export const messagesZh: Record<string, string> = {
   'ies.config.invalid_json': 'JSON 解析失败',
   'ies.config.required': '必填',
   'ies.config.outputs_required': '输出请求不能为空',
+  'ies.config.unsupported_generator': '生成器「{value}」未注册（可用：{supported}）',
+  'ies.config.unsupported_mode': '所选生成器不支持模式「{value}」（支持：{supported}）',
+  'ies.config.unsupported_precision': '所选生成器不支持精度「{value}」（支持：{supported}）',
+  'ies.config.unsupported_solver': '所选生成器不支持求解器「{value}」（支持：{supported}）',
+  'ies.config.unsupported_outputs': '所选生成器不支持输出「{value}」（支持：{supported}）',
+  'ies.config.invalid_options': '所选生成器的选项不合法：{detail}',
   'ies.config.time_limit_invalid': '须为正整数',
   'ies.config.hint_refs': '填写精确引用, 形如 <稳定ID>@<语义化版本>',
 

@@ -92,13 +92,13 @@ test.describe('0.12-A1: 计算配置 revision 编辑器', () => {
     await tabB.close()
 
     // 5) 原页(仍基于 v1)修改并保存 → 409, 表单保留未提交编辑
-    await page.locator('#calc-mode').fill('planning-local')
+    await page.locator('#calc-time-limit').fill('650')
     await page.getByRole('button', { name: SAVE_BTN }).click()
     await expect(page.getByText(CONFLICT).first()).toBeVisible({ timeout: 10_000 })
     await expect(page.getByRole('button', { name: RELOAD_BTN })).toBeVisible()
     // 未提交编辑未被覆盖, 远端 v2 也未自动灌入
-    await expect(page.locator('#calc-mode')).toHaveValue('planning-local')
-    await expect(page.locator('#calc-time-limit')).toHaveValue('600')
+    await expect(page.locator('#calc-mode')).toHaveValue('planning')
+    await expect(page.locator('#calc-time-limit')).toHaveValue('650')
 
     // 6) 用户主动重载 → 表单切换为 v2 内容
     await page.getByRole('button', { name: RELOAD_BTN }).click()
@@ -187,6 +187,57 @@ test.describe('0.12-A1: 计算配置 revision 编辑器', () => {
     // 任何 console/pageerror/失败请求仍零容忍。
     session.assertNoErrors([
       { method: 'GET', path: `/api/projects/${projectId}/config`, status: 404, times: 2 },
+    ])
+    await context.close()
+  })
+})
+
+test.describe('PR #26: 生成器静态能力在保存边界反馈', () => {
+  test('不兼容模式/精度/solver/outputs 可定位，保留编辑，修正后保存', async ({ browser }) => {
+    const username = uniqueName('es-config-caps')
+    const password = strongPassword('Init')
+    const setup = await browser.newContext({ baseURL: process.env.E2E_APP_URL ?? 'http://web:80' })
+    await createEngineer(setup.request, username, password)
+    await setup.close()
+
+    const context = await browser.newContext()
+    const page = await context.newPage()
+    const session = await createSession(page, username, password)
+    const projectId = await createProjectEnterConfig(page, uniqueName('QA 能力反馈项目'))
+    await fillConfig(page, 'planning', '600')
+
+    await page.locator('#calc-precision').selectOption('high')
+    await page.getByRole('button', { name: SAVE_BTN }).click()
+    await expect(page.getByText(/不支持精度|does not support precision/i).first()).toBeVisible()
+    await expect(page.locator('#calc-precision')).toHaveValue('high')
+    await expect(page.getByText(/尚未保存|Not saved yet/i)).toBeVisible()
+
+    await page.locator('#calc-precision').selectOption('medium')
+    await page.locator('#calc-mode').fill('unsupported_mode')
+    await page.getByRole('button', { name: SAVE_BTN }).click()
+    await expect(page.getByText(/不支持模式|does not support mode/i).first()).toBeVisible()
+    await expect(page.locator('#calc-mode')).toHaveValue('unsupported_mode')
+
+    await page.locator('#calc-mode').fill('planning')
+    await page.locator('#calc-solver').fill('test.solver.unknown@1.0.0')
+    await page.getByRole('button', { name: SAVE_BTN }).click()
+    await expect(page.getByText(/不支持求解器|does not support solver/i).first()).toBeVisible()
+    await expect(page.locator('#calc-solver')).toHaveValue('test.solver.unknown@1.0.0')
+
+    await page.locator('#calc-solver').fill('ies.solver.highs@1.7.2')
+    await page.locator('#calc-outputs').fill('["solution", "unknown"]')
+    await page.getByRole('button', { name: SAVE_BTN }).click()
+    await expect(page.getByText(/不支持输出|does not support outputs/i).first()).toBeVisible()
+    await expect(page.locator('#calc-outputs')).toHaveValue('["solution", "unknown"]')
+
+    await page.locator('#calc-outputs').fill('["solution"]')
+    await page.getByRole('button', { name: SAVE_BTN }).click()
+    await expect(page.getByText(SAVED_OK).first()).toBeVisible()
+    await expect(page.getByText(/当前 revision: v1|Current revision.*v1/i)).toBeVisible()
+
+    session.assertNoErrors([
+      { method: 'GET', path: `/api/projects/${projectId}/config`, status: 404, times: 2 },
+      { method: 'PUT', path: `/api/projects/${projectId}/config`, status: 422, times: 4 },
     ])
     await context.close()
   })

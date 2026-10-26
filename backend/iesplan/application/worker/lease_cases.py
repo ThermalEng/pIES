@@ -399,6 +399,11 @@ def cancel_task_record(
     return tasks_domain.set_task_status(db, task_id, "cancelled", business_outcome=outcome)
 
 
+def timeout_task_record(db: Session, task_id: int) -> TaskRecord:
+    """独立超时终态（只 flush，不提交；与普通失败区分）。"""
+    return tasks_domain.set_task_status(db, task_id, "timed_out")
+
+
 # ---------------------------------------------------------------------------
 # 结果提交行写(证据包 + 四维评估 + 结果索引)
 # ---------------------------------------------------------------------------

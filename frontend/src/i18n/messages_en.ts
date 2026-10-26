@@ -368,6 +368,12 @@ export const messagesEn: Record<string, string> = {
   'ies.config.invalid_json': 'Invalid JSON',
   'ies.config.required': 'Required',
   'ies.config.outputs_required': 'Outputs must not be empty',
+  'ies.config.unsupported_generator': 'Generator {value} is not registered (available: {supported})',
+  'ies.config.unsupported_mode': 'Selected generator does not support mode {value} (supported: {supported})',
+  'ies.config.unsupported_precision': 'Selected generator does not support precision {value} (supported: {supported})',
+  'ies.config.unsupported_solver': 'Selected generator does not support solver {value} (supported: {supported})',
+  'ies.config.unsupported_outputs': 'Selected generator does not support outputs {value} (supported: {supported})',
+  'ies.config.invalid_options': 'Invalid options for selected generator: {detail}',
   'ies.config.time_limit_invalid': 'Must be a positive integer',
   'ies.config.hint_refs': 'Enter an exact ref like <stable-id>@<semver>',
 

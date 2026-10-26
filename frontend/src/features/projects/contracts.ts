@@ -97,7 +97,7 @@ export interface DemandBindingDto {
 // 项目视图(含草稿摘要与内容)
 // ---------------------------------------------------------------------------
 
-/** 草稿数据集绑定行(与视图 draft.dataset_bindings 同形)。 */
+/** 草稿数据集绑定行(权威位置: 视图 draft.content.dataset_bindings)。 */
 export interface DraftBindingDto {
   dataset_version_id: number
   dataset_id?: number | null
@@ -131,6 +131,8 @@ export interface DraftContentModelDto {
 /** 草稿内容文档(初始骨架见 backend project/content.py: schema_version, model, calc_config 等)。 */
 export interface DraftContentDto {
   model: DraftContentModelDto
+  /** dataset.bind / dataset.unbind 写入的权威绑定列表。 */
+  dataset_bindings?: DraftBindingDto[] | null
   /** assembly.set_finance_binding: omitted until explicitly saved. */
   finance_binding?: { instances: Record<string, CostBindingDto> }
   /** assembly.set_tariff_bindings: omitted until explicitly saved. */
@@ -151,7 +153,6 @@ export interface DraftViewDto {
   updated_by: number
   updated_at: string
   created_at: string
-  dataset_bindings?: DraftBindingDto[] | null
   content: DraftContentDto
 }
 

@@ -57,7 +57,7 @@ export function projectFromView(body: ProjectViewResponseDto): Project {
 
 /** 视图草稿 → 前端 ProjectDraft。 */
 export function draftFromView(draft: DraftViewDto): ProjectDraft {
-  const bindings = draft.dataset_bindings ?? undefined
+  const bindings = draft.content?.dataset_bindings ?? undefined
   const working = draft.content?.task_working_inputs ?? undefined
   return {
     id: draft.id,

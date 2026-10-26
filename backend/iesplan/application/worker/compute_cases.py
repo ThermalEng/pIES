@@ -60,6 +60,7 @@ from iesplan.computation import (
     SolverBundle,
     SolverRuntime,
     StopProbe,
+    read_stop_reason,
     check_convergence,
     materialize_non_predictive_series,
     materialize_predicted_series,
@@ -511,6 +512,8 @@ def generate_bundle(
     finance: EffectiveFinanceConfig,
     config: CalculationConfig,
     evaluation: EvaluationInput,
+    *,
+    stop: StopProbe | None = None,
 ) -> SolverBundle:
     """经生成器目录选中精确 provider 生成完整 Bundle，并消费快照冻结引用。
 
@@ -522,8 +525,24 @@ def generate_bundle(
     冻结精确引用一致，并预先解析两者（不可解析即明确失败，不等到求解后；
     不读当前可变目录）。
     """
+    reason = read_stop_reason(stop)
+    if reason is not None:
+        raise ComputationUnavailableError("生成前已停止", reason=reason)
     provider = plane.generator_registry.resolve(config)
-    bundle = provider.generate(artifact, models, materialized, finance, config, evaluation)
+    # 稳定 GeneratorProvider.generate 协议不能追加 stop 关键字。
+    # 可协作停止的生成器自愿实现扩展，旧 provider 保持原有调用形状。
+    stoppable_generate = getattr(provider, "generate_with_stop", None)
+    if stop is not None and callable(stoppable_generate):
+        bundle = stoppable_generate(
+            artifact, models, materialized, finance, config, evaluation, stop=stop,
+        )
+    else:
+        bundle = provider.generate(
+            artifact, models, materialized, finance, config, evaluation,
+        )
+    reason = read_stop_reason(stop)
+    if reason is not None:
+        raise ComputationUnavailableError("生成后已停止", reason=reason)
     declared_executor = bundle.manifest.command["executor"]
     if declared_executor != snapshot.executor or bundle.manifest.result_adapter != snapshot.result_adapter:
         raise ComputationUnavailableError(

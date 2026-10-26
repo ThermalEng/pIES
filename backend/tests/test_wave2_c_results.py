@@ -281,7 +281,7 @@ def _prepare_running(
 
     pid = _project(client, user, name)
     _declare_optimization_ready(client, db, user, pid)
-    saved = save_calculation_config_case(db, user, pid, dict(_CONFIG_BODY), None)
+    saved = save_calculation_config_case(db, user, pid, dict(_CONFIG_BODY), None, generator_registry=_registry(client))
     task, _ = tasks_uc.submit_task(
         db, user, pid, "optimization",
         config={"config_revision": saved["revision"]}, evaluation={

@@ -61,7 +61,7 @@ class GeneratorRegistry:
         真实边界，provider 自身不再重复核对）。
 
         1. 精确引用选中 provider；未知即 ``ComputationUnavailableError``；
-        2. 核对 mode/精度/solver 兼容性，不兼容即 ``ComputationUnavailableError``；
+        2. 核对 mode/精度/solver/outputs 兼容性，不兼容即 ``ComputationUnavailableError``；
         3. 用 descriptor 的 options_schema 校验 ``config.options``：
            非法选项属于用户计算配置错误，抛明确 ``ValueError``（字段路径/
            原因），不是不可用；不回退其他 generator，不删字段、不补默认、
@@ -84,6 +84,12 @@ class GeneratorRegistry:
             raise ComputationUnavailableError(
                 f"生成器不兼容所选求解器: {config.generator!r} x {config.solver!r}",
                 reason="incompatible-solver",
+            )
+        unsupported_outputs = tuple(name for name in config.outputs if name not in descriptor.outputs)
+        if unsupported_outputs:
+            raise ComputationUnavailableError(
+                f"生成器不支持所选 outputs: {config.generator!r} x {unsupported_outputs!r}",
+                reason="incompatible-outputs",
             )
         _check_options(descriptor, config)
         return provider

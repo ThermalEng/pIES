@@ -23,8 +23,9 @@ from sqlalchemy.pool import StaticPool  # noqa: E402
 from worker_testkit import setup_environment  # noqa: E402
 
 from iesplan.application import worker as worker_app  # noqa: E402
+from iesplan.core.diagnostics import TASK_TIMEOUT  # noqa: E402
 from iesplan.db import Base  # noqa: E402
-from iesplan.tasks.persistence import ComputeSlot, Task, TaskAttempt, TaskLease  # noqa: E402
+from iesplan.tasks.persistence import ComputeSlot, Task, TaskAttempt, TaskDiagnostic, TaskLease  # noqa: E402
 from iesplan.results.persistence import EvidencePackage, ResultAssessment, ResultIndex  # noqa: E402
 from iesplan.tasks import queue  # noqa: E402
 
@@ -400,6 +401,20 @@ class TestSubmit:
         assert task.status == "completed"
         assert task.business_outcome == "restricted_results"
 
+    def test_completion_wins_race_after_cancel_request(self, db: Session, env: dict[str, Any]):
+        """提交事务已开始时取消竞态：完成获胜，信号清除且资源仅释放一次。"""
+        claim = _claim(db, env)
+        env["task"].status = "cancelling"
+        queue.set_cancel(env["task"].id, "race")
+        db.commit()
+        worker_app.submit_attempt_result(db, claim, payload=_payload(), outcome="normal_completion")
+        db.expire_all()
+        assert db.get(Task, env["task"].id).status == "completed"
+        assert db.get(TaskAttempt, claim.attempt_id).status == "succeeded"
+        assert _lease_row(db, claim).status == "released"
+        assert _slots_used(db) == 0
+        assert queue.get_cancel(env["task"].id) is None
+
     def test_late_submit_after_expiry_rejected(self, db: Session, env: dict[str, Any]):
         """迟到尝试拒绝(03 §4.3): 租约过期后提交 → 整笔拒绝, 结果不入权威库。"""
         claim = _claim(db, env)
@@ -507,3 +522,29 @@ class TestTerminal:
 
         with pytest.raises(TaskStateError):
             worker_app.cancel_attempt(db, claim)
+
+    def test_timeout_has_independent_terminal_and_releases_slot(self, db: Session, env: dict[str, Any]):
+        claim = _claim(db, env)
+        worker_app.timeout_attempt(db, claim, message="受控进程超时")
+        db.expire_all()
+        assert db.get(Task, env["task"].id).status == "timed_out"
+        assert db.get(TaskAttempt, claim.attempt_id).status == "stopped"
+        assert db.get(TaskAttempt, claim.attempt_id).stop_reason == "timeout"
+        assert _lease_row(db, claim).status == "revoked"
+        assert _slots_used(db) == 0
+        assert worker_app.slot_available(db, "compute")
+        diagnostics = db.execute(
+            select(TaskDiagnostic).where(TaskDiagnostic.task_id == env["task"].id)
+        ).scalars().all()
+        assert any(item.code == TASK_TIMEOUT for item in diagnostics)
+
+    def test_timeout_fenced_by_lease_does_not_write_terminal(self, db: Session, env: dict[str, Any]):
+        claim = _claim(db, env)
+        _lease_row(db, claim).status = "expired"
+        db.commit()
+        with pytest.raises(worker_app.LeaseRejectedError):
+            worker_app.timeout_attempt(db, claim, message="late-timeout")
+        db.expire_all()
+        assert db.get(Task, env["task"].id).status == "running"
+        assert db.get(TaskAttempt, claim.attempt_id).status == "running"
+        assert _lease_row(db, claim).status == "expired"
