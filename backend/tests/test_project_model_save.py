@@ -55,7 +55,7 @@ PASSWORD = "Test12345"
 #: 合法 2.0.0 设备模型(阶段 1 契约样例)
 HEAT_PUMP_YAML = """
 schema: ies.device-model
-schema_version: "2.1.0"
+schema_version: "2.2.0"
 
 device:
   id: acme.device.heat_pump
@@ -116,7 +116,7 @@ equations:
 #: 多错误候选(interfaces type + property unit + equation 引用, 聚合 ≥3 条)
 MULTI_ERROR_YAML = """
 schema: ies.device-model
-schema_version: "2.1.0"
+schema_version: "2.2.0"
 device: {id: acme.device.multi, names: {zh-CN: 多错, en-US: Multi}}
 properties:
   p1: {value: 1, unit: not-a-unit, valid_range: {minimum: 0, maximum: 1}}
@@ -132,7 +132,7 @@ equations:
 #: 模板样例(与等值直接 YAML 汇合; inputs 实例化后删除顶层 inputs)
 TEMPLATE_YAML = """
 schema: ies.device-model
-schema_version: "2.1.0"
+schema_version: "2.2.0"
 device: {id: acme.device.electric_load, names: {zh-CN: 电负荷, en-US: Electric Load}}
 inputs:
   properties:
@@ -159,7 +159,7 @@ equations:
 #: 与模板实例化等值的直接 YAML
 DIRECT_EQ_YAML = """
 schema: ies.device-model
-schema_version: "2.1.0"
+schema_version: "2.2.0"
 device: {id: acme.device.electric_load, names: {zh-CN: 电负荷, en-US: Electric Load}}
 properties:
   cop: {value: 3.0, unit: "1", valid_range: {minimum: 1, maximum: 10}}

@@ -1,4 +1,4 @@
-"""ies.device-model 2.1.0 专用非法样例集契约验收（Roadmap 0.8.0 条目 1）。
+"""ies.device-model 2.2.0 专用非法样例集契约验收（Roadmap 0.8.0 条目 1）。
 
 基于真实合法 v2 文档的最小非法 YAML，每个只违反一个契约。
 测试遍历发布目录 backend/iesplan/devices/samples/invalid/2.1/ 下的非法样例，
@@ -87,7 +87,7 @@ def test_valid_sample_still_parseable():
     result = parse_device_model_v2(raw, file=str(VALID_SAMPLE))
     assert result.ok, f"合法样例应可解析，诊断: {[dict(d.params) for d in result.diagnostics]}"
     assert result.document is not None
-    assert result.document.schema_version == "2.1.0"
+    assert result.document.schema_version == "2.2.0"
 
 
 @pytest.mark.parametrize("filename", sorted(EXPECTED.keys()))

@@ -1,6 +1,6 @@
 # 设备模型 YAML
 
-> 契约标识：`ies.device-model`；目标 schema：`2.1.0`（`2.1.0` 模板 `inputs` 新增 `data_full` 类型，正式模型不变）；推荐文件名：`<device-id>.device.yaml`。
+> 契约标识：`ies.device-model`；目标 schema：`2.2.0`（新增状态初值表达式）；推荐文件名：`<device-id>.device.yaml`。
 > 文档状态：生效目标契约；本页只定义目标文件语义，不声明实现进度。
 
 设备模型 YAML 是所有设备共同遵守的纯技术说明。它只回答三件事：设备具有哪些不随时间变化的技术常量、通过哪些序列接口与外部交互、这些常量和序列之间满足什么方程。设备文件不保存价格、成本、财务假设、计算精度、算法选择或可执行实现入口。
@@ -11,7 +11,7 @@
 
 ```yaml
 schema: ies.device-model
-schema_version: "2.1.0"
+schema_version: "2.2.0"
 
 device:
   id: acme.device.heat_pump
@@ -59,7 +59,7 @@ equations:
 | 字段 | 作用 |
 |---|---|
 | `schema` | 固定为 `ies.device-model` |
-| `schema_version` | 统一设备文件契约版本；目标值为 `2.1.0` |
+| `schema_version` | 统一设备文件契约版本；目标值为 `2.2.0` |
 | `device` | 稳定设备身份和显示信息 |
 | `properties` | 不随时间变化的纯技术常量 |
 | `interfaces` | 与外部交互的序列数据定义 |
@@ -112,7 +112,7 @@ properties:
 - 用户必须提交所有声明叶子，并且只能提交已声明路径；缺少或多余字段均阻断；
 - array 作为整体提交，`items` 只逐元素校验，不形成额外的 `path[]` 必填输入；
 - object 的 `fields` 全部必填并拒绝多余键；空 object、空 array 声明均非法；
-- 实例化完成后必须删除 `inputs`，再按只有六个顶层字段的正式模型执行一次完整 `2.1.0` 校验。
+- 实例化完成后必须删除 `inputs`，再按只有六个顶层字段的正式模型执行一次完整 `2.2.0` 校验。
 
 ## `interfaces`
 
@@ -150,16 +150,16 @@ properties:
 ```yaml
 equations:
   variables:
-    soc:
-      unit: "1"
+    stored_energy:
+      unit: kWh
       valid_range:
-        minimum: 0.1
-        maximum: 0.9
+        minimum: 0
+        maximum: null
       initial:
-        property_ref: initial_soc
+        expression: "initial_soc * capacity_kwh"
   relations:
-    - id: soc_transition
-      expression: "soc[t] = soc[t-1] + (charge_in[t] * charge_efficiency - discharge_out[t] / discharge_efficiency) * step_duration / capacity_kwh"
+    - id: energy_transition
+      expression: "stored_energy[t] = stored_energy[t-1] + (charge_in[t] * charge_efficiency - discharge_out[t] / discharge_efficiency) * step_duration"
 ```
 
 规则：
@@ -170,10 +170,20 @@ equations:
 - 每个关系必须通过标识符、单位、有效区间和时间索引校验；
 - 内部变量只存在于 equations，不成为可连接接口；
 - 初值、边界和跨步关系必须显式，不能由 solver 猜测；
-- 状态关系在项目基线首步 `t=0` 使用变量声明的 `initial.property_ref`，只在后续步引用 `t-1`；更深过去引用（`t-2` 及以前）在设备发布输入边界拒绝；`step_duration` 是项目计算基线提供的唯一公开步长变量，不按设备 ID 或 generator 猜测；
+- 状态关系的 `t-1` 在项目基线首步 `t=0` 由变量声明的 `initial` 替代，后续步引用前一步状态；更深过去引用（`t-2` 及以前）在设备发布输入边界拒绝；`step_duration` 是项目计算基线提供的唯一公开步长变量，不按设备 ID 或 generator 猜测；
 - 受限语法必须支持数值零及 `a[t] * b[t] = 0` 形式的非负变量互斥等式；
 - 禁止函数路径、动态导入、任意函数调用、脚本、模板、环境变量和凭证；
 - 计算层按项目基线完整连续序列构造问题，可选择不同精度或求解方法，但不得改变设备文件声明的技术关系。
+
+### 状态初值
+
+`initial` 恰选一种形态：`{property_ref: <property-id>}` 直接引用初值属性，或 `{expression: "<表达式>"}` 组合属性。表达式复用方程的数字、括号、一元正负和算术运算，仅引用本设备未带时间索引的数值 properties；不引用接口、内部变量或 `step_duration`。结果量纲必须与状态变量一致，加减两侧量纲一致。
+
+生成器将属性换算为 SI 后求值。属性被规划变量接管时，初值保留同一个规划变量，不提前代入设备默认值；表达式是否可降级由生成器公开数学能力决定，线性生成器只接受降级后为仿射的形式。例如 `initial_soc * capacity_kwh` 在 SOC 固定、容量规划时仍为仿射，两个均为规划变量时为双线性，不能冒充线性能力。
+
+储能以能量状态承接规划容量；充放电递推、SOC 上下限和初值共同使用该容量。上述片段只示范初值与递推，完整设备还须声明接口、属性、容量相关边界与互斥关系。
+
+`2.2.0` 在 `2.1.0` 基础上增加可选初值表达式；现行文件统一使用新字头，不设旧版本解析分支。设备数据 CSV 的版本独立，仍为 `2.1.0`。
 
 ## 财务边界（术语澄清）
 
@@ -220,10 +230,10 @@ equations:
 
 ## 完成标准
 
-- 合法示例可独立通过 `2.1.0` schema；
+- 合法示例可独立通过 `2.2.0` schema；
 - 所有设备只使用上述统一结构，不为具体设备增加核心关键词；
 - GUI、装配、技术模型和计算生成消费同一规范 descriptor；
 - properties、五类 interface、无项目来源的 `predefined` 槽、方程与非法引用均有契约测试；四种来源绑定（`constant`/`data_repeat`/`data_full`/`data_predict`）由装配格式负责；
 - 设备文件不含独立设备版本、计算精度、价格、成本或实现入口；
 - 非法候选不会进入项目模型目录，成功保存必有校验回执；
-- 设备模型 `1.0.0` 是未发布开发草案；schema、迁移器、回执、模板和兼容路径全部删除，不提供 1.0/2.0 双轨或迁移入口。现行目标为 `2.1.0`，见页首。
+- 设备模型 `1.0.0` 是未发布开发草案；schema、迁移器、回执、模板和兼容路径全部删除，不提供 1.0/2.0 双轨或迁移入口。现行目标为 `2.2.0`，见页首。

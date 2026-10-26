@@ -108,7 +108,7 @@ _FIXTURE_DEVICE_LOCK = {
     "ies.device.grid_connection": "2.0.0",
 }
 _FIXTURE_EQUATION_LOCK = {
-    "contract": "ies.modeling.contribution@2.0.0",
+    "contract": "ies.modeling.contribution@2.1.0",
     "ast": "ies.equation.ast@2.0.0",
 }
 

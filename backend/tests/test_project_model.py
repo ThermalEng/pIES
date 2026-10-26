@@ -39,7 +39,7 @@ from iesplan.modeling import build_math_contribution
 
 HEATER_YAML = """
 schema: ies.device-model
-schema_version: "2.1.0"
+schema_version: "2.2.0"
 device: {id: acme.device.heater, names: {zh-CN: 加热器, en-US: Heater}}
 properties:
   efficiency: {value: 0.9, unit: "1", valid_range: {minimum: 0, maximum: 1}}
@@ -55,7 +55,7 @@ equations:
 
 TANK_YAML = """
 schema: ies.device-model
-schema_version: "2.1.0"
+schema_version: "2.2.0"
 device: {id: acme.device.tank, names: {zh-CN: 罐, en-US: Tank}}
 properties:
   soc0: {value: 0.5, unit: "1", valid_range: {minimum: 0, maximum: 1}}
@@ -73,7 +73,7 @@ equations:
 
 LOAD_YAML = """
 schema: ies.device-model
-schema_version: "2.1.0"
+schema_version: "2.2.0"
 device: {id: acme.device.load, names: {zh-CN: 负荷, en-US: Load}}
 properties: {}
 interfaces:
@@ -88,7 +88,7 @@ equations:
 
 HUB_YAML = """
 schema: ies.device-model
-schema_version: "2.1.0"
+schema_version: "2.2.0"
 device: {id: acme.device.hub, names: {zh-CN: 枢纽, en-US: Hub}}
 properties: {}
 interfaces:
@@ -103,7 +103,7 @@ equations:
 
 BILINEAR_YAML = """
 schema: ies.device-model
-schema_version: "2.1.0"
+schema_version: "2.2.0"
 device: {id: acme.device.bl, names: {zh-CN: 双线性, en-US: Bilinear}}
 properties: {}
 interfaces:
@@ -544,7 +544,7 @@ def test_mps_deterministic_bytes() -> None:
 
 SRC_YAML = """
 schema: ies.device-model
-schema_version: "2.1.0"
+schema_version: "2.2.0"
 device: {id: acme.device.src, names: {zh-CN: 电源, en-US: Source}}
 properties: {}
 interfaces:
@@ -559,7 +559,7 @@ equations:
 
 GEN_YAML = """
 schema: ies.device-model
-schema_version: "2.1.0"
+schema_version: "2.2.0"
 device: {id: acme.device.gen, names: {zh-CN: 机组, en-US: Unit}}
 properties:
   cap_kw: {value: 60, unit: kW, valid_range: {minimum: 0, maximum: 1000}}

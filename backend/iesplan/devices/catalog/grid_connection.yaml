@@ -1,5 +1,5 @@
 schema: ies.device-model
-schema_version: "2.1.0"
+schema_version: "2.2.0"
 device:
   id: ies.device.grid_connection
   names:
@@ -37,4 +37,4 @@ equations:
   variables: {}
   relations:
     - id: import_export_exclusivity
-      expression: "electricity_import[t] * electricity_export[t] = 0"
+      expression: "electricity_export[t] * electricity_import[t] = 0"

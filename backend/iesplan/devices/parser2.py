@@ -1,4 +1,4 @@
-"""`ies.device-model` 2.1.0 解析与校验（纯协议入口，不访问注册表/数据库）。
+"""`ies.device-model` 2.2.0 解析与校验（纯协议入口，不访问注册表/数据库）。
 
 职责（宪法 §7.8 + device-model-yaml.md「校验与规范化」）：
 1. 校验顶层 schema/schema_version 与未知字段（JSON Schema 2.0.0）；
@@ -51,7 +51,7 @@ from iesplan.devices.contracts2 import (
 )
 
 #: 包内 JSON Schema 相对路径
-SCHEMA_FILE = "schema/device-model-2.1.0.schema.json"
+SCHEMA_FILE = "schema/device-model-2.2.0.schema.json"
 
 _ID_PATTERN = re.compile(r"^[a-z0-9]+([._-][a-z0-9]+)*$")
 
@@ -171,7 +171,7 @@ def _check_range_bounds_ref(
 
 
 def _check_interface_source(iface_id: str, type_: str, source: object, file: str) -> None:
-    """interface 不得承载项目来源（2.1.0：所有 interface 禁止 source/mode/value/data_ref/target_type）。
+    """interface 不得承载项目来源（2.2.0：所有 interface 禁止 source/mode/value/data_ref/target_type）。
 
     ``predefined`` 槽为纯技术声明，项目来源由装配实例绑定。
     """
@@ -230,14 +230,28 @@ def validate_equations(
             init = vraw["initial"]
             if not isinstance(init, Mapping):
                 raise ParseError(f"equations.variables.{vid}.initial 必须是 mapping")
-            pref = init.get("property_ref")
-            if not isinstance(pref, str) or pref not in properties:
-                raise ParseError(
-                    f"equations.variables.{vid}.initial.property_ref 必须引用已声明的 property: {pref!r}"
-                )
-            initial_ref = pref
+            if set(init) == {"property_ref"}:
+                pref = init["property_ref"]
+                if not isinstance(pref, str) or pref not in properties:
+                    raise ParseError(
+                        f"equations.variables.{vid}.initial.property_ref 必须引用已声明的 property: {pref!r}"
+                    )
+                initial_ref = pref
+            elif set(init) == {"expression"}:
+                expression = init["expression"]
+                if not isinstance(expression, str) or not expression.strip():
+                    raise ParseError(f"equations.variables.{vid}.initial.expression 必须是非空表达式")
+                try:
+                    names, _offsets = reference_atoms(expression, f"{vid}.initial")
+                except EquationSyntaxError as exc:
+                    raise ParseError(str(exc)) from exc
+                if any(name not in properties for name in names) or "[" in expression or "]" in expression:
+                    raise ParseError(f"equations.variables.{vid}.initial.expression 只允许不带时间索引的 properties")
+            else:
+                raise ParseError(f"equations.variables.{vid}.initial 只能声明 property_ref 或 expression")
         var_specs[vid] = EquationVariable(
             id=vid, unit=unit.strip(), valid_range=vrange, initial_property_ref=initial_ref,
+            initial_expression=init.get("expression") if isinstance(vraw.get("initial"), Mapping) else None,
             minimum_property_ref=lo_ref, maximum_property_ref=hi_ref,
         )
         allowed.add(vid)
@@ -344,8 +358,8 @@ def _parse_inputs_tree(node: Any, path: str, file: str) -> TemplateInputSpec:
                 raise ParseError(f"inputs.{path}.valid_range 必须是 mapping")
             vrange = _check_range_bounds(vr.get("minimum"), vr.get("maximum"), file, f"inputs.{path}")
     elif type_ in ("data_repeat", "data_full", "data_predict"):
-        pass  # 2.1.0: CSV 路径由实例化时的用户值提供，声明中不携带
-    # 2.1.0: 任何叶子都不允许 default/source/mode/data_ref/隐式回退
+        pass  # 2.2.0: CSV 路径由实例化时的用户值提供，声明中不携带
+    # 2.2.0: 任何叶子都不允许 default/source/mode/data_ref/隐式回退
     for forbidden in ("default", "source", "mode", "data_ref"):
         if forbidden in node:
             raise ParseError(f"inputs.{path} 禁止声明 {forbidden}")
@@ -533,7 +547,7 @@ def parse_device_model_v2(raw: Mapping[str, Any], *, file: str = "") -> DeviceMo
         except ParseError as exc:
             diags.append(_diag("SYS-CFG-001", str(exc), file=file, field=f"{fld}.valid_range"))
             continue
-        # 2.1.0: interface 不得承载项目来源（source/mode/value/data_ref/target_type）
+        # 2.2.0: interface 不得承载项目来源（source/mode/value/data_ref/target_type）
         if "source" in iraw or "mode" in iraw or "value" in iraw or "data_ref" in iraw or "target_type" in iraw:
             diags.append(
                 _diag(
@@ -572,6 +586,11 @@ def parse_device_model_v2(raw: Mapping[str, Any], *, file: str = "") -> DeviceMo
                     ),
                     initial_property_ref=(
                         vraw["initial"].get("property_ref")
+                        if isinstance(vraw.get("initial"), Mapping)
+                        else None
+                    ),
+                    initial_expression=(
+                        vraw["initial"].get("expression")
                         if isinstance(vraw.get("initial"), Mapping)
                         else None
                     ),

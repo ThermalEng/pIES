@@ -48,7 +48,7 @@ from iesplan.core.namespace import build_stable_id
 
 TEMPLATE_YAML = """
 schema: ies.device-model
-schema_version: "2.1.0"
+schema_version: "2.2.0"
 device: {id: acme.device.electric_load, names: {zh-CN: 电负荷, en-US: Electric Load}}
 inputs:
   properties:
