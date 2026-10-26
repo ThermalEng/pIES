@@ -50,6 +50,7 @@ from iesplan.storage import get_object  # noqa: E402
 from sqlalchemy import select  # noqa: E402
 from test_dataset_api import make_csv  # noqa: E402
 from iesplan.finance import (  # noqa: E402
+    SCHEMA_VERSION,
     EffectiveFinanceConfig,
     FinanceOverrides,
     FinanceProfile,
@@ -63,7 +64,7 @@ from iesplan.main import create_app  # noqa: E402
 
 PROFILE_PAYLOAD: dict = {
     "schema": "ies.finance-profile",
-    "schema_version": "4.0.0",
+    "schema_version": SCHEMA_VERSION,
     "profile": {
         "id": "cn-north-demo",
         "region": "CN-North",
@@ -104,7 +105,7 @@ PROFILE_PAYLOAD: dict = {
 def _overrides_payload(profile: FinanceProfile) -> dict:
     return {
         "schema": "ies.finance-overrides",
-        "schema_version": "4.0.0",
+        "schema_version": SCHEMA_VERSION,
         "profile_ref": {"id": profile.profile_id},
         "finance_types": {
             "pv_system": {
@@ -1405,7 +1406,7 @@ def _tax_package_overrides(rate: str, refund_amount: str) -> dict:
     """非空税则包覆盖: 所得税率 + 维护两维度 + 期初亏损 + 池期初/退款。"""
     return {
         "schema": "ies.finance-overrides",
-        "schema_version": "4.0.0",
+        "schema_version": SCHEMA_VERSION,
         "profile_ref": {"id": "cn-tax-demo"},
         "credit_pools": {
             "main_pool": {
@@ -1618,7 +1619,7 @@ def test_issue04_d1_demand_rate_and_binding_package_roundtrip(client: TestClient
     _register_profile(client, owner, profile_doc)
     _set_profile(client, owner, pid, "d1-rate-profile")
     override = FinanceOverrides.from_dict({
-        "schema": "ies.finance-overrides", "schema_version": "4.0.0",
+        "schema": "ies.finance-overrides", "schema_version": SCHEMA_VERSION,
         "profile_ref": {"id": "d1-rate-profile"},
         "demand_charges": {"month_kw": {"rate": {"value": "33", "unit": "CNY/kW"}}},
     }, profile=FinanceProfile.from_dict(profile_doc))
@@ -1649,7 +1650,7 @@ def test_issue04_d1_demand_rate_and_binding_package_roundtrip(client: TestClient
         history = json.loads(zipped.read("versions/0001.json"))
         assert history["content"]["demand_bindings"] == binding
         effective = yaml_load(zipped.read("effective_finance.yaml").decode("utf-8"))
-        assert effective["schema_version"] == "4.0.0"
+        assert effective["schema_version"] == SCHEMA_VERSION
         assert effective["demand_charges"]["month_kw"]["rate"]["value"] == "33"
         overrides = yaml_load(zipped.read("finance_overrides.yaml").decode("utf-8"))
         assert overrides["demand_charges"]["month_kw"]["rate"]["value"] == "33"

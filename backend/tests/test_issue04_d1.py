@@ -1,4 +1,4 @@
-"""ISSUE-04 D1: public finance-v4 and assembly-v4, no solver or browser.
+"""ISSUE-04 D1: public finance and assembly-v4, no solver or browser.
 
 Synthetic inputs only. Test the existing production parsing, merge, validation and
 capability gate. D1 validation and capability gating remain independently covered after D2.
@@ -14,7 +14,7 @@ import pytest
 from iesplan.assembly import validate_assembly_doc
 from iesplan.core.yamlmini import load as yaml_load
 from iesplan.application.tasks.submissions import _check_demand_capabilities
-from iesplan.finance import EffectiveFinanceConfig, FinanceOverrides, FinanceProfile, FinanceTripletError, merge_effective
+from iesplan.finance import SCHEMA_VERSION, EffectiveFinanceConfig, FinanceOverrides, FinanceProfile, FinanceTripletError, merge_effective
 from iesplan.tasks.contracts import InvalidRequestError
 from test_finance_triplet import _profile_payload
 
@@ -34,7 +34,7 @@ def test_demand_profile_effective_and_rate_override():
     profile = FinanceProfile.from_dict(payload)
     assert profile.to_dict()["demand_charges"]["main_charge"] == RATE
     overrides = FinanceOverrides.from_dict({
-        "schema": "ies.finance-overrides", "schema_version": "4.0.0",
+        "schema": "ies.finance-overrides", "schema_version": SCHEMA_VERSION,
         "profile_ref": {"id": profile.profile_id},
         "demand_charges": {"main_charge": {"rate": {"value": "38", "unit": "CNY/kW"}}},
     }, profile=profile)
@@ -67,7 +67,7 @@ def test_demand_missing_section_and_unknown_override_rejected():
         FinanceProfile.from_dict(payload)
     profile = FinanceProfile.from_dict(_profile())
     base = {
-        "schema": "ies.finance-overrides", "schema_version": "4.0.0",
+        "schema": "ies.finance-overrides", "schema_version": SCHEMA_VERSION,
         "profile_ref": {"id": profile.profile_id},
     }
     with pytest.raises(FinanceTripletError):
@@ -120,7 +120,7 @@ def test_demand_tax_references_and_vat_override_are_input_only():
     }
     profile = FinanceProfile.from_dict(payload)
     overrides = FinanceOverrides.from_dict({
-        "schema": "ies.finance-overrides", "schema_version": "4.0.0",
+        "schema": "ies.finance-overrides", "schema_version": SCHEMA_VERSION,
         "profile_ref": {"id": profile.profile_id},
         "tax_rules": {"vat": {"demand_input_tax": {
             "main_charge": {"deductible_ratio": {"value": "1", "unit": "1"}},

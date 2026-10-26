@@ -49,6 +49,7 @@ from iesplan.computation.generators.linear import (
     LinearModel,
     LinearVariable,
     LoweringUnsupportedError,
+    lower_expression,
     lower_mutex,
     lower_planning_constraint,
     lower_planning_expression,
@@ -596,10 +597,13 @@ class _ProjectBuilder:
                 self._declare(cname, lower, upper, "continuous", var.unit)
                 self._step_columns.setdefault((inst, name), []).append(cname)
             self._step_units[(inst, name)] = var.unit
-        initial: dict[str, float] = {}
+        initial: dict[str, float | LinearExpression] = {}
         for state in contribution.states:
-            ref = contribution.variables[state].initial_property_ref
-            initial[state] = prop_const[ref]  # type: ignore[index]
+            variable = contribution.variables[state]
+            if variable.initial_ast is not None:
+                initial[state] = lower_expression(variable.initial_ast, symbols)
+            else:
+                initial[state] = prop_const[variable.initial_property_ref]  # type: ignore[index]
         for local, pname, sense in caps:
             for step in range(self.point_count):
                 vname = self._tech_name(inst, local, step)

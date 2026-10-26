@@ -212,6 +212,18 @@ def _is_adjustable_source(interfaces) -> bool:
     return outs and ins
 
 
+def _has_storage_state(type_spec) -> bool:
+    """双向流与显式初始状态表明有跨步调节能力，不依赖状态变量的名称。"""
+    return (
+        type_spec is not None
+        and any(i.type == "bidirectional" for i in type_spec.interfaces.values())
+        and any(
+            v.initial_property_ref is not None or v.initial_expression is not None
+            for v in type_spec.equations.variables.values()
+        )
+    )
+
+
 def _bus_caps(spec: AssemblySpec, ctx, bus: dict) -> tuple[float | None, float | None]:
     """母线固定供给上限(W)与需求上限(W)(可调/可控设备不计入固定侧)。
 
@@ -232,8 +244,7 @@ def _bus_caps(spec: AssemblySpec, ctx, bus: dict) -> tuple[float | None, float |
             continue
         type_spec = resolve_model(ctx, device.definition_id)
         interfaces = type_spec.interfaces if type_spec is not None else {}
-        variables = type_spec.equations.variables if type_spec is not None else {}
-        is_storage = "soc" in variables and any(i.type == "bidirectional" for i in interfaces.values())
+        is_storage = _has_storage_state(type_spec)
         is_grid = {"electricity_import", "electricity_export"}.issubset(interfaces)
         is_controllable = _is_adjustable_source(interfaces)
         if is_grid:
@@ -271,8 +282,7 @@ def _bus_controllable(spec: AssemblySpec, ctx, bus: dict) -> int:
             continue
         type_spec = resolve_model(ctx, device.definition_id)
         interfaces = type_spec.interfaces if type_spec is not None else {}
-        variables = type_spec.equations.variables if type_spec is not None else {}
-        if "soc" in variables and any(i.type == "bidirectional" for i in interfaces.values()):
+        if _has_storage_state(type_spec):
             n += 2
         elif {"electricity_import", "electricity_export"}.issubset(interfaces):
             _, can_import, can_export = _grid_caps(spec, bus["device_ids"], ctx)
@@ -300,10 +310,7 @@ def run_phase_d(spec: AssemblySpec, ctx) -> tuple[list[Diagnostic], list[BusSumm
         has_grid, can_import, can_export = _grid_caps(spec, bus["device_ids"], ctx)
         devices = [d for d in spec.devices if d.id in bus["device_ids"]]
         type_specs = {d.id: resolve_model(ctx, d.definition_id) for d in devices}
-        has_storage = any(
-            ts is not None and "soc" in ts.equations.variables
-            for ts in type_specs.values()
-        )
+        has_storage = any(_has_storage_state(ts) for ts in type_specs.values())
         # 电网可调性由进出口容量(can_import/can_export)判定, 不计入此处
         has_controllable = any(
             ts is not None

@@ -10,6 +10,7 @@ ResultAdapter，不解释求解业务状态；不声称网络/CPU/内存/OOM/身
 from __future__ import annotations
 
 import json
+import logging
 import math
 import subprocess
 from pathlib import Path
@@ -325,6 +326,12 @@ def test_end_to_end_campus_bundle() -> None:
     mps_bytes = bundle.files[PROBLEM_PATH]
     assert mps_bytes.startswith(b"NAME") and len(mps_bytes) > 100
     receipt, outputs = _runtime().run(bundle, _attempt())
+    if receipt.status != "succeeded":
+        logging.getLogger("pies.ci.highs_readiness").warning(
+            "CI_SOLVER readiness status=%s reason=%s stdout_head=%r stdout_tail=%r stderr=%r",
+            receipt.status, receipt.termination_reason,
+            receipt.stdout[:1500], receipt.stdout[-6500:], receipt.stderr[-1500:],
+        )
     assert receipt.status == "succeeded"
     assert receipt.executor_ref == EXECUTOR_REF
     assert receipt.executable_ref == HIGHS_EXECUTABLE_REF
@@ -384,6 +391,85 @@ def _run_tiny_mps(tmp_path, mps_text: str) -> tuple[str, dict]:
     assert completed.returncode == 0, completed.stderr
     content = (tmp_path / "output" / "solution.sol").read_text(encoding="utf-8")
     return completed.stderr, _parse_solution(content)
+
+
+
+def test_real_highs_zero_export_with_unbounded_opposite(tmp_path) -> None:
+    """A synthetic zero-export balance solves without a surplus mutex binary.
+
+    The balance row remains independent of the tautological mutual exclusion.
+    Docker CI provides the real pinned HiGHS executable.
+    """
+    from iesplan.computation.generators.linear import lower_mutex
+
+    zero_mutex = lower_mutex(
+        "no_simultaneous_flow", ("export", 0), ("import", 0),
+        {"export": ("var", 0.0, 0.0), "import": ("var", 0.0, None)},
+    )
+    assert zero_mutex.variables == ()
+    assert zero_mutex.constraints == ()
+    model = LinearModel(
+        variables=(
+            LinearVariable("export", lower=0.0, upper=0.0),
+            LinearVariable("import", lower=0.0, upper=None),
+            LinearVariable("served", lower=3.0, upper=3.0),
+        ),
+        constraints=zero_mutex.constraints + (
+            LinearConstraint(
+                name="flow_balance",
+                expression=LinearExpression(terms=(
+                    (("import", 0), 1.0),
+                    (("export", 0), -1.0),
+                    (("served", 0), -1.0),
+                )),
+                sense="eq", rhs=0.0,
+            ),
+        ),
+        objective=LinearExpression(terms=((("import", 0), 1.0),)),
+    )
+    assert [row.name for row in model.constraints] == ["flow_balance"]
+    assert all(var.kind == "continuous" for var in model.variables)
+    mps_text, _ = write_mps(model)
+    assert "no_simultaneous_flow__mutex" not in mps_text
+    _, facts = _run_tiny_mps(tmp_path, mps_text)
+    assert facts["model_status"] == "HighsModelStatus.kOptimal"
+    assert int(facts["num_columns"]) == 3
+    assert facts["primals"] == pytest.approx([0.0, 3.0, 3.0])
+    assert float(facts["objective_value"]) == pytest.approx(3.0)
+
+
+@pytest.mark.parametrize(
+    "purchased,sold,status",
+    [(3.0, 0.0, "kOptimal"), (0.0, 2.0, "kOptimal"),
+     (0.0, 0.0, "kOptimal"), (1.0, 1.0, "kInfeasible")],
+)
+def test_catalog_grid_mutex_preserves_both_directions(tmp_path, purchased, sold, status):
+    """Real catalog + lowerer + HiGHS: retain export, import and exclusion."""
+    from iesplan.computation.generators import lower_relation
+
+    document = next(d for d in list_devices() if d.device.id == "ies.device.grid_connection")
+    built = build_math_contribution(document)
+    assert built.ok, built.diagnostics
+    (relation,) = built.contribution.relations
+    lowered = lower_relation(
+        relation,
+        {"electricity_import": ("var", 0.0, 3.0), "electricity_export": ("var", 0.0, 2.0)},
+    )
+    model = LinearModel(
+        variables=(
+            LinearVariable("electricity_import", lower=purchased, upper=purchased),
+            LinearVariable("electricity_export", lower=sold, upper=sold),
+        ) + lowered.variables,
+        constraints=lowered.constraints,
+        objective=LinearExpression(terms=(
+            (("electricity_import", 0), 7.0), (("electricity_export", 0), -4.0),
+        )),
+    )
+    text, _ = write_mps(model)
+    _, facts = _run_tiny_mps(tmp_path, text)
+    assert facts["model_status"] == f"HighsModelStatus.{status}"
+    if status == "kOptimal":
+        assert float(facts["objective_value"]) == pytest.approx(7*purchased - 4*sold)
 
 
 class TestUnboundedLowerFiniteUpperHighs:
