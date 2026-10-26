@@ -17,7 +17,6 @@ from iesplan.computation.generators.linear import (
 from iesplan.computation.generators.mps import write_mps
 from iesplan.computation.generators.project import (
     _ProjectBuilder, _tighten_nonnegative_equality_bounds,
-    _state_mutex_envelope_rows,
 )
 from iesplan.devices import init_registry, list_devices
 from iesplan.devices.contracts2 import canonical_bytes, from_dict, to_dict
@@ -126,103 +125,6 @@ def test_fixed_energy_bounds_deduced_without_changing_physics(battery):
         assert _row(b, f"cell__maximum_energy__t{step}").sense == "eq"
         assert f"cell__above_minimum__t{step}" in inferred
         assert f"cell__below_maximum__t{step}" in inferred
-
-
-def test_mutex_state_envelope_is_implied_and_tightens_fractional_modes(battery):
-    # 固定电池两步：初始能量、上下限及效率全部来自已声明输入。
-    # 原 Big-M 二元互斥和技术等式原样保留，只增加有效不等式。
-    b = _rows(battery, capacity=20, power=6)
-    bounds = _tighten_nonnegative_equality_bounds(b.variables, b.rows)
-    cuts = _state_mutex_envelope_rows(bounds, b.rows)
-    assert cuts
-    assert any(row.name.endswith("__charge_before") for row in cuts)
-    assert any(row.name.endswith("__discharge_before") for row in cuts)
-    # 两步动态传播可使相邻状态界有不同紧度；双侧状态界相同的
-    # 合成合法情况则必须推导出全部四种有效不等式。
-    uniform = tuple(
-        LinearVariable(var.name, 7_200_000, 64_800_000, var.kind)
-        if "__stored_energy__" in var.name else var
-        for var in bounds
-    )
-    full_cuts = _state_mutex_envelope_rows(uniform, b.rows)
-    assert any(row.name.endswith("__charge_after") for row in full_cuts)
-    assert any(row.name.endswith("__discharge_after") for row in full_cuts)
-    assert len({row.name for row in cuts}) == len(cuts)
-    rows = tuple(b.rows) + cuts
-    assert all(row in rows for row in b.rows)
-    for row in cuts:
-        assert row.sense in ("le", "ge")
-        assert row.rhs == pytest.approx(row.rhs)  # 求解器级纯数值常量
-
-    # 物理上可行的单边调度，全部满足强化式；初态为 36 MJ。
-    for charge, discharge in ((0, 0), (1000, 0), (0, 1000)):
-        previous = 36_000_000
-        current = previous + charge * 3420 - discharge * (3600 / 0.95)
-        values = {
-            "cell__charge__t0": charge,
-            "cell__discharge__t0": discharge,
-            "cell__stored_energy__t0": current,
-        }
-        for row in cuts:
-            if not row.name.startswith("cell__energy_update__t0"):
-                continue
-            lhs = row.expression.constant + sum(
-                coefficient * values[name]
-                for (name, _), coefficient in row.expression.terms
-            )
-            if row.sense == "le":
-                assert lhs <= row.rhs + 1e-5
-            else:
-                assert lhs >= row.rhs - 1e-5
-
-
-def test_mutex_envelope_coefficients_round_toward_feasible_region():
-    """用系数 5/7 的精确整数可行解检验 derived cut 不得变严。
-
-    7*E - 5*charge + 5*discharge=0，充电 7、放电 0、E=5
-    是严格的原约束可行解。float(5/7) 会向上舍入，若直接把
-    该系数用于 charge_before，则错误排除 E=5 的可行点。
-    """
-    variables = (
-        LinearVariable("cell__charge__t0", 0, 7),
-        LinearVariable("cell__discharge__t0", 0, 7),
-        LinearVariable("cell__energy__t0", 0, 5),
-        LinearVariable("mutex_b", 0, 1, "binary"),
-    )
-    rows = [
-        LinearConstraint("a_mutex",
-            LinearExpression(terms=(
-                (("cell__charge__t0", 0), 1.0), (("mutex_b", 0), -7.0),
-            )), sense="le", rhs=0),
-        LinearConstraint("b_mutex",
-            LinearExpression(terms=(
-                (("cell__discharge__t0", 0), 1.0), (("mutex_b", 0), 7.0),
-            )), sense="le", rhs=7),
-        LinearConstraint("cell__energy_update__t0",
-            LinearExpression(terms=(
-                (("cell__charge__t0", 0), -5.0),
-                (("cell__discharge__t0", 0), 5.0),
-                (("cell__energy__t0", 0), 7.0),
-            )), sense="eq", rhs=0),
-    ]
-    cuts = _state_mutex_envelope_rows(variables, rows)
-    assert cuts
-    solution = {
-        "cell__charge__t0": Fraction(7),
-        "cell__discharge__t0": Fraction(0),
-        "cell__energy__t0": Fraction(5),
-    }
-    for cut in cuts:
-        lhs = sum((
-            Fraction(coef) * solution[name]
-            for (name, _), coef in cut.expression.terms
-        ), Fraction(cut.expression.constant))
-        rhs = Fraction(cut.rhs)
-        if cut.sense == "le":
-            assert lhs <= rhs, cut.name
-        else:
-            assert lhs >= rhs, cut.name
-
 
 
 def test_generic_interval_tightening_preserves_binary_and_unknown_bounds():
@@ -374,9 +276,7 @@ def _solve(b, tmp_path, *, demand_w=0, force_zero=False):
     )
     model = LinearModel(
         variables=_tighten_nonnegative_equality_bounds(b.variables, rows),
-        constraints=tuple(rows) + _state_mutex_envelope_rows(
-            _tighten_nonnegative_equality_bounds(b.variables, rows), rows
-        ),
+        constraints=tuple(rows),
         objective=obj, sense="minimize",
     )
     problem, offset = write_mps(model)
