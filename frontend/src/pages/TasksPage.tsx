@@ -26,6 +26,7 @@ import {
   describeFrozenEvaluation,
   describeFrozenFinance,
   formFromWorking,
+  evaluationFieldErrors,
   getTaskDetail,
   getTaskInputs,
   hasSavedConfig,
@@ -40,7 +41,7 @@ import {
 } from '../features/tasks'
 import { getCalcConfig } from '../features/config'
 import { runValidation } from '../features/validation'
-import type { CreateForm, DistType } from '../features/tasks'
+import type { CreateForm, DistType, EvaluationField } from '../features/tasks'
 import { getMe } from '../features/auth'
 import { translate, translateDiagnostic, translateError, useI18n } from '../i18n'
 import {
@@ -272,6 +273,8 @@ export default function TasksPage() {
    * 重试/确认复用原键(状态不变), 关闭重开即视为新的逻辑提交。 */
   const [submitNonce, setSubmitNonce] = useState(() => newSubmitNonce())
   const [formError, setFormError] = useState<string | null>(null)
+  const [evaluationAttempted, setEvaluationAttempted] = useState(false)
+  const [evaluationServerError, setEvaluationServerError] = useState<{ field: string; message: string } | null>(null)
   const [submitting, setSubmitting] = useState(false)
   /** 校验门禁结果:提交前 validation.run 的阻断诊断(空数组 = 通过; null = 未检查/校验不可用)。 */
   const [blockers, setBlockers] = useState<Diagnostic[] | null>(null)
@@ -464,6 +467,8 @@ export default function TasksPage() {
       // an input *without* evaluation, then later edits make the second check
       // pass while the stale input is still submitted (TASK-REQ-015).
       const submittedForm = { ...formRef.current }
+      setEvaluationAttempted(true)
+      setEvaluationServerError(null)
       if (parseEvaluation(submittedForm) === null) {
         setFormError(t('ies.task.evaluation_invalid'))
         return
@@ -523,7 +528,13 @@ export default function TasksPage() {
         setFlash(t('ies.task.create_ok'))
         await loadList()
       } catch (err) {
-        setFormError(translateError(err as ApiError))
+        const error = err as ApiError
+        if (error.code === 'TASK-REQ-015') {
+          const field = error.location?.field ?? 'evaluation'
+          const message = t('ies.task.evaluation_rejected', { field, code: error.code })
+          setEvaluationServerError({ field, message })
+          setFormError(message)
+        } else setFormError(translateError(error))
       } finally {
         setSubmitting(false)
       }
@@ -541,6 +552,8 @@ export default function TasksPage() {
   useEffect(() => {
     if (!createOpen) return
     setSubmitNonce(newSubmitNonce())
+    setEvaluationAttempted(false)
+    setEvaluationServerError(null)
     let cancelled = false
     setBlockers(null)
     setChecking(true)
@@ -665,6 +678,8 @@ export default function TasksPage() {
     (next: CreateForm) => {
       formRef.current = next
       setForm(next)
+      setEvaluationServerError(null)
+      setFormError(null)
       dirtyRef.current = true
       setAutosaveStatus('dirty')
       schedulePersist()
@@ -681,6 +696,26 @@ export default function TasksPage() {
     if (!dirtyRef.current) return true
     return persistRef.current(formRef.current)
   }, [])
+
+  // 将错误字段带入对话框滚动区域，提交后立即可见。
+  useEffect(() => {
+    if (!formError || !createOpen) return
+    const fields = [
+      ['constructionPeriod', 'construction_period', 'task-construction-period'],
+      ['operationYears', 'operation_years', 'task-operation-years'],
+      ['discountRate', 'discount_rate', 'task-discount-rate'],
+      ['constructionPayments', 'construction_payments', 'task-construction-payments'],
+      ['maintenanceExpenses', 'maintenance_expenses', 'task-maintenance-expenses'],
+    ] as const
+    const errors = evaluationFieldErrors(formRef.current)
+    const target = fields.find(([key, server]) => errors[key] ||
+      evaluationServerError?.field.startsWith(`evaluation.${server}`))
+    if (target) {
+      const input = document.getElementById(target[2])
+      input?.focus()
+      input?.closest('.ies-form-field')?.scrollIntoView({ block: 'center' })
+    }
+  }, [formError, evaluationServerError, createOpen])
 
   const draftWorking = project?.draft?.task_working_inputs ?? null
   const draftRevision = project?.draft?.revision ?? 0
@@ -812,6 +847,14 @@ export default function TasksPage() {
   // -------------------------------------------------------------------------
   // 渲染
   // -------------------------------------------------------------------------
+  const evaluationErrors = evaluationAttempted ? evaluationFieldErrors(form) : {}
+  const evaluationError = (key: EvaluationField, serverField: string): string | null => {
+    const local = evaluationErrors[key]
+    if (local) return t(local)
+    return evaluationServerError?.field.startsWith(`evaluation.${serverField}`)
+      ? evaluationServerError.message : null
+  }
+
   return (
     <div className="ies-task-layout">
       {/* 列表 */}
@@ -1223,20 +1266,24 @@ export default function TasksPage() {
           <p className="ies-form-message" style={{ marginBottom: 'var(--ies-space-2)' }}>
             {t('ies.task.evaluation_hint')}
           </p>
-          <FormField label={t('ies.task.construction_period')} htmlFor="task-construction-period" required>
+          <FormField label={t('ies.task.construction_period')} htmlFor="task-construction-period" required error={evaluationError('constructionPeriod', 'construction_period')}>
             <Input
               id="task-construction-period"
+              invalid={Boolean(evaluationError('constructionPeriod', 'construction_period'))}
+              aria-describedby={evaluationError('constructionPeriod', 'construction_period') ? 'task-construction-period-hint' : undefined}
               value={form.constructionPeriod}
-              placeholder="1"
+              placeholder={t('ies.task.construction_period_example')}
               inputMode="numeric"
               onChange={(e) => updateForm({ ...form, constructionPeriod: e.target.value })}
             />
           </FormField>
-          <FormField label={t('ies.task.operation_years')} htmlFor="task-operation-years" required>
+          <FormField label={t('ies.task.operation_years')} htmlFor="task-operation-years" required error={evaluationError('operationYears', 'operation_years')}>
             <Input
               id="task-operation-years"
+              invalid={Boolean(evaluationError('operationYears', 'operation_years'))}
+              aria-describedby={evaluationError('operationYears', 'operation_years') ? 'task-operation-years-hint' : undefined}
               value={form.operationYears}
-              placeholder="2"
+              placeholder={t('ies.task.operation_years_example')}
               inputMode="numeric"
               onChange={(e) => updateForm({ ...form, operationYears: e.target.value })}
             />
@@ -1251,35 +1298,43 @@ export default function TasksPage() {
               })(),
             })}
           </p>
-          <FormField label={t('ies.task.discount_rate')} htmlFor="task-discount-rate" required>
+          <FormField label={t('ies.task.discount_rate')} htmlFor="task-discount-rate" required error={evaluationError('discountRate', 'discount_rate')}>
             <Input
               id="task-discount-rate"
+              invalid={Boolean(evaluationError('discountRate', 'discount_rate'))}
+              aria-describedby={evaluationError('discountRate', 'discount_rate') ? 'task-discount-rate-hint' : undefined}
               value={form.discountRate}
-              placeholder="0.08"
+              placeholder={t('ies.task.discount_rate_example')}
               inputMode="decimal"
               onChange={(e) => updateForm({ ...form, discountRate: e.target.value })}
             />
           </FormField>
-          <FormField label={t('ies.task.construction_payments')} htmlFor="task-construction-payments" required>
+          <FormField label={t('ies.task.construction_payments')} htmlFor="task-construction-payments" required error={evaluationError('constructionPayments', 'construction_payments')}>
             <Textarea
               id="task-construction-payments"
+              invalid={Boolean(evaluationError('constructionPayments', 'construction_payments'))}
+              aria-describedby={evaluationError('constructionPayments', 'construction_payments') ? 'task-construction-payments-hint task-construction-payments-contract' : 'task-construction-payments-contract'}
               value={form.constructionPayments}
               placeholder={t('ies.task.construction_payments_placeholder')}
               rows={2}
               onChange={(e) => updateForm({ ...form, constructionPayments: e.target.value })}
             />
           </FormField>
-          <FormField label={t('ies.task.maintenance_expenses')} htmlFor="task-maintenance-expenses" required>
+          <p id="task-construction-payments-contract" className="ies-form-message">
+            {t('ies.task.construction_payments_hint')}
+          </p>
+          <FormField label={t('ies.task.maintenance_expenses')} htmlFor="task-maintenance-expenses" required error={evaluationError('maintenanceExpenses', 'maintenance_expenses')}>
             <Textarea
               id="task-maintenance-expenses"
+              invalid={Boolean(evaluationError('maintenanceExpenses', 'maintenance_expenses'))}
+              aria-describedby={evaluationError('maintenanceExpenses', 'maintenance_expenses') ? 'task-maintenance-expenses-hint task-maintenance-expenses-contract' : 'task-maintenance-expenses-contract'}
               value={form.maintenanceExpenses}
               placeholder={t('ies.task.maintenance_expenses_placeholder')}
-              aria-describedby="task-maintenance-expenses-hint"
               rows={3}
               onChange={(e) => updateForm({ ...form, maintenanceExpenses: e.target.value })}
             />
           </FormField>
-          <p id="task-maintenance-expenses-hint" className="ies-form-message" style={{ marginBottom: 'var(--ies-space-2)' }}>
+          <p id="task-maintenance-expenses-contract" className="ies-form-message" style={{ marginBottom: 'var(--ies-space-2)' }}>
             {t('ies.task.maintenance_expenses_hint')}
           </p>
         </fieldset>

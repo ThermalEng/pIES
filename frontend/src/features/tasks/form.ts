@@ -288,35 +288,43 @@ export interface ParsedEvaluation {
  * 无维护支出填 []), 形态由后端边界核对。合法的数值写法(如 '+1'、
  * 首尾空格、'0.080')按 Number() 接受, 展示 E 与签名都以此处解析出的
  * 规范值为准, 不保留“显示—却接受该数值”的分裂。 */
-export function parseEvaluation(f: CreateForm): ParsedEvaluation | null {
-  const periodRaw = f.constructionPeriod.trim()
-  const operationRaw = f.operationYears.trim()
-  const rateRaw = f.discountRate.trim()
-  if (periodRaw === '' || operationRaw === '' || rateRaw === '') return null
-  const period = Number(periodRaw)
-  const operation = Number(operationRaw)
-  const rate = Number(rateRaw)
-  if (!Number.isInteger(period) || period < 0) return null
-  if (!Number.isInteger(operation) || operation < 1) return null
-  if (!Number.isFinite(rate) || rate < 0 || rate > 1) return null
-  let payments: EvaluationConstructionPayment[]
-  let maintenance: EvaluationMaintenanceExpense[]
-  try {
-    const rawPayments: unknown = JSON.parse(f.constructionPayments)
-    const rawMaintenance: unknown = JSON.parse(f.maintenanceExpenses)
-    if (!Array.isArray(rawPayments) || !Array.isArray(rawMaintenance)) return null
-    payments = rawPayments as EvaluationConstructionPayment[]
-    maintenance = rawMaintenance as EvaluationMaintenanceExpense[]
-  } catch {
-    return null
+export type EvaluationField = 'constructionPeriod' | 'operationYears' | 'discountRate' | 'constructionPayments' | 'maintenanceExpenses'
+
+/** 即时输入诊断；付款条目等领域约束仍由后端核对。 */
+export function evaluationFieldErrors(f: CreateForm): Partial<Record<EvaluationField, string>> {
+  const errors: Partial<Record<EvaluationField, string>> = {}
+  const numeric = (key: EvaluationField, valid: (value: number) => boolean, message: string) => {
+    const raw = String(f[key]).trim()
+    if (!raw) errors[key] = 'ies.task.field_required'
+    else if (!valid(Number(raw))) errors[key] = message
   }
+  numeric('constructionPeriod', (v) => Number.isInteger(v) && v >= 0, 'ies.task.construction_period_invalid')
+  numeric('operationYears', (v) => Number.isInteger(v) && v >= 1, 'ies.task.operation_years_invalid')
+  numeric('discountRate', (v) => Number.isFinite(v) && v >= 0 && v <= 1, 'ies.task.discount_rate_invalid')
+  for (const key of ['constructionPayments', 'maintenanceExpenses'] as const) {
+    if (!f[key].trim()) errors[key] = 'ies.task.field_required'
+    else {
+      try {
+        if (!Array.isArray(JSON.parse(f[key]))) errors[key] = 'ies.task.json_array_invalid'
+      } catch {
+        errors[key] = 'ies.task.json_array_invalid'
+      }
+    }
+  }
+  return errors
+}
+
+export function parseEvaluation(f: CreateForm): ParsedEvaluation | null {
+  if (Object.keys(evaluationFieldErrors(f)).length > 0) return null
+  const period = Number(f.constructionPeriod.trim())
+  const operation = Number(f.operationYears.trim())
   return {
     evaluation_years: period + operation,
     construction_period: period,
     operation_years: operation,
-    discount_rate: rate,
-    construction_payments: payments,
-    maintenance_expenses: maintenance,
+    discount_rate: Number(f.discountRate.trim()),
+    construction_payments: JSON.parse(f.constructionPayments) as EvaluationConstructionPayment[],
+    maintenance_expenses: JSON.parse(f.maintenanceExpenses) as EvaluationMaintenanceExpense[],
   }
 }
 

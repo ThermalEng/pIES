@@ -117,15 +117,21 @@ test.describe('空值门禁(非画布 GUI)', () => {
     await expect(dialog.locator('#task-discount-rate')).toHaveValue('')
     await dialog.getByRole('button', { name: /^提交任务$|^Submit task$/i }).click()
     // 评价非法提示出现, 对话框保持打开, 未产生任务
-    await expect(dialog.getByText('请填写建设期(非负整数)、运营年限(正整数)、0..1 区间内折现率与合法付款/维护 JSON(均必填)')).toBeVisible({ timeout: 10_000 })
+    await expect(dialog.getByRole('alert').filter({ hasText: /0\.\.1/ }).last()).toBeVisible({ timeout: 10_000 })
     await expect(dialog).toBeVisible()
+    for (const label of [/建设期\(/, /运营年限/, /折现率/, /建设付款比例/, /维护\/换新支出/]) {
+      const field = dialog.getByLabel(label)
+      await expect(field).toHaveValue('')
+      await expect(field).toHaveAttribute('aria-invalid', 'true')
+      await expect(field).toHaveAccessibleDescription(/填写|Enter/)
+    }
     expect(taskPosts).toHaveLength(0)
 
     // 折现率留空(0 被静默接受的回归点): 只填年限仍被拒绝
     await dialog.locator('#task-construction-period').fill('0')
     await dialog.locator('#task-operation-years').fill('1')
     await dialog.getByRole('button', { name: /^提交任务$|^Submit task$/i }).click()
-    await expect(dialog.getByText('请填写建设期(非负整数)、运营年限(正整数)、0..1 区间内折现率与合法付款/维护 JSON(均必填)')).toBeVisible({ timeout: 10_000 })
+    await expect(dialog.getByRole('alert').filter({ hasText: /0\.\.1/ }).last()).toBeVisible({ timeout: 10_000 })
     expect(taskPosts).toHaveLength(0)
 
     // 填入合法评价后提交: 先断言发出请求的形态(本切片契约)——评价确认走顶层
@@ -134,6 +140,40 @@ test.describe('空值门禁(非画布 GUI)', () => {
     await dialog.locator('#task-discount-rate').fill('0.08')
     await dialog.locator('#task-construction-payments').fill('[{"t": 0, "ratio": 1}]')
     await dialog.locator('#task-maintenance-expenses').fill('[]')
+    // Invalid scalar and JSON edits identify the field without making a task request.
+    const rateField = dialog.getByLabel(/折现率/)
+    await rateField.fill('1.5')
+    await dialog.getByRole('button', { name: /^提交任务$/ }).click()
+    await expect(rateField).toHaveAttribute('aria-invalid', 'true')
+    await expect(rateField).toHaveAccessibleDescription(/0\.\.1/)
+    await expect(rateField).toHaveValue('1.5')
+    expect(taskPosts).toHaveLength(0)
+    await rateField.fill('0.08')
+    const paymentField = dialog.getByLabel(/建设付款比例/)
+    await paymentField.fill('not json')
+    await dialog.getByRole('button', { name: /^提交任务$/ }).click()
+    await expect(paymentField).toHaveAttribute('aria-invalid', 'true')
+    await expect(paymentField).toHaveAccessibleDescription(/JSON/)
+    await expect(paymentField).toHaveValue('not json')
+    expect(taskPosts).toHaveLength(0)
+    // A real server rejection retains both its field location and the entered values.
+    await paymentField.fill('[{"t": 1, "ratio": 1}]') // K=0, so t=1 is invalid
+    const rejected = page.waitForResponse(r => r.request().method() === 'POST' &&
+      new URL(r.url()).pathname === `/api/projects/${projectId}/tasks`)
+    await dialog.getByRole('button', { name: /^提交任务$/ }).click()
+    expect((await rejected).status()).toBe(400)
+    await expect(paymentField).toBeFocused()
+    await expect(paymentField).toHaveAttribute('aria-invalid', 'true')
+    await expect(paymentField).toHaveAccessibleDescription(/construction_payments\[0\]\.t/)
+    await expect(paymentField).toHaveAccessibleDescription(/K=0.*t=0/)
+    await expect(paymentField).toHaveValue('[{"t": 1, "ratio": 1}]')
+    await expect(dialog.getByLabel(/运营年限/)).toHaveValue('1')
+    await expect(dialog.getByText('ies.diag.param.invalid', { exact: true })).toHaveCount(0)
+    // Copying the UI example is valid JSON and does not create an implicit default.
+    const example = await paymentField.getAttribute('placeholder')
+    expect(JSON.parse(example!)).toEqual([{ t: 0, ratio: 1 }])
+    await paymentField.fill(example!)
+    await expect(paymentField).not.toHaveAttribute('aria-invalid', 'true')
     const [submitResponse] = await Promise.all([
       page.waitForResponse(
         (res) => res.url().includes(`/api/projects/${projectId}/tasks`) && res.request().method() === 'POST',
@@ -141,8 +181,8 @@ test.describe('空值门禁(非画布 GUI)', () => {
       dialog.getByRole('button', { name: /^提交任务$|^Submit task$/i }).click(),
     ])
     const submitBody = submitResponse.request().postDataJSON() as Record<string, unknown>
-    expect(taskPosts).toHaveLength(1)
-    expect(taskPosts[0].body).toEqual(submitBody)
+    expect(taskPosts).toHaveLength(2)
+    expect(taskPosts[1].body).toEqual(submitBody)
     expect(submitBody.evaluation).toEqual({
       evaluation_years: 1,
       construction_period: 0,
@@ -259,6 +299,7 @@ test.describe('空值门禁(非画布 GUI)', () => {
     // 404(公开契约); 其余任何 console/pageerror/失败请求仍零容忍。
     session.assertNoErrors([
       { method: 'GET', path: `/api/projects/${projectId}/config`, status: 404, times: 2 },
+      { method: 'POST', path: `/api/projects/${projectId}/tasks`, status: 400, times: 1 },
     ])
     await context.close()
   })

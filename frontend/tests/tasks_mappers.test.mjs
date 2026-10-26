@@ -291,6 +291,20 @@ const PAYMENTS = JSON.stringify([{ t: 0, ratio: '0.6' }, { t: 1, ratio: '0.4' }]
   check('批量提交转数值', bp.sweeps[0].values[1] === 2 && bp.sweeps[0].unit === 'kW')
 }
 
+// Field diagnostics and submission parsing share one basic input boundary.
+{
+  const valid = { ...tk.DEFAULT_FORM, constructionPeriod: '0', operationYears: '1',
+    discountRate: '0.08', constructionPayments: '[{"t":0,"ratio":1}]', maintenanceExpenses: '[]' }
+  check('empty form identifies all five required fields', Object.keys(tk.evaluationFieldErrors(tk.DEFAULT_FORM)).length === 5)
+  check('valid fields have no diagnostics', Object.keys(tk.evaluationFieldErrors(valid)).length === 0)
+  for (const [field, value] of [['constructionPeriod', '-1'], ['operationYears', '1.5'],
+    ['discountRate', 'Infinity'], ['constructionPayments', '{}'], ['maintenanceExpenses', 'not json']]) {
+    const form = { ...valid, [field]: value }
+    const errors = tk.evaluationFieldErrors(form)
+    check(`invalid ${field} is located and blocks parsing`, Object.keys(errors).length === 1 && !!errors[field] && tk.parseEvaluation(form) === null)
+  }
+}
+
 if (failures > 0) {
   console.error(`FAILURES: ${failures}`)
   process.exit(1)

@@ -19,6 +19,7 @@ export {
   buildParams,
   DEFAULT_FORM,
   formFromWorking,
+  evaluationFieldErrors,
   hasSavedConfig,
   logicalSigOf,
   newSubmitNonce,
@@ -48,6 +49,7 @@ export {
 } from './mappers'
 export type {
   CreateForm,
+  EvaluationField,
   DistType,
   ParsedEvaluation,
   SweepRow,
