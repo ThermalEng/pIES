@@ -151,7 +151,7 @@ def test_generator_cooperatively_stops_during_model_build(reason: str) -> None:
 
     provider = build_registry((HIGHS_MILP_PROVIDER,)).resolve(inputs[4])
     with pytest.raises(ComputationUnavailableError) as exc:
-        provider.generate(*inputs, stop=stop)
+        provider.generate_with_stop(*inputs, stop=stop)
     assert exc.value.reason == reason
     assert calls >= 3
 

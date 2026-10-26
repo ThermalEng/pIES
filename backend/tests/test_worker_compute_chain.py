@@ -735,6 +735,8 @@ class _ControlledGenerator:
         )
         return SolverBundle(manifest=manifest, files={"input/probe": b"synthetic"})
 
+    generate_with_stop = generate  # 测试生成器显式声明可协作停止能力
+
 
 def _controlled_plane(plane, mode: str, started: threading.Event, timeout: float):
     """执行层仍使用真实 LocalProcessProvider / SolverRuntime，且精确绑定。"""
@@ -840,7 +842,7 @@ class TestStopLifecycle:
         original = db.get(Task, task_id)
         user = db.get(User, original.requested_by)
         started = threading.Event()
-        controlled, executor = _controlled_plane(plane, started, 18)
+        controlled, executor = _controlled_plane(plane, phase, started, 18)
         thread, result, stop = _run_async(engine, claim, controlled)
         try:
             assert started.wait(8), result

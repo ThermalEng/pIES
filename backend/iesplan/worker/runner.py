@@ -526,7 +526,9 @@ def run_task(
                 task.id, percent, stage, detail,
             )
         if not accepted:
-            raise LeaseFenced()
+            raise worker_app.LeaseRejectedError(
+                "进度上报遭租约拒绝", params={"attempt_id": claim.attempt_id},
+            )
 
     ctx = RunContext(
         task=task, claim=claim, session_factory=factory, worker_id=worker_id,

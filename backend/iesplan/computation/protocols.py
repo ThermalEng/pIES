@@ -137,17 +137,14 @@ class GeneratorProvider(Protocol):
         finance: EffectiveFinanceConfig,
         config: CalculationConfig,
         evaluation: EvaluationInput,
-        *,
-        stop: StopProbe | None = None,
     ) -> SolverBundle:
         """由直接输入生成完整求解包(聚合：manifest + 输入文件字节)。
 
         第三项为已完成物化的集合（``pending_predict`` 为空，由上游在预测
         产物合并后构成；此处信任类型化交接，不复核）。冻结评价确认为独立
         必需输入（无默认值；调用方从同一任务冻结块恢复，不读最新草稿）。
-        ``stop`` 为调用方停止探针；长时生成须协作检查并以
-        ``ComputationUnavailableError(reason=cancelled/fenced)`` 立即退出，
-        不生成半成品 Bundle。全周期总点数由装配基线起始年/分辨率与评价确认的已确认运营年限
+        支持协作停止的实现可额外暴露 ``generate_with_stop``，不改变本
+        稳定接口的参数形状。全周期总点数由装配基线起始年/分辨率与评价确认的已确认运营年限
         推导，``series`` 为空时仍为完整时域，不回退单年；物化集合不再承载
         财务年限权威。调用方只传入已签发 artifact; provider
         信任上游装配与应用边界已完成的签发与内容确认, 不复核。通用选择

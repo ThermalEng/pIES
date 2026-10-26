@@ -207,6 +207,22 @@ class HighsMilpProvider:
             },
         )
 
+    def generate_with_stop(
+        self,
+        artifact: ValidatedAssemblyArtifact,
+        models: Mapping[str, DeviceMathContribution],
+        materialized: MaterializedSet,
+        finance: EffectiveFinanceConfig,
+        config: CalculationConfig,
+        evaluation: EvaluationInput,
+        *,
+        stop: StopProbe,
+    ) -> SolverBundle:
+        """生成器自愿提供的可停止扩展，不改变稳定 generate 协议。"""
+        return self.generate(
+            artifact, models, materialized, finance, config, evaluation, stop=stop,
+        )
+
     @staticmethod
     def _check_stop(stop: StopProbe | None) -> None:
         reason = read_stop_reason(stop)

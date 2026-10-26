@@ -529,9 +529,17 @@ def generate_bundle(
     if reason is not None:
         raise ComputationUnavailableError("生成前已停止", reason=reason)
     provider = plane.generator_registry.resolve(config)
-    bundle = provider.generate(
-        artifact, models, materialized, finance, config, evaluation, stop=stop,
-    )
+    # 稳定 GeneratorProvider.generate 协议不能追加 stop 关键字。
+    # 可协作停止的生成器自愿实现扩展，旧 provider 保持原有调用形状。
+    stoppable_generate = getattr(provider, "generate_with_stop", None)
+    if stop is not None and callable(stoppable_generate):
+        bundle = stoppable_generate(
+            artifact, models, materialized, finance, config, evaluation, stop=stop,
+        )
+    else:
+        bundle = provider.generate(
+            artifact, models, materialized, finance, config, evaluation,
+        )
     reason = read_stop_reason(stop)
     if reason is not None:
         raise ComputationUnavailableError("生成后已停止", reason=reason)
