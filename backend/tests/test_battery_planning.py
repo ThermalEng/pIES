@@ -366,3 +366,29 @@ def test_power_plan_with_explicit_finite_input_bound(battery):
     # A route's unbounded Big-M fallback is deliberately out of scope.
     b = _rows(battery, capacity=0, power=None)
     assert b.variables["battery_kw"].upper == 6000
+
+
+@pytest.mark.parametrize(
+    "initial_ref,initial_expression,port_type,expected",
+    [
+        ("initial_energy", None, "bidirectional", True),
+        (None, "initial_ratio * size", "bidirectional", True),
+        (None, None, "bidirectional", False),
+        ("initial_energy", None, "out", False),
+    ],
+)
+def test_storage_screen_uses_state_declaration_not_variable_name(
+    initial_ref, initial_expression, port_type, expected,
+):
+    from types import SimpleNamespace
+    from iesplan.assembly.rules.solvability import _has_storage_state
+
+    state = SimpleNamespace(
+        initial_property_ref=initial_ref, initial_expression=initial_expression,
+    )
+    model = SimpleNamespace(
+        equations=SimpleNamespace(variables={"arbitrary_state_name": state}),
+        interfaces={"arbitrary_port_name": SimpleNamespace(type=port_type)},
+    )
+    assert _has_storage_state(model) is expected
+    assert not _has_storage_state(None)
