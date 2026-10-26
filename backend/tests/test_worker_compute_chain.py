@@ -484,14 +484,20 @@ class TestComputeChainEndToEnd:
     def test_cancelled_receipt_takes_cancel_path(
         self, client: TestClient, db: Session, engine: Engine, plane
     ) -> None:
-        """cancelled 分流：回执证明用户取消 → 走取消路径（任务未 cancelling 则保持 running）。"""
+        """cancelled 回执须与权威 cancelling 状态一致，并实际收拢租约与槽。"""
         task_id = _submit_calc_task(client, db, dict(_CONFIG_BODY), dict(PLANNING_BODY))
         claim = _claim(db, task_id)
+        task = db.get(Task, task_id)
+        task.status = "cancelling"
+        db.commit()  # 模拟停止信号已被执行层消费后的权威取消状态
         cancelled_plane = _plane_with_stub_runtime(plane, status="cancelled")
         assert _run(engine, claim, cancelled_plane) == "cancelled"
-        task = db.execute(select(Task).where(Task.id == task_id)).scalar_one()
-        assert task.status == "running"
+        db.expire_all()
+        task = db.get(Task, task_id)
+        assert task.status == "cancelled"
         assert task.business_outcome is None
+        assert db.get(TaskAttempt, claim.attempt_id).status == "stopped"
+        assert worker_app.slot_available(db, "compute")
 
 
 def _stored_object_count(db: Session) -> int:
