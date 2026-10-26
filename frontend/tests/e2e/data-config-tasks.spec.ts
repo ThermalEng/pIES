@@ -187,7 +187,7 @@ test.describe('PR #26: 两份数据集绑定状态与读回失败恢复', () => 
       const dialog = page.getByRole('dialog')
       await expect(dialog.getByText(bound)).toBeVisible()
       await expect(dialog.getByRole('button', { name: /解除绑定|Unbind/i })).toBeVisible()
-      await dialog.getByRole('button', { name: /关闭|Close/i }).click()
+      await dialog.getByRole('button', { name: /^关闭$|^Close$/i }).last().click()
     }
 
     await page.reload()
