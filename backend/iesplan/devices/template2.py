@@ -225,7 +225,7 @@ def _merge_tree(leaves: tuple[TemplateInputSpec, ...], template_raw: Mapping[str
                 break
             user_value = user_value[seg]
         if not found:
-            # 2.1.0: 所有声明叶子（含 array 整体）必填, 不接受 default 或隐式回退。
+            # 2.2.0: 所有声明叶子（含 array 整体）必填, 不接受 default 或隐式回退。
             raise ParseError(f"inputs.{leaf.path} 为必填输入，缺少用户值")
         if leaf.type in INPUT_DATA_TYPES:
             _validate_leaf_value(leaf, user_value)
@@ -279,7 +279,7 @@ def instantiate_template(
     except ParseError as exc:
         return None, _diag_list(file, str(exc))
 
-    # 4) 删除顶层 inputs，输出普通 2.1.0 模型
+    # 4) 删除顶层 inputs，输出普通 2.2.0 模型
     merged.pop("inputs", None)
 
     # 5) 最终模型必须重新通过完整 2.0.0 校验

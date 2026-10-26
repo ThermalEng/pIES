@@ -1,4 +1,4 @@
-"""`ies.modeling.contribution` 2.0.0 纯协议: 设备 2.0 descriptor → 公共数学贡献。
+"""`ies.modeling.contribution` 2.1.0 纯协议: 设备 2.0 descriptor → 公共数学贡献。
 
 消费 ``devices.contracts2.DeviceModelDocument``(2.0 设备描述符,已由
 devices.parser2 校验),输出与求解器无关的公共数学贡献 contract: 变量、关系、
@@ -47,7 +47,7 @@ from iesplan.devices.contracts2 import (
 # ---------------------------------------------------------------------------
 
 CONTRACT_SCHEMA_ID = "ies.modeling.contribution"
-CONTRACT_SCHEMA_VERSION = "2.0.0"
+CONTRACT_SCHEMA_VERSION = "2.1.0"
 
 EQUATION_AST_ID = "ies.equation.ast"
 EQUATION_AST_VERSION = "2.0.0"

@@ -32,7 +32,7 @@ const escapeRegExp = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, '\\
 const makeTemplateYaml = (deviceId: string): string => TEMPLATE_YAML_HEAD.replace('__DEVICE_ID__', deviceId)
 
 const TEMPLATE_YAML_HEAD = `schema: ies.device-model
-schema_version: "2.1.0"
+schema_version: "2.2.0"
 device:
   id: __DEVICE_ID__
   names:
@@ -229,7 +229,7 @@ test.describe('场景 12: 新建项目模型(真实后端模板与 YAML)', () =>
     await expect(yamlEditor).toBeVisible()
     const skeleton = await yamlEditor.inputValue()
     expect(skeleton).toContain('schema: ies.device-model')
-    expect(skeleton).toContain('schema_version: "2.1.0"')
+    expect(skeleton).toContain('schema_version: "2.2.0"')
     // 编辑 YAML(替换占位设备 ID)后提交
     await yamlEditor.fill(
       skeleton
@@ -247,7 +247,7 @@ test.describe('场景 12: 新建项目模型(真实后端模板与 YAML)', () =>
     await expect(page.getByText(templateDeviceId)).toBeVisible()
     await expect(page.getByText(/已发布|Published/i).first()).toBeVisible()
 
-    // 窄切片 /custom 回归: 查看精确 revision 详情，断言实际 schema_version 真实值 2.1.0 (非仅标签)
+    // 窄切片 /custom 回归: 查看精确 revision 详情，断言实际 schema_version 真实值 2.2.0 (非仅标签)
     const v1Btn = page.locator('.ies-custom-card__rev', { hasText: 'v1' }).first()
     await expect(v1Btn).toBeVisible()
     await v1Btn.click()
@@ -264,7 +264,7 @@ test.describe('场景 12: 新建项目模型(真实后端模板与 YAML)', () =>
     await page.getByRole('button', { name: /创建模板|New template/i }).click()
     const yamlInput = page.locator('#ies-custom-yaml')
     await expect(yamlInput).toBeVisible()
-    const invalidYaml = 'schema: ies.device-model\nschema_version: "2.1.0"\ninvalid_key: true\n'
+    const invalidYaml = 'schema: ies.device-model\nschema_version: "2.2.0"\ninvalid_key: true\n'
     await yamlInput.fill(invalidYaml)
     // 点击校验
     await page.getByRole('button', { name: /校验|Validate/i }).click()
@@ -277,7 +277,7 @@ test.describe('场景 12: 新建项目模型(真实后端模板与 YAML)', () =>
     // (b) 替换为合法 YAML 再次校验
     const validYaml = [
       'schema: ies.device-model',
-      'schema_version: "2.1.0"',
+      'schema_version: "2.2.0"',
       'device:',
       `  id: user.custom.valid_${Date.now()}`,
       '  names:',

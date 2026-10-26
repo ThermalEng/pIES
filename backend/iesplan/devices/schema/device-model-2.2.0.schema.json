@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://iesplan.dev/schema/device-model/2.1.0",
+  "$id": "https://iesplan.dev/schema/device-model/2.2.0",
   "title": "ies.device-model",
-  "description": "设备模型 YAML 2.1.0 机器可读 schema。设备模型只表达纯技术语义：稳定身份、非时变 properties、五类序列 interfaces 与受限声明式 equations。文件中禁止函数/包/模块路径、shell、凭证、价格、成本、计算精度与任意代码入口。",
+  "description": "设备模型 YAML 2.2.0 机器可读 schema。设备模型只表达纯技术语义：稳定身份、非时变 properties、五类序列 interfaces 与受限声明式 equations。文件中禁止函数/包/模块路径、shell、凭证、价格、成本、计算精度与任意代码入口。",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -18,7 +18,7 @@
       "const": "ies.device-model"
     },
     "schema_version": {
-      "const": "2.1.0"
+      "const": "2.2.0"
     },
     "device": {
       "type": "object",
