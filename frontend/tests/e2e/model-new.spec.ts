@@ -254,7 +254,7 @@ test.describe('场景 12: 新建项目模型(真实后端模板与 YAML)', () =>
     const revBox = page.locator('.ies-custom-revision')
     await expect(revBox).toBeVisible()
     await expect(revBox.getByText(/v1/)).toBeVisible()
-    await expect(revBox.getByText(/2\.1\.0/)).toBeVisible()
+    await expect(revBox.getByText(/2\.2\.0/)).toBeVisible()
     // 点击返回回到列表
     await page.getByRole('button', { name: /返回|Back/i }).click()
     await expect(page.locator('.ies-custom-list')).toBeVisible()
