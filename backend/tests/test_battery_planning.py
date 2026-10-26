@@ -106,12 +106,13 @@ def test_fixed_capacity_hand_energy_and_efficiency(battery):
 def test_planned_capacity_power_and_soc_boundaries_are_affine(battery):
     b = _rows(battery)
     first = _row(b, "cell__energy_update__t0")
-    assert _terms(first)["battery_size"] == pytest.approx(-1800000)
+    # All column coefficients are in solver SI: battery_size is Joules, not kWh.
+    assert _terms(first)["battery_size"] == pytest.approx(-0.5)
     assert first.expression.constant == pytest.approx(0)
     lo = _row(b, "cell__minimum_energy__t0")
     hi = _row(b, "cell__maximum_energy__t0")
-    assert _terms(lo)["battery_size"] == pytest.approx(360000)
-    assert _terms(hi)["battery_size"] == pytest.approx(-3240000)
+    assert _terms(lo)["battery_size"] == pytest.approx(0.1)
+    assert _terms(hi)["battery_size"] == pytest.approx(-0.9)
     for step in (0, 1):
         for flow in ("charge", "discharge"):
             bound = _row(b, f"cell__{flow}__plan_max__t{step}")
@@ -179,8 +180,9 @@ def test_true_optimized_capacity_no_default_upper_bound(battery, tmp_path):
 
 
 def test_zero_capacity_has_no_free_initial_energy(battery, tmp_path):
-    # 零额定功率走固定 0，上界有限；不依赖未合入的 A 路互斥修复。
-    b = _rows(battery, power=0, soc=0.75)
+    # 额定功率为正，容量规划强制为 0：物理能量和充放电必须全为零。
+    # A 路互斥降级尚不接受功率上界为 0；不在 B 路复制该修复。
+    b = _rows(battery, power=6, soc=0.75)
     primal = _solve(b, tmp_path, force_zero=True)
     assert primal["battery_size"] == pytest.approx(0, abs=1e-6)
     for step in (0, 1):
