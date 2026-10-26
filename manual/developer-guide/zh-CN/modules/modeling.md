@@ -45,6 +45,8 @@
 
 设备技术方程不得包含价格或成本目标项。规划目标由规划配置定义，可引用 `EffectiveFinanceConfig` 中的参数；生成器在系统合并阶段加入。
 
+公共数学贡献 `ies.modeling.contribution@2.1.0` 新增状态的可选 `initial_ast`，承载[设备模型初值表达式](../formats/device-model-yaml.md#状态初值)；直接属性初值仍使用 `initial_property_ref`，两者互斥。贡献封存保留初值 AST，生成器按实例属性与规划接管关系降级，不提前固化规划量。复用现有 `ies.equation.ast@2.0.0` 节点，AST 版本不变；该扩展不改变装配、任务快照或结果契约结构。
+
 ## 开发思路
 
 ```text

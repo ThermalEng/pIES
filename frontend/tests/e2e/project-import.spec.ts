@@ -26,7 +26,7 @@ const SINK_TYPE_FINAL = `${SINK_TYPE}_1`
 const SINK_LABEL = '消费链负荷'
 const SINK_NAME = 'userload'
 const SINK_YAML = `schema: ies.device-model
-schema_version: "2.1.0"
+schema_version: "2.2.0"
 device:
   id: acme.device.consumption_load
   names:

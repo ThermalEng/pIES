@@ -1,5 +1,5 @@
 schema: ies.device-model
-schema_version: "2.1.0"
+schema_version: "2.2.0"
 device:
   id: ies.device.heat_load
   names:

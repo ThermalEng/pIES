@@ -21,3 +21,24 @@ def test_public_mutex_lowering_uses_each_actual_finite_bound() -> None:
         ("carry", 0): 1.0, (binary.name, 0): 37.0,
     }
     assert (rows["tax_net__mutex_y"].sense, rows["tax_net__mutex_y"].rhs) == ("le", 37.0)
+
+
+def test_mutex_factor_exchange_is_binary_complement_not_a_flow_restriction():
+    """Swapping factors changes only the internal bit's polarity."""
+    symbols = {"x": ("var", 0.0, 3.0), "y": ("var", 0.0, 5.0)}
+    forward = lower_mutex("flow", ("x", 0), ("y", 0), symbols)
+    reverse = lower_mutex("flow", ("y", 0), ("x", 0), symbols)
+    bit = ("flow__mutex", 0)
+
+    def feasible(lowered, x, y, b):
+        values = {("x", 0): x, ("y", 0): y, bit: b}
+        return all(
+            row.expression.constant + sum(c * values[k] for k, c in row.expression.terms) <= row.rhs
+            for row in lowered.constraints
+        )
+
+    for x in range(4):
+        for y in range(6):
+            for b in (0, 1):
+                assert feasible(forward, x, y, b) == feasible(reverse, x, y, 1-b)
+            assert any(feasible(forward, x, y, b) for b in (0, 1)) == (x*y == 0)

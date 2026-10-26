@@ -31,7 +31,7 @@ from iesplan.modeling import (
 
 HEATER_YAML = """
 schema: ies.device-model
-schema_version: "2.1.0"
+schema_version: "2.2.0"
 device: {id: acme.device.heater, names: {zh-CN: 加热器, en-US: Heater}}
 properties:
   efficiency: {value: 0.9, unit: "1", valid_range: {minimum: 0, maximum: 1}}
@@ -47,7 +47,7 @@ equations:
 
 SOC_YAML = """
 schema: ies.device-model
-schema_version: "2.1.0"
+schema_version: "2.2.0"
 device: {id: acme.device.tank, names: {zh-CN: 罐, en-US: Tank}}
 properties:
   soc0: {value: 0.5, unit: "1", valid_range: {minimum: 0, maximum: 1}}
@@ -64,7 +64,7 @@ equations:
 
 MUTEX_YAML = """
 schema: ies.device-model
-schema_version: "2.1.0"
+schema_version: "2.2.0"
 device: {id: acme.device.hub, names: {zh-CN: 枢纽, en-US: Hub}}
 properties: {}
 interfaces:
@@ -79,7 +79,7 @@ equations:
 
 BILINEAR_YAML = """
 schema: ies.device-model
-schema_version: "2.1.0"
+schema_version: "2.2.0"
 device: {id: acme.device.bl, names: {zh-CN: 双线性, en-US: Bilinear}}
 properties: {}
 interfaces:
@@ -179,7 +179,7 @@ def test_mutex_big_m_with_finite_bounds() -> None:
 
 NEG_MUTEX_YAML = """
 schema: ies.device-model
-schema_version: "2.1.0"
+schema_version: "2.2.0"
 device: {id: acme.device.hub2, names: {zh-CN: 枢纽二, en-US: Hub2}}
 properties: {}
 interfaces:
@@ -194,7 +194,7 @@ equations:
 
 PRODUCT_BOTH_SIDES_YAML = """
 schema: ies.device-model
-schema_version: "2.1.0"
+schema_version: "2.2.0"
 device: {id: acme.device.quad, names: {zh-CN: 四元, en-US: Quad}}
 properties: {}
 interfaces:
@@ -239,6 +239,49 @@ def test_both_sides_non_affine_unsupported() -> None:
     }
     with pytest.raises(LoweringUnsupportedError):
         lower_relation(relation, symbols, step=0)
+
+
+
+@pytest.mark.parametrize(
+    ("charge_upper", "discharge_upper"),
+    [(0.0, 23.0), (23.0, 0.0), (0.0, 0.0), (0.0, None), (None, 0.0)],
+)
+@pytest.mark.parametrize("swapped", [False, True])
+def test_mutex_proven_zero_bound_is_tautology(
+    charge_upper: float | None, discharge_upper: float | None, swapped: bool,
+) -> None:
+    # Both operand orders, both zero positions, both zero, and absent opposite M.
+    original = _relation(MUTEX_YAML, "exclusivity")
+    if swapped:
+        ast = RelationAst(
+            id="exclusivity", output=original.output,
+            lhs_root=BinaryNode(
+                op="*", left=RefNode(name="discharge", offset=0),
+                right=RefNode(name="charge", offset=0),
+            ),
+            rhs_root=NumberNode(value=0),
+            lhs_refs=(), rhs_refs=(),
+        )
+        relation = MathRelation(id="exclusivity", output=original.output, ast=ast)
+    else:
+        relation = original
+    symbols = {
+        "charge": ("var", 0.0, charge_upper),
+        "discharge": ("var", 0.0, discharge_upper),
+    }
+    lowered = lower_relation(relation, symbols, step=1)
+    assert lowered.variables == ()
+    assert lowered.constraints == ()
+
+
+def test_mutex_zero_upper_without_proven_lower_is_not_tautology() -> None:
+    relation = _relation(MUTEX_YAML, "exclusivity")
+    with pytest.raises(LoweringUnsupportedError, match="非负不可证"):
+        lower_relation(
+            relation,
+            {"charge": ("var", None, 0.0),
+             "discharge": ("var", 0.0, None)},
+        )
 
 
 def test_mutex_without_upper_bound_unsupported() -> None:

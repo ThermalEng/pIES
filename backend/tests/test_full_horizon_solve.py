@@ -520,7 +520,7 @@ class TestFullHorizonTrueSolve:
 
 STORE_YAML = """
 schema: ies.device-model
-schema_version: "2.1.0"
+schema_version: "2.2.0"
 device: {id: acme.device.store, names: {zh-CN: 储能, en-US: Store}}
 properties:
   soc0: {value: 200, unit: kWh, valid_range: {minimum: 0, maximum: 1000}}
