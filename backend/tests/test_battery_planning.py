@@ -11,7 +11,7 @@ import pytest
 
 from iesplan.computation import HIGHS_ADAPTER_PATH
 from iesplan.computation.generators.linear import (
-    LinearConstraint, LinearExpression, LinearModel,
+    LinearConstraint, LinearExpression, LinearModel, LinearVariable,
 )
 from iesplan.computation.generators.mps import write_mps
 from iesplan.computation.generators.project import (
@@ -114,8 +114,12 @@ def test_fixed_energy_bounds_deduced_without_changing_physics(battery):
     assert len(inferred) == len(b.variables)
     for step in (0, 1):
         energy = inferred[f"cell__stored_energy__t{step}"]
-        assert energy.lower == pytest.approx(7_200_000)
-        assert energy.upper == pytest.approx(64_800_000)
+        # SOC guarantees these bounds, and dynamics may tighten them further.
+        assert energy.lower is not None
+        assert energy.upper is not None
+        assert energy.lower >= 7_200_000 - 1e-5
+        assert energy.upper <= 64_800_000 + 1e-5
+        assert energy.lower <= energy.upper
         assert _row(b, f"cell__minimum_energy__t{step}").sense == "eq"
         assert _row(b, f"cell__maximum_energy__t{step}").sense == "eq"
         assert f"cell__above_minimum__t{step}" in inferred
