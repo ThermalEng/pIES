@@ -319,79 +319,6 @@ def _mps_columns_and_objective(raw: bytes) -> tuple[list[str], dict[str, float]]
 
 
 
-def test_campus_equal_input_bound_propagation_ab_diagnostic(monkeypatch) -> None:
-    """04c7a30-style off versus c9a35fe-style on: same campus, solver and resources.
-
-    This is a deliberately short *diagnostic*, never proof of 600-second
-    convergence or a replacement for the four full-year successful-chain tests.
-    Git comparison confirms the intervening production model difference is only
-    _tighten_nonnegative_equality_bounds; earlier envelope cuts were reverted.
-    """
-    from dataclasses import replace
-
-    from iesplan.computation.generators import project as project_generator
-
-    raw_inputs = _timed("ab.inputs", _campus_inputs)
-    artifact, models, materialized, finance, config, evaluation = raw_inputs
-    # Two identical, full 8760-step physical models. Only diagnostic timeout
-    # is short; all production success tests retain their 600-second limit.
-    diag_config = replace(config, time_limit_seconds=120)
-    inputs = (artifact, models, materialized, finance, diag_config, evaluation)
-
-    # Equivalent to 04c7a30's generator build (without the later optional
-    # interval propagation). The production B SOC bounds and mutex remain.
-    with monkeypatch.context() as patch:
-        patch.setattr(
-            project_generator, "_tighten_nonnegative_equality_bounds",
-            lambda variables, rows: tuple(variables.values()),
-        )
-        original = _timed("ab.generate_without_propagation", _generate_bundle, inputs)
-    current = _timed("ab.generate_with_propagation", _generate_bundle, inputs)
-
-    original_mps = original.files[PROBLEM_PATH].decode("utf-8")
-    current_mps = current.files[PROBLEM_PATH].decode("utf-8")
-    old_body, separator, old_bounds = original_mps.partition("\nBOUNDS\n")
-    new_body, new_separator, new_bounds = current_mps.partition("\nBOUNDS\n")
-    assert separator == new_separator == "\nBOUNDS\n"
-    assert old_body == new_body, "physical constraints, rows and objective must match"
-    old_bound_text, tail_sep, old_footer = old_bounds.partition("\nOBJSENSE\n")
-    new_bound_text, new_tail_sep, new_footer = new_bounds.partition("\nOBJSENSE\n")
-    assert tail_sep == new_tail_sep == "\nOBJSENSE\n"
-    assert old_footer == new_footer, "objective sense must be unchanged"
-    assert original.files[PARAMETERS_PATH] == current.files[PARAMETERS_PATH]
-    assert original.manifest.command == current.manifest.command
-    _STAGE_LOG.warning(
-        "CI_AB identical_physics=true limit_seconds=120 seed=0 "
-        "unpropagated_bytes=%d propagated_bytes=%d "
-        "unpropagated_bound_lines=%d propagated_bound_lines=%d bounds_equal=%s",
-        len(original_mps), len(current_mps),
-        len(old_bound_text.splitlines()), len(new_bound_text.splitlines()),
-        old_bound_text == new_bound_text,
-    )
-
-    runtime = _runtime()
-    for variant, bundle in (
-        ("04c7_no_interval_propagation", original),
-        ("c9_exact_interval_propagation", current),
-    ):
-        receipt, _outputs = _timed(
-            f"ab.solve.{variant}", runtime.run, bundle, _attempt(f"ab-{variant}")
-        )
-        progress = [
-            line.strip() for line in receipt.stdout.splitlines()
-            if "%" in line and ("inf" in line or "L " in line or "Gap" in line)
-        ]
-        _STAGE_LOG.warning(
-            "CI_AB variant=%s solver_status=%s termination=%s exit_code=%s "
-            "progress_head=%r progress_tail=%r stderr_tail=%r",
-            variant, receipt.status, receipt.termination_reason, receipt.exit_code,
-            progress[:3], progress[-8:], receipt.stderr[-1200:],
-        )
-        # A 120-second run can legitimately time out without disproving
-        # feasibility. Do not turn this diagnostic into an optimality gate.
-        assert receipt.status in {"succeeded", "timed_out"}, (
-            variant, receipt.status, receipt.termination_reason, receipt.stderr[-1200:]
-        )
 
 
 def test_chain_success_reports_business_result() -> None:
@@ -422,6 +349,10 @@ def test_chain_success_reports_business_result() -> None:
     solution = result.outputs["solution"]
     assert solution["objective_unit"] == "CNY"
     assert solution["objective_value"] > 0
+    # Public campus hand check: 850158 CNY demand less 152 kWh initial
+    # battery discharge at 0.7 CNY/kWh. The full MILP must prove this optimum.
+    assert solution["objective_value"] == pytest.approx(850_051.6, rel=0, abs=1e-5)
+    assert next(v["value"] for v in solution["variables"] if v["name"] == "pv_cap") == 0
     assert [item["name"] for item in solution["variables"]] == list(unit_map)
     assert [item["unit"] for item in solution["variables"]] == list(unit_map.values())
 

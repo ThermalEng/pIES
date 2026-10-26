@@ -37,4 +37,4 @@ equations:
   variables: {}
   relations:
     - id: import_export_exclusivity
-      expression: "electricity_import[t] * electricity_export[t] = 0"
+      expression: "electricity_export[t] * electricity_import[t] = 0"

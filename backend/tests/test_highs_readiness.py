@@ -438,6 +438,40 @@ def test_real_highs_zero_export_with_unbounded_opposite(tmp_path) -> None:
     assert float(facts["objective_value"]) == pytest.approx(3.0)
 
 
+@pytest.mark.parametrize(
+    "purchased,sold,status",
+    [(3.0, 0.0, "kOptimal"), (0.0, 2.0, "kOptimal"),
+     (0.0, 0.0, "kOptimal"), (1.0, 1.0, "kInfeasible")],
+)
+def test_catalog_grid_mutex_preserves_both_directions(tmp_path, purchased, sold, status):
+    """Real catalog + lowerer + HiGHS: retain export, import and exclusion."""
+    from iesplan.computation.generators import lower_relation
+
+    document = next(d for d in list_devices() if d.device.id == "ies.device.grid_connection")
+    built = build_math_contribution(document)
+    assert built.ok, built.diagnostics
+    (relation,) = built.contribution.relations
+    lowered = lower_relation(
+        relation,
+        {"electricity_import": ("var", 0.0, 3.0), "electricity_export": ("var", 0.0, 2.0)},
+    )
+    model = LinearModel(
+        variables=(
+            LinearVariable("electricity_import", lower=purchased, upper=purchased),
+            LinearVariable("electricity_export", lower=sold, upper=sold),
+        ) + lowered.variables,
+        constraints=lowered.constraints,
+        objective=LinearExpression(terms=(
+            (("electricity_import", 0), 7.0), (("electricity_export", 0), -4.0),
+        )),
+    )
+    text, _ = write_mps(model)
+    _, facts = _run_tiny_mps(tmp_path, text)
+    assert facts["model_status"] == f"HighsModelStatus.{status}"
+    if status == "kOptimal":
+        assert float(facts["objective_value"]) == pytest.approx(7*purchased - 4*sold)
+
+
 class TestUnboundedLowerFiniteUpperHighs:
     """无下界＋有限上界的 MPS 表达与真实 HiGHS 行为。
 

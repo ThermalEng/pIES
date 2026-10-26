@@ -113,7 +113,8 @@ class TestDeviceSpecificContracts:
         doc = self._doc("ies.device.grid_connection")
         assert doc.interfaces["electricity_import"].type == "out"
         assert doc.interfaces["electricity_export"].type == "in"
-        assert any("electricity_import[t] * electricity_export[t] = 0" in e for e in (r.expression for r in doc.equations.relations))
+        exprs = {r.id: r.expression for r in doc.equations.relations}
+        assert exprs["import_export_exclusivity"] == "electricity_export[t] * electricity_import[t] = 0"
         assert _no_source_in_interfaces(doc)
 
     def test_loads_predefined_kw(self):
