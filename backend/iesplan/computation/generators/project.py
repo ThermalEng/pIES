@@ -363,51 +363,75 @@ def _tighten_nonnegative_equality_bounds(
     variables: Mapping[str, LinearVariable],
     rows: list[LinearConstraint],
 ) -> tuple[LinearVariable, ...]:
-    """从两变量等式和非负松弛项推导有限界，不添加物理约束。
+    """以原等式和现有变量界做保守区间传播，不增删技术方程。
 
-    a*x + b*s + c == rhs，s >= 0、s 无有限上界，则
-    x = (rhs-c)/a - (b/a)*s；依据斜率可推导 x 的一侧界。
-    不处理带规划容量的多变量等式，亦不添加容量默认上界。
+    对 a*x + Σ(b_i*y_i) + c = rhs，使用其余 y_i 的有限区间求 x
+    的必然上下界。不能证明的界保持 None；不假定缺失容量上界，
+    不动 binary 种类和界（MPS 的 BV 编码须保持精确 0/1）。
+    浮点计算的推导端点向外取一 ULP，避免舍入引入意外收紧。
     """
     bounded = dict(variables)
-    for row in rows:
-        terms = row.expression.terms
-        if row.sense != "eq" or len(terms) != 2:
-            continue
-        for index in (0, 1):
-            (target_key, a), (slack_key, b) = terms[index], terms[1 - index]
-            if (
-                target_key[1] != 0 or slack_key[1] != 0
-                or a == 0 or b == 0
-                or target_key[0] not in bounded or slack_key[0] not in bounded
-            ):
+    for _pass in range(2):
+        changed = False
+        for row in rows:
+            if row.sense != "eq":
                 continue
-            target = bounded[target_key[0]]
-            slack = bounded[slack_key[0]]
-            if (
-                target.kind != "continuous" or slack.kind != "continuous"
-                or slack.lower != 0 or slack.upper is not None
-            ):
+            terms = row.expression.terms
+            if not 1 < len(terms) <= 4:
                 continue
-            endpoint = (row.rhs - row.expression.constant) / a
-            if not math.isfinite(endpoint):
-                continue
-            if -b / a > 0:
-                if target.lower is not None and endpoint <= target.lower:
+            constant = row.rhs - row.expression.constant
+            for index, (target_key, coeff) in enumerate(terms):
+                name, offset = target_key
+                if offset != 0 or coeff == 0 or name not in bounded:
                     continue
-                if target.upper is not None and endpoint > target.upper:
-                    continue  # 保留真实不可行性由求解器报告
-                bounded[target.name] = LinearVariable(
-                    target.name, endpoint, target.upper, target.kind
-                )
-            else:
-                if target.upper is not None and endpoint >= target.upper:
+                target = bounded[name]
+                if target.kind != "continuous":
                     continue
-                if target.lower is not None and endpoint < target.lower:
-                    continue
-                bounded[target.name] = LinearVariable(
-                    target.name, target.lower, endpoint, target.kind
-                )
+                others_min = others_max = 0.0
+                min_finite = max_finite = True
+                for j, (other_key, other_coeff) in enumerate(terms):
+                    if j == index:
+                        continue
+                    other_name, other_offset = other_key
+                    if other_offset != 0 or other_name not in bounded:
+                        min_finite = max_finite = False
+                        break
+                    other = bounded[other_name]
+                    small = other.lower if other_coeff > 0 else other.upper
+                    large = other.upper if other_coeff > 0 else other.lower
+                    if small is None:
+                        min_finite = False
+                    else:
+                        others_min += other_coeff * small
+                    if large is None:
+                        max_finite = False
+                    else:
+                        others_max += other_coeff * large
+                lower = target.lower
+                upper = target.upper
+                if (max_finite if coeff > 0 else min_finite):
+                    other_extreme = others_max if coeff > 0 else others_min
+                    candidate = (constant - other_extreme) / coeff
+                    if math.isfinite(candidate):
+                        candidate = math.nextafter(candidate, -math.inf)
+                        if (lower is None or candidate > lower) and (
+                            upper is None or candidate <= upper
+                        ):
+                            lower = candidate
+                if (min_finite if coeff > 0 else max_finite):
+                    other_extreme = others_min if coeff > 0 else others_max
+                    candidate = (constant - other_extreme) / coeff
+                    if math.isfinite(candidate):
+                        candidate = math.nextafter(candidate, math.inf)
+                        if (upper is None or candidate < upper) and (
+                            lower is None or candidate >= lower
+                        ):
+                            upper = candidate
+                if lower != target.lower or upper != target.upper:
+                    bounded[name] = LinearVariable(name, lower, upper, target.kind)
+                    changed = True
+        if not changed:
+            break
     return tuple(bounded.values())
 
 

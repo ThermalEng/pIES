@@ -116,8 +116,35 @@ def test_fixed_energy_bounds_deduced_without_changing_physics(battery):
         energy = inferred[f"cell__stored_energy__t{step}"]
         assert energy.lower == pytest.approx(7_200_000)
         assert energy.upper == pytest.approx(64_800_000)
+        assert _row(b, f"cell__minimum_energy__t{step}").sense == "eq"
+        assert _row(b, f"cell__maximum_energy__t{step}").sense == "eq"
         assert f"cell__above_minimum__t{step}" in inferred
         assert f"cell__below_maximum__t{step}" in inferred
+
+
+def test_generic_interval_tightening_preserves_binary_and_unknown_bounds():
+    variables = {
+        "x": LinearVariable("x", lower=0, upper=None),
+        "s": LinearVariable("s", lower=0, upper=None),
+        "b": LinearVariable("b", lower=0, upper=1, kind="binary"),
+        "size": LinearVariable("size", lower=0, upper=None),
+    }
+    rows = [
+        LinearConstraint("finite_x", LinearExpression(
+            terms=((("s", 0), 1), (("x", 0), 1)),
+            constant=-15,
+        ), sense="eq", rhs=0),
+        LinearConstraint("unknown_size", LinearExpression(
+            terms=((("s", 0), 1), (("size", 0), -2),
+                   (("x", 0), 1)),
+        ), sense="eq", rhs=0),
+    ]
+    inferred = {v.name: v for v in _tighten_nonnegative_equality_bounds(variables, rows)}
+    assert inferred["x"].upper == pytest.approx(15)
+    assert inferred["x"].lower == 0
+    assert inferred["size"].upper is None
+    assert inferred["b"].kind == "binary"
+    assert (inferred["b"].lower, inferred["b"].upper) == (0, 1)
 
 
 def test_planned_energy_bounds_do_not_invent_capacity_limit(battery):
