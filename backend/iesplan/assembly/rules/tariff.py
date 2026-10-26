@@ -89,6 +89,7 @@ def check_tariff_bindings(
 ) -> None:
     """tariff_bindings: 引用、载体、计量量纲与非负语义、序列元数据。"""
     devices = doc.get("devices") or {}
+    planning_variables = (doc.get("planning") or {}).get("variables") or {}
     instance_ids = set(devices)
     tariff = doc.get("tariff_bindings") or {}
     prices = snapshot.energy_prices or {}
@@ -154,7 +155,10 @@ def check_tariff_bindings(
                 },
             )
             continue
-        if not nonnegative_instance_lower_bound(ispec, dev, descriptor):
+        if not nonnegative_instance_lower_bound(
+            ispec, dev, descriptor,
+            instance_id=inst_id, planning_variables=planning_variables,
+        ):
             _tar_fail(
                 diags, field, "interface_not_nonnegative",
                 {

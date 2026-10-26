@@ -24,14 +24,15 @@ from iesplan.assembly import validate_assembly_doc
 from iesplan.computation import CalculationConfig, materialize_non_predictive_series
 from iesplan.computation.generators.highs_milp import GENERATOR_REF
 from iesplan.computation.generators.project import build_project_model_package
-from iesplan.core.yamlmini import load as yaml_load
+from iesplan.core.yamlmini import dump as yaml_dump, load as yaml_load
 from iesplan.devices import init_registry
 from iesplan.devices.parser2 import parse_device_model_v2
 from iesplan.finance import FinanceProfile, merge_effective
 
 
 def _case(interface: str, direction: str, price: str = "0.7", *, bad_unit=False,
-          negative_port=False):
+          negative_port=False, property_floor=None, planned_floor=False,
+          planning_lower="0"):
     carrier = "heat" if interface == "heat_out" else "electricity"
     doc = _doc(expression=f"meter__period_energy_{direction}", sense="minimize")
     doc["tariff_bindings"] = {
@@ -64,6 +65,25 @@ def _case(interface: str, direction: str, price: str = "0.7", *, bad_unit=False,
             "heat_out: {type: out, carrier: heat, unit: kW, valid_range: {minimum: -1,",
         )
         assert device_yamls["heater1"] != HEATER_YAML
+    if property_floor is not None:
+        heater = yaml_load(device_yamls["heater1"])
+        heater["properties"]["flow_floor"] = {
+            "value": 0, "unit": "kW",
+            "valid_range": {"minimum": -10, "maximum": 10},
+        }
+        heater["interfaces"]["heat_out"]["valid_range"]["minimum"] = {
+            "property_ref": "flow_floor",
+        }
+        device_yamls["heater1"] = yaml_dump(heater)
+        doc["devices"]["heater1"]["properties"]["flow_floor"] = {
+            "value": property_floor, "unit": "kW",
+        }
+        if planned_floor:
+            doc["planning"]["variables"]["floor_plan"] = {
+                "device_ref": "heater1", "parameter": "flow_floor",
+                "unit": "kW", "lower_bound": planning_lower,
+                "upper_bound": "1",
+            }
     documents = {}
     for yaml_text in device_yamls.values():
         result = parse_device_model_v2(yaml_load(yaml_text), file="synthetic.yaml")
@@ -154,3 +174,54 @@ def test_direction_freedom_does_not_waive_meter_guards(options, reason):
         d.code == "ASM-TAR-001" and d.params.get("reason") == reason
         for d in checked.diagnostics
     )
+
+
+@pytest.mark.parametrize(
+    ("old_floor", "planned", "lower", "accepted"),
+    [(-1, False, "0", False), (0, False, "0", True),
+     (-1, True, "0", True), (0, True, "0", True),
+     (-1, True, None, True)],
+)
+def test_property_ref_meter_uses_effective_planning_floor(
+    old_floor, planned, lower, accepted,
+):
+    """A legal negative old property loses authority only after planning takeover."""
+    checked, finance, yamls = _case(
+        "heat_out", "sale", property_floor=old_floor,
+        planned_floor=planned, planning_lower=lower,
+    )
+    if not accepted:
+        assert checked.artifact is None
+        assert any(
+            d.code == "ASM-TAR-001"
+            and d.params.get("reason") == "interface_not_nonnegative"
+            for d in checked.diagnostics
+        )
+        return
+    assert checked.artifact is not None, [d.to_dict() for d in checked.diagnostics]
+    if not planned:
+        return
+
+    models = {name: _contribution(text) for name, text in yamls.items()}
+    materialized = materialize_non_predictive_series(
+        checked.artifact, {}, operation_years=2,
+    )
+    config = CalculationConfig(
+        mode="planning", generator=GENERATOR_REF, solver="ies.solver.highs@1.7.2",
+        precision="medium", time_limit_seconds=600, outputs=["solution"],
+    )
+    model, _, _, _, _, _ = build_project_model_package(
+        checked.artifact, models, materialized, finance, config, _evaluation(),
+    )
+    variables = {var.name: var for var in model.variables}
+    assert variables["floor_plan"].lower == 0
+    assert variables["floor_plan"].upper == 1000
+    # Missing explicit planning lower keeps the generator's step bound None,
+    # with the nonnegative planned capacity enforced by its linked row.
+    assert variables["heater1__heat_out__t0"].lower == (0 if lower is not None else None)
+    rows = {row.name: row for row in model.constraints}
+    linked = rows["heater1__heat_out__plan_min__t0"]
+    assert (linked.sense, linked.rhs) == ("ge", 0)
+    assert dict(linked.expression.terms) == {
+        ("heater1__heat_out__t0", 0): 1.0, ("floor_plan", 0): -1.0,
+    }
