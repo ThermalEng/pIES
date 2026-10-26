@@ -327,8 +327,12 @@ def test_demand_property_ref_accepts_planning_takeover_of_negative_old_value(pla
 
     # The identical negative instance floor remains ineligible without takeover.
     # Existing demand-binding tests independently enforce its out/electricity/unit gate.
-    unplanned = deepcopy(doc)
-    del unplanned["planning"]["variables"]["floor_plan"]
+    # Validation materializes resource content into its input tree; a fresh
+    # assembly is required for an independent public-entry comparison.
+    unplanned, _ = _assembly()
+    unplanned["devices"]["grid"]["properties"]["import_floor_kw"] = {
+        "value": -1, "unit": "kW",
+    }
     no_takeover = _check(unplanned, effective, device_documents=docs)
     assert no_takeover.artifact is None
     assert any(
