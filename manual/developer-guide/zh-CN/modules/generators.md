@@ -98,19 +98,26 @@ Bundle 规范化与原子发布
 
 注册表注册真实 provider 实例：`ref` 与描述符引用单一来源；`resolve` 完成通用门禁后返回可调用 provider，快照与目录只公开描述符数据；任一候选不符即整体构建失败。组合根显式注册内置 provider，不动态扫描。
 
+### 生成阶段协作停止
+
+稳定 `generate` 接口保持原有业务输入。需要在生成过程中响应停止的 provider 可提供 `generate_with_stop` 扩展，接收同组业务输入及关键字停止探针 `stop`。探针返回 `None` 表示继续，`cancelled` 或 `fenced` 表示停止；生成器以对应 reason 的 `ComputationUnavailableError` 结束，不返回半成品 Bundle，也不自行管理任务状态或进程。
+
+内置 HiGHS 在模型展开和 MPS 输出期间检查探针。未提供该扩展的 provider 仍按稳定接口调用，应用层在生成前后检查停止，不保证生成过程可即时中断。
+
 ## GeneratorDescriptor
 
 descriptor 至少声明：
 
 - 稳定 generator ID 和版本；
-- 支持的 assembly schema MAJOR/MINOR、计算 mode 和问题能力；
+- 支持的 assembly schema MAJOR/MINOR、计算 mode、precision 和问题能力；
 - 兼容 solver ID/版本及所需 executor 能力；
+- 支持的输出请求 `outputs`，请求集合必须是声明集合的子集；
 - 支持的方程 contract、AST 和数学贡献能力；
 - options schema（完整 Draft 2020-12 对象，根描述 object 且 `additionalProperties` 显式 false；无选项用显式空对象 schema，不用空 `{}`）、默认语义和资源上界；
 - 内部单位体系、确定性承诺和种子语义；
 - 生成的媒体类型、ResultAdapter ID 和版本关系。
 
-这些信息必须在生成 Solver Bundle 前可查询并完成兼容校验，不能等 Worker 启动求解后才发现不兼容。装配阶段不选择或锁定 generator 与 solver。生成前用 descriptor 的 options schema 校验计算配置选项：非法选项是用户配置错误，直接拒绝，不回退其他生成器，不删字段、不补默认；schema 内 `default` 只作描述。
+计算配置保存入口通过生成器公开目录统一核对精确引用、mode、precision、solver、outputs 和 options schema；不支持时返回字段诊断与可用能力，不追加配置 revision。API 不生成 Bundle、不复制具体数学模型检查；具体模型的降级能力仍在生成阶段判断。装配阶段不选择或锁定 generator 与 solver。非法选项直接拒绝，不回退其他生成器，不删字段、不补默认；schema 内 `default` 只作描述。
 
 ## 设备方程如何参与
 
