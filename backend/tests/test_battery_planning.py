@@ -136,8 +136,16 @@ def test_mutex_state_envelope_is_implied_and_tightens_fractional_modes(battery):
     assert cuts
     assert any(row.name.endswith("__charge_before") for row in cuts)
     assert any(row.name.endswith("__discharge_before") for row in cuts)
-    assert any(row.name.endswith("__charge_after") for row in cuts)
-    assert any(row.name.endswith("__discharge_after") for row in cuts)
+    # 两步动态传播可使相邻状态界有不同紧度；双侧状态界相同的
+    # 合成合法情况则必须推导出全部四种有效不等式。
+    uniform = tuple(
+        LinearVariable(var.name, 7_200_000, 64_800_000, var.kind)
+        if "__stored_energy__" in var.name else var
+        for var in bounds
+    )
+    full_cuts = _state_mutex_envelope_rows(uniform, b.rows)
+    assert any(row.name.endswith("__charge_after") for row in full_cuts)
+    assert any(row.name.endswith("__discharge_after") for row in full_cuts)
     assert len({row.name for row in cuts}) == len(cuts)
     rows = tuple(b.rows) + cuts
     assert all(row in rows for row in b.rows)
