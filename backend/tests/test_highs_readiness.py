@@ -51,8 +51,6 @@ from iesplan.computation.generators.linear import (
 )
 from iesplan.computation.generators.mps import write_mps
 from iesplan.computation.runtime import validate_highs_arguments
-from iesplan.core.yamlmini import dump as yaml_dump
-from iesplan.core.yamlmini import load as yaml_load
 from iesplan.devices import init_registry, list_devices
 from iesplan.finance import effective_from_yaml
 from iesplan.modeling import build_math_contribution
@@ -65,16 +63,10 @@ EXECUTOR_ID = "ies.executor.local_process"
 EXECUTOR_VERSION = "1.0.0"
 
 
-def _campus_inputs(*, dispatch=True):
+def _campus_inputs():
     """真实 campus 直接输入（与 generator 测试同一来源）。"""
     init_registry()
     text = (SAMPLES / "valid" / "campus.assembly.yaml").read_text(encoding="utf-8")
-    if not dispatch:
-        source = yaml_load(text)
-        source["devices"]["grid"]["properties"]["max_export_power_kw"]["value"] = 0
-        source["devices"]["bat1"]["properties"]["capacity_kwh"]["value"] = 0
-        source["devices"]["bat1"]["properties"]["rated_power_kw"]["value"] = 0
-        text = yaml_dump(source)
     validated = validate_assembly_text(text, package_dir=SAMPLES)
     assert validated.ok, [(d.code, d.params) for d in validated.diagnostics if d.blocking]
     artifact = validated.artifact
@@ -134,9 +126,9 @@ def _campus_evaluation():
     )
 
 
-def _campus_bundle(*, dispatch=True):
+def _campus_bundle():
     """正式路径生成真实 Bundle（非手写 manifest）。"""
-    artifact, models, materialized, finance, config = _campus_inputs(dispatch=dispatch)
+    artifact, models, materialized, finance, config = _campus_inputs()
     provider = build_registry((HIGHS_MILP_PROVIDER,)).resolve(config)
     assert provider is HIGHS_MILP_PROVIDER
     return provider.generate(artifact, models, materialized, finance, config, _campus_evaluation())
@@ -326,9 +318,9 @@ def _parse_solution(text: str) -> dict:
     return facts
 
 
-def test_end_to_end_campus_bundle(campus_dispatch_case) -> None:
+def test_end_to_end_campus_bundle() -> None:
     """campus 真实 Bundle 经受控执行产出声明 solution 文件。"""
-    bundle = _campus_bundle(dispatch=campus_dispatch_case)
+    bundle = _campus_bundle()
     manifest = bundle.manifest
     assert manifest.command["executable"] == HIGHS_EXECUTABLE_REF
     mps_bytes = bundle.files[PROBLEM_PATH]

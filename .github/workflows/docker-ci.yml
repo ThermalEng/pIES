@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
     inputs:
       full_suite:
-        description: "Full backend/Chromium suite, including the 600s/solve campus MILP performance gates"
+        description: "Explicit full backend and Chromium suite (otherwise select affected tests)"
         type: boolean
         required: false
         default: false
@@ -171,19 +171,14 @@ jobs:
       - name: Run selected Pytest tests
         env:
           TEST_FILES: ${{ matrix.shard.tests }}
-          RUN_CAMPUS_PERFORMANCE: ${{ inputs.full_suite && 'true' || 'false' }}
         run: |
           mkdir -p ci-artifacts/backend
           read -r -a tests <<< "$TEST_FILES"
-          extra=()
-          if [[ "$RUN_CAMPUS_PERFORMANCE" == true ]]; then
-            extra+=(--run-campus-performance)
-          fi
           printf 'Selected backend tests: %s\n' "${tests[*]}"
           docker compose run --rm --no-deps \
             --volume "$PWD/ci-artifacts/backend:/ci-artifacts" \
             --volume "$PWD/manual:/manual:ro" \
-            backend python -m pytest -vv -ra --durations=20 --log-cli-level=WARNING "${tests[@]}" "${extra[@]}" \
+            backend python -m pytest -vv -ra --durations=20 --log-cli-level=WARNING "${tests[@]}" \
             --junitxml=/ci-artifacts/pytest.xml
 
       - name: Upload Pytest report

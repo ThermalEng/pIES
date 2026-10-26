@@ -18,26 +18,6 @@ os.environ["IESPLAN_QUEUE"] = "memory"
 import pytest
 
 
-def pytest_addoption(parser):
-    parser.addoption(
-        "--run-campus-performance", action="store_true",
-        help="Also require optimality for the original full-year campus MILP (600s per solve)",
-    )
-
-
-@pytest.fixture(params=["functional", "dispatch_performance"])
-def campus_dispatch_case(request):
-    """Same chain assertions, two explicitly different input scenarios.
-
-    The functional case retains all six device models and the full calendar.
-    The original positive-storage/export MILP remains an opt-in performance gate.
-    """
-    performance = request.param == "dispatch_performance"
-    if performance and not request.config.getoption("--run-campus-performance"):
-        pytest.skip("Original full-year dispatch benchmark: --run-campus-performance")
-    return performance
-
-
 @pytest.fixture(autouse=True)
 def _init_device_registry():
     """所有测试自动初始化设备注册表(避免单个测试漏写 fixture)。"""

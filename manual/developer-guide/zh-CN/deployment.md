@@ -64,8 +64,6 @@ docker compose up -d --build
 
 本地 Agent 的浏览器探索与云端脚本回归按[前端验收分工](frontend.md#浏览器探索与自动回归)执行。测试环境复用同一用例，使用独立 Compose 项目及数据目录，不与开发或生产数据混用；本地运行入口和 CI 只适配环境，不分别维护业务测试实现。日常按需选取测试，云端保留 `full_suite=true` 手动完整默认套件入口，执行结果注明其不包含的专项环境覆盖。
 
-求解链的功能回归与大规模调度性能分开报告。默认 campus 功能场景保留六类设备、全年小时序列和真实求解，以显式零储能、零外送输入检查生成、回执、单位及财务恢复；正容量储能规划另有小规模真实求解回归。原始正储能／正外送全年 MILP 仍保留：Docker 内 Pytest 加 `--run-campus-performance` 即执行，云端手动 `full_suite=true` 同时启用；普通定向运行明确显示四项性能场景跳过，仍生成并检查原始全年模型。600 秒是该性能场景每次求解的测试预算，不是产品运行默认值。超时不表示输入非法，也不算性能验收通过；功能回归通过不能替代全年性能与实例验收。
-
 Compose 服务承担不同职责：Web 提供静态前端，backend 处理同步 HTTP，compute/I/O Worker 执行相应任务，PostgreSQL 保存权威事实，Redis 保存可重建队列与进度。某个服务能够启动，不代表整体已经 ready。
 
 实现“算法插件”后，Compose 还必须提供独立 `plugin_runner` 服务。普通 Worker 只发送输入引用、租约上下文和资源限制，不向用户插件解释器暴露 Docker Socket、数据库、`./data`、仓库目录或业务秘密。runner 使用只读根文件系统、非 root 身份、临时工作目录和默认断网策略；依赖只从构建阶段批准的离线来源取得。具体 contract 见[模型与算法](customization-center.md)和[算法插件包](formats/algorithm-plugin-package.md)。
