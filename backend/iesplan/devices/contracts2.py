@@ -119,6 +119,7 @@ class EquationVariable:
     unit: str
     valid_range: tuple[float | None, float | None] | None = None
     initial_property_ref: str | None = None
+    initial_expression: str | None = None
     minimum_property_ref: str | None = None
     maximum_property_ref: str | None = None
 
@@ -224,6 +225,8 @@ def to_dict(document: DeviceModelDocument) -> dict[str, Any]:
                    if v.valid_range is not None else {}),
                 **({"initial": {"property_ref": v.initial_property_ref}}
                    if v.initial_property_ref is not None else {}),
+                **({"initial": {"expression": v.initial_expression}}
+                   if v.initial_expression is not None else {}),
             }
             for vid, v in document.equations.variables.items()
         },
@@ -288,6 +291,7 @@ def from_dict(raw: Mapping[str, Any]) -> DeviceModelDocument:
                 unit=str(item["unit"]),
                 valid_range=_valid_range_of(item.get("valid_range")),
                 initial_property_ref=(item.get("initial") or {}).get("property_ref"),
+                initial_expression=(item.get("initial") or {}).get("expression"),
             )
             for vid, item in (equations_raw.get("variables") or {}).items()
         }

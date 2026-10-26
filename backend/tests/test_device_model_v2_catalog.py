@@ -96,11 +96,17 @@ class TestDeviceSpecificContracts:
     def test_battery_bidirectional_and_soc(self):
         doc = self._doc("ies.device.battery")
         assert doc.interfaces["electricity"].type == "bidirectional"
-        assert "soc" in doc.equations.variables and doc.equations.variables["soc"].initial_property_ref == "initial_soc"
+        energy = doc.equations.variables["stored_energy"]
+        assert energy.unit == "kWh"
+        assert energy.initial_expression == "initial_soc * capacity_kwh"
+        assert energy.valid_range == (0, None)
         assert doc.properties["cycle_life"].unit == "1"
         exprs = {r.id: r.expression for r in doc.equations.relations}
         assert "charge[t] * discharge[t] = 0" in exprs["charge_discharge_exclusivity"]
-        assert "step_duration" in exprs["soc_update"] and "capacity_kwh" in exprs["soc_update"]
+        assert "step_duration" in exprs["energy_update"]
+        assert "/ capacity_kwh" not in exprs["energy_update"]
+        assert exprs["minimum_energy"] == "above_minimum[t] = stored_energy[t] - min_soc * capacity_kwh"
+        assert exprs["maximum_energy"] == "below_maximum[t] = max_soc * capacity_kwh - stored_energy[t]"
         assert _no_source_in_interfaces(doc)
 
     def test_grid_import_out_export_in(self):

@@ -64,13 +64,23 @@ interfaces:
       maximum: null
 equations:
   variables:
-    soc:
-      unit: "1"
+    stored_energy:
+      unit: kWh
       valid_range:
         minimum: 0
-        maximum: 1
+        maximum: null
       initial:
-        property_ref: initial_soc
+        expression: "initial_soc * capacity_kwh"
+    above_minimum:
+      unit: kWh
+      valid_range:
+        minimum: 0
+        maximum: null
+    below_maximum:
+      unit: kWh
+      valid_range:
+        minimum: 0
+        maximum: null
     charge:
       unit: kW
       valid_range:
@@ -86,5 +96,9 @@ equations:
       expression: "electricity[t] = discharge[t] - charge[t]"
     - id: charge_discharge_exclusivity
       expression: "charge[t] * discharge[t] = 0"
-    - id: soc_update
-      expression: "soc[t] = soc[t-1] + (charge[t] * charge_efficiency - discharge[t] / discharge_efficiency) * step_duration / capacity_kwh"
+    - id: energy_update
+      expression: "stored_energy[t] = stored_energy[t-1] + (charge[t] * charge_efficiency - discharge[t] / discharge_efficiency) * step_duration"
+    - id: minimum_energy
+      expression: "above_minimum[t] = stored_energy[t] - min_soc * capacity_kwh"
+    - id: maximum_energy
+      expression: "below_maximum[t] = max_soc * capacity_kwh - stored_energy[t]"

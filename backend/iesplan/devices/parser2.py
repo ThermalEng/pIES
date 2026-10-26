@@ -230,14 +230,28 @@ def validate_equations(
             init = vraw["initial"]
             if not isinstance(init, Mapping):
                 raise ParseError(f"equations.variables.{vid}.initial 必须是 mapping")
-            pref = init.get("property_ref")
-            if not isinstance(pref, str) or pref not in properties:
-                raise ParseError(
-                    f"equations.variables.{vid}.initial.property_ref 必须引用已声明的 property: {pref!r}"
-                )
-            initial_ref = pref
+            if set(init) == {"property_ref"}:
+                pref = init["property_ref"]
+                if not isinstance(pref, str) or pref not in properties:
+                    raise ParseError(
+                        f"equations.variables.{vid}.initial.property_ref 必须引用已声明的 property: {pref!r}"
+                    )
+                initial_ref = pref
+            elif set(init) == {"expression"}:
+                expression = init["expression"]
+                if not isinstance(expression, str) or not expression.strip():
+                    raise ParseError(f"equations.variables.{vid}.initial.expression 必须是非空表达式")
+                try:
+                    names, offsets = reference_atoms(expression, f"{vid}.initial")
+                except EquationSyntaxError as exc:
+                    raise ParseError(str(exc)) from exc
+                if any(name not in properties for name in names) or any(offset for offset in offsets):
+                    raise ParseError(f"equations.variables.{vid}.initial.expression 只允许不带时间索引的 properties")
+            else:
+                raise ParseError(f"equations.variables.{vid}.initial 只能声明 property_ref 或 expression")
         var_specs[vid] = EquationVariable(
             id=vid, unit=unit.strip(), valid_range=vrange, initial_property_ref=initial_ref,
+            initial_expression=init.get("expression") if isinstance(vraw.get("initial"), Mapping) else None,
             minimum_property_ref=lo_ref, maximum_property_ref=hi_ref,
         )
         allowed.add(vid)
@@ -572,6 +586,11 @@ def parse_device_model_v2(raw: Mapping[str, Any], *, file: str = "") -> DeviceMo
                     ),
                     initial_property_ref=(
                         vraw["initial"].get("property_ref")
+                        if isinstance(vraw.get("initial"), Mapping)
+                        else None
+                    ),
+                    initial_expression=(
+                        vraw["initial"].get("expression")
                         if isinstance(vraw.get("initial"), Mapping)
                         else None
                     ),

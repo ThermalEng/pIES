@@ -342,6 +342,7 @@ class MathVariable:
     is_state: bool = False
     # 状态变量首步取值来源；后续 step 使用上一 step 的状态。
     initial_property_ref: str | None = None
+    initial_ast: object | None = None
     minimum_property_ref: str | None = None
     maximum_property_ref: str | None = None
 
@@ -475,6 +476,7 @@ def contribution_to_dict(contribution: DeviceMathContribution) -> dict[str, Any]
                 **({"value": v.value} if v.kind == "property" and v.value is not None else {}),
                 "is_state": v.is_state,
                 **({"initial_property_ref": v.initial_property_ref} if v.is_state and v.initial_property_ref is not None else {}),
+                **({"initial_ast": ast_to_dict(v.initial_ast)} if v.is_state and v.initial_ast is not None else {}),
                 **({"minimum_property_ref": v.minimum_property_ref} if v.minimum_property_ref is not None else {}),
                 **({"maximum_property_ref": v.maximum_property_ref} if v.maximum_property_ref is not None else {}),
             }
@@ -566,6 +568,11 @@ def contribution_from_dict(data: Mapping[str, Any]) -> DeviceMathContribution:
                 else {}
             ),
             **(
+                {"initial_ast": ast_from_dict(entry["initial_ast"])}
+                if "initial_ast" in entry
+                else {}
+            ),
+            **(
                 {"minimum_property_ref": entry["minimum_property_ref"]}
                 if "minimum_property_ref" in entry
                 else {}
@@ -652,6 +659,38 @@ def contribution_from_dict(data: Mapping[str, Any]) -> DeviceMathContribution:
 # 主入口
 # ---------------------------------------------------------------------------
 
+
+
+def _initial_dimensions(node: object, properties: Mapping[str, Any]):
+    """首步表达式的物理量纲；只用公开属性，无求解器依赖。"""
+    from collections import Counter
+
+    if isinstance(node, NumberNode):
+        return Counter()
+    if isinstance(node, RefNode):
+        if node.offset != 0 or node.name not in properties:
+            raise ValueError(f"初始表达式只能引用未索引的 property: {node.name!r}")
+        return Counter(dims_of(properties[node.name].unit))
+    if isinstance(node, UnaryNode):
+        return _initial_dimensions(node.operand, properties)
+    if isinstance(node, BinaryNode):
+        left = _initial_dimensions(node.left, properties)
+        right = _initial_dimensions(node.right, properties)
+        if node.op in ("+", "-"):
+            if left != right:
+                raise ValueError("初始表达式加减两侧量纲不一致")
+            return left
+        if node.op in ("*", "/"):
+            factor = 1 if node.op == "*" else -1
+            result = left + Counter()  # copy without Counter subtraction's positive-only semantics
+            for key, power in right.items():
+                result[key] += factor * power
+                if result[key] == 0:
+                    del result[key]
+            return result
+        if node.op == "^" and isinstance(node.right, NumberNode):
+            return Counter({key: power * node.right.value for key, power in left.items()})
+    raise ValueError("初始表达式含不支持的数学形式")
 
 def build_math_contribution(
     document: DeviceModelDocument,
@@ -822,8 +861,9 @@ def build_math_contribution(
     # ---- 状态变量: 初值完整性与量纲兼容 ----
     for vid, vspec in sorted(eq_vars.items()):
         initial = vspec.initial_property_ref
-        is_state = initial is not None or state_refs.get(vid, False)
-        if is_state and initial is None:
+        initial_expr = vspec.initial_expression
+        is_state = initial is not None or initial_expr is not None or state_refs.get(vid, False)
+        if is_state and initial is None and initial_expr is None:
             diags.append(_diag(
                 MOD_EQ_STATE_NO_INITIAL,
                 f"状态变量 {vid!r} 自引用 [t-k] 但未声明 initial",
@@ -848,6 +888,17 @@ def build_math_contribution(
                         ))
                 except UnitError as exc:
                     diags.append(_diag(MOD_EQ_UNIT_CONFLICT, str(exc), name=vid))
+        if initial_expr is not None:
+            try:
+                parsed = _parse_side(_tokenize(initial_expr, f"{vid}.initial"), f"{vid}.initial")
+                if _initial_dimensions(parsed, properties) != dims_of(vspec.unit):
+                    diags.append(_diag(
+                        MOD_EQ_UNIT_CONFLICT,
+                        f"状态 {vid!r} 初值表达式量纲与 {vspec.unit!r} 不兼容",
+                        name=vid,
+                    ))
+            except (_ExprError, ValueError, UnitError) as exc:
+                diags.append(_diag(MOD_EQ_SYNTAX, f"状态 {vid!r} 初值表达式非法: {exc}", name=vid))
 
     if any(d.blocking for d in diags):
         return MathContributionResult(diagnostics=diags, contribution=None)
@@ -859,7 +910,7 @@ def build_math_contribution(
             name=pid, kind="property", unit=p.unit, valid_range=p.valid_range, value=p.value
         )
     for vid, v in sorted(eq_vars.items()):
-        is_state = v.initial_property_ref is not None or state_refs.get(vid, False)
+        is_state = v.initial_property_ref is not None or v.initial_expression is not None or state_refs.get(vid, False)
         _check_bound_refs(vid, v.unit, v.minimum_property_ref, v.maximum_property_ref, properties, diags)
         variables[vid] = MathVariable(
             name=vid,
@@ -868,6 +919,10 @@ def build_math_contribution(
             valid_range=v.valid_range,
             is_state=is_state,
             initial_property_ref=v.initial_property_ref if is_state else None,
+            initial_ast=(
+                _parse_side(_tokenize(v.initial_expression, f"{vid}.initial"), f"{vid}.initial")
+                if v.initial_expression is not None else None
+            ),
             minimum_property_ref=v.minimum_property_ref,
             maximum_property_ref=v.maximum_property_ref,
         )

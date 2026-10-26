@@ -274,22 +274,29 @@
               "initial": {
                 "type": "object",
                 "additionalProperties": false,
-                "required": [
-                  "property_ref"
-                ],
+                "required": [],
                 "properties": {
                   "property_ref": {
                     "type": "string",
                     "minLength": 1
                   },
-                  "value": {
-                    "type": [
-                      "number",
-                      "boolean",
-                      "string"
+                  "expression": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "oneOf": [
+                  {
+                    "required": [
+                      "property_ref"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "expression"
                     ]
                   }
-                }
+                ]
               }
             }
           },
