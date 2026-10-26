@@ -65,11 +65,12 @@ from iesplan.application.worker.lease_cases import (
     record_task_progress,
     renew_lease_once,
     store_result_blob,
+    timeout_task_record,
     verify_lease,
     write_diagnostic,
 )
-from iesplan.core.diagnostics import SEVERITY_ERROR, SEVERITY_INFO, TASK_QUEUED
-from iesplan.tasks import LEASE_TTL_SECONDS, TaskRecord, TaskStateError
+from iesplan.core.diagnostics import SEVERITY_ERROR, SEVERITY_INFO, TASK_QUEUED, TASK_TIMEOUT
+from iesplan.tasks import LEASE_TTL_SECONDS, TaskRecord, TaskStateError, check_transition
 
 __all__ = [
     "CheckAssessment",
@@ -82,6 +83,7 @@ __all__ = [
     "renew_attempt_lease",
     "report_attempt_progress",
     "submit_attempt_result",
+    "timeout_attempt",
 ]
 
 logger = logging.getLogger(__name__)
@@ -441,6 +443,38 @@ def cancel_attempt(
         )
         db.commit()
         return cancelled
+    except Exception:
+        db.rollback()
+        raise
+
+
+def timeout_attempt(db: Session, claim: Claim, *, message: str) -> TaskRecord:
+    """实际运行已超时并收口：attempt stopped、租约 revoked、槽释放、task timed_out。
+
+    不以缺少成功输出判普通失败；所有写入须持有有效 fencing token。
+    """
+    try:
+        if verify_lease(db, claim.attempt_id, claim.lease_token) is None:
+            raise LeaseRejectedError(
+                "租约失效, 超时收拢被拒绝",
+                params={"task_id": claim.task_id, "attempt_id": claim.attempt_id},
+            )
+        task = get_task_record(db, claim.task_id)
+        if task is None:
+            raise TaskStateError("任务不存在", params={"task_id": claim.task_id})
+        check_transition(task, "timed_out")
+        fenced_release_attempt(
+            db, claim.attempt_id, claim.lease_token,
+            attempt_status="stopped", stop_reason="timeout",
+        )
+        timed_out = timeout_task_record(db, task.id)
+        clear_cancel_signal(task.id)
+        write_diagnostic(
+            db, task.id, claim.attempt_id,
+            level=SEVERITY_ERROR, code=TASK_TIMEOUT, message=message,
+        )
+        db.commit()
+        return timed_out
     except Exception:
         db.rollback()
         raise

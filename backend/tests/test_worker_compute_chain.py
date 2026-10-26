@@ -11,6 +11,9 @@ from __future__ import annotations
 
 import json
 import os
+import sys
+import threading
+import time
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -48,8 +51,11 @@ from iesplan.results import persistence as results_store  # noqa: E402
 from iesplan.storage import get_object, list_refs  # noqa: E402
 from iesplan.storage.persistence import StoredObject  # noqa: E402
 from iesplan.tasks import queue  # noqa: E402
-from iesplan.tasks.persistence import Task, TaskDiagnostic, TaskProgress  # noqa: E402
+from iesplan.tasks.persistence import (  # noqa: E402
+    CalcSnapshot, Task, TaskAttempt, TaskDiagnostic, TaskLease, TaskProgress,
+)
 from iesplan.worker import runner  # noqa: E402
+from iesplan.core.diagnostics import TASK_TIMEOUT  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # 测试环境
@@ -685,3 +691,230 @@ class TestSingleUnitSeal:
         ).scalar_one_or_none()
         assert row is not None
         assert (row.stage, float(row.progress_percent)) == ("generate", 40.0)
+
+
+class _ControlledGenerator:
+    """测试专属小 Bundle；生成可控延迟，不构造大型 MPS。"""
+
+    def __init__(self, mode: str, started: threading.Event, timeout: float) -> None:
+        from iesplan.computation.generators.highs_milp import DESCRIPTOR
+
+        self.descriptor = DESCRIPTOR
+        self.ref = DESCRIPTOR.ref
+        self.mode = mode
+        self.started = started
+        self.timeout = timeout
+
+    def available(self) -> bool:
+        return True
+
+    def generate(self, artifact, models, materialized, finance, config, evaluation, *, stop=None):
+        from iesplan.computation import (
+            ComputationUnavailableError, SolverBundle, SolverBundleManifest, read_stop_reason,
+        )
+
+        if self.mode == "generate":
+            self.started.set()
+            for _ in range(300):
+                reason = read_stop_reason(stop)
+                if reason is not None:
+                    raise ComputationUnavailableError("受控生成停止", reason=reason)
+                time.sleep(0.01)
+        manifest = SolverBundleManifest(
+            bundle={"generator": self.ref, "solver": config.solver},
+            inputs=[{"path": "input/probe", "media_type": "text/plain"}],
+            command={
+                "executor": "ies.executor.local_process@1.0.0",
+                "executable": "test.solver.probe@1.0.0",
+                "arguments": [str(Path(__file__).with_name("local_exec_probe.py")), "sleep", "10"],
+                "timeout_seconds": self.timeout,
+                "network": False,
+            },
+            outputs=[{"path": "output/solution", "media_type": "text/plain", "required": True}],
+            result_adapter="ies.result-adapter.highs@5.0.0",
+        )
+        return SolverBundle(manifest=manifest, files={"input/probe": b"synthetic"})
+
+
+def _controlled_plane(plane, mode: str, started: threading.Event, timeout: float):
+    """执行层仍使用真实 LocalProcessProvider / SolverRuntime，且精确绑定。"""
+    from iesplan.computation import (
+        DeploymentPolicy, ExecutorDescriptor, GeneratorRegistry, LocalExecutable,
+        LocalProcessProvider, SolverRuntime, build_executor_registry,
+    )
+
+    helper = str(Path(__file__).with_name("local_exec_probe.py"))
+
+    def validate(args):
+        assert tuple(args) == (helper, "sleep", "10")
+
+    class ObservedProcess(LocalProcessProvider):
+        def execute(self, command, workdir, *, stop=None):
+            started.set()
+            outcome = super().execute(command, workdir, stop=stop)
+            self.last_outcome = outcome
+            return outcome
+
+    executor = ObservedProcess(
+        ExecutorDescriptor(
+            executor_id="ies.executor.local_process", version="1.0.0",
+            executables=("test.solver.probe@1.0.0",),
+        ),
+        (LocalExecutable(
+            ref="test.solver.probe@1.0.0", path=sys.executable,
+            argv_validator=validate,
+        ),),
+        base_environ={},
+    )
+    registry = build_executor_registry((executor,))
+    policy = DeploymentPolicy(
+        executables=("test.solver.probe@1.0.0",),
+        max_timeout_seconds=20, max_memory_mib=128, max_cpu_cores=1,
+        max_output_files=2, max_output_bytes=1024,
+    )
+    controlled = worker_app.ComputeExecutionPlane(
+        generator_registry=GeneratorRegistry({
+            "ies.generator.highs_milp@5.0.0": _ControlledGenerator(mode, started, timeout),
+        }),
+        executor_registry=registry,
+        adapter_registry=plane.adapter_registry,
+        runtime=SolverRuntime(registry, policy),
+        predictor_registry=plane.predictor_registry,
+    )
+    return controlled, executor
+
+
+def _run_async(engine: Engine, claim, plane):
+    finished: dict[str, object] = {}
+    stop_event = threading.Event()
+
+    def run() -> None:
+        try:
+            factory = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
+            finished["status"] = runner.run_task(
+                factory, claim, worker_id="cw-stop-test", compute=plane, stop_event=stop_event,
+            )
+        except BaseException as exc:
+            finished["error"] = exc
+
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    return thread, finished, stop_event
+
+
+def _assert_stopped(db: Session, claim, status: str, attempt_status: str, lease_status: str):
+    db.expire_all()
+    task = db.get(Task, claim.task_id)
+    attempt = db.get(TaskAttempt, claim.attempt_id)
+    lease = db.execute(select(TaskLease).where(TaskLease.attempt_id == claim.attempt_id)).scalar_one()
+    assert task.status == status
+    assert attempt.status == attempt_status
+    assert lease.status == lease_status
+    assert results_store.latest_evidence_for_task(db, claim.task_id) is None
+
+
+class TestStopLifecycle:
+    """HTTP 取消、真实受控进程停止、超时与 fencing 的 attempt 闭环。"""
+
+    @pytest.mark.parametrize("phase", ["generate", "solve"])
+    def test_http_cancel_stops_and_releases_slot(
+        self, client: TestClient, db: Session, engine: Engine, plane, phase: str,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from iesplan.identity.persistence import User
+        from iesplan.computation.runtime import local_process
+
+        spawned: list[int] = []
+        real_popen = local_process.subprocess.Popen
+
+        def observe_spawn(args, *other, **kwargs):
+            proc = real_popen(args, *other, **kwargs)
+            if len(args) > 1 and args[1] == str(Path(__file__).with_name("local_exec_probe.py")):
+                spawned.append(proc.pid)
+            return proc
+
+        monkeypatch.setattr(local_process.subprocess, "Popen", observe_spawn)
+
+        task_id = _submit_calc_task(client, db, dict(_CONFIG_BODY), dict(PLANNING_BODY))
+        claim = _claim(db, task_id)
+        original = db.get(Task, task_id)
+        user = db.get(User, original.requested_by)
+        started = threading.Event()
+        controlled, executor = _controlled_plane(plane, started, 18)
+        thread, result, stop = _run_async(engine, claim, controlled)
+        try:
+            assert started.wait(8), result
+            if phase == "solve":
+                time.sleep(0.3)  # 让真实受控子进程进入 sleep
+            response = client.post(
+                f"/api/projects/{original.project_id}/tasks/{task_id}/cancel",
+                json={"reason": "user_cancel"}, headers=_h(client, user),
+            )
+            assert response.status_code == 200, response.text
+            assert response.json()["cancel_status"] == "cancelling"
+            thread.join(timeout=8)
+            assert not thread.is_alive(), "收到取消后长时阶段未退出"
+            assert result == {"status": "cancelled"}
+            _assert_stopped(db, claim, "cancelled", "stopped", "revoked")
+            assert worker_app.slot_available(db, "compute")
+            if phase == "generate":
+                assert not hasattr(executor, "last_outcome"), "生成取消不得启动求解"
+                assert not spawned
+            else:
+                assert executor.last_outcome.termination_reason == "cancelled"
+                assert spawned, "求解阶段必须实际启动受控子进程"
+                for pid in spawned:
+                    with pytest.raises(ProcessLookupError):
+                        os.kill(pid, 0)  # 取消终态返回时进程必须已实际回收
+            # 新任务经公开提交边界排队，验证刚释放的槽确实可再次领取。
+            snapshot = db.get(CalcSnapshot, original.calc_snapshot_id)
+            config_revision = int(snapshot.calc_config_snapshot["config_ref"]["revision"])
+            status, body = _submit_task(
+                client, original.project_id, user,
+                config={"config_revision": config_revision}, idempotency_key="stop-next-task",
+            )
+            assert status == 201, body
+            with sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)() as next_db:
+                next_claim = worker_app.acquire_attempt(next_db, int(body["task"]["id"]), "cw-next")
+            assert next_claim is not None
+        finally:
+            stop.set()
+            thread.join(timeout=10)
+
+    def test_real_timeout_is_not_failed_when_output_is_missing(
+        self, client: TestClient, db: Session, engine: Engine, plane,
+    ) -> None:
+        task_id = _submit_calc_task(client, db, dict(_CONFIG_BODY), dict(PLANNING_BODY))
+        claim = _claim(db, task_id)
+        started = threading.Event()
+        controlled, executor = _controlled_plane(plane, "solve", started, 0.3)
+        assert _run(engine, claim, controlled) == "timed_out"
+        _assert_stopped(db, claim, "timed_out", "stopped", "revoked")
+        assert executor.last_outcome.termination_reason == "timeout"
+        assert db.get(TaskAttempt, claim.attempt_id).stop_reason == "timeout"
+        assert any(
+            row.code == TASK_TIMEOUT
+            for row in db.execute(select(TaskDiagnostic).where(TaskDiagnostic.task_id == task_id)).scalars()
+        )
+        assert worker_app.slot_available(db, "compute")
+
+    def test_fenced_stop_discards_late_result_without_cancelling(
+        self, client: TestClient, db: Session, engine: Engine, plane,
+    ) -> None:
+        task_id = _submit_calc_task(client, db, dict(_CONFIG_BODY), dict(PLANNING_BODY))
+        claim = _claim(db, task_id)
+        started = threading.Event()
+        controlled, executor = _controlled_plane(plane, "solve", started, 18)
+        thread, result, stop = _run_async(engine, claim, controlled)
+        try:
+            assert started.wait(8), result
+            time.sleep(0.3)
+            stop.set()  # 续租拒绝/Worker 退出的隔离信号，不是用户取消
+            thread.join(timeout=8)
+            assert not thread.is_alive()
+            assert result == {"status": "fenced"}
+            assert executor.last_outcome.termination_reason == "fenced"
+            _assert_stopped(db, claim, "running", "running", "active")
+        finally:
+            stop.set()
+            thread.join(timeout=10)

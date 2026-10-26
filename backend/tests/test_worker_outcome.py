@@ -487,3 +487,22 @@ class TestWorkerExecutionGuards:
         view = _task_view(db, task.id)
         assert view is not None and view.status == "cancelled", view
         assert queue.get_cancel(task.id) is None  # 取消信号已清除
+
+    def test_cancel_signal_after_lease_loss_cannot_claim_cancelled(
+        self, db: Session, env: dict[str, Any], factory,
+    ):
+        """取消与租约丢失竞态：旧 attempt 不得落取消终态或冒领释放。"""
+        task = _add_task(db, env, "report")
+        claim = _claim_task(db, task.id)
+        task.status = "cancelling"
+        queue.set_cancel(task.id, "user_cancel")
+        lease = db.execute(
+            select(TaskLease).where(TaskLease.attempt_id == claim.attempt_id)
+        ).scalar_one()
+        lease.status = "expired"
+        db.commit()
+
+        assert runner.run_task(factory, claim, worker_id="cw-lost") == "lease_rejected"
+        db.expire_all()
+        assert db.get(Task, task.id).status == "cancelling"
+        assert lease.status == "expired"
