@@ -5,14 +5,13 @@ HiGHS 真实求解仅在 GitHub Actions Docker 环境运行；本文件不运行
 """
 from __future__ import annotations
 
-import math
 import subprocess
 
 import pytest
 
 from iesplan.computation import HIGHS_ADAPTER_PATH
 from iesplan.computation.generators.linear import (
-    LinearConstraint, LinearExpression, LinearModel, LoweringUnsupportedError,
+    LinearConstraint, LinearExpression, LinearModel,
 )
 from iesplan.computation.generators.mps import write_mps
 from iesplan.computation.generators.project import _ProjectBuilder
@@ -218,8 +217,8 @@ def test_cost_and_annual_maintenance_use_the_same_planned_size(battery):
         assert component["constant"] == 0
         terms = component["terms"]
         assert len(terms) == 1
-        assert terms[0][0] == "battery_size"
-        assert terms[0][1] > 0
+        assert set(terms) == {"battery_size"}
+        assert terms["battery_size"] > 0
 
 
 def test_power_plan_with_explicit_finite_input_bound(battery):
