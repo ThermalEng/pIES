@@ -208,3 +208,168 @@ test('parameter and rename save responses preserve the next input; graph survive
   session.assertNoErrors([{ method: 'GET', path: `/api/projects/${pid}/config`, status: 404 }])
   await context.close()
 })
+
+// Closing the sidebar unmounts its form while the real graph save may still be in flight.
+for (const newerInput of ['none', 'same-field', 'other-field'] as const) {
+  test(`reopened parameter form synchronizes clean fields and preserves ${newerInput} input`, async ({ browser }) => {
+    const { page, pid, session, context } = await openSidebarProject(browser, '电池储能')
+    const capacity = page.getByRole('spinbutton', { name: 'capacity_kwh (kWh)', exact: true })
+    const power = page.getByRole('spinbutton', { name: 'rated_power_kw (kW)', exact: true })
+    const gate = await holdSave(page, `/api/projects/${pid}/draft`)
+    try {
+      await capacity.fill('1800')
+      await page.getByLabel('设备名称', { exact: true }).click()
+      await gate.ready
+      await reopenSidebar(page, '电池储能: 电池储能 1')
+      await expect(capacity).toHaveValue('1000') // The response has not reached the graph yet.
+      if (newerInput === 'same-field') await capacity.fill('2100')
+      if (newerInput === 'other-field') await power.fill('725')
+      gate.release()
+      await expect(page.getByText('已保存', { exact: true })).toBeVisible()
+      await expect(capacity).toHaveValue(newerInput === 'same-field' ? '2100' : '1800')
+      await expect(power).toHaveValue(newerInput === 'other-field' ? '725' : '500')
+      expect((await readDevices(page, pid))[0].params.capacity_kwh).toBe(1800)
+    } finally { gate.release(); await gate.clear() }
+    const expectedCapacity = newerInput === 'same-field' ? 2100 : 1800
+    const expectedPower = newerInput === 'other-field' ? 725 : 500
+    if (newerInput !== 'none') {
+      const saved = waitForDraftSave(page, pid)
+      await page.getByLabel('设备名称', { exact: true }).click()
+      expect((await saved).ok()).toBe(true)
+    }
+    // Focus/blur must never send a stale value back, including after a refresh.
+    await capacity.click()
+    await page.getByLabel('设备名称', { exact: true }).click()
+    await power.click()
+    await page.getByLabel('设备名称', { exact: true }).click()
+    await refreshAndOpen(page, '电池储能: 电池储能 1')
+    await expect(capacity).toHaveValue(String(expectedCapacity))
+    await expect(power).toHaveValue(String(expectedPower))
+    expect((await readDevices(page, pid))[0].params).toMatchObject({ capacity_kwh: expectedCapacity, rated_power_kw: expectedPower })
+    session.assertNoErrors([{ method: 'GET', path: `/api/projects/${pid}/config`, status: 404 }])
+    await context.close()
+  })
+}
+
+for (const editAfterReopen of [false, true]) {
+  test(`reopened name form synchronizes saved name; newer edit=${editAfterReopen}`, async ({ browser }) => {
+    const { page, pid, session, context } = await openSidebarProject(browser, '电池储能')
+    const name = page.getByLabel('设备名称', { exact: true })
+    const capacity = page.getByRole('spinbutton', { name: 'capacity_kwh (kWh)', exact: true })
+    const gate = await holdSave(page, `/api/projects/${pid}/draft`, 'model.rename_device')
+    try {
+      await name.fill('Saved name')
+      await capacity.click()
+      await gate.ready
+      await reopenSidebar(page, '电池储能: 电池储能 1')
+      await expect(name).toHaveValue('电池储能 1')
+      if (editAfterReopen) await name.fill('Newer name')
+      gate.release()
+      await expect(page.getByText('已保存', { exact: true })).toBeVisible()
+      await expect(name).toHaveValue(editAfterReopen ? 'Newer name' : 'Saved name')
+      expect((await readDevices(page, pid))[0].name).toBe('Saved name')
+    } finally { gate.release(); await gate.clear() }
+    const expected = editAfterReopen ? 'Newer name' : 'Saved name'
+    if (editAfterReopen) {
+      const saved = waitForDraftSave(page, pid)
+      await capacity.click()
+      expect((await saved).ok()).toBe(true)
+    }
+    await name.click()
+    await capacity.click()
+    await refreshAndOpen(page, `电池储能: ${expected}`)
+    await expect(name).toHaveValue(expected)
+    expect((await readDevices(page, pid))[0].name).toBe(expected)
+    session.assertNoErrors([{ method: 'GET', path: `/api/projects/${pid}/config`, status: 404 }])
+    await context.close()
+  })
+}
+
+for (const editAfterReopen of [false, true]) {
+  test(`reopened source form synchronizes saved source; newer edit=${editAfterReopen}`, async ({ browser }) => {
+    const { page, pid, session, context } = await openSidebarProject(browser, '电负荷')
+    const mode = page.locator('#mp-source-mode-electricity_demand')
+    const value = page.locator('#mp-source-value-electricity_demand')
+    const name = page.getByLabel('设备名称', { exact: true })
+    await mode.selectOption('constant')
+    const gate = await holdSave(page, `/api/projects/${pid}/draft`)
+    try {
+      await value.fill('42')
+      await name.click()
+      await gate.ready
+      await reopenSidebar(page, '电负荷: 电负荷 1')
+      await expect(mode).toHaveValue('')
+      if (editAfterReopen) {
+        await mode.selectOption('constant')
+        await value.fill('77')
+      }
+      gate.release()
+      await expect(page.getByText('已保存', { exact: true })).toBeVisible()
+      await expect(mode).toHaveValue('constant')
+      await expect(value).toHaveValue(editAfterReopen ? '77' : '42')
+      expect((await readDevices(page, pid))[0].params.electricity_demand).toBe(42)
+    } finally { gate.release(); await gate.clear() }
+    const expected = editAfterReopen ? 77 : 42
+    if (editAfterReopen) {
+      const saved = waitForDraftSave(page, pid)
+      await name.click()
+      expect((await saved).ok()).toBe(true)
+    }
+    await value.click()
+    await name.click()
+    await refreshAndOpen(page, '电负荷: 电负荷 1')
+    await expect(mode).toHaveValue('constant')
+    await expect(value).toHaveValue(String(expected))
+    expect((await readDevices(page, pid))[0].params.electricity_demand).toBe(expected)
+    session.assertNoErrors([{ method: 'GET', path: `/api/projects/${pid}/config`, status: 404 }])
+    await context.close()
+  })
+}
+
+async function openSidebarProject(browser: import('@playwright/test').Browser, type: string) {
+  const username = uniqueName('es-sidebar'), password = strongPassword('Init')
+  const setup = await browser.newContext()
+  await createEngineer(setup.request, username, password)
+  await setup.close()
+  const context = await browser.newContext()
+  const page = await context.newPage()
+  const session = await createSession(page, username, password)
+  await page.getByRole('button', { name: '新建项目', exact: true }).first().click()
+  const project = uniqueName('Sidebar lifecycle')
+  await page.getByLabel(/名称/).fill(project)
+  await page.getByLabel(/运行起始年/).fill('2026')
+  await page.getByRole('button', { name: '确认', exact: true }).click()
+  await page.getByText(project, { exact: true }).click()
+  const pid = page.url().match(/projects\/(\d+)/)![1]
+  await page.getByRole('navigation', { name: '工作台' }).getByText('系统建模', { exact: true }).click()
+  await dragTo(page, page.getByLabel(`放置 ${type} 设备`), page.locator('.mp-canvas-wrap'), .35, .4)
+  await expect(page.getByRole('button', { name: `${type}: ${type} 1`, exact: true })).toBeVisible()
+  await expect(page.getByText('已保存', { exact: true })).toBeVisible()
+  return { context, page, pid, session }
+}
+
+async function reopenSidebar(page: Page, nodeName: string) {
+  const sidebar = page.getByRole('region', { name: '编辑设备', exact: true })
+  await sidebar.getByRole('button', { name: '关闭', exact: true }).click()
+  await expect(sidebar).toBeHidden()
+  await page.getByRole('button', { name: nodeName, exact: true }).click()
+  await expect(sidebar).toBeVisible()
+}
+
+function waitForDraftSave(page: Page, pid: string) {
+  return page.waitForResponse(r => r.request().method() === 'PUT' &&
+    new URL(r.url()).pathname === `/api/projects/${pid}/draft`)
+}
+
+async function readDevices(page: Page, pid: string) {
+  const response = await page.request.get(`/api/projects/${pid}`)
+  expect(response.ok()).toBe(true)
+  return (await response.json()).draft.content.model.devices
+}
+
+async function refreshAndOpen(page: Page, nodeName: string) {
+  await page.getByRole('button', { name: '刷新', exact: true }).click()
+  await expect(page.getByText('已保存', { exact: true })).toBeVisible()
+  await page.reload()
+  await page.getByRole('button', { name: nodeName, exact: true }).click()
+}

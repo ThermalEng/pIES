@@ -1195,9 +1195,15 @@ function DeviceSidebar({
 }) {
   const { t } = useI18n()
   const [nameDraft, setNameDraft] = useState(device.name)
-  const currentEditor = useRef(device.editorId)
-  currentEditor.current = device.editorId
+  const currentEditor = useRef({ id: device.editorId })
+  if (currentEditor.current.id !== device.editorId) currentEditor.current = { id: device.editorId }
   const pendingNameSaves = useRef(0)
+  const editSequence = useRef(0)
+  const nameEdit = useRef<number | null>(null)
+  const parameterEdits = useRef(new Map<string, number>())
+  const sourceEdits = useRef(new Map<string, number>())
+  const previousDevice = useRef(device)
+  const touchParameter = (key: string) => parameterEdits.current.set(key, ++editSequence.current)
   const [paramDrafts, setParamDrafts] = useState<Record<string, ParamDraft>>(() => draftsOf(device.params))
   const [errors, setErrors] = useState<Record<string, string | null>>({})
   const [armed, setArmed] = useState(false)
@@ -1236,20 +1242,36 @@ function DeviceSidebar({
     }
   }, [projectId, datasetVersionsReload])
 
-  // 编辑会话仅在选择另一设备时重建；保存响应不得重置未提交输入。
+  // 新侧栏可能先收到保存前的设备值。后续回包只同步未编辑字段，
+  // 每次用户输入的代次同时保护“改回旧值”及同字段连续提交。
   useEffect(() => {
-    pendingNameSaves.current = 0
-    setNameDraft(device.name)
-    setParamDrafts(draftsOf(device.params))
-    setErrors({})
-    setArmed(false)
-    // editorId 在重命名期间保持稳定，名称确认由对应提交的 Promise 同步。
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [device.editorId])
+    const switched = previousDevice.current.editorId !== device.editorId
+    previousDevice.current = device
+    if (switched) {
+      pendingNameSaves.current = 0
+      nameEdit.current = null
+      parameterEdits.current.clear()
+      sourceEdits.current.clear()
+      setErrors({})
+      setArmed(false)
+    }
+    if (nameEdit.current === null) setNameDraft(device.name)
+    const saved = draftsOf(device.params)
+    setParamDrafts((drafts) => {
+      const next = { ...drafts }
+      for (const key of new Set([...Object.keys(drafts), ...Object.keys(saved)])) {
+        if (parameterEdits.current.has(key)) continue
+        if (key in saved) next[key] = saved[key]
+        else delete next[key]
+      }
+      return next
+    })
+  }, [device.editorId, device.name, device.params])
 
   const paramKeys = useMemo(() => Object.keys(spec.parameters), [spec])
 
   const commitParam = (key: string, specParam: ParamSpecExt) => {
+    if (!parameterEdits.current.has(key)) return
     const draft = paramDrafts[key] ?? ''
     // 结构化参数(字典,如 import_tariff={peak,flat,valley}):子键全部填齐才提交。
     if (typeof draft === 'object') {
@@ -1258,7 +1280,7 @@ function DeviceSidebar({
       if (filled.length === 0) {
         const next = { ...device.params }
         delete next[key]
-        onPatch({ params: next }, [key])
+        saveParameterPatch({ params: next }, [key])
         setErrors((prev) => ({ ...prev, [key]: null }))
         return
       }
@@ -1275,7 +1297,7 @@ function DeviceSidebar({
         }
         obj[k] = v
       }
-      onPatch({ params: { ...device.params, [key]: obj } }, [key])
+      saveParameterPatch({ params: { ...device.params, [key]: obj } }, [key])
       setErrors((prev) => ({ ...prev, [key]: null }))
       return
     }
@@ -1283,7 +1305,7 @@ function DeviceSidebar({
     if (raw === '') {
       const next = { ...device.params }
       delete next[key]
-      onPatch({ params: next }, [key])
+      saveParameterPatch({ params: next }, [key])
       setErrors((prev) => ({ ...prev, [key]: null }))
       return
     }
@@ -1300,19 +1322,20 @@ function DeviceSidebar({
       setErrors((prev) => ({ ...prev, [key]: lt('sidebar.param_invalid', { min: specParam.min ?? '—', max: specParam.max ?? '—' }) }))
       return
     }
-    onPatch({ params: { ...device.params, [key]: value } }, [key])
+    saveParameterPatch({ params: { ...device.params, [key]: value } }, [key])
     setErrors((prev) => ({ ...prev, [key]: null }))
   }
 
   const restoreDefault = (key: string, specParam: ParamSpecExt) => {
+    touchParameter(key)
     const value = defaultParamValue(specParam as DeviceTypeSpec['parameters'][string], device.kind)
     setParamDrafts((prev) => ({ ...prev, [key]: draftsOfValue(value) }))
     if (value === null) {
       const next = { ...device.params }
       delete next[key]
-      onPatch({ params: next }, [key])
+      saveParameterPatch({ params: next }, [key])
     } else {
-      onPatch({ params: { ...device.params, [key]: value } }, [key])
+      saveParameterPatch({ params: { ...device.params, [key]: value } }, [key])
     }
     setErrors((prev) => ({ ...prev, [key]: null }))
   }
@@ -1331,6 +1354,7 @@ function DeviceSidebar({
       const target = defaultParamValue(specParam as DeviceTypeSpec['parameters'][string], kind)
       if (JSON.stringify(target) === JSON.stringify(current)) continue
       if (current === undefined || (typeof current === 'number' && current === other) || current === other) {
+        touchParameter(key)
         changedKeys.push(key)
         if (target === null) delete nextParams[key]
         else nextParams[key] = target
@@ -1345,7 +1369,7 @@ function DeviceSidebar({
       }
       return next
     })
-    onPatch({ kind, params: nextParams }, changedKeys)
+    saveParameterPatch({ kind, params: nextParams }, changedKeys)
   }
 
   const onDeleteClick = () => {
@@ -1359,8 +1383,8 @@ function DeviceSidebar({
 
   // ---- 预定义接口来源(实例显式事实) --------------------------------------
   type SourceDraft = { mode: string; value: string; datasetVersionId: string; targetType: string }
-  const draftFromParams = (iface: string): SourceDraft => {
-    const raw = device.params[iface]
+  const draftFromParams = (iface: string, params = device.params): SourceDraft => {
+    const raw = params[iface]
     if (typeof raw === 'number') {
       return { mode: 'constant', value: String(raw), datasetVersionId: '', targetType: '' }
     }
@@ -1379,15 +1403,46 @@ function DeviceSidebar({
   const [sourceDrafts, setSourceDrafts] = useState<Record<string, SourceDraft>>({})
 
   useEffect(() => {
-    const next: Record<string, SourceDraft> = {}
-    for (const port of predefinedPorts) next[port.name] = draftFromParams(port.name)
-    setSourceDrafts(next)
-    // 只在切换设备时从已保存参数重建草稿; 保存引起的 params 变化不得
-    // 清除用户正在编辑的未提交状态。
+    setSourceDrafts((drafts) => {
+      const next = { ...drafts }
+      for (const port of predefinedPorts) {
+        if (!sourceEdits.current.has(port.name)) next[port.name] = draftFromParams(port.name)
+      }
+      return next
+    })
+    // 来源和普通参数遵循同一逐字段同步规则，不覆盖未提交的模式/值/版本。
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [device.editorId])
+  }, [device.editorId, device.params, spec.ports])
+
+  const saveParameterPatch = (
+    patch: Partial<Pick<LocalDevice, 'name' | 'kind' | 'params'>>,
+    keys: string[],
+  ) => {
+    const editor = currentEditor.current
+    const parameters = new Map(keys.map((key) => [key, parameterEdits.current.get(key)]))
+    const sources = new Map(keys.map((key) => [key, sourceEdits.current.get(key)]))
+    return onPatch(patch, keys).then((saved) => {
+      if (!saved || currentEditor.current !== editor) return
+      const cleanParameters = keys.filter((key) =>
+        parameterEdits.current.get(key) === parameters.get(key))
+      const cleanSources = keys.filter((key) => sourceEdits.current.get(key) === sources.get(key))
+      for (const key of cleanParameters) parameterEdits.current.delete(key)
+      for (const key of cleanSources) sourceEdits.current.delete(key)
+      setParamDrafts((drafts) => {
+        const next = { ...drafts }
+        for (const key of cleanParameters) next[key] = draftsOfValue(saved.params[key])
+        return next
+      })
+      setSourceDrafts((drafts) => {
+        const next = { ...drafts }
+        for (const key of cleanSources) next[key] = draftFromParams(key, saved.params)
+        return next
+      })
+    })
+  }
 
   const patchSource = (iface: string, patch: Partial<SourceDraft>) => {
+    sourceEdits.current.set(iface, ++editSequence.current)
     setSourceDrafts((prev) => {
       const current = prev[iface] ?? draftFromParams(iface)
       return { ...prev, [iface]: { ...current, ...patch } }
@@ -1401,13 +1456,13 @@ function DeviceSidebar({
     if (!draft.mode) {
       const params: Record<string, unknown> = { ...device.params }
       delete params[iface]
-      onPatch({ params }, [iface])
+      saveParameterPatch({ params }, [iface])
       return true
     }
     if (draft.mode === 'constant') {
       const num = Number(draft.value)
       if (draft.value.trim() === '' || !Number.isFinite(num)) return false
-      onPatch({ params: { ...device.params, [iface]: num } }, [iface])
+      saveParameterPatch({ params: { ...device.params, [iface]: num } }, [iface])
       return true
     }
     if (!draft.datasetVersionId) return false
@@ -1418,11 +1473,12 @@ function DeviceSidebar({
     if (draft.mode === 'data_predict' && draft.targetType.trim()) {
       decl.target_type = draft.targetType.trim()
     }
-    onPatch({ params: { ...device.params, [iface]: decl } }, [iface])
+    saveParameterPatch({ params: { ...device.params, [iface]: decl } }, [iface])
     return true
   }
 
   const commitSource = (iface: string) => {
+    if (!sourceEdits.current.has(iface)) return
     const draft = sourceDrafts[iface] ?? draftFromParams(iface)
     const ok = persistSource(iface, draft)
     setSourceErrors((prev) => ({
@@ -1450,17 +1506,24 @@ function DeviceSidebar({
           <Input
             id="mp-device-name"
             value={nameDraft}
-            onChange={(event) => setNameDraft(event.target.value)}
+            onChange={(event) => {
+              nameEdit.current = ++editSequence.current
+              setNameDraft(event.target.value)
+            }}
             onBlur={() => {
               const name = nameDraft.trim()
-              if (name && (name !== device.name || pendingNameSaves.current > 0)) {
+              if (name && (name !== device.name || nameEdit.current !== null || pendingNameSaves.current > 0)) {
                 const submitted = nameDraft
-                const editor = device.editorId
+                const editor = currentEditor.current
+                const edit = nameEdit.current
                 pendingNameSaves.current += 1
                 void onPatch({ name }).then((saved) => {
                   if (currentEditor.current !== editor) return
                   pendingNameSaves.current -= 1
-                  if (saved) setNameDraft((draft) => draft === submitted ? saved.name : draft)
+                  if (saved && nameEdit.current === edit) {
+                    nameEdit.current = null
+                    setNameDraft((draft) => draft === submitted ? saved.name : draft)
+                  }
                 })
               }
             }}
@@ -1541,6 +1604,7 @@ function DeviceSidebar({
                           onChange={(event) => {
                             // 基于完整子键骨架合并(不能只展开 paramDrafts[key]:
                             // 未初始化时它是 undefined,展开后只剩当前编辑的子键,其余丢失)
+                            touchParameter(key)
                             setParamDrafts((prev) => ({
                               ...prev,
                               [key]: { ...dictDraft, [subKey]: event.target.value },
@@ -1559,7 +1623,10 @@ function DeviceSidebar({
                     aria-label={`${key}${p.unit ? ` (${p.unit})` : ''}`}
                     aria-describedby={errors[key] ? `mp-param-err-${key}` : undefined}
                     invalid={Boolean(errors[key])}
-                    onChange={(event) => setParamDrafts((prev) => ({ ...prev, [key]: event.target.value }))}
+                    onChange={(event) => {
+                      touchParameter(key)
+                      setParamDrafts((prev) => ({ ...prev, [key]: event.target.value }))
+                    }}
                     onBlur={() => commitParam(key, p)}
                   />
                 )}
