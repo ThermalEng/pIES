@@ -944,6 +944,12 @@ def _save_calc(client: TestClient, pid: int, user, body: dict) -> int:
     return resp.json()["revision"]
 
 
+def _generator_registry():
+    from iesplan.computation.generators import HIGHS_MILP_PROVIDER, build_registry
+
+    return build_registry((HIGHS_MILP_PROVIDER,))
+
+
 def _save_calc_case(db: Session, user, pid: int, body: dict, registry) -> int:
     """经保存用例直接落配置（合成算法在保存入口真实可用，带目录注入）。
 
@@ -954,7 +960,8 @@ def _save_calc_case(db: Session, user, pid: int, body: dict, registry) -> int:
     )
 
     saved = save_calculation_config_case(
-        db, user, pid, body, None, predictor_registry=registry
+        db, user, pid, body, None, predictor_registry=registry,
+        generator_registry=_generator_registry(),
     )
     return saved["revision"]
 
@@ -1826,15 +1833,18 @@ class TestPredictEndToEnd:
 
         with pytest.raises(AppError) as exc_info:
             save_calculation_config_case(
-                db, user, pid, _body({}), None, predictor_registry=registry
+                db, user, pid, _body({}), None, predictor_registry=registry,
+                generator_registry=_generator_registry(),
             )
         assert exc_info.value.code == "CONFIG-VAL-001"
         with pytest.raises(AppError):
             save_calculation_config_case(
-                db, user, pid, _body({"scale": 0}), None, predictor_registry=registry
+                db, user, pid, _body({"scale": 0}), None, predictor_registry=registry,
+                generator_registry=_generator_registry(),
             )
         saved = save_calculation_config_case(
-            db, user, pid, _body({"scale": 5.0}), None, predictor_registry=registry
+            db, user, pid, _body({"scale": 5.0}), None, predictor_registry=registry,
+            generator_registry=_generator_registry(),
         )
         assert saved["revision"] == 1
         # 未注册算法同样保存拒绝（不能冒充已校验配置落库）。
@@ -1848,11 +1858,13 @@ class TestPredictEndToEnd:
         ]
         with pytest.raises(AppError) as exc_info:
             save_calculation_config_case(
-                db, user, pid, unknown, 1, predictor_registry=registry
+                db, user, pid, unknown, 1, predictor_registry=registry,
+                generator_registry=_generator_registry(),
             )
         assert exc_info.value.code == "CONFIG-VAL-001"
         # 目录缺席而含预测目标同样不可用。
         with pytest.raises(AppError):
             save_calculation_config_case(
-                db, user, pid, _body({"scale": 5.0}), 1, predictor_registry=None
+                db, user, pid, _body({"scale": 5.0}), 1, predictor_registry=None,
+                generator_registry=_generator_registry(),
             )

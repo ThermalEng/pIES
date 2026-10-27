@@ -178,6 +178,9 @@ function ModelCanvas({ projectId }: { projectId: number }) {
   // 草稿修订(乐观锁): 已加载值, 写操作直接使用, 成功后以后端返回为准;
   // ref 镜像防连续写之间闭包过期, 写前不再 GET(单 PUT 即原子提交)。
   const revisionRef = useRef<number>(1)
+  const devicesRef = useRef(devices)
+  devicesRef.current = devices
+  const devicePatchQueue = useRef<Promise<LocalDevice | undefined>>(Promise.resolve(undefined))
   /** 写冲突(409)进冲突态: 提示加载服务器版本(本地画布未动, 与服务端一致)。 */
   const handleWriteError = useCallback(
     (err: unknown, onOther: () => void) => {
@@ -313,13 +316,13 @@ function ModelCanvas({ projectId }: { projectId: number }) {
   /** 默认名与已有效果冲突时追加序号(服务端 upsert 按名覆盖, 不可静默复用)。 */
   const uniqueDeviceName = useCallback(
     (base: string, exceptId: string | null = null): string => {
-      const taken = new Set(devices.filter((d) => d.id !== exceptId).map((d) => d.name))
+      const taken = new Set(devicesRef.current.filter((d) => d.id !== exceptId).map((d) => d.name))
       if (!taken.has(base)) return base
       let i = 2
       while (taken.has(`${base} ${i}`)) i += 1
       return `${base} ${i}`
     },
-    [devices],
+    [],
   )
 
   const addDevice = useCallback(
@@ -356,6 +359,7 @@ function ModelCanvas({ projectId }: { projectId: number }) {
         }
         const device: LocalDevice = {
           id: name,
+          editorId: Symbol(),
           deviceType: spec.type_id,
           kind: 'new',
           name,
@@ -381,88 +385,109 @@ function ModelCanvas({ projectId }: { projectId: number }) {
   )
 
   const patchDevice = useCallback(
-    async (deviceId: string, patch: Partial<Pick<LocalDevice, 'name' | 'kind' | 'params'>>) => {
-      const current = devices.find((d) => d.id === deviceId)
-      if (!current) return
-      const nextName = patch.name !== undefined ? patch.name.trim() : current.name
-      if (!nextName) return
-      const renamed = nextName !== current.name
-      const finalName = renamed ? uniqueDeviceName(nextName, deviceId) : current.name
-      const next = {
-        ...current,
-        ...patch,
-        id: finalName,
-        name: finalName,
-        params: patch.params ?? current.params,
-        kind: patch.kind ?? current.kind,
-      }
-      try {
-        // 写在途标保存中: 刷新按钮此间禁用, 读回旧修订不得覆盖本次保存。
-        setSaveState('saving')
-        if (!renamed) {
-          const { revision } = await upsertDevice(
-            projectId,
-            {
-              device_type: current.deviceType,
-              name: current.name,
-              kind: next.kind,
-              params: next.params,
-            },
-            revisionRef.current,
-          )
-          revisionRef.current = revision
-          setDevices((prev) => prev.map((d) => (d.id === deviceId ? next : d)))
-        } else {
-          // 原地改名保留实例来源、连接和布局，不触发新建模板输入。
-          const { revision } = await sendCommands(
-            projectId,
-            [
-              { type: 'model.rename_device', payload: { name: current.name, new_name: finalName } },
-              {
-                type: 'model.upsert_device',
-                payload: {
-                  name: finalName,
-                  device_type: current.deviceType,
-                  kind: next.kind,
-                  params: next.params,
-                },
-              },
-            ],
-            revisionRef.current,
-          )
-          revisionRef.current = revision
-          setDevices((prev) => prev.map((d) => (d.id === deviceId ? next : d)))
-          setConnections((prev) =>
-            prev.map((c) =>
-              c.fromDeviceId === deviceId || c.toDeviceId === deviceId
-                ? {
-                    ...c,
-                    fromDeviceId: c.fromDeviceId === deviceId ? finalName : c.fromDeviceId,
-                    toDeviceId: c.toDeviceId === deviceId ? finalName : c.toDeviceId,
-                  }
-                : c,
-            ),
-          )
-          // 布局跟随新键, 旧键清理
-          const layout = loadLayout(projectId)
-          if (layout[deviceId] !== undefined) {
-            layout[finalName] = layout[deviceId]
-            delete layout[deviceId]
-            saveLayout(projectId, layout)
-          }
-          setSelectedDeviceId(finalName)
+    async (selectedId: string, patch: Partial<Pick<LocalDevice, 'name' | 'kind' | 'params'>>, paramKeys: string[] = []) => {
+      const original = devices.find((d) => d.id === selectedId)
+      if (!original) return
+      // 排队时记录字段意图，执行时合并最新参数/名称/修订，避免旧整包覆盖。
+      const paramChanges = paramKeys.map((key) => ({
+        key, present: key in patch.params!, value: patch.params![key],
+      }))
+      const execute = async () => {
+        if (cancelledRef.current) return
+        const current = devicesRef.current.find((d) => d.editorId === original.editorId)
+        if (!current) return
+        const deviceId = current.id
+        const params = { ...current.params }
+        for (const change of paramChanges) {
+          if (change.present) params[change.key] = change.value
+          else delete params[change.key]
         }
-        setSaveState('saved')
-        setAutosave('saved')
-      } catch (err) {
-        handleWriteError(err, () => {
-          setLastError(errorMessage(err))
-          setSaveState('error')
-          setAutosave('error')
-        })
+        const nextName = patch.name !== undefined ? patch.name.trim() : current.name
+        if (!nextName) return
+        const renamed = nextName !== current.name
+        const finalName = renamed ? uniqueDeviceName(nextName, deviceId) : current.name
+        const next = {
+          ...current,
+          ...patch,
+          id: finalName,
+          name: finalName,
+          params,
+          kind: patch.kind ?? current.kind,
+        }
+        try {
+          // 写在途标保存中: 刷新按钮此间禁用, 读回旧修订不得覆盖本次保存。
+          setSaveState('saving')
+          if (!renamed) {
+            const { revision } = await upsertDevice(
+              projectId,
+              {
+                device_type: current.deviceType,
+                name: current.name,
+                kind: next.kind,
+                params: next.params,
+              },
+              revisionRef.current,
+            )
+            revisionRef.current = revision
+            devicesRef.current = devicesRef.current.map((d) => (d.id === deviceId ? next : d))
+            setDevices(devicesRef.current)
+          } else {
+            // 原地改名保留实例来源、连接和布局，不触发新建模板输入。
+            const { revision } = await sendCommands(
+              projectId,
+              [
+                { type: 'model.rename_device', payload: { name: current.name, new_name: finalName } },
+                {
+                  type: 'model.upsert_device',
+                  payload: {
+                    name: finalName,
+                    device_type: current.deviceType,
+                    kind: next.kind,
+                    params: next.params,
+                  },
+                },
+              ],
+              revisionRef.current,
+            )
+            revisionRef.current = revision
+            devicesRef.current = devicesRef.current.map((d) => (d.id === deviceId ? next : d))
+            setDevices(devicesRef.current)
+            setConnections((prev) =>
+              prev.map((c) =>
+                c.fromDeviceId === deviceId || c.toDeviceId === deviceId
+                  ? {
+                      ...c,
+                      fromDeviceId: c.fromDeviceId === deviceId ? finalName : c.fromDeviceId,
+                      toDeviceId: c.toDeviceId === deviceId ? finalName : c.toDeviceId,
+                    }
+                  : c,
+              ),
+            )
+            // 布局跟随新键, 旧键清理
+            const layout = loadLayout(projectId)
+            if (layout[deviceId] !== undefined) {
+              layout[finalName] = layout[deviceId]
+              delete layout[deviceId]
+              saveLayout(projectId, layout)
+            }
+            setSelectedDeviceId((selected) => selected === deviceId ? finalName : selected)
+          }
+          setSaveState('saved')
+          setAutosave('saved')
+          return next
+        } catch (err) {
+          handleWriteError(err, () => {
+            setLastError(errorMessage(err))
+            setSaveState('error')
+            setAutosave('error')
+          })
+        }
       }
+      const pending = devicePatchQueue.current.then(execute)
+      devicePatchQueue.current = pending
+      return pending
     },
-    [devices, connections, projectId, setAutosave, uniqueDeviceName, handleWriteError],
+    [devices, projectId, setAutosave, uniqueDeviceName, handleWriteError],
   )
 
   const deleteDevice = useCallback(
@@ -944,7 +969,7 @@ function ModelCanvas({ projectId }: { projectId: number }) {
               projectId={projectId}
               device={selectedDevice}
               spec={specOf(selectedDevice.deviceType) ?? EMPTY_SPEC}
-              onPatch={(patch) => patchDevice(selectedDevice.id, patch)}
+              onPatch={(patch, paramKeys) => patchDevice(selectedDevice.id, patch, paramKeys)}
               onDelete={() => deleteDevice(selectedDevice.id)}
               onClose={() => setSelectedDeviceId(null)}
             />
@@ -1164,12 +1189,21 @@ function DeviceSidebar({
   projectId: number
   device: LocalDevice
   spec: ExtendedDeviceTypeSpec
-  onPatch: (patch: Partial<Pick<LocalDevice, 'name' | 'kind' | 'params'>>) => void
+  onPatch: (patch: Partial<Pick<LocalDevice, 'name' | 'kind' | 'params'>>, paramKeys?: string[]) => Promise<LocalDevice | undefined>
   onDelete: () => void
   onClose: () => void
 }) {
   const { t } = useI18n()
   const [nameDraft, setNameDraft] = useState(device.name)
+  const currentEditor = useRef({ id: device.editorId })
+  if (currentEditor.current.id !== device.editorId) currentEditor.current = { id: device.editorId }
+  const pendingNameSaves = useRef(0)
+  const editSequence = useRef(0)
+  const nameEdit = useRef<number | null>(null)
+  const parameterEdits = useRef(new Map<string, number>())
+  const sourceEdits = useRef(new Map<string, number>())
+  const previousDevice = useRef(device)
+  const touchParameter = (key: string) => parameterEdits.current.set(key, ++editSequence.current)
   const [paramDrafts, setParamDrafts] = useState<Record<string, ParamDraft>>(() => draftsOf(device.params))
   const [errors, setErrors] = useState<Record<string, string | null>>({})
   const [armed, setArmed] = useState(false)
@@ -1208,17 +1242,36 @@ function DeviceSidebar({
     }
   }, [projectId, datasetVersionsReload])
 
-  // 切换设备时重置表单草稿
+  // 新侧栏可能先收到保存前的设备值。后续回包只同步未编辑字段，
+  // 每次用户输入的代次同时保护“改回旧值”及同字段连续提交。
   useEffect(() => {
-    setNameDraft(device.name)
-    setParamDrafts(draftsOf(device.params))
-    setErrors({})
-    setArmed(false)
-  }, [device.id, device.name, device.params])
+    const switched = previousDevice.current.editorId !== device.editorId
+    previousDevice.current = device
+    if (switched) {
+      pendingNameSaves.current = 0
+      nameEdit.current = null
+      parameterEdits.current.clear()
+      sourceEdits.current.clear()
+      setErrors({})
+      setArmed(false)
+    }
+    if (nameEdit.current === null) setNameDraft(device.name)
+    const saved = draftsOf(device.params)
+    setParamDrafts((drafts) => {
+      const next = { ...drafts }
+      for (const key of new Set([...Object.keys(drafts), ...Object.keys(saved)])) {
+        if (parameterEdits.current.has(key)) continue
+        if (key in saved) next[key] = saved[key]
+        else delete next[key]
+      }
+      return next
+    })
+  }, [device.editorId, device.name, device.params])
 
   const paramKeys = useMemo(() => Object.keys(spec.parameters), [spec])
 
   const commitParam = (key: string, specParam: ParamSpecExt) => {
+    if (!parameterEdits.current.has(key)) return
     const draft = paramDrafts[key] ?? ''
     // 结构化参数(字典,如 import_tariff={peak,flat,valley}):子键全部填齐才提交。
     if (typeof draft === 'object') {
@@ -1227,7 +1280,7 @@ function DeviceSidebar({
       if (filled.length === 0) {
         const next = { ...device.params }
         delete next[key]
-        onPatch({ params: next })
+        saveParameterPatch({ params: next }, [key])
         setErrors((prev) => ({ ...prev, [key]: null }))
         return
       }
@@ -1244,7 +1297,7 @@ function DeviceSidebar({
         }
         obj[k] = v
       }
-      onPatch({ params: { ...device.params, [key]: obj } })
+      saveParameterPatch({ params: { ...device.params, [key]: obj } }, [key])
       setErrors((prev) => ({ ...prev, [key]: null }))
       return
     }
@@ -1252,7 +1305,7 @@ function DeviceSidebar({
     if (raw === '') {
       const next = { ...device.params }
       delete next[key]
-      onPatch({ params: next })
+      saveParameterPatch({ params: next }, [key])
       setErrors((prev) => ({ ...prev, [key]: null }))
       return
     }
@@ -1269,19 +1322,20 @@ function DeviceSidebar({
       setErrors((prev) => ({ ...prev, [key]: lt('sidebar.param_invalid', { min: specParam.min ?? '—', max: specParam.max ?? '—' }) }))
       return
     }
-    onPatch({ params: { ...device.params, [key]: value } })
+    saveParameterPatch({ params: { ...device.params, [key]: value } }, [key])
     setErrors((prev) => ({ ...prev, [key]: null }))
   }
 
   const restoreDefault = (key: string, specParam: ParamSpecExt) => {
+    touchParameter(key)
     const value = defaultParamValue(specParam as DeviceTypeSpec['parameters'][string], device.kind)
     setParamDrafts((prev) => ({ ...prev, [key]: draftsOfValue(value) }))
     if (value === null) {
       const next = { ...device.params }
       delete next[key]
-      onPatch({ params: next })
+      saveParameterPatch({ params: next }, [key])
     } else {
-      onPatch({ params: { ...device.params, [key]: value } })
+      saveParameterPatch({ params: { ...device.params, [key]: value } }, [key])
     }
     setErrors((prev) => ({ ...prev, [key]: null }))
   }
@@ -1291,16 +1345,31 @@ function DeviceSidebar({
     // 保留用户已修改的参数,仅替换"仍为另一属性默认值"的参数
     const otherDefaults = buildDefaultParams(spec as DeviceTypeSpec, kind === 'existing' ? 'new' : 'existing')
     const nextParams: Record<string, unknown> = { ...device.params }
+    const changedKeys: string[] = []
     for (const [key, specParam] of Object.entries(spec.parameters)) {
       const current = device.params[key]
+      // blur 保存可能尚未返回；当前输入已改变的字段不再套用旧默认值。
+      if (JSON.stringify(paramDrafts[key] ?? '') !== JSON.stringify(draftsOfValue(current))) continue
       const other = otherDefaults[key]
       const target = defaultParamValue(specParam as DeviceTypeSpec['parameters'][string], kind)
+      if (JSON.stringify(target) === JSON.stringify(current)) continue
       if (current === undefined || (typeof current === 'number' && current === other) || current === other) {
+        touchParameter(key)
+        changedKeys.push(key)
         if (target === null) delete nextParams[key]
         else nextParams[key] = target
       }
     }
-    onPatch({ kind, params: nextParams })
+    const drafts = draftsOf(nextParams)
+    setParamDrafts((previous) => {
+      const next = { ...previous }
+      for (const key of changedKeys) {
+        if (key in drafts) next[key] = drafts[key]
+        else delete next[key]
+      }
+      return next
+    })
+    saveParameterPatch({ kind, params: nextParams }, changedKeys)
   }
 
   const onDeleteClick = () => {
@@ -1314,8 +1383,8 @@ function DeviceSidebar({
 
   // ---- 预定义接口来源(实例显式事实) --------------------------------------
   type SourceDraft = { mode: string; value: string; datasetVersionId: string; targetType: string }
-  const draftFromParams = (iface: string): SourceDraft => {
-    const raw = device.params[iface]
+  const draftFromParams = (iface: string, params = device.params): SourceDraft => {
+    const raw = params[iface]
     if (typeof raw === 'number') {
       return { mode: 'constant', value: String(raw), datasetVersionId: '', targetType: '' }
     }
@@ -1334,15 +1403,46 @@ function DeviceSidebar({
   const [sourceDrafts, setSourceDrafts] = useState<Record<string, SourceDraft>>({})
 
   useEffect(() => {
-    const next: Record<string, SourceDraft> = {}
-    for (const port of predefinedPorts) next[port.name] = draftFromParams(port.name)
-    setSourceDrafts(next)
-    // 只在切换设备时从已保存参数重建草稿; 保存引起的 params 变化不得
-    // 清除用户正在编辑的未提交状态。
+    setSourceDrafts((drafts) => {
+      const next = { ...drafts }
+      for (const port of predefinedPorts) {
+        if (!sourceEdits.current.has(port.name)) next[port.name] = draftFromParams(port.name)
+      }
+      return next
+    })
+    // 来源和普通参数遵循同一逐字段同步规则，不覆盖未提交的模式/值/版本。
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [device.id])
+  }, [device.editorId, device.params, spec.ports])
+
+  const saveParameterPatch = (
+    patch: Partial<Pick<LocalDevice, 'name' | 'kind' | 'params'>>,
+    keys: string[],
+  ) => {
+    const editor = currentEditor.current
+    const parameters = new Map(keys.map((key) => [key, parameterEdits.current.get(key)]))
+    const sources = new Map(keys.map((key) => [key, sourceEdits.current.get(key)]))
+    return onPatch(patch, keys).then((saved) => {
+      if (!saved || currentEditor.current !== editor) return
+      const cleanParameters = keys.filter((key) =>
+        parameterEdits.current.get(key) === parameters.get(key))
+      const cleanSources = keys.filter((key) => sourceEdits.current.get(key) === sources.get(key))
+      for (const key of cleanParameters) parameterEdits.current.delete(key)
+      for (const key of cleanSources) sourceEdits.current.delete(key)
+      setParamDrafts((drafts) => {
+        const next = { ...drafts }
+        for (const key of cleanParameters) next[key] = draftsOfValue(saved.params[key])
+        return next
+      })
+      setSourceDrafts((drafts) => {
+        const next = { ...drafts }
+        for (const key of cleanSources) next[key] = draftFromParams(key, saved.params)
+        return next
+      })
+    })
+  }
 
   const patchSource = (iface: string, patch: Partial<SourceDraft>) => {
+    sourceEdits.current.set(iface, ++editSequence.current)
     setSourceDrafts((prev) => {
       const current = prev[iface] ?? draftFromParams(iface)
       return { ...prev, [iface]: { ...current, ...patch } }
@@ -1356,13 +1456,13 @@ function DeviceSidebar({
     if (!draft.mode) {
       const params: Record<string, unknown> = { ...device.params }
       delete params[iface]
-      onPatch({ params })
+      saveParameterPatch({ params }, [iface])
       return true
     }
     if (draft.mode === 'constant') {
       const num = Number(draft.value)
       if (draft.value.trim() === '' || !Number.isFinite(num)) return false
-      onPatch({ params: { ...device.params, [iface]: num } })
+      saveParameterPatch({ params: { ...device.params, [iface]: num } }, [iface])
       return true
     }
     if (!draft.datasetVersionId) return false
@@ -1373,11 +1473,12 @@ function DeviceSidebar({
     if (draft.mode === 'data_predict' && draft.targetType.trim()) {
       decl.target_type = draft.targetType.trim()
     }
-    onPatch({ params: { ...device.params, [iface]: decl } })
+    saveParameterPatch({ params: { ...device.params, [iface]: decl } }, [iface])
     return true
   }
 
   const commitSource = (iface: string) => {
+    if (!sourceEdits.current.has(iface)) return
     const draft = sourceDrafts[iface] ?? draftFromParams(iface)
     const ok = persistSource(iface, draft)
     setSourceErrors((prev) => ({
@@ -1405,10 +1506,26 @@ function DeviceSidebar({
           <Input
             id="mp-device-name"
             value={nameDraft}
-            onChange={(event) => setNameDraft(event.target.value)}
+            onChange={(event) => {
+              nameEdit.current = ++editSequence.current
+              setNameDraft(event.target.value)
+            }}
             onBlur={() => {
               const name = nameDraft.trim()
-              if (name && name !== device.name) onPatch({ name })
+              if (name && (name !== device.name || nameEdit.current !== null || pendingNameSaves.current > 0)) {
+                const submitted = nameDraft
+                const editor = currentEditor.current
+                const edit = nameEdit.current
+                pendingNameSaves.current += 1
+                void onPatch({ name }).then((saved) => {
+                  if (currentEditor.current !== editor) return
+                  pendingNameSaves.current -= 1
+                  if (saved && nameEdit.current === edit) {
+                    nameEdit.current = null
+                    setNameDraft((draft) => draft === submitted ? saved.name : draft)
+                  }
+                })
+              }
             }}
           />
         </div>
@@ -1487,6 +1604,7 @@ function DeviceSidebar({
                           onChange={(event) => {
                             // 基于完整子键骨架合并(不能只展开 paramDrafts[key]:
                             // 未初始化时它是 undefined,展开后只剩当前编辑的子键,其余丢失)
+                            touchParameter(key)
                             setParamDrafts((prev) => ({
                               ...prev,
                               [key]: { ...dictDraft, [subKey]: event.target.value },
@@ -1505,7 +1623,10 @@ function DeviceSidebar({
                     aria-label={`${key}${p.unit ? ` (${p.unit})` : ''}`}
                     aria-describedby={errors[key] ? `mp-param-err-${key}` : undefined}
                     invalid={Boolean(errors[key])}
-                    onChange={(event) => setParamDrafts((prev) => ({ ...prev, [key]: event.target.value }))}
+                    onChange={(event) => {
+                      touchParameter(key)
+                      setParamDrafts((prev) => ({ ...prev, [key]: event.target.value }))
+                    }}
                     onBlur={() => commitParam(key, p)}
                   />
                 )}

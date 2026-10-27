@@ -64,9 +64,9 @@ def _inputs(*, resolution="1h", start_year=2024, rate="12",
         }
     profile["profile"]["price_basis"] = basis
     if sales:
-        # The sale meter must be the receiving (in) interface at the system
-        # boundary, not the heater's technical heat_out (out) port. The
-        # 7 kW heat-load equality makes metered output physically measurable.
+        # This sale meter explicitly selects the load's receiving heat_in port,
+        # rather than the heater's out port; either direction may be sold.
+        # The 7 kW heat-load equality makes the selected flow measurable.
         doc["tariff_bindings"] = {
             "heat_sales_meter": {
                 "price": "heat_sale", "instance": "load1",

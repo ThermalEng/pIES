@@ -31,6 +31,8 @@ import type {
 export interface LocalDevice {
   /** 本地 id 即设备名(2.0 名键唯一事实; 改名即换键, 调用方同步连接引用与布局)。 */
   id: string
+  /** 仅用于编辑会话，重命名时保持不变。 */
+  editorId: symbol
   deviceType: string
   kind: DeviceKind
   name: string
@@ -266,6 +268,7 @@ export function deviceFromDraft(
 ): LocalDevice {
   return {
     id: device.name,
+    editorId: Symbol(),
     deviceType: device.device_type,
     kind: device.kind,
     name: device.name,

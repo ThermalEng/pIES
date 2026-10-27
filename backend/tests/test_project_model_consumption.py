@@ -61,7 +61,7 @@ AUX_TYPE_FINAL = f"{AUX_TYPE_BASE}_2"
 
 SINK_YAML = """
 schema: ies.device-model
-schema_version: "2.1.0"
+schema_version: "2.2.0"
 device:
   id: acme.device.consumption_load
   names:
@@ -92,7 +92,7 @@ equations:
 #: 第二样例(同形态、不同稳定 ID; 引用重建语义回归)。
 AUX_YAML = """
 schema: ies.device-model
-schema_version: "2.1.0"
+schema_version: "2.2.0"
 device:
   id: acme.device.standby_load
   names:
@@ -468,7 +468,7 @@ def test_snapshot_freezes_project_model_math(
     revision = _declare_assembly(
         client, owner, pid, revision, {"load2": {"type": "none"}, "gas1": {"type": "none"}}
     )
-    saved = save_calculation_config_case(db, owner, pid, dict(CONFIG_BODY), None)
+    saved = save_calculation_config_case(db, owner, pid, dict(CONFIG_BODY), None, generator_registry=_registry(client))
 
     task, flags = tasks_uc.submit_task(
         db,
@@ -509,7 +509,7 @@ def test_snapshot_freezes_project_model_math(
     assert assembly["devices"]["load2"]["definition"]["id"] == SINK_TYPE_FINAL
     assert assembly["devices"]["load2"]["properties"]["rated_demand_kw"]["value"] == 20
     # 依赖锁记录项目模型的契约版本。
-    assert snapshot.assembly_receipt["dependencies"]["devices"][SINK_TYPE_FINAL] == "2.1.0"
+    assert snapshot.assembly_receipt["dependencies"]["devices"][SINK_TYPE_FINAL] == "2.2.0"
 
     # 历史任务不读当前草稿: 删除项目模型后, 既有快照冻结内容原样保留。
     frozen_before = snapshot.device_models

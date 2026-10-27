@@ -11,6 +11,7 @@ revision 递增 → 乐观锁 409 → 权限 403 → 保存不碰草稿内容对
 from __future__ import annotations
 
 from collections.abc import Iterator
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -24,6 +25,8 @@ from iesplan.api.auth import router as auth_router
 from iesplan.api.config import config_router
 from iesplan.api.deps import get_request_db
 from iesplan.application import identity
+from iesplan.computation.generators import HIGHS_MILP_PROVIDER, build_registry
+from iesplan.computation.generators.descriptor import GeneratorDescriptor
 from iesplan.db import Base
 from iesplan.identity.persistence import User
 from iesplan.main import _register_exception_handlers
@@ -85,6 +88,10 @@ def make_app(db: Session) -> FastAPI:
     application = FastAPI(title="pIES Config API Test")
     application.include_router(auth_router)
     application.include_router(config_router)
+    application.state.bootstrap_context = SimpleNamespace(
+        generator_registry=build_registry((HIGHS_MILP_PROVIDER,)),
+        predictor_registry=None,
+    )
     _register_exception_handlers(application)
     application.dependency_overrides[get_request_db] = lambda: db
     return application
@@ -111,7 +118,7 @@ def _valid_payload() -> dict[str, Any]:
         "schema_version": "2.0.0",
         "mode": "planning",
         "predictions": [],
-        "generator": "ies.generator.highs_milp@3.4.0",
+        "generator": "ies.generator.highs_milp@5.0.0",
         "solver": "ies.solver.highs@1.7.2",
         "precision": "medium",
         "convergence": None,
@@ -188,14 +195,14 @@ def test_save_second_bumps_revision(client: TestClient, db: Session) -> None:
         json={"calculation_config": first, "expected_revision": None},
     )
     assert resp.status_code == 200, resp.text
-    second = {**first, "precision": "high", "seed": 7}
+    second = {**first, "seed": 7}
     resp = client.put(
         f"/api/projects/{project.id}/config",
         json={"calculation_config": second, "expected_revision": 1},
     )
     assert resp.status_code == 200, resp.text
     assert resp.json()["revision"] == 2
-    assert resp.json()["calculation_config"]["precision"] == "high"
+    assert resp.json()["calculation_config"]["seed"] == 7
 
     resp = client.get(f"/api/projects/{project.id}/config")
     assert resp.json() == {"calculation_config": second, "revision": 2}
@@ -262,3 +269,84 @@ def test_save_does_not_touch_draft_content(client: TestClient, db: Session) -> N
     after = db.execute(select(Draft).where(Draft.project_id == project.id)).scalar_one_or_none()
     after_oid = after.content_object_id if after is not None else None
     assert before == after_oid
+
+
+class _SyntheticGenerator:
+    """只有公开 descriptor 的合成生成器：保存测试不得调用 generate。"""
+
+    def __init__(self) -> None:
+        self.descriptor = GeneratorDescriptor(
+            generator_id="test.generator.flex",
+            version="1.0.0",
+            assembly_schema_version="2.0",
+            options_schema={"type": "object", "additionalProperties": False},
+            modes=("dispatch",),
+            precisions=("low", "high"),
+            solvers=("test.solver.flex@2.0.0",),
+            outputs=("trace", "metrics"),
+            result_adapter="test.result.adapter@1.0.0",
+            unit_system="SI",
+            seed_semantics="synthetic fixed seed",
+        )
+
+    @property
+    def ref(self) -> str:
+        return self.descriptor.ref
+
+    def available(self) -> bool:
+        return True
+
+    def generate(self, *args: Any) -> None:
+        raise AssertionError("保存能力校验不得生成 Bundle")
+
+
+def test_save_uses_selected_public_descriptor_for_all_static_choices(
+    client: TestClient, db: Session,
+) -> None:
+    """公开保存边界支持非 medium 能力，并逐项拒绝模式、精度、solver、outputs。"""
+    project = seed_project(db)
+    generator = _SyntheticGenerator()
+    client.app.state.bootstrap_context.generator_registry = build_registry((generator,))
+    body = {
+        **_valid_payload(), "generator": generator.ref, "mode": "dispatch",
+        "precision": "high", "solver": "test.solver.flex@2.0.0",
+        "outputs": ["trace", "metrics"],
+    }
+    cases = [
+        ("mode", "planning", "ies.config.unsupported_mode"),
+        ("precision", "medium", "ies.config.unsupported_precision"),
+        ("solver", "test.solver.other@2.0.0", "ies.config.unsupported_solver"),
+        ("outputs", ["trace", "unknown"], "ies.config.unsupported_outputs"),
+        ("generator", "test.generator.missing@1.0.0", "ies.config.unsupported_generator"),
+    ]
+    for field, invalid, key in cases:
+        resp = client.put(
+            f"/api/projects/{project.id}/config",
+            json={"calculation_config": {**body, field: invalid}, "expected_revision": None},
+        )
+        assert resp.status_code == 422, (field, resp.text)
+        err = resp.json()["error"]
+        assert err["code"] == "CONFIG-VAL-001"
+        assert err["message_key"] == key
+        assert err["location"]["field"] == field
+        assert err["params"]["supported"]
+
+    assert client.get(f"/api/projects/{project.id}/config").status_code == 404
+    accepted = client.put(
+        f"/api/projects/{project.id}/config",
+        json={"calculation_config": body, "expected_revision": None},
+    )
+    assert accepted.status_code == 200, accepted.text
+    assert accepted.json()["calculation_config"] == body
+
+
+def test_builtin_precision_is_descriptor_driven(client: TestClient, db: Session) -> None:
+    project = seed_project(db)
+    invalid = {**_valid_payload(), "precision": "low"}
+    resp = client.put(
+        f"/api/projects/{project.id}/config",
+        json={"calculation_config": invalid, "expected_revision": None},
+    )
+    assert resp.status_code == 422, resp.text
+    assert resp.json()["error"]["location"]["field"] == "precision"
+    assert resp.json()["error"]["params"]["supported"] == "medium"

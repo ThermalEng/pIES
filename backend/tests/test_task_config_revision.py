@@ -261,12 +261,12 @@ def test_pinned_body_frozen_and_isolated(
     """两 revision 各自冻结正文 + config_ref; 改最新不影响既有快照。"""
     owner = make_user(db, "owner_bind_freeze")
     pid = _prepare_project(client, db, owner)
-    rev1 = _save_config(client, pid, owner, _body(seed=11, outputs=["a"]))
+    rev1 = _save_config(client, pid, owner, _body(seed=11, outputs=["solution"]))
     status, body = _submit(client, pid, owner, {"config_revision": rev1}, key="frz-1")
     assert status == 201, body
     task1 = body["task"]
     rev2 = _save_config(
-        client, pid, owner, _body(seed=22, outputs=["b"]), expected_revision=rev1
+        client, pid, owner, _body(seed=22, outputs=["metrics"]), expected_revision=rev1
     )
     assert rev2 == 2
 
@@ -282,8 +282,8 @@ def test_pinned_body_frozen_and_isolated(
     # 冻结内容按领域 canonical 语义比较(jsonable: 元组/列表归一, 与复用判定一致)
     frozen1 = jsonable(dict(snap1.calc_config_snapshot))
     frozen2 = jsonable(dict(snap2.calc_config_snapshot))
-    assert frozen1["seed"] == 11 and frozen1["outputs"] == ["a"]
-    assert frozen2["seed"] == 22 and frozen2["outputs"] == ["b"]
+    assert frozen1["seed"] == 11 and frozen1["outputs"] == ["solution"]
+    assert frozen2["seed"] == 22 and frozen2["outputs"] == ["metrics"]
     assert frozen1["config_ref"] == {"project_id": pid, "revision": 1}
     assert frozen2["config_ref"] == {"project_id": pid, "revision": 2}
     assert "config_revision" not in frozen1.get("task_params", {})
@@ -636,28 +636,35 @@ def test_snapshot_schema_version_written_and_scoped_to_reuse(
 
 
 def test_unknown_generator_ref_rejected(client: TestClient, db: Session) -> None:
-    """旧算法引用不隐式映射: 提交时解析失败 → 400 TASK-REQ-007。"""
+    """旧算法引用在保存输入边界拒绝，不再可冻结成任务。"""
     owner = make_user(db, "owner_old_algo")
     pid = _prepare_project(client, db, owner)
     rev = _save_config(client, pid, owner)
     body = _body(generator="ies.algo.milp_hybrid@1.0.0")
-    new_rev = _save_config(client, pid, owner, body, rev)
-    assert new_rev == rev + 1
-    status, resp = _submit(client, pid, owner, {"config_revision": new_rev}, key="oldalgo-1")
-    assert status == 400, resp
-    assert resp["error"]["code"] == "TASK-REQ-007"
+    resp = client.put(
+        f"/api/projects/{pid}/config",
+        json={"calculation_config": body, "expected_revision": rev},
+        headers=_h(client, owner),
+    )
+    assert resp.status_code == 422, resp.text
+    assert resp.json()["error"]["location"]["field"] == "generator"
+    assert _save_config(client, pid, owner, expected_revision=rev) == rev + 1
 
 
 def test_solver_not_in_descriptor_rejected(client: TestClient, db: Session) -> None:
-    """solver 不在所选生成器兼容清单 → 400 TASK-REQ-008。"""
+    """solver 不在所选生成器兼容清单 → 保存时 422，阻断任务。"""
     owner = make_user(db, "owner_bad_solver")
     pid = _prepare_project(client, db, owner)
     rev = _save_config(client, pid, owner)
     body = _body(solver="ies.solver.unknown@9.9.9")
-    new_rev = _save_config(client, pid, owner, body, rev)
-    status, resp = _submit(client, pid, owner, {"config_revision": new_rev}, key="badsolver-1")
-    assert status == 400, resp
-    assert resp["error"]["code"] == "TASK-REQ-008"
+    resp = client.put(
+        f"/api/projects/{pid}/config",
+        json={"calculation_config": body, "expected_revision": rev},
+        headers=_h(client, owner),
+    )
+    assert resp.status_code == 422, resp.text
+    assert resp.json()["error"]["location"]["field"] == "solver"
+    assert _save_config(client, pid, owner, expected_revision=rev) == rev + 1
 
 
 def test_execution_refs_frozen_from_descriptor(
@@ -724,6 +731,7 @@ def test_ambiguous_executors_blocked_without_guessing() -> None:
         options_schema={"type": "object", "additionalProperties": False},
         assembly_schema_version="2.0",
         modes=("planning",),
+        outputs=("solution",),
         precisions=("medium",),
         solvers=("ies.solver.highs@1.7.2",),
         executors=("ies.executor.a@1.0.0", "ies.executor.b@1.0.0"),

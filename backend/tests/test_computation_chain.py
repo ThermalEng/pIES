@@ -82,6 +82,62 @@ def _mps_dot(order: list[str], coefficients: dict[str, float], primals: list[flo
     return sum(coefficients[name] * primals[indices[name]] for name in coefficients)
 
 
+def _diagnose_mps(bundle, label: str) -> None:
+    """CI 定向证据：实际全年 MPS 的规模和数值量级，不影响求解文件。"""
+    mps = bundle.files[PROBLEM_PATH].decode("utf-8")
+    section = ""
+    row_count = binary_count = 0
+    columns = set()
+    ranges = {"coeff": [], "rhs": [], "bound": []}
+    for line in mps.splitlines():
+        if line in ("ROWS", "COLUMNS", "RHS", "BOUNDS", "OBJSENSE", "ENDATA"):
+            section = line
+            continue
+        fields = line.split()
+        if not fields:
+            continue
+        if section == "ROWS" and fields[0] in ("E", "L", "G"):
+            row_count += 1
+        elif section == "COLUMNS" and fields[0] != "INTORG" and fields[0] != "INTEND":
+            columns.add(fields[0])
+            for index in range(2, len(fields), 2):
+                value = abs(float(fields[index]))
+                if value:
+                    ranges["coeff"].append(value)
+        elif section == "RHS":
+            for index in range(2, len(fields), 2):
+                value = abs(float(fields[index]))
+                if value:
+                    ranges["rhs"].append(value)
+        elif section == "BOUNDS":
+            if fields[0] == "BV":
+                binary_count += 1
+            if len(fields) > 3:
+                value = abs(float(fields[3]))
+                if value:
+                    ranges["bound"].append(value)
+    extremes = {
+        name: (min(values), max(values)) if values else (None, None)
+        for name, values in ranges.items()
+    }
+    _STAGE_LOG.warning(
+        "CI_MPS %s rows=%d columns=%d binary=%d bytes=%d coeff=%r rhs=%r bound=%r",
+        label, row_count, len(columns), binary_count, len(mps), *extremes.values(),
+    )
+
+
+def _report_solver_receipt(stage: str, receipt) -> None:
+    """保留真实超时回执和 HiGHS presolve/B&B 证据，不填充伪解。"""
+    if receipt.status != "succeeded":
+        _STAGE_LOG.warning(
+            "CI_SOLVER %s status=%s reason=%s code=%s stdout_head=%r stdout_tail=%r "
+            "stderr_tail=%r output_truncated=%s",
+            stage, receipt.status, receipt.termination_reason, receipt.exit_code,
+            receipt.stdout[:1500], receipt.stdout[-6500:],
+            receipt.stderr[-1500:], receipt.stdout_truncated,
+        )
+
+
 def _campus_evaluation():
     """campus 合成评价确认（与物化同一 N=1/K=0 口径，冻结值直传）。"""
     from iesplan.finance import EvaluationInput
@@ -150,7 +206,9 @@ def _generate_bundle(inputs):
     artifact, models, materialized, finance, config, evaluation = inputs
     provider = build_registry((HIGHS_MILP_PROVIDER,)).resolve(config)
     assert provider is HIGHS_MILP_PROVIDER
-    return provider.generate(artifact, models, materialized, finance, config, evaluation)
+    bundle = provider.generate(artifact, models, materialized, finance, config, evaluation)
+    _diagnose_mps(bundle, "campus")
+    return bundle
 
 
 def _runtime(policy=None) -> SolverRuntime:
@@ -260,6 +318,9 @@ def _mps_columns_and_objective(raw: bytes) -> tuple[list[str], dict[str, float]]
     return order, coeffs
 
 
+
+
+
 def test_chain_success_reports_business_result() -> None:
     """成功链：求解→回执→解释，业务数值/单位/追溯一致且确定。"""
     inputs = _timed("business.inputs", _campus_inputs)
@@ -271,6 +332,7 @@ def test_chain_success_reports_business_result() -> None:
 
     runtime = _runtime()
     receipt, collected = _timed("business.solve_first", runtime.run, bundle, _attempt("ok"))
+    _report_solver_receipt("business.solve_first", receipt)
     assert receipt.status == "succeeded"
     assert receipt.exit_code == 0
     assert receipt.executor_ref == EXECUTOR_REF
@@ -287,6 +349,10 @@ def test_chain_success_reports_business_result() -> None:
     solution = result.outputs["solution"]
     assert solution["objective_unit"] == "CNY"
     assert solution["objective_value"] > 0
+    # Public campus hand check: 850158 CNY demand less 152 kWh initial
+    # battery discharge at 0.7 CNY/kWh. The full MILP must prove this optimum.
+    assert solution["objective_value"] == pytest.approx(850_051.6, rel=0, abs=1e-5)
+    assert next(v["value"] for v in solution["variables"] if v["name"] == "pv_cap") == 0
     assert [item["name"] for item in solution["variables"]] == list(unit_map)
     assert [item["unit"] for item in solution["variables"]] == list(unit_map.values())
 
@@ -556,6 +622,8 @@ def test_chain_success_reports_declared_components() -> None:
     bundle = _timed("components.generate_bundle", _generate_bundle, inputs)
     runtime = _runtime()
     receipt, collected = _timed("components.solve", runtime.run, bundle, _attempt("comp"))
+    _report_solver_receipt("components.solve", receipt)
+    assert receipt.status == "succeeded", receipt.termination_reason
     result = _timed("components.adapt", _adapt, bundle, receipt, collected)
     assert result.math_status == "solved"
     solution = result.outputs["solution"]
@@ -633,6 +701,8 @@ def test_chain_two_solves_feed_yearly_evaluation() -> None:
     bundle1 = _timed("yearly.generate_one", _generate_bundle, inputs1)
     runtime = _runtime()
     receipt1, collected1 = _timed("yearly.solve_one", runtime.run, bundle1, _attempt("yr1"))
+    _report_solver_receipt("yearly.solve_one", receipt1)
+    assert receipt1.status == "succeeded", receipt1.termination_reason
     solution1 = _timed("yearly.adapt_one", _adapt, bundle1, receipt1, collected1).outputs["solution"]
 
     finance_source = (
@@ -649,6 +719,8 @@ def test_chain_two_solves_feed_yearly_evaluation() -> None:
         (artifact, models, materialized, finance2, config, evaluation),
     )
     receipt2, collected2 = _timed("yearly.solve_two", runtime.run, bundle2, _attempt("yr2"))
+    _report_solver_receipt("yearly.solve_two", receipt2)
+    assert receipt2.status == "succeeded", receipt2.termination_reason
     solution2 = _timed("yearly.adapt_two", _adapt, bundle2, receipt2, collected2).outputs["solution"]
 
     invest, net1 = _yearly_flows(solution1)

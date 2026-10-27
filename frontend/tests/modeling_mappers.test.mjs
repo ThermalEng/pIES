@@ -463,7 +463,7 @@ check('ID: 空串拒绝', md.isValidDeviceId('') === false)
 
 const skeleton = md.buildYamlSkeleton()
 check('骨架: 顶层 schema', skeleton.includes('schema: ies.device-model'))
-check('骨架: schema_version 2.1.0', skeleton.includes('schema_version: "2.1.0"'))
+check('骨架: schema_version 2.2.0', skeleton.includes('schema_version: "2.2.0"'))
 check('骨架: 五顶层字段齐全', ['device:', 'properties: {}', 'interfaces: {}', 'equations:'].every((k) => skeleton.includes(k)))
 check('骨架: 空映射可直接提交后端校验(不产生 null 类型诊断)', !skeleton.includes('properties:\n') && !skeleton.includes('interfaces:\n'))
 check('骨架: 不含经济字段', !skeleton.includes('price') && !skeleton.includes('cost'))

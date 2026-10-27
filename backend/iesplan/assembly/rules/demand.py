@@ -5,6 +5,7 @@ No tariff/price relation is inferred. Month/peak calculation belongs to D2.
 """
 from __future__ import annotations
 from collections.abc import Mapping
+from decimal import Decimal, InvalidOperation
 from math import isfinite
 
 from iesplan.assembly.diags import ASM_TAR_INVALID
@@ -14,6 +15,7 @@ from iesplan.core.units import dims_of
 
 def check_demand_bindings(doc, snapshot, registry, diags) -> None:
     devices = doc.get("devices") or {}
+    planning_variables = (doc.get("planning") or {}).get("variables") or {}
     tariffs = doc.get("tariff_bindings") or {}
     demands = doc.get("demand_bindings") or {}
     reserved = set(devices) | set(tariffs)
@@ -55,17 +57,24 @@ def check_demand_bindings(doc, snapshot, registry, diags) -> None:
         elif (
             spec.type != "out" or spec.carrier != "electricity"
             or dict(dims_of(spec.unit)) != {"power": 1}
-            or not _nonnegative_instance_lower_bound(spec, device, descriptor)
+            or not nonnegative_instance_lower_bound(
+                spec, device, descriptor,
+                instance_id=inst, planning_variables=planning_variables,
+            )
         ):
             fail(billing_id, "requires_nonnegative_electric_power_out")
 
 
-def _nonnegative_instance_lower_bound(spec, instance: Mapping, descriptor) -> bool:
-    """Resolve actual instance-bound property references, not just their existence.
+def nonnegative_instance_lower_bound(
+    spec, instance: Mapping, descriptor, *,
+    instance_id: str, planning_variables: Mapping,
+) -> bool:
+    """Check the effective interface floor after planning-property takeover.
 
-    An otherwise valid instance property may be negative even though an interface
-    declares its minimum through a property_ref. This is a meter-eligibility
-    check; regular property type/unit validation stays in the existing phase.
+    A planned property no longer uses its instance/default value. Its planning
+    lower bound controls the flow through the generator's per-step capacity row;
+    an omitted planning lower bound means zero for the capacity variable.
+    Other planning/property validity is checked by the existing assembly phases.
     """
     if spec.minimum_property_ref is None:
         return spec.minimum is not None and spec.minimum >= 0
@@ -74,6 +83,21 @@ def _nonnegative_instance_lower_bound(spec, instance: Mapping, descriptor) -> bo
     property_spec = descriptor.properties.get(name)
     if property_spec is None:
         return False
+    for variable in planning_variables.values():
+        if not isinstance(variable, Mapping) or (
+            variable.get("device_ref"), variable.get("parameter")
+        ) != (instance_id, name):
+            continue
+        lower = variable.get("lower_bound")
+        if lower is None:
+            return True  # planning capacity's established implicit zero floor
+        if isinstance(lower, bool) or not isinstance(lower, (int, str)):
+            return False
+        try:
+            bound = Decimal(lower)
+        except (InvalidOperation, ValueError):
+            return False
+        return bound.is_finite() and bound >= 0
     override = (instance.get("properties") or {}).get(name)
     value = override.get("value") if isinstance(override, Mapping) else property_spec.value
     return (

@@ -1,11 +1,9 @@
 """能源计费绑定校验(ASM-TAR-001)。
 
 ``tariff_bindings`` 把有效快照 ``energy_prices`` 的 ``price_id`` 绑定到
-计费点实例/接口与聚合, 独立于设备成本绑定。会计方向与载体只由价格
-条目的显式声明决定, 不靠名称推断；流向语义按设备接口方向机械判定：
-``purchase`` 计量的能量经 ``out`` 接口流出计量设备(流入本站),
-``sale`` 计量的能量经 ``in`` 接口流入计量设备(流出本站)；
-需猜测的绑定阻断。
+计费点实例/接口与聚合, 独立于设备成本绑定。会计购售方向由价格
+条目显式声明，技术 in/out 仅表示能量进出所绑定设备，两者不互推。
+仅允许非负、量纲匹配的单向计量接口，不接受双向净值。
 
 时序价格的序列元数据只核对自身完整与分辨率一致；全期覆盖在任务提交边界核对，不一致阻断, 不重采样。
 """
@@ -16,11 +14,31 @@ from typing import Any, Mapping
 
 from iesplan.assembly.diags import ASM_TAR_INVALID
 from iesplan.assembly.diags import make_asm_diag as make_diag
+from iesplan.assembly.rules.demand import nonnegative_instance_lower_bound
 from iesplan.core.diagnostics import Diagnostic
+from iesplan.core.units import dims_of
 from iesplan.finance import EffectiveFinanceConfig, EnergyPrice
 
 #: 计费聚合(时序接口必需；scalar 不用于能源计价)
 TARIFF_AGGREGATIONS: tuple[str, ...] = ("integrate_positive", "sum_positive")
+
+
+def _meter_dims(unit: str, aggregation: str) -> dict[str, int]:
+    """计费聚合后的能量量纲（功率积分按公共单位语义折为能量）。"""
+    dims = dict(dims_of(unit))
+    if aggregation == "integrate_positive":
+        if dims == {"power": 1}:
+            return {"energy": 1}
+        dims["time"] = dims.get("time", 0) + 1
+    return {key: count for key, count in dims.items() if count}
+
+
+def _price_unit(price: EnergyPrice) -> str:
+    if price.kind == "constant":
+        return price.value.unit
+    if price.kind == "time_series":
+        return price.series_meta.unit
+    return next(iter(price.months.values())).series_meta.unit
 
 
 def _tar_fail(diags, field, reason, extra=None):
@@ -69,8 +87,9 @@ def check_tariff_bindings(
     baseline_resolution: str,
     diags: list[Diagnostic],
 ) -> None:
-    """tariff_bindings: price/实例/接口存在性 + 载体/方向相容 + 序列元数据核对。"""
+    """tariff_bindings: 引用、载体、计量量纲与非负语义、序列元数据。"""
     devices = doc.get("devices") or {}
+    planning_variables = (doc.get("planning") or {}).get("variables") or {}
     instance_ids = set(devices)
     tariff = doc.get("tariff_bindings") or {}
     prices = snapshot.energy_prices or {}
@@ -136,17 +155,28 @@ def check_tariff_bindings(
                 },
             )
             continue
-        expected_type = "out" if price.direction == "purchase" else "in"
-        if ispec.type != expected_type:
+        if not nonnegative_instance_lower_bound(
+            ispec, dev, descriptor,
+            instance_id=inst_id, planning_variables=planning_variables,
+        ):
             _tar_fail(
-                diags, field, "direction_flow_mismatch",
+                diags, field, "interface_not_nonnegative",
                 {
                     "binding_id": binding_id,
-                    "price": price_id,
-                    "direction": price.direction,
                     "interface": iface_id,
-                    "interface_type": ispec.type,
                 },
+            )
+            continue
+        meter_dims = _meter_dims(ispec.unit, entry["aggregation"])
+        price_dims = dims_of(_price_unit(price))
+        combined = dict(meter_dims)
+        for dim, count in price_dims.items():
+            combined[dim] = combined.get(dim, 0) + count
+        if {dim: count for dim, count in combined.items() if count} != {"currency": 1}:
+            _tar_fail(
+                diags, field, "meter_price_unit_mismatch",
+                {"binding_id": binding_id, "interface_unit": ispec.unit,
+                 "price_unit": _price_unit(price)},
             )
             continue
         if price.kind == "time_series":

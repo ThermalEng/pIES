@@ -17,7 +17,7 @@
  *   node /tmp/project-draft-commands.mjs
  */
 
-import { putDraftCommands, sendDraftCommand } from '../src/features/projects/index.ts'
+import { projectFromView, putDraftCommands, sendDraftCommand } from '../src/features/projects/index.ts'
 import { modelSectionFromView, deviceTypeFromServer } from '../src/features/modeling/index.ts'
 import { saveWorkingInputs } from '../src/features/tasks/index.ts'
 import { derivePorts } from '../src/pages/model/canvasModel.ts'
@@ -89,9 +89,9 @@ globalThis.fetch = async (url, init = {}) => {
           updated_by: 1,
           updated_at: '2026-10-17T00:00:00Z',
           created_at: '2026-10-17T00:00:00Z',
-          dataset_bindings: [],
           content: {
             model: { devices: [], connections: [] },
+            dataset_bindings: [],
             task_working_inputs: { sample: 'val' },
           },
         },
@@ -168,6 +168,7 @@ globalThis.fetch = async (url, init = {}) => {
       updated_at: '2026-10-17T00:00:00Z',
       created_at: '2026-10-17T00:00:00Z',
       content: {
+        dataset_bindings: [{ dataset_id: 5, dataset_version_id: 11 }, { dataset_id: 6, dataset_version_id: 12 }],
         model: {
           devices: [
             { name: 'hp1', device_type: 'ies.device.heat_pump', kind: 'new', params: { cop: 3.2 } },
@@ -184,6 +185,8 @@ globalThis.fetch = async (url, init = {}) => {
   check('modelSectionFromView: 修订号透传', section.revision === 7)
   check('modelSectionFromView: 设备映射', section.model.devices.length === 1 && section.model.devices[0].name === 'hp1' && section.model.devices[0].kind === 'new')
   check('modelSectionFromView: 连接映射', section.model.connections.length === 1 && section.model.connections[0].name === 'c1')
+  const project = projectFromView(viewDto)
+  check('projectFromView: 从 draft.content 保留两份权威绑定', project.draft?.dataset_bindings?.map((b) => b.dataset_version_id).join(',') === '11,12')
 
   // 空模型
   const emptyView = {

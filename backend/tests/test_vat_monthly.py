@@ -194,7 +194,7 @@ def _finance_payload(*, refunds=(), opening="0", basis="tax_inclusive", rules="a
 
 HEATER_YAML = """
 schema: ies.device-model
-schema_version: "2.1.0"
+schema_version: "2.2.0"
 device: {id: acme.device.heater, names: {zh-CN: 加热器, en-US: Heater}}
 properties:
   efficiency: {value: 0.9, unit: "1", valid_range: {minimum: 0, maximum: 1}}
@@ -218,7 +218,7 @@ equations:
 
 TANK_YAML = """
 schema: ies.device-model
-schema_version: "2.1.0"
+schema_version: "2.2.0"
 device: {id: acme.device.tank, names: {zh-CN: 罐, en-US: Tank}}
 properties:
   soc0: {value: 0.5, unit: "1", valid_range: {minimum: 0, maximum: 1}}
@@ -240,7 +240,7 @@ equations:
 
 LOAD_YAML = """
 schema: ies.device-model
-schema_version: "2.1.0"
+schema_version: "2.2.0"
 device: {id: acme.device.load, names: {zh-CN: 负荷, en-US: Load}}
 properties: {}
 interfaces:
@@ -263,7 +263,7 @@ equations:
 
 GRID_YAML = """
 schema: ies.device-model
-schema_version: "2.1.0"
+schema_version: "2.2.0"
 device: {id: acme.device.grid, names: {zh-CN: 电网, en-US: Grid}}
 properties: {}
 interfaces:
@@ -393,13 +393,13 @@ def _contribution(yaml_text: str):
     return built.contribution
 
 
-def _device_docs(*, heater_yaml: str = HEATER_YAML):
+def _device_docs(*, heater_yaml: str = HEATER_YAML, grid_yaml: str = GRID_YAML):
     docs = {}
     for device_id, yaml_text in (
         ("acme.device.heater", heater_yaml),
         ("acme.device.tank", TANK_YAML),
         ("acme.device.load", LOAD_YAML),
-        ("acme.device.grid", GRID_YAML),
+        ("acme.device.grid", grid_yaml),
     ):
         result = parse_device_model_v2(yaml_load(yaml_text), file="test.yaml")
         assert result.ok, result.diagnostics
@@ -442,15 +442,26 @@ def _inputs(
     maintenance_tax=True,
     payload=None,
     export_values=None,
+    sale_at_source=False,
 ):
     doc = _doc(tank_origin=tank_origin)
+    if sale_at_source:
+        # Explicit sale at the electricity source's out port, not at the
+        # receiving device's in port. Both carry the same flow on this edge.
+        doc["tariff_bindings"]["export_meter"].update(
+            instance="grid1", interface="supply"
+        )
+    # VAT exact piecewise relations need finite physical bounds on every
+    # metered flow. This synthetic source declares the same 100 kW cap as
+    # the receiving heater; the production generator does not guess a cap.
+    grid_yaml = GRID_YAML.replace("maximum: null", "maximum: 100") if sale_at_source else GRID_YAML
     if objective is not None:
         doc["planning"]["objective"] = objective
     models = {
         "heater1": _contribution(heater_yaml),
         "tank1": _contribution(TANK_YAML),
         "load1": _contribution(LOAD_YAML),
-        "grid1": _contribution(GRID_YAML),
+        "grid1": _contribution(grid_yaml),
     }
     if payload is None:
         payload = _finance_payload(
@@ -465,7 +476,7 @@ def _inputs(
     result = validate_assembly_doc(
         doc,
         finance_snapshots={"obj-finance": finance},
-        device_documents=_device_docs(heater_yaml=heater_yaml),
+        device_documents=_device_docs(heater_yaml=heater_yaml, grid_yaml=grid_yaml),
     )
     assert result.artifact is not None, [d.to_dict() for d in result.diagnostics]
     materialized = materialize_non_predictive_series(result.artifact, {}, operation_years=2)
@@ -898,7 +909,7 @@ def test_vat_maintenance_credit_basis_independent(tmp_path) -> None:
 
 HEATER_UNBOUNDED_YAML = """
 schema: ies.device-model
-schema_version: "2.1.0"
+schema_version: "2.2.0"
 device: {id: acme.device.heater, names: {zh-CN: 加热器, en-US: Heater}}
 properties:
   efficiency: {value: 0.9, unit: "1", valid_range: {minimum: 0, maximum: 1}}

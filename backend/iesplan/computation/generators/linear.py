@@ -328,7 +328,7 @@ def _modeling_ref(
     symbols: Mapping[str, SymbolEntry],
     *,
     step: int,
-    initial: Mapping[str, float],
+    initial: Mapping[str, float | LinearExpression],
 ) -> _Affine:
     out = _Affine()
     entry = _resolve_symbol(name, symbols)
@@ -350,7 +350,12 @@ def _modeling_ref(
             raise LoweringUnsupportedError(
                 f"状态 {name!r} 首步缺少初值"
             ) from None
-        out.add_const(_check_number(value, f"状态 {name!r} 初值"))
+        if isinstance(value, LinearExpression):
+            for key, coeff in value.terms:
+                out.add_term(key, coeff)
+            out.add_const(value.constant)
+        else:
+            out.add_const(_check_number(value, f"状态 {name!r} 初值"))
         return out
     out.add_term((name, offset), 1.0)
     return out
@@ -361,7 +366,7 @@ def _lower_modeling_node(
     symbols: Mapping[str, SymbolEntry],
     *,
     step: int,
-    initial: Mapping[str, float],
+    initial: Mapping[str, float | LinearExpression],
     where: str,
 ) -> _Affine:
     if isinstance(node, NumberNode):
@@ -534,7 +539,7 @@ def lower_expression(
     symbols: Mapping[str, SymbolEntry],
     *,
     step: int = 0,
-    initial: Mapping[str, float] | None = None,
+    initial: Mapping[str, float | LinearExpression] | None = None,
 ) -> LinearExpression:
     """降级单个 modeling AST 表达式为仿射式（表达式级）。
 
@@ -558,7 +563,7 @@ def _single_var_product(
     symbols: Mapping[str, SymbolEntry],
     *,
     step: int,
-    initial: Mapping[str, float],
+    initial: Mapping[str, float | LinearExpression],
     where: str,
 ) -> tuple[tuple[str, int], float] | None:
     """判定节点是否为“常数 × 单个变量引用”（返回 (键, 系数））。"""
@@ -636,7 +641,7 @@ def _split_const_product(
     symbols: Mapping[str, SymbolEntry],
     *,
     step: int,
-    initial: Mapping[str, float],
+    initial: Mapping[str, float | LinearExpression],
     where: str,
 ) -> tuple[float, tuple[tuple[str, int], float], tuple[tuple[str, int], float]] | None:
     """剥离常数乘法脊：返回 (总因子, X 单变量项, Y 单变量项)，非单积返回 None。"""
@@ -682,7 +687,7 @@ def lower_relation(
     symbols: Mapping[str, SymbolEntry],
     *,
     step: int = 0,
-    initial: Mapping[str, float] | None = None,
+    initial: Mapping[str, float | LinearExpression] | None = None,
 ) -> LoweredRelation:
     """降级单个 modeling 关系为约束行（关系级）。
 

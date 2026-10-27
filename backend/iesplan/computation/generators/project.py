@@ -42,18 +42,20 @@ from types import MappingProxyType
 from typing import Any
 
 from iesplan.assembly.contracts import ValidatedAssemblyArtifact
+from iesplan.computation.errors import ComputationUnavailableError
 from iesplan.computation.generators.linear import (
     LinearConstraint,
     LinearExpression,
     LinearModel,
     LinearVariable,
     LoweringUnsupportedError,
+    lower_expression,
     lower_mutex,
     lower_planning_constraint,
     lower_planning_expression,
     lower_relation,
 )
-from iesplan.computation.protocols import CalculationConfig
+from iesplan.computation.protocols import CalculationConfig, StopProbe, read_stop_reason
 from iesplan.computation.sequences import (
     MaterializedPriceSeries,
     MaterializedSeries,
@@ -276,12 +278,14 @@ def build_project_model_package(
     finance: EffectiveFinanceConfig,
     config: CalculationConfig,
     evaluation: EvaluationInput,
+    *,
+    stop: StopProbe | None = None,
 ) -> tuple[
     LinearModel, Mapping[str, str], str, Mapping[str, object],
     Mapping[str, Mapping[str, object]], tuple[Mapping[str, object], ...],
 ]:
     """一次建模取得 MPS、财务事实、分量与时序声明，不重复展开月峰。"""
-    builder = _new_builder(artifact, models, materialized, finance, evaluation)
+    builder = _new_builder(artifact, models, materialized, finance, evaluation, stop=stop)
     model, unit_map, objective_unit = builder.build()
     return (
         model, unit_map, objective_unit,
@@ -296,6 +300,8 @@ def _new_builder(
     materialized: MaterializedSet,
     finance: EffectiveFinanceConfig,
     evaluation: EvaluationInput,
+    *,
+    stop: StopProbe | None = None,
 ) -> _ProjectBuilder:
     """由直接输入构造内部编排（建模与分量声明共用同一构造器）。"""
     from iesplan.core.contracts import horizon_point_count
@@ -316,6 +322,7 @@ def _new_builder(
         evaluation=evaluation,
         point_count=point_count,
         step_s=step_s,
+        stop=stop,
     )
 
 
@@ -373,7 +380,10 @@ class _ProjectBuilder:
         evaluation: EvaluationInput,
         point_count: int,
         step_s: float,
+        stop: StopProbe | None = None,
     ) -> None:
+        self.stop = stop
+        self._stop_ticks = 0
         self.doc = doc
         self.devices = devices
         self.models = models
@@ -428,6 +438,17 @@ class _ProjectBuilder:
             key = (var["device_ref"], var["parameter"])
             self.bound_prop[key] = var_name
 
+    def _checkpoint(self) -> None:
+        """生成器协作停止；按有限步数采样，不引入线程或进程管理。"""
+        if self.stop is None:
+            return
+        self._stop_ticks += 1
+        if self._stop_ticks % 128:
+            return
+        reason = read_stop_reason(self.stop)
+        if reason is not None:
+            raise ComputationUnavailableError("项目模型生成已停止", reason=reason)
+
     # ------------------------------------------------------------------
     # 变量声明
     # ------------------------------------------------------------------
@@ -437,6 +458,7 @@ class _ProjectBuilder:
         kind: str, unit: str | None,
     ) -> str:
         """声明 LP 变量（同名复现即取首次；调用方保证同一事实）。"""
+        self._checkpoint()
         if name not in self.variables:
             self.variables[name] = LinearVariable(
                 name=name, lower=lower, upper=upper, kind=kind,
@@ -575,10 +597,13 @@ class _ProjectBuilder:
                 self._declare(cname, lower, upper, "continuous", var.unit)
                 self._step_columns.setdefault((inst, name), []).append(cname)
             self._step_units[(inst, name)] = var.unit
-        initial: dict[str, float] = {}
+        initial: dict[str, float | LinearExpression] = {}
         for state in contribution.states:
-            ref = contribution.variables[state].initial_property_ref
-            initial[state] = prop_const[ref]  # type: ignore[index]
+            variable = contribution.variables[state]
+            if variable.initial_ast is not None:
+                initial[state] = lower_expression(variable.initial_ast, symbols)
+            else:
+                initial[state] = prop_const[variable.initial_property_ref]  # type: ignore[index]
         for local, pname, sense in caps:
             for step in range(self.point_count):
                 vname = self._tech_name(inst, local, step)
@@ -644,6 +669,7 @@ class _ProjectBuilder:
             if flow.type == "predefined"
         }
         for step in range(self.point_count):
+            self._checkpoint()
             step_symbols = dict(symbols)
             for name in predefined:
                 series_si = self._series_si(inst, name, contribution)
@@ -776,6 +802,7 @@ class _ProjectBuilder:
     ) -> None:
         for index, (carrier, _members, ports) in enumerate(buses):
             for step in range(self.point_count):
+                self._checkpoint()
                 terms = tuple(
                     (((f"{inst}__{iface}__t{step}", 0), sign))
                     for inst, iface, sign in ports
@@ -2576,21 +2603,29 @@ class _ProjectBuilder:
         return MappingProxyType(out)
 
     def build(self) -> tuple[LinearModel, Mapping[str, str], str]:
+        if self.stop is not None:
+            reason = read_stop_reason(self.stop)
+            if reason is not None:
+                raise ComputationUnavailableError("项目模型生成已停止", reason=reason)
         buses = self._compute_buses()
         bus_flows = self._bus_flow_index(buses)
         for inst in sorted(self.devices):
+            self._checkpoint()
             statics = self._declare_instance_statics(
                 inst, bus_flows.get(inst, frozenset())
             )
             self._build_relations(inst, statics)
         self._build_bus_rows(buses)
         self._build_monthly_demand()
+        self._checkpoint()
         self._build_planning_rows()
         # VAT/所得税在现金目标构造之前使用同一逐笔维护表达式。
         self._retain_maintenance()
         self._vat_cash = self._build_vat()
         self._income_cash = self._build_income()
+        self._checkpoint()
         objective, objective_unit = self._build_objective()
+        self._checkpoint()
         model = LinearModel(
             variables=tuple(self.variables.values()),
             constraints=tuple(self.rows),
