@@ -1159,10 +1159,10 @@ export function DataPage() {
           <Button variant="secondary" size="md" icon="download" loading={templateBusy} onClick={() => void downloadTemplate()}>
             {t('ies.data.template')}
           </Button>
-          <Button variant="secondary" size="md" icon="plus" onClick={() => setSampleOpen(true)}>
+          <Button variant="secondary" size="md" icon="plus" disabled={busyBind !== null} onClick={() => setSampleOpen(true)}>
             {pt('ies.data.sample_generate')}
           </Button>
-          <Button variant="primary" size="md" icon="upload" onClick={() => setUploadOpen(true)}>
+          <Button variant="primary" size="md" icon="upload" disabled={busyBind !== null} onClick={() => setUploadOpen(true)}>
             {t('ies.data.upload')}
           </Button>
         </div>

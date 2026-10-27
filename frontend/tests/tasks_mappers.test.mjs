@@ -223,6 +223,17 @@ const PAYMENTS = JSON.stringify([{ t: 0, ratio: '0.6' }, { t: 1, ratio: '0.4' }]
   const badJ = { ...f, constructionPayments: 'not-json' }
   check('付款非 JSON 拒绝', tk.parseEvaluation(badJ) === null)
 }
+// 年限展示不依赖尚未填写或非法的其他评价字段，提交校验不变。
+{
+  const f = { ...tk.DEFAULT_FORM, constructionPeriod: ' +2 ', operationYears: '3' }
+  check('独立年限展示接受规范数值写法', tk.deriveEvaluationYears(f) === 5)
+  check('其他字段未填仍禁止提交', tk.parseEvaluation(f) === null)
+  const badOther = { ...f, discountRate: '2', constructionPayments: 'bad', maintenanceExpenses: 'bad' }
+  check('其他字段非法不影响 E', tk.deriveEvaluationYears(badOther) === 5 && tk.parseEvaluation(badOther) === null)
+  for (const [key, value] of [['constructionPeriod', ''], ['constructionPeriod', '-1'], ['constructionPeriod', '0.5'], ['operationYears', '0'], ['operationYears', 'no']]) {
+    check(`非法年限不展示 E: ${key}=${value}`, tk.deriveEvaluationYears({ ...f, [key]: value }) === null)
+  }
+}
 // ISSUE-06 S1: JSON 维护关联项在工作态、提交态与载入态保留同年顺序。
 {
   const expenses = [

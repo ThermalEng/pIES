@@ -286,9 +286,19 @@ export interface ParsedEvaluation {
  * 评价年限不手填: 由建设期 K + 运营年限 N 自动派生 E=K+N 并随提交
  * 明确发送(关系成立由后端核对)。付款与维护为显式 JSON(无默认值;
  * 无维护支出填 []), 形态由后端边界核对。合法的数值写法(如 '+1'、
- * 首尾空格、'0.080')按 Number() 接受, 展示 E 与签名都以此处解析出的
- * 规范值为准, 不保留“显示—却接受该数值”的分裂。 */
+ * 首尾空格、'0.080')按 Number() 接受, 展示 E 与提交采用同一数值口径。 */
 export type EvaluationField = 'constructionPeriod' | 'operationYears' | 'discountRate' | 'constructionPayments' | 'maintenanceExpenses'
+
+const validConstructionPeriod = (value: number) => Number.isInteger(value) && value >= 0
+const validOperationYears = (value: number) => Number.isInteger(value) && value >= 1
+
+/** 年限展示只取决于 K/N；其他评价字段仍由提交解析核对。 */
+export function deriveEvaluationYears(f: Pick<CreateForm, 'constructionPeriod' | 'operationYears'>): number | null {
+  if (!f.constructionPeriod.trim() || !f.operationYears.trim()) return null
+  const period = Number(f.constructionPeriod.trim())
+  const operation = Number(f.operationYears.trim())
+  return validConstructionPeriod(period) && validOperationYears(operation) ? period + operation : null
+}
 
 /** 即时输入诊断；付款条目等领域约束仍由后端核对。 */
 export function evaluationFieldErrors(f: CreateForm): Partial<Record<EvaluationField, string>> {
@@ -298,8 +308,8 @@ export function evaluationFieldErrors(f: CreateForm): Partial<Record<EvaluationF
     if (!raw) errors[key] = 'ies.task.field_required'
     else if (!valid(Number(raw))) errors[key] = message
   }
-  numeric('constructionPeriod', (v) => Number.isInteger(v) && v >= 0, 'ies.task.construction_period_invalid')
-  numeric('operationYears', (v) => Number.isInteger(v) && v >= 1, 'ies.task.operation_years_invalid')
+  numeric('constructionPeriod', validConstructionPeriod, 'ies.task.construction_period_invalid')
+  numeric('operationYears', validOperationYears, 'ies.task.operation_years_invalid')
   numeric('discountRate', (v) => Number.isFinite(v) && v >= 0 && v <= 1, 'ies.task.discount_rate_invalid')
   for (const key of ['constructionPayments', 'maintenanceExpenses'] as const) {
     if (!f[key].trim()) errors[key] = 'ies.task.field_required'

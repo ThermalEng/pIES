@@ -18,6 +18,7 @@ export {
   buildInput,
   buildParams,
   DEFAULT_FORM,
+  deriveEvaluationYears,
   formFromWorking,
   evaluationFieldErrors,
   hasSavedConfig,
