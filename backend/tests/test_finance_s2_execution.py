@@ -276,7 +276,7 @@ def test_same_currency_annual_fixed_and_linear_end_to_end(tmp_path, currency):
     mps_text, offset = write_mps(model)
     doc = json.loads(_parameters(offset=offset, objective_unit=currency).decode("utf-8"))
     doc["unit_map"] = dict(builder.unit_map)
-    doc["financial_facts"] = facts
+    doc["financial_facts"] = dict(facts)
     doc["components"] = {name: dict(value) for name, value in builder.finance_components().items()}
     bundle = _bundle({
         PROBLEM_PATH: mps_text.encode("utf-8"),
