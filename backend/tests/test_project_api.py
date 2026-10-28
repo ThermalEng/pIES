@@ -675,13 +675,15 @@ def test_upsert_device_params_full_replace_and_strict(client: TestClient, db_ses
     assert resp.status_code == 200, resp.text
     rev = resp.json()["revision"]
     assert devices() == [{"name": "PV1", "device_type": "ies.device.pv",
-                          "kind": "new", "params": {"b": 3}}]
+                          "kind": "new", "params": {"b": 3},
+                          "ref": "pv1", "display_name": "PV1"}]
     # 传空对象 → 清空
     resp = put({"name": "PV1", "params": {}}, rev)
     assert resp.status_code == 200, resp.text
     rev = resp.json()["revision"]
     assert devices() == [{"name": "PV1", "device_type": "ies.device.pv",
-                          "kind": "new", "params": {}}]
+                          "kind": "new", "params": {},
+                          "ref": "pv1", "display_name": "PV1"}]
     # 非对象 params 拒绝, 修订不推进
     resp = put({"name": "PV1", "params": [1]}, rev)
     assert resp.status_code == 400, resp.text

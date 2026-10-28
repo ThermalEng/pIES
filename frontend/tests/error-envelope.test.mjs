@@ -165,6 +165,13 @@ async function expectApiError(promise) {
     const message = translate('ies.error.http_exception', { status_code: 405 }, locale)
     check(`${locale} HTTP 状态码插值`, message.includes('405') && !message.includes('{status'))
   }
+  const httpError = new ApiError(405, {
+    code: 'API-REQ-003', message_key: 'ies.error.http_exception',
+    severity: 'error', blocking: true,
+    params: { status_code: 405, detail: 'Method Not Allowed' },
+  })
+  check('HTTP 异常信封优先显示真实状态码而非通用 detail',
+    errorMessage(httpError) === '请求失败(HTTP 405)')
 }
 
 if (failures > 0) {

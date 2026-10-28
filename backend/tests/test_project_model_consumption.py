@@ -371,6 +371,8 @@ def test_saved_model_enters_selector_and_draft(client: TestClient, db: Session) 
             "device_type": SINK_TYPE_FINAL,
             "kind": "new",
             "params": {"rated_demand_kw": 20},
+            "ref": "load2",
+            "display_name": "load2",
         }
     ]
 

@@ -81,6 +81,12 @@ export function translateDiagnostic(diag: Diagnostic): string {
 
 /** 将后端错误信封(ApiError)渲染为文案。 */
 export function translateError(err: ApiError): string {
+  // 405 等 HTTP 信封的 status_code 是权威可诊断内容；通用英文
+  // detail (如 Method Not Allowed) 不应掩盖本地化的精确状态码。
+  if (err.message_key === 'ies.error.http_exception'
+    && typeof err.params?.status_code === 'number') {
+    return translate(err.message_key, err.params)
+  }
   // 1. 优先提取公开详情(params.detail)
   const detail = typeof err.params?.detail === 'string' && err.params.detail.trim()
     ? err.params.detail.trim()
