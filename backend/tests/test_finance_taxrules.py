@@ -31,7 +31,7 @@ from iesplan.tasks.contracts import InvalidRequestError
 def _base_profile() -> dict:
     return {
         "schema": "ies.finance-profile",
-        "schema_version": "5.0.0",
+        "schema_version": "6.0.0",
         "profile": {
             "id": "cn-north-demo",
             "region": "CN-North",
@@ -139,8 +139,7 @@ def _base_profile() -> dict:
                 "deductible_maintenance": {"mode": "explicit_items", "items": []},
                 "depreciation": [
                     {
-                        "asset": "pv_system",
-                        "base_from": "pv_system.upfront_capex_net",
+                        "base_from": {"kind": "upfront_capex_net", "finance_type": "pv_system"},
                         "method": "straight_line",
                         "life_years": 20,
                         "residual": {"value": "0", "unit": "CNY"},
@@ -151,13 +150,14 @@ def _base_profile() -> dict:
                 "opening_losses": [],
             },
         },
+        "net_cashflows": {},
     }
 
 
 def _base_overrides(profile: FinanceProfile) -> dict:
     return {
         "schema": "ies.finance-overrides",
-        "schema_version": "5.0.0",
+        "schema_version": "6.0.0",
         "profile_ref": {"id": profile.profile_id},
         "tax_rules": {
             "operating_vat": {
@@ -309,7 +309,7 @@ def test_explicit_schedule_method_and_replace() -> None:
     overrides = FinanceOverrides.from_dict(
         {
             "schema": "ies.finance-overrides",
-            "schema_version": "5.0.0",
+            "schema_version": "6.0.0",
             "profile_ref": {"id": profile.profile_id},
             "tax_rules": {"building_vat": {"confirmation": {"schedule": [{"period": 2, "ratio": "1"}]}}},
         },
@@ -330,7 +330,7 @@ def test_payment_period_schedule_override_rejected() -> None:
         FinanceOverrides.from_dict(
             {
                 "schema": "ies.finance-overrides",
-                "schema_version": "5.0.0",
+                "schema_version": "6.0.0",
                 "profile_ref": {"id": profile.profile_id},
                 "tax_rules": {"building_vat": {"confirmation": {"schedule": [{"period": 2, "ratio": "1"}]}}},
             },
@@ -388,7 +388,7 @@ def test_override_method_scope_pool_changes_rejected() -> None:
     profile = FinanceProfile.from_dict(_base_profile())
     base = {
         "schema": "ies.finance-overrides",
-        "schema_version": "5.0.0",
+        "schema_version": "6.0.0",
         "profile_ref": {"id": profile.profile_id},
     }
     cases = [
@@ -702,23 +702,21 @@ def test_duplicate_maint_and_asset_references_rejected() -> None:
     payload = _base_profile()
     payload["tax_rules"]["income"]["depreciation"] = [
         {
-            "asset": "pv_system",
-            "base_from": "pv_system.upfront_capex_net",
+            "base_from": {"kind": "upfront_capex_net", "finance_type": "pv_system"},
             "method": "straight_line",
             "life_years": 20,
             "residual": {"value": "0", "unit": "CNY"},
             "first_year": 1,
         },
         {
-            "asset": "pv_system",
-            "base_from": "pv_system.upfront_capex_net",
+            "base_from": {"kind": "upfront_capex_net", "finance_type": "pv_system"},
             "method": "straight_line",
             "life_years": 10,
             "residual": {"value": "0", "unit": "CNY"},
             "first_year": 1,
         },
     ]
-    with pytest.raises(FinanceTripletError):
+    with pytest.raises(FinanceTripletError, match="来源身份重复"):
         FinanceProfile.from_dict(payload)
     payload = _base_profile()
     payload["tax_rules"]["operating_vat"]["maintenance_input_tax"] = [

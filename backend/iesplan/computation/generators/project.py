@@ -1988,22 +1988,25 @@ class _ProjectBuilder:
                 < construction + entry.first_year + entry.life_years
             ):
                 continue
+            if entry.base_from.kind != "upfront_capex_net":
+                continue
+            asset = entry.base_from.finance_type
             capex = _AffineAcc()
             for inst in sorted(self.devices):
                 if inst not in instances or instances[inst].get("type") != "costed":
                     continue
                 if self.devices[inst].get("asset_origin") != "new":
                     continue
-                if instances[inst].get("finance_type") != entry.asset:
+                if instances[inst].get("finance_type") != asset:
                     continue
-                ft_entry = self.finance.finance_types[entry.asset]
+                ft_entry = self.finance.finance_types[asset]
                 if ft_entry.upfront_capex is None:
                     continue
                 capex.add_scaled(self._cost_affine(inst, "upfront_capex"), 1.0)
-            credit_coef, markup = con_credit.get(entry.asset, (0.0, 1.0))
+            credit_coef, markup = con_credit.get(asset, (0.0, 1.0))
             residual = float(entry.residual.value)
             if residual > 0.0:
-                position = f"{location}折旧资产 {entry.asset!r}"
+                position = f"{location}折旧资产 {asset!r}"
                 scale = markup - credit_coef
                 capex_lo = self._affine_side(
                     capex, var_bounds, side="min", label=position
@@ -2016,7 +2019,7 @@ class _ProjectBuilder:
                     self._fact_depr.append(
                         {
                             "rule": rule_id,
-                            "asset": entry.asset,
+                            "asset": asset,
                             "year": year,
                             "amount": _AffineAcc(),
                         }
@@ -2043,7 +2046,7 @@ class _ProjectBuilder:
             deduct.add_scaled(depreciable, 1.0 / life)
             deduct.add_const(-float(entry.residual.value) / life)
             self._fact_depr.append(
-                {"rule": rule_id, "asset": entry.asset, "year": year, "amount": deduct}
+                {"rule": rule_id, "asset": asset, "year": year, "amount": deduct}
             )
 
     def _income_annual_base(
