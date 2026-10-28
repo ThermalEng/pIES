@@ -7,7 +7,7 @@
 到账/结转、退款计划(期后到账标应收)、所得税/折旧/亏损余额,
 以及 NPV 与 IRR/回收期值和状态。
 
-封存块为当前 ``ies.financial-evaluation@1.0.0``(tax_cash 与
+封存块为当前 ``ies.financial-evaluation@3.0.0``(tax_cash 与
 annual_net_flows 必填): 缺必填字段按契约违例暴露, 不静默补空
 税务表。
 
@@ -34,6 +34,9 @@ def _load_fixtures():
 
 def test_downloaded_xlsx_matches_sealed_facts_exactly():
     sealed, pairs = _load_fixtures()
+    assert sealed["schema_version"] == "3.0.0"
+    assert sealed["net_cashflows"] == []
+    assert all("base_from" in row for row in sealed["tax_cash"]["depreciation"])
     assert_block_exact(pairs, sealed)
 
 

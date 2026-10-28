@@ -58,6 +58,7 @@ def _expected_pairs(fin: dict) -> list:
                 f"运营年第 {index + 1} 年(t={item['financial_year']}) / Year {index + 1}",
                 f"能源 {item['energy_net']} − 可变 {item['variable_om']} "
                 f"− 固定 {item['fixed_om']} − 维护 {item['maintenance']} "
+                f"− 需量 {item['demand_charge']} "
                 f"= 净额 {item['net']} {ccy}",
             )
         )
