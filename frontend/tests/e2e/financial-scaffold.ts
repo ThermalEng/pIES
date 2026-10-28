@@ -85,7 +85,7 @@ export function financeProfile(
 ): Record<string, unknown> {
   return {
     schema: 'ies.finance-profile',
-    schema_version: '5.0.0',
+    schema_version: '6.0.0',
     profile: {
       id: profileId,
       region: 'CN-North',
@@ -106,9 +106,10 @@ export function financeProfile(
     },
     demand_charges: {},
     taxes: {},
-    // 4.0.0 必需显式节(空 = 无税务计算, 既有非税路径不变)。
+    // 6.0.0 必需显式节(空 = 无税务/净现金计算, 既有非税路径不变)。
     credit_pools: {},
     tax_rules: {},
+    net_cashflows: {},
   }
 }
 

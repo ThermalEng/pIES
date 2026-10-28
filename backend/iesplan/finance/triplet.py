@@ -1965,6 +1965,10 @@ class FinanceOverrides:
     _parsed_credit_pools: Mapping[str, Mapping[str, object]] = field(
         default_factory=lambda: MappingProxyType({})
     )
+    #: 已绑定 Profile 的净现金覆盖使用类型化补丁；未绑定时首次合并解析。
+    _parsed_net_cashflows: Mapping[str, Mapping[str, object]] = field(
+        default_factory=lambda: MappingProxyType({})
+    )
 
     def __post_init__(self) -> None:
         if self.schema != SCHEMA_OVERRIDES:
@@ -1983,6 +1987,9 @@ class FinanceOverrides:
         )
         object.__setattr__(
             self, "_parsed_credit_pools", MappingProxyType(dict(sorted(self._parsed_credit_pools.items())))
+        )
+        object.__setattr__(
+            self, "_parsed_net_cashflows", MappingProxyType(dict(sorted(self._parsed_net_cashflows.items())))
         )
 
     def to_dict(self) -> dict:
@@ -2118,10 +2125,13 @@ class FinanceOverrides:
 
         cf_raw = _optional_section(mapping, "net_cashflows", "net_cashflows")
         net_cashflows: dict[str, Mapping[str, object]] = {}
+        parsed_cashflows: dict[str, dict] = {}
         for cf_id, cf_patch in cf_raw.items():
             cf_id = _validate_local_id(cf_id, "cashflow_id")
-            raw_patch, _ = _validate_net_cashflow_override(cf_id, cf_patch, profile)
+            raw_patch, parsed_values = _validate_net_cashflow_override(cf_id, cf_patch, profile)
             net_cashflows[cf_id] = raw_patch
+            if parsed_values:
+                parsed_cashflows[cf_id] = parsed_values
 
         return cls(
             schema=schema,
@@ -2136,6 +2146,7 @@ class FinanceOverrides:
             _bound_profile=profile.profile_id if profile is not None else "",
             _parsed_tax_rules=_freeze(parsed_rules),
             _parsed_credit_pools=_freeze(parsed_pools),
+            _parsed_net_cashflows=_freeze(parsed_cashflows),
         )
 
     @classmethod
@@ -2664,6 +2675,8 @@ def _validate_net_cashflow_override(
                 val = Money.from_dict(raw_amt["value"], field=f"{field}.amount.value")
                 if val.unit != profile.currency:
                     raise FinanceTripletError(f"{field}.amount.value 币种必须为 {profile.currency}")
+                if val.value < 0:
+                    raise FinanceTripletError(f"{field}.amount.value 金额禁止负数")
                 raw_patch["amount"] = {"value": val.to_dict()}
                 parsed_values["amount"] = FixedCashflowAmount(value=val)
             elif prof_cf.amount.kind == "source_share":
@@ -2971,7 +2984,7 @@ def merge_effective(profile: FinanceProfile, overrides: FinanceOverrides | None)
     # ---- taxes: 税目只属于 Profile, 原样继承 ----
     merged_taxes: dict[str, TaxEntry] = dict(profile.taxes)
 
-    # ---- credit_pools / tax_rules: 复用 Profile 已解析不可变事实，类型化应用
+    # ---- credit_pools / tax_rules / net_cashflows: 复用已解析不可变事实，类型化应用
     # 覆盖变更。与 Profile 绑定过的 Overrides 直接消费对象保留的已解析
     # 类型化补丁，不再复核、不重解析；无绑定 Overrides 在此做唯一一次覆盖
     # 权限核对与值解析。合并后做一次组合领域引用核对；不重解析未覆盖项。
@@ -3013,19 +3026,15 @@ def merge_effective(profile: FinanceProfile, overrides: FinanceOverrides | None)
     merged_cf: dict[str, NetCashflowEntry] = dict(profile.net_cashflows)
     for cf_id, patch in sorted(overrides.net_cashflows.items()):
         prof_cf = profile.net_cashflows[cf_id]
-        at = prof_cf.at
-        if "at" in patch:
-            at = _parse_cashflow_at(patch["at"], f"net_cashflows.{cf_id}.at")
-        amount = prof_cf.amount
-        if "amount" in patch:
-            raw_amt = patch["amount"]
-            if prof_cf.amount.kind == "fixed":
-                val = Money.from_dict(raw_amt["value"], field=f"net_cashflows.{cf_id}.amount.value")
-                amount = FixedCashflowAmount(value=val)
-            elif prof_cf.amount.kind == "source_share":
-                ratio = Money.from_dict(raw_amt["ratio"], field=f"net_cashflows.{cf_id}.amount.ratio")
-                amount = SourceShareCashflowAmount(base_from=prof_cf.amount.base_from, ratio=ratio)
-        merged_cf[cf_id] = NetCashflowEntry(at=at, direction=prof_cf.direction, amount=amount)
+        # 与税则/池一致：已绑定不再解析；未绑定首次与 Profile 组合时
+        # 调用同一解析器完成身份、覆盖权限、币种与形态检查。
+        values = (overrides._parsed_net_cashflows[cf_id] if bound
+                  else _validate_net_cashflow_override(cf_id, patch, profile)[1])
+        merged_cf[cf_id] = NetCashflowEntry(
+            at=values.get("at", prof_cf.at),
+            direction=prof_cf.direction,
+            amount=values.get("amount", prof_cf.amount),
+        )
 
     _check_tax_refs(
         currency=profile.currency,

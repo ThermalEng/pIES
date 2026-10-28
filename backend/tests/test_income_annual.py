@@ -70,7 +70,7 @@ DEPR_LIFE = 10
 def _gen_finance_payload(*, opening=(), carry_years=INC_CARRY_YEARS):
     return {
         "schema": "ies.finance-profile",
-        "schema_version": "5.0.0",
+        "schema_version": "6.0.0",
         "profile": {
             "id": "income-gen",
             "region": "CN-North",
@@ -118,8 +118,7 @@ def _gen_finance_payload(*, opening=(), carry_years=INC_CARRY_YEARS):
                 "deductible_maintenance": {"mode": "explicit_items", "items": []},
                 "depreciation": [
                     {
-                        "asset": "gen_choice",
-                        "base_from": "gen_choice.upfront_capex_net",
+                        "base_from": {"kind": "upfront_capex_net", "finance_type": "gen_choice"},
                         "method": "straight_line",
                         "life_years": DEPR_LIFE,
                         "residual": {"value": "0", "unit": "CNY"},
@@ -134,6 +133,7 @@ def _gen_finance_payload(*, opening=(), carry_years=INC_CARRY_YEARS):
             },
         },
         "credit_pools": {},
+        "net_cashflows": {},
     }
 
 
@@ -475,8 +475,7 @@ def _mix_payload():
         },
         "depreciation": [
             {
-                "asset": "sys1",
-                "base_from": "sys1.upfront_capex_net",
+                "base_from": {"kind": "upfront_capex_net", "finance_type": "sys1"},
                 "method": "straight_line",
                 "life_years": 20,
                 "residual": {"value": "0", "unit": "CNY"},

@@ -61,7 +61,7 @@ def _finance() -> EffectiveFinanceConfig:
     # 装配的必需空财务快照；无任何价格、成本、税或案例假设。
     return EffectiveFinanceConfig.from_dict({
         "schema": "ies.effective-finance-config",
-        "schema_version": "5.0.0",
+        "schema_version": "6.0.0",
         "profile_id": "synthetic-curve",
         "currency": "CNY",
         "base_year": 2026,
@@ -73,6 +73,7 @@ def _finance() -> EffectiveFinanceConfig:
         "taxes": {},
         "credit_pools": {},
         "tax_rules": {},
+        "net_cashflows": {},
     })
 
 

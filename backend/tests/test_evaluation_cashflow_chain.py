@@ -97,7 +97,7 @@ def _hp_demo_profile() -> dict:
 
 FIXED_PROFILE: dict = {
     "schema": "ies.finance-profile",
-    "schema_version": "5.0.0",
+    "schema_version": "6.0.0",
     "profile": {
         "id": "t2-fixed-demo",
         "region": "CN-North",
@@ -129,6 +129,7 @@ FIXED_PROFILE: dict = {
     "taxes": {},
     "credit_pools": {},
     "tax_rules": {},
+    "net_cashflows": {},
 }
 
 
@@ -976,7 +977,7 @@ def test_monthly_daily_real_task_uses_calendar_tariff_in_cashflow(
         json={
             "finance_overrides": {
                 "schema": "ies.finance-overrides",
-                "schema_version": "5.0.0",
+                "schema_version": "6.0.0",
                 "profile_ref": {"id": profile["profile"]["id"]},
                 "energy_prices": {"grid_import": {
                     "kind": "constant",

@@ -645,6 +645,52 @@ def test_submit_accepts_pool_only_with_capable_generator(
     assert db.execute(select(func.count(Task.id))).scalar() == 1
 
 
+def test_submit_legacy_path_freezes_and_new_cashflow_fails_capability_gate(
+    client: TestClient, db: Session,
+) -> None:
+    """真实提交：既有合法路径 201；冻结含新关系的输入不能被当作税前任务接收。"""
+    from test_config_revisions import PROFILE_PAYLOAD
+
+    owner = make_user(db, "owner_s1_cashflow_gate")
+    legacy_pid = _prepare_project(client, db, owner)
+    legacy_rev = _save_config(client, legacy_pid, owner)
+    status, body = _submit_task(
+        client, legacy_pid, owner, config={"config_revision": legacy_rev},
+        idempotency_key="op-s1-existing",
+    )
+    assert status == 201, body
+    legacy_snapshot = db.get(CalcSnapshot, body["task"]["calc_snapshot_id"])
+    assert legacy_snapshot is not None
+    assert legacy_snapshot.canonical_assembly_text
+    assert legacy_snapshot.schema_version == "5.0.0"  # 独立 CalcSnapshot 协议不迁移
+
+    profile_payload = {
+        **PROFILE_PAYLOAD,
+        "profile": {**PROFILE_PAYLOAD["profile"], "id": "s1-cashflow-submission"},
+        "net_cashflows": {
+            "year_end_refund": {
+                "at": {"kind": "financial_year", "year": 1},
+                "direction": "inflow",
+                "amount": {"kind": "fixed", "value": {"value": "100", "unit": "CNY"}},
+            },
+        },
+    }
+    cashflow_pid, _ = _prepare_taxref_project(client, db, owner, profile_payload)
+    cashflow_rev = _save_config(client, cashflow_pid, owner)
+    status, body = _submit_task(
+        client, cashflow_pid, owner, config={"config_revision": cashflow_rev},
+        idempotency_key="op-s1-new-relationship",
+    )
+    assert status == 400, body
+    assert body["error"]["code"] == "TASK-REQ-007"
+    assert body["error"]["params"]["missing_capabilities"] == ["finance.net_cashflows"]
+    assert body["error"]["params"]["fields"] == [
+        "effective_finance.net_cashflows.year_end_refund",
+    ]
+    assert db.execute(select(func.count(Task.id))).scalar() == 1
+    assert db.execute(select(func.count(CalcSnapshot.id))).scalar() == 1
+
+
 def test_submit_rejects_tax_rules_without_provider_capabilities(
     db: Session, tmp_path: Path
 ) -> None:
@@ -780,7 +826,7 @@ def _evaluation_2y(expenses: list) -> dict:
 def _maint_ref_overrides(items: list) -> dict:
     return {
         "schema": "ies.finance-overrides",
-        "schema_version": "5.0.0",
+        "schema_version": "6.0.0",
         "profile_ref": {"id": "cn-tax-demo"},
         "tax_rules": {
             "operating_vat": {
@@ -931,7 +977,7 @@ def _sched_profile_payload() -> dict:
 def _sched_refund_overrides(schedule: list | None, refund_period: int, arrival: int) -> dict:
     patch: dict = {
         "schema": "ies.finance-overrides",
-        "schema_version": "5.0.0",
+        "schema_version": "6.0.0",
         "profile_ref": {"id": "cn-tax-sched"},
         "credit_pools": {
             "main_pool": {

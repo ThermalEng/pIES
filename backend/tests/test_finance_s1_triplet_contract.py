@@ -22,6 +22,7 @@ from iesplan.application.tasks.submissions import (
 )
 from iesplan.finance import (
     EvaluationEndAt,
+    EffectiveFinanceConfig,
     FinanceOverrides,
     FinanceProfile,
     FinanceTripletError,
@@ -309,6 +310,138 @@ def test_600_net_cashflows_forms_and_overrides():
     bad_ov["net_cashflows"] = {"unknown_cf": {"at": {"kind": "evaluation_end"}}}
     with pytest.raises(FinanceTripletError, match="在 Profile 中不存在, 禁止新增"):
         FinanceOverrides.from_dict(bad_ov, profile=profile)
+
+
+@pytest.mark.parametrize("bound", [False, True], ids=["unbound", "bound"])
+def test_600_net_cashflow_override_typed_roundtrip(bound):
+    """两条公开入口均签发同一合法 Effective；时点/金额与来源身份无损。"""
+    profile = FinanceProfile.from_dict(_valid_profile_dict())
+    payload = {
+        "schema": "ies.finance-overrides", "schema_version": "6.0.0",
+        "profile_ref": {"id": profile.profile_id},
+        "net_cashflows": {
+            "salvage_recovery": {
+                "at": {"kind": "financial_year", "year": 8},
+                "amount": {"ratio": {"value": "0.1", "unit": "1"}},
+            },
+            "year10_bonus": {"amount": {"value": {"value": "25001", "unit": "CNY"}}},
+        },
+    }
+    override = FinanceOverrides.from_dict(payload, **({"profile": profile} if bound else {}))
+    assert override.to_dict() == FinanceOverrides.from_dict(override.to_dict()).to_dict()
+    effective = merge_effective(profile, override)
+    assert effective.net_cashflows["salvage_recovery"].at.year == 8
+    assert effective.net_cashflows["salvage_recovery"].direction == "inflow"
+    assert effective.net_cashflows["salvage_recovery"].amount.base_from.finance_type == "pv_system"
+    assert effective.net_cashflows["salvage_recovery"].amount.ratio.value == Decimal("0.1")
+    assert effective.net_cashflows["year10_bonus"].amount.value.value == Decimal("25001")
+    assert EffectiveFinanceConfig.from_dict(effective.to_dict()).to_dict() == effective.to_dict()
+
+
+@pytest.mark.parametrize("bound", [False, True], ids=["unbound", "bound"])
+@pytest.mark.parametrize("patch", [
+    {"amount": {"value": {"value": "1", "unit": "USD"}}},
+    {"amount": {"value": {"value": "1", "unit": "CNY"}, "unknown": "discard-me"}},
+    {"amount": {"ratio": {"value": "0.2", "unit": "1"}}},
+    {"amount": {"kind": "source_share", "ratio": {"value": "0.2", "unit": "1"}}},
+    {"amount": {"value": {"value": "1", "unit": "CNY"},
+                "base_from": {"kind": "upfront_capex_net", "finance_type": "pv_system"}}},
+    {"direction": "inflow"},
+], ids=["foreign-currency", "unknown-field", "kind-change", "kind-key", "base-from", "direction"])
+def test_600_net_cashflow_override_rejects_scope(bound, patch):
+    profile = FinanceProfile.from_dict(_valid_profile_dict())
+    payload = {
+        "schema": "ies.finance-overrides", "schema_version": "6.0.0",
+        "profile_ref": {"id": profile.profile_id},
+        "net_cashflows": {"year10_bonus": patch},
+    }
+    if bound:
+        with pytest.raises(FinanceTripletError):
+            FinanceOverrides.from_dict(payload, profile=profile)
+    else:
+        with pytest.raises(FinanceTripletError):
+            merge_effective(profile, FinanceOverrides.from_dict(payload))
+
+
+@pytest.mark.parametrize("bound", [False, True], ids=["unbound", "bound"])
+def test_600_net_cashflow_source_share_cannot_change_base_from(bound):
+    profile = FinanceProfile.from_dict(_valid_profile_dict())
+    payload = {
+        "schema": "ies.finance-overrides", "schema_version": "6.0.0",
+        "profile_ref": {"id": profile.profile_id},
+        "net_cashflows": {"salvage_recovery": {"amount": {
+            "ratio": {"value": "0.08", "unit": "1"},
+            "base_from": {"kind": "maintenance_expense_net", "year": 5, "position": 1},
+        }}},
+    }
+    if bound:
+        with pytest.raises(FinanceTripletError):
+            FinanceOverrides.from_dict(payload, profile=profile)
+    else:
+        with pytest.raises(FinanceTripletError):
+            merge_effective(profile, FinanceOverrides.from_dict(payload))
+
+
+def test_600_net_cashflows_checked_without_tax_rules():
+    """无税则也必须核对净现金的合法时点及评价维护清单来源。"""
+    payload = _valid_profile_dict()
+    payload["tax_rules"] = {}
+    payload["credit_pools"] = {}
+    payload["net_cashflows"] = {
+        "replacement": {
+            "at": {"kind": "financial_year", "year": 3},
+            "direction": "inflow",
+            "amount": {"kind": "source_share", "ratio": {"value": "0.5", "unit": "1"},
+                       "base_from": {"kind": "maintenance_expense_net", "year": 3, "position": 1}},
+        },
+    }
+    evaluation = EvaluationInput(
+        evaluation_years=5, construction_period=1, operation_years=4,
+        discount_rate=0.05, construction_payments=(),
+        maintenance_expenses=(MaintenanceExpense(year=3, currency="CNY", amount="100", terms=()),),
+    )
+    _check_tax_evaluation_refs(evaluation, merge_effective(FinanceProfile.from_dict(payload), None))
+
+    payload["net_cashflows"]["replacement"]["at"]["year"] = 999
+    with pytest.raises(InvalidRequestError) as exc:
+        _check_tax_evaluation_refs(evaluation, merge_effective(FinanceProfile.from_dict(payload), None))
+    assert exc.value.code == "TASK-REQ-015"
+    assert exc.value.params["cashflow_id"] == "replacement"
+    assert exc.value.params["year"] == 999
+
+    payload["net_cashflows"]["replacement"]["at"]["year"] = 3
+    payload["net_cashflows"]["replacement"]["amount"]["base_from"]["position"] = 99
+    with pytest.raises(InvalidRequestError) as exc:
+        _check_tax_evaluation_refs(evaluation, merge_effective(FinanceProfile.from_dict(payload), None))
+    assert exc.value.code == "TASK-REQ-015"
+    assert exc.value.params["cashflow_id"] == "replacement"
+    assert exc.value.params["position"] == 99
+
+
+def test_600_maintenance_capitalization_conflicts_across_income_rules():
+    """A 规则折旧与 B 规则当期费用扣除按全局维护身份冲突。"""
+    payload = _valid_profile_dict()
+    from copy import deepcopy
+
+    second = deepcopy(payload["tax_rules"]["cit_rule"])
+    second.update(revenue=[], energy_cost=[], annual_om=[], variable_om=[], depreciation=[])
+    second["deductible_maintenance"] = {
+        "mode": "explicit_items", "items": [{"year": 5, "position": 1, "deductible": True}],
+    }
+    payload["tax_rules"]["cit_rule_b"] = second
+    effective = merge_effective(FinanceProfile.from_dict(payload), None)
+    evaluation = EvaluationInput(
+        evaluation_years=20, construction_period=1, operation_years=19,
+        discount_rate=0.05, construction_payments=(),
+        maintenance_expenses=(MaintenanceExpense(year=5, currency="CNY", amount="100", terms=()),),
+    )
+    with pytest.raises(InvalidRequestError) as exc:
+        _check_tax_evaluation_refs(evaluation, effective)
+    assert exc.value.code == "TASK-REQ-015"
+    assert exc.value.params["rule"] == "cit_rule"
+    assert exc.value.params["deductible_rule"] == "cit_rule_b"
+    assert exc.value.params["year"] == 5
+    assert exc.value.params["position"] == 1
 
 
 def test_600_vat_subcomponent_reference_and_overlap():

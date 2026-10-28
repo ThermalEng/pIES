@@ -846,7 +846,7 @@ def _check_tax_evaluation_refs(
 ) -> None:
     """税务规则与本次评价输入的跨输入对应核对(B1c)。
 
-    空税则直接通过(既有路径不变)。非空时一次性核对，不在快照/持久化/
+    税则可为空，但净现金项目仍须核对。一次性核对，不在快照/持久化/
     Worker/Generator 重复：
     - ``maintenance_input_tax`` / ``deductible_maintenance.items`` 的
       ``(year, position)`` 必须在本次冻结 ``maintenance_expenses`` 清单中
@@ -863,8 +863,6 @@ def _check_tax_evaluation_refs(
     """
     from iesplan.finance import ConstructionVatRule, IncomeTaxRule, VatRule
 
-    if not effective.tax_rules:
-        return
     months = 12 * int(evaluation.evaluation_years)
     year_sizes: dict[int, int] = {}
     for expense in evaluation.maintenance_expenses:
@@ -896,6 +894,15 @@ def _check_tax_evaluation_refs(
 
     K = int(evaluation.construction_period)
     E = int(evaluation.evaluation_years)
+    # 本次全部所得税规则共同占用同一维护项身份空间：跨规则也不得
+    # 一边资本化折旧，一边作为当期费用全额扣除。
+    deductible_maint = {
+        (item.year, item.position): rule_id
+        for rule_id, rule in effective.tax_rules.items()
+        if isinstance(rule, IncomeTaxRule)
+        for item in rule.deductible_maintenance.items
+        if item.deductible
+    }
 
     for rule_id, rule in effective.tax_rules.items():
         if isinstance(rule, VatRule):
@@ -939,18 +946,18 @@ def _check_tax_evaluation_refs(
                                 "field": f"effective_finance.tax_rules.{rule_id}.depreciation",
                             },
                         )
-                    # 扣除冲突检查：作为折旧来源的维护项不得同时声明为当期费用扣除
-                    for m_item in rule.deductible_maintenance.items:
-                        if m_item.year == m_year and m_item.position == m_pos and m_item.deductible:
-                            raise InvalidRequestError(
-                                "维护项已作为折旧来源，不得同时声明为当期费用扣除",
-                                code="TASK-REQ-015",
-                                params={"rule": rule_id, "year": m_year, "position": m_pos},
-                                location={
-                                    "object_type": "task",
-                                    "field": f"effective_finance.tax_rules.{rule_id}.depreciation",
-                                },
-                            )
+                    deducted_by = deductible_maint.get((m_year, m_pos))
+                    if deducted_by is not None:
+                        raise InvalidRequestError(
+                            "维护项已作为折旧来源，不得同时声明为当期费用扣除",
+                            code="TASK-REQ-015",
+                            params={"rule": rule_id, "deductible_rule": deducted_by,
+                                    "year": m_year, "position": m_pos},
+                            location={
+                                "object_type": "task",
+                                "field": f"effective_finance.tax_rules.{rule_id}.depreciation",
+                            },
+                        )
         elif isinstance(rule, ConstructionVatRule):
             if rule.confirmation.method == "explicit_schedule":
                 for entry in rule.confirmation.schedule:

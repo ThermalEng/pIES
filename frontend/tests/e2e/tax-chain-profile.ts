@@ -1,4 +1,4 @@
-// D3 税务主链画像(ies.finance-profile@4.0.0 合成税则, 显式税率/池/退款)。
+// D3 税务主链画像(ies.finance-profile@6.0.0 合成税则, 显式税率/池/退款)。
 //
 // 场景: 光伏余电上网(售电计量口 grid1.electricity_export, 界由
 // max_export_power_kw 给出) + 外购热(购热计量口 boiler1.heat_out, 界由
@@ -56,7 +56,8 @@ const taxProfileTemplate = {
     region: '合成税务验收区',
   },
   schema: 'ies.finance-profile',
-  schema_version: '5.0.0',
+  schema_version: '6.0.0',
+  net_cashflows: {},
   tax_rules: {
     building_vat: {
       confirmation: { method: 'payment_period' },
@@ -78,8 +79,7 @@ const taxProfileTemplate = {
       },
       depreciation: [
         {
-          asset: 'pv_system',
-          base_from: 'pv_system.upfront_capex_net',
+          base_from: { kind: 'upfront_capex_net', finance_type: 'pv_system' },
           first_year: 1,
           life_years: 20,
           method: 'straight_line',

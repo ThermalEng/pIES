@@ -99,6 +99,7 @@ PROFILE_PAYLOAD: dict = {
     "taxes": {},
     "credit_pools": {},
     "tax_rules": {},
+    "net_cashflows": {},
 }
 
 
