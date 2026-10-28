@@ -246,3 +246,67 @@ def test_recovery_and_annual_fee_switch_main_solution(tmp_path, recovery, annual
     )
     assert sum(float(cf) for cf in sealed["annual_net_flows"]) == pytest.approx(objective)
     assert float(sealed["evaluation"]["npv"]) == pytest.approx(objective)
+
+
+@pytest.mark.parametrize("currency", ("CNY", "USD"))
+def test_same_currency_annual_fixed_and_linear_end_to_end(tmp_path, currency):
+    """One genuine HiGHS solution → paired 6.0.0 adapter → year/NPV/components.
+
+    Currency is retained, never converted: a=10kW, b=100kW new, old
+    existing excluded.  Annual: 2*500 + 25*(10+100) = 3750;
+    upfront: 200*(10+100) = 22000; two operation years, zero discount.
+    """
+    import json
+
+    from iesplan.computation.generators.mps import write_mps
+    from iesplan.computation.result_adapters.highs import HIGHS_ADAPTER
+    from test_highs_result_adapter import (
+        PARAMETERS_PATH, PROBLEM_PATH, SOLUTION_PATH, _bundle,
+        _parameters, _receipt,
+    )
+
+    def annual(profile):
+        profile["finance_types"]["same"]["annual_fixed_om"] = {
+            "fixed": _money("500", f"{currency}/a"),
+            "linear": {"cap": {"unit_cost": _money("25", f"{currency}/kW/a")}},
+        }
+
+    builder = _builder([], currency=currency, fixed_capacity=True, finance_patch=annual)
+    solved, facts, model = _tiny_solve(builder, tmp_path, with_model=True)
+    mps_text, offset = write_mps(model)
+    doc = json.loads(_parameters(offset=offset, objective_unit=currency).decode("utf-8"))
+    doc["unit_map"] = dict(builder.unit_map)
+    doc["financial_facts"] = facts
+    doc["components"] = {name: dict(value) for name, value in builder.finance_components().items()}
+    bundle = _bundle({
+        PROBLEM_PATH: mps_text.encode("utf-8"),
+        PARAMETERS_PATH: (json.dumps(doc, sort_keys=True) + "\n").encode("utf-8"),
+    })
+    adapted = HIGHS_ADAPTER.adapt(
+        bundle, _receipt(), {SOLUTION_PATH: (tmp_path / "output" / "solution.sol").read_bytes()},
+    )
+    assert adapted.math_status == "solved"
+    solution = adapted.outputs["solution"]
+    assert solution["objective_unit"] == currency
+    assert solution["objective_value"] == pytest.approx(-29500.0)
+    components = solution["components"]
+    assert components["a__annual_fixed_om"]["unit"] == f"{currency}/a"
+    assert components["b__annual_fixed_om"]["unit"] == f"{currency}/a"
+    assert components["a__annual_fixed_om"]["value"] == pytest.approx(750.0)
+    assert components["b__annual_fixed_om"]["value"] == pytest.approx(3000.0)
+    restored = adapted.outputs["financial_facts"]
+    assert restored["currency"] == currency
+    assert float(restored["annual_fixed_om"]) == pytest.approx(3750.0)
+    assert float(restored["construction_total"]) == pytest.approx(22000.0)
+    assert [float(row["fixed_om"]) for row in restored["annual_operation"]] == pytest.approx([3750, 3750])
+    assert [float(cf) for cf in restored["annual_net_flows"]] == pytest.approx([-22000, -3750, -3750])
+    sealed = build_financial_evaluation(
+        SimpleNamespace(evaluation={
+            "construction_period": 0, "operation_years": 2,
+            "evaluation_years": 2, "discount_rate": 0.0,
+        }), builder.finance, adapted,
+    )
+    assert sealed["currency"] == currency
+    assert float(sealed["evaluation"]["npv"]) == pytest.approx(solution["objective_value"])
+    assert sealed["annual_net_flows"] == restored["annual_net_flows"]
+    assert solved["cap_a"] == pytest.approx(10000)
