@@ -50,7 +50,7 @@ from iesplan.computation.protocols import (
     SolverBundle,
 )
 from iesplan.computation.result_adapter import ResultAdapterDescriptor
-from iesplan.core.units import UnitError, dims_of, from_si
+from iesplan.core.units import UnitError, dims_of, from_si, unit_meta
 
 ADAPTER_ID = "ies.result-adapter.highs"
 ADAPTER_VERSION = "6.0.0"
@@ -428,13 +428,15 @@ class HighsResultAdapter:
                 currency = dims_of(unit) == Counter({"currency": 1})
             except UnitError as exc:
                 _fail(f"分量 {ident!r} 单位无法解析 {unit!r}: {exc}")
-            if currency:
-                value = total
-            else:
-                try:
+            try:
+                if dims_of(unit).get("currency") == 1:
+                    # 与生成器同一系数：USD/a、USD/kW/a 只还原时间/
+                    # 物理分母，不经过 core.units 的无汇率跨币种转换。
+                    value = total / float(unit_meta(unit)["to_si"])
+                else:
                     value = from_si(total, unit)
-                except UnitError as exc:
-                    _fail(f"分量 {ident!r} 反向换算失败 →{unit!r}: {exc}")
+            except UnitError as exc:
+                _fail(f"分量 {ident!r} 反向换算失败 →{unit!r}: {exc}")
             if not math.isfinite(value):
                 _fail(f"分量 {ident!r} 发布值非有限")
             components_out[ident] = {
