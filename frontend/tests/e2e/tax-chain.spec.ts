@@ -871,7 +871,7 @@ test.describe('D3: 税务主链(财务页→提交→求解→税额→评估→
     }
     profile.tax_rules.income.depreciation.push({
       base_from: { kind: 'maintenance_expense_net', year: 2, position: 1 },
-      method: 'straight_line', first_year: 1, life_years: 2,
+      method: 'straight_line', first_year: 2, life_years: 2,
       residual: { value: '0.1', unit: '1' },
     })
     // A real full-document edit through FinancePage; no API-write shortcut.
