@@ -171,7 +171,7 @@ globalThis.fetch = async (url, init = {}) => {
         dataset_bindings: [{ dataset_id: 5, dataset_version_id: 11 }, { dataset_id: 6, dataset_version_id: 12 }],
         model: {
           devices: [
-            { name: 'hp1', device_type: 'ies.device.heat_pump', kind: 'new', params: { cop: 3.2 } },
+            { name: 'hp1', ref: 'hp1', display_name: '热泵1', device_type: 'ies.device.heat_pump', kind: 'new', params: { cop: 3.2 } },
           ],
           connections: [
             { name: 'c1', from_device: 'hp1', from_port: 'heat_out', to_device: 'pipe1', to_port: 'heat_in' },
@@ -184,6 +184,7 @@ globalThis.fetch = async (url, init = {}) => {
   const section = modelSectionFromView(viewDto)
   check('modelSectionFromView: 修订号透传', section.revision === 7)
   check('modelSectionFromView: 设备映射', section.model.devices.length === 1 && section.model.devices[0].name === 'hp1' && section.model.devices[0].kind === 'new')
+  check('modelSectionFromView: 设备 ref 与 display_name 保留', section.model.devices[0].ref === 'hp1' && section.model.devices[0].display_name === '热泵1')
   check('modelSectionFromView: 连接映射', section.model.connections.length === 1 && section.model.connections[0].name === 'c1')
   const project = projectFromView(viewDto)
   check('projectFromView: 从 draft.content 保留两份权威绑定', project.draft?.dataset_bindings?.map((b) => b.dataset_version_id).join(',') === '11,12')

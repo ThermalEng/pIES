@@ -9,6 +9,7 @@ import { useParams } from 'react-router-dom'
 import { Alert, Button, Card, EmptyState, FormField, Input, Select, Spinner, Textarea } from '../components/ui'
 import { getPlanningConfig, savePlanningConfig } from '../features/config'
 import type { PlanningConfigBody, PlanningConstraintDto, PlanningVariableDto } from '../features/config'
+import { getModel } from '../features/modeling'
 import { errorMessage } from '../i18n'
 import { pt } from '../i18n/pageMessages'
 import { ApiError } from '../types'
@@ -22,6 +23,7 @@ type VariableRow = {
   lower_bound: string
   upper_bound: string
   unit: string
+  manual?: boolean
 }
 type ConstraintRow = {
   id: number
@@ -56,6 +58,8 @@ export default function PlanningPage() {
   const [conflict, setConflict] = useState(false)
   const [formError, setFormError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
+  const [devices, setDevices] = useState<Array<{ ref: string; name: string }>>([])
+  const [devicesError, setDevicesError] = useState<string | null>(null)
 
   function applyConfig(body: PlanningConfigBody | null, rev: number | null) {
     setSense(body?.objective.sense ?? '')
@@ -103,6 +107,19 @@ export default function PlanningPage() {
         }
       },
     ).finally(() => { if (!cancelled) setLoading(false) })
+    void getModel(projectId).then(
+      (res) => {
+        if (!cancelled) {
+          setDevices(res.model.devices.map((d) => ({
+            ref: d.ref,
+            name: d.display_name,
+          })))
+        }
+      },
+      (err: unknown) => {
+        if (!cancelled) setDevicesError(errorMessage(err))
+      },
+    )
     return () => { cancelled = true }
     // Component instance is re-mounted by project workbench when projectId changes.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -254,7 +271,68 @@ export default function PlanningPage() {
                 <Input id={'planning-var-name-' + row.id} value={row.name} onChange={(e) => updateVariable(row.id, { name: e.target.value })} />
               </FormField>
               <FormField label={pt('ies.planning.device_ref')} htmlFor={'planning-var-device-' + row.id} required>
-                <Input id={'planning-var-device-' + row.id} value={row.device_ref} onChange={(e) => updateVariable(row.id, { device_ref: e.target.value })} />
+                {devicesError ? (
+                  <div>
+                    <span className="ies-form-message" style={{ color: 'var(--ies-color-error)', display: 'block', marginBottom: 'var(--ies-space-1)' }}>
+                      {devicesError}
+                    </span>
+                    <Input
+                      id={'planning-var-device-' + row.id}
+                      value={row.device_ref}
+                      placeholder="手动输入实例引用 (如 pv_new)"
+                      onChange={(e) => updateVariable(row.id, { device_ref: e.target.value })}
+                    />
+                  </div>
+                ) : devices.length > 0 && !row.manual ? (
+                  <div>
+                    <Select
+                      id={'planning-var-device-' + row.id}
+                      value={row.device_ref}
+                      onChange={(e) => updateVariable(row.id, { device_ref: e.target.value })}
+                    >
+                      <option value="">{pt('ies.planning.choose')}</option>
+                      {row.device_ref && !devices.some((d) => d.ref === row.device_ref) && (
+                        <option value={row.device_ref}>{`${row.device_ref} (当前引用)`}</option>
+                      )}
+                      {devices.map((d) => (
+                        <option key={d.ref} value={d.ref}>
+                          {d.name === d.ref ? d.name : `${d.name} (${d.ref})`}
+                        </option>
+                      ))}
+                    </Select>
+                    <div style={{ marginTop: 'var(--ies-space-1)' }}>
+                      <button
+                        type="button"
+                        className="ies-link-button"
+                        style={{ fontSize: 'var(--ies-font-size-xs)' }}
+                        onClick={() => updateVariable(row.id, { manual: true })}
+                      >
+                        手动输入引用
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <div>
+                    <Input
+                      id={'planning-var-device-' + row.id}
+                      value={row.device_ref}
+                      placeholder="输入实例引用 (如 pv_new)"
+                      onChange={(e) => updateVariable(row.id, { device_ref: e.target.value })}
+                    />
+                    {devices.length > 0 && (
+                      <div style={{ marginTop: 'var(--ies-space-1)' }}>
+                        <button
+                          type="button"
+                          className="ies-link-button"
+                          style={{ fontSize: 'var(--ies-font-size-xs)' }}
+                          onClick={() => updateVariable(row.id, { manual: false })}
+                        >
+                          从设备列表选择
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                )}
               </FormField>
               <FormField label={pt('ies.planning.parameter')} htmlFor={'planning-var-param-' + row.id} required>
                 <Input id={'planning-var-param-' + row.id} value={row.parameter} onChange={(e) => updateVariable(row.id, { parameter: e.target.value })} />
