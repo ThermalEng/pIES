@@ -94,16 +94,16 @@ def _construction_and_annual(profile: dict) -> None:
     }
 
 
-def test_annual_rates_subcomponent_net_basis_and_cash_periods():
+def test_annual_rates_subcomponent_net_basis_and_cash_periods(tmp_path):
     builder = _builder([], fixed_capacity=True, finance_patch=_construction_and_annual)
-    builder.build()
-    facts = builder.financial_facts()
+    solved, facts = _tiny_solve(builder, tmp_path)
+    assert solved["cap_a"] == pytest.approx(10000.0)
     # a: 10 kW; b: 100 kW.  Two newly built assets, one existing excluded.
     gross = 2 * 500 + 110 * 200
     yearly = 2 * 500 + 110 * 25
     deductible = 2 * 500 * .1 / 1.1 + (110 * 200) * .2 / 1.2 * .5
     net = gross - deductible
-    values = {"cap_a": 10000.0}
+    values = solved
     assert _amount(facts["construction_total"], **values) == pytest.approx(gross)
     assert _amount(facts["annual_fixed_om"], **values) == pytest.approx(yearly)
     for row in facts["annual_operation"]:
@@ -127,6 +127,14 @@ def test_annual_rates_subcomponent_net_basis_and_cash_periods():
     assert _amount(taxable[1]["taxable_base"], **values) == pytest.approx(
         -expected_annual_basis - net * .9 / 4
     )
+    # Real monthly VAT ledger must credit the leaf-scoped annual fixed O&M.
+    # The adjacent linear leaf has deductible_ratio=0 and contributes no credit.
+    vat_by_month = {row["month"]: row for row in facts["tax_cash"]["vat"]}
+    assert len(vat_by_month) == 24
+    for month in (12, 24):
+        delta = (_amount(vat_by_month[month]["carry"], **solved)
+                 - _amount(vat_by_month[month - 1]["carry"], **solved))
+        assert delta == pytest.approx(2 * 500 * .1 / 1.1)
 
 
 def _replacement_profile(profile: dict) -> None:
@@ -152,7 +160,7 @@ def _replacement_profile(profile: dict) -> None:
     }
 
 
-def test_initial_and_two_same_year_replacements_have_separate_depreciation():
+def test_initial_and_two_same_year_replacements_have_separate_depreciation(tmp_path):
     expenses = [dict(_expense("300"), year=2), dict(_expense("500"), year=2)]
     builder = _builder(expenses, fixed_capacity=True,
                        finance_patch=_replacement_profile,
@@ -160,9 +168,9 @@ def test_initial_and_two_same_year_replacements_have_separate_depreciation():
                            "construction_period": 1, "operation_years": 3,
                            "evaluation_years": 4, "construction_payments": [{"t": 1, "ratio": 1}],
                        }))
-    builder.build()
-    facts = builder.financial_facts()
-    values = {"cap_a": 10000.0}
+    solved, facts = _tiny_solve(builder, tmp_path)
+    assert solved["cap_a"] == pytest.approx(10000.0)
+    values = solved
     depreciation = facts["tax_cash"]["depreciation"]
     identities = [(r["base_from"]["kind"], r["base_from"].get("position"), r["year"])
                   for r in depreciation]

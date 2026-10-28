@@ -305,10 +305,10 @@ def test_export_excel_usecase(client: TestClient, db: Session) -> None:
 
 
 def _sealed_k1n2() -> dict:
-    """最小 K1N2 2.0.0 封存评价块(展示用, 双维护已合计)。"""
+    """最小 K1N2 3.0.0 封存评价块(展示用, 双维护已合计)。"""
     return {
         "schema": "ies.financial-evaluation",
-        "schema_version": "2.0.0",
+        "schema_version": "3.0.0",
         "status": "evaluated",
         "evaluation_years": 3,
         "construction_period": 1,
@@ -335,6 +335,7 @@ def _sealed_k1n2() -> dict:
             },
         ],
         "monthly_demand": [],
+        "net_cashflows": [],
         "annual_net_flows": ["-84000.0", "-56000.0", "8500", "6979.50"],
         # 无税展示夹具: 五个数组显式为空(合法"不适用"), 不用缺字段伪装。
         "tax_cash": {

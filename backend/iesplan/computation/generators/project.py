@@ -1654,7 +1654,8 @@ class _ProjectBuilder:
                             self._tariff_affine(binding_id, start, end), -factor
                         )
             for entry in rule.om_input_tax:
-                finance_type, _, component = entry.for_path.partition(".")
+                finance_type, _, scope = entry.for_path.partition(".")
+                component = scope.split(".", 1)[0]
                 factor = self._vat_gross_factor(entry.rate) * float(
                     entry.deductible_ratio.value
                 )
