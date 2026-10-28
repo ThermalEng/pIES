@@ -81,13 +81,58 @@ export function translateDiagnostic(diag: Diagnostic): string {
 
 /** 将后端错误信封(ApiError)渲染为文案。 */
 export function translateError(err: ApiError): string {
-  const raw = translate(err.message_key, err.params)
-  // 兜底: 文案含未替换的 {reason} 占位时,使用 err.code + status 注入,避免把模板原样返回。
-  if (raw.includes('{reason}')) {
-    const fallbackReason = err.code && err.code !== 'API-UNKNOWN' ? err.code : `HTTP ${err.status || 0}`
-    return raw.replace(/\{reason\}/g, fallbackReason)
+  // 405 等 HTTP 信封的 status_code 是权威可诊断内容；通用英文
+  // detail (如 Method Not Allowed) 不应掩盖本地化的精确状态码。
+  if (err.message_key === 'ies.error.http_exception'
+    && typeof err.params?.status_code === 'number') {
+    return translate(err.message_key, err.params)
   }
-  return raw
+  // 1. 优先提取公开详情(params.detail)
+  const detail = typeof err.params?.detail === 'string' && err.params.detail.trim()
+    ? err.params.detail.trim()
+    : null
+
+  // 2. 聚合诊断(params.diagnostics): 必须完整保留所有项，不能只取第一项而丢失其余内容
+  let diagText: string | null = null
+  if (Array.isArray(err.params?.diagnostics) && err.params.diagnostics.length > 0) {
+    const formatted = err.params.diagnostics.map((d) => {
+      if (typeof d === 'object' && d !== null) {
+        const diag = d as Record<string, unknown>
+        if (typeof diag.detail === 'string' && diag.detail.trim()) {
+          return diag.detail.trim()
+        }
+        if (typeof diag.message_key === 'string' && diag.message_key) {
+          const rendered = translate(diag.message_key as MessageKey, diag.params as Record<string, unknown> | undefined)
+          if (rendered !== diag.message_key && !/\{[a-zA-Z0-9_]+\}/.test(rendered)) {
+            return diag.code ? `${diag.code}: ${rendered}` : rendered
+          }
+        }
+        if (diag.code) return String(diag.code)
+      }
+      return String(d)
+    }).filter(Boolean)
+    if (formatted.length > 0) {
+      diagText = formatted.join('; ')
+    }
+  }
+
+  if (detail && diagText) {
+    return detail.includes(diagText) ? detail : `${detail} (${diagText})`
+  }
+  if (detail) return detail
+  if (diagText) return diagText
+
+  // 3. 尝试国际化消息键
+  const raw = translate(err.message_key, err.params)
+  if (raw !== err.message_key && !/\{[a-zA-Z0-9_]+\}/.test(raw)) {
+    return raw
+  }
+
+  // 4. 无详情/未匹配/含未替换占位符时：显示本地化通用提示及错误码，不显示原始键或未替换占位符
+  if (err.code && err.code !== 'API-UNKNOWN') {
+    return translate('ies.error.operation_failed_with_code', { code: err.code })
+  }
+  return translate('ies.error.operation_failed')
 }
 
 /** 任意异常 → 用户可读文案:ApiError 走 translateError,其余统一"未知错误"兜底。 */

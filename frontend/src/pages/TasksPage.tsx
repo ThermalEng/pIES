@@ -22,6 +22,7 @@ import {
   buildInput,
   cancelTask,
   createTask,
+  deriveEvaluationYears,
   describeFrozenConfig,
   describeFrozenEvaluation,
   describeFrozenFinance,
@@ -1290,12 +1291,7 @@ export default function TasksPage() {
           </FormField>
           <p className="ies-form-message" style={{ marginBottom: 'var(--ies-space-2)' }}>
             {t('ies.task.evaluation_years_derived', {
-              // 与提交接受口径同源: 展示 E 取同一解析的规范值, 非法表单显 '—'
-              // (此前正则比 Number() 严格, '+1' 等合法写法显示与接受分裂)。
-              years: (() => {
-                const parsed = parseEvaluation(form)
-                return parsed === null ? '—' : String(parsed.evaluation_years)
-              })(),
+              years: deriveEvaluationYears(form) ?? '—',
             })}
           </p>
           <FormField label={t('ies.task.discount_rate')} htmlFor="task-discount-rate" required error={evaluationError('discountRate', 'discount_rate')}>

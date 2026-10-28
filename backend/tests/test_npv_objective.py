@@ -88,7 +88,7 @@ def _hand_const() -> float:
 def _finance_payload() -> dict:
     return {
         "schema": "ies.finance-profile",
-        "schema_version": "5.0.0",
+        "schema_version": "6.0.0",
         "profile": {
             "id": "npv-demo",
             "region": "CN-North",
@@ -101,6 +101,7 @@ def _finance_payload() -> dict:
         "taxes": {},
         "credit_pools": {},
         "tax_rules": {},
+        "net_cashflows": {},
         "finance_types": {
             "sys1": {
                 "upfront_capex": {"linear": {"cap": {"unit_cost": {"value": "1000", "unit": "CNY/kW"}}}},
@@ -662,7 +663,7 @@ equations:
 def _choice_finance_payload() -> dict:
     return {
         "schema": "ies.finance-profile",
-        "schema_version": "5.0.0",
+        "schema_version": "6.0.0",
         "profile": {
             "id": "npv-choice",
             "region": "CN-North",
@@ -675,6 +676,7 @@ def _choice_finance_payload() -> dict:
         "taxes": {},
         "credit_pools": {},
         "tax_rules": {},
+        "net_cashflows": {},
         "finance_types": {
             "gen_sys": {
                 "upfront_capex": {"linear": {"cap": {"unit_cost": {"value": "1000", "unit": "CNY/kW"}}}},

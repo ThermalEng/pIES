@@ -130,6 +130,11 @@ test.describe('空值门禁(非画布 GUI)', () => {
     // 折现率留空(0 被静默接受的回归点): 只填年限仍被拒绝
     await dialog.locator('#task-construction-period').fill('0')
     await dialog.locator('#task-operation-years').fill('1')
+    // E depends only on valid K/N, even before the remaining fields are filled.
+    await expect(dialog.getByText(/E=K\+N.*[:：]\s*1$/)).toBeVisible()
+    await dialog.locator('#task-operation-years').fill('0')
+    await expect(dialog.getByText(/E=K\+N.*[:：]\s*—$/)).toBeVisible()
+    await dialog.locator('#task-operation-years').fill('1')
     await dialog.getByRole('button', { name: /^提交任务$|^Submit task$/i }).click()
     await expect(dialog.getByRole('alert').filter({ hasText: /0\.\.1/ }).last()).toBeVisible({ timeout: 10_000 })
     expect(taskPosts).toHaveLength(0)
@@ -143,6 +148,7 @@ test.describe('空值门禁(非画布 GUI)', () => {
     // Invalid scalar and JSON edits identify the field without making a task request.
     const rateField = dialog.getByLabel(/折现率/)
     await rateField.fill('1.5')
+    await expect(dialog.getByText(/E=K\+N.*[:：]\s*1$/)).toBeVisible()
     await dialog.getByRole('button', { name: /^提交任务$/ }).click()
     await expect(rateField).toHaveAttribute('aria-invalid', 'true')
     await expect(rateField).toHaveAccessibleDescription(/0\.\.1/)

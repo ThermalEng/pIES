@@ -118,7 +118,7 @@ export default function MonthlyDailyPriceEditor({
     if (disabled || !valid) return
     const base = doc ?? (mode === 'overrides' && profileId ? {
       schema: 'ies.finance-overrides',
-      schema_version: '5.0.0',
+      schema_version: '6.0.0',
       profile_ref: { id: profileId },
     } : null)
     if (!base) return

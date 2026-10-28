@@ -36,7 +36,7 @@ from iesplan.finance.triplet import (
 def _profile_payload() -> dict:
     return {
         "schema": "ies.finance-profile",
-        "schema_version": "5.0.0",
+        "schema_version": "6.0.0",
         "profile": {
             "id": "cn-north-demo",
             "region": "CN-North",
@@ -105,6 +105,7 @@ def _profile_payload() -> dict:
         },
         "credit_pools": {},
         "tax_rules": {},
+        "net_cashflows": {},
     }
 
 
@@ -115,7 +116,7 @@ def _profile() -> FinanceProfile:
 def _overrides_payload(profile: FinanceProfile) -> dict:
     return {
         "schema": "ies.finance-overrides",
-        "schema_version": "5.0.0",
+        "schema_version": "6.0.0",
         "profile_ref": {"id": profile.profile_id},
         "finance_types": {
             "pv_system": {
@@ -254,9 +255,9 @@ def test_finance_type_component_requirements():
     payload2["finance_types"]["empty_entry"] = {}
     with pytest.raises(FinanceTripletError, match="不能为空|至少需要"):
         FinanceProfile.from_dict(payload2)
-    # fixed 只允许在 upfront_capex; annual_fixed_om 带 fixed 拒绝
+    # fixed 只允许在 upfront_capex 与 annual_fixed_om; period_variable_om 带 fixed 拒绝
     payload3 = _profile_payload()
-    payload3["finance_types"]["pv_system"]["annual_fixed_om"]["fixed"] = {"value": "5", "unit": "CNY"}
+    payload3["finance_types"]["pv_system"]["period_variable_om"]["fixed"] = {"value": "5", "unit": "CNY"}
     with pytest.raises(FinanceTripletError, match="不允许 fixed"):
         FinanceProfile.from_dict(payload3)
 
@@ -585,7 +586,7 @@ def test_monthly_daily_override_entire_source_and_cross_kind() -> None:
     before = profile.energy_prices["grid_import"].to_dict()
     override = {
         "schema": "ies.finance-overrides",
-        "schema_version": "5.0.0",
+        "schema_version": "6.0.0",
         "profile_ref": {"id": profile.profile_id},
         "energy_prices": {"grid_import": _monthly_daily_source()},
     }

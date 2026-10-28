@@ -66,7 +66,7 @@ def _builder(
         "depreciation": [], "loss_carryforward_years": 5, "opening_losses": [],
     }
     payload = {
-        "schema": "ies.finance-profile", "schema_version": "5.0.0",
+        "schema": "ies.finance-profile", "schema_version": "6.0.0",
         "profile": {
             "id": "maintenance-tiny", "region": "CN-North", "currency": currency,
             "base_year": 2025, "price_basis": "tax_inclusive",
@@ -96,6 +96,7 @@ def _builder(
                      "receivable_policy": "end_receivable", "refunds": []},
         } if taxes else {}),
         "tax_rules": ({"maint_vat": vat_rule, "maint_income": income_rule} if taxes else {}),
+        "net_cashflows": {},
     }
     finance = merge_effective(FinanceProfile.from_dict(payload), None)
     planning = {

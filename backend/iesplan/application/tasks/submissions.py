@@ -846,7 +846,7 @@ def _check_tax_evaluation_refs(
 ) -> None:
     """税务规则与本次评价输入的跨输入对应核对(B1c)。
 
-    空税则直接通过(既有路径不变)。非空时一次性核对，不在快照/持久化/
+    税则可为空，但净现金项目仍须核对。一次性核对，不在快照/持久化/
     Worker/Generator 重复：
     - ``maintenance_input_tax`` / ``deductible_maintenance.items`` 的
       ``(year, position)`` 必须在本次冻结 ``maintenance_expenses`` 清单中
@@ -863,8 +863,6 @@ def _check_tax_evaluation_refs(
     """
     from iesplan.finance import ConstructionVatRule, IncomeTaxRule, VatRule
 
-    if not effective.tax_rules:
-        return
     months = 12 * int(evaluation.evaluation_years)
     year_sizes: dict[int, int] = {}
     for expense in evaluation.maintenance_expenses:
@@ -894,6 +892,18 @@ def _check_tax_evaluation_refs(
                 },
             )
 
+    K = int(evaluation.construction_period)
+    E = int(evaluation.evaluation_years)
+    # 本次全部所得税规则共同占用同一维护项身份空间：跨规则也不得
+    # 一边资本化折旧，一边作为当期费用全额扣除。
+    deductible_maint = {
+        (item.year, item.position): rule_id
+        for rule_id, rule in effective.tax_rules.items()
+        if isinstance(rule, IncomeTaxRule)
+        for item in rule.deductible_maintenance.items
+        if item.deductible
+    }
+
     for rule_id, rule in effective.tax_rules.items():
         if isinstance(rule, VatRule):
             for entry in rule.maintenance_input_tax:
@@ -902,6 +912,52 @@ def _check_tax_evaluation_refs(
             items = rule.deductible_maintenance.items
             for entry in items:
                 _require_maint(rule_id, "deductible_maintenance.items", entry.year, entry.position)
+            for entry in rule.depreciation:
+                if entry.base_from.kind == "upfront_capex_net":
+                    ft_name = entry.base_from.finance_type
+                    ft_entry = effective.finance_types.get(ft_name)
+                    if ft_entry is None or ft_entry.upfront_capex is None:
+                        raise InvalidRequestError(
+                            "折旧引用的初建成本类别不存在或无 upfront_capex",
+                            code="TASK-REQ-015",
+                            params={"rule": rule_id, "finance_type": ft_name},
+                            location={
+                                "object_type": "task",
+                                "field": f"effective_finance.tax_rules.{rule_id}.depreciation",
+                            },
+                        )
+                elif entry.base_from.kind == "maintenance_expense_net":
+                    m_year = entry.base_from.year
+                    m_pos = entry.base_from.position
+                    _require_maint(rule_id, "depreciation.base_from", m_year, m_pos)
+                    # 期间检查：换新在评价年末发生，折旧首年须晚于发生年 (K + first_year > m_year)
+                    if K + entry.first_year <= m_year:
+                        raise InvalidRequestError(
+                            "换新折旧首年须晚于维护支付发生年",
+                            code="TASK-REQ-015",
+                            params={
+                                "rule": rule_id,
+                                "year": m_year,
+                                "first_year": entry.first_year,
+                                "depreciation_start_evaluation_year": K + entry.first_year,
+                            },
+                            location={
+                                "object_type": "task",
+                                "field": f"effective_finance.tax_rules.{rule_id}.depreciation",
+                            },
+                        )
+                    deducted_by = deductible_maint.get((m_year, m_pos))
+                    if deducted_by is not None:
+                        raise InvalidRequestError(
+                            "维护项已作为折旧来源，不得同时声明为当期费用扣除",
+                            code="TASK-REQ-015",
+                            params={"rule": rule_id, "deductible_rule": deducted_by,
+                                    "year": m_year, "position": m_pos},
+                            location={
+                                "object_type": "task",
+                                "field": f"effective_finance.tax_rules.{rule_id}.depreciation",
+                            },
+                        )
         elif isinstance(rule, ConstructionVatRule):
             if rule.confirmation.method == "explicit_schedule":
                 for entry in rule.confirmation.schedule:
@@ -918,6 +974,43 @@ def _check_tax_evaluation_refs(
                         "field": f"effective_finance.credit_pools.{pool_id}.refunds",
                     },
                 )
+    for cf_id, cf in effective.net_cashflows.items():
+        if cf.at.kind == "financial_year":
+            if cf.at.year > E:
+                raise InvalidRequestError(
+                    "净现金项目时点超出评价期上界",
+                    code="TASK-REQ-015",
+                    params={"cashflow_id": cf_id, "year": cf.at.year, "evaluation_years": E},
+                    location={
+                        "object_type": "task",
+                        "field": f"effective_finance.net_cashflows.{cf_id}.at",
+                    },
+                )
+        if cf.amount.kind == "source_share":
+            bf = cf.amount.base_from
+            if bf.kind == "upfront_capex_net":
+                ft_entry = effective.finance_types.get(bf.finance_type)
+                if ft_entry is None or ft_entry.upfront_capex is None:
+                    raise InvalidRequestError(
+                        "净现金项目引用的初建成本类别不存在或无 upfront_capex",
+                        code="TASK-REQ-015",
+                        params={"cashflow_id": cf_id, "finance_type": bf.finance_type},
+                        location={
+                            "object_type": "task",
+                            "field": f"effective_finance.net_cashflows.{cf_id}.amount",
+                        },
+                    )
+            elif bf.kind == "maintenance_expense_net":
+                if year_sizes.get(bf.year, 0) < bf.position:
+                    raise InvalidRequestError(
+                        "净现金项目引用的维护项在本次评价清单中不存在",
+                        code="TASK-REQ-015",
+                        params={"cashflow_id": cf_id, "year": bf.year, "position": bf.position},
+                        location={
+                            "object_type": "task",
+                            "field": f"effective_finance.net_cashflows.{cf_id}.amount",
+                        },
+                    )
 
 
 def _check_demand_capabilities(artifact: Any, generator_ref: object, capabilities: tuple[str, ...]) -> None:
@@ -988,6 +1081,44 @@ def _check_tax_capabilities(
             f"effective_finance.tax_rules.{rule_id}"
             for rule_id in sorted(effective.tax_rules)
         )
+    # 6.0.0 新扩展计算能力闸门（未接通生成器的关系明确拒收）
+    if effective.net_cashflows:
+        if "finance.net_cashflows" not in capabilities:
+            required.setdefault("finance.net_cashflows", []).extend(
+                f"effective_finance.net_cashflows.{cf_id}" for cf_id in sorted(effective.net_cashflows)
+            )
+    for ft_name, ft in effective.finance_types.items():
+        if ft.annual_fixed_om is not None and ft.annual_fixed_om.fixed is not None:
+            if "finance.affine_annual_om" not in capabilities:
+                required.setdefault("finance.affine_annual_om", []).append(
+                    f"effective_finance.finance_types.{ft_name}.annual_fixed_om.fixed"
+                )
+    for rule_id, rule in effective.tax_rules.items():
+        if isinstance(rule, IncomeTaxRule):
+            for entry in rule.depreciation:
+                if entry.base_from.kind == "maintenance_expense_net":
+                    if "finance.maintenance_depreciation" not in capabilities:
+                        required.setdefault("finance.maintenance_depreciation", []).append(
+                            f"effective_finance.tax_rules.{rule_id}.depreciation"
+                        )
+                if entry.residual.unit == "1":
+                    if "finance.ratio_residual" not in capabilities:
+                        required.setdefault("finance.ratio_residual", []).append(
+                            f"effective_finance.tax_rules.{rule_id}.depreciation.residual"
+                        )
+        elif isinstance(rule, VatRule):
+            for entry in rule.om_input_tax:
+                if entry.for_path.count(".") >= 2:
+                    if "finance.subcomponent_vat" not in capabilities:
+                        required.setdefault("finance.subcomponent_vat", []).append(
+                            f"effective_finance.tax_rules.{rule_id}.om_input_tax"
+                        )
+        elif isinstance(rule, ConstructionVatRule):
+            if rule.for_path.count(".") >= 2:
+                if "finance.subcomponent_vat" not in capabilities:
+                    required.setdefault("finance.subcomponent_vat", []).append(
+                        f"effective_finance.tax_rules.{rule_id}.for"
+                    )
     if not required:
         return
     missing = sorted(required)

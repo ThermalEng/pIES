@@ -58,7 +58,7 @@ from iesplan.tasks.persistence import Task as _TaskForDDL  # noqa: E402,F401
 
 PROFILE_PAYLOAD: dict = {
     "schema": "ies.finance-profile",
-    "schema_version": "5.0.0",
+    "schema_version": "6.0.0",
     "profile": {
         "id": "cn-north-demo",
         "region": "CN-North",
@@ -110,13 +110,14 @@ PROFILE_PAYLOAD: dict = {
     "taxes": {},
     "credit_pools": {},
     "tax_rules": {},
+    "net_cashflows": {},
 }
 
 
 def _overrides_payload(profile: FinanceProfile) -> dict:
     return {
         "schema": "ies.finance-overrides",
-        "schema_version": "5.0.0",
+        "schema_version": "6.0.0",
         "profile_ref": {"id": profile.profile_id},
         "finance_types": {
             "pv_system": {
@@ -397,7 +398,7 @@ def _tax_profile_payload() -> dict:
             "variable_om": ["pv_system.period_variable_om"],
             "deductible_maintenance": {"mode": "explicit_items", "items": []},
             "depreciation": [
-                {"asset": "pv_system", "base_from": "pv_system.upfront_capex_net",
+                {"base_from": {"kind": "upfront_capex_net", "finance_type": "pv_system"},
                  "method": "straight_line", "life_years": 20,
                  "residual": {"value": "0", "unit": "CNY"}, "first_year": 1},
             ],
@@ -426,7 +427,7 @@ def test_tax_rules_revision_roundtrip_and_effective(client: TestClient, db_sessi
     assert resp.status_code == 200, resp.text
     tax_overrides = {
         "schema": "ies.finance-overrides",
-        "schema_version": "5.0.0",
+        "schema_version": "6.0.0",
         "profile_ref": {"id": "cn-tax-demo"},
         "credit_pools": {
             "main_pool": {
@@ -925,6 +926,81 @@ def test_version_freezes_effective_and_planning_revisions(
         "revision": eff["revision"],
     }
     assert content["planning_config"] == {"revision": planning_revision}
+
+
+def test_net_cashflow_effective_content_and_project_version_freeze(
+    client: TestClient, db_session: Session,
+) -> None:
+    """真实登记/覆盖/版本固化链：净现金金额属于冻结的旧修订，不读当前草稿。"""
+    import json
+
+    from iesplan.configuration.persistence import EffectiveFinanceRevision
+    from iesplan.storage import get_object
+    from iesplan.finance import effective_from_yaml
+
+    headers, pid = _owner(client, db_session, "cfg_cashflow_freeze")
+    profile_payload = {
+        **PROFILE_PAYLOAD,
+        "profile": {**PROFILE_PAYLOAD["profile"], "id": "cn-cashflow-freeze"},
+        "net_cashflows": {
+            "rebate": {
+                "at": {"kind": "financial_year", "year": 1},
+                "direction": "inflow",
+                "amount": {"kind": "fixed", "value": {"value": "100", "unit": "CNY"}},
+            },
+        },
+    }
+    resp = client.post("/api/finance-profiles", json={"finance_profile": profile_payload}, headers=headers)
+    assert resp.status_code == 200, resp.text
+    resp = client.put(
+        f"/api/projects/{pid}/finance-profile",
+        json={"profile_ref": {"id": "cn-cashflow-freeze"}}, headers=headers,
+    )
+    assert resp.status_code == 200, resp.text
+    resp = client.put(
+        f"/api/projects/{pid}/planning-config",
+        json={"planning_config": _planning_payload(), "expected_revision": None}, headers=headers,
+    )
+    assert resp.status_code == 200, resp.text
+    planning_rev = resp.json()["revision"]
+    initial = client.get(f"/api/projects/{pid}/effective-finance", headers=headers).json()
+    first_rev = initial["revision"]
+    assert initial["effective_finance_config"]["net_cashflows"]["rebate"]["amount"]["value"]["value"] == "100"
+
+    resp = client.post(
+        f"/api/projects/{pid}/versions",
+        json={"name": "cashflow-v1", "reason": "milestone"}, headers=headers,
+    )
+    assert resp.status_code == 201, resp.text
+    frozen = json.loads(get_object(db_session, resp.json()["version"]["content_object_id"]))
+    assert frozen["effective_finance"] == {
+        "profile_id": "cn-cashflow-freeze", "overrides_revision": 1, "revision": first_rev,
+    }
+    assert frozen["planning_config"] == {"revision": planning_rev}
+
+    override = {
+        "schema": "ies.finance-overrides", "schema_version": "6.0.0",
+        "profile_ref": {"id": "cn-cashflow-freeze"},
+        "net_cashflows": {"rebate": {"amount": {"value": {"value": "200", "unit": "CNY"}}}},
+    }
+    resp = client.put(
+        f"/api/projects/{pid}/finance-overrides",
+        json={"finance_overrides": override, "expected_revision": 1}, headers=headers,
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["effective_finance_config"]["net_cashflows"]["rebate"]["amount"]["value"]["value"] == "200"
+    assert resp.json()["effective_finance_config"]["schema_version"] == "6.0.0"
+
+    old_row = db_session.execute(
+        select(EffectiveFinanceRevision).where(
+            EffectiveFinanceRevision.project_id == pid,
+            EffectiveFinanceRevision.revision == first_rev,
+        )
+    ).scalar_one()
+    frozen_effective = effective_from_yaml(get_object(db_session, old_row.content_object_id).decode("utf-8"))
+    assert frozen_effective.net_cashflows["rebate"].amount.value.value == Decimal("100")
+    assert frozen_effective.net_cashflows["rebate"].at.year == 1
+    assert frozen_effective.net_cashflows["rebate"].direction == "inflow"
 
 
 def test_revision_rows_carry_receipt_objects(

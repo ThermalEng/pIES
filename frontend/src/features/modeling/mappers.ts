@@ -22,7 +22,7 @@ import type {
   TemplateSummaryDto,
   ValidRangeDto,
 } from './contracts'
-import type { ProjectViewResponseDto } from '../projects'
+import type { DraftContentDeviceDto, ProjectViewResponseDto } from '../projects'
 import type { FormFieldError, FormFieldValue } from './form'
 import type {
   CandidateModel,
@@ -693,9 +693,11 @@ export function yamlLineColumn(text: string, offset: number): { line: number; co
 // ---------------------------------------------------------------------------
 
 /** 草稿内容设备条目 → 前端 Device(2.0 名键, 无 id/状态/时间字段)。 */
-export function deviceFromDraft(d: DraftDeviceDto): Device {
+export function deviceFromDraft(d: DraftDeviceDto | DraftContentDeviceDto): Device {
   return {
     name: d.name,
+    ref: d.ref,
+    display_name: d.display_name,
     device_type: d.device_type,
     kind: d.kind,
     params: d.params,

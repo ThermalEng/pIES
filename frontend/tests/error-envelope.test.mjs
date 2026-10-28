@@ -107,15 +107,71 @@ async function expectApiError(promise) {
   check('成功诊断可用', result.diagnostics?.[0]?.code === 'V-1')
 }
 
-// 4. 页面共用错误渲染, 不把普通 Error.message 当作翻译键。
+// 4. 错误展示与诊断渲染定向测试（有详情、聚合诊断、未知消息键且无详情）。
 {
-  const err = new ApiError(409, envelope().error)
-  check('共享渲染保留 API 文案', errorMessage(err) === translate(err.message_key, err.params))
+  // 4.1 有公开详情 (params.detail)
+  const errDetail = new ApiError(400, {
+    code: 'PROJ-FIN-001',
+    message_key: 'ies.diag.param.invalid',
+    severity: 'error',
+    blocking: false,
+    params: { detail: 'finance_types.pv.upfront_capex 必填且大于 0' },
+  })
+  check('有详情时展示公开具体详情', errorMessage(errDetail) === 'finance_types.pv.upfront_capex 必填且大于 0')
+
+  // 4.2 聚合诊断 (params.diagnostics 多项，必须完整保留所有项，不丢失后续项)
+  const errMultiDiag = new ApiError(422, {
+    code: 'ASM-CHECK-FAILED',
+    message_key: 'ies.diag.asm.check_failed',
+    severity: 'error',
+    blocking: true,
+    params: {
+      diagnostics: [
+        { code: 'ASM-001', detail: '端口电压不匹配' },
+        { code: 'ASM-002', detail: '母线频率越界' },
+      ],
+    },
+  })
+  const multiText = errorMessage(errMultiDiag)
+  check('聚合诊断完整保留所有项', multiText.includes('端口电压不匹配') && multiText.includes('母线频率越界'), multiText)
+
+  // 4.3 未知消息键且无详情：显示本地化通用提示及错误码，不显示原始键
+  const errUnknown = new ApiError(400, {
+    code: 'PLAN-VAR-999',
+    message_key: 'custom.unregistered.error_key',
+    severity: 'error',
+    blocking: false,
+    params: {},
+  })
+  const unknownText = errorMessage(errUnknown)
+  check('未知消息键显示通用提示与错误码', unknownText === '操作失败 (PLAN-VAR-999)')
+  check('不暴露原始消息键', !unknownText.includes('custom.unregistered.error_key'))
+
+  // 4.4 模板含未替换占位符且无详情：不返回未替换占位符
+  const errPlaceholder = new ApiError(400, {
+    code: 'PARAM-001',
+    message_key: 'ies.diag.param.invalid',
+    severity: 'error',
+    blocking: false,
+    params: {},
+  })
+  const placeholderText = errorMessage(errPlaceholder)
+  check('未替换占位符兜底通用提示', placeholderText === '操作失败 (PARAM-001)')
+  check('不暴露占位符花括号', !placeholderText.includes('{detail}'))
+
+  // 4.5 普通非 ApiError 异常可见且不伪造文案键
   check('普通异常可见且不伪造文案键', errorMessage(new Error('local failure')) === '未知错误:Error: local failure')
   for (const locale of ['zh', 'en']) {
     const message = translate('ies.error.http_exception', { status_code: 405 }, locale)
     check(`${locale} HTTP 状态码插值`, message.includes('405') && !message.includes('{status'))
   }
+  const httpError = new ApiError(405, {
+    code: 'API-REQ-003', message_key: 'ies.error.http_exception',
+    severity: 'error', blocking: true,
+    params: { status_code: 405, detail: 'Method Not Allowed' },
+  })
+  check('HTTP 异常信封优先显示真实状态码而非通用 detail',
+    errorMessage(httpError) === '请求失败(HTTP 405)')
 }
 
 if (failures > 0) {

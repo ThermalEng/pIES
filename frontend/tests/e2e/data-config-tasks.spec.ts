@@ -135,8 +135,38 @@ test.describe('PR #26: 两份数据集绑定状态与读回失败恢复', () => 
     await expect(row(firstName).getByText(unbound)).toBeVisible()
     await expect(row(secondName).getByText(unbound)).toBeVisible()
 
-    await row(firstName).getByRole('button', { name: bind }).click()
+    // Hold delivery of the real write: a new upload must not start before the
+    // subsequent project read has settled and would remount its empty form.
+    let releaseBinding!: () => void
+    let receivedBinding!: () => void
+    const bindingGate = new Promise<void>(resolve => { releaseBinding = resolve })
+    const bindingReady = new Promise<void>(resolve => { receivedBinding = resolve })
+    const draftPath = `**/api/projects/${projectId}/draft`
+    await page.route(draftPath, async route => {
+      if (route.request().method() !== 'PUT') return route.continue()
+      const response = await route.fetch()
+      receivedBinding()
+      await bindingGate
+      await route.fulfill({ response })
+    })
+    const upload = page.getByRole('button', { name: /^上传数据$|^Upload data$/i })
+    const sample = page.getByRole('button', { name: /内置样例数据|Built-in sample data/i })
+    try {
+      await row(firstName).getByRole('button', { name: bind }).click()
+      await bindingReady
+      await expect(upload).toBeDisabled()
+      await expect(sample).toBeDisabled()
+    } finally {
+      releaseBinding()
+    }
     await expect(row(firstName).getByText(bound)).toBeVisible()
+    await page.unroute(draftPath)
+    await expect(upload).toBeEnabled()
+    await expect(sample).toBeEnabled()
+    await upload.click()
+    await page.locator('#dset-name').fill('next upload input')
+    await expect(page.locator('#dset-name')).toHaveValue('next upload input')
+    await page.getByRole('dialog').getByRole('button', { name: /^取消$|^Cancel$/i }).click()
     await expect(row(firstName).getByRole('button', { name: bind })).toBeDisabled()
     await expect(row(secondName).getByText(unbound)).toBeVisible()
     await expect(row(secondName).getByRole('button', { name: bind })).toBeEnabled()

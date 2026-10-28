@@ -63,9 +63,15 @@ test.describe('ISSUE-01 月份日曲线财务页面与真实计费', () => {
     const page = await context.newPage()
     const session = await createSession(page, username, password)
     await page.goto(`${APP}/projects/${pid}/finance`)
+    const rawOverrides = page.locator('#finance-overrides-doc')
+    await rawOverrides.fill('')
     const kind = page.locator('#overrides-price-grid_import-kind')
     await expect(kind).toBeVisible({ timeout: 30_000 })
     await kind.selectOption('monthly_daily')
+    const authoredPrice = JSON.parse(await rawOverrides.inputValue())
+    expect(authoredPrice.schema).toBe('ies.finance-overrides')
+    expect(authoredPrice.schema_version).toBe('6.0.0')
+    expect(authoredPrice.profile_ref).toEqual({ id: profileId })
     const month = (m: number) => page.locator(`#overrides-price-grid_import-month-${m}`)
     await expect(month(12)).toBeVisible()
     await month(1).fill(restRef)
@@ -193,7 +199,7 @@ test.describe('ISSUE-01 月份日曲线财务页面与真实计费', () => {
     const profileDoc = page.locator('#finance-profile-doc')
     const partialProfile = JSON.stringify({
       schema: 'ies.finance-profile',
-      schema_version: '5.0.0',
+      schema_version: '6.0.0',
       energy_prices: { grid_import: null },
     })
     await profileDoc.fill(partialProfile)

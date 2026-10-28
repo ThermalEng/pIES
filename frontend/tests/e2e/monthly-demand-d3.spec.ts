@@ -138,8 +138,14 @@ test.describe('D3 natural-month demand GUI → task → export', () => {
     const bind = page.getByRole('button', { name: /引用|Reference/i })
     await expect(rate).toBeEnabled()
 
-    // Make a real first GUI save, so the clear action has an active revision.
+    // Starting from an empty Overrides editor must author a 6.0.0 envelope.
+    await raw.fill('')
     await rate.fill('20')
+    const authoredRate = JSON.parse(await raw.inputValue())
+    expect(authoredRate.schema).toBe('ies.finance-overrides')
+    expect(authoredRate.schema_version).toBe('6.0.0')
+    expect(authoredRate.profile_ref).toEqual({ id: firstId })
+    // Make a real first GUI save, so the clear action has an active revision.
     await save.click()
     await expect(page.getByText(/覆盖已保存|Overrides saved/i)).toBeVisible()
     await expect(rate).toHaveValue('20')

@@ -318,6 +318,8 @@ export type DeviceKind = 'existing' | 'new'
 /** 2.0 设备实例(名键; 位置入 layout 节, 不在此处)。 */
 export interface Device {
   name: string
+  ref: string
+  display_name: string
   device_type: string
   kind: DeviceKind
   /** 参数(容量、效率曲线、投资/运维成本等),键与模式版本由 schema_version 约定。 */
