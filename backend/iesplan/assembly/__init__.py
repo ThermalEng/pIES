@@ -17,8 +17,10 @@
 
 from iesplan.assembly.builder import (
     BuildDocResult,
+    annotate_device_refs,
     build_assembly_doc_from_content,
     dataset_export_path,
+    device_instance_refs,
     parse_predefined_source_declaration,
 )
 from iesplan.assembly.canonicalizer import (
@@ -66,6 +68,8 @@ __all__ = [
     "BuildDocResult",
     "dataset_export_path",
     "parse_predefined_source_declaration",
+    "device_instance_refs",
+    "annotate_device_refs",
     # 校验入口与产物签发
     "AssemblyValidationResult",
     "validate_assembly_text",

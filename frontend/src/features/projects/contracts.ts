@@ -108,6 +108,8 @@ export interface DraftBindingDto {
 /** 草稿内容模型设备条目。 */
 export interface DraftContentDeviceDto {
   name: string
+  ref: string
+  display_name: string
   device_type: string
   kind: DeviceKind
   params: Record<string, unknown>

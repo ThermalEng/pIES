@@ -20,7 +20,7 @@ ASM-CONV-001 阻断诊断,不回退、不猜测、不吞错。装配不包含 ca
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -196,10 +196,10 @@ def build_assembly_doc_from_content(
     scenario_mode = scenario_raw
 
     # 2) 设备实例(2.0 纯技术形态)
-    refs = _device_refs(devices_raw)
+    refs = device_instance_refs(devices_raw)
     name_ref_of: dict[str, str] = {}
     name_type_of: dict[str, str] = {}
-    for d, ref in zip(devices_raw, refs):
+    for d, ref in zip(devices_raw, refs, strict=True):
         if not isinstance(d, Mapping):
             continue
         name = d.get("name")
@@ -208,7 +208,7 @@ def build_assembly_doc_from_content(
             name_type_of[name] = _resolve_type_id(d)
     devices_out: dict[str, dict] = {}
     seen_refs: set[str] = set()
-    for d, dev_id in sorted(zip(devices_raw, refs), key=lambda t: t[1]):
+    for d, dev_id in sorted(zip(devices_raw, refs, strict=True), key=lambda t: t[1]):
         if dev_id in seen_refs:
             diags.append(
                 _conv_fail(
@@ -399,7 +399,7 @@ def _resolve_type_id(device: dict) -> str:
     return str(device.get("device_type", ""))
 
 
-def _device_refs(devices: list) -> list[str]:
+def device_instance_refs(devices: Sequence[Any]) -> list[str]:
     """实例引用(与内容一一对应，确定性、唯一、合法本地 id)。
 
     名键设备用名称 slug；名称无可用字符时按排序位置回退 ``dx{n}``。
@@ -408,10 +408,23 @@ def _device_refs(devices: list) -> list[str]:
     """
     refs: list[str] = []
     for position, device in enumerate(devices):
-        name = device.get("name") if isinstance(device, dict) else None
+        name = device.get("name") if isinstance(device, Mapping) else None
         slug = _slugify_id(name) if isinstance(name, str) else ""
         refs.append(slug if slug else f"dx{position}")
     return refs
+
+
+def annotate_device_refs(devices: Sequence[Any]) -> list[dict[str, Any]]:
+    """为设备字典列表注入确定的 ref 与 display_name。装配生成与项目查询共用。"""
+    refs = device_instance_refs(devices)
+    annotated: list[dict[str, Any]] = []
+    for d, ref in zip(devices, refs, strict=True):
+        item = dict(d) if isinstance(d, Mapping) else {}
+        item["ref"] = ref
+        name = item.get("name")
+        item["display_name"] = str(name) if name is not None else ref
+        annotated.append(item)
+    return annotated
 
 
 def _conv_fail(dev_id: str, field: str, reason: str, extra: dict | None = None) -> Diagnostic:

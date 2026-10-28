@@ -238,6 +238,8 @@ export type CandidateDiagnosticDto = ModelDiagnosticDto
 /** 草稿设备条目(2.0 名键, 无 id/状态/时间字段)。 */
 export interface DraftDeviceDto {
   name: string
+  ref: string
+  display_name: string
   device_type: string
   kind: DeviceKind
   params: Record<string, unknown>

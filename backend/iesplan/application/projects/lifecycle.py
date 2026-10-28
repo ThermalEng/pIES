@@ -196,6 +196,11 @@ def get_project_view(db: Session, user: UserRecord, project_id: int) -> dict:
     draft = require_current_draft(db, project)
     content = _load_draft_content(db, draft)
     content.pop("applied_commands", None)  # 命令簿记不外泄
+    devices = content.get("model", {}).get("devices", [])
+    if isinstance(devices, list):
+        from iesplan.assembly import annotate_device_refs
+
+        content["model"]["devices"] = annotate_device_refs(devices)
     versions = project_domain.list_versions(db, project_id)
     return {
         "project": project_to_dict(project),
