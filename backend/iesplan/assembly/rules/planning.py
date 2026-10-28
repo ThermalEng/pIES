@@ -225,7 +225,7 @@ def _check_build_scope(
 ) -> None:
     """输入边界建设变量核对(首年建设；无年度索引)。
 
-    - 固定建设成本为正的 costed 实例：必建变量(下界 > 0，建设必然
+    - 固定建设成本或年固定运维费为正的 new/costed 实例：必建变量(下界 > 0，建设必然
       发生)在离散语义实现前按常数计一次放行；可选建设变量(下界为
       0/缺席)的触发在纯 LP 内无精确表达，明确拒收
       (``positive_fixed_cost_unsupported``)，不猜 ε/最小建设量，
@@ -239,11 +239,13 @@ def _check_build_scope(
     if not isinstance(entry, Mapping) or entry.get("type") != "costed":
         return
     ft_entry = snapshot.finance_types.get(entry.get("finance_type"))
-    if ft_entry is None:
+    if ft_entry is None or doc["devices"][variable.device_ref]["asset_origin"] != "new":
         return
     upfront = ft_entry.upfront_capex
-    fixed = upfront.fixed if upfront is not None else None
-    if fixed is None or fixed.value <= 0:
+    annual = ft_entry.annual_fixed_om
+    fixed_costs = (upfront.fixed if upfront is not None else None,
+                   annual.fixed if annual is not None else None)
+    if not any(cost is not None and cost.value > 0 for cost in fixed_costs):
         return
     lower = variable.lower_bound
     if lower is not None and lower > 0:

@@ -1805,7 +1805,7 @@ def _is_sealed_evaluation(section: Any) -> bool:
 def _sealed_tax_rows(fin: dict[str, Any], ccy: str) -> list[tuple[str, Any]]:
     """同次解税务事实与税后现金流明细行（封存原样消费，不重算、不截断）。
 
-    封存块 ``ies.financial-evaluation@2.0.0`` 的 ``tax_cash`` 与
+    封存块 ``ies.financial-evaluation@3.0.0`` 的 ``tax_cash`` 与
     ``annual_net_flows`` 必填：直接消费字段，不为缺字段的旧块做静默
     兼容（缺字段即契约违例，按实际错误暴露，不补空税务）。合法空数组
     仍显式记“无适用规则”，不用空表掩盖。
@@ -1813,6 +1813,14 @@ def _sealed_tax_rows(fin: dict[str, Any], ccy: str) -> list[tuple[str, Any]]:
     tax = fin["tax_cash"]
     horizon = int(fin["evaluation_years"]) * 12
     rows: list[tuple[str, Any]] = []
+    cashflows = fin["net_cashflows"]
+    for item in cashflows:
+        rows.append((
+            f"显式净现金 {item['id']} t={item['t']} {item['direction']} / Explicit net cashflow",
+            f"{item['amount']} {ccy}",
+        ))
+    if not cashflows:
+        rows.append(("显式净现金 / Explicit net cashflows", "无项目 / None"))
     for index, amount in enumerate(fin["annual_net_flows"]):
         rows.append((f"税后现金流 CF[t={index}] / After-tax CF[t={index}]", f"{amount} {ccy}"))
     vat = tax["vat"]
@@ -1852,10 +1860,14 @@ def _sealed_tax_rows(fin: dict[str, Any], ccy: str) -> list[tuple[str, Any]]:
     depreciation = tax["depreciation"]
     if depreciation:
         for row in depreciation:
+            source = row["base_from"]
+            identity = (f"{source['kind']}:{source['finance_type']}"
+                        if source["kind"] == "upfront_capex_net"
+                        else f"{source['kind']}:y={source['year']},#{source['position']}")
             rows.append(
                 (
-                    f"计税折旧 {row['rule']} {row['asset']} y={row['year']} / "
-                    f"Depreciation {row['rule']} {row['asset']} y={row['year']}",
+                    f"计税折旧 {row['rule']} {identity} y={row['year']} / "
+                    f"Depreciation {row['rule']} {identity} y={row['year']}",
                     f"{row['amount']} {ccy}",
                 )
             )

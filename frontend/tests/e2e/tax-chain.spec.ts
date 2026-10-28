@@ -121,12 +121,13 @@ interface SealedEvaluation {
   base_year: number
   discount_rate: number
   payments_applied: Array<{ t: number; ratio: string; amount: string }>
+  net_cashflows: Array<{ id: string; t: number; direction: 'inflow' | 'outflow'; amount: string }>
   annual_operation: Array<{ financial_year: number; energy_net: string; variable_om: string; fixed_om: string; maintenance: string; demand_charge: string; net: string }>
   tax_cash: {
     vat: Array<{ pool: string; month: number; paid: string; refund_claimed: string; refund_arrived: string; carry: string }>
     refunds: Array<{ pool: string; period: number; arrival_period: number; amount: string }>
     income: Array<{ rule: string; year: number; taxable_base: string; loss_used: string; loss_generated: string; loss_expired: string; tax: string }>
-    depreciation: Array<{ rule: string; asset: string; year: number; amount: string }>
+    depreciation: Array<{ rule: string; base_from: { kind: 'upfront_capex_net'; finance_type: string } | { kind: 'maintenance_expense_net'; year: number; position: number }; year: number; amount: string }>
     loss_balances: Array<{ rule: string; vintage_id: string; year: number; last_usable_year: number; amount: string }>
   }
   annual_net_flows: string[]
@@ -412,6 +413,10 @@ function expectedExcelFinancialPairs(fin: SealedEvaluation): Array<[string, stri
       `${item.discounted} / ${item.cumulative} / ${item.cumulative_discounted} ${ccy}`,
     ])
   }
+  for (const item of fin.net_cashflows) {
+    rows.push([`显式净现金 ${item.id} t=${item.t} ${item.direction} / Explicit net cashflow`, `${item.amount} ${ccy}`])
+  }
+  if (fin.net_cashflows.length === 0) rows.push(['显式净现金 / Explicit net cashflows', '无项目 / None'])
   for (let i = 0; i < fin.annual_net_flows.length; i += 1) {
     rows.push([`税后现金流 CF[t=${i}] / After-tax CF[t=${i}]`, `${fin.annual_net_flows[i]} ${ccy}`])
   }
@@ -442,8 +447,12 @@ function expectedExcelFinancialPairs(fin: SealedEvaluation): Array<[string, stri
   }
   if (fin.tax_cash.income.length === 0) rows.push(['所得税 / Income tax', '无适用规则 / No applicable rules'])
   for (const item of fin.tax_cash.depreciation) {
+    const source = item.base_from
+    const identity = source.kind === 'upfront_capex_net'
+      ? `${source.kind}:${source.finance_type}`
+      : `${source.kind}:y=${source.year},#${source.position}`
     rows.push([
-      `计税折旧 ${item.rule} ${item.asset} y=${item.year} / Depreciation ${item.rule} ${item.asset} y=${item.year}`,
+      `计税折旧 ${item.rule} ${identity} y=${item.year} / Depreciation ${item.rule} ${identity} y=${item.year}`,
       `${item.amount} ${ccy}`,
     ])
   }

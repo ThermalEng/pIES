@@ -570,7 +570,7 @@ def test_600_task_submission_gate_and_period_checks():
         "finance.financial_facts",
     )
     with pytest.raises(InvalidRequestError) as exc_info:
-        _check_tax_capabilities("ies.generator.highs_milp@5.0.0", base_caps, effective)
+        _check_tax_capabilities("ies.generator.highs_milp@6.0.0", base_caps, effective)
     assert exc_info.value.code == "TASK-REQ-007"
     missing = exc_info.value.params["missing_capabilities"]
     assert "finance.net_cashflows" in missing

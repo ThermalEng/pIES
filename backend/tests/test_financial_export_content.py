@@ -65,6 +65,7 @@ def _tax_seal() -> dict:
         "currency": "CNY",
         "evaluation_years": 1,
         "annual_net_flows": ["-1000.0", "2500.5"],
+        "net_cashflows": [{"id": "recovery", "t": 1, "direction": "inflow", "amount": "37.25"}],
         "tax_cash": {
             "vat": vat,
             "refunds": [
@@ -82,7 +83,7 @@ def _tax_seal() -> dict:
                     "tax": "375.0",
                 }
             ],
-            "depreciation": [{"rule": "depr", "asset": "pv_system", "year": 1, "amount": "800.0"}],
+            "depreciation": [{"rule": "depr", "base_from": {"kind": "upfront_capex_net", "finance_type": "pv_system"}, "year": 1, "amount": "800.0"}],
             "loss_balances": [
                 {
                     "rule": "income",
