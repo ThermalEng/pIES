@@ -125,9 +125,13 @@ def _binding_direction(builder: _ProjectBuilder, binding_id: str) -> str:
 
 
 def _to_internal(value: float, unit: str) -> float:
-    """业务数值 → 内部单位（物理量 SI，纯金额守币种原值）。"""
-    if dims_of(unit) == Counter({"currency": 1}):
-        return float(value)
+    """物理量转 SI；同币种金额/费率只规范物理与时间分母。
+
+    财务输入边界已核对币种一致；这里绝不进行 USD→CNY 兑换。
+    core.units.to_si 对含 USD 的通用换汇仍明确禁止。
+    """
+    if dims_of(unit).get("currency") == 1:
+        return float(value) * float(unit_meta(unit)["to_si"])
     return to_si(float(value), unit)
 
 
