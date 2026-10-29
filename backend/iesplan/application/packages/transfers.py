@@ -942,6 +942,60 @@ def _check_model_dependencies(
         raise ImportValidationError(reasons)
 
 
+
+def _check_package_step_relations(
+    planning: PlanningConfig | None,
+    content: dict,
+    entries: dict[str, bytes],
+    manifest: dict,
+    *,
+    label: str,
+) -> None:
+    """外部包上传边界：以对应工作状态或历史版本核对逐步端口引用。
+
+    与普通规划保存共用 check_step_relations，不读取数据库最新草稿；
+    不在 confirm_import/内部恢复再次校验。包内实例键在重建模型 ID
+    前后保持稳定，设备类型 ID 则按来源包携带的精确模型解释。
+    """
+    if planning is None or not any(
+        constraint.type == "step_relation" for constraint in planning.constraints.values()
+    ):
+        return
+
+    from iesplan.assembly import check_step_relations, device_instance_refs
+    from iesplan.devices import from_dict as device_from_dict, list_devices
+
+    model = content.get("model") or {}
+    devices = model.get("devices") or []
+    instance_refs = device_instance_refs(devices)
+    if len(set(instance_refs)) != len(instance_refs):
+        raise ImportValidationError([f"{label}设备实例键重复，无法核对逐步引用"])
+    instances = {
+        inst: {"definition": {"id": device.get("device_type")}}
+        for inst, device in zip(instance_refs, devices, strict=True)
+    }
+
+    registry = {doc.device.id: doc for doc in list_devices() if doc.device is not None}
+    for item in (manifest.get("files") or {}).get("models") or []:
+        try:
+            raw = json.loads(entries[item["model_text"]].decode("utf-8"))
+            descriptor = device_from_dict(raw)
+        except (KeyError, UnicodeError, ValueError, TypeError) as exc:
+            raise ImportValidationError(
+                [f"{label}所引用的包内设备模型无法解析: {item.get('device_id')}"]
+            ) from exc
+        registry[item["device_id"]] = descriptor
+
+    diagnostics = []
+    check_step_relations(planning.to_dict(), instances, registry, diagnostics)
+    if diagnostics:
+        raise ImportValidationError([
+            f"{label}逐步技术约束 {d.location.get('field')}: "
+            f"{d.params.get('reason')} ({d.params.get('detail') or d.params})"
+            for d in diagnostics
+        ])
+
+
 def _check_version_dependencies(
     entries: dict[str, bytes], manifest: dict, baseline: ProjectBaseline
 ) -> None:
@@ -1032,6 +1086,9 @@ def _check_version_dependencies(
                 raise ImportValidationError([f"版本 {key} 的 Effective 与来源合并结果不一致"])
         if plan and "planning" not in group:
             raise ImportValidationError([f"版本 {key} 的规划依赖文件缺失"])
+        _check_package_step_relations(
+            group.get("planning"), content, entries, manifest, label=f"版本 {key}",
+        )
     for meta_path in files_meta.get("datasets") or []:
         if meta_path not in entries:
             continue
@@ -1120,13 +1177,19 @@ def import_proposal(
         raise ImportValidationError([f"包内项目计算基线非法: {exc}"]) from exc
     # 1b) 内容文档消费结构 + 引用集合(先于历史配置依赖消费内容)
     referenced = _check_content_structures(entries, manifest)
-    # 1c) 历史依赖关系边界校验(提案行创建之前; 失败不建提案行)
-    _check_version_dependencies(entries, manifest, baseline)
-    # 1d) 项目模型依赖关系边界校验(3.0; 与历史配置依赖同一上传入口)
+    # 1c) 先核对所有携带设备模型的完整性，再按各版本精确上下文核对关系。
     _check_model_dependencies(entries, manifest, referenced)
-    # 规划/财务配置 revision(0.6.5 事项 3): 包内配置严格校验(缺失 = 导入后
-    # 无配置, 不静默默认; 非法 → 拒绝整个导入)。
+    # 1d) 历史依赖校验包括各历史规划对应的端口关系；禁止借用当前草稿。
+    _check_version_dependencies(entries, manifest, baseline)
+    # 当前规划来自包内当前配置，其端口必须引用包内当前草稿的实例。
     package_configs = parse_config_files(entries, manifest)
+    if "planning" in package_configs:
+        draft_doc = json.loads(entries["draft.json"].decode("utf-8"))
+        _check_package_step_relations(
+            package_configs["planning"],
+            draft_doc.get("content") or {},
+            entries, manifest, label="当前规划",
+        )
     schema_version = int(project_meta.get("schema_version", 1) or 1)
 
     # 3) 导入提案(校验报告 + 分区提交内容, 01 §10.4)
