@@ -1,4 +1,4 @@
-"""ies.assembly 4.0.0 校验入口测试(roadmap 0.12 切片 F1)。
+"""ies.assembly 5.0.0 校验入口测试(roadmap 0.12 切片 F1)。
 
 覆盖:
 - 手写 YAML 与 GUI 项目导出进入同一校验入口(validate_assembly_text /
