@@ -145,7 +145,7 @@ def compile_planning_expression(
     )
 
 
-_STEP_PORT_INDEX = re.compile(r"\\b([a-z][a-z0-9_]*)\\[t\\]")
+_STEP_PORT_INDEX = re.compile(r"\b([a-z][a-z0-9_]*)\[t\]")
 
 
 def compile_step_relation_expression(

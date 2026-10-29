@@ -121,25 +121,22 @@ def test_disabled_relation_preserved_and_no_generator_capability_required(doc):
     assert result.artifact is not None, [d.to_dict() for d in result.diagnostics]
     frozen = json.loads(result.artifact.canonical_text)
     assert frozen["planning"]["constraints"]["port_limit"] == rel
-    assert "technical.step_constraints" not in DESCRIPTOR.capabilities
     _check_step_constraint_capability(result.artifact, DESCRIPTOR.ref, DESCRIPTOR.capabilities)
 
 
-def test_enabled_relation_blocks_real_generator_but_test_stub_can_freeze(doc):
+def test_enabled_relation_requires_advertised_capability_and_freezes(doc):
     result = _validate(_insert(doc))
     assert result.artifact is not None
     assert DESCRIPTOR.version == "7.0.0"
     assert DESCRIPTOR.assembly_schema_version == "5.0.0"
-    assert "technical.step_constraints" not in DESCRIPTOR.capabilities
+    assert "technical.step_constraints" in DESCRIPTOR.capabilities
+    _check_step_constraint_capability(result.artifact, DESCRIPTOR.ref, DESCRIPTOR.capabilities)
+    # Any other provider without the capability still fails at TASK-REQ-007.
     with pytest.raises(InvalidRequestError) as exc:
-        _check_step_constraint_capability(result.artifact, DESCRIPTOR.ref, DESCRIPTOR.capabilities)
+        _check_step_constraint_capability(result.artifact, "test.generator@1.0.0", ("affine",))
     assert exc.value.code == "TASK-REQ-007"
     assert exc.value.params["missing_capabilities"] == ["technical.step_constraints"]
     assert "planning.constraints.port_limit" in exc.value.params["fields"]
-    # 仅测试替身具备完整能力标记，绝不调用真实 generator 求解。
-    _check_step_constraint_capability(
-        result.artifact, "test.generator@1.0.0", ("technical.step_constraints",)
-    )
     before = json.loads(result.artifact.canonical_text)
     doc["planning"]["constraints"]["port_limit"]["expression"] = "boundary[t] == supply[t]"
     assert json.loads(result.artifact.canonical_text) == before
