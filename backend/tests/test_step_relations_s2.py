@@ -6,7 +6,7 @@ from copy import deepcopy
 
 import pytest
 
-from iesplan.assembly import validate_assembly_doc
+from iesplan.assembly import parse_assembly_doc, validate_assembly_doc
 from iesplan.computation.generators.highs_milp import HIGHS_MILP_PROVIDER
 from iesplan.computation.generators.project import build_project_model_package
 from iesplan.computation.generators.mps import write_mps
@@ -32,9 +32,20 @@ def _relation(expression, *, enabled=True, references=None):
     }
 
 
+def _source_doc():
+    # Canonical artifacts contain resolved `content` identities for file sources;
+    # those are signed output metadata, not legal public assembly input fields.
+    # Revalidate the original public source after adding the synthetic relation.
+    parsed = parse_assembly_doc(
+        (SAMPLES / "valid" / "campus.assembly.yaml").read_text(encoding="utf-8")
+    )
+    assert parsed.ok, parsed.diagnostics
+    return parsed.doc
+
+
 def _with_constraints(campus, constraints):
-    artifact, models, materialized, finance, config, evaluation = campus
-    doc = json.loads(artifact.canonical_text)
+    _artifact, models, materialized, finance, config, evaluation = campus
+    doc = _source_doc()
     doc["planning"]["constraints"].update(deepcopy(constraints))
     validated = validate_assembly_doc(doc, package_dir=SAMPLES)
     assert validated.artifact is not None, [
@@ -98,8 +109,8 @@ def test_disabled_relation_is_mathematically_identical_to_absent(campus):
 
 
 def test_same_type_instances_are_not_cross_wired(campus):
-    artifact, models, materialized, finance, config, evaluation = campus
-    doc = json.loads(artifact.canonical_text)
+    _artifact, models, materialized, finance, config, evaluation = campus
+    doc = _source_doc()
     doc["devices"]["grid2"] = deepcopy(doc["devices"]["grid"])
     doc["finance_binding"]["instances"]["grid2"] = {"type": "none"}
     doc["planning"]["constraints"]["only_grid2"] = _relation(
