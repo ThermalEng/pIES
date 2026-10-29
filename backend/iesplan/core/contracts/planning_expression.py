@@ -145,7 +145,27 @@ def compile_planning_expression(
     )
 
 
+_STEP_PORT_INDEX = re.compile(r"\b([a-z][a-z0-9_]*)\[t\]")
+
+
+def compile_step_relation_expression(
+    source: str,
+    symbols: Mapping[str, Dimensions | Mapping[str, int] | Counter[str] | None],
+) -> PlanningExpression:
+    """Compile trusted same-step port references once using the shared planning IR.
+
+    The public planning/assembly boundary owns index/reference validation. This
+    pure compiler only erases the already-validated `[t]` marker so a single
+    affine IR can later be bound to each step's real solver column.
+    """
+    if not isinstance(source, str):
+        raise TypeError("step relation expression must be a string")
+    scalar_source = _STEP_PORT_INDEX.sub(lambda match: match.group(1), source)
+    return compile_planning_expression(scalar_source, symbols)
+
+
 __all__ = [
     "PlanningExpression",
     "compile_planning_expression",
+    "compile_step_relation_expression",
 ]

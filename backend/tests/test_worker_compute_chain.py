@@ -930,3 +930,65 @@ class TestStopLifecycle:
         finally:
             stop.set()
             thread.join(timeout=10)
+
+
+def test_step_relation_real_task_freezes_ports_and_survives_later_draft(
+    client: TestClient, db: Session, engine: Engine, plane,
+) -> None:
+    """Public submission -> true HiGHS -> adapter/Worker seal, without live-draft reads."""
+    from copy import deepcopy
+    from iesplan.application import configuration as configuration_cases
+
+    user = make_user(db, "step_task_owner")
+    original = deepcopy(PLANNING_BODY)
+    original["constraints"] = {
+        "pin_battery_port": {
+            "type": "step_relation",
+            "references": {
+                "port": {"instance": "bat1", "interface": "electricity"},
+            },
+            "expression": "port[t] == 0 kW",
+            "enabled": True,
+        },
+    }
+    pid = _prepare_with_planning(client, db, user, original)
+    cfg_rev = _save_config_body(client, pid, user, dict(_CONFIG_BODY))
+    status, response = _submit_task(
+        client, pid, user, config={"config_revision": cfg_rev},
+        idempotency_key="step-e2e-1",
+    )
+    assert status == 201, response
+    task_id = int(response["task"]["id"])
+    task = db.get(Task, task_id)
+    assert task is not None
+    snapshot = worker_app.get_snapshot_record(db, task.calc_snapshot_id)
+    frozen_before = snapshot.canonical_assembly_text
+    assert json.loads(frozen_before)["planning"]["constraints"]["pin_battery_port"] == original["constraints"]["pin_battery_port"]
+
+    claim = _claim(db, task_id)
+    assert _run(engine, claim, plane) == "completed"
+    evidence = results_store.latest_evidence_for_task(db, task_id)
+    assert evidence is not None
+    sealed_bytes = get_object(db, evidence.object_id)
+    sealed = json.loads(sealed_bytes.decode("utf-8"))
+    result = sealed["compute_result"]
+    assert result["math_status"] == "solved"
+    assert result["execution_status"] == "completed"
+    assert sealed["receipt"]["status"] == "succeeded"
+    assert sealed["bundle_manifest"]["bundle"]["generator"] == "ies.generator.highs_milp@7.0.0"
+    # Port series is restored from the precise same MPS columns, not rewritten
+    # after solve. Immutable sealed series remains attached to the old task.
+    series = result["outputs"]["series"]["bat1.electricity"]
+    assert series["unit"] == "kW"
+    assert len(series["values"]) > 0
+    assert all(abs(value) <= 1e-5 for value in series["values"])
+    mps = get_object(db, sealed["bundle_files"]["input/problem.mps"]["object_id"])
+    assert b"step__pin_battery_port__t0" in mps
+
+    _, current_rev, _ = configuration_cases.get_planning_config(db, pid)
+    changed = deepcopy(original)
+    changed["constraints"]["pin_battery_port"]["enabled"] = False
+    configuration_cases.save_planning_config(db, pid, changed, current_rev, user.id)
+    frozen_after = worker_app.get_snapshot_record(db, task.calc_snapshot_id)
+    assert frozen_after.canonical_assembly_text == frozen_before
+    assert get_object(db, evidence.object_id) == sealed_bytes

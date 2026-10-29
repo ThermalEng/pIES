@@ -64,6 +64,7 @@ from iesplan.computation.sequences import (
 from iesplan.core.contracts import (
     SYSTEM_AFTER_TAX_NPV,
     compile_planning_expression,
+    compile_step_relation_expression,
 )
 from iesplan.core.contracts.baseline import TIMELINE_STEP_DURATION_VAR
 from iesplan.core.contracts.planning_expression import PlanningExpression
@@ -656,6 +657,14 @@ class _ProjectBuilder:
         for target in drivers.values():
             if "interface" in target:
                 refs.add(target["interface"])
+        # Step relations consume the SAME port columns as device rows, bus rows,
+        # tariff bindings and the solution series (including otherwise unused ports).
+        for relation in (self.doc["planning"].get("constraints") or {}).values():
+            if relation.get("type") != "step_relation" or relation.get("enabled", True) is False:
+                continue
+            for target in relation["references"].values():
+                if target["instance"] == inst:
+                    refs.add(target["interface"])
         return sorted(
             name
             for name, flow in contribution.interfaces.items()
@@ -2472,6 +2481,71 @@ class _ProjectBuilder:
             f"目标量纲无可报告业务单位，超出首版能力: {items!r}"
         )
 
+    def _build_step_relations(self) -> None:
+        """Compile each frozen relation once; bind it to existing port columns at every t.
+
+        The public assembly gate has already checked indices, references and
+        dimensions. There is no independent flow or post-solve repair variable.
+        """
+        constraints = self.doc["planning"].get("constraints") or {}
+        plan_dimensions = {}
+        for name, spec in self.plan_vars.items():
+            unit = spec.get("unit") or self._bound_prop_unit(
+                spec["device_ref"], spec["parameter"],
+            )
+            plan_dimensions[name] = Counter(dict(dims_of(unit)))
+        for relation_id in sorted(constraints):
+            entry = constraints[relation_id]
+            if entry.get("type") != "step_relation" or entry.get("enabled", True) is False:
+                continue
+            references = entry["references"]
+            dimensions = {
+                **plan_dimensions,
+                TIMELINE_STEP_DURATION_VAR: Counter({"time": 1}),
+            }
+            for alias, target in references.items():
+                flow = self.models[target["instance"]].interfaces[target["interface"]]
+                dimensions[alias] = Counter(dict(dims_of(flow.unit)))
+            compiled = compile_step_relation_expression(entry["expression"], dimensions)
+            placeholders = {
+                name: (("const", self.step_s) if name == TIMELINE_STEP_DURATION_VAR
+                       else ("var", None, None))
+                for name in dimensions
+            }
+            # The pure lowerer uses the shared planning IR/affine rules. It
+            # produces one symbolic row that is instantiated without re-parsing.
+            template = lower_planning_constraint(
+                relation_id, compiled, placeholders,
+            )
+            for step in range(self.point_count):
+                self._checkpoint()
+                row = _AffineAcc()
+                row.add_const(template.expression.constant)
+                for (name, offset), coefficient in template.expression.terms:
+                    if offset:
+                        raise LoweringUnsupportedError(
+                            f"step relation {relation_id!r} has an unsupported offset"
+                        )
+                    if name in references:
+                        target = references[name]
+                        key = (target["instance"], target["interface"])
+                        # _step_columns is created by _declare_instance_statics,
+                        # the same registry subsequently used by step_series().
+                        column = self._step_columns[key][step]
+                    elif name in self.plan_vars:
+                        column = name  # one scalar capacity decision for all steps
+                    else:
+                        raise LoweringUnsupportedError(
+                            f"step relation {relation_id!r}: unknown symbol {name!r}"
+                        )
+                    row.add_term(column, coefficient)
+                self.rows.append(LinearConstraint(
+                    name=f"step__{relation_id}__t{step}",
+                    expression=row.freeze(),
+                    sense=template.sense,
+                    rhs=template.rhs,
+                ))
+
     def _build_planning_rows(self) -> None:
         """已启用规划约束行（约束 type 标签留装配产物，不进 LP）。"""
         planning = self.doc["planning"]
@@ -2479,7 +2553,7 @@ class _ProjectBuilder:
         symbols, placeholders = self._planning_symbols()
         for name in sorted(constraints):
             entry = constraints[name]
-            if entry.get("enabled", True) is False:
+            if entry.get("type") == "step_relation" or entry.get("enabled", True) is False:
                 continue
             compiled = compile_planning_expression(
                 entry["expression"], symbols, currency=None,
@@ -2716,6 +2790,7 @@ class _ProjectBuilder:
             )
             self._build_relations(inst, statics)
         self._build_bus_rows(buses)
+        self._build_step_relations()
         self._build_monthly_demand()
         self._checkpoint()
         self._build_planning_rows()
