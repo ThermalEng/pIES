@@ -76,7 +76,8 @@ def validate_planning_domain(config: PlanningConfig) -> list[Diagnostic]:
                     },
                 )
             )
-    if config.constraints and not any(c.enabled for c in config.constraints.values()):
+    if (config.constraints and not any(c.enabled for c in config.constraints.values())
+            and not any(c.type == "step_relation" for c in config.constraints.values())):
         diags.append(
             make_diag(
                 PLAN_VAR_REF_INVALID,

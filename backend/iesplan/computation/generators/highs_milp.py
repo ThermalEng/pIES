@@ -45,12 +45,12 @@ from iesplan.finance import EffectiveFinanceConfig, EvaluationInput
 from iesplan.modeling import DeviceMathContribution
 
 GENERATOR_ID = "ies.generator.highs_milp"
-GENERATOR_VERSION = "6.0.0"
+GENERATOR_VERSION = "7.0.0"
 GENERATOR_REF = f"{GENERATOR_ID}@{GENERATOR_VERSION}"
 SOLVER_REF = "ies.solver.highs@1.7.2"
 EXECUTOR_REF = "ies.executor.local_process@1.0.0"
 ADAPTER_REF = HIGHS_ADAPTER_REF
-ASSEMBLY_SCHEMA_VERSION = "4.0.0"
+ASSEMBLY_SCHEMA_VERSION = "5.0.0"
 
 #: seed 为 null 时 descriptor 明示的固定种子。
 FIXED_SEED = 0

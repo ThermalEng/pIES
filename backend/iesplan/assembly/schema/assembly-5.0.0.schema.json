@@ -1,0 +1,619 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "ies.assembly/5.0.0",
+  "title": "ies.assembly 5.0.0 装配 YAML 契约",
+  "description": "装配 YAML 是系统模型与规划意图的完整、可审查文本:固定项目计算基线,实例化设备模型、绑定数据、连接真实端口、给出约束。装配不包含 calculation(计算配置在计算包生成时固定)。禁止 shell/command/executable/函数模块路径/环境变量/凭证。各节均必需,无内容写空 {} 或 []。",
+  "type": "object",
+  "required": [
+    "schema",
+    "schema_version",
+    "assembly",
+    "project_baseline",
+    "devices",
+    "connections",
+    "finance",
+    "finance_binding",
+    "tariff_bindings",
+    "demand_bindings",
+    "planning",
+    "outputs",
+    "extensions"
+  ],
+  "properties": {
+    "schema": {
+      "const": "ies.assembly"
+    },
+    "schema_version": {
+      "const": "5.0.0"
+    },
+    "assembly": {
+      "type": "object",
+      "required": [
+        "id",
+        "name"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_-]*$",
+          "description": "本装配的稳定 ID(lower_snake_case 或短横线形式)"
+        },
+        "name": {
+          "type": "string",
+          "description": "人类可读名称"
+        }
+      },
+      "additionalProperties": false
+    },
+    "project_baseline": {
+      "type": "object",
+      "required": [
+        "resolution",
+        "start_year",
+        "scenario_mode"
+      ],
+      "properties": {
+        "resolution": {
+          "type": "string",
+          "enum": [
+            "15min",
+            "30min",
+            "1h"
+          ],
+          "description": "全项目统一计算分辨率,必须能确定性切分一天"
+        },
+        "start_year": {
+          "type": "integer",
+          "description": "运行起始年,公历整数年"
+        },
+        "scenario_mode": {
+          "type": "string",
+          "const": "single",
+          "description": "场景模式,当前固定为 single"
+        }
+      },
+      "additionalProperties": false
+    },
+    "devices": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": [
+          "definition",
+          "asset_origin"
+        ],
+        "properties": {
+          "definition": {
+            "type": "object",
+            "required": [
+              "id"
+            ],
+            "properties": {
+              "id": {
+                "type": "string",
+                "description": "稳定设备模型 ID(裸 ID，禁止 @版本钉选)"
+              }
+            },
+            "additionalProperties": false
+          },
+          "asset_origin": {
+            "type": "string",
+            "enum": [
+              "existing",
+              "new"
+            ],
+            "description": "存量/新增身份，不得推断"
+          },
+          "properties": {
+            "type": "object",
+            "description": "非时变技术常量覆盖，只允许模型已声明字段",
+            "additionalProperties": {
+              "type": "object",
+              "required": [
+                "value",
+                "unit"
+              ],
+              "properties": {
+                "value": {
+                  "type": [
+                    "number",
+                    "string",
+                    "boolean"
+                  ],
+                  "description": "有限标量"
+                },
+                "unit": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "predefined_interfaces": {
+            "type": "object",
+            "description": "每个 predefined 槽恰好一个显式来源声明，三种模式封闭互斥",
+            "additionalProperties": {
+              "oneOf": [
+                {
+                  "properties": {
+                    "mode": {
+                      "const": "constant"
+                    },
+                    "value": {
+                      "type": "number"
+                    }
+                  },
+                  "required": [
+                    "mode",
+                    "value"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "properties": {
+                    "mode": {
+                      "const": "data_repeat"
+                    },
+                    "path": {
+                      "type": "string",
+                      "minLength": 1,
+                      "description": "项目目录内 CSV 相对路径"
+                    }
+                  },
+                  "required": [
+                    "mode",
+                    "path"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "properties": {
+                    "mode": {
+                      "const": "data_predict"
+                    },
+                    "path": {
+                      "type": "string",
+                      "minLength": 1,
+                      "description": "项目目录内 CSV 相对路径"
+                    },
+                    "target_type": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  },
+                  "required": [
+                    "mode",
+                    "path",
+                    "target_type"
+                  ],
+                  "additionalProperties": false
+                }
+              ]
+            }
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "connections": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": [
+          "from",
+          "to"
+        ],
+        "properties": {
+          "from": {
+            "type": "string",
+            "pattern": "^[a-z0-9_][a-z0-9_.-]*\\.[a-z0-9_][a-z0-9_.-]*$",
+            "description": "端点 <device-instance>.<port-id>"
+          },
+          "to": {
+            "type": "string",
+            "pattern": "^[a-z0-9_][a-z0-9_.-]*\\.[a-z0-9_][a-z0-9_.-]*$"
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "finance": {
+      "type": "object",
+      "required": [
+        "ref",
+        "profile_id"
+      ],
+      "properties": {
+        "ref": {
+          "type": "object",
+          "oneOf": [
+            {
+              "properties": {
+                "kind": {
+                  "const": "object"
+                },
+                "object_id": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "media_type": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "object_id"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "properties": {
+                "kind": {
+                  "const": "relative_file"
+                },
+                "path": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "required": [
+                "kind",
+                "path"
+              ],
+              "additionalProperties": false
+            }
+          ]
+        },
+        "profile_id": {
+          "type": "string"
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "冻结 Effective 修订号(应用装配闸门填写的血缘；手写文件可缺席)"
+        }
+      },
+      "additionalProperties": false
+    },
+    "finance_binding": {
+      "type": "object",
+      "required": [
+        "instances"
+      ],
+      "properties": {
+        "instances": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "oneOf": [
+              {
+                "properties": {
+                  "type": {
+                    "const": "costed"
+                  },
+                  "finance_type": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "drivers": {
+                    "type": "object",
+                    "description": "成本驱动目标: property 或 interface+aggregation，二者封闭互斥",
+                    "additionalProperties": {
+                      "oneOf": [
+                        {
+                          "properties": {
+                            "property": {
+                              "type": "string",
+                              "minLength": 1
+                            }
+                          },
+                          "required": [
+                            "property"
+                          ],
+                          "additionalProperties": false
+                        },
+                        {
+                          "properties": {
+                            "interface": {
+                              "type": "string",
+                              "minLength": 1
+                            },
+                            "aggregation": {
+                              "type": "string",
+                              "enum": [
+                                "integrate_positive",
+                                "sum_positive"
+                              ]
+                            }
+                          },
+                          "required": [
+                            "interface",
+                            "aggregation"
+                          ],
+                          "additionalProperties": false
+                        }
+                      ]
+                    }
+                  }
+                },
+                "required": [
+                  "type",
+                  "finance_type"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "properties": {
+                  "type": {
+                    "const": "none"
+                  }
+                },
+                "required": [
+                  "type"
+                ],
+                "additionalProperties": false
+              }
+            ]
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "tariff_bindings": {
+      "type": "object",
+      "propertyNames": {
+        "pattern": "^[a-z][a-z0-9_]*$"
+      },
+      "additionalProperties": {
+        "type": "object",
+        "required": [
+          "price",
+          "instance",
+          "interface",
+          "aggregation"
+        ],
+        "properties": {
+          "price": {
+            "type": "string",
+            "minLength": 1
+          },
+          "instance": {
+            "type": "string",
+            "minLength": 1
+          },
+          "interface": {
+            "type": "string",
+            "minLength": 1
+          },
+          "aggregation": {
+            "type": "string",
+            "enum": [
+              "integrate_positive",
+              "sum_positive"
+            ]
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "demand_bindings": {
+      "type": "object",
+      "propertyNames": {
+        "pattern": "^[a-z][a-z0-9_]*$"
+      },
+      "additionalProperties": {
+        "type": "object",
+        "required": [
+          "charge",
+          "instance",
+          "interface"
+        ],
+        "properties": {
+          "charge": {
+            "type": "string",
+            "minLength": 1
+          },
+          "instance": {
+            "type": "string",
+            "minLength": 1
+          },
+          "interface": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "planning": {
+      "type": "object",
+      "required": [
+        "objective",
+        "variables"
+      ],
+      "properties": {
+        "objective": {
+          "type": "object",
+          "required": [
+            "sense",
+            "expression"
+          ],
+          "properties": {
+            "sense": {
+              "type": "string",
+              "enum": [
+                "minimize",
+                "maximize"
+              ]
+            },
+            "expression": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "additionalProperties": false
+        },
+        "variables": {
+          "type": "object",
+          "description": "规划变量(公共 PlanningVariable 契约的结构侧；公共契约要求至少一个变量)",
+          "minProperties": 1,
+          "additionalProperties": {
+            "type": "object",
+            "required": [
+              "device_ref",
+              "parameter"
+            ],
+            "properties": {
+              "device_ref": {
+                "type": "string",
+                "minLength": 1
+              },
+              "parameter": {
+                "type": "string",
+                "minLength": 1
+              },
+              "lower_bound": {
+                "type": [
+                  "integer",
+                  "string",
+                  "null"
+                ]
+              },
+              "upper_bound": {
+                "type": [
+                  "integer",
+                  "string",
+                  "null"
+                ]
+              },
+              "unit": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "minLength": 1
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "constraints": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "required": [
+              "type",
+              "expression"
+            ],
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "load_balance",
+                  "capacity_limit",
+                  "co2_limit",
+                  "annual_purchase_cost_limit",
+                  "ratio",
+                  "step_relation"
+                ],
+                "description": "约束种类(公共 Constraint 契约白名单)"
+              },
+              "expression": {
+                "type": "string",
+                "minLength": 1
+              },
+              "enabled": {
+                "type": "boolean"
+              },
+              "references": {
+                "type": "object",
+                "minProperties": 1,
+                "patternProperties": {
+                  "^[a-z][a-z0-9_]*$": {
+                    "type": "object",
+                    "required": [
+                      "instance",
+                      "interface"
+                    ],
+                    "properties": {
+                      "instance": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "interface": {
+                        "type": "string",
+                        "minLength": 1
+                      }
+                    },
+                    "additionalProperties": false
+                  }
+                },
+                "additionalProperties": false
+              }
+            },
+            "additionalProperties": false,
+            "allOf": [
+              {
+                "if": {
+                  "properties": {
+                    "type": {
+                      "const": "step_relation"
+                    }
+                  },
+                  "required": [
+                    "type"
+                  ]
+                },
+                "then": {
+                  "required": [
+                    "references"
+                  ]
+                },
+                "else": {
+                  "not": {
+                    "required": [
+                      "references"
+                    ]
+                  }
+                }
+              }
+            ]
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "outputs": {
+      "type": "object",
+      "required": [
+        "series",
+        "metrics"
+      ],
+      "properties": {
+        "series": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z0-9_][a-z0-9_.-]*\\.[a-z0-9_][a-z0-9_.-]*$"
+          },
+          "description": "希望发布的序列引用 <device>.<output>(声明顺序保留)"
+        },
+        "metrics": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z0-9_][a-z0-9_.-]*\\.[a-z0-9_][a-z0-9_.-]*$"
+          },
+          "description": "希望发布的指标引用 <scope>.<metric>(scope 为设备或 system)"
+        }
+      },
+      "additionalProperties": false
+    },
+    "extensions": {
+      "type": "object",
+      "description": "命名空间化扩展(键须含 '.');不得改变核心字段语义或安全规则"
+    }
+  },
+  "additionalProperties": false
+}
