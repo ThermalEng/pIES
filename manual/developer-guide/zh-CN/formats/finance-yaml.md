@@ -2,9 +2,9 @@
 
 > 契约标识与版本：`ies.finance-profile@6.0.0`、`ies.finance-overrides@6.0.0`、`ies.effective-finance-config@6.0.0`。本版统一年度固定项的年率单位，以明确金额来源表达初建／换新折旧，并独立声明净现金项目；旧消费者不能安全解释这些关系，三件套同步提升主版本，不接受旧字头或双轨解析。
 > 推荐文件名（项目包内固定名称）：`finance_profile.yaml`、`finance_overrides.yaml`、`effective_finance.yaml`
-> 文档状态：生效目标契约；本页只定义目标文件语义，不声明实现进度。
+> 文档状态：生效契约；本页定义文件语义。
 
-本页版本仅升级财务三件套；评价输入与 `CalcSnapshot@5.0.0`、装配、设备模型、CalculationConfig、通用 Bundle 和 ComputeResult 顶层结构不变。折旧输出改为来源身份并新增净现金明细，配套生成器／适配器目标为 `6.0.0`，封存财务评价目标为 `3.0.0`，见[同次解财务事实映射](solver-bundle.md#同次解财务事实映射)。输入解析、合并、生成、恢复及展示需共同迁移；不通过在旧字头下放宽校验代替版本切换。
+本页版本仅升级财务三件套；评价输入与 `CalcSnapshot@5.0.0`、装配、设备模型、CalculationConfig、通用 Bundle 和 ComputeResult 顶层结构不变。折旧输出改为来源身份并新增净现金明细，配套生成器／适配器为 `6.0.0`，封存财务评价为 `3.0.0`，见[同次解财务事实映射](solver-bundle.md#同次解财务事实映射)。输入解析、合并、生成、恢复及展示使用同一版本语义；不通过在旧字头下放宽校验代替版本切换。
 
 本页定义财务三件套的完整 YAML 结构与校验语义，是 [文件格式标准](../file-formats.md) 与[财务计算](../modules/finance.md)的字段级权威正文。装配如何引用有效快照见[装配 YAML](assembly-yaml.md)。
 
