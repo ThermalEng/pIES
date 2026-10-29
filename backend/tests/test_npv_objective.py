@@ -222,7 +222,7 @@ def _doc(
 ):
     return {
         "schema": "ies.assembly",
-        "schema_version": "4.0.0",
+        "schema_version": "5.0.0",
         "assembly": {"id": "npv-mini", "name": "NPV 手算装配"},
         "project_baseline": {
             "resolution": "1h",
@@ -702,7 +702,7 @@ def _choice_finance_payload() -> dict:
 def _choice_doc(objective: dict, *, cap_bounds: tuple[str, str] = ("0", "10")) -> dict:
     return {
         "schema": "ies.assembly",
-        "schema_version": "4.0.0",
+        "schema_version": "5.0.0",
         "assembly": {"id": "npv-choice", "name": "NPV 选择算例"},
         "project_baseline": {
             "resolution": "1h",
