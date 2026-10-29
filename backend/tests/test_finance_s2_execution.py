@@ -308,5 +308,5 @@ def test_same_currency_annual_fixed_and_linear_end_to_end(tmp_path, currency):
     )
     assert sealed["currency"] == currency
     assert float(sealed["evaluation"]["npv"]) == pytest.approx(solution["objective_value"])
-    assert sealed["annual_net_flows"] == restored["annual_net_flows"]
+    assert sealed["annual_net_flows"] == list(restored["annual_net_flows"])
     assert solved["cap_a"] == pytest.approx(10000)
