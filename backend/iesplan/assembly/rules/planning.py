@@ -319,6 +319,12 @@ def check_planning(
             )
             continue
         _check_build_scope(doc, snapshot, var_name, variable, diags)
+        if var_name == "step_duration":
+            _plan_fail(
+                diags, ASM_PLAN_UNDEF, field, "variable_reserved_collision",
+                {"variable": var_name, "reserved": "step_duration"},
+            )
+            continue
         if var_name in finance_dims:
             _plan_fail(
                 diags, ASM_PLAN_UNDEF, field, "variable_reserved_collision",

@@ -63,6 +63,10 @@ def check_step_relations(planning: Mapping, devices: Mapping, registry: Mapping,
         return
     symbols = {"step_duration": Counter({"time": 1})}
     for name, item in (planning.get("variables") or {}).items():
+        # Never replace the immutable timeline primitive with a planning decision.
+        # The public domain/assembly variable gate reports the name collision.
+        if name == "step_duration":
+            continue
         instance = devices.get(item.get("device_ref")) if isinstance(item, Mapping) else None
         desc = registry.get((instance.get("definition") or {}).get("id")) if isinstance(instance, Mapping) else None
         spec = desc.properties.get(item.get("parameter")) if desc is not None else None
