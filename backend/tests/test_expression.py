@@ -85,6 +85,32 @@ class TestDimChecks:
         expr = parse_expr("a * b", VARS, var_dims=dims)
         assert expr.eval({"a": 2, "b": 3}) == pytest.approx(6.0)
 
+    @pytest.mark.parametrize("source", [
+        "a * b == 1 kWh",
+        "a * b + 1 kWh == 2 kWh",
+        "1 kWh / b == a",
+        "1 kWh / a == b",
+        "min(a * b, 1 kWh) == 1 kWh",
+        "if(a > 0 W, a * b, 1 kWh) == 1 kWh",
+        "a * b / 1 kWh == 1",
+        "(a * b) ** 2 == (1 kWh) ** 2",
+        "1 / (a * b) == 1 / 1 kWh",
+    ])
+    def test_energy_power_time_equivalence(self, source):
+        dims = {"a": _dim_of({"power": 1}), "b": _dim_of({"time": 1})}
+        original = {name: value.copy() for name, value in dims.items()}
+        expr = parse_expr(source, {"a", "b"}, dims)
+        assert expr.eval({"a": 1000, "b": 3600}) == 1.0
+        assert dims == original
+
+    @pytest.mark.parametrize("source", [
+        "a * b <= 1 kW", "a / b <= 1 kWh", "a * b <= 1 CNY",
+    ])
+    def test_energy_equivalence_keeps_incompatible_dimensions_rejected(self, source):
+        dims = {"a": _dim_of({"power": 1}), "b": _dim_of({"time": 1})}
+        with pytest.raises(ExpressionDimensionError):
+            parse_expr(source, {"a", "b"}, dims)
+
     def test_sqrt_even_dims(self):
         dims = {"a": _dim_of({"energy": 2})}
         parse_expr("sqrt(a)", VARS, var_dims=dims)  # 不抛异常

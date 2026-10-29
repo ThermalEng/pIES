@@ -81,6 +81,17 @@ def test_compile_keeps_signed_exponents() -> None:
     assert compile_planning_expression("(1 / 1 kW) ** 2", {}).dimension == (("power", -2),)
 
 
+@pytest.mark.parametrize(("source", "dimension"), [
+    ("pv_cap * 1 h", (("energy", 1),)),
+    ("1 kWh / 1 h", (("power", 1),)),
+    ("1 kWh / pv_cap", (("time", 1),)),
+    ("pv_cap * 1 h / 1 kWh", ()),
+    ("1 / (pv_cap * 1 h)", (("energy", -1),)),
+])
+def test_compile_energy_equivalence_preserves_business_dimensions(source, dimension) -> None:
+    assert compile_planning_expression(source, SYMBOLS).dimension == dimension
+
+
 def test_compile_empty_rejected() -> None:
     with pytest.raises(ExpressionSyntaxError):
         compile_planning_expression("  ", SYMBOLS)

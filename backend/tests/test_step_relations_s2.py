@@ -98,6 +98,20 @@ def test_compatible_unit_literals_have_identical_math(campus):
     assert write_mps(lhs[0]) == write_mps(rhs[0])
 
 
+def test_energy_literal_and_power_times_duration_have_identical_math(campus):
+    lhs = _model(_with_constraints(campus, {
+        "energy_limit": _relation("boundary[t] * step_duration <= 0.5 kWh"),
+    }))
+    rhs = _model(_with_constraints(campus, {
+        "energy_limit": _relation("boundary[t] * step_duration <= 500 W * 1 h"),
+    }))
+    row = _rows(lhs[0], "energy_limit")[0]
+    assert _terms(row) == {"grid__electricity_export__t0": 3600.0}
+    assert row.expression.constant == pytest.approx(-1_800_000)
+    assert row.sense == "le" and row.rhs == 0
+    assert write_mps(lhs[0]) == write_mps(rhs[0])
+
+
 def test_disabled_relation_is_mathematically_identical_to_absent(campus):
     no_relation = _model(campus)
     disabled = _model(_with_constraints(campus, {

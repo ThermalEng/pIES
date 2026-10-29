@@ -68,8 +68,21 @@ Dimensions = Counter[str]
 
 
 def _dim_of(categories: dict[str, int] | None = None) -> Dimensions:
-    """构造量纲(类别 → 次数)。"""
-    return Counter(categories or {})
+    """构造等价量纲；energy = power × time，保留纯功率／能量类别。"""
+    dims = Counter(categories or {})
+    energy = dims.pop(DIM_ENERGY, 0)
+    power = dims[DIM_POWER] + energy
+    time = dims[DIM_TIME] + energy
+    if power > 0 and time > 0:
+        shared = min(power, time)
+    elif power < 0 and time < 0:
+        shared = max(power, time)
+    else:
+        shared = 0
+    dims[DIM_ENERGY] = shared
+    dims[DIM_POWER] = power - shared
+    dims[DIM_TIME] = time - shared
+    return Counter({key: value for key, value in dims.items() if value})
 
 
 def _combine_dims(left: Dimensions, right: Dimensions, sign: int) -> Dimensions:
@@ -83,7 +96,7 @@ def _combine_dims(left: Dimensions, right: Dimensions, sign: int) -> Dimensions:
         merged[key] += sign * value
         if merged[key] == 0:
             del merged[key]
-    return merged
+    return _dim_of(dict(merged))
 
 
 def _dim_str(d: Dimensions) -> str:
@@ -498,6 +511,7 @@ def parse_expr(
     # 改写在白名单构建之前完成, qconstN 为引擎内部带量纲常量, 白名单放行
     dims: dict[str, Dimensions] = dict(var_dims or {})
     text, dims, qconst_values = rewrite_unit_suffixes(text, dims)
+    dims = {name: _dim_of(dict(dimension)) for name, dimension in dims.items()}
     allowed = frozenset(allowed_vars) | {k for k in dims if k.startswith(_QCONST_PREFIX)}
 
     # 双扫描之一:危险标识符模式(混淆手段一律拒绝,04 §4.3 禁止列表)
