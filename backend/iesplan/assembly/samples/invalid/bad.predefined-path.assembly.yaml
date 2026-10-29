@@ -1,6 +1,6 @@
 # 非法样例: 预定义路径为宿主机绝对路径 → ASM-SYN-009
 schema: ies.assembly
-schema_version: "4.0.0"
+schema_version: "5.0.0"
 
 assembly:
   id: bad_predefined_path

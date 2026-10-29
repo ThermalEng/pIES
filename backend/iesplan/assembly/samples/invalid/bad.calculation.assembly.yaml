@@ -1,6 +1,6 @@
 # 非法样例: 装配携带 calculation 章节 → ASM-SYN-002
 schema: ies.assembly
-schema_version: "4.0.0"
+schema_version: "5.0.0"
 
 assembly:
   id: bad_calculation

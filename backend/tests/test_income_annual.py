@@ -140,7 +140,7 @@ def _gen_finance_payload(*, opening=(), carry_years=INC_CARRY_YEARS):
 def _gen_doc(objective: dict, *, cap_bounds: tuple[str, str] = ("0", "10")) -> dict:
     return {
         "schema": "ies.assembly",
-        "schema_version": "4.0.0",
+        "schema_version": "5.0.0",
         "assembly": {"id": "income-gen", "name": "所得税选择算例"},
         "project_baseline": {
             "resolution": "1h",

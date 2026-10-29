@@ -799,8 +799,25 @@ class _DocBuilder:
                         )
                     if entry.get("enabled") is not None:
                         self._bool(entry["enabled"], f"{field}.constraints.{const_name}.enabled")
+                    if kind == "step_relation":
+                        ref_field = f"{field}.constraints.{const_name}.references"
+                        refs = self._require_map(entry.get("references"), ref_field)
+                        if refs is not None:
+                            if not refs:
+                                self._diag(ASM_SYN_FIELD, ref_field, {"reason": "empty_references"})
+                            for alias, target in refs.items():
+                                if not isinstance(alias, str) or re.fullmatch(r"[a-z][a-z0-9_]*", alias) is None:
+                                    self._diag(ASM_SYN_FIELD, f"{ref_field}.{alias}", {"reason": "invalid_alias"})
+                                detail = self._require_map(target, f"{ref_field}.{alias}")
+                                if detail is not None:
+                                    for key in ("instance", "interface"):
+                                        self._str(detail, key, f"{ref_field}.{alias}.{key}", required=True)
+                                    for key in detail:
+                                        if key not in ("instance", "interface"):
+                                            self._diag(ASM_SYN_PARSE, f"{ref_field}.{alias}.{key}", {"reason": "unknown_key", "key": key})
                     for key in entry:
-                        if key not in ("type", "expression", "enabled"):
+                        allowed = ("type", "expression", "enabled", "references") if kind == "step_relation" else ("type", "expression", "enabled")
+                        if key not in allowed:
                             self._diag(
                                 ASM_SYN_PARSE, f"{field}.constraints.{const_name}.{key}",
                                 {"reason": "unknown_key", "key": key},

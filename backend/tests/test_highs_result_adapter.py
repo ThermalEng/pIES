@@ -150,7 +150,7 @@ def _parameters(
         "assembly": {"id": "assembly-7", "schema_version": "2.0.0"},
         "components": {} if components is None else components,
         "financial_facts": _facts(),
-        "generator": "ies.generator.highs_milp@6.0.0",
+        "generator": "ies.generator.highs_milp@7.0.0",
         "objective_offset": offset,
         "objective_unit": objective_unit,
         "outputs": ["solution", "metrics"] if outputs is None else outputs,
@@ -172,7 +172,7 @@ def _bundle(files: dict | None = None) -> SolverBundle:
         }
     manifest = SolverBundleManifest(
         bundle={
-            "generator": "ies.generator.highs_milp@6.0.0",
+            "generator": "ies.generator.highs_milp@7.0.0",
             "solver": "ies.solver.highs@1.7.2",
         },
         inputs=[{"path": path, "media_type": "application/octet-stream"} for path in sorted(files)],
@@ -202,7 +202,7 @@ def _receipt(**kwargs) -> ExecutionReceipt:
     kwargs.setdefault("assembly_id", "assembly-7")
     kwargs.setdefault("calculation_config_id", "config-7")
     kwargs.setdefault("attempt_id", "attempt-7")
-    kwargs.setdefault("generator_ref", "ies.generator.highs_milp@6.0.0")
+    kwargs.setdefault("generator_ref", "ies.generator.highs_milp@7.0.0")
     kwargs.setdefault("solver_ref", "ies.solver.highs@1.7.2")
     kwargs.setdefault("executor_ref", "ies.executor.local_process@1.0.0")
     kwargs.setdefault("executable_ref", "ies.solver.highs@1.7.2")

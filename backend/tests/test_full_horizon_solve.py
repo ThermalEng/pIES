@@ -545,7 +545,7 @@ def _store_doc() -> dict:
     """
     return {
         "schema": "ies.assembly",
-        "schema_version": "4.0.0",
+        "schema_version": "5.0.0",
         "assembly": {"id": "mini-store", "name": "无序列储能"},
         "project_baseline": {
             "resolution": "1h", "start_year": START_YEAR, "scenario_mode": "single",
@@ -980,7 +980,7 @@ class TestGeneratorEmptySeriesHorizon:
         finance = merge_effective(FinanceProfile.from_dict(payload), None)
         config = CalculationConfig(
             mode="planning",
-            generator="ies.generator.highs_milp@6.0.0",
+            generator="ies.generator.highs_milp@7.0.0",
             solver="ies.solver.highs@1.7.2",
             precision="medium",
             time_limit_seconds=600,

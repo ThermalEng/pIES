@@ -157,7 +157,7 @@ def _seed_dataset(db: Session, user, pid: int, *, quota_bytes: int = 0) -> int:
 #: time_axis 缺一即阻断(ASM-CONV-001)。夹具必须显式声明, 不得依赖回退。
 EXPLICIT_CALC_PATCH = {
     "mode": "fixed_operation",
-    "generator": "ies.generator.highs_milp@6.0.0",
+    "generator": "ies.generator.highs_milp@7.0.0",
     "solver": "ies.solver.highs@1.7.2",
     "time_axis": {"resolution": "1h", "start": "2025-01-01T00:00:00Z"},
 }
@@ -285,7 +285,7 @@ _CONFIG_BODY: dict[str, Any] = {
     "schema_version": "2.0.0",
     "mode": "planning",
     "predictions": [],
-    "generator": "ies.generator.highs_milp@6.0.0",
+    "generator": "ies.generator.highs_milp@7.0.0",
     "solver": "ies.solver.highs@1.7.2",
     "precision": "medium",
     "convergence": None,
@@ -586,7 +586,7 @@ def test_submit_accepts_tax_rules_with_capable_generator(
     ).scalar_one()
     assert snapshot.result_adapter == "ies.result-adapter.highs@6.0.0"
     assert snapshot.executor == "ies.executor.local_process@1.0.0"
-    assert snapshot.calc_config_snapshot["generator"] == "ies.generator.highs_milp@6.0.0"
+    assert snapshot.calc_config_snapshot["generator"] == "ies.generator.highs_milp@7.0.0"
     assert db.execute(select(func.count(Task.id))).scalar() == 1
     config_cases.set_project_finance_profile(db, pid, "cn-north-demo", owner.id)
     save_compute_planning(db, pid, owner.id, device_ref)
@@ -686,7 +686,7 @@ def test_submit_legacy_path_freezes_and_new_cashflow_is_accepted(
     cashflow_snapshot = db.get(CalcSnapshot, body["task"]["calc_snapshot_id"])
     assert cashflow_snapshot is not None
     assert cashflow_snapshot.schema_version == "5.0.0"  # CalcSnapshot remains independent
-    assert cashflow_snapshot.calc_config_snapshot["generator"] == "ies.generator.highs_milp@6.0.0"
+    assert cashflow_snapshot.calc_config_snapshot["generator"] == "ies.generator.highs_milp@7.0.0"
     assert cashflow_snapshot.result_adapter == "ies.result-adapter.highs@6.0.0"
     assert cashflow_snapshot.canonical_assembly_text
     assert db.execute(select(func.count(Task.id))).scalar() == 2

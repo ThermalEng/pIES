@@ -691,6 +691,9 @@ def _assemble_snapshot(
     _check_monthly_daily_capabilities(
         artifact, effective, calc_config.get("generator"), generator_capabilities
     )
+    _check_step_constraint_capability(
+        artifact, calc_config.get("generator"), generator_capabilities
+    )
     _check_maintenance_refs(evaluation, artifact, device_models, effective)
     _check_maintenance_capability(evaluation, calc_config.get("generator"), generator_capabilities)
     receipt = artifact.receipt.to_dict()
@@ -1163,6 +1166,32 @@ def _check_monthly_daily_capabilities(
             location={"object_type": "task", "field": fields[0]},
         )
 
+
+
+def _check_step_constraint_capability(
+    artifact: Any, generator_ref: object, capabilities: tuple[str, ...],
+) -> None:
+    """逐步技术约束仅在完整声明能力后允许提交；不读取可变草稿。"""
+    if "technical.step_constraints" in capabilities:
+        return
+    canonical = json.loads(artifact.canonical_text)
+    constraints = (canonical.get("planning") or {}).get("constraints") or {}
+    fields = [
+        f"planning.constraints.{key}"
+        for key, entry in sorted(constraints.items())
+        if entry.get("type") == "step_relation" and entry.get("enabled", True)
+    ]
+    if fields:
+        raise InvalidRequestError(
+            "所选生成器尚未实现逐步技术关系，不允许静默忽略",
+            code="TASK-REQ-007",
+            params={
+                "generator": generator_ref,
+                "missing_capabilities": ["technical.step_constraints"],
+                "fields": fields,
+            },
+            location={"object_type": "task", "field": fields[0]},
+        )
 
 def _used_price_oids(artifact: Any, effective: EffectiveFinanceConfig) -> list[str]:
     """Distinct frozen object refs actually used by canonical tariff bindings."""

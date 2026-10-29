@@ -39,6 +39,17 @@ def validate_planning_domain(config: PlanningConfig) -> list[Diagnostic]:
     diags: list[Diagnostic] = []
     seen: dict[tuple[str, str], str] = {}
     for var_name, variable in sorted(config.variables.items()):
+        if var_name == "step_duration":
+            diags.append(
+                make_diag(
+                    PLAN_VAR_REF_INVALID,
+                    params={"detail": "规划变量不得占用保留时间原语 step_duration"},
+                    location={
+                        "object_type": "planning_config",
+                        "field": f"variables.{var_name}",
+                    },
+                )
+            )
         if not _DEVICE_REF_RE.fullmatch(variable.device_ref):
             diags.append(
                 make_diag(
@@ -76,7 +87,8 @@ def validate_planning_domain(config: PlanningConfig) -> list[Diagnostic]:
                     },
                 )
             )
-    if config.constraints and not any(c.enabled for c in config.constraints.values()):
+    if (config.constraints and not any(c.enabled for c in config.constraints.values())
+            and not any(c.type == "step_relation" for c in config.constraints.values())):
         diags.append(
             make_diag(
                 PLAN_VAR_REF_INVALID,

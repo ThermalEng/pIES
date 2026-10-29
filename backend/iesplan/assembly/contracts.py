@@ -28,18 +28,18 @@ from iesplan.core.errors import AppError
 # ---------------------------------------------------------------------------
 
 SCHEMA_ID = "ies.assembly"
-SCHEMA_VERSION = "4.0.0"
+SCHEMA_VERSION = "5.0.0"
 
 #: 机器可读 schema 路径(相对本包;与 devices 的 schema/ 布局一致)
-ASSEMBLY_SCHEMA_PATH = "schema/assembly-4.0.0.schema.json"
+ASSEMBLY_SCHEMA_PATH = "schema/assembly-5.0.0.schema.json"
 
 #: 规范化算法 ID 与版本(写入回执;语义变化必须升版本并保留历史解释能力)
 CANON_ALGORITHM_ID = "ies.assembly.canonical"
-CANON_ALGORITHM_VERSION = "4.0.0"
+CANON_ALGORITHM_VERSION = "5.0.0"
 
 #: 四阶段校验器 ID 与版本(写入回执)
 VALIDATOR_ID = "ies.assembly.validator"
-VALIDATOR_VERSION = "4.0.0"
+VALIDATOR_VERSION = "5.0.0"
 
 
 # ---------------------------------------------------------------------------

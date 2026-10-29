@@ -85,7 +85,7 @@ def _assembly(capacity_kw: float, *, optimize: bool) -> str:
     lower = "0" if optimize else "1000"
     upper = "100" if optimize else "1000"
     return f"""schema: ies.assembly
-schema_version: "4.0.0"
+schema_version: "5.0.0"
 assembly:
   id: synthetic_curve
   name: Synthetic curve

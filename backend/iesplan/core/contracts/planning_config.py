@@ -21,6 +21,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation, Overflow, localcontext
+import re
 from types import MappingProxyType
 from typing import Final
 
@@ -36,6 +37,7 @@ CONSTRAINT_TYPES: Final[tuple[str, ...]] = (
     "co2_limit",
     "annual_purchase_cost_limit",
     "ratio",
+    "step_relation",
 )
 
 #: 表达式最大长度(受限声明式语法, 防病态输入)。
@@ -223,6 +225,7 @@ class Constraint:
     type: str
     expression: str
     enabled: bool = True
+    references: Mapping[str, Mapping[str, str]] | None = None
 
     def __post_init__(self) -> None:
         if self.type not in CONSTRAINT_TYPES:
@@ -238,14 +241,33 @@ class Constraint:
                 f"enabled 必须为布尔值, 实际 {type(self.enabled).__name__}"
             )
 
+        if self.type == "step_relation":
+            if not isinstance(self.references, Mapping) or not self.references:
+                raise PlanningConfigError("step_relation.references 必须为非空映射")
+            refs = {}
+            for alias, target in sorted(self.references.items()):
+                if not isinstance(alias, str) or re.fullmatch(r"[a-z][a-z0-9_]*", alias) is None:
+                    raise PlanningConfigError(f"非法局部别名: {alias!r}")
+                if not isinstance(target, Mapping) or set(target) != {"instance", "interface"}:
+                    raise PlanningConfigError(f"引用 {alias!r} 只允许 instance/interface 两个字段")
+                if any(not isinstance(target[key], str) or not target[key] for key in ("instance", "interface")):
+                    raise PlanningConfigError(f"引用 {alias!r} 必须明确实例与真实端口")
+                refs[alias] = MappingProxyType(dict(target))
+            object.__setattr__(self, "references", MappingProxyType(refs))
+        elif self.references is not None:
+            raise PlanningConfigError("非 step_relation 约束不允许 references")
+
     def to_dict(self) -> dict:
-        return {"type": self.type, "expression": self.expression, "enabled": self.enabled}
+        value = {"type": self.type, "expression": self.expression, "enabled": self.enabled}
+        if self.type == "step_relation":
+            value["references"] = {alias: dict(ref) for alias, ref in self.references.items()}
+        return value
 
     @classmethod
     def from_dict(cls, mapping: object) -> "Constraint":
         if not isinstance(mapping, Mapping):
             raise PlanningConfigError("约束必须是字典")
-        unknown = set(mapping) - {"type", "expression", "enabled"}
+        unknown = set(mapping) - {"type", "expression", "enabled", "references"}
         if unknown:
             raise PlanningConfigError(f"约束存在未知字段: {sorted(unknown)}")
         missing = {"type", "expression"} - set(mapping)
@@ -260,6 +282,7 @@ class Constraint:
             type=str(mapping["type"]),
             expression=str(mapping["expression"]),
             enabled=enabled,
+            references=mapping.get("references"),
         )
 
 # ---------------------------------------------------------------------------
