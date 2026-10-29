@@ -434,6 +434,8 @@ def check_planning(
                 {"detail": str(exc)},
             )
             continue
+        if constraint.type == "step_relation":
+            continue  # 引用、[t] 和量纲由本模块下方公共逐步关系闸门处理。
         if not constraint.enabled:
             continue
         _check_expression(
@@ -447,6 +449,9 @@ def check_planning(
             prod=prod,
             diags=diags,
         )
+
+    from iesplan.assembly.rules.step import check_step_relations
+    check_step_relations(planning, devices, registry, diags)
 
 
 __all__ = ["check_planning", "finance_identifiers"]
