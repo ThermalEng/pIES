@@ -11,7 +11,7 @@ from collections.abc import Mapping
 
 from iesplan.assembly.diags import ASM_PLAN_DIM, ASM_PLAN_SYNTAX, ASM_PLAN_UNDEF
 from iesplan.assembly.diags import make_asm_diag
-from iesplan.core.contracts import compile_planning_expression
+from iesplan.core.contracts import compile_step_relation_expression
 from iesplan.core.expression import ExpressionCodeError, ExpressionDimensionError, ExpressionError
 from iesplan.core.units import ALIAS_MAP, UNITS, dims_of
 
@@ -130,7 +130,7 @@ def check_step_relations(planning: Mapping, devices: Mapping, registry: Mapping,
             _reject(diags, ASM_PLAN_SYNTAX, field + ".expression", "step_no_indexed_port")
             continue
         try:
-            compiled = compile_planning_expression(rewritten, local)
+            compiled = compile_step_relation_expression(expression, local)
             aliases = {safe: name for name, safe in compiled.aliases}
             ir = compiled.ir
             if ir[0] != "cmp" or ir[1] not in ("eq", "le", "ge"):

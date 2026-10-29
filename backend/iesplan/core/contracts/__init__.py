@@ -35,6 +35,7 @@ from iesplan.core.contracts.planning_expression import (
     SYSTEM_AFTER_TAX_NPV,
     PlanningExpression,
     compile_planning_expression,
+    compile_step_relation_expression,
 )
 
 __all__ = [
@@ -55,6 +56,7 @@ __all__ = [
     "ProjectBaseline",
     "ProjectBaselineError",
     "compile_planning_expression",
+    "compile_step_relation_expression",
     "horizon_point_count",
     "horizon_year_boundary_steps",
     "horizon_year_point_counts",

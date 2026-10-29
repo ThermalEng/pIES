@@ -97,6 +97,7 @@ DESCRIPTOR = GeneratorDescriptor(
         "finance.maintenance_depreciation",
         "finance.ratio_residual",
         "finance.net_cashflows",
+        "technical.step_constraints",
     ),
     solvers=(SOLVER_REF,),
     executors=(EXECUTOR_REF,),
