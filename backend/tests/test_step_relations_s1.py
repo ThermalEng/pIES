@@ -150,3 +150,18 @@ def test_scalar_planning_still_passes_unchanged(doc):
     assert result.artifact is not None, [d.to_dict() for d in result.diagnostics]
     assert not any(c.get("type") == "step_relation"
                    for c in json.loads(result.artifact.canonical_text)["planning"]["constraints"].values())
+
+
+def test_reserved_primitive_cannot_be_shadowed_to_pass_nonlinear_relation(doc):
+    """主审复现：错误的装机变量名不允许冒充固定时间步长。"""
+    variable = doc["planning"]["variables"].pop("pv_cap")
+    doc["planning"]["variables"]["step_duration"] = variable
+    relation = _relation()
+    relation["expression"] = "boundary[t] * step_duration <= boundary[t] * 1 kW"
+    result = _validate(_insert(doc, relation))
+    assert result.artifact is None
+    assert any(
+        d.params.get("reason") == "variable_reserved_collision"
+        and "planning.variables.step_duration" in str(d.location)
+        for d in result.diagnostics
+    ), [d.to_dict() for d in result.diagnostics]

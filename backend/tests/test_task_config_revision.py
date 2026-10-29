@@ -940,3 +940,30 @@ def test_step_relation_enabled_requires_generator_capability_at_submission(
     assert status == 400, body
     assert _error(body)["code"] == "TASK-REQ-007"
     assert "technical.step_constraints" in str(_error(body))
+
+
+def test_step_duration_shadow_rejected_on_public_planning_save(
+    client: TestClient, db: Session,
+) -> None:
+    """保存边界拒绝原语名冲突且不发布新 revision。"""
+    from iesplan.application import configuration as config_uc
+    from iesplan.application.configuration.revisions import InvalidRequestError
+
+    owner = make_user(db, "owner_step_reserved")
+    pid = _prepare_project(client, db, owner, name="逐步原语保留名")
+    current, rev, _ = config_uc.get_planning_config(db, pid)
+    payload = current.to_dict()
+    payload["variables"]["step_duration"] = payload["variables"].pop("cap")
+    payload["constraints"]["electric_limit"] = {
+        "type": "step_relation",
+        "references": {"electric": {"instance": "bat1", "interface": "electricity"}},
+        "expression": "electric[t] * step_duration <= electric[t] * 1 kW",
+        "enabled": False,
+    }
+    with pytest.raises(InvalidRequestError) as exc:
+        config_uc.save_planning_config(db, pid, payload, rev, owner.id)
+    assert exc.value.code == "PROJ-PLAN-003"
+    assert "variables.step_duration" in str(exc.value.params)
+    restored, unchanged_rev, _ = config_uc.get_planning_config(db, pid)
+    assert unchanged_rev == rev
+    assert restored.to_dict() == current.to_dict()
