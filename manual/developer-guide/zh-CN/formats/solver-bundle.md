@@ -113,7 +113,7 @@ extensions: {}
 
 配套生成器在 `parameters.json` 的 `financial_facts` 声明结构化财务事实映射，ResultAdapter 使用同一次主解恢复为 `ComputeResult.outputs.financial_facts`。声明复用既有仿射求值方式，包含明确字段、业务身份、期间、单位与求解列引用；消费者不拆解分量键、序列 ID 或列名。现金流声明与规划目标中的现金表达式同源，不重新建立税务模型。声明不复制完整财务配置，也不是新的用户公式语言。
 
-以下为配套生成器 `ies.generator.highs_milp@6.0.0` 与适配器 `ies.result-adapter.highs@6.0.0` 的业务输出：
+以下为配套生成器 `ies.generator.highs_milp@7.0.0` 与适配器 `ies.result-adapter.highs@6.0.0` 的业务输出：
 
 | 字段 | 语义 |
 | --- | --- |
@@ -132,7 +132,7 @@ extensions: {}
 
 `t`、`month`、`year`、`period`、`arrival_period`、`last_usable_year` 及日历／评价年、日历月均为整数；`ratio` 与金额均为十进制字符串。期间映射以财务契约为准，池与规则保持显式身份，共享池不得按规则重复计入。没有适用规则时对应数组为空，含义为不适用；适用规则的零税额、零余额显式发布，不省略为未知。无税则的完整现金流仍须声明并恢复，不以缺映射冒充零税。
 
-需量费与能源电量费分列，不重复包含于 `energy_net` 或 O&M；显式净现金项目也不重复写入 `annual_operation.net`，只在其时点进入完整现金流。月明细按 `(billing_id, calendar_year, calendar_month)` 排序，年度正费用与净额在模型中同源产生；适配器只恢复声明，不重新取 max、重新计税或扣费。财务结果按 `ies.financial-evaluation@3.0.0` 封存；折旧来源身份与净现金项目改变输出结构，配套生成器／适配器为本节的 6.0.0，不在旧结果上注入新字段。
+需量费与能源电量费分列，不重复包含于 `energy_net` 或 O&M；显式净现金项目也不重复写入 `annual_operation.net`，只在其时点进入完整现金流。月明细按 `(billing_id, calendar_year, calendar_month)` 排序，年度正费用与净额在模型中同源产生；适配器只恢复声明，不重新取 max、重新计税或扣费。财务结果按 `ies.financial-evaluation@3.0.0` 封存；折旧来源身份与净现金项目改变输出结构，配套生成器为 `7.0.0`、适配器为 `6.0.0`，不在旧结果上注入新字段。
 
 该块随已请求的 `solution` 且存在可用数学解时发布；未请求solution或无可用解时缺席。它不增加 CalculationConfig 输出词汇，不改变 ComputeResult 顶层身份与状态或通用 Bundle manifest。适配器只恢复业务事实，不重算税务、猜列名或改写期间；内部可信声明不增加重复结构、摘要或完整性复核。
 

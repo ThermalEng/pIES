@@ -98,7 +98,7 @@ Bundle 规范化与原子发布
 
 ## 首个内置 provider 与完整 Bundle 聚合
 
-首个内置 provider 为 `ies.generator.highs_milp@6.0.0`（见“首个内置链”）：mode 只要 `planning`、精度只要 `medium`、solver 只要 `ies.solver.highs@1.7.2`；options 只接受空对象；输出请求支持 `solution` 与 `metrics`（`metrics` 为 ResultAdapter 后处理请求，不对应求解器第二个原始文件，未知输出明确拒绝）；只消费装配实际绑定的 constant/time_series/monthly_daily 计费价格（快照中未绑定的价格条目不触发拒绝），未知价格类型明确拒绝；`seed` 为 null 时使用固定种子 `0`，种子同时固定进求解命令与元数据，不读取随机全局状态。
+首个内置 provider 为 `ies.generator.highs_milp@7.0.0`（见“首个内置链”）：mode 只要 `planning`、精度只要 `medium`、solver 只要 `ies.solver.highs@1.7.2`；options 只接受空对象；输出请求支持 `solution` 与 `metrics`（`metrics` 为 ResultAdapter 后处理请求，不对应求解器第二个原始文件，未知输出明确拒绝）；只消费装配实际绑定的 constant/time_series/monthly_daily 计费价格（快照中未绑定的价格条目不触发拒绝），未知价格类型明确拒绝；`seed` 为 null 时使用固定种子 `0`，种子同时固定进求解命令与元数据，不读取随机全局状态。
 
 `generate` 返回唯一完整聚合：manifest（即 `bundle.yaml` 内容）加按规范相对路径索引的只读输入文件字节映射（`input/problem.mps` 与 `input/parameters.json`）。`input/parameters.json` 为最小规范 JSON 元数据，只保存 ResultAdapter 后续必需的 `unit_map`、`objective_offset`、`objective_unit`（目标业务单位，按编译期根量纲确定：金额取财务币种，无量纲取 `"1"`，单一物理量纲取 SI 基准单位）、财务分量求值声明 `components`（分量 ident → `{unit, caliber, constant, terms}`，与目标同一分量展开路径，不依赖目标写法）、请求 outputs、固定 seed、precision 与装配/引用追溯，不复制完整装配、模型与财务，不写 hash。结构化命令按真实 HiGHS CLI 语法逐项存储（非 shell），`time_limit_seconds` 同时进入硬资源声明与求解器选项且语义一致；同一组直接输入与 provider 版本逐字节相同，不写临时目录，不启动 solver。
 
@@ -175,7 +175,7 @@ Bundle 以规范 manifest 与全部输入文件作为身份，不另放随机 ID
 
 ## 首个内置链
 
-首个内置 provider 为 `ies.generator.highs_milp@6.0.0`，兼容求解器 `ies.solver.highs@1.7.2`，结构化命令执行器前向引用 `ies.executor.local_process@1.0.0`，结果适配器前向引用 `ies.result-adapter.highs@6.0.0`。技术模型支持可证明的仿射关系，以及有限非负上下界下 `x*y=0` 的确定性二进制 Big-M 转换；设备状态仅允许 `t` 与 `t-1`；公开规划变量为连续变量。生成器可为受支持的互斥关系及[财务税务关系](finance.md#求解能力边界)引入必要的内部离散变量，所需界由业务参数和变量边界推导。电池“规划容量参与 SOC 分母”一类双线性明确不支持。
+首个内置 provider 为 `ies.generator.highs_milp@7.0.0`，兼容求解器 `ies.solver.highs@1.7.2`，结构化命令执行器前向引用 `ies.executor.local_process@1.0.0`，结果适配器前向引用 `ies.result-adapter.highs@6.0.0`。技术模型支持可证明的仿射关系，以及有限非负上下界下 `x*y=0` 的确定性二进制 Big-M 转换；设备状态仅允许 `t` 与 `t-1`；公开规划变量为连续变量。生成器可为受支持的互斥关系及[财务税务关系](finance.md#求解能力边界)引入必要的内部离散变量，所需界由业务参数和变量边界推导。电池“规划容量参与 SOC 分母”一类双线性明确不支持。
 
 独立评价确认是必需生成输入，不提供默认评价值。生成器、结果适配协议与通用 Bundle manifest 分别按自身契约独立版本化。
 
@@ -191,7 +191,7 @@ Bundle 以规范 manifest 与全部输入文件作为身份，不另放随机 ID
 
 ## 月份日价格能力
 
-`finance.monthly_daily_prices` 表示生成器能够消费月份日价格已物化的完整运营期序列。只有实际计费绑定使用该来源时，提交才要求此能力；未使用条目不触发能力拒绝。内置 `ies.generator.highs_milp@6.0.0` 声明此能力，配套 `ies.result-adapter.highs@6.0.0`；来源扩展不改变既有财务事实输出形态。其他生成器精确版本是否支持按其公开能力声明判断，不依赖名称或版本字符串猜测。
+`finance.monthly_daily_prices` 表示生成器能够消费月份日价格已物化的完整运营期序列。只有实际计费绑定使用该来源时，提交才要求此能力；未使用条目不触发能力拒绝。内置 `ies.generator.highs_milp@7.0.0` 声明此能力，配套 `ies.result-adapter.highs@6.0.0`；来源扩展不改变既有财务事实输出形态。其他生成器精确版本是否支持按其公开能力声明判断，不依赖名称或版本字符串猜测。
 
 生成器保留来源类型，识别新来源后进入既有已物化价格逐点计价路径，不改写冻结财务为 `time_series`，不再展开公历规则、不读来源对象或重复核对点数。计价、VAT、所得税及财务结果继续消费同一逐点价格关系。
 
