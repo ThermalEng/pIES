@@ -1670,3 +1670,155 @@ def test_issue04_d1_demand_rate_and_binding_package_roundtrip(client: TestClient
     assert restored.status_code == 200, restored.text
     view = client.get(f"/api/projects/{new_pid}", headers=_h(client, importer)).json()
     assert view["draft"]["content"]["demand_bindings"] == binding
+
+
+
+# ---------------------------------------------------------------------------
+# S1：逐步端口关系在公开项目包上传边界的精确上下文校验
+# ---------------------------------------------------------------------------
+
+def _step_package_fixture(client: TestClient, db: Session, owner, *, version=False):
+    """通过真实项目/设备/财务/规划入口创建可导出的合成电池关系。"""
+    from assembly_fixture import declare_compute_device
+    from iesplan.application import configuration as config_cases
+
+    pid = _create_project(client, owner, name="S1-端口关系包")
+    _setup_finance(client, owner, pid)
+    instance, _ = declare_compute_device(client, pid, _h(client, owner))
+    declaration = {
+        "objective": {"sense": "minimize", "expression": "0"},
+        "variables": {
+            "cap": {
+                "device_ref": instance,
+                "parameter": "capacity_kwh",
+                "lower_bound": "0",
+                "upper_bound": "200",
+                "unit": "kWh",
+            },
+        },
+        "constraints": {
+            "electric_limit": {
+                "type": "step_relation",
+                "references": {
+                    "electric": {"instance": instance, "interface": "electricity"},
+                },
+                "expression": "electric[t] <= 10 kW",
+                "enabled": False,
+            },
+        },
+    }
+    _, revision = config_cases.save_planning_config(db, pid, declaration, None, owner.id)
+    assert revision == 1
+    if version:
+        view = client.get(f"/api/projects/{pid}", headers=_h(client, owner))
+        assert view.status_code == 200, view.text
+        draft_revision = view.json()["draft"]["revision"]
+        response = client.post(
+            f"/api/projects/{pid}/versions",
+            json={
+                "name": "S1 历史基线",
+                "reason": "snapshot_freeze",
+                "expected_revision": draft_revision,
+            },
+            headers=_h(client, owner),
+        )
+        assert response.status_code == 201, response.text
+    return pid, declaration
+
+
+def _rewrite_step_package(raw: bytes, planning_path: str, *, instance=None,
+                          interface=None, expression=None) -> bytes:
+    """仅变更规划 YAML 并同步对象清单大小，不因 ZIP 清单失配掩盖业务门禁。"""
+    from iesplan.core.yamlmini import load as yaml_load
+
+    with zipfile.ZipFile(io.BytesIO(raw)) as zf:
+        entries = {name: zf.read(name) for name in zf.namelist()}
+    document = yaml_load(entries[planning_path].decode("utf-8"))
+    relation = document["constraints"]["electric_limit"]
+    if instance is not None:
+        relation["references"]["electric"]["instance"] = instance
+    if interface is not None:
+        relation["references"]["electric"]["interface"] = interface
+    if expression is not None:
+        relation["expression"] = expression
+    entries[planning_path] = yaml_dump(document).encode("utf-8")
+    manifest = json.loads(entries["manifest.json"].decode("utf-8"))
+    for entry in manifest["objects"]:
+        if entry["path"] == planning_path:
+            entry["size_bytes"] = len(entries[planning_path])
+    entries["manifest.json"] = json.dumps(manifest, ensure_ascii=False).encode("utf-8")
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+        for name, value in sorted(entries.items()):
+            zf.writestr(name, value)
+    return buffer.getvalue()
+
+
+def test_step_relation_package_roundtrip_retains_declaration(
+    client: TestClient, db: Session,
+) -> None:
+    from iesplan.application import configuration as config_cases
+
+    owner = make_user(db, "s1pkg_roundtrip_owner")
+    importer = make_user(db, "s1pkg_roundtrip_importer")
+    pid, original = _step_package_fixture(client, db, owner, version=True)
+    exported = _export_zip(client, owner, pid)
+    proposal = packages_uc.propose_import(db, importer, exported)
+    recreated = packages_uc.confirm_import(db, importer, proposal.id)
+    db.commit()
+    restored, _, _ = config_cases.get_planning_config(db, recreated.id)
+    assert restored.to_dict()["constraints"]["electric_limit"] == original["constraints"]["electric_limit"]
+
+    # 原项目后续修改不能改写已经导入的独立规划内容。
+    current, current_rev, _ = config_cases.get_planning_config(db, pid)
+    revised = current.to_dict()
+    revised["constraints"]["electric_limit"]["expression"] = "electric[t] <= 9 kW"
+    config_cases.save_planning_config(db, pid, revised, current_rev, owner.id)
+    again, _, _ = config_cases.get_planning_config(db, recreated.id)
+    assert again.to_dict()["constraints"]["electric_limit"] == original["constraints"]["electric_limit"]
+
+
+@pytest.mark.parametrize(("mutation", "expected"), [
+    ({"instance": "missing_battery"}, "step_unknown_instance"),
+    ({"interface": "missing_port"}, "step_unknown_interface"),
+    ({"expression": "electric[t-1] <= 10 kW"}, "step_invalid_index"),
+    ({"expression": "electric[t] <= 10 kWh"}, "dimension_mismatch"),
+])
+def test_step_relation_import_proposal_rejects_bad_current_config(
+    client: TestClient, db: Session, mutation: dict, expected: str,
+) -> None:
+    owner = make_user(db, "s1pkg_bad_owner")
+    importer = make_user(db, "s1pkg_bad_importer")
+    pid, _ = _step_package_fixture(client, db, owner)
+    raw = _rewrite_step_package(
+        _export_zip(client, owner, pid), "planning_config.yaml", **mutation,
+    )
+    with pytest.raises(package_domain.ImportValidationError) as exc:
+        packages_uc.propose_import(db, importer, raw)
+    assert expected in str(exc.value)
+    assert "electric_limit" in str(exc.value)
+
+
+@pytest.mark.parametrize(("mutation", "expected"), [
+    ({"interface": "missing_port"}, "step_unknown_interface"),
+    ({"instance": "not_in_history"}, "step_unknown_instance"),
+    ({"expression": "electric[t+1] <= 10 kW"}, "step_invalid_index"),
+])
+def test_step_relation_import_proposal_rejects_invalid_historical_dependency(
+    client: TestClient, db: Session, mutation: dict, expected: str,
+) -> None:
+    owner = make_user(db, "s1pkg_history_owner")
+    importer = make_user(db, "s1pkg_history_importer")
+    pid, _ = _step_package_fixture(client, db, owner, version=True)
+    raw = _export_zip(client, owner, pid)
+    with zipfile.ZipFile(io.BytesIO(raw)) as zf:
+        manifest = json.loads(zf.read("manifest.json"))
+    history = manifest["files"]["version_configs"]
+    assert len(history) == 1
+    path = next(iter(history.values()))["planning_config"]
+    assert path != "planning_config.yaml"
+    changed = _rewrite_step_package(raw, path, **mutation)
+    with pytest.raises(package_domain.ImportValidationError) as exc:
+        packages_uc.propose_import(db, importer, changed)
+    assert expected in str(exc.value)
+    assert "版本 " in str(exc.value)
