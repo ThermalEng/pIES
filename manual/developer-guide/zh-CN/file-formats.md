@@ -16,7 +16,7 @@
 | [地区 FinanceProfile YAML](formats/finance-yaml.md) | `*.finance-profile.yaml` / `finance_profile.yaml` | 注册地区财务基准：成本分量、能源价格、税务规则与抵扣池 | 财务合并器与装配校验 |
 | [项目 FinanceOverrides YAML](formats/finance-yaml.md) | `*.finance-overrides.yaml` / `finance_overrides.yaml` | 引用 `FinanceProfile {id}`，稀疏覆盖既有成本、定价和税务参数 | 财务合并器 |
 | [有效财务快照](formats/finance-yaml.md) | `*.effective-finance.yaml` / `effective_finance.yaml` | 合并器确定性产物：来源标识与完整成本、价格、规则及抵扣池 | 装配校验、计算生成与求解 |
-| [装配 YAML](formats/assembly-yaml.md) | `*.assembly.yaml` | 固定项目计算基线、设备实例、规范数据与来源绑定、连接、指向有效财务快照的精确引用、`finance_binding`、`tariff_bindings`、规划配置 | 装配校验器 |
+| [装配 YAML](formats/assembly-yaml.md) | `*.assembly.yaml` | 固定项目计算基线、设备实例、规范数据与来源绑定、连接、指向有效财务快照的精确引用、成本／能源／需量绑定及规划配置；跨实例逐步技术关系归规划约束 | 装配校验器 |
 | [Solver Bundle](formats/solver-bundle.md) | 一个目录或不可变归档 | 固定求解器输入文件、受控命令、预期输出和结果适配器 | 求解运行时 |
 | [计算配置](formats/calculation-config.md) | 计算提交输入（JSON 兼容映射），目标 `2.0.0` | 固定 mode、预测算法与参数、generator、solver、精度、耦合预测收敛条件、时间限制、选项、种子和输出选择 | 生成器（生成前能力核对） |
 | [项目包](formats/project-package.md) | `*.zip`（`manifest.json` 在根） | 离线交换：当前工作状态、包内历史版本及其精确财务/规划/数据依赖 | 项目包导入器 |
