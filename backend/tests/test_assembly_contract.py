@@ -179,7 +179,7 @@ class TestSchemaFile:
         assert set(constraints["required"]) == {"type", "expression"}
         assert set(constraints["properties"]["type"]["enum"]) == {
             "load_balance", "capacity_limit", "co2_limit",
-            "annual_purchase_cost_limit", "ratio",
+            "annual_purchase_cost_limit", "ratio", "step_relation",
         }
         assert constraints["additionalProperties"] is False
         finance = schema["properties"]["finance"]

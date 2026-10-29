@@ -913,7 +913,6 @@ def test_step_relation_enabled_requires_generator_capability_at_submission(
 ) -> None:
     """真实任务提交：已保存且启用的关系在内置 v7 未支持时明确 007。"""
     from iesplan.application import configuration as config_uc
-    from iesplan.application.projects import versions as project_versions_uc
 
     owner = make_user(db, "owner_step_s1_gate")
     pid = _prepare_project(client, db, owner, name="逐步任务拒收测试")
