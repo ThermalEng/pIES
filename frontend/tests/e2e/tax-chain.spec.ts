@@ -857,8 +857,9 @@ test.describe('D3: 税务主链(财务页→提交→求解→税额→评估→
     const profile: Record<string, any> = taxProfile('s2-net-' + Date.now())
     // S2 synthetic arithmetic: gross maintenance=100 at y=2#1, VAT=13%
     // deductible. Net source=100/1.13; half recovered at E=3.
-    // Replacement depreciation: net*(1-10%)/2, operating years 1/2
-    // map to evaluation years K+1=2 and K+2=3. Neither is a second payment.
+    // Replacement depreciation: net*(1-10%)/2, starting in operating year 2
+    // (evaluation year K+2=3). The second depreciation year is outside E=3.
+    // The same maintenance item cannot also be deducted immediately as an expense.
     profile.net_cashflows = {
       replacement_recovery: {
         at: { kind: 'evaluation_end' }, direction: 'inflow',
@@ -869,6 +870,10 @@ test.describe('D3: 税务主链(财务页→提交→求解→税额→评估→
         },
       },
     }
+    profile.tax_rules.income.deductible_maintenance.items =
+      profile.tax_rules.income.deductible_maintenance.items.map((item: any) =>
+        item.year === 2 && item.position === 1 ? { ...item, deductible: false } : item,
+      )
     profile.tax_rules.income.depreciation.push({
       base_from: { kind: 'maintenance_expense_net', year: 2, position: 1 },
       method: 'straight_line', first_year: 2, life_years: 2,
@@ -900,7 +905,7 @@ test.describe('D3: 税务主链(财务页→提交→求解→税额→评估→
       row.rule === 'income' && row.base_from.kind === 'maintenance_expense_net' &&
       row.base_from.year === 2 && row.base_from.position === 1,
     )
-    expect(replacementDepreciation.map((row) => row.year)).toEqual([2, 3])
+    expect(replacementDepreciation.map((row) => row.year)).toEqual([3])
     replacementDepreciation.forEach((row) =>
       approx(Number(row.amount), expectedDepreciation, 1e-9, 1e-6),
     )
