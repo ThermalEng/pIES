@@ -871,3 +871,73 @@ def test_device_catalog_change_does_not_rewrite_history(
     first_again = tasks_domain.get_snapshot(factory(), first_id)
     assert first_again is not None
     assert jsonable(dict(first_again.device_models or {})) == first_models
+
+
+def test_step_relation_save_reopen_and_atomic_invalid_revision(
+    client: TestClient, db: Session,
+) -> None:
+    """真实规划保存用例：保留禁用引用；坏端口不创建下一修订。"""
+    from iesplan.application import configuration as config_uc
+    from iesplan.application.configuration import revisions as revisions_uc
+
+    owner = make_user(db, "owner_step_s1_save")
+    pid = _prepare_project(client, db, owner, name="逐步保存修订测试")
+    previous, rev, _ = config_uc.get_planning_config(db, pid)
+    assert rev == 1
+    payload = previous.to_dict()
+    payload["constraints"]["electric_limit"] = {
+        "type": "step_relation",
+        "references": {"electric": {"instance": "bat1", "interface": "electricity"}},
+        "expression": "electric[t] <= 10 kW",
+        "enabled": False,
+    }
+    _, rev2 = config_uc.save_planning_config(db, pid, payload, 1, owner.id)
+    assert rev2 == 2
+    loaded, loaded_rev, _ = config_uc.get_planning_config(db, pid)
+    assert loaded_rev == 2
+    assert loaded.to_dict()["constraints"]["electric_limit"] == payload["constraints"]["electric_limit"]
+
+    bad = loaded.to_dict()
+    bad["constraints"]["electric_limit"]["references"]["electric"]["interface"] = "unknown"
+    with pytest.raises(revisions_uc.InvalidRequestError) as exc:
+        config_uc.save_planning_config(db, pid, bad, rev2, owner.id)
+    assert exc.value.code == "PROJ-PLAN-003"
+    assert "references.electric.interface" in str(exc.value.params)
+    still, current_rev, _ = config_uc.get_planning_config(db, pid)
+    assert current_rev == rev2
+    assert still.to_dict() == loaded.to_dict()
+
+
+def test_step_relation_enabled_requires_generator_capability_at_submission(
+    client: TestClient, db: Session,
+) -> None:
+    """真实任务提交：已保存且启用的关系在内置 v7 未支持时明确 007。"""
+    from iesplan.application import configuration as config_uc
+    from iesplan.application.projects import versions as project_versions_uc
+
+    owner = make_user(db, "owner_step_s1_gate")
+    pid = _prepare_project(client, db, owner, name="逐步任务拒收测试")
+    current, rev, _ = config_uc.get_planning_config(db, pid)
+    payload = current.to_dict()
+    payload["constraints"]["electric_limit"] = {
+        "type": "step_relation",
+        "references": {"electric": {"instance": "bat1", "interface": "electricity"}},
+        "expression": "electric[t] <= 10 kW",
+        "enabled": True,
+    }
+    _, rev2 = config_uc.save_planning_config(db, pid, payload, rev, owner.id)
+    assert rev2 == 2
+    # 项目版本冻结的是确定规划修订；调用现有版本用例，不直接改数据库。
+    from iesplan import project as project_domain
+    draft = project_domain.require_current_draft(db, project_domain.require_project(db, pid))
+    response = client.post(
+        f"/api/projects/{pid}/versions",
+        json={"name": "逐步启用版本", "reason": "snapshot_freeze", "expected_revision": draft.revision},
+        headers=_h(client, owner),
+    )
+    assert response.status_code == 201, response.text
+    calc_rev = _save_config(client, pid, owner)
+    status, body = _submit(client, pid, owner, {"config_revision": calc_rev}, key="step-enabled-s1")
+    assert status == 400, body
+    assert _error(body)["code"] == "TASK-REQ-007"
+    assert "technical.step_constraints" in str(_error(body))
