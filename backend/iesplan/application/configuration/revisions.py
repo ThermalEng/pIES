@@ -62,7 +62,7 @@ from iesplan.finance import (
 from iesplan.core.yamlmini import dump as yaml_dump
 from iesplan.planning.contracts import validate_planning_domain
 from iesplan.project.contracts import ProjectRecord
-from iesplan.storage import add_ref, put_object
+from iesplan.storage import add_ref, put_object, get_object
 
 
 class InvalidRequestError(AppError):
@@ -774,6 +774,35 @@ def _save_planning_config(
             code="PROJ-PLAN-003",
             params=_diag_params(diags),
         )
+    if any(c.type == "step_relation" for c in config.constraints.values()):
+        # 规划保存是真实公开边界；使用当前项目实例键和设备目录完成
+        # 逐步关系的引用/表达式校验。无需等待草稿全部可计算。
+        from iesplan.application.models import load_project_device_documents
+        from iesplan.assembly import check_step_relations, device_instance_refs
+        from iesplan.devices import list_devices
+
+        draft = project_domain.require_current_draft(db, project)
+        content = project_domain.parse_content_object(get_object(db, draft.content_object_id))
+        items = ((content.get("model") or {}).get("devices") or [])
+        refs = device_instance_refs(items)
+        if len(set(refs)) != len(refs):
+            raise InvalidRequestError(
+                "项目实例引用不唯一", code="PROJ-PLAN-003",
+                params={"detail": "duplicate_instance_ref"},
+            )
+        instances = {
+            ref: {"definition": {"id": device.get("device_type")}}
+            for ref, device in zip(refs, items, strict=True)
+        }
+        catalog = {doc.device.id: doc for doc in list_devices() if doc.device is not None}
+        catalog.update(load_project_device_documents(db, content))
+        step_diags = []
+        check_step_relations(config.to_dict(), instances, catalog, step_diags)
+        if step_diags:
+            raise InvalidRequestError(
+                "逐步技术关系引用或表达式非法",
+                code="PROJ-PLAN-003", params=_diag_params(step_diags),
+            )
     if project.effective_finance_revision is None:
         raise InvalidRequestError(
             "规划配置必须先生成有效财务快照(请先设置 Profile)",
