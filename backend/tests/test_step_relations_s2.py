@@ -69,7 +69,8 @@ def test_full_horizon_math_uses_same_ports_and_scalar_capacity(campus):
     assert limit[0].sense == "le"
     assert _terms(limit[0]) == {"grid__electricity_export__t0": 1, "pv_cap": -1}
     assert limit[0].expression.constant == pytest.approx(500)
-    assert _terms(limit[-1]) == {f"grid__electricity_export__t{n - 1}": 1, "pv_cap": -1}
+    final_row = next(r for r in limit if r.name == f"step__limit__t{n - 1}")
+    assert _terms(final_row) == {f"grid__electricity_export__t{n - 1}": 1, "pv_cap": -1}
     assert _terms(_rows(model, "equal")[0]) == {
         "grid__electricity_export__t0": 1, "pv1__electric_out__t0": -1,
     }
@@ -101,9 +102,6 @@ def test_same_type_instances_are_not_cross_wired(campus):
     doc = json.loads(artifact.canonical_text)
     doc["devices"]["grid2"] = deepcopy(doc["devices"]["grid"])
     doc["finance_binding"]["instances"]["grid2"] = {"type": "none"}
-    doc["connections"]["e_grid_pv2"] = {
-        "from": "pv1.electric_out", "to": "grid2.electricity_export",
-    }
     doc["planning"]["constraints"]["only_grid2"] = _relation(
         "boundary[t] <= supply[t]",
         references={
