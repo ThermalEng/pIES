@@ -112,6 +112,11 @@ def test_same_type_instances_are_not_cross_wired(campus):
     _artifact, models, materialized, finance, config, evaluation = campus
     doc = _source_doc()
     doc["devices"]["grid2"] = deepcopy(doc["devices"]["grid"])
+    # The synthetic second grid must be wired into the public assembly graph;
+    # an unconnected electricity_export input is rejected before S2 compilation.
+    doc["connections"]["e_grid2_pv"] = {
+        "from": "pv1.electric_out", "to": "grid2.electricity_export",
+    }
     doc["finance_binding"]["instances"]["grid2"] = {"type": "none"}
     doc["planning"]["constraints"]["only_grid2"] = _relation(
         "boundary[t] <= supply[t]",
