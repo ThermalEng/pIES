@@ -976,10 +976,6 @@ def test_step_relation_real_task_freezes_ports_and_survives_later_draft(
     assert result["execution_status"] == "completed"
     assert sealed["receipt"]["status"] == "succeeded"
     assert sealed["bundle_manifest"]["bundle"]["generator"] == "ies.generator.highs_milp@7.0.0"
-    assert "technical.step_constraints" in plane.generator_registry.resolve(
-        configuration_cases.get_calculation_config_case(db, pid).config
-    ).descriptor.capabilities if False else True  # provider descriptor asserted by S2 unit test
-
     # Port series is restored from the precise same MPS columns, not rewritten
     # after solve. Immutable sealed series remains attached to the old task.
     series = result["outputs"]["series"]["bat1.electricity"]
