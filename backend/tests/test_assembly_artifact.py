@@ -197,7 +197,7 @@ class TestUnhappyPath:
         # (预定义数据接口不参与边连接, 用真实 in 端口覆盖该规则)
         text = (
             "schema: ies.assembly\n"
-            'schema_version: "4.0.0"\n'
+            'schema_version: "5.0.0"\n'
             "assembly:\n  id: bad\n  name: bad\n"
             "project_baseline:\n  resolution: 1h\n  start_year: 2026\n  scenario_mode: single\n"
             "devices:\n"

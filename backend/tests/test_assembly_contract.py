@@ -111,7 +111,7 @@ class TestSchemaFile:
         schema_path = ASSEMBLY_DIR / ASSEMBLY_SCHEMA_PATH
         assert schema_path.exists(), f"缺少 {ASSEMBLY_SCHEMA_PATH}"
         schema = json.loads(schema_path.read_text(encoding="utf-8"))
-        assert schema["$id"] == f"{SCHEMA_ID}/4.0.0"
+        assert schema["$id"] == f"{SCHEMA_ID}/5.0.0"
         assert schema["title"] == "ies.assembly 5.0.0 装配 YAML 契约"
         required = schema["required"]
         assert "schema" in required and "schema_version" in required
