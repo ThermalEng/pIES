@@ -58,6 +58,7 @@ def _expected_pairs(fin: dict) -> list:
                 f"运营年第 {index + 1} 年(t={item['financial_year']}) / Year {index + 1}",
                 f"能源 {item['energy_net']} − 可变 {item['variable_om']} "
                 f"− 固定 {item['fixed_om']} − 维护 {item['maintenance']} "
+                f"− 需量 {item['demand_charge']} "
                 f"= 净额 {item['net']} {ccy}",
             )
         )
@@ -104,12 +105,20 @@ def _expected_pairs(fin: dict) -> list:
 def _expected_tax_pairs(fin: dict, ccy: str) -> list:
     """税务明细期望行(独立组装展示文本，只组装不重算财务业务)。
 
-    与生产 ``_sealed_tax_rows`` 逐行对应：封存块 1.0.0 的 ``tax_cash`` 与
+    与生产 ``_sealed_tax_rows`` 逐行对应：封存块 3.0.0 的 ``tax_cash`` 与
     ``annual_net_flows`` 必填，直接消费；合法空数组显式记“无适用规则”。
     """
     tax = fin["tax_cash"]
     horizon = int(fin["evaluation_years"]) * 12
     rows = []
+    cashflows = fin["net_cashflows"]
+    for item in cashflows:
+        rows.append((
+            f"显式净现金 {item['id']} t={item['t']} {item['direction']} / Explicit net cashflow",
+            f"{item['amount']} {ccy}",
+        ))
+    if not cashflows:
+        rows.append(("显式净现金 / Explicit net cashflows", "无项目 / None"))
     for index, amount in enumerate(fin["annual_net_flows"]):
         rows.append((f"税后现金流 CF[t={index}] / After-tax CF[t={index}]", f"{amount} {ccy}"))
     vat = tax["vat"]
@@ -149,10 +158,14 @@ def _expected_tax_pairs(fin: dict, ccy: str) -> list:
     depreciation = tax["depreciation"]
     if depreciation:
         for row in depreciation:
+            source = row["base_from"]
+            identity = (f"{source['kind']}:{source['finance_type']}"
+                        if source["kind"] == "upfront_capex_net"
+                        else f"{source['kind']}:y={source['year']},#{source['position']}")
             rows.append(
                 (
-                    f"计税折旧 {row['rule']} {row['asset']} y={row['year']} / "
-                    f"Depreciation {row['rule']} {row['asset']} y={row['year']}",
+                    f"计税折旧 {row['rule']} {identity} y={row['year']} / "
+                    f"Depreciation {row['rule']} {identity} y={row['year']}",
                     f"{row['amount']} {ccy}",
                 )
             )

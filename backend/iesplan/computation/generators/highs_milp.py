@@ -1,4 +1,4 @@
-"""首个真实 GeneratorProvider：``ies.generator.highs_milp@5.0.0``。
+"""首个真实 GeneratorProvider：``ies.generator.highs_milp@6.0.0``。
 
 纯内存确定性转换：直接输入（装配产物、设备数学贡献、物化序列、
 有效财务快照、计算配置、冻结评价确认）→ ``SolverBundle`` 完整聚合
@@ -18,7 +18,7 @@ constant tariff；数学能力即 ``build_project_model`` 现有 lowerer 明确
 直接输入形状不变。通用 Bundle manifest 未变；结果适配
 协议按实际输出变化独立版本化，不因生成器输入变化而同步升版。
 5.0.0 将维护金额仿射式同源接入现金、VAT、所得税和财务事实声明，
-配套 ``ies.result-adapter.highs@5.0.0`` 从同一次主解恢复年度金额。
+配套 ``ies.result-adapter.highs@6.0.0`` 从同一次主解恢复年度金额。
 """
 
 from __future__ import annotations
@@ -45,7 +45,7 @@ from iesplan.finance import EffectiveFinanceConfig, EvaluationInput
 from iesplan.modeling import DeviceMathContribution
 
 GENERATOR_ID = "ies.generator.highs_milp"
-GENERATOR_VERSION = "5.0.0"
+GENERATOR_VERSION = "6.0.0"
 GENERATOR_REF = f"{GENERATOR_ID}@{GENERATOR_VERSION}"
 SOLVER_REF = "ies.solver.highs@1.7.2"
 EXECUTOR_REF = "ies.executor.local_process@1.0.0"
@@ -92,6 +92,11 @@ DESCRIPTOR = GeneratorDescriptor(
         "finance.monthly_demand",
         "finance.affine_maintenance",
         "finance.monthly_daily_prices",
+        "finance.affine_annual_om",
+        "finance.subcomponent_vat",
+        "finance.maintenance_depreciation",
+        "finance.ratio_residual",
+        "finance.net_cashflows",
     ),
     solvers=(SOLVER_REF,),
     executors=(EXECUTOR_REF,),

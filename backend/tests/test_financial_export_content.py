@@ -7,7 +7,7 @@
 到账/结转、退款计划(期后到账标应收)、所得税/折旧/亏损余额,
 以及 NPV 与 IRR/回收期值和状态。
 
-封存块为当前 ``ies.financial-evaluation@1.0.0``(tax_cash 与
+封存块为当前 ``ies.financial-evaluation@3.0.0``(tax_cash 与
 annual_net_flows 必填): 缺必填字段按契约违例暴露, 不静默补空
 税务表。
 
@@ -34,6 +34,9 @@ def _load_fixtures():
 
 def test_downloaded_xlsx_matches_sealed_facts_exactly():
     sealed, pairs = _load_fixtures()
+    assert sealed["schema_version"] == "3.0.0"
+    assert sealed["net_cashflows"] == []
+    assert all("base_from" in row for row in sealed["tax_cash"]["depreciation"])
     assert_block_exact(pairs, sealed)
 
 
@@ -65,6 +68,7 @@ def _tax_seal() -> dict:
         "currency": "CNY",
         "evaluation_years": 1,
         "annual_net_flows": ["-1000.0", "2500.5"],
+        "net_cashflows": [{"id": "recovery", "t": 1, "direction": "inflow", "amount": "37.25"}],
         "tax_cash": {
             "vat": vat,
             "refunds": [
@@ -82,7 +86,7 @@ def _tax_seal() -> dict:
                     "tax": "375.0",
                 }
             ],
-            "depreciation": [{"rule": "depr", "asset": "pv_system", "year": 1, "amount": "800.0"}],
+            "depreciation": [{"rule": "depr", "base_from": {"kind": "upfront_capex_net", "finance_type": "pv_system"}, "year": 1, "amount": "800.0"}],
             "loss_balances": [
                 {
                     "rule": "income",
@@ -126,7 +130,7 @@ def test_tax_rows_consume_sealed_facts_without_recompute():
     rows = _sealed_tax_rows(fin, "CNY")
     values = [value for _, value in rows]
     for amount in (
-        "-1000.0", "2500.5", "10.5", "5.0", "100.25", "7.5",
+        "37.25", "-1000.0", "2500.5", "10.5", "5.0", "100.25", "7.5",
         "2000.0", "500.0", "375.0", "800.0", "1200.0",
     ):
         assert any(amount in str(value) for value in values), amount
@@ -137,8 +141,9 @@ def test_tax_rows_consume_sealed_facts_without_recompute():
     assert len(post) == 1 and "(期后应收，非期内现金)" in post[0]
     within = [label for label, _ in rows if "确认m=3→到账m=5" in label]
     assert len(within) == 1 and "期后应收" not in within[0]
-    # 行数精确：CF 2 + VAT 48 + 退款 2 + 所得税 5 + 折旧 1 + 余额 1。
-    assert len(rows) == 2 + 48 + 2 + 5 + 1 + 1
+    # 行数精确：显式净现金 1 + CF 2 + VAT 48 + 退款 2 + 所得税 5 + 折旧 1 + 余额 1。
+    assert rows[0][0].startswith("显式净现金 recovery t=1 inflow")
+    assert len(rows) == 1 + 2 + 48 + 2 + 5 + 1 + 1
 
 
 def test_tax_expected_mirror_matches_production():
@@ -159,6 +164,10 @@ def test_tax_rows_absent_for_missing_required_fields():
 
     with pytest.raises(KeyError):
         _sealed_tax_rows({"currency": "CNY", "evaluation_years": 1}, "CNY")
+    missing_net = _tax_seal()
+    del missing_net["net_cashflows"]
+    with pytest.raises(KeyError, match="net_cashflows"):
+        _sealed_tax_rows(missing_net, "CNY")
 
 
 def test_negative_wrong_k_must_fail():

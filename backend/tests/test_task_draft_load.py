@@ -177,6 +177,15 @@ def test_load_draft_restores_frozen_inputs(client: TestClient, db: Session) -> N
     source_version = next(v for v in versions_before if v["id"] == snap["project_version_id"])
     source_content = load_content_object(db, int(source_version["content_object_id"]))
     expected = {k: v for k, v in source_content.items() if k != "applied_commands"}
+    # GET 项目视图为设备补充 ref/display_name 展示字段；冻结内容对象
+    # 仍保持 name 键的原始业务形态，比较时显式核对这一确定性投影。
+    expected["model"] = {
+        **expected["model"],
+        "devices": [
+            {**device, "ref": device["name"], "display_name": device["name"]}
+            for device in expected["model"]["devices"]
+        ],
+    }
     view = client.get(f"/api/projects/{pid}", headers=_h(client, owner)).json()
     assert view["draft"]["revision"] == first_rev + 1
     working = view["draft"]["content"].pop("task_working_inputs")

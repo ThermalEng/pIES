@@ -924,8 +924,15 @@ export interface FinancialTaxCashIncomeRow {
 
 export interface FinancialTaxCashDepreciation {
   rule: string
-  asset: string
+  base_from: { kind: 'upfront_capex_net'; finance_type: string } | { kind: 'maintenance_expense_net'; year: number; position: number }
   year: number
+  amount: string
+}
+
+export interface FinancialNetCashflow {
+  id: string
+  t: number
+  direction: 'inflow' | 'outflow'
   amount: string
 }
 
@@ -958,6 +965,7 @@ export interface FinancialEvaluationBlock {
   construction_total_unit: string
   annual_fixed_om: string
   payments_applied: FinancialEvaluationPayment[]
+  net_cashflows: FinancialNetCashflow[]
   annual_operation: FinancialEvaluationYear[]
   monthly_demand: FinancialMonthlyDemand[]
   tax_cash: FinancialTaxCash

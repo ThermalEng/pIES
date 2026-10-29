@@ -788,7 +788,7 @@ class TestT2CashflowChain:
         )
         fin = sealed["financial_evaluation"]
         facts = sealed["compute_result"]["outputs"]["financial_facts"]
-        assert fin["schema_version"] == "2.0.0"
+        assert fin["schema_version"] == "3.0.0"
         assert fin["construction_period"] == 1
         assert fin["operation_years"] == 2
         # Real heat-pump planning decision (not a placeholder): its rated

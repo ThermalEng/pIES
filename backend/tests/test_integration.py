@@ -308,7 +308,7 @@ def _bind_dataset(client: TestClient, user_id: int, project_id: int, revision: i
 #: 这些字段, 夹具必须经 config.patch 显式声明, 不得依赖回退。
 EXPLICIT_CALC_PATCH = {
     "mode": "fixed_operation",
-    "generator": "ies.generator.highs_milp@5.0.0",
+    "generator": "ies.generator.highs_milp@6.0.0",
     "solver": "ies.solver.highs@1.7.2",
     "time_axis": {"resolution": "1h", "start": "2025-01-01T00:00:00Z"},
 }
@@ -429,7 +429,7 @@ CALC_PAYLOAD: dict[str, Any] = {
     "schema_version": "2.0.0",
     "mode": "planning",
     "predictions": [],
-    "generator": "ies.generator.highs_milp@5.0.0",
+    "generator": "ies.generator.highs_milp@6.0.0",
     "solver": "ies.solver.highs@1.7.2",
     "precision": "medium",
     "convergence": None,
@@ -982,7 +982,7 @@ def test_config_gate(client: TestClient, db: Session) -> None:
 
     # 合法保存 → revision 1 → 读回一致
     body = _save_config(client, eng_id, pid)
-    assert body["calculation_config"]["generator"] == "ies.generator.highs_milp@5.0.0"
+    assert body["calculation_config"]["generator"] == "ies.generator.highs_milp@6.0.0"
     resp = client.get(f"/api/projects/{pid}/config", headers=_h(client, eng_id))
     assert resp.status_code == 200, resp.text
     assert resp.json() == body

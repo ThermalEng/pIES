@@ -99,7 +99,7 @@ def chain():
     assert not mat.pending_predict
     config = CalculationConfig(
         mode="planning",
-        generator="ies.generator.highs_milp@5.0.0",
+        generator="ies.generator.highs_milp@6.0.0",
         solver="ies.solver.highs@1.7.2",
         precision="medium",
         time_limit_seconds=3600,

@@ -157,7 +157,7 @@ def _seed_dataset(db: Session, user, pid: int, *, quota_bytes: int = 0) -> int:
 #: time_axis 缺一即阻断(ASM-CONV-001)。夹具必须显式声明, 不得依赖回退。
 EXPLICIT_CALC_PATCH = {
     "mode": "fixed_operation",
-    "generator": "ies.generator.highs_milp@5.0.0",
+    "generator": "ies.generator.highs_milp@6.0.0",
     "solver": "ies.solver.highs@1.7.2",
     "time_axis": {"resolution": "1h", "start": "2025-01-01T00:00:00Z"},
 }
@@ -285,7 +285,7 @@ _CONFIG_BODY: dict[str, Any] = {
     "schema_version": "2.0.0",
     "mode": "planning",
     "predictions": [],
-    "generator": "ies.generator.highs_milp@5.0.0",
+    "generator": "ies.generator.highs_milp@6.0.0",
     "solver": "ies.solver.highs@1.7.2",
     "precision": "medium",
     "convergence": None,
@@ -584,9 +584,9 @@ def test_submit_accepts_tax_rules_with_capable_generator(
     snapshot = db.execute(
         select(CalcSnapshot).where(CalcSnapshot.id == body["task"]["calc_snapshot_id"])
     ).scalar_one()
-    assert snapshot.result_adapter == "ies.result-adapter.highs@5.0.0"
+    assert snapshot.result_adapter == "ies.result-adapter.highs@6.0.0"
     assert snapshot.executor == "ies.executor.local_process@1.0.0"
-    assert snapshot.calc_config_snapshot["generator"] == "ies.generator.highs_milp@5.0.0"
+    assert snapshot.calc_config_snapshot["generator"] == "ies.generator.highs_milp@6.0.0"
     assert db.execute(select(func.count(Task.id))).scalar() == 1
     config_cases.set_project_finance_profile(db, pid, "cn-north-demo", owner.id)
     save_compute_planning(db, pid, owner.id, device_ref)
@@ -640,15 +640,15 @@ def test_submit_accepts_pool_only_with_capable_generator(
     snapshot = db.execute(
         select(CalcSnapshot).where(CalcSnapshot.id == body["task"]["calc_snapshot_id"])
     ).scalar_one()
-    assert snapshot.result_adapter == "ies.result-adapter.highs@5.0.0"
+    assert snapshot.result_adapter == "ies.result-adapter.highs@6.0.0"
     assert snapshot.executor == "ies.executor.local_process@1.0.0"
     assert db.execute(select(func.count(Task.id))).scalar() == 1
 
 
-def test_submit_legacy_path_freezes_and_new_cashflow_fails_capability_gate(
+def test_submit_legacy_path_freezes_and_new_cashflow_is_accepted(
     client: TestClient, db: Session,
 ) -> None:
-    """真实提交：既有合法路径 201；冻结含新关系的输入不能被当作税前任务接收。"""
+    """真实提交：既有路径与 S2 新净现金均由 6.0.0 能力接收并冻结。"""
     from test_config_revisions import PROFILE_PAYLOAD
 
     owner = make_user(db, "owner_s1_cashflow_gate")
@@ -681,14 +681,16 @@ def test_submit_legacy_path_freezes_and_new_cashflow_fails_capability_gate(
         client, cashflow_pid, owner, config={"config_revision": cashflow_rev},
         idempotency_key="op-s1-new-relationship",
     )
-    assert status == 400, body
-    assert body["error"]["code"] == "TASK-REQ-007"
-    assert body["error"]["params"]["missing_capabilities"] == ["finance.net_cashflows"]
-    assert body["error"]["params"]["fields"] == [
-        "effective_finance.net_cashflows.year_end_refund",
-    ]
-    assert db.execute(select(func.count(Task.id))).scalar() == 1
-    assert db.execute(select(func.count(CalcSnapshot.id))).scalar() == 1
+    assert status == 201, body
+    assert body["task"]["status"] == "queued"
+    cashflow_snapshot = db.get(CalcSnapshot, body["task"]["calc_snapshot_id"])
+    assert cashflow_snapshot is not None
+    assert cashflow_snapshot.schema_version == "5.0.0"  # CalcSnapshot remains independent
+    assert cashflow_snapshot.calc_config_snapshot["generator"] == "ies.generator.highs_milp@6.0.0"
+    assert cashflow_snapshot.result_adapter == "ies.result-adapter.highs@6.0.0"
+    assert cashflow_snapshot.canonical_assembly_text
+    assert db.execute(select(func.count(Task.id))).scalar() == 2
+    assert db.execute(select(func.count(CalcSnapshot.id))).scalar() == 2
 
 
 def test_submit_rejects_tax_rules_without_provider_capabilities(
@@ -720,7 +722,7 @@ def test_submit_rejects_tax_rules_without_provider_capabilities(
         precisions=("medium",),
         solvers=("ies.solver.highs@1.7.2",),
         executors=("ies.executor.local_process@1.0.0",),
-        result_adapter="ies.result-adapter.highs@5.0.0",
+        result_adapter="ies.result-adapter.highs@6.0.0",
         unit_system="SI",
         seed_semantics="测试合成 provider，无税务能力标记",
     )

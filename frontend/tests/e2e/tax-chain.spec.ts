@@ -121,12 +121,13 @@ interface SealedEvaluation {
   base_year: number
   discount_rate: number
   payments_applied: Array<{ t: number; ratio: string; amount: string }>
+  net_cashflows: Array<{ id: string; t: number; direction: 'inflow' | 'outflow'; amount: string }>
   annual_operation: Array<{ financial_year: number; energy_net: string; variable_om: string; fixed_om: string; maintenance: string; demand_charge: string; net: string }>
   tax_cash: {
     vat: Array<{ pool: string; month: number; paid: string; refund_claimed: string; refund_arrived: string; carry: string }>
     refunds: Array<{ pool: string; period: number; arrival_period: number; amount: string }>
     income: Array<{ rule: string; year: number; taxable_base: string; loss_used: string; loss_generated: string; loss_expired: string; tax: string }>
-    depreciation: Array<{ rule: string; asset: string; year: number; amount: string }>
+    depreciation: Array<{ rule: string; base_from: { kind: 'upfront_capex_net'; finance_type: string } | { kind: 'maintenance_expense_net'; year: number; position: number }; year: number; amount: string }>
     loss_balances: Array<{ rule: string; vintage_id: string; year: number; last_usable_year: number; amount: string }>
   }
   annual_net_flows: string[]
@@ -412,6 +413,10 @@ function expectedExcelFinancialPairs(fin: SealedEvaluation): Array<[string, stri
       `${item.discounted} / ${item.cumulative} / ${item.cumulative_discounted} ${ccy}`,
     ])
   }
+  for (const item of fin.net_cashflows) {
+    rows.push([`显式净现金 ${item.id} t=${item.t} ${item.direction} / Explicit net cashflow`, `${item.amount} ${ccy}`])
+  }
+  if (fin.net_cashflows.length === 0) rows.push(['显式净现金 / Explicit net cashflows', '无项目 / None'])
   for (let i = 0; i < fin.annual_net_flows.length; i += 1) {
     rows.push([`税后现金流 CF[t=${i}] / After-tax CF[t=${i}]`, `${fin.annual_net_flows[i]} ${ccy}`])
   }
@@ -442,8 +447,12 @@ function expectedExcelFinancialPairs(fin: SealedEvaluation): Array<[string, stri
   }
   if (fin.tax_cash.income.length === 0) rows.push(['所得税 / Income tax', '无适用规则 / No applicable rules'])
   for (const item of fin.tax_cash.depreciation) {
+    const source = item.base_from
+    const identity = source.kind === 'upfront_capex_net'
+      ? `${source.kind}:${source.finance_type}`
+      : `${source.kind}:y=${source.year},#${source.position}`
     rows.push([
-      `计税折旧 ${item.rule} ${item.asset} y=${item.year} / Depreciation ${item.rule} ${item.asset} y=${item.year}`,
+      `计税折旧 ${item.rule} ${identity} y=${item.year} / Depreciation ${item.rule} ${identity} y=${item.year}`,
       `${item.amount} ${ccy}`,
     ])
   }
@@ -829,4 +838,138 @@ test.describe('D3: 税务主链(财务页→提交→求解→税额→评估→
     void pid
     void token
   })
+
+  test('S2: 非空维护净来源折旧与净现金→文档编辑→Worker→结果→Excel→草稿隔离', async ({ browser }) => {
+    const username = uniqueName('s2-fin')
+    const password = strongPassword('Init')
+    const projectName = uniqueName('S2 合成净现金')
+    const apiCtx = await browser.newContext({ baseURL: APP })
+    await createEngineer(apiCtx.request, username, password)
+    const token = await loginToken(apiCtx.request, username, password)
+    const pid = await scaffoldProject(requestJson, apiCtx.request, token, projectName, 's2-base-' + Date.now(), {
+      scenario: 'pv_export',
+    })
+    const context = await browser.newContext()
+    const page = await context.newPage()
+    const session = await createSession(page, username, password)
+    await page.getByText(projectName).click({ timeout: 30_000 })
+
+    const profile: Record<string, any> = taxProfile('s2-net-' + Date.now())
+    // S2 synthetic arithmetic: gross maintenance=100 at y=2#1, VAT=13%
+    // deductible. Net source=100/1.13; half recovered at E=3.
+    // Replacement depreciation: net*(1-10%)/2, starting in operating year 2
+    // (evaluation year K+2=3). The second depreciation year is outside E=3.
+    // The same maintenance item cannot also be deducted immediately as an expense.
+    profile.net_cashflows = {
+      replacement_recovery: {
+        at: { kind: 'evaluation_end' }, direction: 'inflow',
+        amount: {
+          kind: 'source_share',
+          base_from: { kind: 'maintenance_expense_net', year: 2, position: 1 },
+          ratio: { value: '0.5', unit: '1' },
+        },
+      },
+    }
+    profile.tax_rules.income.deductible_maintenance.items =
+      profile.tax_rules.income.deductible_maintenance.items.map((item: any) =>
+        item.year === 2 && item.position === 1 ? { ...item, deductible: false } : item,
+      )
+    profile.tax_rules.income.depreciation.push({
+      base_from: { kind: 'maintenance_expense_net', year: 2, position: 1 },
+      method: 'straight_line', first_year: 2, life_years: 2,
+      residual: { value: '0.1', unit: '1' },
+    })
+    // A real full-document edit through FinancePage; no API-write shortcut.
+    await registerAndBindTaxProfile(page, profile)
+    await saveAfterTaxPlanningObjective(page, pid)
+    await submitEvaluationViaUI(page)
+    await waitCompleted(page)
+    await openResults(page)
+    const listed = await browserJson<{ items: TaskListItem[] }>(page, 'GET', '/api/projects/' + pid + '/tasks?limit=10')
+    const taskId = Number(listed.items[0].id)
+    const fin = await fetchSealed(page, pid, taskId)
+    const frozenInputs = await browserJson<any>(page, 'GET', '/api/projects/' + pid + '/tasks/' + taskId + '/inputs')
+    expect(frozenInputs.inputs.frozen_refs.finance_profile_id).toBe(profile.profile.id)
+    expect(fin.evaluation_years).toBe(3)
+    expect(fin.construction_period).toBe(1)
+    expect(fin.operation_years).toBe(2)
+    expect(fin.net_cashflows).toHaveLength(1)
+
+    const sourceNet = 100 / 1.13
+    const expectedReceipt = sourceNet * 0.5
+    const expectedDepreciation = sourceNet * 0.9 / 2
+    const receipt = fin.net_cashflows[0]
+    expect(receipt).toMatchObject({ id: 'replacement_recovery', direction: 'inflow', t: 3 })
+    approx(Number(receipt.amount), expectedReceipt, 1e-9, 1e-6)
+    const replacementDepreciation = fin.tax_cash.depreciation.filter((row) =>
+      row.rule === 'income' && row.base_from.kind === 'maintenance_expense_net' &&
+      row.base_from.year === 2 && row.base_from.position === 1,
+    )
+    expect(replacementDepreciation.map((row) => row.year)).toEqual([3])
+    replacementDepreciation.forEach((row) =>
+      approx(Number(row.amount), expectedDepreciation, 1e-9, 1e-6),
+    )
+    expect(Number(fin.annual_operation[0].maintenance)).toBe(100)
+    expect(Number(fin.annual_operation[1].maintenance)).toBe(50)
+    const income3 = fin.tax_cash.income.find((row) => row.rule === 'income' && row.year === 3)!
+    const vat3 = fin.tax_cash.vat.filter((row) => row.month >= 25 && row.month <= 36)
+    const paid3 = vat3.reduce((sum, row) => sum + Number(row.paid), 0)
+    const refund3 = vat3.reduce((sum, row) => sum + Number(row.refund_arrived), 0)
+    const cash3 = Number(fin.annual_operation[1].net) - paid3 + refund3 -
+      Number(income3.tax) + expectedReceipt
+    approx(Number(fin.annual_net_flows[3]), cash3, 1e-9, 1e-3)
+    approx(Number(fin.evaluation.npv),
+      fin.annual_net_flows.reduce((sum, cf, year) => sum + Number(cf) / Math.pow(1.08, year), 0),
+      1e-9, 1e-3)
+
+    // Verify visible rows in ResultsPage, including the typed source identity.
+    const card = page.locator('section.ies-card').filter({
+      has: page.getByRole('heading', { name: /评价现金流\(封存\)|Sealed evaluation/i }),
+    })
+    await expect(card.locator('tr').filter({ hasText: 'replacement_recovery / CF[t=3]' }))
+      .toContainText(receipt.amount + ' ' + fin.currency)
+    for (const row of replacementDepreciation) {
+      await expect(card.locator('tr').filter({
+        hasText: 'maintenance_expense_net: y=2, #1 / y=' + row.year,
+      })).toContainText(row.amount + ' ' + fin.currency)
+    }
+
+    // Change only current editable task draft; the frozen old result and export remain unchanged.
+    await page.getByRole('navigation', { name: /工作台|Workspace/i }).getByText('任务中心').click({ timeout: 30_000 })
+    await page.getByRole('button', { name: /提交任务|Submit task/i }).first().click({ timeout: 30_000 })
+    const changed = '[{"year":2,"amount":"999.00","currency":"CNY"},{"year":3,"amount":"50.00","currency":"CNY"}]'
+    await page.locator('#task-maintenance-expenses').fill(changed)
+    await page.getByRole('dialog').getByRole('button', { name: /取消|Cancel/i }).click({ timeout: 30_000 })
+    await expect.poll(async () => {
+      const p = await browserJson<any>(page, 'GET', '/api/projects/' + pid)
+      return p.draft.content.task_working_inputs?.maintenance_expenses
+    }, { timeout: 30_000 }).toBe(changed)
+    const frozenAgain = await browserJson<any>(page, 'GET', '/api/projects/' + pid + '/tasks/' + taskId + '/inputs')
+    expect(frozenAgain.inputs.snapshot.evaluation).toEqual(frozenInputs.inputs.snapshot.evaluation)
+    expect(await fetchSealed(page, pid, taskId)).toEqual(fin)
+
+    await page.getByRole('navigation', { name: /工作台|Workspace/i }).getByText('导出').click({ timeout: 30_000 })
+    const downloadPromise = page.waitForEvent('download', { timeout: 120_000 })
+    await page.getByRole('button', { name: /导出 Excel 报告|Export Excel report/i }).click({ timeout: 30_000 })
+    const downloaded = await downloadPromise
+    expect(downloaded.suggestedFilename()).toMatch(/\.xlsx$/)
+    const outPath = path.join(OUT_DIR, 's2-net-source-report.xlsx')
+    await downloaded.saveAs(outPath)
+    const excel = new Map(excelFinancialPairs(outPath))
+    expect(excel.get('显式净现金 replacement_recovery t=3 inflow / Explicit net cashflow'))
+      .toBe(receipt.amount + ' ' + fin.currency)
+    for (const row of replacementDepreciation) {
+      const identity = 'maintenance_expense_net:y=2,#1 y=' + row.year
+      expect(excel.get('计税折旧 income ' + identity + ' / Depreciation income ' + identity))
+        .toBe(row.amount + ' ' + fin.currency)
+    }
+    expect(excel.get('税后现金流 CF[t=3] / After-tax CF[t=3]'))
+      .toBe(fin.annual_net_flows[3] + ' ' + fin.currency)
+    expect(await fetchSealed(page, pid, taskId)).toEqual(fin)
+
+    await apiCtx.close()
+    session.assertNoErrors()
+    await context.close()
+  })
+
 })

@@ -74,6 +74,7 @@ from iesplan.finance import (
     EffectiveFinanceConfig,
     EvaluationInput,
     IncomeTaxRule,
+    MaintenanceExpenseNetBaseFrom,
     ScaleUnitCostTerm,
     VatRule,
     annual_boundaries,
@@ -124,9 +125,13 @@ def _binding_direction(builder: _ProjectBuilder, binding_id: str) -> str:
 
 
 def _to_internal(value: float, unit: str) -> float:
-    """业务数值 → 内部单位（物理量 SI，纯金额守币种原值）。"""
-    if dims_of(unit) == Counter({"currency": 1}):
-        return float(value)
+    """物理量转 SI；同币种金额/费率只规范物理与时间分母。
+
+    财务输入边界已核对币种一致；这里绝不进行 USD→CNY 兑换。
+    core.units.to_si 对含 USD 的通用换汇仍明确禁止。
+    """
+    if dims_of(unit).get("currency") == 1:
+        return float(value) * float(unit_meta(unit)["to_si"])
     return to_si(float(value), unit)
 
 
@@ -410,6 +415,8 @@ class _ProjectBuilder:
         self._fact_income: list[dict[str, Any]] = []
         self._fact_depr: list[dict[str, Any]] = []
         self._fact_balances: list[dict[str, Any]] = []
+        self._fact_net_cashflows: list[dict[str, Any]] = []
+        self._net_sources: dict[tuple, _AffineAcc] = {}
         self.point_count = point_count
         self.step_s = step_s
         self.series: dict[tuple[str, str], list[float]] = {}
@@ -824,6 +831,7 @@ class _ProjectBuilder:
 
     def _cost_affine(
         self, inst: str, component: str, start: int = 0, end: int | None = None,
+        *, part: str | None = None,
     ) -> _AffineAcc:
         """单个成本分量的仿射式（fixed 常数 + linear driver 展开）。
 
@@ -837,9 +845,11 @@ class _ProjectBuilder:
         entry = instances[inst]
         ft_entry = self.finance.finance_types[entry["finance_type"]]
         comp = getattr(ft_entry, component)
-        if comp.fixed is not None:
+        if comp.fixed is not None and part in (None, "fixed"):
             out.add_const(_money_to_internal(comp.fixed))
         for driver, cost in (comp.linear or {}).items():
+            if part is not None and part != f"linear.{driver}":
+                continue
             # S2 的 upkeep 比例引用同一实例 upfront；美元建设单价只按
             # 物理分母归一，不进行汇率换算。其他运维分量沿既有换算路径。
             coeff = (
@@ -1239,14 +1249,12 @@ class _ProjectBuilder:
             }
         return MappingProxyType(out)
 
-    def _construction_affine(
-        self, markup: Mapping[str, float] | None = None
-    ) -> _AffineAcc:
+    def _construction_affine(self) -> _AffineAcc:
         """建设总额仿射式（新建 costed 实例 upfront 分量之和，既有沉没不计）。
 
         与 ``finance_components`` 同一新增/既有增量语义：existing 只计
-        周期可变分量，建设沉没成本不进入前瞻现金流。``markup`` 按
-        finance_type 给出不含税口径的价税合计系数（无则为 1）。
+        周期可变分量，建设沉没成本不进入前瞻现金流；成本子项的明确
+        税率分别形成实际付款。
         """
         out = _AffineAcc()
         instances = (self.doc.get("finance_binding") or {}).get("instances") or {}
@@ -1259,9 +1267,71 @@ class _ProjectBuilder:
             ft_entry = self.finance.finance_types[finance_type]
             if ft_entry.upfront_capex is None:
                 continue
-            factor = markup.get(finance_type, 1.0) if markup else 1.0
-            out.add_scaled(self._cost_affine(inst, "upfront_capex"), factor)
+            out.add_scaled(self._cost_paid_net(inst, "upfront_capex")[0], 1.0)
         return out
+
+    def _cost_tax_factors(self) -> dict[str, tuple[float, float]]:
+        """Explicit tax scope → (gross-payment multiplier, deductible input fraction).
+
+        A whole-component scope covers all its leaves; a leaf overrides nothing:
+        overlapping scopes were rejected by the finance input contract.  An
+        unmentioned leaf retains its original payment and has no input credit.
+        """
+        factors: dict[str, tuple[float, float]] = {}
+        for rule in self.finance.tax_rules.values():
+            if isinstance(rule, VatRule):
+                entries = [(item.for_path, item.rate, item.deductible_ratio)
+                           for item in rule.om_input_tax]
+            elif isinstance(rule, ConstructionVatRule):
+                entries = [(rule.for_path, rule.rate, rule.deductible_ratio)]
+            else:
+                continue
+            for path, rate, ratio in entries:
+                gross = 1.0 + float(rate.value) if self.finance.price_basis == "tax_exclusive" else 1.0
+                factors[path] = (gross, self._vat_gross_factor(rate) * float(ratio.value))
+        return factors
+
+    def _cost_paid_net(
+        self, inst: str, component: str, start: int = 0, end: int | None = None,
+    ) -> tuple[_AffineAcc, _AffineAcc]:
+        """One leaf-level source for actual gross payment and tax-net basis.
+
+        Both amounts are affine expressions of the same construction/operation
+        variables.  VAT availability or refund timing never changes the net
+        accounting basis.
+        """
+        binding = self.doc["finance_binding"]["instances"][inst]
+        prefix = f"{binding['finance_type']}.{component}"
+        comp = getattr(self.finance.finance_types[binding["finance_type"]], component)
+        factors = self._cost_tax_factors()
+        gross, net = _AffineAcc(), _AffineAcc()
+        parts = (["fixed"] if comp.fixed is not None else []) + [
+            f"linear.{driver}" for driver in sorted(comp.linear or {})
+        ]
+        for part in parts:
+            amount = self._cost_affine(inst, component, start, end, part=part)
+            if component == "annual_fixed_om":
+                # Convert the declared annual rate into *one* full-year amount.
+                amount_year = _AffineAcc()
+                amount_year.add_scaled(amount, _YEAR_SECONDS)
+                amount = amount_year
+            multiplier, credit = factors.get(f"{prefix}.{part}", factors.get(prefix, (1.0, 0.0)))
+            gross.add_scaled(amount, multiplier)
+            net.add_scaled(amount, multiplier - credit)
+        return gross, net
+
+    def _cost_scope_affine(
+        self, inst: str, path: str, start: int = 0, end: int | None = None,
+    ) -> _AffineAcc:
+        """The precise cost leaf or whole component referenced by a VAT rule."""
+        _, component, *suffix = path.split(".")
+        amount = self._cost_affine(inst, component, start, end,
+                                   part=".".join(suffix) if suffix else None)
+        if component == "annual_fixed_om":
+            annual = _AffineAcc()
+            annual.add_scaled(amount, _YEAR_SECONDS)
+            return annual
+        return amount
 
     def _vat_gross_markups(self) -> tuple[dict[str, float], dict[str, float], dict[str, float]]:
         """不含税口径下已声明税率对应的收付加成（价税合计出现金）。
@@ -1284,11 +1354,9 @@ class _ProjectBuilder:
                     prices[entry.price] = 1.0 + float(entry.rate.value)
                 for entry in rule.out_tax:
                     prices[entry.price] = 1.0 + float(entry.rate.value)
-                for entry in rule.om_input_tax:
-                    oms[entry.for_path] = 1.0 + float(entry.rate.value)
-            for rule in pool_rules["construction"]:
-                finance_type, _, _ = rule.for_path.partition(".")
-                construction[finance_type] = 1.0 + float(rule.rate.value)
+                # Cost markups are applied per leaf by _cost_paid_net.  A
+                # component-level multiplier would double-charge a leaf or
+                # tax an explicitly uncovered sibling.
         return prices, oms, construction
 
     def _demand_tax_factors(self) -> dict[str, tuple[float, float]]:
@@ -1317,9 +1385,7 @@ class _ProjectBuilder:
         年秒数（与适配器 ``from_si`` 年值折算同源）。调用方已确保该
         分量存在，不为缺席兜空。
         """
-        out = _AffineAcc()
-        out.add_scaled(self._cost_affine(inst, "annual_fixed_om"), _YEAR_SECONDS)
-        return out
+        return self._cost_paid_net(inst, "annual_fixed_om")[0]
 
     def _retain_maintenance(self) -> None:
         """冻结清单逐笔构造一次仿射付款，并按评价年求和。
@@ -1378,6 +1444,9 @@ class _ProjectBuilder:
             npv.add_scaled(acc, -1.0 / discount(t))
         for year_no in sorted(self._fact_annual):
             npv.add_scaled(self._fact_annual[year_no]["net"], 1.0 / discount(year_no))
+        for row in self._fact_net_cashflows:
+            sign = 1.0 if row["direction"] == "inflow" else -1.0
+            npv.add_scaled(row["amount"], sign / discount(row["t"]))
         return npv
 
     def _retain_operating_facts(self) -> None:
@@ -1393,9 +1462,9 @@ class _ProjectBuilder:
         （构造器单次建模；重复调用会重复累积，调用方保证单次）。
         """
         evaluation = self.evaluation
-        price_markup, om_markup, construction_markup = self._vat_gross_markups()
+        price_markup, _, _ = self._vat_gross_markups()
         demand_tax = self._demand_tax_factors()
-        construction = self._construction_affine(construction_markup or None)
+        construction = self._construction_affine()
         baseline = self.doc["project_baseline"]
         bounds = annual_boundaries(
             baseline["resolution"], baseline["start_year"], evaluation.operation_years
@@ -1439,17 +1508,13 @@ class _ProjectBuilder:
                     and ft_entry.period_variable_om is not None
                 ):
                     variable.add_scaled(
-                        self._cost_affine(inst, "period_variable_om", start, end),
-                        -om_markup.get(f"{finance_type}.period_variable_om", 1.0),
+                        self._cost_paid_net(inst, "period_variable_om", start, end)[0], -1.0,
                     )
                 if (
                     "annual_fixed_om" in produced
                     and ft_entry.annual_fixed_om is not None
                 ):
-                    fixed.add_scaled(
-                        self._annual_fixed_om_annual(inst),
-                        -om_markup.get(f"{finance_type}.annual_fixed_om", 1.0),
-                    )
+                    fixed.add_scaled(self._annual_fixed_om_annual(inst), -1.0)
             annual.add_scaled(energy, 1.0)
             annual.add_scaled(variable, 1.0)
             annual.add_scaled(fixed, 1.0)
@@ -1593,7 +1658,8 @@ class _ProjectBuilder:
                             self._tariff_affine(binding_id, start, end), -factor
                         )
             for entry in rule.om_input_tax:
-                finance_type, _, component = entry.for_path.partition(".")
+                finance_type, _, scope = entry.for_path.partition(".")
+                component = scope.split(".", 1)[0]
                 factor = self._vat_gross_factor(entry.rate) * float(
                     entry.deductible_ratio.value
                 )
@@ -1615,13 +1681,13 @@ class _ProjectBuilder:
                     if getattr(ft_entry, component) is None:
                         continue
                     if component == "annual_fixed_om":
-                        amount = self._annual_fixed_om_annual(inst)
+                        amount = self._cost_scope_affine(inst, entry.for_path)
                         for year in range(construction + 1, construction + operation + 1):
                             inp[12 * year - 1].add_scaled(amount, factor)
                     else:
                         for month, start, end in spans:
                             inp[month - 1].add_scaled(
-                                self._cost_affine(inst, component, start, end), factor
+                                self._cost_scope_affine(inst, entry.for_path, start, end), factor
                             )
             for entry in rule.maintenance_input_tax:
                 # 引用存在性与跨输入对应已由提交边界核对；同一 (year,
@@ -1648,7 +1714,7 @@ class _ProjectBuilder:
                 ft_entry = self.finance.finance_types[finance_type]
                 if ft_entry.upfront_capex is None:
                     continue
-                total.add_scaled(self._cost_affine(inst, "upfront_capex"), 1.0)
+                total.add_scaled(self._cost_scope_affine(inst, rule.for_path), 1.0)
             factor = self._vat_gross_factor(rule.rate) * float(
                 rule.deductible_ratio.value
             )
@@ -1934,7 +2000,6 @@ class _ProjectBuilder:
         真实消费的可变分量保留。可抵比例只改变抵扣额，不改变实际付款。
         """
         finance_type, _, component = for_path.partition(".")
-        coef, markup = om_credit.get(for_path, (0.0, 1.0))
         for inst in sorted(self.devices):
             if inst not in instances or instances[inst].get("type") != "costed":
                 continue
@@ -1950,13 +2015,44 @@ class _ProjectBuilder:
             ft_entry = self.finance.finance_types[finance_type]
             if getattr(ft_entry, component) is None:
                 continue
-            if component == "annual_fixed_om":
-                amount = self._annual_fixed_om_annual(inst)
+            # Income tax deducts the whole incurred component, not just its
+            # VAT-covered leaves.  Uncovered siblings keep full basis.
+            start, end = span if span is not None else (0, None)
+            base.add_scaled(self._cost_paid_net(inst, component, start, end)[1], -1.0)
+
+    def _maintenance_net(self, year: int, position: int) -> _AffineAcc:
+        """The uniquely identified payment less explicitly eligible input VAT."""
+        key = (year, position)
+        credit = 0.0
+        for rule in self.finance.tax_rules.values():
+            if isinstance(rule, VatRule):
+                for item in rule.maintenance_input_tax:
+                    if (item.year, item.position) == key:
+                        credit += self._vat_gross_split_factor(item.rate) * float(
+                            item.deductible_ratio.value
+                        )
+        net = _AffineAcc()
+        net.add_scaled(self._maintenance_items[key], 1.0 - credit)
+        return net
+
+    def _source_net(self, source: Any) -> _AffineAcc:
+        """Resolve each typed money source once for depreciation and net cash."""
+        key = source.identity
+        if key not in self._net_sources:
+            amount = _AffineAcc()
+            if source.kind == "upfront_capex_net":
+                instances = self.doc["finance_binding"]["instances"]
+                for inst in sorted(self.devices):
+                    binding = instances.get(inst)
+                    if (binding is None or binding["type"] != "costed"
+                            or binding["finance_type"] != source.finance_type
+                            or self.devices[inst]["asset_origin"] != "new"):
+                        continue
+                    amount.add_scaled(self._cost_paid_net(inst, "upfront_capex")[1], 1.0)
             else:
-                # variable_om 调用方恒传运营年区间（分量口径已在入口保证）。
-                start, end = span  # type: ignore[misc]
-                amount = self._cost_affine(inst, component, start, end)
-            base.add_scaled(amount, -(markup - coef))
+                amount.add_scaled(self._maintenance_net(source.year, source.position), 1.0)
+            self._net_sources[key] = amount
+        return self._net_sources[key]
 
     def _income_deduct_depreciation(
         self,
@@ -1988,65 +2084,40 @@ class _ProjectBuilder:
                 < construction + entry.first_year + entry.life_years
             ):
                 continue
-            if entry.base_from.kind != "upfront_capex_net":
-                continue
-            asset = entry.base_from.finance_type
-            capex = _AffineAcc()
-            for inst in sorted(self.devices):
-                if inst not in instances or instances[inst].get("type") != "costed":
-                    continue
-                if self.devices[inst].get("asset_origin") != "new":
-                    continue
-                if instances[inst].get("finance_type") != asset:
-                    continue
-                ft_entry = self.finance.finance_types[asset]
-                if ft_entry.upfront_capex is None:
-                    continue
-                capex.add_scaled(self._cost_affine(inst, "upfront_capex"), 1.0)
-            credit_coef, markup = con_credit.get(asset, (0.0, 1.0))
+            source = entry.base_from
+            depreciable = self._source_net(source)
             residual = float(entry.residual.value)
-            if residual > 0.0:
-                position = f"{location}折旧资产 {asset!r}"
-                scale = markup - credit_coef
-                capex_lo = self._affine_side(
-                    capex, var_bounds, side="min", label=position
-                )
-                capex_hi = self._affine_side(
-                    capex, var_bounds, side="max", label=position
-                )
-                if capex_hi <= 0.0:
-                    # 静态已知未形成资产：不计提，残值不产生任何影响。
-                    self._fact_depr.append(
-                        {
-                            "rule": rule_id,
-                            "asset": asset,
-                            "year": year,
-                            "amount": _AffineAcc(),
-                        }
-                    )
-                    continue
-                if capex_lo <= 0.0:
-                    raise LoweringUnsupportedError(
-                        f"{position}为可变容量且残值 {residual!r} 为正："
-                        "零建设时无资产可提、有建设时残值须以实际基础 "
-                        "为限，当前线性表达不能精确区分，超出首版能力"
-                    )
-                if residual > scale * capex_lo:
-                    raise LoweringUnsupportedError(
-                        f"{position}残值 {residual!r} 超过最小计税基础 "
-                        f"{scale * capex_lo!r}：不得以负折旧增加所得"
-                    )
-            depreciable = _AffineAcc()
-            depreciable.add_scaled(capex, markup)
-            depreciable.add_scaled(capex, -credit_coef)
+            position = f"{location}折旧来源 {source.identity!r}"
+            # A ratio residual is affine even when the asset can be absent.
+            # A positive fixed residual must not turn absence into a tax shield.
+            if entry.residual.unit == "1":
+                residual_amount = _AffineAcc()
+                residual_amount.add_scaled(depreciable, residual)
+            else:
+                residual_amount = _AffineAcc()
+                residual_amount.add_const(residual)
+                if residual > 0.0:
+                    basis_lo = self._affine_side(depreciable, var_bounds, side="min", label=position)
+                    basis_hi = self._affine_side(depreciable, var_bounds, side="max", label=position)
+                    if basis_hi <= 0.0:
+                        residual_amount = _AffineAcc()
+                    elif basis_lo <= 0.0:
+                        raise LoweringUnsupportedError(
+                            f"{position}的可变容量固定正残值在零建设与形成资产之间无法精确选择，"
+                            "超出当前选建能力"
+                        )
+                    elif residual > basis_lo:
+                        raise LoweringUnsupportedError(
+                            f"{position}残值 {residual!r} 超过最小计税基础 {basis_lo!r}"
+                        )
+            annual = _AffineAcc()
             life = float(entry.life_years)
-            base.add_scaled(depreciable, -1.0 / life)
-            base.add_const(float(entry.residual.value) / life)
-            deduct = _AffineAcc()
-            deduct.add_scaled(depreciable, 1.0 / life)
-            deduct.add_const(-float(entry.residual.value) / life)
+            annual.add_scaled(depreciable, 1.0 / life)
+            annual.add_scaled(residual_amount, -1.0 / life)
+            base.add_scaled(annual, -1.0)
             self._fact_depr.append(
-                {"rule": rule_id, "asset": asset, "year": year, "amount": deduct}
+                {"rule": rule_id, "base_from": source.to_dict(),
+                 "year": year, "amount": annual}
             )
 
     def _income_annual_base(
@@ -2107,15 +2178,36 @@ class _ProjectBuilder:
         for item in rule.deductible_maintenance.items:
             if item.year != year or not item.deductible:
                 continue
-            coef = maint_credit.get((item.year, item.position), 0.0)
-            base.add_scaled(
-                self._maintenance_items[(item.year, item.position)],
-                -(1.0 - coef),
-            )
+            source = MaintenanceExpenseNetBaseFrom(year=item.year, position=item.position)
+            base.add_scaled(self._source_net(source), -1.0)
         self._income_deduct_depreciation(
             base, rule, rule_id, year, credits[2], instances, var_bounds, location
         )
         return base
+
+    def _retain_net_cashflows(self) -> None:
+        """Declare each explicit after-tax receipt/payment and enter CF once.
+
+        These entries are already *net*.  They do not belong to operating net
+        income, VAT output or the income-tax base and are never inferred from
+        book residual value.
+        """
+        for cash_id, entry in sorted(self.finance.net_cashflows.items()):
+            t = (self.evaluation.evaluation_years if entry.at.kind == "evaluation_end"
+                 else entry.at.year)
+            amount = _AffineAcc()
+            if entry.amount.kind == "fixed":
+                amount.add_const(float(entry.amount.value.value))
+            else:
+                amount.add_scaled(self._source_net(entry.amount.base_from),
+                                  float(entry.amount.ratio.value))
+            direction = 1.0 if entry.direction == "inflow" else -1.0
+            self._year_cash(t).add_scaled(amount, direction)
+            self._fact_net_cashflows.append({
+                "id": cash_id, "t": t, "direction": entry.direction,
+                "amount": amount.snapshot(),
+            })
+        self._fact_net_cashflows.sort(key=lambda row: (row["t"], row["id"]))
 
     def _build_income(self) -> _AffineAcc | None:
         """各所得税规则年度计税/亏损/税额精确链；返回 NPV 现金仿射（或 None）。
@@ -2564,6 +2656,11 @@ class _ProjectBuilder:
                 {"t": t, "ratio": ratio, "amount": self._decl_affine(acc)}
                 for t, ratio, acc in self._fact_payments
             ],
+            "net_cashflows": [
+                {"id": row["id"], "t": row["t"], "direction": row["direction"],
+                 "amount": self._decl_affine(row["amount"])}
+                for row in self._fact_net_cashflows
+            ],
             "annual_operation": annual_operation,
             "tax_cash": {
                 "vat": vat,
@@ -2580,7 +2677,7 @@ class _ProjectBuilder:
                 "depreciation": [
                     {
                         "rule": row["rule"],
-                        "asset": row["asset"],
+                        "base_from": row["base_from"],
                         "year": row["year"],
                         "amount": self._decl_affine(row["amount"]),
                     }
@@ -2626,6 +2723,7 @@ class _ProjectBuilder:
         self._retain_maintenance()
         self._vat_cash = self._build_vat()
         self._income_cash = self._build_income()
+        self._retain_net_cashflows()
         self._checkpoint()
         objective, objective_unit = self._build_objective()
         self._checkpoint()

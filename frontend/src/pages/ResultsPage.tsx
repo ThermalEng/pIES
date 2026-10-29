@@ -1652,6 +1652,21 @@ function FinancialEvaluationCard({ fin }: { fin: FinancialEvaluationBlock }) {
           </table>
         </div>
       ) : null}
+      <div style={{ marginTop: 'var(--ies-space-3)' }}>
+        <h3 style={{ fontSize: 'var(--ies-fs-sm)', fontWeight: 700, marginBottom: 'var(--ies-space-2)' }}>
+          {t('ies.result.fin_net_cashflows')}
+        </h3>
+        {fin.net_cashflows.length > 0 ? (
+          <table className="ies-metric-table"><tbody>
+            {fin.net_cashflows.map((item) => (
+              <tr key={`${item.t}-${item.id}`}>
+                <td>{item.id} / CF[t={item.t}] / {t(`ies.result.fin_net_${item.direction}`)}</td>
+                <td>{item.amount} {ccy}</td>
+              </tr>
+            ))}
+          </tbody></table>
+        ) : <p>{t('ies.result.fin_net_none')}</p>}
+      </div>
       {annual.length > 0 ? (
         <div style={{ marginTop: 'var(--ies-space-3)' }}>
           <h3 style={{ fontSize: 'var(--ies-fs-sm)', fontWeight: 700, marginBottom: 'var(--ies-space-2)' }}>
@@ -1869,9 +1884,12 @@ function TaxCashSections({ fin }: { fin: FinancialEvaluationBlock }) {
           <table className="ies-metric-table">
             <tbody>
               {tax.depreciation.map((row, index) => (
-                <tr key={`${row.rule}-${row.asset}-${row.year}-${index}`}>
+                <tr key={`${row.rule}-${row.year}-${index}`}>
                   <td>
-                    {row.rule} / {row.asset} / y={row.year}
+                    {row.rule} / {row.base_from.kind === 'upfront_capex_net'
+                      ? `${row.base_from.kind}: ${row.base_from.finance_type}`
+                      : `${row.base_from.kind}: y=${row.base_from.year}, #${row.base_from.position}`}
+                    {' '} / y={row.year}
                   </td>
                   <td>
                     {row.amount} {ccy}

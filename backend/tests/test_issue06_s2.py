@@ -43,6 +43,7 @@ def _builder(
     expenses: list[dict], *, taxes: bool = False, second_planned: bool = False,
     same_category: bool = True, upper: str | None = "10", fixed_capacity: bool = False,
     currency: str = "CNY",
+    finance_patch=None, evaluation_patch=None,
 ) -> _ProjectBuilder:
     """S1 已冻结的形态直接进入生产 builder：设备仅含标量 property。"""
     vat_rule = {
@@ -98,6 +99,8 @@ def _builder(
         "tax_rules": ({"maint_vat": vat_rule, "maint_income": income_rule} if taxes else {}),
         "net_cashflows": {},
     }
+    if finance_patch is not None:
+        finance_patch(payload)
     finance = merge_effective(FinanceProfile.from_dict(payload), None)
     planning = {
         "cap_a": {"device_ref": "a", "parameter": "cap_kw",
@@ -138,12 +141,15 @@ def _builder(
     contribution = SimpleNamespace(
         variables={"cap_kw": scalar}, interfaces={}, relations=(), states=(),
     )
-    evaluation = parse_evaluation_input({
+    evaluation_data = {
         "evaluation_years": 2, "construction_period": 0,
         "operation_years": 2, "discount_rate": 0.0,
         "construction_payments": [{"t": 0, "ratio": 1}],
         "maintenance_expenses": expenses,
-    })
+    }
+    if evaluation_patch is not None:
+        evaluation_patch(evaluation_data)
+    evaluation = parse_evaluation_input(evaluation_data)
     return _ProjectBuilder(
         doc=doc, devices=doc["devices"], models={name: contribution for name in doc["devices"]},
         series=(), finance=finance, evaluation=evaluation, point_count=0, step_s=3600.0,
@@ -155,7 +161,7 @@ def _amount(node: dict, **values: float) -> float:
                                         for name, coeff in node["terms"].items())
 
 
-def _tiny_solve(builder: _ProjectBuilder, tmp_path) -> tuple[dict[str, float], dict]:
+def _tiny_solve(builder: _ProjectBuilder, tmp_path, *, with_model=False):
     """一个真正的 HiGHS 主解；MPS 至多为标量与月税务列，无时间步。"""
     model, _, _ = builder.build()
     raw, _ = write_mps(model)
@@ -173,7 +179,9 @@ def _tiny_solve(builder: _ProjectBuilder, tmp_path) -> tuple[dict[str, float], d
     assert solution["model_status"] == "HighsModelStatus.kOptimal"
     columns = _mps_column_names(raw.encode("utf-8"))
     assert len(columns) == len(solution["primals"])
-    return dict(zip(columns, solution["primals"], strict=True)), builder.financial_facts()
+    solved = dict(zip(columns, solution["primals"], strict=True))
+    facts = builder.financial_facts()
+    return (solved, facts, model) if with_model else (solved, facts)
 
 
 def test_affine_amount_instance_scope_zero_and_full_cash() -> None:

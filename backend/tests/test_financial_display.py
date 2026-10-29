@@ -13,10 +13,10 @@ from iesplan.application.results.writes import _financial_absence
 
 
 def _sealed() -> dict:
-    """K1N2 封存评价块(当前 2.0.0 形态, 无需量绑定)。"""
+    """K1N2 封存评价块(当前 3.0.0 形态, 无需量绑定)。"""
     return {
         "schema": "ies.financial-evaluation",
-        "schema_version": "2.0.0",
+        "schema_version": "3.0.0",
         "status": "evaluated",
         "evaluation_years": 3,
         "construction_period": 1,
@@ -32,6 +32,7 @@ def _sealed() -> dict:
             {"t": 0, "ratio": "0.6", "amount": "84000.0"},
             {"t": 1, "ratio": "0.4", "amount": "56000.0"},
         ],
+        "net_cashflows": [],
         "annual_operation": [
             {
                 "financial_year": 2, "energy_net": "10000", "variable_om": "100",
