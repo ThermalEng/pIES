@@ -78,7 +78,8 @@ export default function PlanningPage() {
   }
 
   function populateForm(body: PlanningConfigBody | null) {
-    setSense(body?.objective.sense ?? '')
+    const rawSense = body?.objective.sense
+    setSense(rawSense === 'minimize' || rawSense === 'maximize' ? rawSense : '')
     setExpression(body?.objective.expression ?? '')
     setVariables(Object.entries(body?.variables ?? {}).map(([name, value]) => ({
       id: newId(),
@@ -94,7 +95,7 @@ export default function PlanningPage() {
       name,
       type: value.type,
       expression: value.expression,
-      enabled: value.enabled,
+      enabled: value.enabled !== false,
       references: value.references,
     })))
   }
@@ -189,24 +190,62 @@ export default function PlanningPage() {
     }
   }
 
+  function serializeFormState(): PlanningConfigBody {
+    const variableMap: Record<string, PlanningVariableDto> = {}
+    const usedVarNames = new Set<string>()
+    variables.forEach((row, index) => {
+      let key = row.name.trim()
+      if (!key || usedVarNames.has(key)) {
+        key = key ? `${key}_${index + 1}` : `variable_${index + 1}`
+      }
+      usedVarNames.add(key)
+      variableMap[key] = {
+        device_ref: row.device_ref.trim(),
+        parameter: row.parameter.trim(),
+        lower_bound: row.lower_bound.trim() || null,
+        upper_bound: row.upper_bound.trim() || null,
+        unit: row.unit.trim() || null,
+      }
+    })
+    const constraintMap: Record<string, PlanningConstraintDto> = {}
+    const usedConNames = new Set<string>()
+    constraints.forEach((row, index) => {
+      let key = row.name.trim()
+      if (!key || usedConNames.has(key)) {
+        key = key ? `${key}_${index + 1}` : `constraint_${index + 1}`
+      }
+      usedConNames.add(key)
+      constraintMap[key] = {
+        type: row.type || '',
+        expression: row.expression.trim(),
+        enabled: row.enabled !== false,
+        ...(row.type === 'step_relation' && row.references ? { references: row.references } : {}),
+      }
+    })
+    return {
+      ...(baseConfig ?? EMPTY_PLANNING),
+      objective: { ...(baseConfig?.objective ?? {}), sense, expression: expression.trim() },
+      variables: variableMap,
+      ...(constraints.length > 0 || (baseConfig?.constraints && Object.keys(baseConfig.constraints).length > 0)
+        ? { constraints: constraintMap }
+        : {}),
+    }
+  }
+
   function switchView(target: 'form' | 'document') {
     if (target === view || saving || reloading) return
     if (target === 'document') {
-      // An untouched empty form may switch directly to the full YAML skeleton.
-      if (sense || expression || variables.length || constraints.length) {
-        const form = buildConfig()
-        if (!form) return
-        setBaseConfig(form)
-        setDocumentText(planningToYaml(form))
-      }
+      const state = serializeFormState()
+      setBaseConfig(state)
+      setDocumentText(planningToYaml(state))
     } else {
       try {
         const parsed = planningFromYaml(documentText)
-        if (!parsed.objective || !parsed.variables || !parsed.constraints ||
-            typeof parsed.objective !== 'object' || typeof parsed.variables !== 'object' ||
-            typeof parsed.constraints !== 'object' || Array.isArray(parsed.variables) ||
-            Array.isArray(parsed.constraints)) {
-          throw new Error('Planning YAML needs objective, variables and constraints mappings')
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed) ||
+            !parsed.objective || typeof parsed.objective !== 'object' || Array.isArray(parsed.objective) ||
+            (parsed.variables !== undefined && (typeof parsed.variables !== 'object' || Array.isArray(parsed.variables))) ||
+            (parsed.constraints !== undefined && (typeof parsed.constraints !== 'object' || Array.isArray(parsed.constraints)))) {
+          throw new Error('Planning YAML root needs an objective mapping')
         }
         setBaseConfig(parsed)
         populateForm(parsed)

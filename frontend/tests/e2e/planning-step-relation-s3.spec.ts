@@ -30,6 +30,56 @@ test('S3 YAML -> form -> saved revision -> real same-solve constrained result', 
   })
   await page.goto(`/projects/${pid}/planning`)
   await expect(page.locator('#planning-expression')).toBeVisible()
+
+  // 1. Partial form -> YAML: switching to document view does not block on incomplete form.
+  await page.locator('#planning-expression').fill('hp_partial')
+  await page.getByRole('button', { name: /完整 YAML 文档|Full YAML document/ }).click()
+  await expect(page.locator('#planning-yaml')).toBeVisible()
+  expect(await page.locator('#planning-yaml').inputValue()).toContain('hp_partial')
+  await expect(page.getByRole('alert')).toHaveCount(0)
+
+  // 2. Legal omitted constraints and explicit enabled: false round-trips correctly.
+  const omittedConstraintsYaml = `objective:
+  sense: minimize
+  expression: hp_partial
+variables:
+  v1:
+    device_ref: hp1
+    parameter: rated_heat_kw
+`
+  await page.locator('#planning-yaml').fill(omittedConstraintsYaml)
+  await page.getByRole('button', { name: /表单编辑|Form editor/ }).click()
+  await expect(page.locator('#planning-expression')).toHaveValue('hp_partial')
+  await expect(page.getByRole('alert')).toHaveCount(0)
+  await expect(page.locator('[id^="planning-con-name-"]')).toHaveCount(0)
+
+  // Constraint with omitted enabled defaults to enabled (true) in form; explicit enabled: false is false.
+  await page.getByRole('button', { name: /完整 YAML 文档|Full YAML document/ }).click()
+  const enabledSemanticsYaml = `objective:
+  sense: minimize
+  expression: hp_partial
+variables:
+  v1:
+    device_ref: hp1
+    parameter: rated_heat_kw
+constraints:
+  c_omitted:
+    type: ratio
+    expression: 1 <= 2
+  c_disabled:
+    type: ratio
+    expression: 1 <= 3
+    enabled: false
+`
+  await page.locator('#planning-yaml').fill(enabledSemanticsYaml)
+  await page.getByRole('button', { name: /表单编辑|Form editor/ }).click()
+  await expect(page.getByRole('alert')).toHaveCount(0)
+  const omittedSelect = page.locator('[id^="planning-con-enabled-"]').first()
+  const disabledSelect = page.locator('[id^="planning-con-enabled-"]').nth(1)
+  expect(await omittedSelect.inputValue()).toBe('true')
+  expect(await disabledSelect.inputValue()).toBe('false')
+
+  // Switch back to YAML for the rest of the test suite.
   await page.getByRole('button', { name: /完整 YAML 文档|Full YAML document/ }).click()
 
   const yaml = `objective:
@@ -130,15 +180,18 @@ constraints:
   }
 
   await page.locator('#planning-yaml').fill(stable)
+  const assertMainErrors = session.assertNoErrors
   // Another tab advances revision: conflict preserves the first tab's draft,
   // with explicit reload (also locked during its real GET).
   const other = await context.newPage()
   attachTab(session, other)
+  const assertOtherErrors = session.assertNoErrors
   await other.goto(`/projects/${pid}/planning`)
   await expect(other.locator('#planning-expression')).toBeVisible()
   await other.locator('[id^="planning-var-upper-"]').fill('850')
   await other.getByRole('button', { name: /保存规划配置|Save planning config/ }).click()
   await expect(other.getByText(/revision v4/).first()).toBeVisible()
+  assertOtherErrors()
   await other.close()
   await page.getByRole('button', { name: /保存规划配置|Save planning config/ }).click()
   await expect(page.getByText(/当前编辑已保留|Your edits are preserved/)).toBeVisible()
@@ -185,6 +238,6 @@ constraints:
   // heat[t] = 30 kW and heat[t] <= 0.5 * hp_cap => optimum hp_cap = 60 kW,
   // whereas the original unconstrained optimum is 50 kW.
   await expect(row.getByText(/60\.0000/)).toBeVisible()
-  session.assertNoErrors(failures)
+  assertMainErrors(failures)
   await context.close()
 })

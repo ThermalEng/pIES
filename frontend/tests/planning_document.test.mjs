@@ -50,6 +50,40 @@ check('quoted high-precision decimal retained exactly', parsed.variables.hp_cap.
 check('scalar and step coexist', parsed.constraints.scalar.type === 'ratio' && parsed.constraints.heat_gate.type === 'step_relation')
 check('real instance/port ref remains distinct from alias', parsed.constraints.heat_gate.references.heat.instance === 'hp1' && parsed.constraints.heat_gate.references.heat.interface === 'heat_out')
 check('disabled step stays present', parsed.constraints.disabled_gate.enabled === false)
+
+// Omitted constraints and default enabled semantics
+const withoutConstraints = `objective:
+  sense: minimize
+  expression: hp_cap
+variables:
+  v1:
+    device_ref: hp1
+    parameter: rated_heat_kw
+`
+const parsedWithoutConstraints = planningFromYaml(withoutConstraints)
+check('omitted constraints parses without error', parsedWithoutConstraints.constraints === undefined)
+check('round-trip without constraints preserved', JSON.stringify(planningFromYaml(planningToYaml(parsedWithoutConstraints))) === JSON.stringify(parsedWithoutConstraints))
+
+const omittedEnabledYaml = `objective:
+  sense: minimize
+  expression: hp_cap
+variables:
+  v1:
+    device_ref: hp1
+    parameter: rated_heat_kw
+constraints:
+  c_omitted:
+    type: ratio
+    expression: 1 <= 2
+  c_disabled:
+    type: ratio
+    expression: 1 <= 3
+    enabled: false
+`
+const parsedOmittedEnabled = planningFromYaml(omittedEnabledYaml)
+check('omitted enabled parses as undefined', parsedOmittedEnabled.constraints.c_omitted.enabled === undefined)
+check('explicit enabled: false parses as false', parsedOmittedEnabled.constraints.c_disabled.enabled === false)
+
 const restored = planningFromYaml(planningToYaml(parsed))
 check('YAML round-trip preserves full body', JSON.stringify(restored) === JSON.stringify(parsed))
 check('other form fields can change without dropping references', (() => {

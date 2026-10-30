@@ -52,9 +52,9 @@ export interface PlanningConstraintDto {
 }
 
 export interface PlanningConfigBody {
-  objective: { sense: 'minimize' | 'maximize'; expression: string }
+  objective: { sense: string; expression: string }
   variables: Record<string, PlanningVariableDto>
-  constraints: Record<string, PlanningConstraintDto>
+  constraints?: Record<string, PlanningConstraintDto>
 }
 
 export interface PlanningConfigEnvelopeDto {
