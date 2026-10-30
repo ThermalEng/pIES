@@ -1,6 +1,11 @@
 // Planning YAML is an editing view: references and disabled constraints survive
 // form overlays; numeric bounds must remain decimal strings, never JS floats.
-import { planningFromYaml, planningToYaml } from '../src/features/config/planningDocument.ts'
+// The Docker logic runner bundles tests as ESM while yaml's Node entry is
+// CommonJS and dynamically requires built-in modules. Provide Node's require
+// before the deferred import initializes the bundled yaml dependency.
+import { createRequire } from 'node:module'
+globalThis.require = createRequire(import.meta.url)
+const { planningFromYaml, planningToYaml } = await import('../src/features/config/planningDocument.ts')
 
 let failed = 0
 function check(name, ok) {
