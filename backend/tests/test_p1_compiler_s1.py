@@ -137,7 +137,10 @@ def test_source_inventory_is_inspectable_and_unpersisted(measured_generate):
         assert family.relation.ast.lhs_root is not None
         assert family.relation.ast.rhs_root is not None
         assert family.referenced_symbols
-        assert all(isinstance(name, str) for name in family.known_coefficients)
+        for local in family.known_coefficients:
+            key = ("step_duration" if local == "step_duration"
+                   else f"{family.source.instance_id}.{local}")
+            assert key in inventory.coefficients  # never misclassify a planning decision
     for sym in inventory.symbols.values():
         assert sym.source.field_path
     metadata = json.loads(bundle.files[generator.PARAMETERS_PATH])
@@ -238,6 +241,7 @@ def test_two_instances_planned_initial_and_varying_steps():
     assert coefficients(rows["heater2__conversion__t0"])["heater2__electricity_in__t0"] == pytest.approx(-0.8)
     assert sum(v.name == "soc_plan" for v in model.variables) == 1
     assert builder.inventory.property_bindings[("tank1", "soc0")] == "soc_plan"
+    assert "tank1.soc0" not in builder.inventory.coefficients
     assert builder.inventory.property_bindings[("tank2", "soc0")] != "soc_plan"
 
     reversed_doc = copy.deepcopy(doc)
