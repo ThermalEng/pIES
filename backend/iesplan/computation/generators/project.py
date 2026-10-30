@@ -430,8 +430,11 @@ class _ProjectBuilder:
         self.point_count = point_count
         self.step_s = step_s
         self.series: dict[tuple[str, str], list[float]] = {}
+        self._series_sources: dict[tuple[str, str], Mapping[str, object]] = {}
         for entry in series:
-            self.series[(entry.device, entry.interface)] = list(entry.values)
+            key = (entry.device, entry.interface)
+            self.series[key] = list(entry.values)
+            self._series_sources[key] = entry.source
         self.prices: dict[str, list[float]] = {}
         for entry in prices:
             self.prices[entry.price_id] = [
@@ -692,14 +695,22 @@ class _ProjectBuilder:
             if flow.type != "predefined":
                 continue
             identity = f"{inst}.{name}"
+            source = self._series_sources.get((inst, name), {})
+            data_ref = source.get("object_id")
             self.inventory.coefficients[identity] = KnownCoefficient(
                 identity, "materialized_series",
-                SourceLocation(f"devices.{inst}.predefined_interfaces.{name}",
-                               inst, contribution.device_id,
-                               dev["definition"].get("revision")),
+                SourceLocation(
+                    f"devices.{inst}.predefined_interfaces.{name}",
+                    inst, contribution.device_id,
+                    dev["definition"].get("revision"),
+                    data_object_ref=data_ref if isinstance(data_ref, str) else None,
+                ),
             )
         families: list[RelationFamily] = []
-        known = set(prop_const) | {
+        known = {
+            name for name in prop_const
+            if (inst, name) not in self.bound_prop
+        } | {
             name for name, flow in contribution.interfaces.items()
             if flow.type == "predefined"
         } | {TIMELINE_STEP_DURATION_VAR}
