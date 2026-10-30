@@ -20,7 +20,7 @@ from unittest.mock import patch
 import pytest
 
 from iesplan.assembly.contracts import ValidatedAssemblyArtifact, ValidationReceipt
-from iesplan.computation import MaterializedSet, build_project_model, write_mps
+from iesplan.computation import MaterializedSet, build_registry, write_mps
 from iesplan.computation.generators import highs_milp as generator
 from iesplan.computation.generators import project
 from iesplan.computation.result_adapters.highs import HIGHS_ADAPTER, _mps_column_names
@@ -247,8 +247,20 @@ def test_two_instances_planned_initial_and_varying_steps():
     reversed_doc = copy.deepcopy(doc)
     reversed_doc["devices"] = dict(reversed(tuple(doc["devices"].items())))
     reversed_art, reversed_series = setup(reversed_doc)
-    reordered = build_project_model(
+    # The reordered case also uses the same PUBLIC provider generate boundary,
+    # not a second/private runtime model or an adapter-side reconstruction.
+    public_config = replace(config, generator=generator.GENERATOR_REF)
+    provider = build_registry((generator.HIGHS_MILP_PROVIDER,)).resolve(public_config)
+    bundle = provider.generate(
         reversed_art, dict(reversed(tuple(models.items()))), reversed_series,
-        finance, config, evaluation,
-    )[0]
-    assert write_mps(model) == write_mps(reordered)
+        finance, public_config, evaluation,
+    )
+    mps_text, _offset = write_mps(model)
+    assert bundle.files[generator.PROBLEM_PATH] == mps_text.encode("utf-8")
+    metadata = json.loads(bundle.files[generator.PARAMETERS_PATH])
+    assert "soc_plan" in metadata["unit_map"]
+    assert len(next(s["columns"] for s in metadata["step_series"]
+                    if s["series_id"] == "tank1.soc")) == POINTS
+    assert len(next(s["columns"] for s in metadata["step_series"]
+                    if s["series_id"] == "tank2.soc")) == POINTS
+    assert metadata["financial_facts"]["annual_net_flows"]
