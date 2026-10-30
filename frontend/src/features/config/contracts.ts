@@ -38,10 +38,17 @@ export interface PlanningVariableDto {
   unit: string | null
 }
 
+export interface PlanningReferenceDto {
+  instance: string
+  interface: string
+}
+
 export interface PlanningConstraintDto {
   type: string
   expression: string
   enabled: boolean
+  /** Only step_relation has local alias -> real instance/interface identities. */
+  references?: Record<string, PlanningReferenceDto>
 }
 
 export interface PlanningConfigBody {
