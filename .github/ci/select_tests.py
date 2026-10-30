@@ -129,6 +129,7 @@ PAGE_SPECS = {
 # A single source file can feed multiple subsystems. Keep these real consumers
 # targeted instead of widening every computation change to the full suite.
 GENERATOR_PROJECT_CONSUMERS = (
+    "test_battery_planning.py",
     "test_vat_monthly.py",
     "test_income_annual.py",
     "test_npv_objective.py",
@@ -693,6 +694,12 @@ def self_test() -> None:
     assert "page-loading.spec.ts" not in economic["browser_specs"]
     generator = pick(["backend/iesplan/computation/generators/project.py"])
     assert all("tests/" + test in generator["backend_tests"].split() for test in GENERATOR_PROJECT_CONSUMERS)
+    # Protect the battery optimization/zero-capacity tests from future silent
+    # omission when the shared project generator is refactored.
+    assert "tests/test_battery_planning.py" in generator["backend_tests"].split()
+    assert "tests/test_battery_planning.py" not in pick([
+        "backend/iesplan/computation/generators/mps.py"
+    ])["backend_tests"].split()
     assert "tax-chain.spec.ts" in generator["browser_specs"]
     assert len(generator["backend_tests"].split()) < 30  # scoped, never automatic full-suite
     ordinary = pick(["backend/iesplan/computation/generators/mps.py"])
