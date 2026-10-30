@@ -21,6 +21,7 @@ class SourceLocation:
     model_revision: str | None = None
     relation_id: str | None = None
     binding_id: str | None = None
+    data_object_ref: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
