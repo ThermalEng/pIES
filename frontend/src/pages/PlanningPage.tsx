@@ -8,6 +8,7 @@ import { useParams } from 'react-router-dom'
 
 import { Alert, Button, Card, EmptyState, FormField, Input, Select, Spinner, Textarea } from '../components/ui'
 import { getPlanningConfig, savePlanningConfig } from '../features/config'
+import { EMPTY_PLANNING, planningDraftToYaml, planningFromYaml, planningToYaml } from '../features/config/planningDocument'
 import type { PlanningConfigBody, PlanningConstraintDto, PlanningVariableDto } from '../features/config'
 import { getModel } from '../features/modeling'
 import { errorMessage } from '../i18n'
@@ -31,6 +32,7 @@ type ConstraintRow = {
   type: string
   expression: string
   enabled: boolean
+  references?: PlanningConstraintDto['references']
 }
 
 const CONSTRAINT_TYPES = [
@@ -39,6 +41,7 @@ const CONSTRAINT_TYPES = [
   'co2_limit',
   'annual_purchase_cost_limit',
   'ratio',
+  'step_relation',
 ]
 
 export default function PlanningPage() {
@@ -53,6 +56,9 @@ export default function PlanningPage() {
   const [expression, setExpression] = useState('')
   const [variables, setVariables] = useState<VariableRow[]>([])
   const [constraints, setConstraints] = useState<ConstraintRow[]>([])
+  const [baseConfig, setBaseConfig] = useState<PlanningConfigBody | null>(null)
+  const [view, setView] = useState<'form' | 'document'>('form')
+  const [documentText, setDocumentText] = useState(planningToYaml(EMPTY_PLANNING))
   const [saving, setSaving] = useState(false)
   const [reloading, setReloading] = useState(false)
   const [conflict, setConflict] = useState(false)
@@ -62,7 +68,18 @@ export default function PlanningPage() {
   const [devicesError, setDevicesError] = useState<string | null>(null)
 
   function applyConfig(body: PlanningConfigBody | null, rev: number | null) {
-    setSense(body?.objective.sense ?? '')
+    setBaseConfig(body)
+    setDocumentText(planningToYaml(body ?? EMPTY_PLANNING))
+    populateForm(body)
+    setRevision(rev)
+    setConflict(false)
+    setFormError(null)
+    setNotice(null)
+  }
+
+  function populateForm(body: PlanningConfigBody | null) {
+    const rawSense = body?.objective.sense
+    setSense(rawSense === 'minimize' || rawSense === 'maximize' ? rawSense : '')
     setExpression(body?.objective.expression ?? '')
     setVariables(Object.entries(body?.variables ?? {}).map(([name, value]) => ({
       id: newId(),
@@ -78,12 +95,9 @@ export default function PlanningPage() {
       name,
       type: value.type,
       expression: value.expression,
-      enabled: value.enabled,
+      enabled: value.enabled !== false,
+      references: value.references,
     })))
-    setRevision(rev)
-    setConflict(false)
-    setFormError(null)
-    setNotice(null)
   }
 
   useEffect(() => {
@@ -164,16 +178,75 @@ export default function PlanningPage() {
         type: row.type,
         expression: row.expression.trim(),
         enabled: row.enabled,
+        ...(row.type === 'step_relation' && row.references ? { references: row.references } : {}),
       }
     }
     setFormError(null)
-    return { objective: { sense, expression: expression.trim() }, variables: variableMap, constraints: constraintMap }
+    return {
+      ...(baseConfig ?? EMPTY_PLANNING),
+      objective: { ...(baseConfig?.objective ?? {}), sense, expression: expression.trim() },
+      variables: variableMap,
+      constraints: constraintMap,
+    }
+  }
+
+  function switchView(target: 'form' | 'document') {
+    if (target === view || saving || reloading) return
+    if (target === 'document') {
+      setDocumentText(planningDraftToYaml(
+        {
+          ...(baseConfig ?? EMPTY_PLANNING),
+          objective: { ...(baseConfig?.objective ?? {}), sense, expression },
+        },
+        variables.map((row) => [row.name, {
+          device_ref: row.device_ref,
+          parameter: row.parameter,
+          lower_bound: row.lower_bound || null,
+          upper_bound: row.upper_bound || null,
+          unit: row.unit || null,
+        }]),
+        constraints.map((row) => [row.name, {
+          type: row.type,
+          expression: row.expression,
+          enabled: row.enabled,
+          ...(row.type === 'step_relation' && row.references ? { references: row.references } : {}),
+        }]),
+      ))
+    } else {
+      try {
+        const parsed = planningFromYaml(documentText)
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed) ||
+            !parsed.objective || typeof parsed.objective !== 'object' || Array.isArray(parsed.objective) ||
+            (parsed.variables !== undefined && (typeof parsed.variables !== 'object' || Array.isArray(parsed.variables))) ||
+            (parsed.constraints !== undefined && (typeof parsed.constraints !== 'object' || Array.isArray(parsed.constraints)))) {
+          throw new Error('Planning YAML root needs an objective mapping')
+        }
+        setBaseConfig(parsed)
+        populateForm(parsed)
+      } catch (err) {
+        setFormError(String(err instanceof Error ? err.message : err))
+        return
+      }
+    }
+    setFormError(null)
+    setView(target)
   }
 
   async function handleSave() {
     if (projectId === undefined) return
-    const body = buildConfig()
-    if (!body) return
+    let body: PlanningConfigBody
+    if (view === 'document') {
+      try {
+        body = planningFromYaml(documentText)
+      } catch (err) {
+        setFormError(String(err instanceof Error ? err.message : err))
+        return
+      }
+    } else {
+      const form = buildConfig()
+      if (!form) return
+      body = form
+    }
     setSaving(true)
     setNotice(null)
     setConflict(false)
@@ -228,6 +301,12 @@ export default function PlanningPage() {
         </Button>
       </div>
       <p>{pt('ies.planning.intro')}</p>
+      <div className="ies-flex" role="group" aria-label={pt('ies.planning.view_label')}>
+        <Button variant={view === 'form' ? 'primary' : 'secondary'} disabled={saving || reloading}
+          onClick={() => switchView('form')}>{pt('ies.planning.form_tab')}</Button>
+        <Button variant={view === 'document' ? 'primary' : 'secondary'} disabled={saving || reloading}
+          onClick={() => switchView('document')}>{pt('ies.planning.document_tab')}</Button>
+      </div>
       {notice && <Alert variant="success">{notice}</Alert>}
       {formError && <Alert variant="error">{formError}</Alert>}
       {conflict && (
@@ -241,6 +320,15 @@ export default function PlanningPage() {
         disabled={saving || reloading}
         style={{ border: 0, margin: 0, padding: 0, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 'var(--ies-space-4)' }}
       >
+      {view === 'document' ? (
+        <Card title={pt('ies.planning.document_tab')}>
+          <FormField label={pt('ies.planning.document_label')} htmlFor="planning-yaml"
+            hint={pt('ies.planning.document_hint')}>
+            <Textarea id="planning-yaml" value={documentText} spellCheck={false}
+              onChange={(e) => setDocumentText(e.target.value)} rows={24} />
+          </FormField>
+        </Card>
+      ) : (<>
       <Card title={pt('ies.planning.objective')}>
         <FormField label={pt('ies.planning.sense')} htmlFor="planning-sense" required>
           <Select id="planning-sense" value={sense} onChange={(e) => setSense(e.target.value as Sense)}>
@@ -387,6 +475,9 @@ export default function PlanningPage() {
               <Textarea id={'planning-con-expression-' + row.id} value={row.expression}
                 onChange={(e) => updateConstraint(row.id, { expression: e.target.value })} rows={2} />
             </FormField>
+            {row.type === 'step_relation' && (
+              <p>{pt('ies.planning.step_references_hint')}</p>
+            )}
           </div>
         ))}
         <div style={{ marginTop: 'var(--ies-space-3)' }}>
@@ -395,6 +486,7 @@ export default function PlanningPage() {
           }])}>{pt('ies.planning.add_constraint')}</Button>
         </div>
       </Card>
+      </>)}
       </fieldset>
     </div>
   )
