@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import copy
 from dataclasses import replace
-from hashlib import sha256
 import json
 import logging
 import resource
@@ -35,9 +34,12 @@ from test_project_model import _inputs, _contribution, HEATER_YAML, POINTS
 def measured_generate():
     """One generate, instrumented at the actual build/writer/metadata boundaries."""
     inputs = _campus_inputs()
-    artifact = inputs[0]
     stages = {}
     captured = {}
+    # reset_peak() is useful for stage-local peaks but erases its previous
+    # high water. Preserve each interval high water before every reset and
+    # aggregate them to cover the *entire* generate call.
+    memory_peaks = {"whole_generate": 0}
     original_new = project._new_builder
     original_build = generator.build_project_model_package
     original_writer = generator.write_mps
@@ -50,16 +52,23 @@ def measured_generate():
 
     def measure(label, fn):
         def wrapped(*args, **kwargs):
+            # Capture uninstrumented work between the previous stage and this
+            # one before restarting a stage-local high-water interval.
+            _current, preceding_peak = tracemalloc.get_traced_memory()
+            memory_peaks["whole_generate"] = max(
+                memory_peaks["whole_generate"], preceding_peak,
+            )
             tracemalloc.reset_peak()
             start = time.perf_counter()
             result = fn(*args, **kwargs)
             elapsed_ms = (time.perf_counter() - start) * 1000
             _current, peak = tracemalloc.get_traced_memory()
+            memory_peaks["whole_generate"] = max(
+                memory_peaks["whole_generate"], peak,
+            )
             stages[label] = {
                 "wall_ms": round(elapsed_ms, 3),
                 "traced_peak_bytes": peak,
-                # Linux Docker runner reports ru_maxrss in KiB.
-                "process_peak_rss_kib": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss,
             }
             if label == "model_and_recovery_declarations":
                 captured["model"] = result[0]
@@ -80,7 +89,8 @@ def measured_generate():
         ):
             bundle = generator.HIGHS_MILP_PROVIDER.generate(*inputs)
         total_ms = (time.perf_counter() - start) * 1000
-        _current, total_peak = tracemalloc.get_traced_memory()
+        _current, last_interval_peak = tracemalloc.get_traced_memory()
+        total_peak = max(memory_peaks["whole_generate"], last_interval_peak)
     finally:
         tracemalloc.stop()
 
@@ -88,8 +98,9 @@ def measured_generate():
     from iesplan.computation import export_bundle_files
     files = export_bundle_files(bundle)
     baseline = {
-        "fixture": "public campus sample, one operational year, no private data",
-        "assembly_sha256": sha256(artifact.canonical_text.encode()).hexdigest(),
+        "fixture": "assembly/samples/valid/campus.assembly.yaml (public synthetic)",
+        "measurement_note": "wall time includes tracemalloc tracing overhead",
+        "rss_note": "ru_maxrss is the cumulative Pytest-process high-water mark, not an isolated generate RSS",
         "generator": generator.GENERATOR_REF,
         "points": captured["builder"].point_count,
         "columns": len(model.variables),
@@ -104,7 +115,7 @@ def measured_generate():
             max(0, total_ms - sum(v["wall_ms"] for v in stages.values())), 3,
         ),
         "full_generate_traced_peak_bytes": total_peak,
-        "process_peak_rss_kib": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss,
+        "pytest_process_cumulative_peak_rss_kib": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss,
         "stages": stages,
     }
     logging.warning("P1_S1_BASELINE %s", json.dumps(baseline, sort_keys=True))
@@ -120,6 +131,10 @@ def test_reproducible_generator_measurement(measured_generate):
         "model_and_recovery_declarations", "mps_write", "metadata_serialization",
     }
     assert data["total_wall_ms"] > 0
+    assert data["full_generate_traced_peak_bytes"] >= max(
+        stage["traced_peak_bytes"] for stage in data["stages"].values()
+    )
+    assert "assembly_sha256" not in data
     assert builder.inventory.relations  # AST-based, not deferred builder callbacks
 
 
