@@ -8,7 +8,7 @@ import { useParams } from 'react-router-dom'
 
 import { Alert, Button, Card, EmptyState, FormField, Input, Select, Spinner, Textarea } from '../components/ui'
 import { getPlanningConfig, savePlanningConfig } from '../features/config'
-import { EMPTY_PLANNING, planningFromYaml, planningToYaml } from '../features/config/planningDocument'
+import { EMPTY_PLANNING, planningDraftToYaml, planningFromYaml, planningToYaml } from '../features/config/planningDocument'
 import type { PlanningConfigBody, PlanningConstraintDto, PlanningVariableDto } from '../features/config'
 import { getModel } from '../features/modeling'
 import { errorMessage } from '../i18n'
@@ -190,54 +190,28 @@ export default function PlanningPage() {
     }
   }
 
-  function serializeFormState(): PlanningConfigBody {
-    const variableMap: Record<string, PlanningVariableDto> = {}
-    const usedVarNames = new Set<string>()
-    variables.forEach((row, index) => {
-      let key = row.name.trim()
-      if (!key || usedVarNames.has(key)) {
-        key = key ? `${key}_${index + 1}` : `variable_${index + 1}`
-      }
-      usedVarNames.add(key)
-      variableMap[key] = {
-        device_ref: row.device_ref.trim(),
-        parameter: row.parameter.trim(),
-        lower_bound: row.lower_bound.trim() || null,
-        upper_bound: row.upper_bound.trim() || null,
-        unit: row.unit.trim() || null,
-      }
-    })
-    const constraintMap: Record<string, PlanningConstraintDto> = {}
-    const usedConNames = new Set<string>()
-    constraints.forEach((row, index) => {
-      let key = row.name.trim()
-      if (!key || usedConNames.has(key)) {
-        key = key ? `${key}_${index + 1}` : `constraint_${index + 1}`
-      }
-      usedConNames.add(key)
-      constraintMap[key] = {
-        type: row.type || '',
-        expression: row.expression.trim(),
-        enabled: row.enabled !== false,
-        ...(row.type === 'step_relation' && row.references ? { references: row.references } : {}),
-      }
-    })
-    return {
-      ...(baseConfig ?? EMPTY_PLANNING),
-      objective: { ...(baseConfig?.objective ?? {}), sense, expression: expression.trim() },
-      variables: variableMap,
-      ...(constraints.length > 0 || (baseConfig?.constraints && Object.keys(baseConfig.constraints).length > 0)
-        ? { constraints: constraintMap }
-        : {}),
-    }
-  }
-
   function switchView(target: 'form' | 'document') {
     if (target === view || saving || reloading) return
     if (target === 'document') {
-      const state = serializeFormState()
-      setBaseConfig(state)
-      setDocumentText(planningToYaml(state))
+      setDocumentText(planningDraftToYaml(
+        {
+          ...(baseConfig ?? EMPTY_PLANNING),
+          objective: { ...(baseConfig?.objective ?? {}), sense, expression },
+        },
+        variables.map((row) => [row.name, {
+          device_ref: row.device_ref,
+          parameter: row.parameter,
+          lower_bound: row.lower_bound || null,
+          upper_bound: row.upper_bound || null,
+          unit: row.unit || null,
+        }]),
+        constraints.map((row) => [row.name, {
+          type: row.type,
+          expression: row.expression,
+          enabled: row.enabled,
+          ...(row.type === 'step_relation' && row.references ? { references: row.references } : {}),
+        }]),
+      ))
     } else {
       try {
         const parsed = planningFromYaml(documentText)

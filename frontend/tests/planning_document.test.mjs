@@ -5,7 +5,8 @@
 // before the deferred import initializes the bundled yaml dependency.
 import { createRequire } from 'node:module'
 globalThis.require = createRequire(import.meta.url)
-const { planningFromYaml, planningToYaml } = await import('../src/features/config/planningDocument.ts')
+const { planningDraftToYaml, planningFromYaml, planningToYaml } = await import('../src/features/config/planningDocument.ts')
+const { parseDocument } = await import('yaml')
 
 let failed = 0
 function check(name, ok) {
@@ -91,6 +92,38 @@ check('other form fields can change without dropping references', (() => {
   const read = planningFromYaml(planningToYaml(modified))
   return read.constraints.heat_gate.references.heat.interface === 'heat_out' && !read.constraints.disabled_gate.enabled
 })())
+
+const variableRows = [
+  ['variable_2', { ...parsed.variables.hp_cap }],
+  ['', { device_ref: '', parameter: '', lower_bound: null, upper_bound: null, unit: null }],
+  ['hp_cap', { ...parsed.variables.hp_cap, lower_bound: '11' }],
+  ['hp_cap_5', { ...parsed.variables.hp_cap, lower_bound: '22' }],
+  ['hp_cap', { ...parsed.variables.hp_cap, lower_bound: '33' }],
+  ['', { ...parsed.variables.hp_cap, lower_bound: '44' }],
+]
+const constraintRows = [
+  ['constraint_2', parsed.constraints.heat_gate],
+  ['', { type: '', expression: '', enabled: true }],
+  ['gate', parsed.constraints.heat_gate],
+  ['gate_5', parsed.constraints.scalar],
+  ['gate', parsed.constraints.disabled_gate],
+]
+const draftText = planningDraftToYaml(parsed, variableRows, constraintRows)
+// Inspect rows directly: a JSON object cannot represent duplicate draft names.
+const draftAst = parseDocument(draftText, { uniqueKeys: false })
+const draftVariables = draftAst.get('variables', true).items
+const draftConstraints = draftAst.get('constraints', true).items
+check('draft preserves all variable names and row order', JSON.stringify(draftVariables.map(p => p.key.value)) === JSON.stringify(variableRows.map(([name]) => name)))
+check('draft retains precise bounds in every variable row', JSON.stringify(draftVariables.map(p => p.value.get('lower_bound'))) === JSON.stringify(variableRows.map(([, value]) => value.lower_bound)))
+check('draft preserves all constraint names and row order', JSON.stringify(draftConstraints.map(p => p.key.value)) === JSON.stringify(constraintRows.map(([name]) => name)))
+check('draft retains every constraint expression', JSON.stringify(draftConstraints.map(p => p.value.get('expression'))) === JSON.stringify(constraintRows.map(([, value]) => value.expression)))
+check('draft retains disabled state and real references', draftConstraints[4].value.get('enabled') === false && draftConstraints[4].value.getIn(['references', 'heat', 'instance']) === 'hp1')
+let duplicateDraftRejected = false
+try { planningFromYaml(draftText) } catch { duplicateDraftRejected = true }
+check('duplicate draft rows remain rejected at save parsing', duplicateDraftRejected)
+
+const completeDraft = planningDraftToYaml(parsed, Object.entries(parsed.variables), Object.entries(parsed.constraints))
+check('complete form draft preserves the existing planning body', JSON.stringify(planningFromYaml(completeDraft)) === JSON.stringify(parsed))
 for (const [name, invalid] of [
   ['broken YAML', source + '\ninvalid: ['],
   ['duplicate keys', source.replace('  heat_gate:', '  scalar:\n    type: ratio\n    expression: 1 <= 2\n  heat_gate:')],

@@ -114,6 +114,42 @@ constraints:
     expression: heat[t] <= 0 kW
     enabled: false
 `
+  // An unnamed new row must not overwrite an existing variable_2 or constraint_2.
+  await page.locator('#planning-yaml').fill(yaml.replaceAll('hp_cap', 'variable_2'))
+  await page.getByRole('button', { name: /表单编辑|Form editor/ }).click()
+  await page.getByRole('button', { name: /添加规划变量|Add variable/ }).click()
+  await page.getByRole('button', { name: /完整 YAML 文档|Full YAML document/ }).click()
+  expect(await page.locator('#planning-yaml').inputValue()).toContain('heat[t] <= 0.5 * variable_2')
+  await page.getByRole('button', { name: /表单编辑|Form editor/ }).click()
+  await expect(page.locator('[id^="planning-var-name-"]')).toHaveCount(2)
+  await expect(page.locator('[id^="planning-var-name-"]').first()).toHaveValue('variable_2')
+  await expect(page.locator('[id^="planning-var-name-"]').nth(1)).toHaveValue('')
+  await expect(page.locator('[id^="planning-var-param-"]').first()).toHaveValue('rated_heat_kw')
+  await expect(page.locator('[id^="planning-var-lower-"]').first()).toHaveValue('50.000000000000000000000000000001')
+  await page.getByRole('button', { name: /完整 YAML 文档|Full YAML document/ }).click()
+  const singleConstraint = yaml.slice(0, yaml.indexOf('\nconstraints:')) + `
+constraints:
+  constraint_2:
+    type: step_relation
+    references:
+      heat:
+        instance: hp1
+        interface: heat_out
+    expression: heat[t] <= 0.5 * hp_cap
+    enabled: false
+`
+  await page.locator('#planning-yaml').fill(singleConstraint)
+  await page.getByRole('button', { name: /表单编辑|Form editor/ }).click()
+  await page.getByRole('button', { name: /添加约束|Add constraint/ }).click()
+  await page.getByRole('button', { name: /完整 YAML 文档|Full YAML document/ }).click()
+  expect(await page.locator('#planning-yaml').inputValue()).toContain('interface: heat_out')
+  await page.getByRole('button', { name: /表单编辑|Form editor/ }).click()
+  await expect(page.locator('[id^="planning-con-name-"]')).toHaveCount(2)
+  await expect(page.locator('[id^="planning-con-name-"]').first()).toHaveValue('constraint_2')
+  await expect(page.locator('[id^="planning-con-name-"]').nth(1)).toHaveValue('')
+  await expect(page.locator('[id^="planning-con-expression-"]').first()).toHaveValue('heat[t] <= 0.5 * hp_cap')
+  await expect(page.locator('[id^="planning-con-enabled-"]').first()).toHaveValue('false')
+  await page.getByRole('button', { name: /完整 YAML 文档|Full YAML document/ }).click()
   await page.locator('#planning-yaml').fill(yaml)
 
   // Hold real network PUT; UI should lock document and view selector, then recover.

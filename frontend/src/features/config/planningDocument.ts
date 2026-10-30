@@ -3,8 +3,8 @@
  * not a second resource or new public file protocol. Never convert decimal
  * bounds through JavaScript Number when reading plain YAML scalars.
  */
-import { isMap, isScalar, parseDocument, stringify } from 'yaml'
-import type { PlanningConfigBody } from './contracts'
+import { Document, isMap, isScalar, Pair, parseDocument, stringify, YAMLMap } from 'yaml'
+import type { PlanningConfigBody, PlanningConstraintDto, PlanningVariableDto } from './contracts'
 
 export const EMPTY_PLANNING: PlanningConfigBody = {
   objective: { sense: 'minimize', expression: '' },
@@ -14,6 +14,25 @@ export const EMPTY_PLANNING: PlanningConfigBody = {
 
 export function planningToYaml(body: PlanningConfigBody): string {
   return stringify(body, { lineWidth: 0 })
+}
+
+/** Editing rows may have empty/duplicate names; do not collapse them into objects. */
+export function planningDraftToYaml(
+  body: PlanningConfigBody,
+  variables: ReadonlyArray<readonly [string, PlanningVariableDto]>,
+  constraints: ReadonlyArray<readonly [string, PlanningConstraintDto]>,
+): string {
+  const doc = new Document(body)
+  function rows<T>(entries: ReadonlyArray<readonly [string, T]>): YAMLMap {
+    const mapping = new YAMLMap(doc.schema)
+    for (const [name, value] of entries) {
+      mapping.items.push(new Pair(doc.createNode(name), doc.createNode(value)))
+    }
+    return mapping
+  }
+  doc.set('variables', rows(variables))
+  doc.set('constraints', rows(constraints))
+  return doc.toString({ lineWidth: 0 })
 }
 
 export function planningFromYaml(source: string): PlanningConfigBody {
