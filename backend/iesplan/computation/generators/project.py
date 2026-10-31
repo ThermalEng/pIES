@@ -48,6 +48,7 @@ from iesplan.computation.generators.sources import SourceTrace, SourceRows, Sour
 from iesplan.computation.generators.compiler_ir import (
     CompilerInventory,
     CompilerAnalysis,
+    BoundFact,
     SemanticRelation,
     CapacityLimit,
     StateInitial,
@@ -615,47 +616,129 @@ class _ProjectBuilder:
 
         数值直接换算；未被接管的 property 引用按实例解析。被规划
         变量接管的 property 不再用实例旧值：静态安全界取规划变量
-        对应界（maximum 取 upper_bound，minimum 取 lower_bound，
-        缺失则 None），并返回规划变量名供逐时容量行使用。
+        对应界，并返回规划变量名供逐时容量行使用。
         """
+        num_internal = None if number is None else _to_internal(float(number), unit)
         if ref is not None and (inst, ref) in self.bound_prop:
             pname = self.bound_prop[(inst, ref)]
             spec = self.plan_vars[pname]
             punit = spec.get("unit") or unit
             raw = spec.get("upper_bound" if side == "upper" else "lower_bound")
-            bound = None if raw is None else _to_internal(float(raw), punit)
+            p_bound = None if raw is None else _to_internal(float(raw), punit)
+            if num_internal is not None and p_bound is not None:
+                bound = min(num_internal, p_bound) if side == "upper" else max(num_internal, p_bound)
+            elif num_internal is not None:
+                bound = num_internal
+            else:
+                bound = p_bound
             return bound, pname
         if ref is not None:
             value, punit = self._prop_value_unit(inst, ref)
-            return _to_internal(value, punit), None
-        if number is None:
-            return None, None
-        return _to_internal(number, unit), None
+            ref_internal = _to_internal(value, punit)
+            if num_internal is not None:
+                bound = min(num_internal, ref_internal) if side == "upper" else max(num_internal, ref_internal)
+            else:
+                bound = ref_internal
+            return bound, None
+        return num_internal, None
 
     def _declare_global_symbols(self) -> None:
         """Declare each planning decision once, before binding any instance."""
         for name in sorted(self.plan_vars):
             spec = self.plan_vars[name]
             inst, prop = spec["device_ref"], spec["parameter"]
-            self._source(name, "planning", kind="symbol", location=SourceLocation(
+            project_source = SourceLocation(
                 f"planning.variables.{name}", inst, self.models[inst].device_id,
                 self.devices[inst]["definition"].get("revision"), binding_id=name,
-            ))
+            )
+            self._source(name, "planning", kind="symbol", location=project_source)
             model_var = self.models[inst].variables[prop]
             unit = spec.get("unit") or model_var.unit
-            lower = spec.get("lower_bound")
-            upper = spec.get("upper_bound")
-            lo = 0.0 if lower is None else _to_internal(float(lower), unit)
-            hi = None if upper is None else _to_internal(float(upper), unit)
+            model_source = SourceLocation(
+                f"properties.{prop}.valid_range", inst, self.models[inst].device_id,
+                self.devices[inst]["definition"].get("revision"),
+            )
+            m_lo = None
+            m_hi = None
+            if model_var.valid_range is not None:
+                m_min, m_max = model_var.valid_range
+                if m_min is not None:
+                    m_lo = _to_internal(float(m_min), model_var.unit)
+                if m_max is not None:
+                    m_hi = _to_internal(float(m_max), model_var.unit)
+            model_domain = (m_lo, m_hi) if (m_lo is not None or m_hi is not None) else None
+
+            raw_lower = spec.get("lower_bound")
+            raw_upper = spec.get("upper_bound")
+            p_lo = None if raw_lower is None else _to_internal(float(raw_lower), unit)
+            p_hi = None if raw_upper is None else _to_internal(float(raw_upper), unit)
+            project_boundary = (p_lo, p_hi) if (p_lo is not None or p_hi is not None) else None
+
+            # Lower bound intersection: max(m_lo, p_lo)
+            if m_lo is not None and p_lo is not None:
+                lo = max(m_lo, p_lo)
+                lo_source = project_source if p_lo >= m_lo else model_source
+            elif m_lo is not None:
+                lo = m_lo
+                lo_source = model_source
+            elif p_lo is not None:
+                lo = p_lo
+                lo_source = project_source
+            else:
+                lo = 0.0
+                lo_source = project_source
+
+            # Upper bound intersection: min(m_hi, p_hi)
+            if m_hi is not None and p_hi is not None:
+                hi = min(m_hi, p_hi)
+                hi_source = project_source if p_hi <= m_hi else model_source
+            elif m_hi is not None:
+                hi = m_hi
+                hi_source = model_source
+            elif p_hi is not None:
+                hi = p_hi
+                hi_source = project_source
+            else:
+                hi = None
+                hi_source = None
+
+            if lo is not None and hi is not None and lo > hi:
+                raise LoweringUnsupportedError(
+                    f"有效域冲突：规划变量 {name!r} 模型有效域 {model_domain} "
+                    f"与项目界 {project_boundary} 交集为空 (lower={lo} > upper={hi})",
+                    model_source={
+                        "source": f"symbol:{name}",
+                        "role": "planning_bound_conflict",
+                        "axis": "scalar",
+                        "index": 0,
+                        "location": {
+                            "planning_variable": name,
+                            "device_ref": inst,
+                            "parameter": prop,
+                            "model_domain": model_domain,
+                            "project_boundary": project_boundary,
+                        },
+                    },
+                )
+
             self._declare(name, lo, hi, "continuous", unit)
             self.inventory.symbols[name] = SymbolDeclaration(
-                name, "planning", IndexDomain("scalar"), unit,
-                SourceLocation(f"planning.variables.{name}", inst,
-                               self.models[inst].device_id,
-                               self.devices[inst]["definition"].get("revision"),
-                               binding_id=name),
+                name, "planning", IndexDomain("scalar"), unit, project_source,
             )
             self.inventory.property_bindings[(inst, prop)] = name
+            fact = BoundFact(
+                symbol=name,
+                lower=lo,
+                upper=hi,
+                lower_source=lo_source,
+                upper_source=hi_source,
+                model_domain=model_domain,
+                model_source=model_source if model_domain is not None else None,
+                project_boundary=project_boundary,
+                project_source=project_source if project_boundary is not None else None,
+            )
+            self.inventory.bound_facts[name] = fact
+            self.inventory.bound_facts[f"{inst}.{prop}"] = fact
         self.inventory.coefficients["step_duration"] = KnownCoefficient(
             "step_duration", "step_duration",
             SourceLocation("project_baseline.resolution"), self.step_s,
@@ -707,17 +790,8 @@ class _ProjectBuilder:
                 key = (inst, name)
                 if key in self.bound_prop:
                     pname = self.bound_prop[key]
-                    spec = self.plan_vars[pname]
-                    unit = spec.get("unit") or var.unit
-                    lower = spec.get("lower_bound")
-                    upper = spec.get("upper_bound")
-                    # 建设容量变量缺席下界即模型语义下界 0（规划契约；
-                    # 线性层 None 表 -inf，MPS 的 FR+UP 会被 HiGHS 判重复
-                    # 定义丢弃上界，必须在此落实为 LO 0）。
-                    lower_f = 0.0 if lower is None else _to_internal(float(lower), unit)
-                    upper_f = None if upper is None else _to_internal(float(upper), unit)
-                    symbols[name] = ("var", lower_f, upper_f)
-                    # Global declaration already owns this exact capacity symbol.
+                    var_decl = self.variables[pname]
+                    symbols[name] = ("var", var_decl.lower, var_decl.upper)
                 else:
                     symbols[name] = ("const", prop_const[name])
             else:
@@ -731,6 +805,17 @@ class _ProjectBuilder:
                     var.valid_range[1] if var.valid_range else None,
                     var.maximum_property_ref, "upper",
                 )
+                if lower is not None and upper is not None and lower > upper:
+                    raise LoweringUnsupportedError(
+                        f"有效域冲突：变量 {inst}.{name} 界颠倒 (lower={lower} > upper={upper})",
+                        model_source={
+                            "source": f"variable:{inst}.{name}",
+                            "role": "bound_conflict",
+                            "axis": "step",
+                            "index": 0,
+                            "location": {"instance": inst, "variable": name},
+                        },
+                    )
                 symbols[name] = ("var", lower, upper)
                 if pname_lo is not None:
                     caps.append((name, pname_lo, "ge"))
@@ -750,6 +835,17 @@ class _ProjectBuilder:
                 inst, flow.unit, flow.valid_range[1],
                 flow.maximum_property_ref, "upper",
             )
+            if lower is not None and upper is not None and lower > upper:
+                raise LoweringUnsupportedError(
+                    f"有效域冲突：接口 {inst}.{iface_name} 界颠倒 (lower={lower} > upper={upper})",
+                    model_source={
+                        "source": f"interface:{inst}.{iface_name}",
+                        "role": "bound_conflict",
+                        "axis": "step",
+                        "index": 0,
+                        "location": {"instance": inst, "interface": iface_name},
+                    },
+                )
             symbols[iface_name] = ("var", lower, upper)
             if pname_lo is not None:
                 caps.append((iface_name, pname_lo, "ge"))
@@ -768,6 +864,17 @@ class _ProjectBuilder:
             self.inventory.outputs.append(OutputReference(
                 identity, identity, IndexDomain("step", self.point_count), origin,
             ))
+            m_domain = (
+                _to_internal(float(flow.valid_range[0]), flow.unit) if flow.valid_range[0] is not None else None,
+                _to_internal(float(flow.valid_range[1]), flow.unit) if flow.valid_range[1] is not None else None,
+            ) if (flow.valid_range and (flow.valid_range[0] is not None or flow.valid_range[1] is not None)) else None
+            self.inventory.bound_facts[identity] = BoundFact(
+                symbol=identity,
+                lower=lower,
+                upper=upper,
+                model_domain=m_domain,
+                model_source=origin if m_domain is not None else None,
+            )
         for name, var in contribution.variables.items():
             if var.kind == "property":
                 continue
@@ -785,6 +892,17 @@ class _ProjectBuilder:
             self.inventory.outputs.append(OutputReference(
                 identity, identity, IndexDomain("step", self.point_count), origin,
             ))
+            m_domain = (
+                _to_internal(float(var.valid_range[0]), var.unit) if var.valid_range and var.valid_range[0] is not None else None,
+                _to_internal(float(var.valid_range[1]), var.unit) if var.valid_range and var.valid_range[1] is not None else None,
+            ) if (var.valid_range and (var.valid_range[0] is not None or var.valid_range[1] is not None)) else None
+            self.inventory.bound_facts[identity] = BoundFact(
+                symbol=identity,
+                lower=lower,
+                upper=upper,
+                model_domain=m_domain,
+                model_source=origin if m_domain is not None else None,
+            )
         initial: dict[str, float | LinearExpression] = {}
         for state in contribution.states:
             variable = contribution.variables[state]

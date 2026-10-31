@@ -300,6 +300,21 @@ class BoundRequest:
     value: float | None
 
 
+@dataclass(frozen=True, slots=True)
+class BoundFact:
+    """Declared, intersected, or derived bound fact with provenance."""
+
+    symbol: str
+    lower: float | None = None
+    upper: float | None = None
+    lower_source: SourceLocation | None = None
+    upper_source: SourceLocation | None = None
+    model_domain: tuple[float | None, float | None] | None = None
+    model_source: SourceLocation | None = None
+    project_boundary: tuple[float | None, float | None] | None = None
+    project_source: SourceLocation | None = None
+
+
 class CompilerAnalysis:
     """One read-only relation/usage view and one existing-box-bound entrypoint.
 
@@ -392,14 +407,45 @@ class CompilerAnalysis:
             remaining.remove(ready)
         return tuple(result)
 
+    def bound_fact(self, name: str) -> BoundFact | None:
+        """Query unified bound fact and provenance for a symbol."""
+        if name in self.inventory.bound_facts:
+            return self.inventory.bound_facts[name]
+        if "." in name:
+            inst, _, prop = name.partition(".")
+            bound_name = self.inventory.property_bindings.get((inst, prop))
+            if bound_name and bound_name in self.inventory.bound_facts:
+                return self.inventory.bound_facts[bound_name]
+        var = self.variables.get(name)
+        if var is not None:
+            return BoundFact(
+                symbol=name,
+                lower=var.lower,
+                upper=var.upper,
+            )
+        return None
+
     def variable_bounds(
         self, name: str, *, relation: SemanticRelation | None = None,
         period: int | None = None,
     ) -> tuple[float | None, float | None]:
         variable = self.variables.get(name)
         if variable is None:
-            raise LoweringUnsupportedError(f"查询未知求解变量 {name!r}")
-        result = (variable.lower, variable.upper)
+            resolved_name = name
+            if "." in name:
+                inst, _, prop = name.partition(".")
+                resolved_name = self.inventory.property_bindings.get((inst, prop), name)
+                variable = self.variables.get(resolved_name)
+            if variable is None:
+                fact = self.inventory.bound_facts.get(resolved_name) or self.inventory.bound_facts.get(name)
+                if fact is not None:
+                    result = (fact.lower, fact.upper)
+                else:
+                    raise LoweringUnsupportedError(f"查询未知求解变量 {name!r}")
+            else:
+                result = (variable.lower, variable.upper)
+        else:
+            result = (variable.lower, variable.upper)
         if relation is not None:
             self.bound_requests.extend(
                 BoundRequest(relation.identity, relation.source, period, side,
@@ -474,12 +520,18 @@ class CompilerInventory:
     relations: list[RelationFamily] = field(default_factory=list)
     outputs: list[OutputReference] = field(default_factory=list)
     operations: list[SemanticRelation] = field(default_factory=list)
+    bound_facts: dict[str, BoundFact] = field(default_factory=dict)
     sealed: bool = False
 
     def collect(self, operation: SemanticRelation) -> None:
         if self.sealed:
             raise RuntimeError("no source relations after collection barrier")
         self.operations.append(operation)
+
+    def register_bound_fact(self, fact: BoundFact) -> None:
+        if self.sealed:
+            raise RuntimeError("no bound facts after collection barrier")
+        self.bound_facts[fact.symbol] = fact
 
     def seal(self) -> None:
         self.sealed = True
