@@ -1094,8 +1094,14 @@ class _ProjectBuilder:
                          if op.identity == rid)
                 ].input_symbols
             }))
+            # VAT settlement is continuous across the whole evaluation
+            # timeline, including construction months with no operating steps.
+            # spans contains only operating months, so initialise every
+            # financial month explicitly and attach (0, 0) to non-operating
+            # periods below.
             period_terms: dict[int, list[FinancialAmountTerm]] = {
-                month: [] for month, _start, _end in spans
+                month: []
+                for month in range(1, 12 * self.evaluation.evaluation_years + 1)
             }
 
             def add_period_term(
@@ -1232,7 +1238,11 @@ class _ProjectBuilder:
             previous_id: str | None = None
             previous_carry: str | None = None
             opening_credit = _money_to_internal(pool.opening_credit)
-            for month, start, end in spans:
+            operating_span_by_month = {
+                month: (start, end) for month, start, end in spans
+            }
+            for month in range(1, 12 * self.evaluation.evaluation_years + 1):
+                start, end = operating_span_by_month.get(month, (0, 0))
                 period_id = f"vat.{pool_id}.m{month}"
                 terms = tuple(period_terms.get(month, ()))
                 source_operations = {
