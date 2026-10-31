@@ -10,6 +10,7 @@ import subprocess
 import pytest
 
 from iesplan.computation import HIGHS_ADAPTER_PATH
+from iesplan.computation.generators.compiler_ir import CompilerAnalysis
 from iesplan.computation.generators.linear import (
     LinearConstraint,
     LinearExpression,
@@ -84,6 +85,10 @@ def _rows(battery, *, capacity=None, power=None, soc=0.5, minimum=0.1,
     # reintroducing the removed mixed declaration/expansion entrypoint.
     builder._declare_global_symbols()
     bound = builder._bind_instance_symbols("cell")
+    # This isolated two-step harness deliberately has no finance/network input.
+    # Still honor the same immutable analysis barrier as public generate.
+    builder.inventory.seal()
+    builder.analysis = CompilerAnalysis(builder.inventory, builder.variables)
     builder._expand_instance("cell", bound)
     builder._build_relations("cell", bound)
     return builder
