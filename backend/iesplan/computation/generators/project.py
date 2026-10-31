@@ -2424,17 +2424,14 @@ class _ProjectBuilder:
     def _build_vat(self) -> _AffineAcc | None:
         """各池连续月度 paid/carry 精确链；返回 NPV 现金仿射（或 None）。
 
-        ``paid - carry = out - in - 上月余额`` 等式 + 非负 + 互斥
-        （已有 Big-M，界由变量界与累计推导）确定唯一精确状态，不靠
-        目标压紧；退款按声明从可用留抵扣减（超额即不可行），到账月记
-        现金，期后到账仅应收。约束与目标选择无关，现金只入 NPV。
+        月范围、期初留抵、退款领取/到账以及上月余额连接均来自 collection
+        barrier 前的 vat_period 声明；本阶段只把这些语义关系精确降级
+        为现有 paid/carry/mutex 行，不再重新解释 credit_pools 的时序。
         """
         operations = self.analysis.relations("vat")
         if not operations:
             return None
         evaluation = self.evaluation
-        months = 12 * evaluation.evaluation_years
-        spans = self._vat_month_spans()
         taken = set(self.variables)
         cash = _AffineAcc()
         rate = evaluation.discount_rate
@@ -2442,54 +2439,57 @@ class _ProjectBuilder:
         def discount(year: int) -> float:
             return (1.0 + rate) ** year
 
+        all_periods = self.analysis.relations("vat_period")
         for operation in operations:
             pool_id = operation.payload.pool_id
-            pool = self.finance.credit_pools[pool_id]
-            out_list, in_list = self._vat_pool_month_bases(operation.payload.rules, spans)
-            claims: dict[int, float] = {}
-            arrivals: dict[int, float] = {}
+            pool = operation.payload.pool
+            periods = tuple(sorted(
+                (
+                    relation for relation in all_periods
+                    if relation.payload.pool_id == pool_id
+                ),
+                key=lambda relation: relation.payload.month,
+            ))
+            spans = [
+                (relation.payload.month, relation.payload.start, relation.payload.end)
+                for relation in periods
+            ]
+            out_list, in_list = self._vat_pool_month_bases(
+                operation.payload.rules, spans
+            )
             for refund in pool.refunds:
-                amount = _money_to_internal(refund.amount)
-                claims[refund.period] = claims.get(refund.period, 0.0) + amount
-                if refund.arrival_period <= months:
-                    arrivals[refund.arrival_period] = (
-                        arrivals.get(refund.arrival_period, 0.0) + amount
-                    )
                 self._fact_refunds.append(
                     {
                         "pool": pool_id,
                         "period": refund.period,
                         "arrival_period": refund.arrival_period,
-                        "amount": amount,
+                        "amount": _money_to_internal(refund.amount),
                     }
                 )
-            cumulative_hi = _money_to_internal(pool.opening_credit)
+            cumulative_hi = periods[0].payload.opening_credit if periods else 0.0
             previous = _AffineAcc()
             previous.add_const(cumulative_hi)
-            for month in range(1, months + 1):
+            for period_relation in periods:
+                period = period_relation.payload
+                month = period.month
                 location = f"VAT 池 {pool_id!r} 第 {month} 月"
                 out_max = self.analysis.affine_side(
                     out_list[month - 1], side="max", label=location,
-                    relation=operation, period=month,
+                    relation=period_relation, period=month,
                 )
                 out_min = self.analysis.affine_side(
                     out_list[month - 1], side="min", label=location,
-                    relation=operation, period=month,
+                    relation=period_relation, period=month,
                 )
                 in_max = self.analysis.affine_side(
                     in_list[month - 1], side="max", label=location,
-                    relation=operation, period=month,
+                    relation=period_relation, period=month,
                 )
                 in_min = self.analysis.affine_side(
                     in_list[month - 1], side="min", label=location,
-                    relation=operation, period=month,
+                    relation=period_relation, period=month,
                 )
-                # 留抵上界须覆盖销项为负（销售记账抵减）的一侧：单调递推
-                # cumulative_hi（只增不减）保证归纳每一步不切割真解；
-                # max 内置于递推会破坏归纳，此处不取。
                 cumulative_hi += max(in_max - out_min, 0.0)
-                # 上月余额非负（期初解析禁负 + 退款声明受可用约束），
-                # 故实缴上界取 max(out - in, 0) 的盒确界即 sound。
                 paid_hi = max(out_max - in_min, 0.0)
                 if not math.isfinite(paid_hi):
                     raise LoweringUnsupportedError(
@@ -2512,7 +2512,7 @@ class _ProjectBuilder:
                 if paid_hi > 0.0 and cumulative_hi > 0.0:
                     mutex = self.analysis.mutex(
                         f"vat__{pool_id}__m{month}", paid_name, carry_name,
-                        relation=operation, period=month,
+                        relation=period_relation, period=month,
                     )
                     binary = mutex.variables[0]
                     self.variables[binary.name] = binary
@@ -2531,7 +2531,7 @@ class _ProjectBuilder:
                         rhs=0.0,
                     )
                 )
-                claim = claims.get(month, 0.0)
+                claim = period.refund_claim
                 if claim > 0.0:
                     claim_expr = _AffineAcc()
                     claim_expr.add_term(carry_name, 1.0)
@@ -2545,11 +2545,11 @@ class _ProjectBuilder:
                     )
                 year = (month + 11) // 12
                 cash.add_term(paid_name, -1.0 / discount(year))
-                if month in arrivals:
-                    cash.add_const(arrivals[month] / discount(year))
+                if period.refund_arrival:
+                    cash.add_const(period.refund_arrival / discount(year))
                 self._year_cash(year).add_term(paid_name, -1.0)
-                if month in arrivals:
-                    self._year_cash(year).add_const(arrivals[month])
+                if period.refund_arrival:
+                    self._year_cash(year).add_const(period.refund_arrival)
                 self._fact_vat.append(
                     {
                         "pool": pool_id,
@@ -2557,7 +2557,7 @@ class _ProjectBuilder:
                         "paid": paid_name,
                         "carry": carry_name,
                         "claim": claim,
-                        "arrival": arrivals.get(month, 0.0),
+                        "arrival": period.refund_arrival,
                     }
                 )
                 previous = _AffineAcc()
