@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import json
 import math
+import time
 from collections import Counter
 from collections.abc import Mapping
 from datetime import datetime, timedelta
@@ -84,7 +85,10 @@ from iesplan.computation.generators.linear import (
     lower_expression,
     lower_planning_constraint,
     lower_planning_expression,
-    lower_relation,
+)
+from iesplan.computation.generators.templates import (
+    TechnicalTemplate, StepConstraintTemplate, compile_technical,
+    bind_technical, compile_step_constraint,
 )
 from iesplan.computation.protocols import CalculationConfig, StopProbe, read_stop_reason
 from iesplan.computation.sequences import (
@@ -472,6 +476,25 @@ class _ProjectBuilder:
         self.inventory = CompilerInventory()
         self._instance_relations: dict[str, tuple[RelationFamily, ...]] = {}
         self.analysis: CompilerAnalysis | None = None
+        # Per-generate compiled structures, never published or persisted.
+        self._technical_templates: dict[str, TechnicalTemplate] = {}
+        self._step_templates: dict[str, StepConstraintTemplate] = {}
+        self.template_block_size = 256  # internal scheduling only, not a business input
+        self.template_stats: dict[str, int | float] = {
+            "technical_compiles": 0,
+            "technical_binds": 0,
+            "affine_direct_rows": 0,
+            "mutex_fallback_relations": 0,
+            "step_compiles": 0,
+            "step_binds": 0,
+            "technical_blocks": 0,
+            "step_blocks": 0,
+            "collect_analysis_ms": 0.0,
+            "compile_ms": 0.0,
+            "allocate_ms": 0.0,
+            "technical_expand_ms": 0.0,
+            "step_expand_ms": 0.0,
+        }
         #: (实例, 局部变量身份) → 按 step 顺序的求解列名, 仅收录带业务单位的
         #: 步变量(接口流与设备技术变量, 与 _declare 调用同源; 关系降级
         #: 临时变量 unit 为 None, 不进入)。下游不得拆解列名反推身份。
@@ -1599,13 +1622,66 @@ class _ProjectBuilder:
         self.inventory.seal()
         self.analysis = CompilerAnalysis(self.inventory, self.variables)
 
+    def _blocks(self):
+        """Cover the complete domain, including final partial block and year edges."""
+        size = self.template_block_size
+        if not isinstance(size, int) or isinstance(size, bool) or size <= 0:
+            raise ValueError("internal template block size must be positive")
+        for start in range(0, self.point_count, size):
+            yield range(start, min(start + size, self.point_count))
+
+    def _compile_templates(
+        self, bound_instances: Mapping[str, Mapping[str, Any]],
+    ) -> None:
+        """Compile each shared AST/role structure once after S2 collection.
+
+        The identity key is in-memory AST object identity, not a source hash.
+        Different planned-vs-fixed property roles cannot share a template;
+        same model instances with distinct actual values may share safely.
+        """
+        if not self.inventory.sealed or self.analysis is None:
+            raise RuntimeError("compile templates only after complete collection")
+        compiled: dict[tuple, TechnicalTemplate] = {}
+        for inst in sorted(bound_instances):
+            contribution = self.models[inst]
+            symbols = bound_instances[inst]["symbols"]
+            predefined = {
+                name for name, flow in contribution.interfaces.items()
+                if flow.type == "predefined"
+            }
+            for family in self._instance_relations[inst]:
+                self._checkpoint()
+                roles = {
+                    name: ("known" if (
+                        name in predefined or symbols[name][0] == "const"
+                    ) else "var")
+                    for name in family.referenced_symbols
+                }
+                key = (id(family.relation.ast), tuple(sorted(roles.items())))
+                template = compiled.get(key)
+                if template is None:
+                    template = compile_technical(family.relation, roles)
+                    compiled[key] = template
+                    self.template_stats["technical_compiles"] += 1
+                self._technical_templates[family.identity] = template
+        for operation in self.analysis.relations("planning_step"):
+            self._checkpoint()
+            spec = operation.payload
+            self._step_templates[operation.identity] = compile_step_constraint(
+                spec.name, spec.template.expression, spec.template.sense,
+                spec.template.rhs, spec.references, frozenset(self.plan_vars),
+            )
+            self.template_stats["step_compiles"] += 1
+
     def _expand_instance(self, inst: str, statics: Mapping[str, Any]) -> None:
         """Allocate step columns and variable capacity rows AFTER global binding."""
         for local, lower, upper, unit in statics["columns"]:
-            for step in range(self.point_count):
-                cname = self._tech_name(inst, local, step)
-                self._declare(cname, lower, upper, "continuous", unit)
-                self._step_columns.setdefault((inst, local), []).append(cname)
+            columns = self._step_columns.setdefault((inst, local), [])
+            for block in self._blocks():
+                for step in block:
+                    cname = self._tech_name(inst, local, step)
+                    self._declare(cname, lower, upper, "continuous", unit)
+                    columns.append(cname)
             self._step_units[(inst, local)] = unit
         for relation in self.inventory.operations:
             if relation.kind != "capacity" or relation.payload.instance != inst:
@@ -1668,31 +1744,89 @@ class _ProjectBuilder:
     # ------------------------------------------------------------------
 
     def _build_relations(self, inst: str, statics: dict[str, Any]) -> None:
+        """Bind precompiled tech structures in blocks over the *real* time axis."""
+        families = self._instance_relations[inst]
+        if not families:
+            return
         contribution = self.models[inst]
-        symbols = statics["symbols"]
         initial = {
             op.payload.state: op.payload.value
-            for op in self.inventory.operations
-            if op.kind == "initial" and op.payload.instance == inst
+            for op in self.analysis.relations("initial")
+            if op.payload.instance == inst
         }
-        predefined = {
-            name
+        known = dict(statics["prop_const"])
+        known[TIMELINE_STEP_DURATION_VAR] = self.step_s
+        series_by_name = {
+            name: self._series_si(inst, name, contribution)
             for name, flow in contribution.interfaces.items()
             if flow.type == "predefined"
         }
-        for step in range(self.point_count):
-            self._checkpoint()
-            step_symbols = dict(symbols)
-            for name in predefined:
-                series_si = self._series_si(inst, name, contribution)
-                step_symbols[name] = ("const", series_si[step])
-            step_symbols = self.analysis.modeling_symbols(inst, step, step_symbols)
-            for family in self._instance_relations[inst]:
-                relation = family.relation
-                lowered = lower_relation(
-                    relation, step_symbols, step=step, initial=initial,
-                )
-                self._emit_lowered(inst, relation.id, step, lowered)
+        # S2's exact declared box bounds are time-independent for technical
+        # columns; evaluate through its shared analysis entry *once* per local.
+        bounds = {}
+        for name, entry in statics["symbols"].items():
+            if entry[0] != "var":
+                continue
+            actual = self.bound_prop.get((inst, name), self._tech_name(inst, name, 0))
+            if actual in self.variables:
+                bounds[name] = self.analysis.variable_bounds(actual)
+            else:
+                bounds[name] = (entry[1], entry[2])
+        # The bound property and step-column table are *already* declared.
+        # Capture them once per instance; only the step index changes. The
+        # shared template binder can now produce one final global-column
+        # LinearConstraint instead of local DTO -> qualified duplicate DTO.
+        current_step = 0
+        bound_properties = {
+            name: column for (device, name), column in self.bound_prop.items()
+            if device == inst
+        }
+        step_columns = {
+            name: columns for (device, name), columns in self._step_columns.items()
+            if device == inst
+        }
+
+        def global_column(key: tuple[str, int]) -> tuple[str, int]:
+            name, offset = key
+            if name in bound_properties:
+                if offset != 0:
+                    raise LoweringUnsupportedError(
+                        f"规划接管 property {name!r} 不得带时间索引"
+                    )
+                return (bound_properties[name], 0)
+            columns = step_columns.get(name)
+            if columns is not None:
+                return (columns[current_step + offset], 0)
+            # Preserve the legacy naming of auxiliary/initial affine symbols
+            # that are not published step-series columns.
+            return (self._tech_name(inst, name, current_step + offset), 0)
+
+        for block in self._blocks():
+            self.template_stats["technical_blocks"] += 1
+            for step in block:
+                current_step = step
+                self._checkpoint()
+                for name, values in series_by_name.items():
+                    known[name] = values[step]
+                for family in families:
+                    template = self._technical_templates[family.identity]
+                    lowered = bind_technical(
+                        template, instance=inst, step=step, known=known,
+                        initial=initial, bound=bounds,
+                        affine_column=global_column,
+                        affine_row_name=f"{inst}__{family.relation.id}__t{step}",
+                    )
+                    self.template_stats["technical_binds"] += 1
+                    if lowered.variables:
+                        # Exact Big-M mutex lowering still requires declaring
+                        # and qualifying its new auxiliary binary column.
+                        self.template_stats["mutex_fallback_relations"] += 1
+                        self._emit_lowered(inst, family.relation.id, step, lowered)
+                    else:
+                        # Affine rows are already fully qualified and validated.
+                        # Constant tautologies produce no row as before.
+                        self.template_stats["affine_direct_rows"] += len(lowered.constraints)
+                        self.rows.extend(lowered.constraints)
 
     def _series_si(
         self, inst: str, iface: str, contribution: DeviceMathContribution,
@@ -3295,36 +3429,36 @@ class _ProjectBuilder:
         )
 
     def _build_step_relations(self) -> None:
-        """Instantiate already compiled, globally bound step relations."""
+        """Bind already compiled port/planning slots without alias lookups."""
         for operation in self.analysis.relations("planning_step"):
-            spec = operation.payload
-            template = spec.template
-            references = spec.references
-            for step in range(self.point_count):
-                self._checkpoint()
-                row = _AffineAcc()
-                row.add_const(template.expression.constant)
-                for (name, offset), coefficient in template.expression.terms:
-                    if offset:
-                        raise LoweringUnsupportedError(
-                            f"step relation {spec.name!r} has an unsupported offset"
-                        )
-                    if name in references:
-                        target = references[name]
-                        key = (target["instance"], target["interface"])
-                        column = self._step_columns[key][step]
-                    elif name in self.plan_vars:
-                        column = name
-                    else:
-                        raise LoweringUnsupportedError(
-                            f"step relation {spec.name!r}: unknown symbol {name!r}"
-                        )
-                    row.add_term(column, coefficient)
-                self.rows.append(LinearConstraint(
-                    name=f"step__{spec.name}__t{step}",
-                    expression=row.freeze(), sense=template.sense,
-                    rhs=template.rhs,
-                ))
+            template = self._step_templates[operation.identity]
+            for block in self._blocks():
+                self.template_stats["step_blocks"] += 1
+                for step in block:
+                    self._checkpoint()
+                    terms: dict[tuple[str, int], float] = {}
+                    for inst, iface, coeff in template.ports:
+                        column = self._step_columns[(inst, iface)][step]
+                        key = (column, 0)
+                        total = terms.get(key, 0.0) + coeff
+                        if total == 0.0:
+                            terms.pop(key, None)
+                        else:
+                            terms[key] = total
+                    for symbol, coeff in template.planning:
+                        key = (symbol, 0)
+                        total = terms.get(key, 0.0) + coeff
+                        if total == 0.0:
+                            terms.pop(key, None)
+                        else:
+                            terms[key] = total
+                    self.rows.append(LinearConstraint(
+                        name=f"step__{template.relation_id}__t{step}",
+                        expression=LinearExpression(
+                            terms=tuple(terms.items()), constant=template.constant,
+                        ), sense=template.sense, rhs=template.rhs,
+                    ))
+                    self.template_stats["step_binds"] += 1
 
     def _build_planning_rows(self) -> None:
         """Consume scalar planning templates from the same sealed collection."""
@@ -3560,14 +3694,36 @@ class _ProjectBuilder:
             bound_instances[inst] = self._bind_instance_symbols(
                 inst, bus_flows.get(inst, frozenset())
             )
-        # S2 barrier: every domain relation is visible before any conversion.
+        # S2 barrier retained. The actual production path consumes compiled
+        # structures instead of a per-step AST lowerer or mutable alias table.
+        timer = time.perf_counter()
         self._collect_semantic_relations(buses, bound_instances)
+        self.template_stats["collect_analysis_ms"] = round(
+            (time.perf_counter() - timer) * 1000, 3,
+        )
+        timer = time.perf_counter()
+        self._compile_templates(bound_instances)
+        self.template_stats["compile_ms"] = round(
+            (time.perf_counter() - timer) * 1000, 3,
+        )
+        timer = time.perf_counter()
         for inst in sorted(bound_instances):
             self._expand_instance(inst, bound_instances[inst])
+        self.template_stats["allocate_ms"] = round(
+            (time.perf_counter() - timer) * 1000, 3,
+        )
+        timer = time.perf_counter()
         for inst in sorted(bound_instances):
             self._build_relations(inst, bound_instances[inst])
+        self.template_stats["technical_expand_ms"] = round(
+            (time.perf_counter() - timer) * 1000, 3,
+        )
         self._build_bus_rows()
+        timer = time.perf_counter()
         self._build_step_relations()
+        self.template_stats["step_expand_ms"] = round(
+            (time.perf_counter() - timer) * 1000, 3,
+        )
         # The source/dependency analysis, not a second set of raw document
         # loops, supplies the conditional-conversion order. All phases see the
         # same sealed inventory and the same live variable-bound authority.

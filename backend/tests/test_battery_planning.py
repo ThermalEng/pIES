@@ -41,7 +41,7 @@ def battery():
 
 def _rows(battery, *, capacity=None, power=None, soc=0.5, minimum=0.1,
           maximum=0.9, charge_efficiency=0.95, discharge_efficiency=0.95,
-          finance=None, finance_binding=None, evaluation=None):
+          finance=None, finance_binding=None, evaluation=None, block_size=256):
     """由真实通用贡献生成两小时 SI 数学行；规划容量不设有限上界。"""
     props = {
         "initial_soc": (soc, "1"),
@@ -86,6 +86,7 @@ def _rows(battery, *, capacity=None, power=None, soc=0.5, minimum=0.1,
         series=(), finance=finance, evaluation=evaluation,
         point_count=2, step_s=3600,
     )
+    builder.template_block_size = block_size
     # The compiler now has an explicit declaration/binding barrier.
     # This harness keeps its trusted two-hour synthetic domain rather than
     # reintroducing the removed mixed declaration/expansion entrypoint.
@@ -100,6 +101,7 @@ def _rows(battery, *, capacity=None, power=None, soc=0.5, minimum=0.1,
     else:
         builder.inventory.seal()
         builder.analysis = CompilerAnalysis(builder.inventory, builder.variables)
+    builder._compile_templates({"cell": bound})
     builder._expand_instance("cell", bound)
     builder._build_relations("cell", bound)
     return builder

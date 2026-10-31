@@ -1,0 +1,433 @@
+"""P1-S3: repeatable full two-year/two-instance resource comparison.
+
+All measurements run in the same Docker test image, with the same parsed
+synthetic models, finance input, actual 17,520 hourly steps and one enabled
+step_relation. Old S2 modeling/step kernels exist *only* in a test-reference
+subclass; both paths use the same S2 inventory, domains, cash semantics and
+the same S3 column allocation (documented limit of this comparison).
+"""
+from __future__ import annotations
+
+import gc
+import json
+import logging
+import statistics
+import time
+import tracemalloc
+
+from iesplan.computation.generators.mps import write_mps
+from iesplan.computation.generators.project import _ProjectBuilder
+from iesplan.finance import EvaluationInput, FinanceProfile, merge_effective
+
+from test_p1_s3_templates import _S2ReferenceBuilder
+from test_linear_lowering import SOC_YAML
+from test_project_model import _contribution, _finance_payload
+
+
+def _full_two_year_builder(builder_type, *, block_size: int):
+    tank = _contribution(SOC_YAML)
+    models = {"a": tank, "b": tank}
+    devices = {
+        inst: {
+            "definition": {"id": tank.device_id},
+            "asset_origin": "existing",
+            "properties": {
+                "soc0": {"value": initial, "unit": "1"},
+                "step_c": {"value": coeff, "unit": "1"},
+            },
+        }
+        for inst, initial, coeff in (("a", 0.2, 1.0), ("b", 0.7, 0.5))
+    }
+    doc = {
+        "project_baseline": {
+            "start_year": 2026, "resolution": "1h", "scenario_mode": "single",
+        },
+        "planning": {
+            "variables": {},
+            "objective": {"sense": "minimize", "expression": "0"},
+            "constraints": {
+                "peer_flow": {
+                    "type": "step_relation",
+                    "references": {
+                        "left": {"instance": "a", "interface": "flow"},
+                        "right": {"instance": "b", "interface": "flow"},
+                    },
+                    "expression": "left[t] == right[t]",
+                    "enabled": True,
+                },
+            },
+        },
+        "devices": devices,
+        "connections": {},
+        "finance_binding": {"instances": {
+            "a": {"type": "none"}, "b": {"type": "none"},
+        }},
+        "tariff_bindings": {},
+        "demand_bindings": {},
+    }
+    finance = merge_effective(
+        FinanceProfile.from_dict(_finance_payload()), None,
+    )
+    evaluation = EvaluationInput(
+        evaluation_years=2, construction_period=0, operation_years=2,
+        discount_rate=0.0, construction_payments=(), maintenance_expenses=(),
+    )
+    builder = builder_type(
+        doc=doc, devices=devices, models=models, series=(),
+        finance=finance, evaluation=evaluation, point_count=17520,
+        step_s=3600.0,
+    )
+    builder.template_block_size = block_size
+    return builder
+
+
+def test_cross_year_two_instance_resource_repeats_and_block_choices(tmp_path):
+    # AB / BA repeated pairs quantify order noise. Single 128/512 runs
+    # contextualize default 256; no timing threshold or "winner" assumption.
+    trials = (
+        ("s2_reference", 256, "pair1_a"),
+        ("s3_production", 256, "pair1_b"),
+        ("s3_production", 256, "pair2_a"),
+        ("s2_reference", 256, "pair2_b"),
+        ("s3_production", 128, "block128"),
+        ("s3_production", 512, "block512"),
+    )
+    mps_path = tmp_path / "frozen-s2-two-year.mps"
+    unit_path = tmp_path / "frozen-s2-two-year-units.json"
+    facts_path = tmp_path / "frozen-s2-two-year-facts.json"
+    series_path = tmp_path / "frozen-s2-two-year-series.json"
+    reports: list[dict] = []
+    expected_shape = None
+    for kind, block_size, position in trials:
+        gc.collect()
+        builder_type = (
+            _S2ReferenceBuilder if kind == "s2_reference" else _ProjectBuilder
+        )
+        tracemalloc.start()
+        try:
+            started = time.perf_counter()
+            builder = _full_two_year_builder(builder_type, block_size=block_size)
+            model, units, _unit = builder.build()
+            wall_ms = round((time.perf_counter() - started) * 1000, 3)
+            _current, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+        assert builder.inventory.sealed
+        assert len(builder.analysis.relations("planning_step")) == 1
+        # Production must compile one step relation, not 17,520 copies;
+        # every execution still binds 17,520 distinct actual time rows.
+        if kind == "s3_production":
+            assert builder.template_stats["technical_compiles"] == 1
+            assert builder.template_stats["technical_binds"] == 2 * 17520
+            assert builder.template_stats["step_compiles"] == 1
+            assert builder.template_stats["step_binds"] == 17520
+        else:
+            assert builder.template_stats["s2_ast_lower_calls"] == 2 * 17520
+            assert builder.template_stats["s2_step_row_bindings"] == 17520
+
+        name = "a__soc_step__t8760"
+        (cross_year,) = (row for row in model.constraints if row.name == name)
+        assert dict(cross_year.expression.terms)[("a__soc__t8759", 0)] == -1.0
+        for edge in (255, 256, 8759, 8760, 17519):
+            assert builder._step_columns[("a", "soc")][edge] == (
+                f"a__soc__t{edge}"
+            )
+        assert any(
+            row.name == "step__peer_flow__t17519"
+            for row in model.constraints
+        )
+        shape = {
+            "point_count": builder.point_count,
+            "instances": 2,
+            "planning_step_relations": 1,
+            "columns": len(model.variables),
+            "rows": len(model.constraints),
+            "binary_columns": sum(v.kind == "binary" for v in model.variables),
+            "row_nonzeros": sum(len(row.expression.terms) for row in model.constraints),
+            "objective_nonzeros": len(model.objective.terms),
+        }
+        if expected_shape is None:
+            expected_shape = shape
+        assert shape == expected_shape
+
+        mps_text, offset = write_mps(model)
+        if not mps_path.exists():
+            mps_path.write_text(mps_text, encoding="utf-8")
+            expected_offset = offset
+        else:
+            assert offset == expected_offset
+            assert mps_text == mps_path.read_text(encoding="utf-8")
+        unit_json = json.dumps(dict(units), sort_keys=True)
+        fact_json = json.dumps(dict(builder.financial_facts()), sort_keys=True)
+        series_json = json.dumps(list(builder.step_series()), sort_keys=True)
+        for path, content in (
+            (unit_path, unit_json), (facts_path, fact_json),
+            (series_path, series_json),
+        ):
+            if not path.exists():
+                path.write_text(content, encoding="utf-8")
+            else:
+                assert content == path.read_text(encoding="utf-8")
+        report = {
+            "kind": kind,
+            "order": position,
+            "block_size": block_size,
+            "wall_ms": wall_ms,
+            "traced_peak_bytes": peak,
+            "stage_wall_ms": dict(builder.template_stats),
+            "mps_bytes": len(mps_text.encode("utf-8")),
+            "step_series_declarations_bytes": len(series_json.encode("utf-8")),
+            "finance_fact_declarations_bytes": len(fact_json.encode("utf-8")),
+            **shape,
+        }
+        reports.append(report)
+        # Do not keep any old full model/AST or its trace in the next sample.
+        del builder, model, units, mps_text, unit_json, fact_json, series_json
+        gc.collect()
+
+    repeated = {
+        kind: [report for report in reports
+               if report["kind"] == kind and report["block_size"] == 256]
+        for kind in ("s2_reference", "s3_production")
+    }
+    assert all(len(rows) == 2 for rows in repeated.values())
+    summary = {
+        "two_year_hours": 17520,
+        "input": "synthetic two instances, 2026+2027, one enabled step_relation",
+        "ordered_samples": reports,
+        "default_block_size": 256,
+        "default_block_choice_note":
+            "Compare 128/256/512 timings and traced peaks; 256 is a balance, "
+            "not an asserted machine-independent optimum",
+        "paired_repeats": {
+            kind: {
+                "wall_ms_median": statistics.median(x["wall_ms"] for x in rows),
+                "wall_ms_min": min(x["wall_ms"] for x in rows),
+                "wall_ms_max": max(x["wall_ms"] for x in rows),
+                "traced_peak_bytes_median":
+                    statistics.median(x["traced_peak_bytes"] for x in rows),
+            }
+            for kind, rows in repeated.items()
+        },
+        "reference_scope":
+            "Frozen original S2 technical AST and step row loops in test only; "
+            "S3 column allocation, S2 semantic inventory, cash and writer shared; "
+            "not a separate checkout of S2, not worker/solver and no metadata Bundle",
+        "measurement_scope":
+            "Full model build with tracemalloc overhead; MPS and output comparisons "
+            "are after timer; peaks not isolated process RSS; AB/BA repeats "
+            "control part of order effect",
+    }
+    logging.warning("P1_S3_MULTIYEAR_REPEATS %s", json.dumps(summary, sort_keys=True))
+
+
+class _S3PriorLocalRowEmitter(_ProjectBuilder):
+    """Frozen test-only pre-optimization S3 technical row emission.
+
+    Both paths use the SAME S3 compiled semantic template and all remaining
+    domain logic. Only the intermediate local LinearExpression → final global
+    LinearExpression/Constraint copying differs. Not a production fallback.
+    """
+
+    def _build_relations(self, inst, statics):
+        from iesplan.computation.generators.templates import bind_technical
+        from iesplan.core.contracts.baseline import TIMELINE_STEP_DURATION_VAR
+
+        families = self._instance_relations[inst]
+        if not families:
+            return
+        contribution = self.models[inst]
+        initial = {
+            op.payload.state: op.payload.value
+            for op in self.analysis.relations("initial")
+            if op.payload.instance == inst
+        }
+        known = dict(statics["prop_const"])
+        known[TIMELINE_STEP_DURATION_VAR] = self.step_s
+        series = {
+            name: self._series_si(inst, name, contribution)
+            for name, flow in contribution.interfaces.items()
+            if flow.type == "predefined"
+        }
+        bounds = {}
+        for name, entry in statics["symbols"].items():
+            if entry[0] != "var":
+                continue
+            actual = self.bound_prop.get((inst, name), self._tech_name(inst, name, 0))
+            bounds[name] = (
+                self.analysis.variable_bounds(actual)
+                if actual in self.variables else (entry[1], entry[2])
+            )
+        for block in self._blocks():
+            self.template_stats["technical_blocks"] += 1
+            for step in block:
+                self._checkpoint()
+                for name, sequence in series.items():
+                    known[name] = sequence[step]
+                for family in families:
+                    lowered = bind_technical(
+                        self._technical_templates[family.identity],
+                        instance=inst, step=step, known=known,
+                        initial=initial, bound=bounds,
+                    )
+                    self.template_stats["technical_binds"] += 1
+                    self._emit_lowered(inst, family.relation.id, step, lowered)
+
+
+def test_direct_global_row_emitter_against_prior_s3_in_same_docker(tmp_path):
+    """AB/BA direct-row vs previous local-row S3 on real two-year model.
+
+    Timers exclude MPS serialization and use normal wall clock without
+    tracemalloc; mathematical equality is full MPS + unit/declaration facts.
+    This directly attributes qualification-copy overhead rather than
+    conflating it with the older S2 AST compiler.
+    """
+    order = (
+        ("s3_previous_local_row", _S3PriorLocalRowEmitter),
+        ("s3_direct_global_row", _ProjectBuilder),
+        ("s3_direct_global_row", _ProjectBuilder),
+        ("s3_previous_local_row", _S3PriorLocalRowEmitter),
+    )
+    was_traced = tracemalloc.is_tracing()
+    if was_traced:
+        tracemalloc.stop()
+    report = []
+    mps_path = tmp_path / "s3-local-row-baseline.mps"
+    units_path = tmp_path / "s3-local-row-units.json"
+    try:
+        for index, (name, builder_type) in enumerate(order):
+            gc.collect()
+            assert not tracemalloc.is_tracing()
+            begin = time.perf_counter()
+            builder = _full_two_year_builder(builder_type, block_size=256)
+            model, units, objective_unit = builder.build()
+            wall_ms = round((time.perf_counter() - begin) * 1000, 3)
+            mps, objective_offset = write_mps(model)
+            units_text = json.dumps(dict(units), sort_keys=True)
+            if index == 0:
+                mps_path.write_text(mps, encoding="utf-8")
+                units_path.write_text(units_text, encoding="utf-8")
+                reference_offset = objective_offset
+            else:
+                assert mps == mps_path.read_text(encoding="utf-8")
+                assert units_text == units_path.read_text(encoding="utf-8")
+                assert objective_offset == reference_offset
+            direct = builder.template_stats["affine_direct_rows"]
+            assert (direct > 0) == (name == "s3_direct_global_row")
+            assert builder.template_stats["technical_binds"] == 35040
+            assert builder.template_stats["step_binds"] == 17520
+            report.append({
+                "order": index + 1, "path": name, "wall_ms": wall_ms,
+                "affine_direct_rows": direct,
+                "columns": len(model.variables),
+                "rows": len(model.constraints),
+                "nonzeros": sum(len(r.expression.terms) for r in model.constraints),
+                "mps_bytes": len(mps.encode("utf-8")),
+            })
+            del builder, model, units, mps
+    finally:
+        if was_traced:
+            tracemalloc.start()
+    categories = {
+        name: [item["wall_ms"] for item in report if item["path"] == name]
+        for name, _ in order[:2]
+    }
+    logging.warning("P1_S3_DIRECT_ROW_ABBA %s", json.dumps({
+        "scenario": "two independent instances, 2026+2027, enabled step relation, 17520 steps",
+        "scope": "same compiled template & complete model, only local-to-global copy differs",
+        "measurement": "normal untraced wall; AB/BA; MPS/units checked strictly; no solver",
+        "samples": report,
+        "median_ms": {
+            name: statistics.median(values) for name, values in categories.items()
+        },
+        "range_ms": {
+            name: max(values) - min(values) for name, values in categories.items()
+        },
+        "limits": "Two samples per path, Docker CI noisy; no universal speed claim",
+    }, sort_keys=True))
+
+
+def test_cross_year_untraced_normal_wall_comparison():
+    """Repeat AB/BA with real wall clock but WITHOUT allocation tracing.
+
+    This complements—not replaces—the traced peak-memory and exact-MPS
+    comparison above. No speed threshold: Docker CI runners have noise.
+    """
+    sequence = ("s2_reference", "s3_production", "s3_production", "s2_reference")
+    samples = []
+    expected_signature = None
+    # The memory-tracing benchmark in this module is a separate test.
+    # Ensure this sample is truly untraced even if a caller enabled tracing.
+    preexisting_tracer = tracemalloc.is_tracing()
+    if preexisting_tracer:
+        tracemalloc.stop()
+    try:
+        _run_untraced_samples(sequence, samples, _full_two_year_builder)
+    finally:
+        if preexisting_tracer:
+            tracemalloc.start()
+    signatures = {tuple(sorted(s["signature"].items())) for s in samples}
+    assert len(signatures) == 1
+    expected_signature = samples[0]["signature"]
+    for sample in samples:
+        sample.pop("signature")
+    results = {
+        kind: [s["wall_ms"] for s in samples if s["kind"] == kind]
+        for kind in ("s2_reference", "s3_production")
+    }
+    logging.warning("P1_S3_MULTIYEAR_NORMAL_WALL %s", json.dumps({
+        "scope": "full 17520-step model build, 2 instances, 1 enabled step_relation",
+        "reference_scope": "test-frozen S2 technical/step loops; shared S3 columns and other S2 domains",
+        "method": "same Docker worker, AB/BA order, gc before each, tracemalloc off",
+        "samples": samples,
+        "median_wall_ms": {
+            kind: statistics.median(walls) for kind, walls in results.items()
+        },
+        "range_wall_ms": {
+            kind: max(walls) - min(walls) for kind, walls in results.items()
+        },
+        "model_shape": expected_signature,
+        "note": "No solver, MPS writer or Bundle metadata in timer; no universal speed claim",
+    }, sort_keys=True))
+
+
+def _run_untraced_samples(sequence, samples, builder_factory):
+    expected_signature = None
+    for order, kind in enumerate(sequence):
+        gc.collect()
+        builder_type = (
+            _S2ReferenceBuilder if kind == "s2_reference" else _ProjectBuilder
+        )
+        assert not tracemalloc.is_tracing()
+        before = time.perf_counter()
+        builder = builder_factory(builder_type, block_size=256)
+        model, unit_map, objective_unit = builder.build()
+        wall_ms = round((time.perf_counter() - before) * 1000, 3)
+        signature = {
+            "columns": len(model.variables),
+            "rows": len(model.constraints),
+            "binary": sum(v.kind == "binary" for v in model.variables),
+            "nonzeros": sum(len(r.expression.terms) for r in model.constraints),
+            "objective_nonzeros": len(model.objective.terms),
+            "objective_unit": objective_unit,
+            "unit_map_size": len(unit_map),
+        }
+        if expected_signature is None:
+            expected_signature = signature
+        assert signature == expected_signature
+        if kind == "s3_production":
+            assert builder.template_stats["technical_compiles"] == 1
+            assert builder.template_stats["technical_binds"] == 35040
+            assert builder.template_stats["step_binds"] == 17520
+            assert builder.template_stats["affine_direct_rows"] > 0
+        else:
+            assert builder.template_stats["s2_ast_lower_calls"] == 35040
+        samples.append({
+            "order": order + 1,
+            "kind": kind,
+            "wall_ms": wall_ms,
+            "technical_direct_rows": builder.template_stats["affine_direct_rows"],
+            "mutex_fallback_relations": builder.template_stats["mutex_fallback_relations"],
+            "signature": signature,
+        })
+        del builder, model, unit_map
