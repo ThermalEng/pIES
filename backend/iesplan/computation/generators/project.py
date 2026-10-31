@@ -55,6 +55,7 @@ from iesplan.computation.generators.compiler_ir import (
     TariffCharge,
     DemandPeak,
     MaintenancePayment,
+    VatRuleSource,
     VatPoolOperation,
     IncomeTaxOperation,
     DepreciationCharge,
@@ -879,8 +880,14 @@ class _ProjectBuilder:
                     else:
                         symbols.append(f'{inst}.{target["interface"]}')
                 ident = f"{inst}__{component}"
+                domain = (
+                    IndexDomain("scalar") if component == "upfront_capex"
+                    else IndexDomain("year", self.evaluation.operation_years)
+                    if component == "annual_fixed_om"
+                    else IndexDomain("step", self.point_count)
+                )
                 add(SemanticRelation(
-                    f"cost.{ident}", "cost", IndexDomain("year"),
+                    f"cost.{ident}", "cost", domain,
                     CostComponent(inst, component, ft, value),
                     SourceLocation(f"finance.finance_types.{ft}.{component}",
                                    inst, binding_id=inst),
@@ -889,6 +896,17 @@ class _ProjectBuilder:
 
         for binding_id in sorted(self.doc.get("tariff_bindings") or {}):
             binding = self.doc["tariff_bindings"][binding_id]
+            price = self.finance.energy_prices[binding["price"]]
+            coefficient_id = f'price.{binding["price"]}'
+            if coefficient_id not in self.inventory.coefficients:
+                is_fixed = price.kind == "constant"
+                self.inventory.coefficients[coefficient_id] = KnownCoefficient(
+                    coefficient_id, "fixed_price" if is_fixed else "materialized_price",
+                    SourceLocation(f'finance.energy_prices.{binding["price"]}',
+                                   binding_id=binding["price"]),
+                    _to_internal(float(price.value.value), price.value.unit)
+                    if is_fixed else None,
+                )
             name = f'{binding_id}__{_tariff_suffix(_binding_direction(self, binding_id))}'
             add(SemanticRelation(
                 f"tariff.{binding_id}", "tariff", IndexDomain("step", self.point_count),
@@ -934,19 +952,79 @@ class _ProjectBuilder:
                 tuple(sorted(refs)), (f"maintenance.y{entry.year}.p{position}",),
             ))
 
+        # Keep each tax rule's frozen identity distinct from the pooled
+        # recurrence. Match its *actual* declared source outputs, never guess
+        # a device or amount from the spelling of an MPS variable.
+        tax_rule_refs: dict[str, tuple[str, ...]] = {}
+        for rule_id, rule in sorted(self.finance.tax_rules.items()):
+            if not isinstance(rule, (VatRule, ConstructionVatRule)):
+                continue
+            used = set()
+            for entry in (*getattr(rule, "in_tax", ()),
+                          *getattr(rule, "out_tax", ())):
+                used.update(
+                    op.output_symbols[0] for op in self.inventory.operations
+                    if op.kind == "tariff" and op.payload.price_id == entry.price
+                )
+            for entry in getattr(rule, "demand_input_tax", ()):
+                used.update(
+                    op.output_symbols[0] for op in self.inventory.operations
+                    if op.kind == "demand" and op.payload.charge_id == entry.charge
+                )
+            for entry in getattr(rule, "maintenance_input_tax", ()):
+                used.add(f"maintenance.y{entry.year}.p{entry.position}")
+            for entry in getattr(rule, "om_input_tax", ()):
+                used.update(
+                    op.output_symbols[0] for op in self.inventory.operations
+                    if op.kind == "cost"
+                    and op.payload.finance_type == entry.for_path.split(".")[0]
+                    and op.payload.component == entry.for_path.split(".")[1]
+                )
+            if isinstance(rule, ConstructionVatRule):
+                used.update(
+                    op.output_symbols[0] for op in self.inventory.operations
+                    if op.kind == "cost" and op.payload.component == "upfront_capex"
+                    and op.payload.finance_type == rule.for_path.split(".")[0]
+                )
+            tax_rule_refs[rule_id] = tuple(sorted(used))
+            add(SemanticRelation(
+                f"vat_rule.{rule_id}", "vat_rule",
+                IndexDomain("month", 12 * self.evaluation.evaluation_years),
+                VatRuleSource(rule_id, rule),
+                SourceLocation(f"finance.tax_rules.{rule_id}", relation_id=rule_id),
+                tax_rule_refs[rule_id],
+            ))
+
         grouped = self._vat_grouped_rules()
         for pool_id, rules in sorted((grouped or {}).items()):
+            frozen_rules = MappingProxyType({
+                "vat": tuple(rules["vat"]),
+                "construction": tuple(rules["construction"]),
+            })
+            vat_rule_ids = tuple(sorted(
+                f"vat_rule.{rid}" for rid, rule in self.finance.tax_rules.items()
+                if isinstance(rule, (VatRule, ConstructionVatRule))
+                and rule.credit_pool == pool_id
+            ))
+            refs = tuple(sorted({
+                name for rid in vat_rule_ids
+                for name in self.inventory.operations[
+                    next(i for i, op in enumerate(self.inventory.operations)
+                         if op.identity == rid)
+                ].input_symbols
+            }))
             add(SemanticRelation(
-                f"vat.{pool_id}", "vat", IndexDomain("month", 12 * self.evaluation.evaluation_years),
-                VatPoolOperation(pool_id, rules),
+                f"vat.{pool_id}", "vat",
+                IndexDomain("month", 12 * self.evaluation.evaluation_years),
+                VatPoolOperation(pool_id, frozen_rules),
                 SourceLocation(f"finance.credit_pools.{pool_id}", binding_id=pool_id),
-                tuple(sorted({name for rule in rules["vat"]
-                              for name in (f"tax.{rule.credit_pool}",)})),
-                (f"vat.{pool_id}.paid", f"vat.{pool_id}.carry"),
-                depends_on=tuple(sorted(
-                    op.identity for op in self.inventory.operations
-                    if op.kind in ("tariff", "demand", "cost", "maintenance")
-                )), requires_bounds=True,
+                refs, (f"vat.{pool_id}.paid", f"vat.{pool_id}.carry"),
+                depends_on=tuple(sorted((
+                    *vat_rule_ids,
+                    *(op.identity for op in self.inventory.operations
+                      if op.kind in ("tariff", "demand", "cost", "maintenance"))
+                ))),
+                requires_bounds=True,
             ))
         for rule_id, rule in self._income_rules():
             for index, entry in enumerate(rule.depreciation):
