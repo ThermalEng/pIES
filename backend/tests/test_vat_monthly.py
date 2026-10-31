@@ -27,6 +27,7 @@ from iesplan.computation import (
 )
 from iesplan.computation.generators.highs_milp import GENERATOR_REF
 from iesplan.computation.generators.linear import LoweringUnsupportedError
+from iesplan.computation.generators.project import _new_builder
 from iesplan.computation.result_adapters.highs import HIGHS_ADAPTER
 from iesplan.core.yamlmini import load as yaml_load
 from iesplan.devices import init_registry
@@ -505,6 +506,62 @@ def _inputs(
         outputs=["solution"],
     )
     return result.artifact, models, materialized, finance, config, _evaluation()
+
+
+def _collection_builder(inputs):
+    """Stop a real project fixture at the collection/analysis barrier."""
+    artifact, models, materialized, finance, _config, evaluation = inputs
+    builder = _new_builder(artifact, models, materialized, finance, evaluation)
+    buses = builder._compute_buses()
+    bus_flows = builder._bus_flow_index(buses)
+    builder._declare_global_symbols()
+    bound = {
+        inst: builder._bind_instance_symbols(
+            inst, bus_flows.get(inst, frozenset())
+        )
+        for inst in sorted(builder.devices)
+    }
+    builder._collect_semantic_relations(buses, bound)
+    assert builder.inventory.sealed
+    assert not builder.rows
+    return builder
+
+
+def test_pre_lowering_initial_uses_planning_identity() -> None:
+    builder = _collection_builder(_inputs())
+    relation = builder.analysis.operation("tank1.soc.initial")
+    assert relation.input_symbols == ("soc_pin",)
+    assert relation.identity in builder.analysis.uses["soc_pin"]
+    assert builder.inventory.property_bindings[("tank1", "soc0")] == "soc_pin"
+    assert not builder._step_columns
+
+
+def test_pre_lowering_vat_periods_include_state_refunds_and_sources() -> None:
+    refund = {
+        "period": 1,
+        "arrival_period": 2,
+        "amount": {"value": "10", "unit": "CNY"},
+    }
+    builder = _collection_builder(_inputs(refunds=(refund,), opening="100"))
+    periods = tuple(
+        relation for relation in builder.analysis.relations("vat_period")
+        if relation.payload.pool_id == "main_pool"
+    )
+    assert len(periods) == 36
+    first, second = periods[:2]
+    assert first.payload.month == 1
+    assert first.payload.opening_credit == pytest.approx(100)
+    assert first.payload.refund_claim == pytest.approx(10)
+    assert second.payload.refund_arrival == pytest.approx(10)
+    assert first.identity in second.depends_on
+    assert "vat.main_pool.carry.m1" in second.input_symbols
+    assert any(
+        symbol.startswith("import_meter__") or symbol.startswith("export_meter__")
+        for symbol in first.input_symbols
+    )
+    pool = builder.analysis.operation("vat.main_pool")
+    assert first.identity in pool.depends_on
+    assert not any(name.startswith("vat__") for name in builder.variables)
 
 
 # ---------------------------------------------------------------------------
