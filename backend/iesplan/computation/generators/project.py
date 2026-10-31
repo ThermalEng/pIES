@@ -1748,28 +1748,24 @@ class _ProjectBuilder:
         ``_tariff_affine`` 直接拒绝。
         """
         out: dict[str, Mapping[str, object]] = {}
-        instances = (self.doc.get("finance_binding") or {}).get("instances") or {}
-        for inst in sorted(self.devices):
-            if inst not in instances or instances[inst].get("type") != "costed":
-                continue
-            origin = self.devices[inst].get("asset_origin")
-            produced = _COMPONENTS_NEW if origin == "new" else _COMPONENTS_EXISTING
-            ft_entry = self.finance.finance_types[instances[inst]["finance_type"]]
-            for component in produced:
-                if getattr(ft_entry, component) is None:
-                    continue
-                ident = f"{inst}__{component}"
-                affine = self._cost_affine(inst, component)
-                out[ident] = {
-                    "unit": self._component_unit(component),
-                    "caliber": _COMPONENT_CALIBER[component],
-                    "constant": affine.constant,
-                    "terms": dict(sorted(affine.terms.items())),
-                }
-        for binding_id in sorted(self.doc.get("tariff_bindings") or {}):
-            component = _tariff_suffix(_binding_direction(self, binding_id))
-            ident = f"{binding_id}__{component}"
-            affine = self._tariff_affine(binding_id)
+        # Result declarations consume the very same collected amount relations
+        # that fed cashflow, planning rows and tax basis construction.
+        for relation in self.analysis.relations("cost"):
+            spec = relation.payload
+            component = spec.component
+            ident = relation.output_symbols[0]
+            affine = self._cost_affine(spec.instance, component)
+            out[ident] = {
+                "unit": self._component_unit(component),
+                "caliber": _COMPONENT_CALIBER[component],
+                "constant": affine.constant,
+                "terms": dict(sorted(affine.terms.items())),
+            }
+        for relation in self.analysis.relations("tariff"):
+            spec = relation.payload
+            component = _tariff_suffix(_binding_direction(self, spec.binding_id))
+            ident = relation.output_symbols[0]
+            affine = self._tariff_affine(spec.binding_id)
             out[ident] = {
                 "unit": self._component_unit(component),
                 "caliber": _COMPONENT_CALIBER[component],
