@@ -378,11 +378,11 @@ def finance_component_declarations(
     ResultAdapter 用同一次真实解求值发布，不重建财务模型。
     """
     builder = _new_builder(artifact, models, materialized, finance, evaluation)
-    # Every public declaration consumer must cross the same collection and
-    # analysis barrier, including assemblies without demand bindings.  Building
-    # only the demand case leaves analysis unset for ordinary cost/tariff rows.
-    # The demand case also retains its exact peak columns from this build.
-    builder.build()
+    # Finance declarations cross the same source-collection and analysis
+    # barrier as full generation, but they must not lower unrelated planning
+    # constraints/objectives merely to expose cost/tariff declarations.
+    # Demand declarations still allocate their exact peak columns here.
+    builder.prepare_finance_components()
     return builder.finance_components()
 
 
@@ -2185,6 +2185,35 @@ class _ProjectBuilder:
         if component == "annual_fixed_om":
             return f"{self.finance.currency}/a"
         return self.finance.currency
+
+    def prepare_finance_components(self) -> None:
+        """Prepare the shared finance relation graph for the declaration API.
+
+        This is not a legacy document scan.  It uses the same binding,
+        collection, sealing and CompilerAnalysis lifecycle as build(), then
+        lowers only the solver columns needed by cost/tariff/demand declaration
+        expressions.  Unrelated planning constraints and the project objective
+        remain the responsibility of the full generate entry.
+        """
+        if self.analysis is not None:
+            return
+        buses = self._compute_buses()
+        bus_flows = self._bus_flow_index(buses)
+        self._declare_global_symbols()
+        bound_instances: dict[str, dict[str, Any]] = {}
+        for inst in sorted(self.devices):
+            bound_instances[inst] = self._bind_instance_symbols(
+                inst, bus_flows.get(inst, frozenset())
+            )
+        self._collect_semantic_relations(
+            buses, bound_instances,
+            include_planning=False,
+            include_objective=False,
+        )
+        for inst in sorted(bound_instances):
+            self._expand_instance(inst, bound_instances[inst])
+        if self.analysis.relations("demand"):
+            self._build_monthly_demand()
 
     def finance_components(self) -> Mapping[str, Mapping[str, object]]:
         """全部已声明财务分量的求值声明（与目标同一构造路径）。
