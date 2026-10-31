@@ -346,7 +346,8 @@ class _S2ReferenceBuilder(_ProjectBuilder):
 
     def _compile_templates(self, bound_instances):
         # All other builder stages stay IDENTICAL within this Docker process.
-        pass
+        self.template_stats["s2_ast_lower_calls"] = 0
+        self.template_stats["s2_step_row_bindings"] = 0
 
     def _build_relations(self, inst, statics):
         model = self.models[inst]
@@ -370,6 +371,7 @@ class _S2ReferenceBuilder(_ProjectBuilder):
                 lowered = lower_relation_s2(
                     family.relation, current, step=step, initial=initial,
                 )
+                self.template_stats["s2_ast_lower_calls"] += 1
                 self._emit_lowered(inst, family.relation.id, step, lowered)
 
     def _build_step_relations(self):
@@ -405,6 +407,7 @@ class _S2ReferenceBuilder(_ProjectBuilder):
                         rhs=template.rhs,
                     )
                 )
+                self.template_stats["s2_step_row_bindings"] += 1
 
 
 def test_same_docker_s2_s3_full_campus_build_and_exact_mps(tmp_path):
