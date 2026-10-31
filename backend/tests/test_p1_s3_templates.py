@@ -15,7 +15,8 @@ import pytest
 
 from iesplan.computation.generators.compiler_ir import CompilerAnalysis
 from iesplan.computation.generators.linear import (
-    LinearConstraint, LinearExpression, LinearModel, LoweringUnsupportedError, lower_relation,
+    LinearConstraint, LinearExpression, LinearModel, LoweringUnsupportedError,
+    lower_expression, lower_relation,
 )
 from iesplan.computation.generators.mps import write_mps
 from iesplan.computation.generators.project import _ProjectBuilder
@@ -86,6 +87,61 @@ def test_same_template_live_step_coefficient_and_late_division_by_zero():
             )
             assert actual == lower_relation_s2(relation, symbols, step=step)
             assert lower_relation(relation, symbols, step=step) == actual
+
+
+@pytest.mark.parametrize(
+    ("body", "failed_symbol"),
+    [
+        ("(soc[t-1] / flow[t])^0", "flow"),
+        ("(flow[t] / step_c)^0", "step_c"),
+        ("((soc[t-1] / flow[t]) * 0)^0", "flow"),
+    ],
+)
+def test_zero_exponent_must_evaluate_divisor_at_later_step(body, failed_symbol):
+    # Both examples are parsed and built through the actual modeling
+    # publication pipeline, not a hand-built AST. Previously the fast plan
+    # discarded the base of x^0 and accepted a later zero denominator.
+    yaml_doc = SOC_YAML.replace(
+        "flow: {type: in", "flow: {type: predefined",
+    ).replace(
+        "soc[t] = soc[t-1] + flow[t] * step_c",
+        f"soc[t] = {body}",
+    )
+    relation = _relation(yaml_doc, "soc_step")
+    symbols = {
+        "soc": ("var", 0.0, 1.0),
+        "flow": ("const", 1.0),
+        "step_c": ("const", 2.0),
+    }
+    initial = {"soc": 0.5}
+    roles = {name: ("known" if entry[0] == "const" else "var")
+             for name, entry in symbols.items()}
+    template = compile_technical(relation, roles)
+    # At t=0 both independent S2 and public/shared S3 produce the same row.
+    first = bind_technical(
+        template, instance="synthetic", step=0,
+        known={"flow": 1.0, "step_c": 2.0}, initial=initial,
+        bound={"soc": (0.0, 1.0)},
+    )
+    assert first == lower_relation_s2(relation, symbols, step=0, initial=initial)
+    assert first == lower_relation(relation, symbols, step=0, initial=initial)
+    failing = dict(symbols)
+    failing[failed_symbol] = ("const", 0.0)
+    with pytest.raises(LoweringUnsupportedError, match="除零"):
+        lower_relation_s2(relation, failing, step=1, initial=initial)
+    with pytest.raises(LoweringUnsupportedError, match="除零"):
+        lower_relation(relation, failing, step=1, initial=initial)
+    with pytest.raises(LoweringUnsupportedError, match="除零"):
+        lower_expression(relation.ast.rhs_root, failing, step=1, initial=initial)
+    with pytest.raises(LoweringUnsupportedError, match="除零") as raised:
+        bind_technical(
+            template, instance="device_a", step=1,
+            known={"flow": 0.0 if failed_symbol == "flow" else 1.0,
+                   "step_c": 0.0 if failed_symbol == "step_c" else 2.0},
+            initial=initial, bound={"soc": (0.0, 1.0)},
+        )
+    message = str(raised.value)
+    assert "soc_step" in message and "device_a" in message and "step 1" in message
 
 
 def test_affine_initial_and_cross_step_offset_are_preserved():
