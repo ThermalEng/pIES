@@ -555,9 +555,12 @@ def test_pre_lowering_vat_periods_include_state_refunds_and_sources() -> None:
     assert second.payload.refund_arrival == pytest.approx(10)
     assert first.identity in second.depends_on
     assert "vat.main_pool.carry.m1" in second.input_symbols
+    # Construction month 1 has no operating tariff steps.  Metered VAT
+    # sources enter at the first operating month (construction_period=1).
+    operating = next(period for period in periods if period.payload.month == 13)
     assert any(
         symbol.startswith("import_meter__") or symbol.startswith("export_meter__")
-        for symbol in first.input_symbols
+        for symbol in operating.input_symbols
     )
     pool = builder.analysis.operation("vat.main_pool")
     assert first.identity in pool.depends_on
