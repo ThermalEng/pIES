@@ -182,6 +182,18 @@ class VatPoolOperation:
 
 
 @dataclass(frozen=True, slots=True)
+class FinancialAmountTerm:
+    """Period-bound reference to an already collected semantic amount source."""
+
+    role: str
+    source_relation: str
+    coefficient: float
+    start: int | None = None
+    end: int | None = None
+    scope: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class VatPeriodConnection:
     """One declared VAT month before conditional rows are lowered."""
 
@@ -192,6 +204,7 @@ class VatPeriodConnection:
     opening_credit: float
     refund_claim: float
     refund_arrival: float
+    amount_terms: tuple[FinancialAmountTerm, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -208,6 +221,7 @@ class IncomeYearConnection:
     year: int
     start: int | None
     end: int | None
+    amount_terms: tuple[FinancialAmountTerm, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
