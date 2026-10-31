@@ -1574,11 +1574,11 @@ class _ProjectBuilder:
             raw = planning["objective"]["expression"]
             compiled = None
             if raw.strip() == SYSTEM_AFTER_TAX_NPV:
-            objective_inputs = tuple(sorted({
-                output for op in self.inventory.operations
-                if op.kind in ("annual_cash", "vat", "income", "net_cash")
-                for output in op.output_symbols
-            }))
+                objective_inputs = tuple(sorted({
+                    output for op in self.inventory.operations
+                    if op.kind in ("annual_cash", "vat", "income", "net_cash")
+                    for output in op.output_symbols
+                }))
             else:
                 compiled = compile_planning_expression(raw, dimensions, currency=None)
                 objective_template = lower_planning_expression(compiled, placeholders)
