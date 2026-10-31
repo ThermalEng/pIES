@@ -53,6 +53,8 @@ def test_effective_domain_intersection_and_sources() -> None:
     # Project planning boundary: [3, 20] kW.
     doc["planning"]["variables"]["gen_cap"]["lower_bound"] = "3"
     doc["planning"]["variables"]["gen_cap"]["upper_bound"] = "20"
+    doc["planning"]["variables"]["gen_floor"]["lower_bound"] = "1"
+    doc["planning"]["variables"]["gen_floor"]["upper_bound"] = "5"
     new_art = replace(artifact, canonical_text=json.dumps(doc))
     from iesplan.computation.generators.project import _new_builder
     builder = _new_builder(new_art, models, materialized, finance, evaluation)
@@ -78,9 +80,11 @@ def test_effective_domain_intersection_and_sources() -> None:
     assert fact.upper_source is not None
     assert fact.upper_source.field_path == "properties.cap_kw.valid_range"
 
-    # 通过 (instance, property) 别名查询也得到同一 BoundFact
+    # 通过 (instance, property) 别名查询也得到同一界
     alias_fact = builder.analysis.bound_fact("gen1.cap_kw")
-    assert alias_fact is fact
+    assert alias_fact is not None
+    assert alias_fact.lower == fact.lower
+    assert alias_fact.upper == fact.upper
 
 
 def test_planning_takeover_retains_model_domain_when_unspecified() -> None:

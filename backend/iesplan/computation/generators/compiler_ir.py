@@ -354,6 +354,8 @@ class CompilerAnalysis:
                     )
         self.uses = {name: frozenset(ids) for name, ids in uses.items()}
         self.bound_requests: list[BoundRequest] = []
+        from iesplan.computation.generators.bound_inference import BoundInferenceEngine
+        self.inference = BoundInferenceEngine(inventory, variables)
 
     def relations(self, kind: str) -> tuple[SemanticRelation, ...]:
         return self._groups.get(kind, ())
@@ -409,19 +411,45 @@ class CompilerAnalysis:
 
     def bound_fact(self, name: str) -> BoundFact | None:
         """Query unified bound fact and provenance for a symbol."""
-        if name in self.inventory.bound_facts:
-            return self.inventory.bound_facts[name]
+        resolved_name = name
         if "." in name:
             inst, _, prop = name.partition(".")
-            bound_name = self.inventory.property_bindings.get((inst, prop))
-            if bound_name and bound_name in self.inventory.bound_facts:
-                return self.inventory.bound_facts[bound_name]
-        var = self.variables.get(name)
-        if var is not None:
+            resolved_name = self.inventory.property_bindings.get((inst, prop), name)
+
+        fact = self.inventory.bound_facts.get(resolved_name) or self.inventory.bound_facts.get(name)
+        inf_lo, inf_hi = self.inference.bounds.get(resolved_name, (None, None))
+        if inf_lo is None and inf_hi is None:
+            inf_lo, inf_hi = self.inference.bounds.get(name, (None, None))
+
+        if fact is not None:
+            lo = fact.lower if inf_lo is None else (inf_lo if fact.lower is None else max(fact.lower, inf_lo))
+            hi = fact.upper if inf_hi is None else (inf_hi if fact.upper is None else min(fact.upper, inf_hi))
+            lo_src, hi_src = self.inference.provenance.get(resolved_name, (fact.lower_source, fact.upper_source))
             return BoundFact(
                 symbol=name,
-                lower=var.lower,
-                upper=var.upper,
+                lower=lo,
+                upper=hi,
+                lower_source=lo_src or fact.lower_source,
+                upper_source=hi_src or fact.upper_source,
+                model_domain=fact.model_domain,
+                model_source=fact.model_source,
+                project_boundary=fact.project_boundary,
+                project_source=fact.project_source,
+            )
+
+        var = self.variables.get(resolved_name) or self.variables.get(name)
+        if var is not None or inf_lo is not None or inf_hi is not None:
+            var_lo = var.lower if var else None
+            var_hi = var.upper if var else None
+            lo = var_lo if inf_lo is None else (inf_lo if var_lo is None else max(var_lo, inf_lo))
+            hi = var_hi if inf_hi is None else (inf_hi if var_hi is None else min(var_hi, inf_hi))
+            lo_src, hi_src = self.inference.provenance.get(resolved_name, (None, None))
+            return BoundFact(
+                symbol=name,
+                lower=lo,
+                upper=hi,
+                lower_source=lo_src,
+                upper_source=hi_src,
             )
         return None
 
@@ -429,23 +457,29 @@ class CompilerAnalysis:
         self, name: str, *, relation: SemanticRelation | None = None,
         period: int | None = None,
     ) -> tuple[float | None, float | None]:
-        variable = self.variables.get(name)
-        if variable is None:
-            resolved_name = name
-            if "." in name:
-                inst, _, prop = name.partition(".")
-                resolved_name = self.inventory.property_bindings.get((inst, prop), name)
-                variable = self.variables.get(resolved_name)
-            if variable is None:
-                fact = self.inventory.bound_facts.get(resolved_name) or self.inventory.bound_facts.get(name)
-                if fact is not None:
-                    result = (fact.lower, fact.upper)
-                else:
-                    raise LoweringUnsupportedError(f"查询未知求解变量 {name!r}")
+        resolved_name = name
+        if "." in name:
+            inst, _, prop = name.partition(".")
+            resolved_name = self.inventory.property_bindings.get((inst, prop), name)
+
+        variable = self.variables.get(resolved_name) or self.variables.get(name)
+        inf_lo, inf_hi = self.inference.bounds.get(resolved_name, (None, None))
+        if inf_lo is None and inf_hi is None:
+            inf_lo, inf_hi = self.inference.bounds.get(name, (None, None))
+
+        if variable is None and inf_lo is None and inf_hi is None:
+            fact = self.inventory.bound_facts.get(resolved_name) or self.inventory.bound_facts.get(name)
+            if fact is not None:
+                result = (fact.lower, fact.upper)
             else:
-                result = (variable.lower, variable.upper)
+                raise LoweringUnsupportedError(f"查询未知求解变量 {name!r}")
         else:
-            result = (variable.lower, variable.upper)
+            var_lo = variable.lower if variable else None
+            var_hi = variable.upper if variable else None
+            lo = var_lo if inf_lo is None else (inf_lo if var_lo is None else max(var_lo, inf_lo))
+            hi = var_hi if inf_hi is None else (inf_hi if var_hi is None else min(var_hi, inf_hi))
+            result = (lo, hi)
+
         if relation is not None:
             self.bound_requests.extend(
                 BoundRequest(relation.identity, relation.source, period, side,
@@ -458,28 +492,33 @@ class CompilerAnalysis:
         self, affine: object, *, side: str, label: str,
         relation: SemanticRelation | None = None, period: int | None = None,
     ) -> float:
-        # Both the income and VAT lowerers share exactly this existing
-        # coefficient-sign box interval; no invented Big-M / global propagation.
-        total = affine.constant
-        for name, coeff in affine.terms.items():
-            if coeff == 0.0:
-                continue
-            lo, hi = self.variable_bounds(name)
-            value = hi if (coeff > 0.0) == (side == "max") else lo
-            if value is None or not math.isfinite(value):
-                raise LoweringUnsupportedError(
-                    f"{label}缺有限界：变量 {name!r} 界不足，无法精确",
-                    model_source=({
-                        "source": f"relation:{relation.identity}", "role": "bound",
-                        "axis": relation.domain.kind, "index": period or 0,
-                        "location": {k: v for k, v in asdict(relation.source).items() if v is not None},
-                    } if relation is not None else None),
-                )
-            total += coeff * value
+        terms = getattr(affine, "terms", {})
+        constant = float(getattr(affine, "constant", 0.0))
+        inferred = self.inference.bound_affine(terms, constant, side=side)
+        if inferred is not None and math.isfinite(inferred):
+            total = inferred
+        else:
+            total = constant
+            for name, coeff in terms.items():
+                if coeff == 0.0:
+                    continue
+                lo, hi = self.variable_bounds(name)
+                value = hi if (coeff > 0.0) == (side == "max") else lo
+                if value is None or not math.isfinite(value):
+                    raise LoweringUnsupportedError(
+                        f"{label}缺有限界：变量 {name!r} 界不足，无法精确",
+                        model_source=({
+                            "source": f"relation:{relation.identity}", "role": "bound",
+                            "axis": relation.domain.kind, "index": period or 0,
+                            "location": {k: v for k, v in asdict(relation.source).items() if v is not None},
+                        } if relation is not None else None),
+                    )
+                total += coeff * value
+
         if relation is not None:
             self.bound_requests.append(BoundRequest(
                 relation.identity, relation.source, period, side,
-                tuple(sorted(k for k, v in affine.terms.items() if v)), total,
+                tuple(sorted(k for k, v in terms.items() if v)), total,
             ))
         return total
 
