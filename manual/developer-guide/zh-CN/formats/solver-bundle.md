@@ -144,6 +144,24 @@ extensions: {}
 
 同次解声明中的 `net_cashflows[].amount` 复用金额仿射节点，base_from、项目 ID 与期间是冻结字面量。适配器求值而不重建来源金额；application 原样封存项目明细与完整现金流。
 
+## 构模来源映射
+
+内置生成器 `ies.generator.highs_milp@7.1.0` 与适配器 `ies.result-adapter.highs@6.1.0` 配套使用 `input/parameters.json.model_sources`。该新增输出不改变现有解与财务字段、六项生成输入或通用 Bundle manifest；各 provider 按精确版本选择，不以新适配器补写旧任务。
+
+来源映射为 `schema: ies.model-sources`、`schema_version: 1.0.0` 的对象：
+
+| 字段 | 含义 |
+| --- | --- |
+| `sources` | 不透明来源 ID 到 `{kind, location, domain, inputs, depends_on}` 的表；location 保留冻结字段路径及已有实例、模型、revision、关系、绑定或数据对象身份，无值项省略；domain 为 `{kind,count}`，inputs 和 depends_on 为显式来源引用 |
+| `groups` | `[{source, role, axis, targets, indices}]`；source 引用来源表，role 区分原关系与转换辅助角色，axis 为 scalar/step/month/year，targets 为实际求解行或列名；indices 为与 targets 对齐的实际索引，连续等差时用 `{start,stride,count}`，否则为整数数组；标量索引为0 |
+| `outputs` | `[{path,sources}]`，path 为既有结果字段的键／数组下标路径，sources 引用来源表；目标、分量、步序列和财务明细由同次构模登记，不由消费者拆名称推断 |
+
+组的 role 以 `row:` 或 `column:` 区分行列，后缀表示转换角色。组内 targets 保留生成顺序，来源表和组按稳定身份排序。来源表保存关系及其依赖一次，组只记录实际索引和目标，不复制每步公式、完整 YAML 或求解值；同一关系可产生多组，多个来源通过 inputs／depends_on 保留。没有生成行的常量关系仍可保留来源，没有输出值时不伪造主解。
+
+请求 solution 且取得可用主解时，适配器将同一映射发布为 `ComputeResult.outputs.model_sources`，与既有结果一起封存；不重建模型、不重新读取项目、不以来源映射再次验证可信矩阵。求解不可行时映射仍保存在 Bundle 证据，不声称已找到最小冲突集。无 solution 请求时不新增来源输出。来源内容按配套 provider 版本解释，ComputeResult 顶层、财务评价、装配和 solver 版本不随之机械升级。
+
+生成中已识别的数学转换失败沿现有 `TASK-SOLVE-001` 诊断链发布 `context.model_source`：`{source,role,axis,index,location}`，位置来自当前绑定关系，index 为真实 step／评价月／评价年（标量为0）。缺有限界、不支持的数学形式仍是转换能力不足，不改称输入非法或数学无界。只有预期转换错误携带该定位；取消、隔离及内部程序异常保持各自失败语义，不吞掉或统一包装为模型错误。
+
 ## 运行时职责
 
 SolverRuntime 是求解器无关的受控执行层，只负责：
