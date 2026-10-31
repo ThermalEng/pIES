@@ -1413,109 +1413,104 @@ class _ProjectBuilder:
         ]
 
     def _build_monthly_demand(self) -> None:
-        """精确月最大功率：二元编码选择实际峰值点，不依赖目标函数。
+        """Exact natural-month max over the collected demand relations.
 
-        peak>=所有逐点功率；被编码索引选中的点强制 peak<=power[t]。
-        未选中的点由实例真实功率上下界 U-L[t] 放松。索引被限制
-        0..n-1，故一个且仅有一个真实点被选中，峰值严格等于月最大值。
-        不满足有限盒界的实例在实际构模时拒绝，不猜 Big-M 或 epsilon。
-        物化的功率输入无需变量，其真实峰值是直接常量。
+        The original binary-selection formulation is retained.  Every actual
+        point bound now comes through the same analysis used by the technical
+        and tax condition operations; no invented finite box is introduced.
         """
-        spans = self._vat_month_spans()
         baseline_year = self.doc["project_baseline"]["start_year"]
         construction = self.evaluation.construction_period
-        bindings = self.doc.get("demand_bindings") or {}
-        for billing_id, binding in sorted(bindings.items()):
-            instance = binding["instance"]
-            interface = binding["interface"]
-            charge_id = binding["charge"]
-            rate = self.finance.demand_charges[charge_id].rate
+        for operation in self.analysis.relations("demand"):
+            spec = operation.payload
+            billing_id = spec.billing_id
+            instance, interface = spec.instance, spec.interface
+            month, start, end = spec.month, spec.start, spec.end
+            rate = self.finance.demand_charges[spec.charge_id].rate
             rate_si = _money_to_internal(rate)
-            total = _AffineAcc()
-            for month, start, end in spans:
-                key = (instance, interface, month)
-                peak = self._demand_peaks.get(key)
-                if peak is None:
-                    peak = _AffineAcc()
-                    if (instance, interface) in self.series:
-                        values = self._series_si(
-                            instance, interface, self.models[instance]
-                        )[start:end]
-                        peak.add_const(max(values))
-                    else:
-                        names = [
-                            self._tech_name(instance, interface, t)
-                            for t in range(start, end)
-                        ]
-                        candidates = [self.variables[name] for name in names]
-                        if any(
-                            variable.lower is None or variable.upper is None
-                            for variable in candidates
-                        ):
-                            raise LoweringUnsupportedError(
-                                f"需量绑定 {billing_id!r} 计量点 "
-                                f"{instance}.{interface} 的月 {month} 缺实际有限界"
-                            )
-                        upper = max(float(var.upper) for var in candidates)
-                        lower = max(float(var.lower) for var in candidates)
-                        peak_name = f"{instance}__{interface}__demand_peak_m{month}"
-                        self._declare(peak_name, lower, upper, "continuous", None)
-                        peak.add_term(peak_name, 1.0)
-                        bit_count = (len(names) - 1).bit_length()
-                        bits = [
-                            self._declare(
-                                f"{peak_name}__bit{bit}", 0.0, 1.0, "binary", None
-                            )
-                            for bit in range(bit_count)
-                        ]
-                        if bits:
-                            valid = _AffineAcc()
-                            for bit, flag in enumerate(bits):
-                                valid.add_term(flag, float(1 << bit))
-                            self.rows.append(LinearConstraint(
-                                name=f"{peak_name}__valid",
-                                expression=valid.freeze(), sense="le",
-                                rhs=float(len(names) - 1),
-                            ))
-                        for offset, variable in enumerate(candidates):
-                            floor = _AffineAcc()
-                            floor.add_term(peak_name, 1.0)
-                            floor.add_term(variable.name, -1.0)
-                            self.rows.append(LinearConstraint(
-                                name=f"{peak_name}__floor_{offset}",
-                                expression=floor.freeze(), sense="ge", rhs=0.0,
-                            ))
-                            slack = upper - float(variable.lower)
-                            select = floor.snapshot()
-                            ones = 0
-                            for bit, flag in enumerate(bits):
-                                if offset & (1 << bit):
-                                    select.add_term(flag, slack)
-                                    ones += 1
-                                else:
-                                    select.add_term(flag, -slack)
-                            self.rows.append(LinearConstraint(
-                                name=f"{peak_name}__select_{offset}",
-                                expression=select.freeze(), sense="le",
-                                rhs=slack * ones,
-                            ))
-                    self._demand_peaks[key] = peak
-                base_charge = _AffineAcc()
-                base_charge.add_scaled(peak, rate_si)
-                total.add_scaled(base_charge, 1.0)
-                operating_month = month - 12 * construction - 1
-                self._demand_rows.append({
-                    "billing_id": billing_id,
-                    "charge_id": charge_id,
-                    "calendar_year": baseline_year + operating_month // 12,
-                    "calendar_month": operating_month % 12 + 1,
-                    "financial_year": (month - 1) // 12 + 1,
-                    "month": month,
-                    "peak": peak,
-                    "base_charge": base_charge,
-                    "rate": rate.to_dict(),
-                })
-            self._demand_totals[billing_id] = total
+            total = self._demand_totals.setdefault(billing_id, _AffineAcc())
+            key = (instance, interface, month)
+            peak = self._demand_peaks.get(key)
+            if peak is None:
+                peak = _AffineAcc()
+                if (instance, interface) in self.series:
+                    values = self._series_si(
+                        instance, interface, self.models[instance]
+                    )[start:end]
+                    peak.add_const(max(values))
+                else:
+                    names = [
+                        self._tech_name(instance, interface, t)
+                        for t in range(start, end)
+                    ]
+                    bounds = [
+                        self.analysis.variable_bounds(name, relation=operation, period=month)
+                        for name in names
+                    ]
+                    if any(lo is None or hi is None for lo, hi in bounds):
+                        raise LoweringUnsupportedError(
+                            f"需量绑定 {billing_id!r} 计量点 "
+                            f"{instance}.{interface} 的月 {month} 缺实际有限界"
+                        )
+                    upper = max(float(hi) for _lo, hi in bounds)
+                    lower = max(float(lo) for lo, _hi in bounds)
+                    peak_name = f"{instance}__{interface}__demand_peak_m{month}"
+                    self._declare(peak_name, lower, upper, "continuous", None)
+                    peak.add_term(peak_name, 1.0)
+                    bit_count = (len(names) - 1).bit_length()
+                    bits = [
+                        self._declare(
+                            f"{peak_name}__bit{bit}", 0.0, 1.0, "binary", None
+                        )
+                        for bit in range(bit_count)
+                    ]
+                    if bits:
+                        valid = _AffineAcc()
+                        for bit, flag in enumerate(bits):
+                            valid.add_term(flag, float(1 << bit))
+                        self.rows.append(LinearConstraint(
+                            name=f"{peak_name}__valid",
+                            expression=valid.freeze(), sense="le",
+                            rhs=float(len(names) - 1),
+                        ))
+                    for offset, (name, (lo, _hi)) in enumerate(zip(names, bounds)):
+                        floor = _AffineAcc()
+                        floor.add_term(peak_name, 1.0)
+                        floor.add_term(name, -1.0)
+                        self.rows.append(LinearConstraint(
+                            name=f"{peak_name}__floor_{offset}",
+                            expression=floor.freeze(), sense="ge", rhs=0.0,
+                        ))
+                        slack = upper - float(lo)
+                        select = floor.snapshot()
+                        ones = 0
+                        for bit, flag in enumerate(bits):
+                            if offset & (1 << bit):
+                                select.add_term(flag, slack)
+                                ones += 1
+                            else:
+                                select.add_term(flag, -slack)
+                        self.rows.append(LinearConstraint(
+                            name=f"{peak_name}__select_{offset}",
+                            expression=select.freeze(), sense="le",
+                            rhs=slack * ones,
+                        ))
+                self._demand_peaks[key] = peak
+            base_charge = _AffineAcc()
+            base_charge.add_scaled(peak, rate_si)
+            total.add_scaled(base_charge, 1.0)
+            operating_month = month - 12 * construction - 1
+            self._demand_rows.append({
+                "billing_id": billing_id,
+                "charge_id": spec.charge_id,
+                "calendar_year": baseline_year + operating_month // 12,
+                "calendar_month": operating_month % 12 + 1,
+                "financial_year": (month - 1) // 12 + 1,
+                "month": month,
+                "peak": peak,
+                "base_charge": base_charge,
+                "rate": rate.to_dict(),
+            })
 
     def _ident_affine(self, ident: str) -> _AffineAcc:
         """规划财务标识符 → 仿射式（`<前缀>__<分量>` 首个 __ 切分）。"""
