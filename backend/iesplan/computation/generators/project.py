@@ -2918,15 +2918,6 @@ class _ProjectBuilder:
         } or None)
         evaluation = self.evaluation
         years = evaluation.evaluation_years
-        construction = evaluation.construction_period
-        operation = evaluation.operation_years
-        baseline = self.doc["project_baseline"]
-        bounds = annual_boundaries(
-            baseline["resolution"], baseline["start_year"], operation
-        )
-        span_by_year = {
-            construction + index + 1: span for index, span in enumerate(bounds)
-        }
         var_bounds = {
             variable.name: (variable.lower, variable.upper)
             for variable in self.variables.values()
@@ -2960,8 +2951,21 @@ class _ProjectBuilder:
                 )
             )
 
+        all_year_relations = self.analysis.relations("income_year")
+        all_claim_relations = self.analysis.relations("income_loss_claim")
         for operation in operations:
             rule_id, rule = operation.payload.rule_id, operation.payload.rule
+            year_relations = tuple(sorted(
+                (
+                    relation for relation in all_year_relations
+                    if relation.payload.rule_id == rule_id
+                ),
+                key=lambda relation: relation.payload.year,
+            ))
+            claim_relations = tuple(
+                relation for relation in all_claim_relations
+                if relation.payload.rule_id == rule_id
+            )
             tax_rate = float(rule.rate.value)
             carry_years = int(rule.loss_carryforward_years)
             vintages: list[dict] = []
@@ -2974,10 +2978,18 @@ class _ProjectBuilder:
                         "last": int(opening.last_usable_year),
                         "init_upper": float(opening.amount.value),
                         "rem": opening_acc,
+                        "origin_kind": "opening",
+                        "origin_index": position,
                     }
                 )
             seq_next = len(vintages)
-            for year in range(1, years + 1):
+            for year_relation in year_relations:
+                year = year_relation.payload.year
+                span = (
+                    None
+                    if year_relation.payload.start is None
+                    else (year_relation.payload.start, year_relation.payload.end)
+                )
                 location = f"所得税规则 {rule_id!r} 第 {year} 年"
                 expired: list[tuple[str, int, _AffineAcc]] = []
                 for vintage in vintages:
@@ -2990,15 +3002,15 @@ class _ProjectBuilder:
                             )
                         )
                 base = self._income_annual_base(
-                    rule, rule_id, year, span_by_year.get(year), credits, var_bounds,
+                    rule, rule_id, year, span, credits, var_bounds,
                     location,
                 )
                 base_kept = base.snapshot()
                 base_hi = self.analysis.affine_side(
-                    base, side="max", label=location, relation=operation, period=year,
+                    base, side="max", label=location, relation=year_relation, period=year,
                 )
                 base_lo = self.analysis.affine_side(
-                    base, side="min", label=location, relation=operation, period=year,
+                    base, side="min", label=location, relation=year_relation, period=year,
                 )
                 profit_hi = max(base_hi, 0.0)
                 gen_hi = max(-base_lo, 0.0)
@@ -3014,13 +3026,23 @@ class _ProjectBuilder:
                 if profit_hi > 0.0 and gen_hi > 0.0:
                     mutex = self.analysis.mutex(
                         f"inc__{rule_id}__m{year}", profit_name, gen_name,
-                        relation=operation, period=year,
+                        relation=year_relation, period=year,
                     )
                     binary = mutex.variables[0]
                     self.variables[binary.name] = binary
                     self.rows.extend(mutex.constraints)
+                declared_origins = {
+                    (relation.payload.origin_kind, relation.payload.origin_index)
+                    for relation in claim_relations
+                    if relation.payload.use_year == year
+                }
                 available = sorted(
-                    (vintage for vintage in vintages if vintage["last"] >= year),
+                    (
+                        vintage for vintage in vintages
+                        if (
+                            vintage["origin_kind"], vintage["origin_index"]
+                        ) in declared_origins
+                    ),
                     key=lambda vintage: (vintage["last"], vintage["seq"]),
                 )
                 need = _AffineAcc()
@@ -3097,6 +3119,8 @@ class _ProjectBuilder:
                             "last": year + carry_years,
                             "init_upper": gen_hi,
                             "rem": gen_acc,
+                            "origin_kind": "generated",
+                            "origin_index": year,
                         }
                     )
                     seq_next += 1
