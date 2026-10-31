@@ -327,7 +327,7 @@ export default function ConfigPage(props: ConfigPageProps) {
             id="calc-generator"
             value={generator}
             onChange={(e) => setGenerator(e.target.value)}
-            placeholder="ies.generator.highs_milp@7.0.0"
+            placeholder="ies.generator.highs_milp@7.1.0"
             invalid={!!fieldErrors.generator}
           />
         </FormField>

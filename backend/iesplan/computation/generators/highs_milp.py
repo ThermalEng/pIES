@@ -18,7 +18,7 @@ constant tariff；数学能力即 ``build_project_model`` 现有 lowerer 明确
 直接输入形状不变。通用 Bundle manifest 未变；结果适配
 协议按实际输出变化独立版本化，不因生成器输入变化而同步升版。
 5.0.0 将维护金额仿射式同源接入现金、VAT、所得税和财务事实声明，
-配套 ``ies.result-adapter.highs@6.0.0`` 从同一次主解恢复年度金额。
+配套 ``ies.result-adapter.highs@6.1.0`` 从同一次主解恢复年度金额。
 """
 
 from __future__ import annotations
@@ -45,7 +45,7 @@ from iesplan.finance import EffectiveFinanceConfig, EvaluationInput
 from iesplan.modeling import DeviceMathContribution
 
 GENERATOR_ID = "ies.generator.highs_milp"
-GENERATOR_VERSION = "7.0.0"
+GENERATOR_VERSION = "7.1.0"
 GENERATOR_REF = f"{GENERATOR_ID}@{GENERATOR_VERSION}"
 SOLVER_REF = "ies.solver.highs@1.7.2"
 EXECUTOR_REF = "ies.executor.local_process@1.0.0"
@@ -154,7 +154,7 @@ class HighsMilpProvider:
         self._check_capabilities(artifact, config, finance)
         self._check_stop(stop)
         seed = config.seed if config.seed is not None else FIXED_SEED
-        model, unit_map, objective_unit, facts, components, series = (
+        model, unit_map, objective_unit, facts, components, series, sources = (
             build_project_model_package(
                 artifact, models, materialized, finance, config, evaluation, stop=stop,
             )
@@ -172,7 +172,9 @@ class HighsMilpProvider:
             components,
             series,
             facts,
+            sources,
         )
+        self._check_stop(stop)
         manifest = SolverBundleManifest(
             bundle={"generator": self.ref, "solver": SOLVER_REF},
             inputs=[
@@ -273,6 +275,7 @@ class HighsMilpProvider:
         components: Mapping[str, Mapping[str, object]],
         series: tuple[Mapping[str, object], ...],
         facts: Mapping[str, object],
+        sources: Mapping[str, object],
     ) -> bytes:
         """ResultAdapter 后续必需的最小规范 JSON 元数据（规范字节）。
 
@@ -306,6 +309,7 @@ class HighsMilpProvider:
             },
             "generator": self.ref,
             "financial_facts": dict(facts),
+            "model_sources": dict(sources),
             "objective_offset": offset,
             "objective_unit": objective_unit,
             "outputs": list(config.outputs),

@@ -113,7 +113,7 @@ extensions: {}
 
 配套生成器在 `parameters.json` 的 `financial_facts` 声明结构化财务事实映射，ResultAdapter 使用同一次主解恢复为 `ComputeResult.outputs.financial_facts`。声明复用既有仿射求值方式，包含明确字段、业务身份、期间、单位与求解列引用；消费者不拆解分量键、序列 ID 或列名。现金流声明与规划目标中的现金表达式同源，不重新建立税务模型。声明不复制完整财务配置，也不是新的用户公式语言。
 
-以下为配套生成器 `ies.generator.highs_milp@7.0.0` 与适配器 `ies.result-adapter.highs@6.0.0` 的业务输出：
+以下为配套生成器 `ies.generator.highs_milp@7.1.0` 与适配器 `ies.result-adapter.highs@6.1.0` 的业务输出：
 
 | 字段 | 语义 |
 | --- | --- |
@@ -132,7 +132,7 @@ extensions: {}
 
 `t`、`month`、`year`、`period`、`arrival_period`、`last_usable_year` 及日历／评价年、日历月均为整数；`ratio` 与金额均为十进制字符串。期间映射以财务契约为准，池与规则保持显式身份，共享池不得按规则重复计入。没有适用规则时对应数组为空，含义为不适用；适用规则的零税额、零余额显式发布，不省略为未知。无税则的完整现金流仍须声明并恢复，不以缺映射冒充零税。
 
-需量费与能源电量费分列，不重复包含于 `energy_net` 或 O&M；显式净现金项目也不重复写入 `annual_operation.net`，只在其时点进入完整现金流。月明细按 `(billing_id, calendar_year, calendar_month)` 排序，年度正费用与净额在模型中同源产生；适配器只恢复声明，不重新取 max、重新计税或扣费。财务结果按 `ies.financial-evaluation@3.0.0` 封存；折旧来源身份与净现金项目改变输出结构，配套生成器为 `7.0.0`、适配器为 `6.0.0`，不在旧结果上注入新字段。
+需量费与能源电量费分列，不重复包含于 `energy_net` 或 O&M；显式净现金项目也不重复写入 `annual_operation.net`，只在其时点进入完整现金流。月明细按 `(billing_id, calendar_year, calendar_month)` 排序，年度正费用与净额在模型中同源产生；适配器只恢复声明，不重新取 max、重新计税或扣费。财务结果按 `ies.financial-evaluation@3.0.0` 封存；当前配套生成器为 `7.1.0`、适配器为 `6.1.0`，财务字段保持原义，不在旧结果上注入新字段。
 
 该块随已请求的 `solution` 且存在可用数学解时发布；未请求solution或无可用解时缺席。它不增加 CalculationConfig 输出词汇，不改变 ComputeResult 顶层身份与状态或通用 Bundle manifest。适配器只恢复业务事实，不重算税务、猜列名或改写期间；内部可信声明不增加重复结构、摘要或完整性复核。
 
@@ -152,7 +152,7 @@ extensions: {}
 
 | 字段 | 含义 |
 | --- | --- |
-| `sources` | 不透明来源 ID 到 `{kind, location, domain, inputs, depends_on}` 的表；location 保留冻结字段路径及已有实例、模型、revision、关系、绑定或数据对象身份，无值项省略；domain 为 `{kind,count}`，inputs 和 depends_on 为显式来源引用 |
+| `sources` | 不透明来源 ID 到 `{kind, location, domain, inputs, outputs, depends_on}` 的表；location 保留冻结字段路径及已有实例、模型、revision、关系、绑定或数据对象身份，无值项省略；domain 为 `{kind,count}`，单一财务期间另带实际 `index`；inputs／outputs 为已绑定的符号身份，depends_on 引用本表中的上游关系 |
 | `groups` | `[{source, role, axis, targets, indices}]`；source 引用来源表，role 区分原关系与转换辅助角色，axis 为 scalar/step/month/year，targets 为实际求解行或列名；indices 为与 targets 对齐的实际索引，连续等差时用 `{start,stride,count}`，否则为整数数组；标量索引为0 |
 | `outputs` | `[{path,sources}]`，path 为既有结果字段的键／数组下标路径，sources 引用来源表；目标、分量、步序列和财务明细由同次构模登记，不由消费者拆名称推断 |
 
@@ -160,7 +160,7 @@ extensions: {}
 
 请求 solution 且取得可用主解时，适配器将同一映射发布为 `ComputeResult.outputs.model_sources`，与既有结果一起封存；不重建模型、不重新读取项目、不以来源映射再次验证可信矩阵。求解不可行时映射仍保存在 Bundle 证据，不声称已找到最小冲突集。无 solution 请求时不新增来源输出。来源内容按配套 provider 版本解释，ComputeResult 顶层、财务评价、装配和 solver 版本不随之机械升级。
 
-生成中已识别的数学转换失败沿现有 `TASK-SOLVE-001` 诊断链发布 `context.model_source`：`{source,role,axis,index,location}`，位置来自当前绑定关系，index 为真实 step／评价月／评价年（标量为0）。缺有限界、不支持的数学形式仍是转换能力不足，不改称输入非法或数学无界。只有预期转换错误携带该定位；取消、隔离及内部程序异常保持各自失败语义，不吞掉或统一包装为模型错误。
+生成中已识别的数学转换失败沿现有 `TASK-SOLVE-001` 诊断链发布 `context.model_source`：`{source,role,axis,index,location}`，并可附 `coefficients` 保存该关系已知系数的来源位置。该模型定位可由有权查看任务的项目成员读取，堆栈仍按原权限规则处理。位置来自当前绑定关系，index 为真实 step／评价月／评价年（标量为0）；物化系数沿用冻结对象身份，月日价格可保留按1～12月排列的 `data_object_refs`。缺有限界、不支持的数学形式仍是转换能力不足，不改称输入非法或数学无界。只有预期转换错误携带该定位；取消、隔离及内部程序异常保持各自失败语义，不吞掉或统一包装为模型错误。
 
 ## 运行时职责
 

@@ -44,6 +44,7 @@ from typing import Any
 
 from iesplan.assembly.contracts import ValidatedAssemblyArtifact
 from iesplan.computation.errors import ComputationUnavailableError
+from iesplan.computation.generators.sources import SourceTrace, SourceRows, SourceColumns
 from iesplan.computation.generators.compiler_ir import (
     CompilerInventory,
     CompilerAnalysis,
@@ -188,16 +189,16 @@ for _si_symbol in ("J", "W", "K", "s", "rad", "kg", "m³", "V", "m²"):
         _SI_UNIT_BY_DIM_KEY[next(iter(_si_dims))] = _si_symbol
 
 
-def _refs_of(node: object) -> set[str]:
+def _refs_of(node: object, offset: int | None = None) -> set[str]:
     """AST 引用的裸名集合（时间偏移不影响存在性收集）。"""
     if isinstance(node, NumberNode):
         return set()
     if isinstance(node, RefNode):
-        return {node.name}
+        return {node.name} if offset is None or node.offset == offset else set()
     if isinstance(node, UnaryNode):
-        return _refs_of(node.operand)
+        return _refs_of(node.operand, offset)
     if isinstance(node, BinaryNode):
-        return _refs_of(node.left) | _refs_of(node.right)
+        return _refs_of(node.left, offset) | _refs_of(node.right, offset)
     return set()
 
 
@@ -306,7 +307,7 @@ def build_project_model_with_facts(
     完全一致，第四项为 ``financial_facts`` 结构化声明（格式页映射表为
     唯一正文，供配套适配器用同一次主解恢复，不重建模型）。
     """
-    model, unit_map, objective_unit, facts, _, _ = build_project_model_package(
+    model, unit_map, objective_unit, facts, _, _, _ = build_project_model_package(
         artifact, models, materialized, finance, config, evaluation
     )
     return model, unit_map, objective_unit, facts
@@ -324,6 +325,7 @@ def build_project_model_package(
 ) -> tuple[
     LinearModel, Mapping[str, str], str, Mapping[str, object],
     Mapping[str, Mapping[str, object]], tuple[Mapping[str, object], ...],
+    Mapping[str, object],
 ]:
     """一次建模取得 MPS、财务事实、分量与时序声明，不重复展开月峰。"""
     builder = _new_builder(artifact, models, materialized, finance, evaluation, stop=stop)
@@ -332,6 +334,7 @@ def build_project_model_package(
         model, unit_map, objective_unit,
         builder.financial_facts(), builder.finance_components(),
         builder.step_series(),
+        builder.model_sources(),
     )
 
 
@@ -437,6 +440,7 @@ class _ProjectBuilder:
         #: 同源财务事实留存（与目标同一表达式/循环内并行累积，供
         #: ``financial_facts`` 声明；键与结构见格式页映射表）。
         self._demand_peaks: dict[tuple[str, str, int], _AffineAcc] = {}
+        self._demand_peak_sources: dict[tuple[str, str, int], str] = {}
         self._demand_rows: list[dict[str, Any]] = []
         self._demand_totals: dict[str, _AffineAcc] = {}
         self._fact_cash: dict[int, _AffineAcc] = {}
@@ -464,13 +468,16 @@ class _ProjectBuilder:
             self.series[key] = list(entry.values)
             self._series_sources[key] = entry.source
         self.prices: dict[str, list[float]] = {}
+        self._price_sources = {}
         for entry in prices:
+            self._price_sources[entry.price_id] = entry.source
             self.prices[entry.price_id] = [
                 _to_internal(v, entry.unit) for v in entry.values
             ]
         self._series_si_cache: dict[tuple[str, str], list[float]] = {}
-        self.variables: dict[str, LinearVariable] = {}
-        self.rows: list[LinearConstraint] = []
+        self.source_trace = SourceTrace()
+        self.variables: dict[str, LinearVariable] = SourceColumns(self.source_trace)
+        self.rows: list[LinearConstraint] = SourceRows(self.source_trace)
         self.unit_map: dict[str, str] = {}
         # Per-generate declarations: no published input or Bundle schema change.
         self.inventory = CompilerInventory()
@@ -541,6 +548,56 @@ class _ProjectBuilder:
     def _tech_name(self, inst: str, local: str, step: int) -> str:
         return f"{inst}__{local}__t{step}"
 
+    def _source(self, identity, role, axis="scalar", index=0, *,
+                kind="relation", location=None):
+        key = f"{kind}:{identity}"
+        if location is not None:
+            self.source_trace.register(key, kind, location, IndexDomain(axis))
+        self.source_trace.activate(key, role, axis, index)
+
+    def _register_sources(self):
+        for identity, symbol in self.inventory.symbols.items():
+            self.source_trace.register(
+                f"symbol:{identity}", symbol.role, symbol.source, symbol.domain,
+                outputs=(identity,),
+            )
+        for identity, coefficient in self.inventory.coefficients.items():
+            self.source_trace.register(
+                f"coefficient:{identity}", coefficient.mode,
+                coefficient.source,
+                (IndexDomain("step", self.point_count)
+                 if coefficient.mode in ("materialized_series", "materialized_price") else IndexDomain("scalar")),
+                outputs=(identity,),
+            )
+        for family in self.inventory.relations:
+            inst = family.source.instance_id
+            refs = [("step_duration" if name == TIMELINE_STEP_DURATION_VAR else
+                     self.inventory.property_bindings.get((inst, name), f"{inst}.{name}"))
+                    for name in family.referenced_symbols]
+            self.source_trace.register(
+                f"technical:{family.identity}", "technical", family.source,
+                family.domain, refs,
+                [f"relation:{inst}.{state}.initial" for state in sorted(
+                    _refs_of(family.relation.ast.lhs_root, -1)
+                    | _refs_of(family.relation.ast.rhs_root, -1)
+                )],
+                ([self.inventory.property_bindings.get(
+                    (inst, family.output_symbol), f"{inst}.{family.output_symbol}"
+                )] if family.output_symbol is not None else []),
+            )
+        for operation in self.inventory.operations:
+            self.source_trace.register(
+                f"relation:{operation.identity}", operation.kind, operation.source,
+                operation.domain, operation.input_symbols,
+                [f"relation:{identity}" for identity in operation.depends_on],
+                operation.output_symbols,
+            )
+            payload = operation.payload
+            if isinstance(payload, (DemandPeak, VatPeriodConnection)):
+                self.source_trace.sources[f"relation:{operation.identity}"]["domain"]["index"] = payload.month
+            elif isinstance(payload, (MaintenancePayment, IncomeYearConnection, AnnualCash, ConstructionPayment)):
+                self.source_trace.sources[f"relation:{operation.identity}"]["domain"]["index"] = payload.year
+
     def _prop_value_unit(self, inst: str, prop: str) -> tuple[float, str]:
         """实例 property 值与单位（装配覆盖优先，否则设备默认值）。"""
         dev = self.devices[inst]
@@ -580,6 +637,10 @@ class _ProjectBuilder:
         for name in sorted(self.plan_vars):
             spec = self.plan_vars[name]
             inst, prop = spec["device_ref"], spec["parameter"]
+            self._source(name, "planning", kind="symbol", location=SourceLocation(
+                f"planning.variables.{name}", inst, self.models[inst].device_id,
+                self.devices[inst]["definition"].get("revision"), binding_id=name,
+            ))
             model_var = self.models[inst].variables[prop]
             unit = spec.get("unit") or model_var.unit
             lower = spec.get("lower_bound")
@@ -727,6 +788,10 @@ class _ProjectBuilder:
         initial: dict[str, float | LinearExpression] = {}
         for state in contribution.states:
             variable = contribution.variables[state]
+            self._source(f"{inst}.{state}.initial", "initial", location=SourceLocation(
+                f"equations.variables.{state}.initial", inst, contribution.device_id,
+                dev["definition"].get("revision"),
+            ))
             if variable.initial_ast is not None:
                 initial[state] = lower_expression(variable.initial_ast, symbols)
             else:
@@ -786,7 +851,7 @@ class _ProjectBuilder:
                 f"{inst}.{local}.plan_{sense}", "capacity",
                 IndexDomain("step", self.point_count),
                 CapacityLimit(inst, local, pname, sense),
-                SourceLocation(f"equations.variables.{local}.valid_range", inst,
+                SourceLocation(f"{'interfaces' if local in contribution.interfaces else 'equations.variables'}.{local}.valid_range", inst,
                                contribution.device_id, dev["definition"].get("revision")),
                 (f"{inst}.{local}", pname),
             ))
@@ -887,6 +952,10 @@ class _ProjectBuilder:
             entry = constraints[name]
             if entry.get("enabled", True) is False:
                 continue
+            self._source(
+                f"planning.{'step' if entry.get('type') == 'step_relation' else 'scalar'}.{name}",
+                "planning", location=SourceLocation(f"planning.constraints.{name}", relation_id=name),
+            )
             if entry.get("type") == "step_relation":
                 references = entry["references"]
                 step_dimensions = {
@@ -1005,10 +1074,14 @@ class _ProjectBuilder:
             coefficient_id = f'price.{binding["price"]}'
             if coefficient_id not in self.inventory.coefficients:
                 is_fixed = price.kind == "constant"
+                price_source = self._price_sources.get(binding["price"], {})
                 self.inventory.coefficients[coefficient_id] = KnownCoefficient(
                     coefficient_id, "fixed_price" if is_fixed else "materialized_price",
                     SourceLocation(f'finance.energy_prices.{binding["price"]}',
-                                   binding_id=binding["price"]),
+                                   binding_id=binding["price"],
+                                   data_object_ref=price_source.get("object_id"),
+                                   data_object_refs=(tuple(price_source["months"][str(month)] for month in range(1, 13))
+                                                     if "months" in price_source else None)),
                     _to_internal(float(price.value.value), price.value.unit)
                     if is_fixed else None,
                 )
@@ -1018,7 +1091,7 @@ class _ProjectBuilder:
                 TariffCharge(binding_id, binding["instance"], binding["interface"],
                              binding["aggregation"], binding["price"]),
                 SourceLocation(f"tariff_bindings.{binding_id}", binding_id=binding_id),
-                (f'{binding["instance"]}.{binding["interface"]}',), (name,),
+                (f'{binding["instance"]}.{binding["interface"]}', coefficient_id), (name,),
             ))
 
         spans = self._vat_month_spans() if (
@@ -1569,11 +1642,11 @@ class _ProjectBuilder:
                 refs, (f"net_cash.{cash_id}",),
                 depends_on=dependencies,
             ))
-        for payment in self.evaluation.construction_payments:
+        for position, payment in enumerate(self.evaluation.construction_payments):
             add(SemanticRelation(
-                f"construction_payment.{payment.t}", "construction_payment",
+                f"construction_payment.{payment.t}.p{position}", "construction_payment",
                 IndexDomain("year"), ConstructionPayment(payment.t, float(payment.ratio)),
-                SourceLocation("evaluation.construction_payments", binding_id=str(payment.t)),
+                SourceLocation(f"evaluation.construction_payments.{position}", binding_id=str(position)),
                 tuple(op.output_symbols[0] for op in self.inventory.operations if op.kind == "cost"
                       and isinstance(op.payload, CostComponent)
                       and op.payload.component == "upfront_capex"),
@@ -1594,6 +1667,9 @@ class _ProjectBuilder:
                 (f"cash.y{year}",),
             ))
         if include_objective:
+            self._source("planning.objective", "objective", location=SourceLocation(
+                "planning.objective.expression",
+            ))
             raw = planning["objective"]["expression"]
             compiled = None
             if raw.strip() == SYSTEM_AFTER_TAX_NPV:
@@ -1621,6 +1697,7 @@ class _ProjectBuilder:
 
         self.inventory.seal()
         self.analysis = CompilerAnalysis(self.inventory, self.variables)
+        self._register_sources()
 
     def _blocks(self):
         """Cover the complete domain, including final partial block and year edges."""
@@ -1651,6 +1728,7 @@ class _ProjectBuilder:
             }
             for family in self._instance_relations[inst]:
                 self._checkpoint()
+                self._source(family.identity, "compile", kind="technical")
                 roles = {
                     name: ("known" if (
                         name in predefined or symbols[name][0] == "const"
@@ -1679,6 +1757,7 @@ class _ProjectBuilder:
             columns = self._step_columns.setdefault((inst, local), [])
             for block in self._blocks():
                 for step in block:
+                    self._source(f"{inst}.{local}", "declared", "step", step, kind="symbol")
                     cname = self._tech_name(inst, local, step)
                     self._declare(cname, lower, upper, "continuous", unit)
                     columns.append(cname)
@@ -1691,6 +1770,7 @@ class _ProjectBuilder:
                 relation.payload.sense,
             )
             for step in range(self.point_count):
+                self._source(relation.identity, "capacity", "step", step)
                 vname = self._tech_name(inst, local, step)
                 suffix = "plan_max" if sense == "le" else "plan_min"
                 self.rows.append(LinearConstraint(
@@ -1810,6 +1890,7 @@ class _ProjectBuilder:
                     known[name] = values[step]
                 for family in families:
                     template = self._technical_templates[family.identity]
+                    self._source(family.identity, "equation", "step", step, kind="technical")
                     lowered = bind_technical(
                         template, instance=inst, step=step, known=known,
                         initial=initial, bound=bounds,
@@ -1818,6 +1899,7 @@ class _ProjectBuilder:
                     )
                     self.template_stats["technical_binds"] += 1
                     if lowered.variables:
+                        self._source(family.identity, "mutex", "step", step, kind="technical")
                         # Exact Big-M mutex lowering still requires declaring
                         # and qualifying its new auxiliary binary column.
                         self.template_stats["mutex_fallback_relations"] += 1
@@ -1948,6 +2030,7 @@ class _ProjectBuilder:
             spec = operation.payload
             for step in range(self.point_count):
                 self._checkpoint()
+                self._source(operation.identity, "balance", "step", step)
                 terms = tuple(
                     ((f"{inst}__{iface}__t{step}", 0), sign)
                     for inst, iface, sign in spec.ports
@@ -2119,6 +2202,7 @@ class _ProjectBuilder:
         construction = self.evaluation.construction_period
         for operation in self.analysis.relations("demand"):
             spec = operation.payload
+            self._source(operation.identity, "peak", "month", spec.month)
             billing_id = spec.billing_id
             instance, interface = spec.instance, spec.interface
             month, start, end = spec.month, spec.start, spec.end
@@ -2192,6 +2276,11 @@ class _ProjectBuilder:
                             rhs=slack * ones,
                         ))
                 self._demand_peaks[key] = peak
+                self._demand_peak_sources[key] = f"relation:{operation.identity}"
+            else:
+                self.source_trace.sources[f"relation:{operation.identity}"]["depends_on"].append(
+                    self._demand_peak_sources[key]
+                )
             base_charge = _AffineAcc()
             base_charge.add_scaled(peak, rate_si)
             total.add_scaled(base_charge, 1.0)
@@ -2535,6 +2624,7 @@ class _ProjectBuilder:
         """
         for relation in self.analysis.relations("maintenance"):
             spec = relation.payload
+            self._source(relation.identity, "payment", "year", spec.year)
             entry, position = spec.entry, spec.position
             amount = _AffineAcc()
             amount.add_const(float(entry.amount))
@@ -2802,6 +2892,7 @@ class _ProjectBuilder:
         all_periods = self.analysis.relations("vat_period")
         for operation in operations:
             pool_id = operation.payload.pool_id
+            self._source(operation.identity, "vat")
             pool = operation.payload.pool
             periods = tuple(sorted(
                 (
@@ -2826,6 +2917,7 @@ class _ProjectBuilder:
             for period_relation in periods:
                 period = period_relation.payload
                 month = period.month
+                self._source(period_relation.identity, "vat", "month", month)
                 location = f"VAT 池 {pool_id!r} 第 {month} 月"
                 out_max = self.analysis.affine_side(
                     out_list[month - 1], side="max", label=location,
@@ -3143,6 +3235,8 @@ class _ProjectBuilder:
             cash_id, entry = spec.cash_id, spec.entry
             t = (self.evaluation.evaluation_years if entry.at.kind == "evaluation_end"
                  else entry.at.year)
+            self._source(relation.identity, "net_payment", "year", t)
+            self.source_trace.sources[f"relation:{relation.identity}"]["domain"]["index"] = t
             amount = _AffineAcc()
             if entry.amount.kind == "fixed":
                 amount.add_const(float(entry.amount.value.value))
@@ -3238,6 +3332,7 @@ class _ProjectBuilder:
             seq_next = len(vintages)
             for year_relation in year_relations:
                 year = year_relation.payload.year
+                self._source(year_relation.identity, "income", "year", year)
                 location = f"所得税规则 {rule_id!r} 第 {year} 年"
                 expired: list[tuple[str, int, _AffineAcc]] = []
                 for vintage in vintages:
@@ -3436,6 +3531,7 @@ class _ProjectBuilder:
                 self.template_stats["step_blocks"] += 1
                 for step in block:
                     self._checkpoint()
+                    self._source(operation.identity, "step_constraint", "step", step)
                     terms: dict[tuple[str, int], float] = {}
                     for inst, iface, coeff in template.ports:
                         column = self._step_columns[(inst, iface)][step]
@@ -3464,6 +3560,7 @@ class _ProjectBuilder:
         """Consume scalar planning templates from the same sealed collection."""
         for operation in self.analysis.relations("planning_scalar"):
             spec = operation.payload
+            self._source(operation.identity, "constraint")
             lowered = spec.template
             substituted = self._substitute(lowered.expression)
             self.rows.append(LinearConstraint(
@@ -3513,6 +3610,64 @@ class _ProjectBuilder:
                 "columns": list(self._step_columns[(inst, local)]),
             })
         return tuple(out)
+
+    def model_sources(self) -> Mapping[str, object]:
+        """Expose references from the same build, never parse solver names."""
+        outputs = [{"path": ["solution", "objective_value"],
+                    "sources": ["relation:planning.objective"]}]
+        for inst, local in sorted(self._step_columns):
+            outputs.append({"path": ["series", f"{inst}.{local}"],
+                            "sources": [f"symbol:{inst}.{local}"]})
+        component_sources = {}
+        for operation in self.inventory.operations:
+            if operation.kind in ("cost", "tariff", "demand"):
+                for ident in operation.output_symbols:
+                    component_sources.setdefault(ident, []).append(f"relation:{operation.identity}")
+        for ident, refs in sorted(component_sources.items()):
+            outputs.append({"path": ["solution", "components", ident], "sources": refs})
+        # The financial declaration producer already owns each identity/period.
+        # Keep field references, not a second amount or tax calculation.
+        for index, operation in enumerate(self.analysis.relations("annual_cash")):
+            outputs.append({"path": ["financial_facts", "annual_operation", index],
+                            "sources": [f"relation:{operation.identity}"]})
+        for index, item in enumerate(self._fact_vat):
+            outputs.append({"path": ["financial_facts", "tax_cash", "vat", index],
+                            "sources": [f"relation:vat.{item['pool']}.m{item['month']}"]})
+        for index, item in enumerate(self._fact_income):
+            outputs.append({"path": ["financial_facts", "tax_cash", "income", index],
+                            "sources": [f"relation:income.{item['rule']}.y{item['year']}"]})
+        for index, item in enumerate(self._fact_balances):
+            outputs.append({"path": ["financial_facts", "tax_cash", "loss_balances", index],
+                            "sources": [f"relation:income.{item['rule']}.y{item['year']}"]})
+        for index, item in enumerate(self._fact_refunds):
+            outputs.append({"path": ["financial_facts", "tax_cash", "refunds", index],
+                            "sources": [f"relation:vat.{item['pool']}.m{item['period']}"]})
+        for index, item in enumerate(self._demand_rows):
+            outputs.append({"path": ["financial_facts", "monthly_demand", index],
+                            "sources": [f"relation:demand.{item['billing_id']}.m{item['month']}"]})
+        for operation in self.inventory.operations:
+            if operation.kind == "depreciation":
+                spec = operation.payload
+                for index, item in enumerate(self._fact_depr):
+                    if item["rule"] == spec.rule_id and item["base_from"] == spec.entry.base_from.to_dict():
+                        outputs.append({"path": ["financial_facts", "tax_cash", "depreciation", index],
+                                        "sources": [f"relation:{operation.identity}"]})
+        for index, item in enumerate(self._fact_net_cashflows):
+            outputs.append({"path": ["financial_facts", "net_cashflows", index],
+                            "sources": [f"relation:net_cash.{item['id']}"]})
+        for index, operation in enumerate(self.analysis.relations("construction_payment")):
+            outputs.append({"path": ["financial_facts", "payments_applied", index],
+                            "sources": [f"relation:{operation.identity}"]})
+        for field, kinds in (
+            ("construction_total", ("cost",)), ("annual_fixed_om", ("cost",)),
+            ("annual_net_flows", ("annual_cash", "construction_payment", "vat", "income", "net_cash")),
+        ):
+            outputs.append({"path": ["financial_facts", field], "sources": [
+                f"relation:{op.identity}" for op in self.inventory.operations if op.kind in kinds
+                and (field not in ("construction_total", "annual_fixed_om")
+                     or op.payload.component == ("upfront_capex" if field == "construction_total" else field))
+            ]})
+        return MappingProxyType(self.source_trace.export(outputs))
 
     @staticmethod
     def _decl_affine(acc: _AffineAcc) -> dict[str, object]:
@@ -3681,6 +3836,14 @@ class _ProjectBuilder:
         return MappingProxyType(out)
 
     def build(self) -> tuple[LinearModel, Mapping[str, str], str]:
+        try:
+            return self._build()
+        except LoweringUnsupportedError as exc:
+            if exc.model_source is None:
+                exc.model_source = self.source_trace.location()
+            raise
+
+    def _build(self) -> tuple[LinearModel, Mapping[str, str], str]:
         if self.stop is not None:
             reason = read_stop_reason(self.stop)
             if reason is not None:
@@ -3744,6 +3907,7 @@ class _ProjectBuilder:
             elif phase == "net_cash":
                 self._retain_net_cashflows()
             elif phase == "objective":
+                self._source("planning.objective", "objective")
                 objective, objective_unit = self._build_objective()
         self._checkpoint()
         model = LinearModel(

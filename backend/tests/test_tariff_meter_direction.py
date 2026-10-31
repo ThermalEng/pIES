@@ -112,7 +112,7 @@ def test_four_port_and_settlement_combinations_reach_cashflow(interface, directi
         mode="planning", generator=GENERATOR_REF, solver="ies.solver.highs@1.7.2",
         precision="medium", time_limit_seconds=600, outputs=["solution"],
     )
-    model, _, unit, facts, components, _ = build_project_model_package(
+    model, _, unit, facts, components, _, _ = build_project_model_package(
         checked.artifact, models, materialized, finance, config, _evaluation()
     )
     assert unit == "CNY"
@@ -152,7 +152,7 @@ def test_source_out_sale_keeps_signed_positive_zero_negative_prices(price, expec
         mode="planning", generator=GENERATOR_REF, solver="ies.solver.highs@1.7.2",
         precision="medium", time_limit_seconds=600, outputs=["solution"],
     )
-    _, _, _, facts, components, _ = build_project_model_package(
+    _, _, _, facts, components, _, _ = build_project_model_package(
         checked.artifact, models, materialized, finance, config, _evaluation()
     )
     source = components["meter__period_energy_sale"]
@@ -210,7 +210,7 @@ def test_property_ref_meter_uses_effective_planning_floor(
         mode="planning", generator=GENERATOR_REF, solver="ies.solver.highs@1.7.2",
         precision="medium", time_limit_seconds=600, outputs=["solution"],
     )
-    model, _, _, _, _, _ = build_project_model_package(
+    model, _, _, _, _, _, _ = build_project_model_package(
         checked.artifact, models, materialized, finance, config, _evaluation(),
     )
     variables = {var.name: var for var in model.variables}

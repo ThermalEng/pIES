@@ -67,7 +67,7 @@ def _rows(model, relation_id):
 
 
 def test_full_horizon_math_uses_same_ports_and_scalar_capacity(campus):
-    model, units, _, _, _, series = _model(_with_constraints(campus, {
+    model, units, _, _, _, series, _ = _model(_with_constraints(campus, {
         "limit": _relation("boundary[t] + 0.5 kW <= pv_cap"),
         "equal": _relation("boundary[t] == supply[t]"),
         "floor": _relation("boundary[t] >= 500 W"),

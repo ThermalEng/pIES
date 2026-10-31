@@ -138,6 +138,7 @@ GENERATOR_PROJECT_CONSUMERS = (
     "test_p1_s2_relation_analysis.py",
     "test_p1_s3_templates.py",
     "test_p1_s3_multiscale.py",
+    "test_p1_s4_sources.py",
     "test_linear_lowering.py",
     "test_issue04_d2.py",
     "test_vat_monthly.py",
@@ -452,6 +453,8 @@ def pick(changed: list[str], full: bool = False) -> dict[str, str]:
             if path in (
                 "backend/iesplan/computation/generators/project.py",
                 "backend/iesplan/computation/generators/templates.py",
+                "backend/iesplan/computation/generators/sources.py",
+                "backend/iesplan/computation/generators/compiler_ir.py",
             ):
                 backend.update(GENERATOR_PROJECT_CONSUMERS)
                 browser.update(("tax-chain.spec.ts", "result-planning-solution.spec.ts"))

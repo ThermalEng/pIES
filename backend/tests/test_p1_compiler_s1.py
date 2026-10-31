@@ -200,7 +200,7 @@ def test_s2_complete_source_collection_and_cross_domain_usage(measured_generate)
     # into the current public Bundle/ComputeResult protocol.
 
 
-def test_source_inventory_is_inspectable_and_unpersisted(measured_generate):
+def test_source_inventory_stays_internal_with_minimal_persisted_sources(measured_generate):
     bundle, builder, _ = measured_generate
     inventory = builder.inventory
     assert inventory.symbols and inventory.outputs and inventory.relations
@@ -221,10 +221,10 @@ def test_source_inventory_is_inspectable_and_unpersisted(measured_generate):
     for sym in inventory.symbols.values():
         assert sym.source.field_path
     metadata = json.loads(bundle.files[generator.PARAMETERS_PATH])
-    # P1-S1 source identities are internal until the authoritative Bundle
-    # and diagnostics contracts are revised by the owner.
+    # S4 publishes only the approved source projection, never the compiler IR.
     assert "compiler_inventory" not in metadata
-    assert "source_map" not in metadata
+    assert metadata["model_sources"]["schema"] == "ies.model-sources"
+    assert set(metadata["model_sources"]) == {"schema", "schema_version", "sources", "groups", "outputs"}
 
 
 def test_public_generate_adapter_reuses_one_bundle_mapping(measured_generate):
@@ -257,6 +257,7 @@ def test_public_generate_adapter_reuses_one_bundle_mapping(measured_generate):
     )
     assert "annual_net_flows" in out["financial_facts"]
     assert "annual_operation" in out["financial_facts"]
+    assert result.to_dict()["outputs"]["model_sources"] == params["model_sources"]
 
 
 def test_two_instances_planned_initial_and_varying_steps():

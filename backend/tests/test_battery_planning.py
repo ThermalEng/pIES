@@ -130,6 +130,18 @@ def test_fixed_capacity_hand_energy_and_efficiency(battery):
     assert b.unit_map["cell__charge__t0"] == "kW"
 
 
+def test_planned_capacity_rows_retain_the_original_limit_source(battery):
+    builder = _rows(battery)
+    builder._register_sources()
+    sources = builder.source_trace.export([])
+    capacity = [g for g in sources["groups"]
+                if sources["sources"][g["source"]]["kind"] == "capacity"]
+    assert capacity
+    assert any("cell__charge__plan_max__t0" in group["targets"] for group in capacity)
+    assert all(sources["sources"][g["source"]]["location"]["instance_id"] == "cell"
+               for g in capacity)
+
+
 def test_planned_capacity_power_and_soc_boundaries_are_affine(battery):
     b = _rows(battery)
     first = _row(b, "cell__energy_update__t0")

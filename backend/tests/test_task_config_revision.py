@@ -146,7 +146,7 @@ def _body(**overrides: Any) -> dict[str, Any]:
         "schema_version": "2.0.0",
         "mode": "planning",
         "predictions": [],
-        "generator": "ies.generator.highs_milp@7.0.0",
+        "generator": "ies.generator.highs_milp@7.1.0",
         "solver": "ies.solver.highs@1.7.2",
         "precision": "medium",
         "convergence": None,
@@ -344,7 +344,7 @@ def test_task_params_preserved(client: TestClient, db: Session, factory) -> None
     frozen = dict(snap.calc_config_snapshot)
     assert frozen["task_params"]["horizon_years"] == 3
     assert "config_revision" not in frozen["task_params"]
-    assert frozen["mode"] == "planning" and frozen["generator"] == "ies.generator.highs_milp@7.0.0"
+    assert frozen["mode"] == "planning" and frozen["generator"] == "ies.generator.highs_milp@7.1.0"
 
 
 def test_detail_shows_config_revision(client: TestClient, db: Session) -> None:
@@ -622,7 +622,7 @@ def test_snapshot_schema_version_written_and_scoped_to_reuse(
         dataset_ids=list(snap.dataset_version_ids or []),
         calc_config=frozen,
         evaluation=jsonable(dict(snap.evaluation or {})),
-        result_adapter="ies.result-adapter.highs@6.0.0",
+        result_adapter="ies.result-adapter.highs@6.1.0",
         executor="ies.executor.local_process@1.0.0",
         program_version=snap.program_version or "",
         extensions=jsonable(dict(snap.extension_versions or {})),
@@ -682,7 +682,7 @@ def test_execution_refs_frozen_from_descriptor(
     assert status == 201, body
     snap = tasks_domain.get_snapshot(factory(), body["task"]["calc_snapshot_id"])
     assert snap is not None
-    assert snap.result_adapter == "ies.result-adapter.highs@6.0.0"
+    assert snap.result_adapter == "ies.result-adapter.highs@6.1.0"
     assert snap.executor == "ies.executor.local_process@1.0.0"
 
     same = dict(
@@ -699,7 +699,7 @@ def test_execution_refs_frozen_from_descriptor(
     )
     assert (
         _snapshot_inputs_equal(
-            snap, result_adapter="ies.result-adapter.highs@6.0.0",
+            snap, result_adapter="ies.result-adapter.highs@6.1.0",
             executor="ies.executor.local_process@1.0.0", **same,
         )
         is True
@@ -735,7 +735,7 @@ def test_ambiguous_executors_blocked_without_guessing() -> None:
         precisions=("medium",),
         solvers=("ies.solver.highs@1.7.2",),
         executors=("ies.executor.a@1.0.0", "ies.executor.b@1.0.0"),
-        result_adapter="ies.result-adapter.highs@6.0.0",
+        result_adapter="ies.result-adapter.highs@6.1.0",
         unit_system="SI",
         seed_semantics="seed 解释见 descriptor",
     )
@@ -756,7 +756,7 @@ def test_missing_generator_registry_is_server_error() -> None:
     )
     from iesplan.core.errors import AppError  # noqa: E402
 
-    body = {"generator": "ies.generator.highs_milp@7.0.0", "solver": "ies.solver.highs@1.7.2"}
+    body = {"generator": "ies.generator.highs_milp@7.1.0", "solver": "ies.solver.highs@1.7.2"}
     try:
         _resolve_execution_refs(body, None, project_id=1)
     except AppError as exc:

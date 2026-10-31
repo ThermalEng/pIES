@@ -376,6 +376,7 @@ def fail_attempt(
     stack_trace: str | None = None,
     outcome: str | None = None,
     level: str = SEVERITY_ERROR,
+    model_source: dict | None = None,
 ) -> TaskRecord:
     """确定性失败收拢(带 fencing): 尝试 failed + 租约 revoked + 槽释放 + 任务 failed。
 
@@ -397,7 +398,8 @@ def fail_attempt(
         )
         write_diagnostic(
             db, task.id, claim.attempt_id, level=level, code=code, message=message,
-            context={"outcome": outcome or task.business_outcome},
+            context={"outcome": outcome or task.business_outcome,
+                     **({"model_source": model_source} if model_source is not None else {})},
         )
         db.commit()
         return task
