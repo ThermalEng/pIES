@@ -20,7 +20,8 @@ from iesplan.computation.generators.project import _ProjectBuilder
 from iesplan.finance import EvaluationInput, FinanceProfile, merge_effective
 
 from test_p1_s3_templates import _S2ReferenceBuilder
-from test_project_model import SOC_YAML, _contribution, _finance_payload
+from test_linear_lowering import SOC_YAML
+from test_project_model import _contribution, _finance_payload
 
 
 def _full_two_year_builder(builder_type, *, block_size: int):
