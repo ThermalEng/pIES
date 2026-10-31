@@ -561,6 +561,12 @@ def test_pre_lowering_vat_periods_include_state_refunds_and_sources() -> None:
     )
     pool = builder.analysis.operation("vat.main_pool")
     assert first.identity in pool.depends_on
+    assert first.payload.amount_terms
+    assert all(
+        term.source_relation in first.depends_on
+        for term in first.payload.amount_terms
+    )
+    assert {term.role for term in first.payload.amount_terms} <= {"vat_in", "vat_out"}
     assert not any(name.startswith("vat__") for name in builder.variables)
 
 
