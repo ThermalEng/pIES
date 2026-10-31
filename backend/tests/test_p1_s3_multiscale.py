@@ -221,6 +221,132 @@ def test_cross_year_two_instance_resource_repeats_and_block_choices(tmp_path):
     logging.warning("P1_S3_MULTIYEAR_REPEATS %s", json.dumps(summary, sort_keys=True))
 
 
+class _S3PriorLocalRowEmitter(_ProjectBuilder):
+    """Frozen test-only pre-optimization S3 technical row emission.
+
+    Both paths use the SAME S3 compiled semantic template and all remaining
+    domain logic. Only the intermediate local LinearExpression → final global
+    LinearExpression/Constraint copying differs. Not a production fallback.
+    """
+
+    def _build_relations(self, inst, statics):
+        from iesplan.computation.generators.templates import bind_technical
+        from iesplan.core.contracts.baseline import TIMELINE_STEP_DURATION_VAR
+
+        families = self._instance_relations[inst]
+        if not families:
+            return
+        contribution = self.models[inst]
+        initial = {
+            op.payload.state: op.payload.value
+            for op in self.analysis.relations("initial")
+            if op.payload.instance == inst
+        }
+        known = dict(statics["prop_const"])
+        known[TIMELINE_STEP_DURATION_VAR] = self.step_s
+        series = {
+            name: self._series_si(inst, name, contribution)
+            for name, flow in contribution.interfaces.items()
+            if flow.type == "predefined"
+        }
+        bounds = {}
+        for name, entry in statics["symbols"].items():
+            if entry[0] != "var":
+                continue
+            actual = self.bound_prop.get((inst, name), self._tech_name(inst, name, 0))
+            bounds[name] = (
+                self.analysis.variable_bounds(actual)
+                if actual in self.variables else (entry[1], entry[2])
+            )
+        for block in self._blocks():
+            self.template_stats["technical_blocks"] += 1
+            for step in block:
+                self._checkpoint()
+                for name, sequence in series.items():
+                    known[name] = sequence[step]
+                for family in families:
+                    lowered = bind_technical(
+                        self._technical_templates[family.identity],
+                        instance=inst, step=step, known=known,
+                        initial=initial, bound=bounds,
+                    )
+                    self.template_stats["technical_binds"] += 1
+                    self._emit_lowered(inst, family.relation.id, step, lowered)
+
+
+def test_direct_global_row_emitter_against_prior_s3_in_same_docker(tmp_path):
+    """AB/BA direct-row vs previous local-row S3 on real two-year model.
+
+    Timers exclude MPS serialization and use normal wall clock without
+    tracemalloc; mathematical equality is full MPS + unit/declaration facts.
+    This directly attributes qualification-copy overhead rather than
+    conflating it with the older S2 AST compiler.
+    """
+    order = (
+        ("s3_previous_local_row", _S3PriorLocalRowEmitter),
+        ("s3_direct_global_row", _ProjectBuilder),
+        ("s3_direct_global_row", _ProjectBuilder),
+        ("s3_previous_local_row", _S3PriorLocalRowEmitter),
+    )
+    was_traced = tracemalloc.is_tracing()
+    if was_traced:
+        tracemalloc.stop()
+    report = []
+    mps_path = tmp_path / "s3-local-row-baseline.mps"
+    units_path = tmp_path / "s3-local-row-units.json"
+    try:
+        for index, (name, builder_type) in enumerate(order):
+            gc.collect()
+            assert not tracemalloc.is_tracing()
+            begin = time.perf_counter()
+            builder = _full_two_year_builder(builder_type, block_size=256)
+            model, units, objective_unit = builder.build()
+            wall_ms = round((time.perf_counter() - begin) * 1000, 3)
+            mps, objective_offset = write_mps(model)
+            units_text = json.dumps(dict(units), sort_keys=True)
+            if index == 0:
+                mps_path.write_text(mps, encoding="utf-8")
+                units_path.write_text(units_text, encoding="utf-8")
+                reference_offset = objective_offset
+            else:
+                assert mps == mps_path.read_text(encoding="utf-8")
+                assert units_text == units_path.read_text(encoding="utf-8")
+                assert objective_offset == reference_offset
+            direct = builder.template_stats["affine_direct_rows"]
+            assert (direct > 0) == (name == "s3_direct_global_row")
+            assert builder.template_stats["technical_binds"] == 35040
+            assert builder.template_stats["step_binds"] == 17520
+            report.append({
+                "order": index + 1, "path": name, "wall_ms": wall_ms,
+                "affine_direct_rows": direct,
+                "columns": len(model.variables),
+                "rows": len(model.constraints),
+                "nonzeros": sum(len(r.expression.terms) for r in model.constraints),
+                "mps_bytes": len(mps.encode("utf-8")),
+            })
+            del builder, model, units, mps
+    finally:
+        if was_traced:
+            tracemalloc.start()
+    categories = {
+        name: [item["wall_ms"] for item in report if item["path"] == name]
+        for name, _ in order[:2]
+    }
+    logging.warning("P1_S3_DIRECT_ROW_ABBA %s", json.dumps({
+        "scenario": "two independent instances, 2026+2027, enabled step relation, 17520 steps",
+        "scope": "same compiled template & complete model, only local-to-global copy differs",
+        "measurement": "normal untraced wall; AB/BA; MPS/units checked strictly; no solver",
+        "samples": report,
+        "median_ms": {
+            name: statistics.median(values) for name, values in categories.items()
+        },
+        "range_ms": {
+            name: max(values) - min(values) for name, values in categories.items()
+        },
+        "limits": "Two samples per path, Docker CI noisy; no universal speed claim",
+    }, sort_keys=True))
+
+
 def test_cross_year_untraced_normal_wall_comparison():
     """Repeat AB/BA with real wall clock but WITHOUT allocation tracing.
 
