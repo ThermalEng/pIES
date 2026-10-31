@@ -160,6 +160,75 @@ def _builder(
     )
 
 
+def _collect_only(builder: _ProjectBuilder) -> _ProjectBuilder:
+    """Stop exactly at the S2 collection/analysis barrier; allocate no rows."""
+    buses = builder._compute_buses()
+    bus_flows = builder._bus_flow_index(buses)
+    builder._declare_global_symbols()
+    bound = {
+        inst: builder._bind_instance_symbols(
+            inst, bus_flows.get(inst, frozenset())
+        )
+        for inst in sorted(builder.devices)
+    }
+    builder._collect_semantic_relations(buses, bound)
+    assert builder.inventory.sealed
+    assert not builder.rows
+    return builder
+
+
+def test_pre_lowering_amount_sources_bind_cost_and_maintenance_to_income() -> None:
+    """Capacity -> amount -> depreciation -> income is one inspectable graph."""
+
+    def patch(profile: dict) -> None:
+        profile["tax_rules"]["maint_income"]["depreciation"] = [
+            {
+                "base_from": {
+                    "kind": "upfront_capex_net", "finance_type": "same",
+                },
+                "method": "straight_line", "life_years": 4,
+                "residual": {"value": "0", "unit": "1"}, "first_year": 1,
+            },
+            {
+                "base_from": {
+                    "kind": "maintenance_expense_net", "year": 1, "position": 1,
+                },
+                "method": "straight_line", "life_years": 2,
+                "residual": {"value": "0", "unit": "1"}, "first_year": 1,
+            },
+        ]
+
+    builder = _collect_only(_builder(
+        [_expense("11", _scale("a", "2"), _share("a", 0.1))],
+        taxes=True, finance_patch=patch,
+    ))
+    analysis = builder.analysis
+
+    cost_a = analysis.operation("cost.a__upfront_capex")
+    assert cost_a.input_symbols == ("cap_a",)
+    assert cost_a.identity in analysis.uses["cap_a"]
+    assert cost_a.payload.terms[0].symbol == "cap_a"
+
+    upfront = analysis.operation("depreciation.maint_income.0")
+    assert upfront.input_symbols == ("a__upfront_capex", "b__upfront_capex")
+    assert upfront.depends_on == (
+        "cost.a__upfront_capex", "cost.b__upfront_capex",
+    )
+    assert "('upfront_capex_net', 'same')" not in upfront.input_symbols
+
+    maintenance = analysis.operation("maintenance.y1.p1")
+    assert "cap_a" in maintenance.input_symbols
+    maint_dep = analysis.operation("depreciation.maint_income.1")
+    assert maint_dep.input_symbols == ("maintenance.y1.p1",)
+    assert maint_dep.depends_on == ("maintenance.y1.p1",)
+
+    year1 = analysis.operation("income.maint_income.y1")
+    assert upfront.identity in year1.depends_on
+    assert maint_dep.identity in year1.depends_on
+    assert year1.identity in analysis.dependencies["income.maint_income"]
+    assert not any(name.startswith("inc__") for name in builder.variables)
+
+
 def _amount(node: dict, **values: float) -> float:
     return float(node["constant"]) + sum(float(coeff) * values[name]
                                         for name, coeff in node["terms"].items())
