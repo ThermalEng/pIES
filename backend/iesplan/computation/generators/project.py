@@ -45,6 +45,23 @@ from iesplan.assembly.contracts import ValidatedAssemblyArtifact
 from iesplan.computation.errors import ComputationUnavailableError
 from iesplan.computation.generators.compiler_ir import (
     CompilerInventory,
+    CompilerAnalysis,
+    SemanticRelation,
+    CapacityLimit,
+    StateInitial,
+    BusBalance,
+    PlanningRule,
+    CostComponent,
+    TariffCharge,
+    DemandPeak,
+    MaintenancePayment,
+    VatPoolOperation,
+    IncomeTaxOperation,
+    DepreciationCharge,
+    NetCashPayment,
+    ConstructionPayment,
+    AnnualCash,
+    ProjectObjective,
     IndexDomain,
     KnownCoefficient,
     OutputReference,
@@ -447,6 +464,7 @@ class _ProjectBuilder:
         # Per-generate declarations: no published input or Bundle schema change.
         self.inventory = CompilerInventory()
         self._instance_relations: dict[str, tuple[RelationFamily, ...]] = {}
+        self.analysis: CompilerAnalysis | None = None
         #: (实例, 局部变量身份) → 按 step 顺序的求解列名, 仅收录带业务单位的
         #: 步变量(接口流与设备技术变量, 与 _declare 调用同源; 关系降级
         #: 临时变量 unit 为 None, 不进入)。下游不得拆解列名反推身份。
@@ -733,6 +751,25 @@ class _ProjectBuilder:
             families.append(family)
             self.inventory.relations.append(family)
         self._instance_relations[inst] = tuple(families)
+        for local, pname, sense in caps:
+            self.inventory.collect(SemanticRelation(
+                f"{inst}.{local}.plan_{sense}", "capacity",
+                IndexDomain("step", self.point_count),
+                CapacityLimit(inst, local, pname, sense),
+                SourceLocation(f"equations.variables.{local}.valid_range", inst,
+                               contribution.device_id, dev["definition"].get("revision")),
+                (f"{inst}.{local}", pname),
+            ))
+        for name, value in initial.items():
+            self.inventory.collect(SemanticRelation(
+                f"{inst}.{name}.initial", "initial", IndexDomain("scalar"),
+                StateInitial(inst, name, value),
+                SourceLocation(f"equations.variables.{name}.initial", inst,
+                               contribution.device_id, dev["definition"].get("revision")),
+                tuple(sorted({ref for (ref, _), _coef in value.terms}))
+                if isinstance(value, LinearExpression) else (),
+                (f"{inst}.{name}",),
+            ))
         return {
             "symbols": symbols,
             "initial": initial,
@@ -741,6 +778,253 @@ class _ProjectBuilder:
             "columns": column_specs,
             "caps": caps,
         }
+
+
+    def _collect_semantic_relations(
+        self, buses: list[tuple], bound_instances: Mapping[str, Mapping[str, Any]],
+    ) -> None:
+        """Collect ALL enabled source operations before allocating ANY rows.
+
+        Original AST families, per-instance state/limits, structured planning
+        templates, financial rules and conditional operations are data. No
+        callbacks, no MPS rows, no post-hoc inventory reconstructed from rows.
+        The only later authority for domain conversion is the sealed inventory.
+        """
+        add = self.inventory.collect
+        for index, (carrier, members, ports) in enumerate(buses):
+            symbols = tuple(sorted(f"{inst}.{iface}" for inst, iface, _ in ports))
+            add(SemanticRelation(
+                f"bus.{carrier}.{index}", "bus", IndexDomain("step", self.point_count),
+                BusBalance(carrier, index, ports),
+                SourceLocation("connections", binding_id=f"{carrier}:{index}"),
+                symbols,
+            ))
+
+        planning = self.doc["planning"]
+        constraints = planning.get("constraints") or {}
+        dimensions, placeholders = self._planning_symbols()
+        plan_dimensions = {
+            name: Counter(dict(dims_of(self.plan_vars[name].get("unit") or
+                                    self._bound_prop_unit(spec["device_ref"], spec["parameter"]))))
+            for name, spec in self.plan_vars.items()
+        }
+        for name in sorted(constraints):
+            entry = constraints[name]
+            if entry.get("enabled", True) is False:
+                continue
+            if entry.get("type") == "step_relation":
+                references = entry["references"]
+                step_dimensions = {
+                    **plan_dimensions,
+                    TIMELINE_STEP_DURATION_VAR: Counter({"time": 1}),
+                }
+                for alias, target in references.items():
+                    flow = self.models[target["instance"]].interfaces[target["interface"]]
+                    step_dimensions[alias] = Counter(dict(dims_of(flow.unit)))
+                compiled = compile_step_relation_expression(
+                    entry["expression"], step_dimensions,
+                )
+                symbols = {
+                    item: (("const", self.step_s) if item == TIMELINE_STEP_DURATION_VAR
+                           else ("var", None, None))
+                    for item in step_dimensions
+                }
+                template = lower_planning_constraint(name, compiled, symbols)
+                used = tuple(sorted({
+                    f'{references[alias]["instance"]}.{references[alias]["interface"]}'
+                    if alias in references else alias
+                    for (alias, _), coeff in template.expression.terms if coeff
+                }))
+                add(SemanticRelation(
+                    f"planning.step.{name}", "planning_step",
+                    IndexDomain("step", self.point_count),
+                    PlanningRule(name, template, True, references),
+                    SourceLocation(f"planning.constraints.{name}", relation_id=name),
+                    used,
+                ))
+            else:
+                compiled = compile_planning_expression(
+                    entry["expression"], dimensions, currency=None,
+                )
+                template = lower_planning_constraint(name, compiled, placeholders)
+                used = tuple(sorted({
+                    ident for (ident, _), coeff in template.expression.terms if coeff
+                }))
+                add(SemanticRelation(
+                    f"planning.scalar.{name}", "planning_scalar",
+                    IndexDomain("scalar"), PlanningRule(name, template, False, {}),
+                    SourceLocation(f"planning.constraints.{name}", relation_id=name),
+                    used,
+                ))
+
+        bindings = (self.doc.get("finance_binding") or {}).get("instances") or {}
+        for inst in sorted(self.devices):
+            binding = bindings.get(inst)
+            if binding is None or binding.get("type") != "costed":
+                continue
+            ft = binding["finance_type"]
+            record = self.finance.finance_types[ft]
+            kinds = (_COMPONENTS_NEW if self.devices[inst].get("asset_origin") == "new"
+                     else _COMPONENTS_EXISTING)
+            for component in kinds:
+                value = getattr(record, component)
+                if value is None:
+                    continue
+                symbols = []
+                for driver in value.linear or {}:
+                    target = binding["drivers"][driver]
+                    if "property" in target:
+                        symbols.append(self.inventory.property_bindings[
+                            (inst, target["property"])
+                        ])
+                    else:
+                        symbols.append(f'{inst}.{target["interface"]}')
+                ident = f"{inst}__{component}"
+                add(SemanticRelation(
+                    f"cost.{ident}", "cost", IndexDomain("year"),
+                    CostComponent(inst, component, ft, value),
+                    SourceLocation(f"finance.finance_types.{ft}.{component}",
+                                   inst, binding_id=inst),
+                    tuple(sorted(symbols)), (ident,),
+                ))
+
+        for binding_id in sorted(self.doc.get("tariff_bindings") or {}):
+            binding = self.doc["tariff_bindings"][binding_id]
+            name = f'{binding_id}__{_tariff_suffix(_binding_direction(self, binding_id))}'
+            add(SemanticRelation(
+                f"tariff.{binding_id}", "tariff", IndexDomain("step", self.point_count),
+                TariffCharge(binding_id, binding["instance"], binding["interface"],
+                             binding["aggregation"], binding["price"]),
+                SourceLocation(f"tariff_bindings.{binding_id}", binding_id=binding_id),
+                (f'{binding["instance"]}.{binding["interface"]}',), (name,),
+            ))
+
+        spans = self._vat_month_spans() if (
+            self.doc.get("demand_bindings") or self.finance.credit_pools
+            or self.finance.tax_rules
+        ) else []
+        for billing_id, binding in sorted((self.doc.get("demand_bindings") or {}).items()):
+            for month, start, end in spans:
+                add(SemanticRelation(
+                    f"demand.{billing_id}.m{month}", "demand", IndexDomain("month"),
+                    DemandPeak(billing_id, binding["instance"], binding["interface"],
+                               binding["charge"], month, start, end),
+                    SourceLocation(f"demand_bindings.{billing_id}", binding_id=billing_id),
+                    (f'{binding["instance"]}.{binding["interface"]}',),
+                    (f'{billing_id}__period_demand_charge',),
+                    requires_bounds=True,
+                ))
+
+        positions: dict[int, int] = {}
+        for entry in self.evaluation.maintenance_expenses:
+            position = positions.get(entry.year, 0) + 1
+            positions[entry.year] = position
+            refs = []
+            for term in entry.terms:
+                if isinstance(term, ScaleUnitCostTerm):
+                    refs.append(self.inventory.property_bindings[
+                        (term.instance_id, term.property)
+                    ])
+                elif isinstance(term, CostComponentShareTerm):
+                    refs.append(f"{term.instance_id}__upfront_capex")
+            add(SemanticRelation(
+                f"maintenance.y{entry.year}.p{position}", "maintenance",
+                IndexDomain("year"), MaintenancePayment(entry.year, position, entry),
+                SourceLocation(f"evaluation.maintenance_expenses.y{entry.year}.p{position}",
+                               binding_id=f"{entry.year}:{position}"),
+                tuple(sorted(refs)), (f"maintenance.y{entry.year}.p{position}",),
+            ))
+
+        grouped = self._vat_grouped_rules()
+        for pool_id, rules in sorted((grouped or {}).items()):
+            add(SemanticRelation(
+                f"vat.{pool_id}", "vat", IndexDomain("month", 12 * self.evaluation.evaluation_years),
+                VatPoolOperation(pool_id, rules),
+                SourceLocation(f"finance.credit_pools.{pool_id}", binding_id=pool_id),
+                tuple(sorted({name for rule in rules["vat"]
+                              for name in (f"tax.{rule.credit_pool}",)})),
+                (f"vat.{pool_id}.paid", f"vat.{pool_id}.carry"),
+                depends_on=tuple(sorted(
+                    op.identity for op in self.inventory.operations
+                    if op.kind in ("tariff", "demand", "cost", "maintenance")
+                )), requires_bounds=True,
+            ))
+        for rule_id, rule in self._income_rules():
+            for index, entry in enumerate(rule.depreciation):
+                add(SemanticRelation(
+                    f"depreciation.{rule_id}.{index}", "depreciation",
+                    IndexDomain("year", self.evaluation.evaluation_years),
+                    DepreciationCharge(rule_id, entry),
+                    SourceLocation(f"finance.tax_rules.{rule_id}.depreciation.{index}",
+                                   relation_id=rule_id),
+                    (str(entry.base_from.identity),),
+                    (f"depreciation.{rule_id}.{index}",),
+                    requires_bounds=True,
+                ))
+            add(SemanticRelation(
+                f"income.{rule_id}", "income",
+                IndexDomain("year", self.evaluation.evaluation_years),
+                IncomeTaxOperation(rule_id, rule),
+                SourceLocation(f"finance.tax_rules.{rule_id}", relation_id=rule_id),
+                tuple(sorted({*rule.revenue, *rule.energy_cost,
+                              *rule.demand_cost})),
+                (f"income.{rule_id}.tax", f"income.{rule_id}.loss_balance"),
+                depends_on=tuple(sorted(
+                    op.identity for op in self.inventory.operations
+                    if op.kind in ("vat", "demand", "maintenance", "depreciation", "tariff", "cost")
+                )), requires_bounds=True,
+            ))
+
+        for cash_id, entry in sorted(self.finance.net_cashflows.items()):
+            refs = (str(entry.amount.base_from.identity),) if entry.amount.kind != "fixed" else ()
+            add(SemanticRelation(
+                f"net_cash.{cash_id}", "net_cash", IndexDomain("year"),
+                NetCashPayment(cash_id, entry),
+                SourceLocation(f"finance.net_cashflows.{cash_id}", binding_id=cash_id),
+                refs, (f"net_cash.{cash_id}",),
+                depends_on=tuple(op.identity for op in self.inventory.operations
+                                 if op.kind in ("maintenance", "cost")),
+            ))
+        for payment in self.evaluation.construction_payments:
+            add(SemanticRelation(
+                f"construction_payment.{payment.t}", "construction_payment",
+                IndexDomain("year"), ConstructionPayment(payment.t, float(payment.ratio)),
+                SourceLocation("evaluation.construction_payments", binding_id=str(payment.t)),
+                tuple(op.output_symbols[0] for op in self.inventory.operations if op.kind == "cost"
+                      and isinstance(op.payload, CostComponent)
+                      and op.payload.component == "upfront_capex"),
+            ))
+        for index, (start, end) in enumerate(annual_boundaries(
+            self.doc["project_baseline"]["resolution"],
+            self.doc["project_baseline"]["start_year"],
+            self.evaluation.operation_years,
+        )):
+            year = self.evaluation.construction_period + index + 1
+            add(SemanticRelation(
+                f"cash.y{year}", "annual_cash", IndexDomain("year"),
+                AnnualCash(year, start, end),
+                SourceLocation(f"evaluation.operation_years.{year}"),
+                tuple(op.output_symbols[0] for op in self.inventory.operations
+                      if op.kind in ("cost", "tariff", "demand", "maintenance")
+                      and op.output_symbols),
+                (f"cash.y{year}",),
+            ))
+        raw = planning["objective"]["expression"]
+        compiled = None
+        if raw.strip() != SYSTEM_AFTER_TAX_NPV:
+            compiled = compile_planning_expression(raw, dimensions, currency=None)
+        add(SemanticRelation(
+            "planning.objective", "objective", IndexDomain("scalar"),
+            ProjectObjective(raw, compiled),
+            SourceLocation("planning.objective.expression"),
+            tuple(sorted(self.plan_vars)),
+            ("objective",),
+            depends_on=tuple(op.identity for op in self.inventory.operations
+                             if op.kind in ("annual_cash", "vat", "income", "net_cash")),
+        ))
+
+        self.inventory.seal()
+        self.analysis = CompilerAnalysis(self.inventory, self.variables)
 
     def _expand_instance(self, inst: str, statics: Mapping[str, Any]) -> None:
         """Allocate step columns and variable capacity rows AFTER global binding."""
