@@ -908,10 +908,10 @@ def test_step_relation_save_reopen_and_atomic_invalid_revision(
     assert still.to_dict() == loaded.to_dict()
 
 
-def test_step_relation_enabled_requires_generator_capability_at_submission(
+def test_step_relation_enabled_submits_with_supported_generator(
     client: TestClient, db: Session,
 ) -> None:
-    """真实任务提交：已保存且启用的关系在内置 v7 未支持时明确 007。"""
+    """真实提交：已支持 step_relation 的 v7 接受已冻结启用关系。"""
     from iesplan.application import configuration as config_uc
 
     owner = make_user(db, "owner_step_s1_gate")
@@ -937,9 +937,14 @@ def test_step_relation_enabled_requires_generator_capability_at_submission(
     assert response.status_code == 201, response.text
     calc_rev = _save_config(client, pid, owner)
     status, body = _submit(client, pid, owner, {"config_revision": calc_rev}, key="step-enabled-s1")
-    assert status == 400, body
-    assert _error(body)["code"] == "TASK-REQ-007"
-    assert "technical.step_constraints" in str(_error(body))
+    # S2 implemented the advertised generator capability. The old S1
+    # rejection expectation is obsolete; preserve the full public save →
+    # freeze → submit workflow and verify the accepted task instead.
+    assert status == 201, body
+    task = body["task"]
+    assert task["type"] == "calc"
+    assert task["status"] == "queued"
+    assert task["calc_snapshot_id"] is not None
 
 
 def test_step_duration_shadow_rejected_on_public_planning_save(
