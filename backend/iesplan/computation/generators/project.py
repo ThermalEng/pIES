@@ -1094,6 +1094,131 @@ class _ProjectBuilder:
                          if op.identity == rid)
                 ].input_symbols
             }))
+            period_terms: dict[int, list[FinancialAmountTerm]] = {
+                month: [] for month, _start, _end in spans
+            }
+
+            def add_period_term(
+                month: int, role: str, source_relation: str, coefficient: float,
+                *, start: int | None = None, end: int | None = None,
+                scope: str | None = None,
+            ) -> None:
+                period_terms[month].append(FinancialAmountTerm(
+                    role, source_relation, coefficient, start, end, scope
+                ))
+
+            for rule in frozen_rules["vat"]:
+                for entry in rule.demand_input_tax:
+                    factor = self._vat_gross_factor(entry.rate) * float(
+                        entry.deductible_ratio.value
+                    )
+                    for source in self.inventory.operations:
+                        if (
+                            source.kind == "demand"
+                            and source.payload.charge_id == entry.charge
+                        ):
+                            add_period_term(
+                                source.payload.month, "vat_in",
+                                source.identity, factor,
+                            )
+                for entry in rule.in_tax:
+                    factor = self._vat_gross_factor(entry.rate) * float(
+                        entry.deductible_ratio.value
+                    )
+                    for source in self.inventory.operations:
+                        if (
+                            source.kind == "tariff"
+                            and source.payload.price_id == entry.price
+                        ):
+                            for month, start, end in spans:
+                                add_period_term(
+                                    month, "vat_in", source.identity, factor,
+                                    start=start, end=end,
+                                )
+                for entry in rule.out_tax:
+                    factor = self._vat_gross_factor(entry.rate)
+                    for source in self.inventory.operations:
+                        if (
+                            source.kind == "tariff"
+                            and source.payload.price_id == entry.price
+                        ):
+                            for month, start, end in spans:
+                                add_period_term(
+                                    month, "vat_out", source.identity, -factor,
+                                    start=start, end=end,
+                                )
+                for entry in rule.om_input_tax:
+                    finance_type, _, scope_tail = entry.for_path.partition(".")
+                    component = scope_tail.split(".", 1)[0]
+                    factor = self._vat_gross_factor(entry.rate) * float(
+                        entry.deductible_ratio.value
+                    )
+                    for source in self.inventory.operations:
+                        if (
+                            source.kind != "cost"
+                            or source.payload.finance_type != finance_type
+                            or source.payload.component != component
+                        ):
+                            continue
+                        if component == "annual_fixed_om":
+                            for year in range(
+                                self.evaluation.construction_period + 1,
+                                self.evaluation.construction_period
+                                + self.evaluation.operation_years + 1,
+                            ):
+                                month = 12 * year
+                                if month in period_terms:
+                                    add_period_term(
+                                        month, "vat_in", source.identity, factor,
+                                        scope=entry.for_path,
+                                    )
+                        else:
+                            for month, start, end in spans:
+                                add_period_term(
+                                    month, "vat_in", source.identity, factor,
+                                    start=start, end=end, scope=entry.for_path,
+                                )
+                for entry in rule.maintenance_input_tax:
+                    factor = self._vat_gross_split_factor(entry.rate) * float(
+                        entry.deductible_ratio.value
+                    )
+                    month = 12 * entry.year
+                    add_period_term(
+                        month, "vat_in",
+                        f"maintenance.y{entry.year}.p{entry.position}",
+                        factor,
+                    )
+
+            for rule in frozen_rules["construction"]:
+                finance_type, _, _scope = rule.for_path.partition(".")
+                factor = self._vat_gross_factor(rule.rate) * float(
+                    rule.deductible_ratio.value
+                )
+                sources = tuple(
+                    source for source in self.inventory.operations
+                    if (
+                        source.kind == "cost"
+                        and source.payload.component == "upfront_capex"
+                        and source.payload.finance_type == finance_type
+                    )
+                )
+                if rule.confirmation.method == "payment_period":
+                    periods = tuple(
+                        (12 * payment.t + 1, float(payment.ratio))
+                        for payment in self.evaluation.construction_payments
+                    )
+                else:
+                    periods = tuple(
+                        (item.period, float(item.ratio))
+                        for item in rule.confirmation.schedule
+                    )
+                for month, ratio in periods:
+                    for source in sources:
+                        add_period_term(
+                            month, "vat_in", source.identity, factor * ratio,
+                            scope=rule.for_path,
+                        )
+
             claims: dict[int, float] = {}
             arrivals: dict[int, float] = {}
             for refund in pool.refunds:
@@ -1109,10 +1234,19 @@ class _ProjectBuilder:
             opening_credit = _money_to_internal(pool.opening_credit)
             for month, start, end in spans:
                 period_id = f"vat.{pool_id}.m{month}"
-                period_inputs = list(refs)
+                terms = tuple(period_terms.get(month, ()))
+                source_operations = {
+                    op.identity: op for op in self.inventory.operations
+                }
+                period_inputs = [
+                    output
+                    for term in terms
+                    for output in source_operations[term.source_relation].output_symbols
+                ]
                 if previous_carry is not None:
                     period_inputs.append(previous_carry)
                 dependencies = list(vat_rule_ids)
+                dependencies.extend(term.source_relation for term in terms)
                 if previous_id is not None:
                     dependencies.append(previous_id)
                 add(SemanticRelation(
@@ -1122,6 +1256,7 @@ class _ProjectBuilder:
                         opening_credit if month == 1 else 0.0,
                         claims.get(month, 0.0),
                         arrivals.get(month, 0.0),
+                        terms,
                     ),
                     SourceLocation(
                         f"finance.credit_pools.{pool_id}.months.{month}",
