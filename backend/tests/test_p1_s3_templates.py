@@ -424,7 +424,7 @@ def test_same_docker_s2_s3_full_campus_build_and_exact_mps(tmp_path):
     assert current_mps == old_blob.read_text(encoding="utf-8")
     assert builder.financial_facts() == old_facts
     assert builder.finance_components() == old_components
-    assert builder.step_series() == json.loads(
+    assert list(builder.step_series()) == json.loads(
         (tmp_path / "s2-series.json").read_text(encoding="utf-8")
     )
     assert builder.template_stats["technical_binds"] > 0
