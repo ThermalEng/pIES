@@ -35,6 +35,16 @@ class ProductCandidate:
     right: tuple[Instruction, ...]
 
 
+# Coefficient plans contain only known input arithmetic; decision columns
+# remain symbolic slots. No instance parameter or point-0 series value is baked
+# into a shared structure.
+Coeff = tuple
+@dataclass(frozen=True, slots=True)
+class AffineFormula:
+    constant: Coeff
+    terms: tuple[tuple[Key, Coeff], ...]
+
+
 @dataclass(frozen=True, slots=True)
 class TechnicalTemplate:
     relation_id: str
@@ -43,6 +53,8 @@ class TechnicalTemplate:
     lhs_mutex: ProductCandidate | None
     rhs_mutex: ProductCandidate | None
     refs: tuple[str, ...]
+    fast_lhs: AffineFormula | None = None
+    fast_rhs: AffineFormula | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -122,6 +134,155 @@ def _mutex_product(
     )
 
 
+
+class _GeneralBinding(Exception):
+    """An affine structure needs the compiled generic instruction binder."""
+
+
+def _op(operation: str, *args: Coeff) -> Coeff:
+    return (operation, *args)
+
+
+def _formula(node: object, roles: Mapping[str, str]) -> AffineFormula:
+    """Partial evaluate structure into decision slots with live coefficient plans."""
+    if isinstance(node, NumberNode):
+        return AffineFormula(("num", float(node.value)), ())
+    if isinstance(node, RefNode):
+        if roles[node.name] == "known":
+            if node.offset:
+                raise LoweringUnsupportedError(
+                    f"常量 {node.name!r} 不得带时间索引 [t{node.offset:+d}]"
+                )
+            return AffineFormula(("ref", node.name), ())
+        return AffineFormula(("num", 0.0),
+                             (((node.name, node.offset), ("num", 1.0)),))
+    if isinstance(node, UnaryNode):
+        inner = _formula(node.operand, roles)
+        if node.op == "+":
+            return inner
+        if node.op == "-":
+            return AffineFormula(
+                _op("neg", inner.constant),
+                tuple((key, _op("neg", coeff)) for key, coeff in inner.terms),
+            )
+        raise _GeneralBinding()
+    if not isinstance(node, BinaryNode):
+        raise _GeneralBinding()
+    left = _formula(node.left, roles)
+    right = _formula(node.right, roles)
+    if node.op in ("+", "-"):
+        terms = dict(left.terms)
+        for key, coeff in right.terms:
+            if node.op == "-":
+                coeff = _op("neg", coeff)
+            terms[key] = _op("add", terms[key], coeff) if key in terms else coeff
+        return AffineFormula(
+            _op("add" if node.op == "+" else "sub", left.constant, right.constant),
+            tuple(sorted(terms.items())),
+        )
+    if node.op == "*":
+        if left.terms and right.terms:
+            raise _GeneralBinding()
+        variable, scalar = (left, right) if left.terms else (right, left)
+        return AffineFormula(
+            _op("mul", variable.constant, scalar.constant),
+            tuple((key, _op("mul", coeff, scalar.constant))
+                  for key, coeff in variable.terms),
+        )
+    if node.op == "/":
+        if right.terms:
+            raise _GeneralBinding()
+        return AffineFormula(
+            _op("div", left.constant, right.constant),
+            tuple((key, _op("div", coeff, right.constant))
+                  for key, coeff in left.terms),
+        )
+    if node.op == "^":
+        if not left.terms and not right.terms:
+            return AffineFormula(_op("pow", left.constant, right.constant), ())
+        # A proven numeric exponent is the only symbolic power that is affine.
+        if not right.terms and right.constant == ("num", 1.0):
+            return left
+        if not right.terms and right.constant == ("num", 0.0):
+            return AffineFormula(("num", 1.0), ())
+        raise _GeneralBinding()
+    raise _GeneralBinding()
+
+
+def _try_formula(node: object, roles: Mapping[str, str]) -> AffineFormula | None:
+    try:
+        return _formula(node, roles)
+    except _GeneralBinding:
+        return None
+
+
+def _coefficient(expr: Coeff, values: Mapping[str, float],
+                 cache: dict[Coeff, float], where: str) -> float:
+    if expr in cache:
+        return cache[expr]
+    tag = expr[0]
+    if tag == "num":
+        value = expr[1]
+    elif tag == "ref":
+        value = values[expr[1]]
+    elif tag == "neg":
+        value = -_coefficient(expr[1], values, cache, where)
+    else:
+        left = _coefficient(expr[1], values, cache, where)
+        right = _coefficient(expr[2], values, cache, where)
+        if tag == "add":
+            value = left + right
+        elif tag == "sub":
+            value = left - right
+        elif tag == "mul":
+            value = left * right
+        elif tag == "div":
+            if right == 0:
+                raise LoweringUnsupportedError(f"{where}除零")
+            value = left / right
+        elif tag == "pow":
+            try:
+                value = math.pow(left, right)
+            except (ValueError, OverflowError):
+                raise LoweringUnsupportedError(f"{where}常数幂定义域/溢出") from None
+        else:
+            raise RuntimeError(f"unknown coefficient plan: {tag}")
+    if not math.isfinite(value):
+        raise LoweringUnsupportedError(f"{where}系数或常数非有限")
+    cache[expr] = value
+    return value
+
+
+def _bind_formula(
+    formula: AffineFormula, known: Mapping[str, float],
+    cache: dict[Coeff, float], *, step: int,
+    initial: Mapping[str, float | LinearExpression], where: str,
+) -> _Affine:
+    """Apply only live known coefficients; no per-step AST or symbol-table copy."""
+    result = _Affine(_coefficient(formula.constant, known, cache, where), {})
+    for (name, offset), plan in formula.terms:
+        coeff = _coefficient(plan, known, cache, where)
+        if coeff == 0:
+            continue
+        if offset < -1:
+            raise LoweringUnsupportedError(
+                f"{where}{name!r} 的 [t{offset:+d}] 超出首版能力"
+            )
+        if offset == -1 and step == 0:
+            if name not in initial:
+                raise LoweringUnsupportedError(f"{where}状态 {name!r} 首步缺少初值")
+            entry = initial[name]
+            if isinstance(entry, LinearExpression):
+                result.constant += coeff * entry.constant
+                for key, amount in entry.terms:
+                    result.add_term(key, coeff * amount)
+            else:
+                result.constant += coeff * float(entry)
+        else:
+            result.add_term((name, offset), coeff)
+    return result.checked(where)
+
+
 def compile_technical(
     relation: MathRelation, roles: Mapping[str, str],
 ) -> TechnicalTemplate:
@@ -135,6 +296,8 @@ def compile_technical(
         lhs_mutex=_mutex_product(lhs, roles),
         rhs_mutex=_mutex_product(rhs, roles),
         refs=tuple(sorted(roles)),
+        fast_lhs=_try_formula(lhs, roles),
+        fast_rhs=_try_formula(rhs, roles),
     )
 
 
@@ -254,12 +417,25 @@ def bind_technical(
 ) -> LoweredRelation:
     """Bind actual step values, returning the unchanged solver-neutral lowerer IR."""
     where = f"关系 {template.relation_id!r} 实例 {instance!r} step {step}: "
+    cache: dict[Coeff, float] = {}
     try:
-        lhs = _evaluate(template.lhs, step=step, known=known, initial=initial, where=where)
+        lhs = (
+            _bind_formula(template.fast_lhs, known, cache, step=step,
+                          initial=initial, where=where)
+            if template.fast_lhs is not None
+            else _evaluate(template.lhs, step=step, known=known,
+                           initial=initial, where=where)
+        )
     except LoweringUnsupportedError as exc:
         lhs = exc
     try:
-        rhs = _evaluate(template.rhs, step=step, known=known, initial=initial, where=where)
+        rhs = (
+            _bind_formula(template.fast_rhs, known, cache, step=step,
+                          initial=initial, where=where)
+            if template.fast_rhs is not None
+            else _evaluate(template.rhs, step=step, known=known,
+                           initial=initial, where=where)
+        )
     except LoweringUnsupportedError as exc:
         rhs = exc
     if isinstance(lhs, _Affine) and isinstance(rhs, _Affine):
