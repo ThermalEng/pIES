@@ -832,6 +832,7 @@ class _ProjectBuilder:
 
     def _collect_semantic_relations(
         self, buses: list[tuple], bound_instances: Mapping[str, Mapping[str, Any]],
+        *, include_planning: bool = True, include_objective: bool = True,
     ) -> None:
         """Collect ALL enabled source operations before allocating ANY rows.
 
@@ -858,7 +859,8 @@ class _ProjectBuilder:
                                     self._bound_prop_unit(spec["device_ref"], spec["parameter"]))))
             for name, spec in self.plan_vars.items()
         }
-        for name in sorted(constraints):
+        planning_constraints = sorted(constraints) if include_planning else ()
+        for name in planning_constraints:
             entry = constraints[name]
             if entry.get("enabled", True) is False:
                 continue
@@ -1568,30 +1570,31 @@ class _ProjectBuilder:
                       and op.output_symbols),
                 (f"cash.y{year}",),
             ))
-        raw = planning["objective"]["expression"]
-        compiled = None
-        if raw.strip() == SYSTEM_AFTER_TAX_NPV:
+        if include_objective:
+            raw = planning["objective"]["expression"]
+            compiled = None
+            if raw.strip() == SYSTEM_AFTER_TAX_NPV:
             objective_inputs = tuple(sorted({
                 output for op in self.inventory.operations
                 if op.kind in ("annual_cash", "vat", "income", "net_cash")
                 for output in op.output_symbols
             }))
-        else:
-            compiled = compile_planning_expression(raw, dimensions, currency=None)
-            objective_template = lower_planning_expression(compiled, placeholders)
-            objective_inputs = tuple(sorted({
-                ident for (ident, _), coefficient in objective_template.terms
-                if coefficient
-            }))
-        add(SemanticRelation(
-            "planning.objective", "objective", IndexDomain("scalar"),
-            ProjectObjective(raw, compiled),
-            SourceLocation("planning.objective.expression"),
-            objective_inputs,
-            ("objective",),
-            depends_on=tuple(op.identity for op in self.inventory.operations
-                             if op.kind in ("annual_cash", "vat", "income", "net_cash")),
-        ))
+            else:
+                compiled = compile_planning_expression(raw, dimensions, currency=None)
+                objective_template = lower_planning_expression(compiled, placeholders)
+                objective_inputs = tuple(sorted({
+                    ident for (ident, _), coefficient in objective_template.terms
+                    if coefficient
+                }))
+            add(SemanticRelation(
+                "planning.objective", "objective", IndexDomain("scalar"),
+                ProjectObjective(raw, compiled),
+                SourceLocation("planning.objective.expression"),
+                objective_inputs,
+                ("objective",),
+                depends_on=tuple(op.identity for op in self.inventory.operations
+                                 if op.kind in ("annual_cash", "vat", "income", "net_cash")),
+            ))
 
         self.inventory.seal()
         self.analysis = CompilerAnalysis(self.inventory, self.variables)
