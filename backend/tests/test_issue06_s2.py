@@ -225,6 +225,9 @@ def test_pre_lowering_amount_sources_bind_cost_and_maintenance_to_income() -> No
     year1 = analysis.operation("income.maint_income.y1")
     assert upfront.identity in year1.depends_on
     assert maint_dep.identity in year1.depends_on
+    assert {term.source_relation for term in year1.payload.amount_terms} >= {
+        upfront.identity, maint_dep.identity, maintenance.identity,
+    }
     assert year1.identity in analysis.dependencies["income.maint_income"]
     assert not any(name.startswith("inc__") for name in builder.variables)
 
