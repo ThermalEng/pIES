@@ -121,11 +121,24 @@ class PlanningRule:
 
 
 @dataclass(frozen=True, slots=True)
+class CostAmountTerm:
+    """One compiled finance driver term before solver-column expansion."""
+
+    driver: str
+    local: str
+    symbol: str
+    target_kind: str  # property or interface
+    aggregation: str
+    coefficient: float
+
+
+@dataclass(frozen=True, slots=True)
 class CostComponent:
     instance: str
     component: str
     finance_type: str
-    value: object
+    fixed_amount: float | None
+    terms: tuple[CostAmountTerm, ...]
 
 
 @dataclass(frozen=True, slots=True)
