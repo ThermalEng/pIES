@@ -165,12 +165,46 @@ class VatRuleSource:
 class VatPoolOperation:
     pool_id: str
     rules: Mapping[str, tuple]
+    pool: object
+
+
+@dataclass(frozen=True, slots=True)
+class VatPeriodConnection:
+    """One declared VAT month before conditional rows are lowered."""
+
+    pool_id: str
+    month: int
+    start: int
+    end: int
+    opening_credit: float
+    refund_claim: float
+    refund_arrival: float
 
 
 @dataclass(frozen=True, slots=True)
 class IncomeTaxOperation:
     rule_id: str
     rule: object
+
+
+@dataclass(frozen=True, slots=True)
+class IncomeYearConnection:
+    """One declared income-tax year and its prior-year state edge."""
+
+    rule_id: str
+    year: int
+    start: int | None
+    end: int | None
+
+
+@dataclass(frozen=True, slots=True)
+class IncomeLossClaim:
+    """Potential ordered loss-vintage claim, declared before lowering."""
+
+    rule_id: str
+    use_year: int
+    origin_kind: str  # opening or generated
+    origin_index: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -207,7 +241,8 @@ class ProjectObjective:
 SemanticPayload = (
     CapacityLimit | StateInitial | BusBalance | PlanningRule | CostComponent
     | TariffCharge | DemandPeak | MaintenancePayment | VatRuleSource | VatPoolOperation
-    | IncomeTaxOperation | DepreciationCharge | NetCashPayment
+    | VatPeriodConnection | IncomeTaxOperation | IncomeYearConnection | IncomeLossClaim
+    | DepreciationCharge | NetCashPayment
     | ConstructionPayment | AnnualCash | ProjectObjective
 )
 
