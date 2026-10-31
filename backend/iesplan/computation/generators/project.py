@@ -373,9 +373,11 @@ def finance_component_declarations(
     ResultAdapter 用同一次真实解求值发布，不重建财务模型。
     """
     builder = _new_builder(artifact, models, materialized, finance, evaluation)
-    if json.loads(artifact.canonical_text).get("demand_bindings"):
-        # 需量分量必须消费本次建模生成的精确峰值求解列。
-        builder.build()
+    # Every public declaration consumer must cross the same collection and
+    # analysis barrier, including assemblies without demand bindings.  Building
+    # only the demand case leaves analysis unset for ordinary cost/tariff rows.
+    # The demand case also retains its exact peak columns from this build.
+    builder.build()
     return builder.finance_components()
 
 
