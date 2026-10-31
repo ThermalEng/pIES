@@ -137,6 +137,7 @@ GENERATOR_PROJECT_CONSUMERS = (
     "test_p1_compiler_s1.py",
     "test_p1_s2_relation_analysis.py",
     "test_p1_s3_templates.py",
+    "test_p1_s3_multiscale.py",
     "test_linear_lowering.py",
     "test_issue04_d2.py",
     "test_vat_monthly.py",
@@ -713,6 +714,7 @@ def self_test() -> None:
     assert "tests/test_finance_s2_execution.py" in generator["backend_tests"].split()
     assert "tests/test_p1_s2_relation_analysis.py" in generator["backend_tests"].split()
     assert "tests/test_p1_s3_templates.py" in generator["backend_tests"].split()
+    assert "tests/test_p1_s3_multiscale.py" in generator["backend_tests"].split()
     assert "tests/test_linear_lowering.py" in generator["backend_tests"].split()
     assert "tests/test_issue04_d2.py" in generator["backend_tests"].split()
     compiled_template = pick(["backend/iesplan/computation/generators/templates.py"])
