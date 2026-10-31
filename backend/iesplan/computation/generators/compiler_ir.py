@@ -178,7 +178,7 @@ class VatRuleSource:
 class VatPoolOperation:
     pool_id: str
     rules: Mapping[str, tuple]
-    pool: object
+    pool: object | None = None
 
 
 @dataclass(frozen=True, slots=True)
