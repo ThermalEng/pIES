@@ -396,8 +396,15 @@ def test_same_docker_s2_s3_full_campus_build_and_exact_mps(tmp_path):
     old_blob.write_text(old_mps, encoding="utf-8")
     old_facts = old_builder.financial_facts()
     old_components = old_builder.finance_components()
-    old_series = old_builder.step_series()
-    del old, old_builder, old_mps
+    # Do not retain the S2 full-series/column maps in the Python heap when
+    # measuring S3's tracemalloc peak: serialize the exact comparison facts.
+    (tmp_path / "s2-units.json").write_text(
+        json.dumps(dict(old_units), sort_keys=True), encoding="utf-8",
+    )
+    (tmp_path / "s2-series.json").write_text(
+        json.dumps(old_builder.step_series(), sort_keys=True), encoding="utf-8",
+    )
+    del old, old_builder, old_mps, old_units
     gc.collect()
 
     current, units, objective_unit, builder, current_metrics = build_once(
@@ -411,11 +418,15 @@ def test_same_docker_s2_s3_full_campus_build_and_exact_mps(tmp_path):
     assert current_metrics["objective_nonzeros"] == old_metrics["objective_nonzeros"]
     assert current_offset == old_offset
     assert objective_unit == old_unit
-    assert units == old_units
+    assert dict(units) == json.loads(
+        (tmp_path / "s2-units.json").read_text(encoding="utf-8")
+    )
     assert current_mps == old_blob.read_text(encoding="utf-8")
     assert builder.financial_facts() == old_facts
     assert builder.finance_components() == old_components
-    assert builder.step_series() == old_series
+    assert builder.step_series() == json.loads(
+        (tmp_path / "s2-series.json").read_text(encoding="utf-8")
+    )
     assert builder.template_stats["technical_binds"] > 0
     logging.warning("P1_S3_SAME_DOCKER_BUILD %s", json.dumps({
         "source": "public campus 8760 points, unchanged complete model",
