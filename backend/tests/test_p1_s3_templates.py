@@ -1,0 +1,305 @@
+"""P1-S3: compiled technical/step templates, live coefficients and block continuity.
+
+Legacy lower_relation is invoked only as an independent TEST ORACLE; the
+production project builder never executes it. All application CI uses Docker.
+"""
+from __future__ import annotations
+
+import json
+import logging
+import time
+import tracemalloc
+
+import pytest
+
+from iesplan.computation.generators.compiler_ir import CompilerAnalysis
+from iesplan.computation.generators.linear import (
+    LinearExpression, LinearModel, LoweringUnsupportedError, lower_relation,
+)
+from iesplan.computation.generators.mps import write_mps
+from iesplan.computation.generators.project import _ProjectBuilder
+from iesplan.computation.generators.templates import compile_technical, bind_technical
+
+from test_battery_planning import battery, _rows
+from test_linear_lowering import (
+    _relation, HEATER_YAML, SOC_YAML, MUTEX_YAML, BILINEAR_YAML,
+)
+from test_project_model import _contribution
+from test_p1_compiler_s1 import measured_generate
+
+
+def _compiled(relation, symbols, *, step, initial=None):
+    modes = {
+        name: ("known" if entry[0] == "const" else "var")
+        for name, entry in symbols.items()
+    }
+    template = compile_technical(relation, modes)
+    return template, bind_technical(
+        template, instance="synthetic", step=step,
+        known={k: v[1] for k, v in symbols.items() if v[0] == "const"},
+        initial=initial or {},
+        bound={k: (v[1], v[2]) for k, v in symbols.items() if v[0] == "var"},
+    )
+
+
+@pytest.mark.parametrize("efficiency", [0.0, 0.5, 0.9, -1.25])
+def test_affine_dynamic_coefficient_matches_legacy_at_each_step(efficiency):
+    relation = _relation(HEATER_YAML, "conversion")
+    symbols = {
+        "efficiency": ("const", efficiency),
+        "electricity_in": ("var", 0.0, None),
+        "heat_out": ("var", 0.0, None),
+    }
+    template, actual = _compiled(relation, symbols, step=3)
+    expected = lower_relation(relation, symbols, step=3)
+    assert template.fast_lhs is not None and template.fast_rhs is not None
+    assert actual == expected
+
+
+def test_same_template_live_step_coefficient_and_late_division_by_zero():
+    # Same source structure compiled ONCE; values vary across steps.
+    relation = _relation(
+        HEATER_YAML.replace("electricity_in[t] * efficiency",
+                            "electricity_in[t] / efficiency"),
+        "conversion",
+    )
+    roles = {"heat_out": "var", "electricity_in": "var", "efficiency": "known"}
+    template = compile_technical(relation, roles)
+    bounds = {"heat_out": (0.0, None), "electricity_in": (0.0, None)}
+    for step, value in enumerate((2.0, -4.0, 0.0)):
+        if step == 2:
+            with pytest.raises(LoweringUnsupportedError, match="除零.*|step 2.*除零"):
+                bind_technical(
+                    template, instance="x", step=step, known={"efficiency": value},
+                    initial={}, bound=bounds,
+                )
+        else:
+            symbols = {"heat_out": ("var", 0.0, None),
+                       "electricity_in": ("var", 0.0, None),
+                       "efficiency": ("const", value)}
+            actual = bind_technical(
+                template, instance="x", step=step,
+                known={"efficiency": value}, initial={}, bound=bounds,
+            )
+            assert actual == lower_relation(relation, symbols, step=step)
+
+
+def test_affine_initial_and_cross_step_offset_are_preserved():
+    relation = _relation(SOC_YAML, "soc_step")
+    symbols = {
+        "soc": ("var", 0.0, 1.0),
+        "flow": ("var", 0.0, None),
+        "step_c": ("const", 2.5),
+    }
+    initial = {"soc": LinearExpression(
+        terms=((("planned_capacity", 0), 0.4),), constant=0.1,
+    )}
+    for step in (0, 1, 255, 256, 8759, 8760):
+        template, actual = _compiled(relation, symbols, step=step, initial=initial)
+        expected = lower_relation(relation, symbols, step=step, initial=initial)
+        assert template.fast_lhs is not None
+        assert actual == expected
+        if step == 0:
+            assert ("planned_capacity", 0) in dict(actual.constraints[0].expression.terms)
+        else:
+            assert ("soc", -1) in dict(actual.constraints[0].expression.terms)
+
+
+def test_mutex_finite_zero_and_nonaffine_protection():
+    relation = _relation(MUTEX_YAML, "exclusivity")
+    for max_x in (0.0, 100.0):
+        symbols = {
+            "charge": ("var", 0.0, max_x),
+            "discharge": ("var", 0.0, 200.0),
+        }
+        template, actual = _compiled(relation, symbols, step=1)
+        assert template.lhs_mutex is not None
+        assert actual == lower_relation(relation, symbols, step=1)
+    bad = _relation(BILINEAR_YAML, "bilin")
+    symbols = {name: ("var", 0.0, None) for name in ("x", "y", "z")}
+    template = compile_technical(bad, {name: "var" for name in symbols})
+    with pytest.raises(LoweringUnsupportedError, match="变量×变量"):
+        bind_technical(template, instance="b", step=0, known={},
+                       initial={}, bound={k: (0.0, None) for k in symbols})
+
+
+def _battery_model(builder):
+    return LinearModel(
+        variables=tuple(builder.variables.values()),
+        constraints=tuple(builder.rows),
+        objective=LinearExpression(), sense="minimize",
+    )
+
+
+def test_battery_block_sizes_preserve_full_model_and_real_columns(battery):
+    models = [
+        _rows(battery, power=6, block_size=size)
+        for size in (1, 2, 256)
+    ]
+    a = _battery_model(models[0])
+    for result in models:
+        assert _battery_model(result) == a
+        assert result.template_stats["technical_compiles"] == len(battery.relations)
+        assert result.template_stats["technical_binds"] == (
+            result.point_count * len(battery.relations)
+        )
+        assert len(result._step_columns[("cell", "stored_energy")]) == 2
+    assert write_mps(_battery_model(models[0])) == write_mps(_battery_model(models[2]))
+
+
+def test_two_instances_share_structure_not_values_and_cross_calendar_year():
+    tank = _contribution(SOC_YAML)
+    steps = 8762  # 2026 year-end plus two real steps in 2027
+    doc = {"planning": {"variables": {},
+                        "objective": {"sense": "minimize", "expression": "0"}},
+           "connections": {}, "finance_binding": {"instances": {}},
+           "tariff_bindings": {}, "demand_bindings": {}}
+    devices = {
+        inst: {"definition": {"id": tank.device_id}, "asset_origin": "existing",
+               "properties": {
+                   "soc0": {"value": initial, "unit": "1"},
+                   "step_c": {"value": factor, "unit": "1"},
+               }}
+        for inst, initial, factor in (("a", 0.2, 1.0), ("b", 0.7, 0.5))
+    }
+    builder = _ProjectBuilder(
+        doc=doc, devices=devices, models={"a": tank, "b": tank},
+        series=(), finance=None, evaluation=None,
+        point_count=steps, step_s=3600,
+    )
+    builder.template_block_size = 127
+    builder._declare_global_symbols()
+    bound = {inst: builder._bind_instance_symbols(inst) for inst in sorted(devices)}
+    builder.inventory.seal()
+    builder.analysis = CompilerAnalysis(builder.inventory, builder.variables)
+    builder._compile_templates(bound)
+    for inst in sorted(devices):
+        builder._expand_instance(inst, bound[inst])
+        builder._build_relations(inst, bound[inst])
+    assert builder.template_stats["technical_compiles"] == len(tank.relations)
+    assert builder.template_stats["technical_binds"] == 2 * steps * len(tank.relations)
+    for inst, initial, factor in (("a", 0.2, 1.0), ("b", 0.7, 0.5)):
+        first = next(r for r in builder.rows if r.name == f"{inst}__soc_step__t0")
+        assert first.expression.constant == pytest.approx(-initial)
+        last = next(r for r in builder.rows
+                    if r.name == f"{inst}__soc_step__t8760")
+        assert dict(last.expression.terms)[(f"{inst}__soc__t8759", 0)] == -1.0
+        assert dict(last.expression.terms)[(f"{inst}__flow__t8760", 0)] == -factor
+    assert len(builder._step_columns[("a", "soc")]) == steps
+    assert len(builder._step_columns[("b", "soc")]) == steps
+    assert builder._step_columns[("a", "soc")][8759] != (
+        builder._step_columns[("b", "soc")][8759]
+    )
+
+
+def _reference_technical_benchmark(builder):
+    """Same-run S2 AST loop vs S3 template BIND ONLY, no duplicate full model.
+
+    Measures isolated *binding* kernels with the same actual campus input,
+    Docker process, tracemalloc methodology and step count. Both exclude final
+    row allocation / MPS. Never mislabel this as an S2 full-build benchmark.
+    """
+    from iesplan.computation.generators.linear import lower_relation
+    from iesplan.core.contracts.baseline import TIMELINE_STEP_DURATION_VAR
+
+    inputs = []
+    for inst in sorted(builder.models):
+        model = builder.models[inst]
+        if not model.relations:
+            continue
+        static = {TIMELINE_STEP_DURATION_VAR: ("const", builder.step_s)}
+        known = {TIMELINE_STEP_DURATION_VAR: builder.step_s}
+        for name, var in model.variables.items():
+            if var.kind == "property":
+                if (inst, name) in builder.bound_prop:
+                    key = builder.bound_prop[(inst, name)]
+                    col = builder.variables[key]
+                    static[name] = ("var", col.lower, col.upper)
+                else:
+                    value = builder._prop_const(inst, name)
+                    static[name] = ("const", value)
+                    known[name] = value
+            else:
+                colname = builder._step_columns[(inst, name)][0]
+                col = builder.variables[colname]
+                static[name] = ("var", col.lower, col.upper)
+        series = {}
+        for iface, item in model.interfaces.items():
+            if item.type == "predefined":
+                series[iface] = builder._series_si(inst, iface, model)
+            elif (inst, iface) in builder._step_columns:
+                col = builder.variables[builder._step_columns[(inst, iface)][0]]
+                static[iface] = ("var", col.lower, col.upper)
+        initial = {
+            op.payload.state: op.payload.value
+            for op in builder.analysis.relations("initial")
+            if op.payload.instance == inst
+        }
+        bounds = {k: (v[1], v[2]) for k, v in static.items() if v[0] == "var"}
+        inputs.append((inst, model, static, known, series, initial, bounds))
+
+    def sample(kind):
+        tracemalloc.start()
+        try:
+            t0 = time.perf_counter()
+            rows = 0
+            aux = 0
+            for inst, model, static, known, series, initial, bounds in inputs:
+                for step in range(builder.point_count):
+                    if kind == "legacy":
+                        values = dict(static)
+                        for name, sequence in series.items():
+                            values[name] = ("const", sequence[step])
+                        values = builder.analysis.modeling_symbols(inst, step, values)
+                    else:
+                        for name, sequence in series.items():
+                            known[name] = sequence[step]
+                    for family in builder._instance_relations[inst]:
+                        if kind == "legacy":
+                            lowered = lower_relation(
+                                family.relation, values, step=step, initial=initial,
+                            )
+                        else:
+                            lowered = bind_technical(
+                                builder._technical_templates[family.identity],
+                                instance=inst, step=step, known=known,
+                                initial=initial, bound=bounds,
+                            )
+                        rows += len(lowered.constraints)
+                        aux += len(lowered.variables)
+            wall = round((time.perf_counter() - t0) * 1000, 3)
+            _current, peak = tracemalloc.get_traced_memory()
+            return {"bind_wall_ms": wall, "traced_peak_bytes": peak,
+                    "lowered_rows": rows, "auxiliary_variables": aux}
+        finally:
+            tracemalloc.stop()
+    old = sample("legacy")
+    new = sample("template")
+    assert old["lowered_rows"] == new["lowered_rows"]
+    assert old["auxiliary_variables"] == new["auxiliary_variables"]
+    return {"s2_ast_kernel": old, "s3_template_kernel": new}
+
+
+def test_public_campus_production_template_counts_and_resource_comparison(measured_generate):
+    bundle, builder, full = measured_generate
+    count = sum(len(builder.models[inst].relations) for inst in builder.models)
+    assert builder.inventory.sealed
+    assert builder.template_stats["technical_binds"] == builder.point_count * count
+    assert 0 < builder.template_stats["technical_compiles"] <= count
+    assert builder.template_stats["step_compiles"] == len(
+        builder.analysis.relations("planning_step")
+    )
+    assert builder.template_stats["step_binds"] == (
+        builder.point_count * builder.template_stats["step_compiles"]
+    )
+    assert len(bundle.files["input/problem.mps"]) == full["mps_bytes"]
+    comparison = _reference_technical_benchmark(builder)
+    metrics = {
+        **full,
+        "template_stats": builder.template_stats,
+        "same_run_s2_s3_technical_bind_comparison": comparison,
+        "full_build_s2_comparison_note":
+            "Historical P1-S2 CI logs, not a second S2 full-model build in this run",
+        "live_full_horizon": True,
+    }
+    logging.warning("P1_S3_BASELINE %s", json.dumps(metrics, sort_keys=True))
