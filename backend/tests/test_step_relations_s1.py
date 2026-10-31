@@ -127,7 +127,7 @@ def test_disabled_relation_preserved_and_no_generator_capability_required(doc):
 def test_enabled_relation_requires_advertised_capability_and_freezes(doc):
     result = _validate(_insert(doc))
     assert result.artifact is not None
-    assert DESCRIPTOR.version == "7.0.0"
+    assert DESCRIPTOR.version == "7.1.0"
     assert DESCRIPTOR.assembly_schema_version == "5.0.0"
     assert "technical.step_constraints" in DESCRIPTOR.capabilities
     _check_step_constraint_capability(result.artifact, DESCRIPTOR.ref, DESCRIPTOR.capabilities)

@@ -651,6 +651,7 @@ def _handle_failure(
                     db, claim, code=TASK_SOLVE_FAILED,
                     message=f"{exc} (reason={exc.reason})",
                     level=SEVERITY_ERROR,
+                    model_source=exc.model_source,
                     stack_trace=traceback.format_exc(limit=10),
                 )
         except worker_app.LeaseRejectedError:

@@ -1,14 +1,14 @@
 """P1 compiler's *internal*, per-generate declaration and relation inventory.
 
-This is not a second input contract, a global registry, or a persisted Bundle
-schema.  Keep original modeling ASTs instead of callbacks or per-step AST copies.
-Later slices will add the remaining domains to this same inventory.
+This is not a second input contract or a global registry. Keep original
+modeling ASTs instead of callbacks or per-step AST copies. Only compact
+source references leave this inventory in the paired Bundle metadata.
 """
 from __future__ import annotations
 
 from collections import defaultdict
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 import math
 
 from iesplan.computation.generators.linear import (
@@ -31,6 +31,7 @@ class SourceLocation:
     relation_id: str | None = None
     binding_id: str | None = None
     data_object_ref: str | None = None
+    data_object_refs: tuple[str, ...] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -421,7 +422,12 @@ class CompilerAnalysis:
             value = hi if (coeff > 0.0) == (side == "max") else lo
             if value is None or not math.isfinite(value):
                 raise LoweringUnsupportedError(
-                    f"{label}缺有限界：变量 {name!r} 界不足，无法精确"
+                    f"{label}缺有限界：变量 {name!r} 界不足，无法精确",
+                    model_source=({
+                        "source": f"relation:{relation.identity}", "role": "bound",
+                        "axis": relation.domain.kind, "index": period or 0,
+                        "location": {k: v for k, v in asdict(relation.source).items() if v is not None},
+                    } if relation is not None else None),
                 )
             total += coeff * value
         if relation is not None:

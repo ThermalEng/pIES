@@ -201,7 +201,7 @@ def _task_summary_prefetched(
 #: 任务诊断 context 白名单: 仅这些内部字段可向普通项目成员展示,
 #: 其余(路径/对象 id/求解器参数等)仅管理员可见或置空
 _DIAG_CONTEXT_ALLOWLIST: frozenset[str] = frozenset(
-    {"trace_id", "queue", "snapshot_id", "business_outcome", "outcome"}
+    {"trace_id", "queue", "snapshot_id", "business_outcome", "outcome", "model_source"}
 )
 
 

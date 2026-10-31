@@ -30,14 +30,9 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
+from iesplan.computation.errors import ComputationUnavailableError
 from iesplan.core.contracts import OBJECTIVE_SENSES, PlanningExpression
-from iesplan.modeling import (
-    BinaryNode,
-    MathRelation,
-    NumberNode,
-    RefNode,
-    UnaryNode,
-)
+from iesplan.modeling import MathRelation
 
 __all__ = [
     "LoweringUnsupportedError",
@@ -60,8 +55,11 @@ ROW_SENSES: tuple[str, ...] = ("eq", "le", "ge")
 VARIABLE_KINDS: tuple[str, ...] = ("continuous", "binary")
 
 
-class LoweringUnsupportedError(ValueError):
-    """数学形式超出首版降级能力（明确拒绝，非诊断包装）。"""
+class LoweringUnsupportedError(ComputationUnavailableError, ValueError):
+    """数学形式或转换条件不足；保留 ValueError 语义与来源定位。"""
+
+    def __init__(self, message, *, model_source=None):
+        super().__init__(message, reason="unsupported-model", model_source=model_source)
 
 
 # ---------------------------------------------------------------------------

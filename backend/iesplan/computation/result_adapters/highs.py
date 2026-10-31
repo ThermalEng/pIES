@@ -1,4 +1,4 @@
-"""首个真实 ResultAdapterProvider：``ies.result-adapter.highs@6.0.0``。
+"""首个真实 ResultAdapterProvider：``ies.result-adapter.highs@6.1.0``。
 
 与 ``ies.generator.highs_milp@6.0.0`` 配套，在 2.0.0 主解/序列/度量
 恢复基础上增加同次解结构化财务事实映射（映射协议改变故升版；仿射
@@ -53,7 +53,7 @@ from iesplan.computation.result_adapter import ResultAdapterDescriptor
 from iesplan.core.units import UnitError, dims_of, from_si, unit_meta
 
 ADAPTER_ID = "ies.result-adapter.highs"
-ADAPTER_VERSION = "6.0.0"
+ADAPTER_VERSION = "6.1.0"
 ADAPTER_REF = f"{ADAPTER_ID}@{ADAPTER_VERSION}"
 
 DESCRIPTOR = ResultAdapterDescriptor(
@@ -272,6 +272,7 @@ def _parameters(bundle: SolverBundle) -> dict[str, Any]:
         # 结构化财务事实原始声明（必需映射，缺键即旧包，自然失败；
         # 求值与形状由恢复侧按映射表消费，此处不重验条目结构）。
         "financial_facts": doc["financial_facts"],
+        "model_sources": doc["model_sources"],
     }
 
 
@@ -481,6 +482,7 @@ class HighsResultAdapter:
             out["financial_facts"] = _recover_financial_facts(
                 params["financial_facts"], index_of, solution["primals"]
             )
+            out["model_sources"] = params["model_sources"]
         if "metrics" in params["requested"]:
             out["metrics"] = {
                 "model_status": status,

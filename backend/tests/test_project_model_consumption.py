@@ -126,7 +126,7 @@ CONFIG_BODY: dict = {
     "schema_version": "2.0.0",
     "mode": "planning",
     "predictions": [],
-    "generator": "ies.generator.highs_milp@7.0.0",
+    "generator": "ies.generator.highs_milp@7.1.0",
     "solver": "ies.solver.highs@1.7.2",
     "precision": "medium",
     "convergence": None,
@@ -138,7 +138,7 @@ CONFIG_BODY: dict = {
 
 EXPLICIT_CALC_PATCH = {
     "mode": "fixed_operation",
-    "generator": "ies.generator.highs_milp@7.0.0",
+    "generator": "ies.generator.highs_milp@7.1.0",
     "solver": "ies.solver.highs@1.7.2",
     "time_axis": {"resolution": "1h", "start": "2025-01-01T00:00:00Z"},
 }

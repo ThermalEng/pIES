@@ -25,7 +25,7 @@ test('calculation settings survive save and browser reload @basic', async ({ bro
     .getByText('计算配置', { exact: true }).click()
   await expect(page.locator('#calc-mode')).toBeEditable()
   await page.locator('#calc-mode').fill('planning')
-  await page.locator('#calc-generator').fill('ies.generator.highs_milp@7.0.0')
+  await page.locator('#calc-generator').fill('ies.generator.highs_milp@7.1.0')
   await page.locator('#calc-solver').fill('ies.solver.highs@1.7.2')
   await page.locator('#calc-precision').selectOption('medium')
   await page.locator('#calc-time-limit').fill('43200')

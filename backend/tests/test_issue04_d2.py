@@ -249,7 +249,9 @@ def test_zero_rate_non_economic_still_real_peak(tmp_path, resolution):
 
 def test_two_rates_same_meter_no_energy_tariff(tmp_path):
     """Two user-declared charges on the same physical meter are independent."""
-    facts, sealed, _ = _solved(_inputs(second_rate="4"), tmp_path)
+    facts, sealed, bundle = _solved(_inputs(second_rate="4"), tmp_path)
+    sources = json.loads(bundle.files["input/parameters.json"])["model_sources"]["sources"]
+    assert sources["relation:demand.second.m13"]["depends_on"] == ["relation:demand.first.m13"]
     rows = facts["monthly_demand"]
     assert len(rows) == 24
     assert [(row["billing_id"], row["calendar_month"]) for row in rows] == [

@@ -120,6 +120,17 @@ def test_annual_rates_subcomponent_net_basis_and_cash_periods(tmp_path):
     ] * 2
     assert all(_amount(row["amount"], **values) == pytest.approx(net * .9 / 4)
                for row in rows)
+    provenance = builder.model_sources()
+    kinds = {source["kind"] for source in provenance["sources"].values()}
+    assert {"vat_period", "income_year", "depreciation", "cost"} <= kinds
+    for group in provenance["groups"]:
+        assert group["source"] in provenance["sources"]
+    assert any(group["role"] == "row:vat" and group["axis"] == "month"
+               for group in provenance["groups"])
+    assert any(group["role"] == "row:income" and group["axis"] == "year"
+               for group in provenance["groups"])
+    assert any(output["path"][:3] == ["financial_facts", "tax_cash", "depreciation"]
+               for output in provenance["outputs"])
     # VAT credit comes from each covered leaf; the non-deductible annual
     # linear item never disappears from income tax's annual cost basis.
     taxable = facts["tax_cash"]["income"]

@@ -1,10 +1,10 @@
 # P1 开发计划：关系汇集、统一分析与方程结构复用
 
-> 文档类型：一次实施计划，不是新的产品／文件契约。状态：实施中；S1～S3 已验收收口，S4 待实施。
+> 文档类型：一次实施计划，不是新的产品／文件契约。状态：实施中；S1～S3 已验收收口，S4 已实现，正在集成验证，尚未合并。
 > 日期：2026-10-31；审查基线：`8ed9badb315263c25a3b06ff976b14192e0f7925`（P0 文档已提交）。
 > 计划与验收负责人：主审；实现由独立开发者承担。
 > 对应事项：[Roadmap P1](../../manual/changelog/roadmap.md#通用建模与计算升级的剩余阶段)。本计划 PR 包含 P0 规范，可在该分支承接首个实施切片；后续独立切片从已合入前置工作的最新 master 开始。
-> 当前进度：S1～S3 已完成；[S3 计划已归档](../archive/development/2026-10-31-p1-s3-template-expansion-plan.md)，[最终审查](https://github.com/ThermalEng/pIES/pull/36#issuecomment-6544520301)。下一切片为 S4 来源持久化与集成收口，尚未启动。
+> 当前进度：S1～S3 已完成；[S3 计划已归档](../archive/development/2026-10-31-p1-s3-template-expansion-plan.md)，[最终审查](https://github.com/ThermalEng/pIES/pull/36#issuecomment-6544520301)。S4 已接通来源持久化、普通成员任务诊断与同次结果封存；待精确提交的 CI 和最终审查后收口，不提前宣布 P1 完成。
 
 ## 1. 目标与交付边界
 
