@@ -1298,8 +1298,6 @@ class _ProjectBuilder:
                     depends_on=source_dependencies,
                     requires_bounds=True,
                 ))
-            price_refs = set(rule.revenue) | set(rule.energy_cost)
-            cost_refs = set(rule.annual_om) | set(rule.variable_om)
             demand_refs = set(rule.demand_cost)
             om_credit, maint_credit, _construction_credit, out_tax, in_tax = (
                 self._income_vat_credits(grouped or None)
@@ -2821,40 +2819,6 @@ class _ProjectBuilder:
                 )
         return om, maint, construction, out_tax, in_tax
 
-    def _income_deduct_om(
-        self,
-        base: _AffineAcc,
-        for_path: str,
-        span: tuple[int, int] | None,
-        om_credit: dict[str, tuple[float, float]],
-        instances: Mapping[str, Any],
-    ) -> None:
-        """运维可扣额 = 实际付款 − 已声明 VAT 抵免（与基础现金同一增量范围）。
-
-        不含税口径下已声明税率的实际付款先按价税合计加成，再减明确可抵
-        额；含税口径基础金额已为全额。既有沉没固定 OM 不消费亦不抵扣；
-        真实消费的可变分量保留。可抵比例只改变抵扣额，不改变实际付款。
-        """
-        finance_type, _, component = for_path.partition(".")
-        for inst in sorted(self.devices):
-            if inst not in instances or instances[inst].get("type") != "costed":
-                continue
-            if instances[inst].get("finance_type") != finance_type:
-                continue
-            produced = (
-                _COMPONENTS_NEW
-                if self.devices[inst].get("asset_origin") == "new"
-                else _COMPONENTS_EXISTING
-            )
-            if component not in produced:
-                continue
-            ft_entry = self.finance.finance_types[finance_type]
-            if getattr(ft_entry, component) is None:
-                continue
-            # Income tax deducts the whole incurred component, not just its
-            # VAT-covered leaves.  Uncovered siblings keep full basis.
-            start, end = span if span is not None else (0, None)
-            base.add_scaled(self._cost_paid_net(inst, component, start, end)[1], -1.0)
 
     def _maintenance_net(self, year: int, position: int) -> _AffineAcc:
         """The uniquely identified payment less explicitly eligible input VAT."""
