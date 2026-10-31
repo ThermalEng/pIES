@@ -1149,6 +1149,101 @@ class _ProjectBuilder:
             for item in rule.deductible_maintenance.items:
                 if item.deductible:
                     income_inputs.add(f"maintenance.y{item.year}.p{item.position}")
+
+            source_dependencies = tuple(sorted(
+                op.identity for op in self.inventory.operations
+                if (
+                    any(output in income_inputs for output in op.output_symbols)
+                    or op.kind == "vat"
+                )
+            ))
+            operating_spans = annual_boundaries(
+                self.doc["project_baseline"]["resolution"],
+                self.doc["project_baseline"]["start_year"],
+                self.evaluation.operation_years,
+            )
+            span_by_year = {
+                self.evaluation.construction_period + index + 1: span
+                for index, span in enumerate(operating_spans)
+            }
+            year_ids: list[str] = []
+            previous_year_id: str | None = None
+            previous_loss: str | None = None
+            for year in range(1, self.evaluation.evaluation_years + 1):
+                span = span_by_year.get(year)
+                year_inputs = list(income_inputs)
+                if previous_loss is not None:
+                    year_inputs.append(previous_loss)
+                year_dependencies = list(source_dependencies)
+                if previous_year_id is not None:
+                    year_dependencies.append(previous_year_id)
+                year_id = f"income.{rule_id}.y{year}"
+                add(SemanticRelation(
+                    year_id, "income_year", IndexDomain("year"),
+                    IncomeYearConnection(
+                        rule_id, year,
+                        span[0] if span is not None else None,
+                        span[1] if span is not None else None,
+                    ),
+                    SourceLocation(
+                        f"finance.tax_rules.{rule_id}.years.{year}",
+                        relation_id=rule_id,
+                    ),
+                    tuple(sorted(year_inputs)),
+                    (
+                        f"income.{rule_id}.taxable_base.y{year}",
+                        f"income.{rule_id}.generated_loss.y{year}",
+                        f"income.{rule_id}.loss_balance.y{year}",
+                    ),
+                    depends_on=tuple(sorted(year_dependencies)),
+                    requires_bounds=True,
+                ))
+                year_ids.append(year_id)
+                previous_year_id = year_id
+                previous_loss = f"income.{rule_id}.loss_balance.y{year}"
+
+            claim_ids: list[str] = []
+            years = self.evaluation.evaluation_years
+            for origin_index, opening in enumerate(rule.opening_losses):
+                for use_year in range(1, min(int(opening.last_usable_year), years) + 1):
+                    claim_id = (
+                        f"income.{rule_id}.claim.y{use_year}.opening{origin_index}"
+                    )
+                    add(SemanticRelation(
+                        claim_id, "income_loss_claim", IndexDomain("year"),
+                        IncomeLossClaim(
+                            rule_id, use_year, "opening", origin_index
+                        ),
+                        SourceLocation(
+                            f"finance.tax_rules.{rule_id}.opening_losses.{origin_index}",
+                            relation_id=rule_id,
+                        ),
+                        (f"income.{rule_id}.opening_loss.{origin_index}",),
+                        (claim_id,),
+                    ))
+                    claim_ids.append(claim_id)
+            carry_years = int(rule.loss_carryforward_years)
+            for origin_year in range(1, years):
+                last = min(origin_year + carry_years, years)
+                for use_year in range(origin_year + 1, last + 1):
+                    claim_id = (
+                        f"income.{rule_id}.claim.y{use_year}.generated{origin_year}"
+                    )
+                    add(SemanticRelation(
+                        claim_id, "income_loss_claim", IndexDomain("year"),
+                        IncomeLossClaim(
+                            rule_id, use_year, "generated", origin_year
+                        ),
+                        SourceLocation(
+                            f"finance.tax_rules.{rule_id}.loss_carryforward_years",
+                            relation_id=rule_id,
+                        ),
+                        (f"income.{rule_id}.generated_loss.y{origin_year}",),
+                        (claim_id,),
+                        depends_on=(f"income.{rule_id}.y{origin_year}",),
+                    ))
+                    claim_ids.append(claim_id)
+
             add(SemanticRelation(
                 f"income.{rule_id}", "income",
                 IndexDomain("year", self.evaluation.evaluation_years),
@@ -1156,10 +1251,8 @@ class _ProjectBuilder:
                 SourceLocation(f"finance.tax_rules.{rule_id}", relation_id=rule_id),
                 tuple(sorted(income_inputs)),
                 (f"income.{rule_id}.tax", f"income.{rule_id}.loss_balance"),
-                depends_on=tuple(sorted(
-                    op.identity for op in self.inventory.operations
-                    if op.kind in ("vat", "demand", "maintenance", "depreciation", "tariff", "cost")
-                )), requires_bounds=True,
+                depends_on=tuple(sorted((*year_ids, *claim_ids))),
+                requires_bounds=True,
             ))
 
         for cash_id, entry in sorted(self.finance.net_cashflows.items()):
