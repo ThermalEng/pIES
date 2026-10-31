@@ -129,7 +129,13 @@ PAGE_SPECS = {
 # A single source file can feed multiple subsystems. Keep these real consumers
 # targeted instead of widening every computation change to the full suite.
 GENERATOR_PROJECT_CONSUMERS = (
+    "test_project_model.py",
     "test_battery_planning.py",
+    "test_step_relations_s2.py",
+    "test_finance_s2_execution.py",
+    "test_issue06_s2.py",
+    "test_p1_compiler_s1.py",
+    "test_p1_s2_relation_analysis.py",
     "test_vat_monthly.py",
     "test_income_annual.py",
     "test_npv_objective.py",
@@ -697,6 +703,9 @@ def self_test() -> None:
     # Protect the battery optimization/zero-capacity tests from future silent
     # omission when the shared project generator is refactored.
     assert "tests/test_battery_planning.py" in generator["backend_tests"].split()
+    assert "tests/test_step_relations_s2.py" in generator["backend_tests"].split()
+    assert "tests/test_finance_s2_execution.py" in generator["backend_tests"].split()
+    assert "tests/test_p1_s2_relation_analysis.py" in generator["backend_tests"].split()
     assert "tests/test_battery_planning.py" not in pick([
         "backend/iesplan/computation/generators/mps.py"
     ])["backend_tests"].split()

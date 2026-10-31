@@ -121,9 +121,12 @@ def _builder(
     doc = {
         "project_baseline": {"resolution": "1h", "start_year": 2025},
         "devices": {
-            "a": {"asset_origin": "new", "properties": {"cap_kw": {"value": 60, "unit": "kW"}}},
-            "b": {"asset_origin": "new", "properties": {"cap_kw": {"value": 100, "unit": "kW"}}},
-            "old": {"asset_origin": "existing", "properties": {"cap_kw": {"value": 20, "unit": "kW"}}},
+            "a": {"definition": {"id": "ies.device.synthetic_capacity"},
+                  "asset_origin": "new", "properties": {"cap_kw": {"value": 60, "unit": "kW"}}},
+            "b": {"definition": {"id": "ies.device.synthetic_capacity"},
+                  "asset_origin": "new", "properties": {"cap_kw": {"value": 100, "unit": "kW"}}},
+            "old": {"definition": {"id": "ies.device.synthetic_capacity"},
+                    "asset_origin": "existing", "properties": {"cap_kw": {"value": 20, "unit": "kW"}}},
         },
         "finance_binding": {"instances": {
             name: {"type": "costed", "finance_type": (
@@ -139,6 +142,7 @@ def _builder(
     }
     scalar = SimpleNamespace(kind="property", value=1.0, unit="kW")
     contribution = SimpleNamespace(
+        device_id="ies.device.synthetic_capacity",
         variables={"cap_kw": scalar}, interfaces={}, relations=(), states=(),
     )
     evaluation_data = {
@@ -154,6 +158,82 @@ def _builder(
         doc=doc, devices=doc["devices"], models={name: contribution for name in doc["devices"]},
         series=(), finance=finance, evaluation=evaluation, point_count=0, step_s=3600.0,
     )
+
+
+def _collect_only(builder: _ProjectBuilder) -> _ProjectBuilder:
+    """Stop exactly at the S2 collection/analysis barrier; allocate no rows."""
+    buses = builder._compute_buses()
+    bus_flows = builder._bus_flow_index(buses)
+    builder._declare_global_symbols()
+    bound = {
+        inst: builder._bind_instance_symbols(
+            inst, bus_flows.get(inst, frozenset())
+        )
+        for inst in sorted(builder.devices)
+    }
+    builder._collect_semantic_relations(buses, bound)
+    assert builder.inventory.sealed
+    assert not builder.rows
+    return builder
+
+
+def test_pre_lowering_amount_sources_bind_cost_and_maintenance_to_income() -> None:
+    """Capacity -> amount -> depreciation -> income is one inspectable graph."""
+
+    def patch(profile: dict) -> None:
+        profile["tax_rules"]["maint_income"]["depreciation"] = [
+            {
+                "base_from": {
+                    "kind": "upfront_capex_net", "finance_type": "same",
+                },
+                "method": "straight_line", "life_years": 4,
+                "residual": {"value": "0", "unit": "1"}, "first_year": 1,
+            },
+            {
+                "base_from": {
+                    "kind": "maintenance_expense_net", "year": 1, "position": 1,
+                },
+                "method": "straight_line", "life_years": 2,
+                "residual": {"value": "0", "unit": "1"}, "first_year": 1,
+            },
+        ]
+
+    builder = _collect_only(_builder(
+        # The shared synthetic VAT rule explicitly references positions 1
+        # and 2; both must exist at the collection barrier.  Position 2 is
+        # intentionally non-deductible and is not a depreciation source.
+        [_expense("11", _scale("a", "2"), _share("a", 0.1)),
+         _expense("0")],
+        taxes=True, finance_patch=patch,
+    ))
+    analysis = builder.analysis
+
+    cost_a = analysis.operation("cost.a__upfront_capex")
+    assert cost_a.input_symbols == ("cap_a",)
+    assert cost_a.identity in analysis.uses["cap_a"]
+    assert cost_a.payload.terms[0].symbol == "cap_a"
+
+    upfront = analysis.operation("depreciation.maint_income.0")
+    assert upfront.input_symbols == ("a__upfront_capex", "b__upfront_capex")
+    assert upfront.depends_on == (
+        "cost.a__upfront_capex", "cost.b__upfront_capex",
+    )
+    assert "('upfront_capex_net', 'same')" not in upfront.input_symbols
+
+    maintenance = analysis.operation("maintenance.y1.p1")
+    assert "cap_a" in maintenance.input_symbols
+    maint_dep = analysis.operation("depreciation.maint_income.1")
+    assert maint_dep.input_symbols == ("maintenance.y1.p1",)
+    assert maint_dep.depends_on == ("maintenance.y1.p1",)
+
+    year1 = analysis.operation("income.maint_income.y1")
+    assert upfront.identity in year1.depends_on
+    assert maint_dep.identity in year1.depends_on
+    assert {term.source_relation for term in year1.payload.amount_terms} >= {
+        upfront.identity, maint_dep.identity, maintenance.identity,
+    }
+    assert year1.identity in analysis.dependencies["income.maint_income"]
+    assert not any(name.startswith("inc__") for name in builder.variables)
 
 
 def _amount(node: dict, **values: float) -> float:

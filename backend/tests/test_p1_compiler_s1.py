@@ -24,6 +24,7 @@ from iesplan.computation.generators import highs_milp as generator
 from iesplan.computation.generators import project
 from iesplan.computation.result_adapters.highs import HIGHS_ADAPTER, _mps_column_names
 from iesplan.computation.sequences import materialize_non_predictive_series
+from iesplan.finance import IncomeTaxRule
 
 from test_highs_milp_provider import _campus_inputs
 from test_highs_result_adapter import _receipt
@@ -48,6 +49,21 @@ def measured_generate():
     def capture_builder(*args, **kwargs):
         builder = original_new(*args, **kwargs)
         captured["builder"] = builder
+        original_expand = builder._expand_instance
+
+        def assert_collection_barrier(inst, statics):
+            # Executed in the REAL public generate path before the first
+            # time column or conditional conversion is emitted.
+            assert builder.inventory.sealed
+            assert builder.analysis is not None
+            assert builder.analysis.relations("objective")
+            assert len(builder.inventory.relations) == sum(
+                len(model.relations) for model in builder.models.values()
+            )
+            captured["barrier_checks"] = captured.get("barrier_checks", 0) + 1
+            return original_expand(inst, statics)
+
+        builder._expand_instance = assert_collection_barrier
         return builder
 
     def measure(label, fn):
@@ -119,6 +135,21 @@ def measured_generate():
         "stages": stages,
     }
     logging.warning("P1_S1_BASELINE %s", json.dumps(baseline, sort_keys=True))
+    inventory = captured["builder"].inventory
+    # Same public campus input and measured trace as S1, *not* a second
+    # generate. Collection/analysis are included in the build-stage wall time.
+    logging.warning("P1_S2_BASELINE %s", json.dumps({
+        **baseline,
+        "semantic_relation_count": len(inventory.operations),
+        "technical_relation_family_count": len(inventory.relations),
+        "relations_by_domain": {
+            kind: sum(op.kind == kind for op in inventory.operations)
+            for kind in sorted({op.kind for op in inventory.operations})
+        },
+        "conditional_phase_order": captured["builder"].analysis.conversion_phases(),
+        "collection_analysis_timing_note":
+            "Included in model_and_recovery_declarations; not separately instrumented",
+    }, sort_keys=True))
     return bundle, captured["builder"], baseline
 
 
@@ -136,6 +167,37 @@ def test_reproducible_generator_measurement(measured_generate):
     )
     assert "assembly_sha256" not in data
     assert builder.inventory.relations  # AST-based, not deferred builder callbacks
+    assert builder.inventory.sealed
+    assert builder.analysis is not None
+    assert builder.analysis.conversion_phases()[-1] == "objective"
+
+
+def test_s2_complete_source_collection_and_cross_domain_usage(measured_generate):
+    _bundle, builder, _data = measured_generate
+    inventory, analysis = builder.inventory, builder.analysis
+    assert inventory.sealed
+    assert len(inventory.all_relations) == len(inventory.relations) + len(inventory.operations)
+    kinds = {op.kind for op in inventory.operations}
+    assert {"bus", "objective", "annual_cash"} <= kinds
+    assert len(analysis.relations("annual_cash")) == builder.evaluation.operation_years
+    assert len(analysis.relations("demand")) == (
+        len(builder.doc.get("demand_bindings") or {}) * len(builder._vat_month_spans())
+    )
+    assert len(analysis.relations("vat")) == len(builder.finance.credit_pools)
+    assert len(analysis.relations("income")) == sum(
+        isinstance(v, IncomeTaxRule) for v in builder.finance.tax_rules.values()
+    )
+    for op in analysis.relations("tariff"):
+        spec = op.payload
+        symbol = f"{spec.instance}.{spec.interface}"
+        assert op.identity in analysis.uses[symbol]
+        assert inventory.symbols[symbol].role == "flow"
+    for op in analysis.relations("cost"):
+        assert op.output_symbols
+        for symbol in op.input_symbols:
+            assert op.identity in analysis.uses[symbol]
+    # Neither the internal source relations nor the usage index are serialized
+    # into the current public Bundle/ComputeResult protocol.
 
 
 def test_source_inventory_is_inspectable_and_unpersisted(measured_generate):

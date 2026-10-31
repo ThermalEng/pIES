@@ -10,6 +10,7 @@ import subprocess
 import pytest
 
 from iesplan.computation import HIGHS_ADAPTER_PATH
+from iesplan.computation.generators.compiler_ir import CompilerAnalysis
 from iesplan.computation.generators.linear import (
     LinearConstraint,
     LinearExpression,
@@ -39,7 +40,8 @@ def battery():
 
 
 def _rows(battery, *, capacity=None, power=None, soc=0.5, minimum=0.1,
-          maximum=0.9, charge_efficiency=0.95, discharge_efficiency=0.95):
+          maximum=0.9, charge_efficiency=0.95, discharge_efficiency=0.95,
+          finance=None, finance_binding=None, evaluation=None):
     """由真实通用贡献生成两小时 SI 数学行；规划容量不设有限上界。"""
     props = {
         "initial_soc": (soc, "1"),
@@ -55,8 +57,13 @@ def _rows(battery, *, capacity=None, power=None, soc=0.5, minimum=0.1,
     doc = {
         "planning": {"objective": {"sense": "minimize", "expression": "0"},
                      "variables": {}},
+        "project_baseline": {
+            "resolution": "1h", "start_year": 2026, "scenario_mode": "single",
+        },
         "connections": {}, "tariff_bindings": {}, "demand_bindings": {},
-        "finance_binding": {"instances": {}},
+        "finance_binding": {
+            "instances": {"cell": finance_binding} if finance_binding else {},
+        },
     }
     if capacity is None:
         doc["planning"]["variables"]["battery_size"] = {
@@ -76,7 +83,7 @@ def _rows(battery, *, capacity=None, power=None, soc=0.5, minimum=0.1,
             key: {"value": value, "unit": unit} for key, (value, unit) in props.items()
         }}},
         models={"cell": battery},
-        series=(), finance=None, evaluation=None,
+        series=(), finance=finance, evaluation=evaluation,
         point_count=2, step_s=3600,
     )
     # The compiler now has an explicit declaration/binding barrier.
@@ -84,6 +91,15 @@ def _rows(battery, *, capacity=None, power=None, soc=0.5, minimum=0.1,
     # reintroducing the removed mixed declaration/expansion entrypoint.
     builder._declare_global_symbols()
     bound = builder._bind_instance_symbols("cell")
+    # Two-step synthetic physics still shares the one immutable compiler
+    # barrier. Finance tests must provide their *complete* frozen-like inputs
+    # before collection, never mutate them after the inventory is sealed.
+    if finance is not None:
+        assert finance_binding is not None and evaluation is not None
+        builder._collect_semantic_relations([], {"cell": bound})
+    else:
+        builder.inventory.seal()
+        builder.analysis = CompilerAnalysis(builder.inventory, builder.variables)
     builder._expand_instance("cell", bound)
     builder._build_relations("cell", bound)
     return builder
@@ -215,15 +231,27 @@ def test_cost_and_annual_maintenance_use_the_same_planned_size(battery):
     profile["annual_fixed_om"]["linear"]["cap"]["unit_cost"] = {
         "value": "12", "unit": "CNY/kWh/a",
     }
-    b = _rows(battery, power=6)
-    b.finance = merge_effective(FinanceProfile.from_dict(payload), None)
-    b.doc["finance_binding"]["instances"]["cell"] = {
-        "type": "costed", "finance_type": "sys1",
-        "drivers": {
-            "cap": {"property": "capacity_kwh"},
-            "thr": {"interface": "electricity", "aggregation": "integrate_positive"},
+    from iesplan.finance import EvaluationInput
+
+    b = _rows(
+        battery, power=6,
+        finance=merge_effective(FinanceProfile.from_dict(payload), None),
+        finance_binding={
+            "type": "costed", "finance_type": "sys1",
+            "drivers": {
+                "cap": {"property": "capacity_kwh"},
+                "thr": {"interface": "electricity",
+                        "aggregation": "integrate_positive"},
+            },
         },
-    }
+        evaluation=EvaluationInput(
+            evaluation_years=1, construction_period=0, operation_years=1,
+            discount_rate=0.0, construction_payments=(),
+            maintenance_expenses=(),
+        ),
+    )
+    assert b.inventory.sealed
+    assert any(op.kind == "cost" for op in b.inventory.operations)
     components = b.finance_components()
     for field in ("upfront_capex", "annual_fixed_om"):
         component = components[f"cell__{field}"]
@@ -324,16 +352,7 @@ def test_planned_capacity_capex_and_dated_maintenance_recover_from_one_solution(
     }
     profile.pop("period_variable_om")  # 只验证容量、建设、年费与指定年维护。
 
-    b = _rows(battery, discharge_efficiency=1, power=6)
-    b.finance = merge_effective(FinanceProfile.from_dict(payload), None)
-    b.doc["finance_binding"]["instances"]["cell"] = {
-        "type": "costed", "finance_type": "sys1",
-        "drivers": {"cap": {"property": "capacity_kwh"}},
-    }
-    b.doc["project_baseline"] = {
-        "resolution": "1h", "start_year": 2026, "scenario_mode": "single",
-    }
-    b.evaluation = EvaluationInput(
+    evaluation = EvaluationInput(
         evaluation_years=3, construction_period=1, operation_years=2,
         discount_rate=0.0,
         construction_payments=(ConstructionPayment(t=0, ratio="1"),),
@@ -353,6 +372,18 @@ def test_planned_capacity_capex_and_dated_maintenance_recover_from_one_solution(
             ),
         ),
     )
+    b = _rows(
+        battery, discharge_efficiency=1, power=6,
+        finance=merge_effective(FinanceProfile.from_dict(payload), None),
+        finance_binding={
+            "type": "costed", "finance_type": "sys1",
+            "drivers": {"cap": {"property": "capacity_kwh"}},
+        },
+        evaluation=evaluation,
+    )
+    assert b.inventory.sealed
+    assert len(b.analysis.relations("maintenance")) == 1
+    assert len(b.analysis.relations("annual_cash")) == 2
     # 复用生产 builder 的建设/维护同源仿射声明，不构造第二套财务算法。
     b._retain_maintenance()
     b._retain_operating_facts()
