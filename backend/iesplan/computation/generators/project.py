@@ -1034,7 +1034,13 @@ class _ProjectBuilder:
                 self._declare(cname, lower, upper, "continuous", unit)
                 self._step_columns.setdefault((inst, local), []).append(cname)
             self._step_units[(inst, local)] = unit
-        for local, pname, sense in statics["caps"]:
+        for relation in self.inventory.operations:
+            if relation.kind != "capacity" or relation.payload.instance != inst:
+                continue
+            local, pname, sense = (
+                relation.payload.local, relation.payload.planning_symbol,
+                relation.payload.sense,
+            )
             for step in range(self.point_count):
                 vname = self._tech_name(inst, local, step)
                 suffix = "plan_max" if sense == "le" else "plan_min"
@@ -1091,7 +1097,11 @@ class _ProjectBuilder:
     def _build_relations(self, inst: str, statics: dict[str, Any]) -> None:
         contribution = self.models[inst]
         symbols = statics["symbols"]
-        initial = statics["initial"]
+        initial = {
+            op.payload.state: op.payload.value
+            for op in self.inventory.operations
+            if op.kind == "initial" and op.payload.instance == inst
+        }
         predefined = {
             name
             for name, flow in contribution.interfaces.items()
@@ -1106,7 +1116,8 @@ class _ProjectBuilder:
             for family in self._instance_relations[inst]:
                 relation = family.relation
                 lowered = lower_relation(
-                    relation, step_symbols, step=step, initial=initial,
+                    relation, self.analysis.modeling_symbols(inst, step, step_symbols),
+                    step=step, initial=initial,
                 )
                 self._emit_lowered(inst, relation.id, step, lowered)
 
@@ -1224,29 +1235,23 @@ class _ProjectBuilder:
                 buses.append((carrier, members, ordered))
         return buses
 
-    def _build_bus_rows(
-        self,
-        buses: list[
-            tuple[str, tuple[str, ...], tuple[tuple[str, str, float], ...]]
-        ],
-    ) -> None:
-        for index, (carrier, _members, ports) in enumerate(buses):
+    def _build_bus_rows(self) -> None:
+        """Expand sealed network conservation relations, not raw connections."""
+        for operation in self.analysis.relations("bus"):
+            spec = operation.payload
             for step in range(self.point_count):
                 self._checkpoint()
                 terms = tuple(
-                    (((f"{inst}__{iface}__t{step}", 0), sign))
-                    for inst, iface, sign in ports
+                    ((f"{inst}__{iface}__t{step}", 0), sign)
+                    for inst, iface, sign in spec.ports
                 )
-                self.rows.append(
-                    LinearConstraint(
-                        name=f"bus__{carrier}__{index}__t{step}",
-                        expression=LinearExpression(
-                            terms=tuple(sorted(terms)), constant=0.0,
-                        ),
-                        sense="eq",
-                        rhs=0.0,
-                    )
-                )
+                self.rows.append(LinearConstraint(
+                    name=f"bus__{spec.carrier}__{spec.bus_index}__t{step}",
+                    expression=LinearExpression(
+                        terms=tuple(sorted(terms)), constant=0.0,
+                    ),
+                    sense="eq", rhs=0.0,
+                ))
 
     # ------------------------------------------------------------------
     # 财务分量仿射式
@@ -2851,11 +2856,9 @@ class _ProjectBuilder:
 
     def _build_objective(self) -> tuple[_AffineAcc, str]:
         planning = self.doc["planning"]
-        raw = planning["objective"]
-        if (
-            isinstance(raw.get("expression"), str)
-            and raw["expression"].strip() == SYSTEM_AFTER_TAX_NPV
-        ):
+        objective_relation, = self.analysis.relations("objective")
+        objective_spec = objective_relation.payload
+        if objective_spec.expression.strip() == SYSTEM_AFTER_TAX_NPV:
             # 显式全周期 NPV 目标：方向已由装配输入边界核对，此处信任
             # 类型化交接，不重复拒绝。基础 gross 现金与 VAT 现金（实缴
             # 流出、到账退税流入）只入本目标；税额状态约束与目标选择
@@ -2868,10 +2871,8 @@ class _ProjectBuilder:
             return npv, self.finance.currency
         # 普通目标不消费经营现金，但同次解财务事实仍须声明（与目标无关）。
         self._retain_operating_facts()
-        symbols, placeholders = self._planning_symbols()
-        compiled = compile_planning_expression(
-            raw["expression"], symbols, currency=None,
-        )
+        _symbols, placeholders = self._planning_symbols()
+        compiled = objective_spec.compiled
         lowered = lower_planning_expression(compiled, placeholders)
         return self._substitute(lowered), self._objective_unit(compiled)
 
@@ -2896,41 +2897,11 @@ class _ProjectBuilder:
         )
 
     def _build_step_relations(self) -> None:
-        """Compile each frozen relation once; bind it to existing port columns at every t.
-
-        The public assembly gate has already checked indices, references and
-        dimensions. There is no independent flow or post-solve repair variable.
-        """
-        constraints = self.doc["planning"].get("constraints") or {}
-        plan_dimensions = {}
-        for name, spec in self.plan_vars.items():
-            unit = spec.get("unit") or self._bound_prop_unit(
-                spec["device_ref"], spec["parameter"],
-            )
-            plan_dimensions[name] = Counter(dict(dims_of(unit)))
-        for relation_id in sorted(constraints):
-            entry = constraints[relation_id]
-            if entry.get("type") != "step_relation" or entry.get("enabled", True) is False:
-                continue
-            references = entry["references"]
-            dimensions = {
-                **plan_dimensions,
-                TIMELINE_STEP_DURATION_VAR: Counter({"time": 1}),
-            }
-            for alias, target in references.items():
-                flow = self.models[target["instance"]].interfaces[target["interface"]]
-                dimensions[alias] = Counter(dict(dims_of(flow.unit)))
-            compiled = compile_step_relation_expression(entry["expression"], dimensions)
-            placeholders = {
-                name: (("const", self.step_s) if name == TIMELINE_STEP_DURATION_VAR
-                       else ("var", None, None))
-                for name in dimensions
-            }
-            # The pure lowerer uses the shared planning IR/affine rules. It
-            # produces one symbolic row that is instantiated without re-parsing.
-            template = lower_planning_constraint(
-                relation_id, compiled, placeholders,
-            )
+        """Instantiate already compiled, globally bound step relations."""
+        for operation in self.analysis.relations("planning_step"):
+            spec = operation.payload
+            template = spec.template
+            references = spec.references
             for step in range(self.point_count):
                 self._checkpoint()
                 row = _AffineAcc()
@@ -2938,50 +2909,35 @@ class _ProjectBuilder:
                 for (name, offset), coefficient in template.expression.terms:
                     if offset:
                         raise LoweringUnsupportedError(
-                            f"step relation {relation_id!r} has an unsupported offset"
+                            f"step relation {spec.name!r} has an unsupported offset"
                         )
                     if name in references:
                         target = references[name]
                         key = (target["instance"], target["interface"])
-                        # _step_columns is created by _declare_instance_statics,
-                        # the same registry subsequently used by step_series().
                         column = self._step_columns[key][step]
                     elif name in self.plan_vars:
-                        column = name  # one scalar capacity decision for all steps
+                        column = name
                     else:
                         raise LoweringUnsupportedError(
-                            f"step relation {relation_id!r}: unknown symbol {name!r}"
+                            f"step relation {spec.name!r}: unknown symbol {name!r}"
                         )
                     row.add_term(column, coefficient)
                 self.rows.append(LinearConstraint(
-                    name=f"step__{relation_id}__t{step}",
-                    expression=row.freeze(),
-                    sense=template.sense,
+                    name=f"step__{spec.name}__t{step}",
+                    expression=row.freeze(), sense=template.sense,
                     rhs=template.rhs,
                 ))
 
     def _build_planning_rows(self) -> None:
-        """已启用规划约束行（约束 type 标签留装配产物，不进 LP）。"""
-        planning = self.doc["planning"]
-        constraints = planning.get("constraints") or {}
-        symbols, placeholders = self._planning_symbols()
-        for name in sorted(constraints):
-            entry = constraints[name]
-            if entry.get("type") == "step_relation" or entry.get("enabled", True) is False:
-                continue
-            compiled = compile_planning_expression(
-                entry["expression"], symbols, currency=None,
-            )
-            lowered = lower_planning_constraint(name, compiled, placeholders)
+        """Consume scalar planning templates from the same sealed collection."""
+        for operation in self.analysis.relations("planning_scalar"):
+            spec = operation.payload
+            lowered = spec.template
             substituted = self._substitute(lowered.expression)
-            self.rows.append(
-                LinearConstraint(
-                    name=name,
-                    expression=substituted.freeze(),
-                    sense=lowered.sense,
-                    rhs=lowered.rhs,
-                )
-            )
+            self.rows.append(LinearConstraint(
+                name=spec.name, expression=substituted.freeze(),
+                sense=lowered.sense, rhs=lowered.rhs,
+            ))
 
     # ------------------------------------------------------------------
     # 总装
@@ -3206,12 +3162,13 @@ class _ProjectBuilder:
             bound_instances[inst] = self._bind_instance_symbols(
                 inst, bus_flows.get(inst, frozenset())
             )
-        # Global barrier: every instance symbol and technical AST now exists.
+        # S2 barrier: every domain relation is visible before any conversion.
+        self._collect_semantic_relations(buses, bound_instances)
         for inst in sorted(bound_instances):
             self._expand_instance(inst, bound_instances[inst])
         for inst in sorted(bound_instances):
             self._build_relations(inst, bound_instances[inst])
-        self._build_bus_rows(buses)
+        self._build_bus_rows()
         self._build_step_relations()
         self._build_monthly_demand()
         self._checkpoint()
