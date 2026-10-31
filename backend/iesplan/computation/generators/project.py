@@ -1049,6 +1049,7 @@ class _ProjectBuilder:
                 "vat": tuple(rules["vat"]),
                 "construction": tuple(rules["construction"]),
             })
+            pool = self.finance.credit_pools[pool_id]
             vat_rule_ids = tuple(sorted(
                 f"vat_rule.{rid}" for rid, rule in self.finance.tax_rules.items()
                 if isinstance(rule, (VatRule, ConstructionVatRule))
@@ -1061,17 +1062,57 @@ class _ProjectBuilder:
                          if op.identity == rid)
                 ].input_symbols
             }))
+            claims: dict[int, float] = {}
+            arrivals: dict[int, float] = {}
+            for refund in pool.refunds:
+                amount = _money_to_internal(refund.amount)
+                claims[refund.period] = claims.get(refund.period, 0.0) + amount
+                if refund.arrival_period <= 12 * self.evaluation.evaluation_years:
+                    arrivals[refund.arrival_period] = (
+                        arrivals.get(refund.arrival_period, 0.0) + amount
+                    )
+            period_ids: list[str] = []
+            previous_id: str | None = None
+            previous_carry: str | None = None
+            opening_credit = _money_to_internal(pool.opening_credit)
+            for month, start, end in spans:
+                period_id = f"vat.{pool_id}.m{month}"
+                period_inputs = list(refs)
+                if previous_carry is not None:
+                    period_inputs.append(previous_carry)
+                dependencies = list(vat_rule_ids)
+                if previous_id is not None:
+                    dependencies.append(previous_id)
+                add(SemanticRelation(
+                    period_id, "vat_period", IndexDomain("month"),
+                    VatPeriodConnection(
+                        pool_id, month, start, end,
+                        opening_credit if month == 1 else 0.0,
+                        claims.get(month, 0.0),
+                        arrivals.get(month, 0.0),
+                    ),
+                    SourceLocation(
+                        f"finance.credit_pools.{pool_id}.months.{month}",
+                        binding_id=pool_id,
+                    ),
+                    tuple(sorted(period_inputs)),
+                    (
+                        f"vat.{pool_id}.paid.m{month}",
+                        f"vat.{pool_id}.carry.m{month}",
+                    ),
+                    depends_on=tuple(sorted(dependencies)),
+                    requires_bounds=True,
+                ))
+                period_ids.append(period_id)
+                previous_id = period_id
+                previous_carry = f"vat.{pool_id}.carry.m{month}"
             add(SemanticRelation(
                 f"vat.{pool_id}", "vat",
                 IndexDomain("month", 12 * self.evaluation.evaluation_years),
-                VatPoolOperation(pool_id, frozen_rules),
+                VatPoolOperation(pool_id, frozen_rules, pool),
                 SourceLocation(f"finance.credit_pools.{pool_id}", binding_id=pool_id),
                 refs, (f"vat.{pool_id}.paid", f"vat.{pool_id}.carry"),
-                depends_on=tuple(sorted((
-                    *vat_rule_ids,
-                    *(op.identity for op in self.inventory.operations
-                      if op.kind in ("tariff", "demand", "cost", "maintenance"))
-                ))),
+                depends_on=tuple((*vat_rule_ids, *period_ids)),
                 requires_bounds=True,
             ))
         for rule_id, rule in self._income_rules():
