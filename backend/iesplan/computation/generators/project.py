@@ -2457,125 +2457,52 @@ class _ProjectBuilder:
         value = float(rate.value)
         return value / (1.0 + value)
 
-    def _vat_pool_month_bases(
-        self,
-        pool_rules: dict[str, list],
-        spans: list[tuple[int, int, int]],
-    ) -> tuple[list[_AffineAcc], list[_AffineAcc]]:
-        """单池每税务月 (销项, 可抵进项) 仿射（无交易月为零）。
+    def _financial_amount_term_affine(
+        self, term: FinancialAmountTerm,
+    ) -> _AffineAcc:
+        """Resolve one collected financial amount term without re-binding sources."""
+        source = self.analysis.operation(term.source_relation)
+        start = 0 if term.start is None else term.start
+        end = term.end
+        if source.kind == "tariff":
+            return self._tariff_affine(source.payload.binding_id, start, end)
+        if source.kind == "demand":
+            spec = source.payload
+            for row in self._demand_rows:
+                if (
+                    row["billing_id"] == spec.billing_id
+                    and row["month"] == spec.month
+                ):
+                    return row["base_charge"].snapshot()
+            raise RuntimeError(
+                f"demand amount {source.identity!r} was not lowered before tax"
+            )
+        if source.kind == "cost":
+            spec = source.payload
+            scope = term.scope or f"{spec.finance_type}.{spec.component}"
+            return self._cost_scope_affine(
+                spec.instance, scope, start, end,
+            )
+        if source.kind == "maintenance":
+            spec = source.payload
+            return self._maintenance_items[(spec.year, spec.position)].snapshot()
+        raise RuntimeError(
+            f"unsupported financial amount source {source.identity!r}"
+        )
 
-        经营数据按步区间归集；年度固定 OM 按运营年年末月确认；维护按
-        清单年年末月确认；建设进项总额按确认方法落月。金额符号如实
-        保留，不钳零。
-        """
+    def _vat_pool_month_bases(
+        self, periods: tuple[SemanticRelation, ...],
+    ) -> tuple[list[_AffineAcc], list[_AffineAcc]]:
+        """Build VAT bases only from period-bound terms collected before lowering."""
         months = 12 * self.evaluation.evaluation_years
         out: list[_AffineAcc] = [_AffineAcc() for _ in range(months)]
         inp: list[_AffineAcc] = [_AffineAcc() for _ in range(months)]
-        construction = self.evaluation.construction_period
-        operation = self.evaluation.operation_years
-        bindings = self.doc.get("tariff_bindings") or {}
-        instances = (self.doc.get("finance_binding") or {}).get("instances") or {}
-        for rule in pool_rules["vat"]:
-            for entry in rule.demand_input_tax:
-                factor = self._vat_gross_factor(entry.rate) * float(
-                    entry.deductible_ratio.value
-                )
-                for row in self._demand_rows:
-                    if row["charge_id"] == entry.charge:
-                        inp[row["month"] - 1].add_scaled(row["base_charge"], factor)
-            for entry in rule.in_tax:
-                factor = self._vat_gross_factor(entry.rate) * float(
-                    entry.deductible_ratio.value
-                )
-                for binding_id, binding in bindings.items():
-                    if binding.get("price") != entry.price:
-                        continue
-                    for month, start, end in spans:
-                        inp[month - 1].add_scaled(
-                            self._tariff_affine(binding_id, start, end), factor
-                        )
-            for entry in rule.out_tax:
-                factor = self._vat_gross_factor(entry.rate)
-                for binding_id, binding in bindings.items():
-                    if binding.get("price") != entry.price:
-                        continue
-                    for month, start, end in spans:
-                        # 销项记账为负，税基取相反数（符号如实保留）。
-                        out[month - 1].add_scaled(
-                            self._tariff_affine(binding_id, start, end), -factor
-                        )
-            for entry in rule.om_input_tax:
-                finance_type, _, scope = entry.for_path.partition(".")
-                component = scope.split(".", 1)[0]
-                factor = self._vat_gross_factor(entry.rate) * float(
-                    entry.deductible_ratio.value
-                )
-                for inst in sorted(self.devices):
-                    if inst not in instances or instances[inst].get("type") != "costed":
-                        continue
-                    if instances[inst].get("finance_type") != finance_type:
-                        continue
-                    # 与基础现金同一增量语义：既有沉没固定 OM 不消费，
-                    # 不产生进项；真实消费的可变分量保留。
-                    produced = (
-                        _COMPONENTS_NEW
-                        if self.devices[inst].get("asset_origin") == "new"
-                        else _COMPONENTS_EXISTING
-                    )
-                    if component not in produced:
-                        continue
-                    ft_entry = self.finance.finance_types[finance_type]
-                    if getattr(ft_entry, component) is None:
-                        continue
-                    if component == "annual_fixed_om":
-                        amount = self._cost_scope_affine(inst, entry.for_path)
-                        for year in range(construction + 1, construction + operation + 1):
-                            inp[12 * year - 1].add_scaled(amount, factor)
-                    else:
-                        for month, start, end in spans:
-                            inp[month - 1].add_scaled(
-                                self._cost_scope_affine(inst, entry.for_path, start, end), factor
-                            )
-            for entry in rule.maintenance_input_tax:
-                # 引用存在性与跨输入对应已由提交边界核对；同一 (year,
-                # position) 直接消费逐笔金额。维护金额为实际含税付款，
-                # 恒按含税拆价计税，不随文件 price_basis 改变。
-                factor = self._vat_gross_split_factor(entry.rate) * float(
-                    entry.deductible_ratio.value
-                )
-                inp[12 * entry.year - 1].add_scaled(
-                    self._maintenance_items[(entry.year, entry.position)], factor
-                )
-        for rule in pool_rules["construction"]:
-            # 分量口径（仅 upfront_capex）与引用存在性已由公开财务入口
-            # 核对；新建范围与基础建设总额同一增量语义。
-            finance_type, _, _ = rule.for_path.partition(".")
-            total = _AffineAcc()
-            for inst in sorted(self.devices):
-                if inst not in instances or instances[inst].get("type") != "costed":
-                    continue
-                if self.devices[inst].get("asset_origin") != "new":
-                    continue
-                if instances[inst].get("finance_type") != finance_type:
-                    continue
-                ft_entry = self.finance.finance_types[finance_type]
-                if ft_entry.upfront_capex is None:
-                    continue
-                total.add_scaled(self._cost_scope_affine(inst, rule.for_path), 1.0)
-            factor = self._vat_gross_factor(rule.rate) * float(
-                rule.deductible_ratio.value
-            )
-            deductible = _AffineAcc()
-            deductible.add_scaled(total, factor)
-            method = rule.confirmation.method
-            if method == "payment_period":
-                for payment in self.evaluation.construction_payments:
-                    inp[12 * payment.t].add_scaled(deductible, float(payment.ratio))
-            else:
-                # explicit_schedule：比例直接作用于派生总额，不再次乘
-                # 付款比例。方法枚举与确认期上界已在入口/提交边界核对。
-                for item in rule.confirmation.schedule:
-                    inp[item.period - 1].add_scaled(deductible, float(item.ratio))
+        for relation in periods:
+            period = relation.payload
+            for term in period.amount_terms:
+                amount = self._financial_amount_term_affine(term)
+                target = out if term.role == "vat_out" else inp
+                target[period.month - 1].add_scaled(amount, term.coefficient)
         return out, inp
 
     def _build_vat(self) -> _AffineAcc | None:
@@ -2607,13 +2534,7 @@ class _ProjectBuilder:
                 ),
                 key=lambda relation: relation.payload.month,
             ))
-            spans = [
-                (relation.payload.month, relation.payload.start, relation.payload.end)
-                for relation in periods
-            ]
-            out_list, in_list = self._vat_pool_month_bases(
-                operation.payload.rules, spans
-            )
+            out_list, in_list = self._vat_pool_month_bases(periods)
             for refund in pool.refunds:
                 self._fact_refunds.append(
                     {
