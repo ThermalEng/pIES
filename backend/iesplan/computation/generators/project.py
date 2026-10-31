@@ -76,7 +76,6 @@ from iesplan.computation.generators.linear import (
     LinearVariable,
     LoweringUnsupportedError,
     lower_expression,
-    lower_mutex,
     lower_planning_constraint,
     lower_planning_expression,
     lower_relation,
@@ -2131,36 +2130,6 @@ class _ProjectBuilder:
                 for item in rule.confirmation.schedule:
                     inp[item.period - 1].add_scaled(deductible, float(item.ratio))
         return out, inp
-
-    @staticmethod
-    def _affine_side(
-        affine: _AffineAcc,
-        var_bounds: Mapping[str, tuple[float | None, float | None]],
-        *,
-        side: str,
-        label: str,
-    ) -> float:
-        """仿射式在变量盒上的确界；无界即明确能力不支持。
-
-        有限界由实际变量界推导，不猜常量；缺界命名位置/变量后拒绝，
-        不填业务默认。``label`` 为调用方业务位置（如 VAT 池月、所得税年）。
-        """
-        total = affine.constant
-        for name, coeff in affine.terms.items():
-            if coeff == 0.0:
-                continue
-            if name not in var_bounds:
-                raise LoweringUnsupportedError(
-                    f"{label}引用未知变量 {name!r}"
-                )
-            lower, upper = var_bounds[name]
-            bound = upper if (coeff > 0.0) == (side == "max") else lower
-            if bound is None or not math.isfinite(bound):
-                raise LoweringUnsupportedError(
-                    f"{label}缺有限界：变量 {name!r} 界不足，无法精确"
-                )
-            total += coeff * bound
-        return total
 
     def _build_vat(self) -> _AffineAcc | None:
         """各池连续月度 paid/carry 精确链；返回 NPV 现金仿射（或 None）。
