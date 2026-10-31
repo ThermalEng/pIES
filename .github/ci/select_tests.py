@@ -136,6 +136,9 @@ GENERATOR_PROJECT_CONSUMERS = (
     "test_issue06_s2.py",
     "test_p1_compiler_s1.py",
     "test_p1_s2_relation_analysis.py",
+    "test_p1_s3_templates.py",
+    "test_linear_lowering.py",
+    "test_issue04_d2.py",
     "test_vat_monthly.py",
     "test_income_annual.py",
     "test_npv_objective.py",
@@ -445,7 +448,10 @@ def pick(changed: list[str], full: bool = False) -> dict[str, str]:
                 browser.update(BROWSER_GROUPS.get(area, ()))
                 browser.add(SMOKE_BROWSER)
                 frontend.update(FRONTEND_GROUPS.get(area, ()))
-            if path == "backend/iesplan/computation/generators/project.py":
+            if path in (
+                "backend/iesplan/computation/generators/project.py",
+                "backend/iesplan/computation/generators/templates.py",
+            ):
                 backend.update(GENERATOR_PROJECT_CONSUMERS)
                 browser.update(("tax-chain.spec.ts", "result-planning-solution.spec.ts"))
         elif path in ("frontend/Dockerfile", "frontend/package.json", "frontend/package-lock.json"):
@@ -706,6 +712,15 @@ def self_test() -> None:
     assert "tests/test_step_relations_s2.py" in generator["backend_tests"].split()
     assert "tests/test_finance_s2_execution.py" in generator["backend_tests"].split()
     assert "tests/test_p1_s2_relation_analysis.py" in generator["backend_tests"].split()
+    assert "tests/test_p1_s3_templates.py" in generator["backend_tests"].split()
+    assert "tests/test_linear_lowering.py" in generator["backend_tests"].split()
+    assert "tests/test_issue04_d2.py" in generator["backend_tests"].split()
+    compiled_template = pick(["backend/iesplan/computation/generators/templates.py"])
+    assert all(
+        "tests/" + test in compiled_template["backend_tests"].split()
+        for test in GENERATOR_PROJECT_CONSUMERS
+    )
+    assert "tax-chain.spec.ts" in compiled_template["browser_specs"]
     assert "tests/test_battery_planning.py" not in pick([
         "backend/iesplan/computation/generators/mps.py"
     ])["backend_tests"].split()
