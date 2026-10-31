@@ -199,7 +199,11 @@ def test_pre_lowering_amount_sources_bind_cost_and_maintenance_to_income() -> No
         ]
 
     builder = _collect_only(_builder(
-        [_expense("11", _scale("a", "2"), _share("a", 0.1))],
+        # The shared synthetic VAT rule explicitly references positions 1
+        # and 2; both must exist at the collection barrier.  Position 2 is
+        # intentionally non-deductible and is not a depreciation source.
+        [_expense("11", _scale("a", "2"), _share("a", 0.1)),
+         _expense("0")],
         taxes=True, finance_patch=patch,
     ))
     analysis = builder.analysis
