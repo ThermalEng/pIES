@@ -17,6 +17,7 @@ from test_vat_monthly import (
     HOURS_2026,
     HOURS_2027,
     _finance_payload,
+    _collection_builder,
     _hand_chain,
     _hand_monthly,
     _hand_npv_with_vat,
@@ -255,6 +256,46 @@ def _gen_inputs(
         maintenance_expenses=(),
     )
     return artifact, models, materialized, finance, config, evaluation
+
+
+def test_pre_lowering_income_years_and_loss_claims_are_explicit() -> None:
+    payload = _gen_finance_payload(opening=((500, 2), (800, 7)))
+    builder = _collection_builder(_gen_inputs(
+        {"sense": "maximize", "expression": NPV_MARKER},
+        payload=payload,
+    ))
+    analysis = builder.analysis
+    years = tuple(
+        relation for relation in analysis.relations("income_year")
+        if relation.payload.rule_id == "income_gen"
+    )
+    assert [relation.payload.year for relation in years] == [1, 2, 3]
+    assert years[0].identity in years[1].depends_on
+    assert "income.income_gen.loss_balance.y1" in years[1].input_symbols
+
+    claims = tuple(
+        relation for relation in analysis.relations("income_loss_claim")
+        if relation.payload.rule_id == "income_gen"
+    )
+    assert any(
+        relation.payload.use_year == 2
+        and relation.payload.origin_kind == "opening"
+        and relation.payload.origin_index == 0
+        for relation in claims
+    )
+    generated_y1_to_y2 = next(
+        relation for relation in claims
+        if relation.payload.use_year == 2
+        and relation.payload.origin_kind == "generated"
+        and relation.payload.origin_index == 1
+    )
+    assert generated_y1_to_y2.depends_on == ("income.income_gen.y1",)
+    assert "income.income_gen.generated_loss.y1" in generated_y1_to_y2.input_symbols
+
+    parent = analysis.operation("income.income_gen")
+    assert all(relation.identity in parent.depends_on for relation in years)
+    assert generated_y1_to_y2.identity in parent.depends_on
+    assert not any(name.startswith("inc__") for name in builder.variables)
 
 
 def _gen_bases(cap_kw: Decimal, *, price_y3: Decimal = GEN_PRICE_Y3) -> tuple[Decimal, ...]:
