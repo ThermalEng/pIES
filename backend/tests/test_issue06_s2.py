@@ -121,9 +121,12 @@ def _builder(
     doc = {
         "project_baseline": {"resolution": "1h", "start_year": 2025},
         "devices": {
-            "a": {"asset_origin": "new", "properties": {"cap_kw": {"value": 60, "unit": "kW"}}},
-            "b": {"asset_origin": "new", "properties": {"cap_kw": {"value": 100, "unit": "kW"}}},
-            "old": {"asset_origin": "existing", "properties": {"cap_kw": {"value": 20, "unit": "kW"}}},
+            "a": {"definition": {"id": "ies.device.synthetic_capacity"},
+                  "asset_origin": "new", "properties": {"cap_kw": {"value": 60, "unit": "kW"}}},
+            "b": {"definition": {"id": "ies.device.synthetic_capacity"},
+                  "asset_origin": "new", "properties": {"cap_kw": {"value": 100, "unit": "kW"}}},
+            "old": {"definition": {"id": "ies.device.synthetic_capacity"},
+                    "asset_origin": "existing", "properties": {"cap_kw": {"value": 20, "unit": "kW"}}},
         },
         "finance_binding": {"instances": {
             name: {"type": "costed", "finance_type": (
@@ -139,6 +142,7 @@ def _builder(
     }
     scalar = SimpleNamespace(kind="property", value=1.0, unit="kW")
     contribution = SimpleNamespace(
+        device_id="ies.device.synthetic_capacity",
         variables={"cap_kw": scalar}, interfaces={}, relations=(), states=(),
     )
     evaluation_data = {
