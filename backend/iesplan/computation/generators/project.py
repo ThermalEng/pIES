@@ -560,7 +560,7 @@ class _ProjectBuilder:
             self.inventory.symbols[name] = SymbolDeclaration(
                 name, "planning", IndexDomain("scalar"), unit,
                 SourceLocation(f"planning.variables.{name}", inst,
-                               self.models[inst].device_id,
+                               self.devices[inst]["definition"].get("device_id"),
                                self.devices[inst]["definition"].get("revision"),
                                binding_id=name),
             )
