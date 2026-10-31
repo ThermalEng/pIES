@@ -1585,66 +1585,57 @@ class _ProjectBuilder:
         self, inst: str, component: str, start: int = 0, end: int | None = None,
         *, part: str | None = None,
     ) -> _AffineAcc:
-        """单个成本分量的仿射式（fixed 常数 + linear driver 展开）。
+        """Lower the already collected cost amount expression.
 
-        ``fixed`` 按常数计入：仅静态实例与必建变量（下界 > 0，建设必然
-        发生）可达本路径；可选建设变量 + 正固定费在用户输入边界拒收，
-        不进入生成器。``start``/``end`` 只约束接口型 driver 的 step
-        区间（property 标量按年值口径本年全额，不切片）。
+        Finance driver binding, aggregation and unit-cost conversion are frozen
+        in the cost relation before the collection barrier.  This stage only
+        expands its semantic driver identities to the current solver columns.
         """
         out = _AffineAcc()
-        instances = (self.doc.get("finance_binding") or {}).get("instances") or {}
-        comp = self.analysis.operation(f"cost.{inst}__{component}").payload.value
-        if comp.fixed is not None and part in (None, "fixed"):
-            out.add_const(_money_to_internal(comp.fixed))
-        for driver, cost in (comp.linear or {}).items():
-            if part is not None and part != f"linear.{driver}":
+        spec = self.analysis.operation(f"cost.{inst}__{component}").payload
+        if spec.fixed_amount is not None and part in (None, "fixed"):
+            out.add_const(spec.fixed_amount)
+        for term in spec.terms:
+            if part is not None and part != f"linear.{term.driver}":
                 continue
-            # S2 的 upkeep 比例引用同一实例 upfront；美元建设单价只按
-            # 物理分母归一，不进行汇率换算。其他运维分量沿既有换算路径。
-            coeff = (
-                _unit_cost_to_internal(float(cost.unit_cost.value), cost.unit_cost.unit)
-                if component == "upfront_capex"
-                else _to_internal(float(cost.unit_cost.value), cost.unit_cost.unit)
+            out.add_scaled(
+                self._driver_affine(inst, term, start, end), term.coefficient
             )
-            out.add_scaled(self._driver_affine(inst, driver, start, end), coeff)
         return out
 
     def _driver_affine(
-        self, inst: str, driver: str, start: int = 0, end: int | None = None,
+        self, inst: str, term: CostAmountTerm,
+        start: int = 0, end: int | None = None,
     ) -> _AffineAcc:
-        """单个 driver 的数量仿射式（property 标量或接口能量）。
-
-        被规划接管的容量 property 直接引用首年建设容量变量（全期在产
-        即建设量）；未接管 property 保持旧行为（实例常量）。property
-        口径为年值（费率含时间维度由装配边界保证），逐年路径下本年全额，
-        不按区间切片；接口能量按区间内实际步求和。
-        """
+        """Expand one collected cost driver term to solver-column affine form."""
         out = _AffineAcc()
-        instances = (self.doc.get("finance_binding") or {}).get("instances") or {}
-        target = instances[inst]["drivers"][driver]
-        if "property" in target:
-            prop = target["property"]
-            if (inst, prop) in self.bound_prop:
-                out.add_term(self.bound_prop[(inst, prop)], 1.0)
+        if term.target_kind == "property":
+            if term.symbol in self.plan_vars:
+                out.add_term(term.symbol, 1.0)
                 return out
-            out.add_const(self._prop_const(inst, prop))
+            coefficient = self.inventory.coefficients.get(term.symbol)
+            if coefficient is None or coefficient.value is None:
+                raise RuntimeError(
+                    f"cost driver {term.driver!r} lacks fixed property {term.symbol!r}"
+                )
+            out.add_const(coefficient.value)
             return out
-        iface = target["interface"]
-        aggregation = target["aggregation"]
+        iface = term.local
         contribution = self.models[inst]
         stop = self.point_count if end is None else end
         if (inst, iface) in self.series:
             values = self._series_si(inst, iface, contribution)[start:stop]
-            if aggregation == "integrate_positive":
+            if term.aggregation == "integrate_positive":
                 out.add_const(sum(values) * self.step_s)
             else:
                 out.add_const(sum(values))
             return out
         prefix = f"{inst}__{iface}"
         for step in range(start, stop):
-            coeff = self.step_s if aggregation == "integrate_positive" else 1.0
-            out.add_term(f"{prefix}__t{step}", coeff)
+            coefficient = (
+                self.step_s if term.aggregation == "integrate_positive" else 1.0
+            )
+            out.add_term(f"{prefix}__t{step}", coefficient)
         return out
 
     def _prop_const(self, inst: str, prop: str) -> float:
@@ -2040,11 +2031,11 @@ class _ProjectBuilder:
         """
         binding = self.doc["finance_binding"]["instances"][inst]
         prefix = f"{binding['finance_type']}.{component}"
-        comp = self.analysis.operation(f"cost.{inst}__{component}").payload.value
+        spec = self.analysis.operation(f"cost.{inst}__{component}").payload
         factors = self._cost_tax_factors()
         gross, net = _AffineAcc(), _AffineAcc()
-        parts = (["fixed"] if comp.fixed is not None else []) + [
-            f"linear.{driver}" for driver in sorted(comp.linear or {})
+        parts = (["fixed"] if spec.fixed_amount is not None else []) + [
+            f"linear.{term.driver}" for term in spec.terms
         ]
         for part in parts:
             amount = self._cost_affine(inst, component, start, end, part=part)
