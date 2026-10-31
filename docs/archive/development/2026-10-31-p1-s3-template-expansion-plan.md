@@ -1,6 +1,10 @@
 # P1-S3 实施计划：模板复用与分块展开
 
-> 文档类型：一次实施计划，不定义公共格式或长期规范。状态：计划就绪，待实现。
+> 状态：已归档；归档日期：2026-10-31。
+> 归档原因：PR #36 的 P1-S3 实现提交 `2c83be6` 已复审通过并合并为 `a158074`，本切片完成；本文保留原计划，不再作为后续开发指令。
+> 现行替代来源：[P1 总实施计划](../../development/p1-compiler-foundation-plan.md)、[Roadmap](../../../manual/changelog/roadmap.md#通用建模与计算升级的剩余阶段)及[更新日志](../../../manual/changelog/README.md)。验证与性能口径见[最终审查](https://github.com/ThermalEng/pIES/pull/36#issuecomment-6544520301)。正文中的原阶段描述及相对链接按历史语境保留。
+>
+> 文档类型：一次实施计划，不定义公共格式或长期规范。原状态：计划就绪，待实现。
 > 日期：2026-10-31；基线：`master@295040f5122a4676082213e907f50569fd79518e`，包含 PR #35 的 S2 合并及文档收口。
 > 上游：[P1 总计划](p1-compiler-foundation-plan.md)、[Roadmap](../../manual/changelog/roadmap.md#通用建模与计算升级的剩余阶段)。主审维护计划、正式契约和验收；执行者实现本切片并提交 CI 证据。
 > 权威依据：[架构宪法](../../manual/developer-guide/zh-CN/ARCHITECTURE_CONSTITUTION.md)、[生成器](../../manual/developer-guide/zh-CN/modules/generators.md)、[技术贡献](../../manual/developer-guide/zh-CN/modules/modeling.md)、[Bundle](../../manual/developer-guide/zh-CN/formats/solver-bundle.md)。
