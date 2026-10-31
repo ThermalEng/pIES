@@ -1,7 +1,7 @@
 """P1-S3: compiled technical/step templates, live coefficients and block continuity.
 
-Legacy lower_relation is invoked only as an independent TEST ORACLE; the
-production project builder never executes it. All application CI uses Docker.
+The frozen S2 reference is test-only and independently validates the public
+and production S3 binding kernel. All application CI uses Docker.
 """
 from __future__ import annotations
 
@@ -20,6 +20,7 @@ from iesplan.computation.generators.linear import (
 from iesplan.computation.generators.mps import write_mps
 from iesplan.computation.generators.project import _ProjectBuilder
 from iesplan.computation.generators.templates import compile_technical, bind_technical
+from s2_reference_lowerer import lower_relation_s2
 
 from test_battery_planning import battery, _rows
 from test_linear_lowering import (
@@ -52,9 +53,10 @@ def test_affine_dynamic_coefficient_matches_legacy_at_each_step(efficiency):
         "heat_out": ("var", 0.0, None),
     }
     template, actual = _compiled(relation, symbols, step=3)
-    expected = lower_relation(relation, symbols, step=3)
+    expected = lower_relation_s2(relation, symbols, step=3)
     assert template.fast_lhs is not None and template.fast_rhs is not None
     assert actual == expected
+    assert lower_relation(relation, symbols, step=3) == actual
 
 
 def test_same_template_live_step_coefficient_and_late_division_by_zero():
@@ -82,7 +84,8 @@ def test_same_template_live_step_coefficient_and_late_division_by_zero():
                 template, instance="x", step=step,
                 known={"efficiency": value}, initial={}, bound=bounds,
             )
-            assert actual == lower_relation(relation, symbols, step=step)
+            assert actual == lower_relation_s2(relation, symbols, step=step)
+            assert lower_relation(relation, symbols, step=step) == actual
 
 
 def test_affine_initial_and_cross_step_offset_are_preserved():
@@ -97,7 +100,7 @@ def test_affine_initial_and_cross_step_offset_are_preserved():
     )}
     for step in (0, 1, 255, 256, 8759, 8760):
         template, actual = _compiled(relation, symbols, step=step, initial=initial)
-        expected = lower_relation(relation, symbols, step=step, initial=initial)
+        expected = lower_relation_s2(relation, symbols, step=step, initial=initial)
         assert template.fast_lhs is not None
         assert actual == expected
         if step == 0:
@@ -115,7 +118,7 @@ def test_mutex_finite_zero_and_nonaffine_protection():
         }
         template, actual = _compiled(relation, symbols, step=1)
         assert template.lhs_mutex is not None
-        assert actual == lower_relation(relation, symbols, step=1)
+        assert actual == lower_relation_s2(relation, symbols, step=1)
     bad = _relation(BILINEAR_YAML, "bilin")
     symbols = {name: ("var", 0.0, None) for name in ("x", "y", "z")}
     template = compile_technical(bad, {name: "var" for name in symbols})
@@ -200,7 +203,7 @@ def _reference_technical_benchmark(builder):
     Docker process, tracemalloc methodology and step count. Both exclude final
     row allocation / MPS. Never mislabel this as an S2 full-build benchmark.
     """
-    from iesplan.computation.generators.linear import lower_relation
+    from s2_reference_lowerer import lower_relation_s2
     from iesplan.core.contracts.baseline import TIMELINE_STEP_DURATION_VAR
 
     inputs = []
@@ -257,7 +260,7 @@ def _reference_technical_benchmark(builder):
                             known[name] = sequence[step]
                     for family in builder._instance_relations[inst]:
                         if kind == "legacy":
-                            lowered = lower_relation(
+                            lowered = lower_relation_s2(
                                 family.relation, values, step=step, initial=initial,
                             )
                         else:
@@ -308,7 +311,7 @@ class _S2ReferenceBuilder(_ProjectBuilder):
                 current[name] = ("const", self._series_si(inst, name, model)[step])
             current = self.analysis.modeling_symbols(inst, step, current)
             for family in self._instance_relations[inst]:
-                lowered = lower_relation(
+                lowered = lower_relation_s2(
                     family.relation, current, step=step, initial=initial,
                 )
                 self._emit_lowered(inst, family.relation.id, step, lowered)
