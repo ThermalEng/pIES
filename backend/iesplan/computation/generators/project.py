@@ -2170,26 +2170,23 @@ class _ProjectBuilder:
         目标压紧；退款按声明从可用留抵扣减（超额即不可行），到账月记
         现金，期后到账仅应收。约束与目标选择无关，现金只入 NPV。
         """
-        grouped = self._vat_grouped_rules()
-        if grouped is None:
+        operations = self.analysis.relations("vat")
+        if not operations:
             return None
         evaluation = self.evaluation
         months = 12 * evaluation.evaluation_years
         spans = self._vat_month_spans()
-        var_bounds = {
-            variable.name: (variable.lower, variable.upper)
-            for variable in self.variables.values()
-        }
-        taken = set(var_bounds)
+        taken = set(self.variables)
         cash = _AffineAcc()
         rate = evaluation.discount_rate
 
         def discount(year: int) -> float:
             return (1.0 + rate) ** year
 
-        for pool_id in sorted(grouped):
+        for operation in operations:
+            pool_id = operation.payload.pool_id
             pool = self.finance.credit_pools[pool_id]
-            out_list, in_list = self._vat_pool_month_bases(grouped[pool_id], spans)
+            out_list, in_list = self._vat_pool_month_bases(operation.payload.rules, spans)
             claims: dict[int, float] = {}
             arrivals: dict[int, float] = {}
             for refund in pool.refunds:
@@ -2212,17 +2209,21 @@ class _ProjectBuilder:
             previous.add_const(cumulative_hi)
             for month in range(1, months + 1):
                 location = f"VAT 池 {pool_id!r} 第 {month} 月"
-                out_max = self._affine_side(
-                    out_list[month - 1], var_bounds, side="max", label=location
+                out_max = self.analysis.affine_side(
+                    out_list[month - 1], side="max", label=location,
+                    relation=operation, period=month,
                 )
-                out_min = self._affine_side(
-                    out_list[month - 1], var_bounds, side="min", label=location
+                out_min = self.analysis.affine_side(
+                    out_list[month - 1], side="min", label=location,
+                    relation=operation, period=month,
                 )
-                in_max = self._affine_side(
-                    in_list[month - 1], var_bounds, side="max", label=location
+                in_max = self.analysis.affine_side(
+                    in_list[month - 1], side="max", label=location,
+                    relation=operation, period=month,
                 )
-                in_min = self._affine_side(
-                    in_list[month - 1], var_bounds, side="min", label=location
+                in_min = self.analysis.affine_side(
+                    in_list[month - 1], side="min", label=location,
+                    relation=operation, period=month,
                 )
                 # 留抵上界须覆盖销项为负（销售记账抵减）的一侧：单调递推
                 # cumulative_hi（只增不减）保证归纳每一步不切割真解；
@@ -2250,14 +2251,9 @@ class _ProjectBuilder:
                     carry_name, lower=0.0, upper=cumulative_hi,
                 )
                 if paid_hi > 0.0 and cumulative_hi > 0.0:
-                    mutex = lower_mutex(
-                        f"vat__{pool_id}__m{month}",
-                        (paid_name, 0),
-                        (carry_name, 0),
-                        {
-                            paid_name: ("var", 0.0, paid_hi),
-                            carry_name: ("var", 0.0, cumulative_hi),
-                        },
+                    mutex = self.analysis.mutex(
+                        f"vat__{pool_id}__m{month}", paid_name, carry_name,
+                        relation=operation, period=month,
                     )
                     binary = mutex.variables[0]
                     self.variables[binary.name] = binary
@@ -2478,7 +2474,10 @@ class _ProjectBuilder:
         界由实际变量盒推导，不猜常量。
         """
         construction = self.evaluation.construction_period
-        for entry in rule.depreciation:
+        for relation in self.analysis.relations("depreciation"):
+            if relation.payload.rule_id != rule_id:
+                continue
+            entry = relation.payload.entry
             if not (
                 construction + entry.first_year
                 <= year
@@ -2498,8 +2497,14 @@ class _ProjectBuilder:
                 residual_amount = _AffineAcc()
                 residual_amount.add_const(residual)
                 if residual > 0.0:
-                    basis_lo = self._affine_side(depreciable, var_bounds, side="min", label=position)
-                    basis_hi = self._affine_side(depreciable, var_bounds, side="max", label=position)
+                    basis_lo = self.analysis.affine_side(
+                        depreciable, side="min", label=position,
+                        relation=relation, period=year,
+                    )
+                    basis_hi = self.analysis.affine_side(
+                        depreciable, side="max", label=position,
+                        relation=relation, period=year,
+                    )
                     if basis_hi <= 0.0:
                         residual_amount = _AffineAcc()
                     elif basis_lo <= 0.0:
@@ -2622,10 +2627,13 @@ class _ProjectBuilder:
         约束与目标选择无关，现金只入 NPV；折旧/亏损抵扣不是现金流，
         不重复扣除。
         """
-        rules = self._income_rules()
-        if not rules:
+        operations = self.analysis.relations("income")
+        if not operations:
             return None
-        credits = self._income_vat_credits(self._vat_grouped_rules())
+        credits = self._income_vat_credits({
+            op.payload.pool_id: op.payload.rules
+            for op in self.analysis.relations("vat")
+        } or None)
         evaluation = self.evaluation
         years = evaluation.evaluation_years
         construction = evaluation.construction_period
@@ -2670,7 +2678,8 @@ class _ProjectBuilder:
                 )
             )
 
-        for rule_id, rule in rules:
+        for operation in operations:
+            rule_id, rule = operation.payload.rule_id, operation.payload.rule
             tax_rate = float(rule.rate.value)
             carry_years = int(rule.loss_carryforward_years)
             vintages: list[dict] = []
@@ -2703,11 +2712,11 @@ class _ProjectBuilder:
                     location,
                 )
                 base_kept = base.snapshot()
-                base_hi = self._affine_side(
-                    base, var_bounds, side="max", label=location
+                base_hi = self.analysis.affine_side(
+                    base, side="max", label=location, relation=operation, period=year,
                 )
-                base_lo = self._affine_side(
-                    base, var_bounds, side="min", label=location
+                base_lo = self.analysis.affine_side(
+                    base, side="min", label=location, relation=operation, period=year,
                 )
                 profit_hi = max(base_hi, 0.0)
                 gen_hi = max(-base_lo, 0.0)
@@ -2721,14 +2730,9 @@ class _ProjectBuilder:
                 equation.add_scaled(base, -1.0)
                 constrain(f"inc__{rule_id}__eq__y{year}", equation, "eq", 0.0)
                 if profit_hi > 0.0 and gen_hi > 0.0:
-                    mutex = lower_mutex(
-                        f"inc__{rule_id}__m{year}",
-                        (profit_name, 0),
-                        (gen_name, 0),
-                        {
-                            profit_name: ("var", 0.0, profit_hi),
-                            gen_name: ("var", 0.0, gen_hi),
-                        },
+                    mutex = self.analysis.mutex(
+                        f"inc__{rule_id}__m{year}", profit_name, gen_name,
+                        relation=operation, period=year,
                     )
                     binary = mutex.variables[0]
                     self.variables[binary.name] = binary
