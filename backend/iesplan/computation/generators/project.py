@@ -763,13 +763,25 @@ class _ProjectBuilder:
                 (f"{inst}.{local}", pname),
             ))
         for name, value in initial.items():
+            # Initial ASTs are lowered with model-local identifiers, but the
+            # semantic graph must expose the globally bound identity.  In
+            # particular a planning takeover is the same scalar decision at
+            # t=0, not a second local property symbol.
+            initial_inputs = ()
+            if isinstance(value, LinearExpression):
+                initial_inputs = tuple(sorted({
+                    self.inventory.property_bindings.get(
+                        (inst, ref), f"{inst}.{ref}"
+                    )
+                    for (ref, _), coefficient in value.terms
+                    if coefficient
+                }))
             self.inventory.collect(SemanticRelation(
                 f"{inst}.{name}.initial", "initial", IndexDomain("scalar"),
                 StateInitial(inst, name, value),
                 SourceLocation(f"equations.variables.{name}.initial", inst,
                                contribution.device_id, dev["definition"].get("revision")),
-                tuple(sorted({ref for (ref, _), _coef in value.terms}))
-                if isinstance(value, LinearExpression) else (),
+                initial_inputs,
                 (f"{inst}.{name}",),
             ))
         return {
@@ -780,6 +792,37 @@ class _ProjectBuilder:
             "columns": column_specs,
             "caps": caps,
         }
+
+
+    def _amount_source_links(
+        self, source: Any,
+    ) -> tuple[tuple[str, ...], tuple[str, ...]]:
+        """Bind a typed money source to the already collected amount outputs.
+
+        This is collection-time graph data, not a second amount evaluator.
+        Upfront sources may intentionally aggregate several new instances of
+        the same finance type; maintenance sources bind the frozen
+        (year, position) item exactly.
+        """
+        if source.kind == "upfront_capex_net":
+            operations = tuple(
+                op for op in self.inventory.operations
+                if op.kind == "cost"
+                and isinstance(op.payload, CostComponent)
+                and op.payload.component == "upfront_capex"
+                and op.payload.finance_type == source.finance_type
+            )
+        else:
+            identity = f"maintenance.y{source.year}.p{source.position}"
+            operations = tuple(
+                op for op in self.inventory.operations if op.identity == identity
+            )
+        return (
+            tuple(sorted({
+                output for op in operations for output in op.output_symbols
+            })),
+            tuple(sorted(op.identity for op in operations)),
+        )
 
 
     def _collect_semantic_relations(
@@ -1030,14 +1073,18 @@ class _ProjectBuilder:
             ))
         for rule_id, rule in self._income_rules():
             for index, entry in enumerate(rule.depreciation):
+                source_symbols, source_dependencies = self._amount_source_links(
+                    entry.base_from
+                )
                 add(SemanticRelation(
                     f"depreciation.{rule_id}.{index}", "depreciation",
                     IndexDomain("year", self.evaluation.evaluation_years),
                     DepreciationCharge(rule_id, entry),
                     SourceLocation(f"finance.tax_rules.{rule_id}.depreciation.{index}",
                                    relation_id=rule_id),
-                    (str(entry.base_from.identity),),
+                    source_symbols,
                     (f"depreciation.{rule_id}.{index}",),
+                    depends_on=source_dependencies,
                     requires_bounds=True,
                 ))
             price_refs = set(rule.revenue) | set(rule.energy_cost)
@@ -1073,23 +1120,15 @@ class _ProjectBuilder:
 
         for cash_id, entry in sorted(self.finance.net_cashflows.items()):
             refs: tuple[str, ...] = ()
+            dependencies: tuple[str, ...] = ()
             if entry.amount.kind != "fixed":
-                source = entry.amount.base_from
-                if isinstance(source, MaintenanceExpenseNetBaseFrom):
-                    refs = (f"maintenance.y{source.year}.p{source.position}",)
-                else:
-                    refs = tuple(
-                        op.output_symbols[0] for op in self.inventory.operations
-                        if op.kind == "cost" and op.payload.component == "upfront_capex"
-                        and op.payload.finance_type == source.finance_type
-                    )
+                refs, dependencies = self._amount_source_links(entry.amount.base_from)
             add(SemanticRelation(
                 f"net_cash.{cash_id}", "net_cash", IndexDomain("year"),
                 NetCashPayment(cash_id, entry),
                 SourceLocation(f"finance.net_cashflows.{cash_id}", binding_id=cash_id),
                 refs, (f"net_cash.{cash_id}",),
-                depends_on=tuple(op.identity for op in self.inventory.operations
-                                 if op.kind in ("maintenance", "cost")),
+                depends_on=dependencies,
             ))
         for payment in self.evaluation.construction_payments:
             add(SemanticRelation(
