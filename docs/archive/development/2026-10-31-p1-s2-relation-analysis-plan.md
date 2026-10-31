@@ -1,6 +1,10 @@
 # P1-S2 实施计划：完整关系汇集与统一分析
 
-> 文档类型：一次实施计划，非公共格式或第二套正式规范。状态：待开发。
+> 状态：已归档；归档日期：2026-10-31。
+> 归档原因：PR #35 的 P1-S2 实现提交 `47e3f5c` 已复审通过，本切片完成；本文保留原计划，不再作为后续开发指令。
+> 现行替代来源：[P1 总实施计划](../../development/p1-compiler-foundation-plan.md)、[Roadmap](../../../manual/changelog/roadmap.md#通用建模与计算升级的剩余阶段)及[更新日志](../../../manual/changelog/README.md)。审查与验证证据见 [PR #35](https://github.com/ThermalEng/pIES/pull/35#issuecomment-6541622751)。正文中的原阶段描述及相对链接按历史语境保留。
+>
+> 文档类型：一次实施计划，非公共格式或第二套正式规范。原状态：待开发。
 > 日期：2026-10-31；基线：`master@4fead3580ef6683d139b17e3ee5b5d3d0e0e0041`，已合并 PR #34 的 P1-S1。
 > 主审负责计划、正式契约及验收；远程开发者负责本切片实现、测试与 CI 证据。
 > 上游：[P1 总实施计划](p1-compiler-foundation-plan.md)、[Roadmap](../../manual/changelog/roadmap.md#通用建模与计算升级的剩余阶段)。
