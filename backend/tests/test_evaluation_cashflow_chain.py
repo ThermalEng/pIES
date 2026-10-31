@@ -503,7 +503,11 @@ def _check_financial(
     total = Decimal(fin["construction_total"])
     for index, (t, ratio) in enumerate(payments):
         entry = fin["payments_applied"][index]
-        assert (entry["t"], Decimal(entry["ratio"])) == (t, Decimal(str(ratio)))
+        # The adapter exposes the frozen numeric ratio as a JSON number.
+        # Decimal(float) expands the binary representation of 0.6 rather
+        # than testing its public JSON decimal value. Keep an exact decimal
+        # assertion against the serialized number (no numerical tolerance).
+        assert (entry["t"], Decimal(str(entry["ratio"]))) == (t, Decimal(str(ratio)))
     for t in range(k + 1):
         paid = [r for (tt, r) in payments if tt == t]
         expect = -sum(Decimal(str(r)) for r in paid) * total if paid else Decimal("0")
