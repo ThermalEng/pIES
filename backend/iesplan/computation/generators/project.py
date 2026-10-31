@@ -58,6 +58,7 @@ from iesplan.computation.generators.compiler_ir import (
     MaintenancePayment,
     VatRuleSource,
     VatPoolOperation,
+    FinancialAmountTerm,
     VatPeriodConnection,
     IncomeTaxOperation,
     IncomeYearConnection,
