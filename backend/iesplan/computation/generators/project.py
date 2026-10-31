@@ -1301,29 +1301,25 @@ class _ProjectBuilder:
             price_refs = set(rule.revenue) | set(rule.energy_cost)
             cost_refs = set(rule.annual_om) | set(rule.variable_om)
             demand_refs = set(rule.demand_cost)
-            income_inputs = {
-                output
-                for op in self.inventory.operations
-                for output in op.output_symbols
-                if (
-                    (op.kind == "tariff" and op.payload.price_id in price_refs)
-                    or (op.kind == "demand" and op.payload.charge_id in demand_refs)
-                    or (op.kind == "cost" and
-                        f"{op.payload.finance_type}.{op.payload.component}" in cost_refs)
-                    or (op.kind == "depreciation" and op.payload.rule_id == rule_id)
-                )
-            }
-            for item in rule.deductible_maintenance.items:
-                if item.deductible:
-                    income_inputs.add(f"maintenance.y{item.year}.p{item.position}")
+            om_credit, maint_credit, _construction_credit, out_tax, in_tax = (
+                self._income_vat_credits(grouped or None)
+            )
+            demand_tax: dict[str, tuple[float, float]] = {}
+            for pool_rules in (grouped or {}).values():
+                for vat_rule in pool_rules["vat"]:
+                    for entry in vat_rule.demand_input_tax:
+                        rate = float(entry.rate.value)
+                        gross = (
+                            1.0 + rate
+                            if self.finance.price_basis == "tax_exclusive"
+                            else 1.0
+                        )
+                        credit = self._vat_gross_factor(entry.rate) * float(
+                            entry.deductible_ratio.value
+                        )
+                        demand_tax[entry.charge] = (gross, credit)
 
-            source_dependencies = tuple(sorted(
-                op.identity for op in self.inventory.operations
-                if (
-                    any(output in income_inputs for output in op.output_symbols)
-                    or op.kind == "vat"
-                )
-            ))
+            source_operations = tuple(self.inventory.operations)
             operating_spans = annual_boundaries(
                 self.doc["project_baseline"]["resolution"],
                 self.doc["project_baseline"]["start_year"],
@@ -1333,15 +1329,120 @@ class _ProjectBuilder:
                 self.evaluation.construction_period + index + 1: span
                 for index, span in enumerate(operating_spans)
             }
+            vat_dependencies = tuple(
+                op.identity for op in source_operations if op.kind == "vat"
+            )
+            income_inputs: set[str] = set()
             year_ids: list[str] = []
             previous_year_id: str | None = None
             previous_loss: str | None = None
             for year in range(1, self.evaluation.evaluation_years + 1):
                 span = span_by_year.get(year)
-                year_inputs = list(income_inputs)
+                terms: list[FinancialAmountTerm] = []
+                if span is not None:
+                    start_step, end_step = span
+                    for source in source_operations:
+                        if source.kind != "tariff":
+                            continue
+                        price_id = source.payload.price_id
+                        if price_id in rule.revenue:
+                            tax, markup = out_tax.get(price_id, (0.0, 1.0))
+                            terms.append(FinancialAmountTerm(
+                                "income_tariff", source.identity,
+                                -(markup - tax), start_step, end_step,
+                            ))
+                        elif price_id in rule.energy_cost:
+                            credit, markup = in_tax.get(price_id, (0.0, 1.0))
+                            terms.append(FinancialAmountTerm(
+                                "income_tariff", source.identity,
+                                -(markup - credit), start_step, end_step,
+                            ))
+
+                    for source in source_operations:
+                        if (
+                            source.kind != "demand"
+                            or source.payload.charge_id not in demand_refs
+                            or (source.payload.month - 1) // 12 + 1 != year
+                        ):
+                            continue
+                        gross, credit = demand_tax.get(
+                            source.payload.charge_id, (1.0, 0.0)
+                        )
+                        terms.append(FinancialAmountTerm(
+                            "income_demand", source.identity, -(gross - credit)
+                        ))
+
+                    for for_path, annual in (
+                        *((path, True) for path in rule.annual_om),
+                        *((path, False) for path in rule.variable_om),
+                    ):
+                        finance_type, _, component = for_path.partition(".")
+                        for source in source_operations:
+                            if (
+                                source.kind != "cost"
+                                or source.payload.finance_type != finance_type
+                                or source.payload.component != component
+                            ):
+                                continue
+                            spec = source.payload
+                            prefix = f"{finance_type}.{component}"
+                            parts: list[str] = []
+                            if spec.fixed_amount is not None:
+                                parts.append("fixed")
+                            parts.extend(
+                                f"linear.{item.driver}" for item in spec.terms
+                            )
+                            for part in parts:
+                                path = f"{prefix}.{part}"
+                                credit, gross = om_credit.get(
+                                    path, om_credit.get(prefix, (0.0, 1.0))
+                                )
+                                terms.append(FinancialAmountTerm(
+                                    "income_cost", source.identity,
+                                    -(gross - credit),
+                                    None if annual else start_step,
+                                    None if annual else end_step,
+                                    path,
+                                ))
+
+                for item in rule.deductible_maintenance.items:
+                    if item.year != year or not item.deductible:
+                        continue
+                    key = (item.year, item.position)
+                    terms.append(FinancialAmountTerm(
+                        "income_maintenance",
+                        f"maintenance.y{item.year}.p{item.position}",
+                        -(1.0 - maint_credit.get(key, 0.0)),
+                    ))
+
+                construction = self.evaluation.construction_period
+                for source in source_operations:
+                    if (
+                        source.kind != "depreciation"
+                        or source.payload.rule_id != rule_id
+                    ):
+                        continue
+                    entry = source.payload.entry
+                    if (
+                        construction + entry.first_year
+                        <= year
+                        < construction + entry.first_year + entry.life_years
+                    ):
+                        terms.append(FinancialAmountTerm(
+                            "income_depreciation", source.identity, -1.0
+                        ))
+
+                source_by_id = {op.identity: op for op in source_operations}
+                year_inputs = [
+                    output
+                    for term in terms
+                    for output in source_by_id[term.source_relation].output_symbols
+                ]
+                income_inputs.update(year_inputs)
                 if previous_loss is not None:
                     year_inputs.append(previous_loss)
-                year_dependencies = list(source_dependencies)
+                year_dependencies = [term.source_relation for term in terms]
+                year_dependencies.extend(vat_dependencies)
                 if previous_year_id is not None:
                     year_dependencies.append(previous_year_id)
                 year_id = f"income.{rule_id}.y{year}"
@@ -1351,18 +1452,19 @@ class _ProjectBuilder:
                         rule_id, year,
                         span[0] if span is not None else None,
                         span[1] if span is not None else None,
+                        tuple(terms),
                     ),
                     SourceLocation(
                         f"finance.tax_rules.{rule_id}.years.{year}",
                         relation_id=rule_id,
                     ),
-                    tuple(sorted(year_inputs)),
+                    tuple(sorted(set(year_inputs))),
                     (
                         f"income.{rule_id}.taxable_base.y{year}",
                         f"income.{rule_id}.generated_loss.y{year}",
                         f"income.{rule_id}.loss_balance.y{year}",
                     ),
-                    depends_on=tuple(sorted(year_dependencies)),
+                    depends_on=tuple(sorted(set(year_dependencies))),
                     requires_bounds=True,
                 ))
                 year_ids.append(year_id)
