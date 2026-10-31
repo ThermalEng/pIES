@@ -2913,144 +2913,82 @@ class _ProjectBuilder:
             self._net_sources[key] = amount
         return self._net_sources[key]
 
-    def _income_deduct_depreciation(
+    def _income_depreciation_affine(
         self,
-        base: _AffineAcc,
-        rule: IncomeTaxRule,
-        rule_id: str,
+        relation: SemanticRelation,
         year: int,
-        con_credit: dict[str, tuple[float, float]],
-        instances: Mapping[str, Any],
-        var_bounds: Mapping[str, tuple[float | None, float | None]],
-        location: str,
-    ) -> None:
-        """直线折旧可扣额（计税基础随建设选择与容量派生；残值只减一次）。
-
-        单资产年额 =（价税合计建设额 − 可抵建设进项 − 残值）/ 年限，
-        仅在 ``[K+first_year, K+first_year+life)`` 计提。不可抵进项留在
-        计税基础中；无已声明建设税率时基础即陈述建设额，不推断。派生
-        建设额静态已知为零（含无本课题新增可折旧资产）时不计提，残值
-        亦不产生税盾或反向所得；静态恒已形成且残值不超过最小计税基础
-        时按公式计提，超基础则明确拒绝（不以负折旧放行）；可变容量下
-        固定正残值无法静态判定资产是否形成时明确拒绝，不猜形成状态。
-        界由实际变量盒推导，不猜常量。
-        """
-        construction = self.evaluation.construction_period
-        for relation in self.analysis.relations("depreciation"):
-            if relation.payload.rule_id != rule_id:
-                continue
-            entry = relation.payload.entry
-            if not (
-                construction + entry.first_year
-                <= year
-                < construction + entry.first_year + entry.life_years
-            ):
-                continue
-            source = entry.base_from
-            depreciable = self._source_net(source, relation=relation)
-            residual = float(entry.residual.value)
-            position = f"{location}折旧来源 {source.identity!r}"
-            # A ratio residual is affine even when the asset can be absent.
-            # A positive fixed residual must not turn absence into a tax shield.
-            if entry.residual.unit == "1":
-                residual_amount = _AffineAcc()
-                residual_amount.add_scaled(depreciable, residual)
-            else:
-                residual_amount = _AffineAcc()
-                residual_amount.add_const(residual)
-                if residual > 0.0:
-                    basis_lo = self.analysis.affine_side(
-                        depreciable, side="min", label=position,
-                        relation=relation, period=year,
-                    )
-                    basis_hi = self.analysis.affine_side(
-                        depreciable, side="max", label=position,
-                        relation=relation, period=year,
-                    )
-                    if basis_hi <= 0.0:
-                        residual_amount = _AffineAcc()
-                    elif basis_lo <= 0.0:
-                        raise LoweringUnsupportedError(
-                            f"{position}的可变容量固定正残值在零建设与形成资产之间无法精确选择，"
-                            "超出当前选建能力"
-                        )
-                    elif residual > basis_lo:
-                        raise LoweringUnsupportedError(
-                            f"{position}残值 {residual!r} 超过最小计税基础 {basis_lo!r}"
-                        )
-            annual = _AffineAcc()
-            life = float(entry.life_years)
-            annual.add_scaled(depreciable, 1.0 / life)
-            annual.add_scaled(residual_amount, -1.0 / life)
-            base.add_scaled(annual, -1.0)
-            self._fact_depr.append(
-                {"rule": rule_id, "base_from": source.to_dict(),
-                 "year": year, "amount": annual}
-            )
-
-    def _income_annual_base(
-        self,
-        rule: IncomeTaxRule,
-        rule_id: str,
-        year: int,
-        year_span: tuple[int, int] | None,
-        credits: tuple[
-            dict[str, tuple[float, float]],
-            dict[tuple[int, int], float],
-            dict[str, tuple[float, float]],
-            dict[str, tuple[float, float]],
-            dict[str, tuple[float, float]],
-        ],
         var_bounds: Mapping[str, tuple[float | None, float | None]],
         location: str,
     ) -> _AffineAcc:
-        """单所得税规则单评价年应税基础（收入 − 成本 − 可扣维护 − 折旧）。
+        """Lower one already collected depreciation amount relation."""
+        entry = relation.payload.entry
+        source = entry.base_from
+        depreciable = self._source_net(source, relation=relation)
+        residual = float(entry.residual.value)
+        position = f"{location}折旧来源 {source.identity!r}"
+        if entry.residual.unit == "1":
+            residual_amount = _AffineAcc()
+            residual_amount.add_scaled(depreciable, residual)
+        else:
+            residual_amount = _AffineAcc()
+            residual_amount.add_const(residual)
+            if residual > 0.0:
+                basis_lo = self.analysis.affine_side(
+                    depreciable, side="min", label=position,
+                    relation=relation, period=year,
+                )
+                basis_hi = self.analysis.affine_side(
+                    depreciable, side="max", label=position,
+                    relation=relation, period=year,
+                )
+                if basis_hi <= 0.0:
+                    residual_amount = _AffineAcc()
+                elif basis_lo <= 0.0:
+                    raise LoweringUnsupportedError(
+                        f"{position}的可变容量固定正残值在零建设与形成资产之间无法精确选择，"
+                        "超出当前选建能力"
+                    )
+                elif residual > basis_lo:
+                    raise LoweringUnsupportedError(
+                        f"{position}残值 {residual!r} 超过最小计税基础 {basis_lo!r}"
+                    )
+        annual = _AffineAcc()
+        life = float(entry.life_years)
+        annual.add_scaled(depreciable, 1.0 / life)
+        annual.add_scaled(residual_amount, -1.0 / life)
+        self._fact_depr.append(
+            {
+                "rule": relation.payload.rule_id,
+                "base_from": source.to_dict(),
+                "year": year,
+                "amount": annual,
+            }
+        )
+        return annual
 
-        计税收入 = 实际销售收款 − 已声明销项税；可扣购能费用 = 实际含税
-        付款 − 已声明可抵进项，不可抵部分保留。不含税口径下先按已声明
-        税率形成实际收付款；无声明不推断。负价符号如实保留。维护可扣额
-        为含税付款扣已声明 VAT 抵免。实缴/留抵兑现时点不改变这些税基。
+    def _income_annual_base(
+        self,
+        year_relation: SemanticRelation,
+        var_bounds: Mapping[str, tuple[float | None, float | None]],
+        location: str,
+    ) -> _AffineAcc:
+        """Lower the taxable-base amount terms frozen on one income year.
+
+        Revenue, energy, demand, O&M, maintenance and depreciation sources were
+        already selected, period-bound and tax-adjusted before the collection
+        barrier.  No finance-binding or tax-rule scan is permitted here.
         """
         base = _AffineAcc()
-        instances = (self.doc.get("finance_binding") or {}).get("instances") or {}
-        bindings = self.doc.get("tariff_bindings") or {}
-        om_credit, maint_credit, _, out_tax, in_tax = credits
-        if year_span is not None:
-            start, end = year_span
-            revenue = set(rule.revenue)
-            energy = set(rule.energy_cost)
-            for binding_id in sorted(bindings):
-                price_id = bindings[binding_id]["price"]
-                if price_id in revenue:
-                    factor, markup = out_tax.get(price_id, (0.0, 1.0))
-                    base.add_scaled(
-                        self._tariff_affine(binding_id, start, end), -(markup - factor)
-                    )
-                elif price_id in energy:
-                    coef, markup = in_tax.get(price_id, (0.0, 1.0))
-                    base.add_scaled(
-                        self._tariff_affine(binding_id, start, end), -(markup - coef)
-                    )
-            demand_tax = self._demand_tax_factors()
-            for row in self._demand_rows:
-                if row["financial_year"] != year or row["charge_id"] not in rule.demand_cost:
-                    continue
-                gross, credit = demand_tax.get(row["charge_id"], (1.0, 0.0))
-                base.add_scaled(row["base_charge"], -(gross - credit))
-            for for_path in rule.annual_om:
-                self._income_deduct_om(base, for_path, None, om_credit, instances)
-            for for_path in rule.variable_om:
-                self._income_deduct_om(
-                    base, for_path, (start, end), om_credit, instances
+        year = year_relation.payload.year
+        for term in year_relation.payload.amount_terms:
+            source = self.analysis.operation(term.source_relation)
+            if source.kind == "depreciation":
+                amount = self._income_depreciation_affine(
+                    source, year, var_bounds, location
                 )
-        for item in rule.deductible_maintenance.items:
-            if item.year != year or not item.deductible:
-                continue
-            source = MaintenanceExpenseNetBaseFrom(year=item.year, position=item.position)
-            base.add_scaled(self._source_net(source), -1.0)
-        self._income_deduct_depreciation(
-            base, rule, rule_id, year, credits[2], instances, var_bounds, location
-        )
+            else:
+                amount = self._financial_amount_term_affine(term)
+            base.add_scaled(amount, term.coefficient)
         return base
 
     def _retain_net_cashflows(self) -> None:
