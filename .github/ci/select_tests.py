@@ -129,6 +129,7 @@ PAGE_SPECS = {
 # A single source file can feed multiple subsystems. Keep these real consumers
 # targeted instead of widening every computation change to the full suite.
 GENERATOR_PROJECT_CONSUMERS = (
+    "test_project_model.py",
     "test_battery_planning.py",
     "test_step_relations_s2.py",
     "test_finance_s2_execution.py",
