@@ -1694,14 +1694,15 @@ class _ProjectBuilder:
         unmentioned leaf retains its original payment and has no input credit.
         """
         factors: dict[str, tuple[float, float]] = {}
-        for rule in self.finance.tax_rules.values():
-            if isinstance(rule, VatRule):
-                entries = [(item.for_path, item.rate, item.deductible_ratio)
-                           for item in rule.om_input_tax]
-            elif isinstance(rule, ConstructionVatRule):
-                entries = [(rule.for_path, rule.rate, rule.deductible_ratio)]
-            else:
-                continue
+        for operation in self.analysis.relations("vat"):
+            pool_rules = operation.payload.rules
+            entries = [
+                (item.for_path, item.rate, item.deductible_ratio)
+                for rule in pool_rules["vat"] for item in rule.om_input_tax
+            ] + [
+                (rule.for_path, rule.rate, rule.deductible_ratio)
+                for rule in pool_rules["construction"]
+            ]
             for path, rate, ratio in entries:
                 gross = 1.0 + float(rate.value) if self.finance.price_basis == "tax_exclusive" else 1.0
                 factors[path] = (gross, self._vat_gross_factor(rate) * float(ratio.value))
@@ -1718,7 +1719,7 @@ class _ProjectBuilder:
         """
         binding = self.doc["finance_binding"]["instances"][inst]
         prefix = f"{binding['finance_type']}.{component}"
-        comp = getattr(self.finance.finance_types[binding["finance_type"]], component)
+        comp = self.analysis.operation(f"cost.{inst}__{component}").payload.value
         factors = self._cost_tax_factors()
         gross, net = _AffineAcc(), _AffineAcc()
         parts = (["fixed"] if comp.fixed is not None else []) + [
@@ -1758,14 +1759,14 @@ class _ProjectBuilder:
         影响抵扣资格，不缩小实际付款，加成恒用全额税率；维护按明确
         金额口径不加成；未声明税率不推断。
         """
-        grouped = self._vat_grouped_rules()
-        if grouped is None or self.finance.price_basis != "tax_exclusive":
+        operations = self.analysis.relations("vat")
+        if not operations or self.finance.price_basis != "tax_exclusive":
             return {}, {}, {}
         prices: dict[str, float] = {}
         oms: dict[str, float] = {}
         construction: dict[str, float] = {}
-        for pool_rules in grouped.values():
-            for rule in pool_rules["vat"]:
+        for operation in operations:
+            for rule in operation.payload.rules["vat"]:
                 for entry in rule.in_tax:
                     prices[entry.price] = 1.0 + float(entry.rate.value)
                 for entry in rule.out_tax:
@@ -1782,16 +1783,15 @@ class _ProjectBuilder:
         未声明进项的费项既不臆测税率也不臆测抵扣资格。
         """
         out: dict[str, tuple[float, float]] = {}
-        for rule in self.finance.tax_rules.values():
-            if not isinstance(rule, VatRule):
-                continue
-            for entry in rule.demand_input_tax:
-                rate = float(entry.rate.value)
-                gross = 1.0 + rate if self.finance.price_basis == "tax_exclusive" else 1.0
-                deductible = self._vat_gross_factor(entry.rate) * float(
-                    entry.deductible_ratio.value
-                )
-                out[entry.charge] = (gross, deductible)
+        for operation in self.analysis.relations("vat"):
+            for rule in operation.payload.rules["vat"]:
+                for entry in rule.demand_input_tax:
+                    rate = float(entry.rate.value)
+                    gross = 1.0 + rate if self.finance.price_basis == "tax_exclusive" else 1.0
+                    deductible = self._vat_gross_factor(entry.rate) * float(
+                        entry.deductible_ratio.value
+                    )
+                    out[entry.charge] = (gross, deductible)
         return out
 
     def _annual_fixed_om_annual(self, inst: str) -> _AffineAcc:
@@ -2390,8 +2390,8 @@ class _ProjectBuilder:
         """The uniquely identified payment less explicitly eligible input VAT."""
         key = (year, position)
         credit = 0.0
-        for rule in self.finance.tax_rules.values():
-            if isinstance(rule, VatRule):
+        for operation in self.analysis.relations("vat"):
+            for rule in operation.payload.rules["vat"]:
                 for item in rule.maintenance_input_tax:
                     if (item.year, item.position) == key:
                         credit += self._vat_gross_split_factor(item.rate) * float(
