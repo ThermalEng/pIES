@@ -239,7 +239,9 @@ def _coefficient(expr: Coeff, values: Mapping[str, float],
         elif tag == "div":
             if right == 0:
                 raise LoweringUnsupportedError(f"{where}除零")
-            value = left / right
+            # Same order as the existing affine lowerer: multiply every
+            # affine coefficient by the reciprocal of the known denominator.
+            value = left * (1.0 / right)
         elif tag == "pow":
             try:
                 value = math.pow(left, right)
