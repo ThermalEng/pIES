@@ -1678,17 +1678,13 @@ class _ProjectBuilder:
         税率分别形成实际付款。
         """
         out = _AffineAcc()
-        instances = (self.doc.get("finance_binding") or {}).get("instances") or {}
-        for inst in sorted(self.devices):
-            if inst not in instances or instances[inst].get("type") != "costed":
-                continue
-            if self.devices[inst].get("asset_origin") != "new":
-                continue
-            finance_type = instances[inst]["finance_type"]
-            ft_entry = self.finance.finance_types[finance_type]
-            if ft_entry.upfront_capex is None:
-                continue
-            out.add_scaled(self._cost_paid_net(inst, "upfront_capex")[0], 1.0)
+        for relation in self.analysis.relations("cost"):
+            spec = relation.payload
+            if (spec.component == "upfront_capex"
+                    and self.devices[spec.instance].get("asset_origin") == "new"):
+                out.add_scaled(
+                    self._cost_paid_net(spec.instance, "upfront_capex")[0], 1.0,
+                )
         return out
 
     def _cost_tax_factors(self) -> dict[str, tuple[float, float]]:
@@ -1885,21 +1881,16 @@ class _ProjectBuilder:
         price_markup, _, _ = self._vat_gross_markups()
         demand_tax = self._demand_tax_factors()
         construction = self._construction_affine()
-        baseline = self.doc["project_baseline"]
-        bounds = annual_boundaries(
-            baseline["resolution"], baseline["start_year"], evaluation.operation_years
-        )
-        instances = (self.doc.get("finance_binding") or {}).get("instances") or {}
-        bindings = self.doc.get("tariff_bindings") or {}
-
         self._fact_construction.add_scaled(construction, 1.0)
-        for payment in evaluation.construction_payments:
+        for relation in self.analysis.relations("construction_payment"):
+            payment = relation.payload
             amount = _AffineAcc()
-            amount.add_scaled(construction, float(payment.ratio))
-            self._year_cash(payment.t).add_scaled(construction, -float(payment.ratio))
-            self._fact_payments.append((payment.t, payment.ratio, amount.snapshot()))
-        for index, (start, end) in enumerate(bounds):
-            year_no = evaluation.construction_period + index + 1
+            amount.add_scaled(construction, payment.ratio)
+            self._year_cash(payment.year).add_scaled(construction, -payment.ratio)
+            self._fact_payments.append((payment.year, payment.ratio, amount.snapshot()))
+        for index, relation in enumerate(self.analysis.relations("annual_cash")):
+            spec = relation.payload
+            start, end, year_no = spec.start, spec.end, spec.year
             energy = _AffineAcc()
             variable = _AffineAcc()
             fixed = _AffineAcc()
@@ -1910,31 +1901,21 @@ class _ProjectBuilder:
                     demand.add_scaled(
                         row["base_charge"], demand_tax.get(row["charge_id"], (1.0, 0.0))[0]
                     )
-            for binding_id in sorted(bindings):
-                price_id = bindings[binding_id]["price"]
+            for tariff_relation in self.analysis.relations("tariff"):
+                charge = tariff_relation.payload
                 energy.add_scaled(
-                    self._tariff_affine(binding_id, start, end),
-                    -price_markup.get(price_id, 1.0),
+                    self._tariff_affine(charge.binding_id, start, end),
+                    -price_markup.get(charge.price_id, 1.0),
                 )
-            for inst in sorted(self.devices):
-                if inst not in instances or instances[inst].get("type") != "costed":
-                    continue
-                origin = self.devices[inst].get("asset_origin")
-                produced = _COMPONENTS_NEW if origin == "new" else _COMPONENTS_EXISTING
-                finance_type = instances[inst]["finance_type"]
-                ft_entry = self.finance.finance_types[finance_type]
-                if (
-                    "period_variable_om" in produced
-                    and ft_entry.period_variable_om is not None
-                ):
+            for cost_relation in self.analysis.relations("cost"):
+                cost = cost_relation.payload
+                if cost.component == "period_variable_om":
                     variable.add_scaled(
-                        self._cost_paid_net(inst, "period_variable_om", start, end)[0], -1.0,
+                        self._cost_paid_net(cost.instance, cost.component, start, end)[0],
+                        -1.0,
                     )
-                if (
-                    "annual_fixed_om" in produced
-                    and ft_entry.annual_fixed_om is not None
-                ):
-                    fixed.add_scaled(self._annual_fixed_om_annual(inst), -1.0)
+                elif cost.component == "annual_fixed_om":
+                    fixed.add_scaled(self._annual_fixed_om_annual(cost.instance), -1.0)
             annual.add_scaled(energy, 1.0)
             annual.add_scaled(variable, 1.0)
             annual.add_scaled(fixed, 1.0)
