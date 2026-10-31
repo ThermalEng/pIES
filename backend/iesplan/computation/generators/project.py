@@ -660,27 +660,29 @@ class _ProjectBuilder:
             )
             m_lo = None
             m_hi = None
-            if model_var.valid_range is not None:
-                m_min, m_max = model_var.valid_range
+            m_range = getattr(model_var, "valid_range", None)
+            m_unit = getattr(model_var, "unit", unit)
+            if m_range is not None:
+                m_min, m_max = m_range
                 if m_min is not None:
-                    m_lo = _to_internal(float(m_min), model_var.unit)
+                    m_lo = _to_internal(float(m_min), m_unit)
                 if m_max is not None:
-                    m_hi = _to_internal(float(m_max), model_var.unit)
+                    m_hi = _to_internal(float(m_max), m_unit)
             model_domain = (m_lo, m_hi) if (m_lo is not None or m_hi is not None) else None
 
             raw_lower = spec.get("lower_bound")
             raw_upper = spec.get("upper_bound")
-            p_lo = None if raw_lower is None else _to_internal(float(raw_lower), unit)
+            p_lo = 0.0 if raw_lower is None else _to_internal(float(raw_lower), unit)
             p_hi = None if raw_upper is None else _to_internal(float(raw_upper), unit)
-            project_boundary = (p_lo, p_hi) if (p_lo is not None or p_hi is not None) else None
+            project_boundary = (p_lo, p_hi) if (raw_lower is not None or raw_upper is not None) else None
 
             # Lower bound intersection: max(m_lo, p_lo)
             if m_lo is not None and p_lo is not None:
                 lo = max(m_lo, p_lo)
                 lo_source = project_source if p_lo >= m_lo else model_source
             elif m_lo is not None:
-                lo = m_lo
-                lo_source = model_source
+                lo = max(m_lo, 0.0)
+                lo_source = project_source if 0.0 >= m_lo else model_source
             elif p_lo is not None:
                 lo = p_lo
                 lo_source = project_source
@@ -4026,7 +4028,6 @@ class _ProjectBuilder:
                 })
         out: dict[str, object] = {
             "currency": self.finance.currency,
-            "construction_status": construction_status,
             "monthly_demand": monthly_demand,
             "construction_total": self._decl_affine(self._fact_construction),
             "annual_fixed_om": self._decl_affine(self._fact_fixed_om),
@@ -4078,6 +4079,8 @@ class _ProjectBuilder:
                 for t in range(years + 1)
             ],
         }
+        if construction_status:
+            out["construction_status"] = construction_status
         return MappingProxyType(out)
 
     def build(self) -> tuple[LinearModel, Mapping[str, str], str]:

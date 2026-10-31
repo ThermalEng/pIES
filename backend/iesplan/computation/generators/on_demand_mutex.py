@@ -22,10 +22,24 @@ from iesplan.computation.generators.linear import (
 from iesplan.computation.generators.project import build_project_model
 from iesplan.finance import EffectiveFinanceConfig, EvaluationInput
 from iesplan.computation.protocols import CalculationConfig
-from iesplan.computation.result_adapters.highs import HIGHS_ADAPTER, _mps_column_names, _parse_solution
 
 
 HIGHS_EXECUTABLE = "/usr/local/bin/ies-highs-solver"
+
+
+def _parse_highs_solution(raw: bytes) -> dict[str, Any]:
+    lines = raw.decode("utf-8").splitlines()
+    facts: dict[str, str] = {}
+    for line in lines[1:]:
+        if line == "primal:":
+            break
+        k, sep, v = line.partition(":")
+        if sep:
+            facts[k.strip()] = v.strip()
+    return {
+        "model_status": facts.get("model_status", ""),
+        "objective": float(facts.get("objective_value", 0.0)),
+    }
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,7 +87,7 @@ def evaluate_mutex_strategies(
     full_wall_ms = (time.perf_counter() - t0) * 1000.0
     assert res_full.returncode == 0, res_full.stderr
 
-    sol_full = _parse_solution((full_dir / "solution" / "values.sol").read_bytes())
+    sol_full = _parse_highs_solution((full_dir / "solution" / "values.sol").read_bytes())
     full_integers = sum(1 for v in full_model.variables if v.kind == "binary")
 
     # 2. Candidate on-demand relaxation:
@@ -113,7 +127,7 @@ def evaluate_mutex_strategies(
             cwd=candidate_dir, text=True, capture_output=True, check=False,
         )
         assert res_cand.returncode == 0, res_cand.stderr
-        sol_cand = _parse_solution((candidate_dir / "solution" / "values.sol").read_bytes())
+        sol_cand = _parse_highs_solution((candidate_dir / "solution" / "values.sol").read_bytes())
         final_obj = sol_cand["objective"]
 
         # If full model had mutexes, check if relaxed solution satisfies them
