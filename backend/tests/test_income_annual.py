@@ -272,6 +272,16 @@ def test_pre_lowering_income_years_and_loss_claims_are_explicit() -> None:
     assert [relation.payload.year for relation in years] == [1, 2, 3]
     assert years[0].identity in years[1].depends_on
     assert "income.income_gen.loss_balance.y1" in years[1].input_symbols
+    assert years[1].payload.amount_terms
+    assert any(
+        term.role == "income_depreciation"
+        and term.source_relation == "depreciation.income_gen.0"
+        for term in years[1].payload.amount_terms
+    )
+    assert all(
+        term.source_relation in years[1].depends_on
+        for term in years[1].payload.amount_terms
+    )
 
     claims = tuple(
         relation for relation in analysis.relations("income_loss_claim")
