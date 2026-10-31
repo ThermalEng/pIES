@@ -3118,16 +3118,27 @@ class _ProjectBuilder:
             self._build_relations(inst, bound_instances[inst])
         self._build_bus_rows()
         self._build_step_relations()
-        self._build_monthly_demand()
-        self._checkpoint()
-        self._build_planning_rows()
-        # VAT/所得税在现金目标构造之前使用同一逐笔维护表达式。
-        self._retain_maintenance()
-        self._vat_cash = self._build_vat()
-        self._income_cash = self._build_income()
-        self._retain_net_cashflows()
-        self._checkpoint()
-        objective, objective_unit = self._build_objective()
+        # The source/dependency analysis, not a second set of raw document
+        # loops, supplies the conditional-conversion order. All phases see the
+        # same sealed inventory and the same live variable-bound authority.
+        objective = None
+        objective_unit = None
+        for phase in self.analysis.conversion_phases():
+            self._checkpoint()
+            if phase == "demand":
+                self._build_monthly_demand()
+            elif phase == "planning_scalar":
+                self._build_planning_rows()
+            elif phase == "maintenance":
+                self._retain_maintenance()
+            elif phase == "vat":
+                self._vat_cash = self._build_vat()
+            elif phase == "income":
+                self._income_cash = self._build_income()
+            elif phase == "net_cash":
+                self._retain_net_cashflows()
+            elif phase == "objective":
+                objective, objective_unit = self._build_objective()
         self._checkpoint()
         model = LinearModel(
             variables=tuple(self.variables.values()),
