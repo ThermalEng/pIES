@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Mapping
+from typing import Callable, Mapping
 
 from iesplan.computation.generators.linear import (
     LinearConstraint, LinearExpression, LoweredRelation, LoweringUnsupportedError,
@@ -460,8 +460,19 @@ def bind_technical(
     template: TechnicalTemplate, *, instance: str, step: int,
     known: Mapping[str, float], initial: Mapping[str, float | LinearExpression],
     bound: Mapping[str, tuple[float | None, float | None]],
+    affine_column: Callable[[Key], Key] | None = None,
+    affine_row_name: str | None = None,
 ) -> LoweredRelation:
-    """Bind actual step values, returning the unchanged solver-neutral lowerer IR."""
+    """Bind with the shared compiler; optionally emit a final-column affine row.
+
+    ProjectBuilder passes a column-slot resolver only for the affine branch:
+    this avoids allocating local LinearExpression/LinearConstraint objects
+    that would immediately be discarded during LP qualification.  Public
+    single-relation callers omit it and retain the existing local-key IR.
+
+    A conditional mutex still returns the exact *local* lower_mutex IR, with
+    auxiliary variables, to be qualified by the existing project emitter.
+    """
     where = f"关系 {template.relation_id!r} 实例 {instance!r} step {step}: "
     cache: dict[Coeff, float] = {}
     try:
@@ -489,13 +500,18 @@ def bind_technical(
             raise LoweringUnsupportedError(
                 f"{where}恒假（常数 {diff.constant}≠0）"
             )
+        # Preserve local-key order before projection. The final expression
+        # performs its own global-key sort and validation exactly once; the
+        # former local DTO plus a second sorted global DTO are unnecessary.
+        ordered = sorted(diff.terms.items())
+        if affine_column is None:
+            terms = tuple(ordered)
+        else:
+            terms = tuple((affine_column(key), coeff) for key, coeff in ordered)
         return LoweredRelation(constraints=(
             LinearConstraint(
-                template.relation_id,
-                LinearExpression(
-                    tuple((key, coeff) for key, coeff in diff.terms.items()),
-                    diff.constant,
-                ),
+                affine_row_name or template.relation_id,
+                LinearExpression(terms, diff.constant),
                 sense="eq", rhs=0.0,
             ),
         ))
