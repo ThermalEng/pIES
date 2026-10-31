@@ -2029,9 +2029,8 @@ class _ProjectBuilder:
         variables.  VAT availability or refund timing never changes the net
         accounting basis.
         """
-        binding = self.doc["finance_binding"]["instances"][inst]
-        prefix = f"{binding['finance_type']}.{component}"
         spec = self.analysis.operation(f"cost.{inst}__{component}").payload
+        prefix = f"{spec.finance_type}.{component}"
         factors = self._cost_tax_factors()
         gross, net = _AffineAcc(), _AffineAcc()
         parts = (["fixed"] if spec.fixed_amount is not None else []) + [
