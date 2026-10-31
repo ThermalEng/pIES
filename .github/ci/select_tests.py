@@ -142,6 +142,7 @@ GENERATOR_PROJECT_CONSUMERS = (
     "test_p2_s1_bounds.py",
     "test_p2_s2_derivation.py",
     "test_p2_s3_activation.py",
+    "test_p2_s4_integration.py",
     "test_linear_lowering.py",
     "test_issue04_d2.py",
     "test_vat_monthly.py",
