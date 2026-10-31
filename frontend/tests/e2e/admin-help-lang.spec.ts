@@ -95,12 +95,14 @@ test.describe('场景 8: 帮助中心', () => {
     const content = page.locator('.ies-help__content')
     await expect(content).toBeVisible()
     await expect(content.locator('.ies-help__title, .ies-help__h1').first()).toBeVisible({ timeout: 10_000 })
-    const codeBlock = content.locator('pre.ies-help__code').first()
+    const codeBlock = content.locator('pre.ies-help__code').filter({ hasText: 'GeneratorProvider' }).first()
     await expect(codeBlock).toBeVisible()
     await expect(codeBlock).toContainText('GeneratorProvider')
 
-    // 表格渲染(真实单元格内容, 非仅存在性)
-    const table = content.locator('table.ies-help__table').first()
+    // 按内容定位目标表格，正文新增表格或调整顺序不影响渲染验收。
+    const table = content.locator('table.ies-help__table').filter({
+      has: page.getByRole('cell', { name: 'DeviceDescriptor', exact: true }),
+    })
     await expect(table).toBeVisible({ timeout: 10_000 })
     await expect(table).toContainText('DeviceDescriptor')
 
