@@ -203,6 +203,18 @@ def test_battery_block_sizes_preserve_full_model_and_real_columns(battery):
         assert result.template_stats["technical_binds"] == (
             result.point_count * len(battery.relations)
         )
+        # Affine rows go directly to final global solver columns. Exact
+        # mutexes still use the established auxiliary-binary qualification.
+        assert result.template_stats["affine_direct_rows"] > 0
+        assert result.template_stats["mutex_fallback_relations"] == sum(
+            variable.kind == "binary" for variable in result.variables.values()
+        )
+        assert all(
+            column in result.variables
+            for row in result.rows
+            for (column, offset), _coefficient in row.expression.terms
+            if offset == 0
+        )
         assert len(result._step_columns[("cell", "stored_energy")]) == 2
     assert write_mps(_battery_model(models[0])) == write_mps(_battery_model(models[2]))
 
