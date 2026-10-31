@@ -219,3 +219,69 @@ def test_cross_year_two_instance_resource_repeats_and_block_choices(tmp_path):
             "control part of order effect",
     }
     logging.warning("P1_S3_MULTIYEAR_REPEATS %s", json.dumps(summary, sort_keys=True))
+
+
+def test_cross_year_untraced_normal_wall_comparison():
+    """Repeat AB/BA with real wall clock but WITHOUT allocation tracing.
+
+    This complements—not replaces—the traced peak-memory and exact-MPS
+    comparison above. No speed threshold: Docker CI runners have noise.
+    """
+    sequence = ("s2_reference", "s3_production", "s3_production", "s2_reference")
+    samples = []
+    expected_signature = None
+    for order, kind in enumerate(sequence):
+        gc.collect()
+        builder_type = (
+            _S2ReferenceBuilder if kind == "s2_reference" else _ProjectBuilder
+        )
+        assert not tracemalloc.is_tracing()
+        before = time.perf_counter()
+        builder = _full_two_year_builder(builder_type, block_size=256)
+        model, unit_map, objective_unit = builder.build()
+        wall_ms = round((time.perf_counter() - before) * 1000, 3)
+        signature = {
+            "columns": len(model.variables),
+            "rows": len(model.constraints),
+            "binary": sum(v.kind == "binary" for v in model.variables),
+            "nonzeros": sum(len(r.expression.terms) for r in model.constraints),
+            "objective_nonzeros": len(model.objective.terms),
+            "objective_unit": objective_unit,
+            "unit_map_size": len(unit_map),
+        }
+        if expected_signature is None:
+            expected_signature = signature
+        assert signature == expected_signature
+        if kind == "s3_production":
+            assert builder.template_stats["technical_compiles"] == 1
+            assert builder.template_stats["technical_binds"] == 35040
+            assert builder.template_stats["step_binds"] == 17520
+            assert builder.template_stats["affine_direct_rows"] > 0
+        else:
+            assert builder.template_stats["s2_ast_lower_calls"] == 35040
+        samples.append({
+            "order": order + 1,
+            "kind": kind,
+            "wall_ms": wall_ms,
+            "technical_direct_rows": builder.template_stats["affine_direct_rows"],
+            "mutex_fallback_relations": builder.template_stats["mutex_fallback_relations"],
+        })
+        del builder, model, unit_map
+    results = {
+        kind: [s["wall_ms"] for s in samples if s["kind"] == kind]
+        for kind in ("s2_reference", "s3_production")
+    }
+    logging.warning("P1_S3_MULTIYEAR_NORMAL_WALL %s", json.dumps({
+        "scope": "full 17520-step model build, 2 instances, 1 enabled step_relation",
+        "reference_scope": "test-frozen S2 technical/step loops; shared S3 columns and other S2 domains",
+        "method": "same Docker worker, AB/BA order, gc before each, tracemalloc off",
+        "samples": samples,
+        "median_wall_ms": {
+            kind: statistics.median(walls) for kind, walls in results.items()
+        },
+        "range_wall_ms": {
+            kind: max(walls) - min(walls) for kind, walls in results.items()
+        },
+        "model_shape": expected_signature,
+        "note": "No solver, MPS writer or Bundle metadata in timer; no universal speed claim",
+    }, sort_keys=True))
