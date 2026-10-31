@@ -43,6 +43,15 @@ from typing import Any
 
 from iesplan.assembly.contracts import ValidatedAssemblyArtifact
 from iesplan.computation.errors import ComputationUnavailableError
+from iesplan.computation.generators.compiler_ir import (
+    CompilerInventory,
+    IndexDomain,
+    KnownCoefficient,
+    OutputReference,
+    RelationFamily,
+    SourceLocation,
+    SymbolDeclaration,
+)
 from iesplan.computation.generators.linear import (
     LinearConstraint,
     LinearExpression,
@@ -421,8 +430,11 @@ class _ProjectBuilder:
         self.point_count = point_count
         self.step_s = step_s
         self.series: dict[tuple[str, str], list[float]] = {}
+        self._series_sources: dict[tuple[str, str], Mapping[str, object]] = {}
         for entry in series:
-            self.series[(entry.device, entry.interface)] = list(entry.values)
+            key = (entry.device, entry.interface)
+            self.series[key] = list(entry.values)
+            self._series_sources[key] = entry.source
         self.prices: dict[str, list[float]] = {}
         for entry in prices:
             self.prices[entry.price_id] = [
@@ -432,6 +444,9 @@ class _ProjectBuilder:
         self.variables: dict[str, LinearVariable] = {}
         self.rows: list[LinearConstraint] = []
         self.unit_map: dict[str, str] = {}
+        # Per-generate declarations: no published input or Bundle schema change.
+        self.inventory = CompilerInventory()
+        self._instance_relations: dict[str, tuple[RelationFamily, ...]] = {}
         #: (实例, 局部变量身份) → 按 step 顺序的求解列名, 仅收录带业务单位的
         #: 步变量(接口流与设备技术变量, 与 _declare 调用同源; 关系降级
         #: 临时变量 unit 为 None, 不进入)。下游不得拆解列名反推身份。
@@ -512,19 +527,45 @@ class _ProjectBuilder:
             return None, None
         return _to_internal(number, unit), None
 
-    def _declare_instance_statics(
+    def _declare_global_symbols(self) -> None:
+        """Declare each planning decision once, before binding any instance."""
+        for name in sorted(self.plan_vars):
+            spec = self.plan_vars[name]
+            inst, prop = spec["device_ref"], spec["parameter"]
+            model_var = self.models[inst].variables[prop]
+            unit = spec.get("unit") or model_var.unit
+            lower = spec.get("lower_bound")
+            upper = spec.get("upper_bound")
+            lo = 0.0 if lower is None else _to_internal(float(lower), unit)
+            hi = None if upper is None else _to_internal(float(upper), unit)
+            self._declare(name, lo, hi, "continuous", unit)
+            self.inventory.symbols[name] = SymbolDeclaration(
+                name, "planning", IndexDomain("scalar"), unit,
+                SourceLocation(f"planning.variables.{name}", inst,
+                               self.models[inst].device_id,
+                               self.devices[inst]["definition"].get("revision"),
+                               binding_id=name),
+            )
+            self.inventory.property_bindings[(inst, prop)] = name
+        self.inventory.coefficients["step_duration"] = KnownCoefficient(
+            "step_duration", "step_duration",
+            SourceLocation("project_baseline.resolution"), self.step_s,
+        )
+
+    def _bind_instance_symbols(
         self, inst: str, bus_flows: set[str] | frozenset[str] = frozenset(),
     ) -> dict[str, Any]:
-        """实例的静态符号与变量声明（property 常量/接管变量、内部变量、流变量）。
+        """Bind all instance-local symbols; do NOT allocate time columns or rows.
 
-        公开计算原语 ``step_duration`` 以基线导出的 SI 秒值注入符号表，
-        设备不得自行声明。
+        The source, original AST and coefficient origin remain inspectable
+        before any step-level relation is converted.
         """
         contribution = self.models[inst]
         dev = self.devices[inst]
         overrides = dev.get("properties") or {}
         prop_const: dict[str, float] = {}
         prop_unit: dict[str, str] = {}
+        column_specs: list[tuple[str, float | None, float | None, str]] = []
         for name, var in contribution.variables.items():
             if var.kind != "property":
                 continue
@@ -536,6 +577,20 @@ class _ProjectBuilder:
                 unit = var.unit
             prop_const[name] = _to_internal(value, unit)
             prop_unit[name] = unit
+            source = SourceLocation(
+                f"devices.{inst}.properties.{name}" if name in overrides
+                else f"properties.{name}",
+                inst, contribution.device_id, dev["definition"].get("revision"),
+            )
+            identity = self.bound_prop.get((inst, name), f"{inst}.{name}")
+            self.inventory.property_bindings[(inst, name)] = identity
+            if (inst, name) not in self.bound_prop:
+                self.inventory.symbols[identity] = SymbolDeclaration(
+                    identity, "property", IndexDomain("scalar"), unit, source,
+                )
+                self.inventory.coefficients[identity] = KnownCoefficient(
+                    identity, "fixed_property", source, prop_const[name],
+                )
         symbols: dict[str, tuple] = {}
         caps: list[tuple[str, str, str]] = []
         for name, var in contribution.variables.items():
@@ -553,7 +608,7 @@ class _ProjectBuilder:
                     lower_f = 0.0 if lower is None else _to_internal(float(lower), unit)
                     upper_f = None if upper is None else _to_internal(float(upper), unit)
                     symbols[name] = ("var", lower_f, upper_f)
-                    self._declare(pname, lower_f, upper_f, "continuous", unit)
+                    # Global declaration already owns this exact capacity symbol.
                 else:
                     symbols[name] = ("const", prop_const[name])
             else:
@@ -591,50 +646,124 @@ class _ProjectBuilder:
                 caps.append((iface_name, pname_lo, "ge"))
             if pname_hi is not None:
                 caps.append((iface_name, pname_hi, "le"))
-            for step in range(self.point_count):
-                cname = self._tech_name(inst, iface_name, step)
-                self._declare(cname, lower, upper, "continuous", flow.unit)
-                self._step_columns.setdefault((inst, iface_name), []).append(cname)
-            self._step_units[(inst, iface_name)] = flow.unit
+            column_specs.append((iface_name, lower, upper, flow.unit))
+            origin = SourceLocation(
+                f"interfaces.{iface_name}", inst, contribution.device_id,
+                dev["definition"].get("revision"),
+            )
+            identity = f"{inst}.{iface_name}"
+            self.inventory.symbols[identity] = SymbolDeclaration(
+                identity, "flow", IndexDomain("step", self.point_count),
+                flow.unit, origin,
+            )
+            self.inventory.outputs.append(OutputReference(
+                identity, identity, IndexDomain("step", self.point_count), origin,
+            ))
         for name, var in contribution.variables.items():
             if var.kind == "property":
                 continue
             lower, upper = symbols[name][1], symbols[name][2]
-            for step in range(self.point_count):
-                cname = self._tech_name(inst, name, step)
-                self._declare(cname, lower, upper, "continuous", var.unit)
-                self._step_columns.setdefault((inst, name), []).append(cname)
-            self._step_units[(inst, name)] = var.unit
+            column_specs.append((name, lower, upper, var.unit))
+            origin = SourceLocation(
+                f"equations.variables.{name}", inst, contribution.device_id,
+                dev["definition"].get("revision"),
+            )
+            identity = f"{inst}.{name}"
+            self.inventory.symbols[identity] = SymbolDeclaration(
+                identity, "state" if name in contribution.states else "internal",
+                IndexDomain("step", self.point_count), var.unit, origin,
+            )
+            self.inventory.outputs.append(OutputReference(
+                identity, identity, IndexDomain("step", self.point_count), origin,
+            ))
         initial: dict[str, float | LinearExpression] = {}
         for state in contribution.states:
             variable = contribution.variables[state]
             if variable.initial_ast is not None:
                 initial[state] = lower_expression(variable.initial_ast, symbols)
             else:
-                initial[state] = prop_const[variable.initial_property_ref]  # type: ignore[index]
-        for local, pname, sense in caps:
-            for step in range(self.point_count):
-                vname = self._tech_name(inst, local, step)
-                suffix = "plan_max" if sense == "le" else "plan_min"
-                self.rows.append(
-                    LinearConstraint(
-                        name=f"{inst}__{local}__{suffix}__t{step}",
-                        expression=LinearExpression(
-                            terms=tuple(
-                                sorted((((vname, 0), 1.0), ((pname, 0), -1.0)))
-                            ),
-                            constant=0.0,
-                        ),
-                        sense=sense,
-                        rhs=0.0,
+                ref = variable.initial_property_ref
+                # A taken-over property is the SAME scalar decision at t=0,
+                # not the historic/default property value.
+                if (inst, ref) in self.bound_prop:
+                    initial[state] = LinearExpression(
+                        terms=(((ref, 0), 1.0),), constant=0.0,
                     )
-                )
+                else:
+                    initial[state] = prop_const[ref]
+        for name, flow in contribution.interfaces.items():
+            if flow.type != "predefined":
+                continue
+            identity = f"{inst}.{name}"
+            source = self._series_sources.get((inst, name), {})
+            data_ref = source.get("object_id")
+            self.inventory.coefficients[identity] = KnownCoefficient(
+                identity, "materialized_series",
+                SourceLocation(
+                    f"devices.{inst}.predefined_interfaces.{name}",
+                    inst, contribution.device_id,
+                    dev["definition"].get("revision"),
+                    data_object_ref=data_ref if isinstance(data_ref, str) else None,
+                ),
+            )
+        families: list[RelationFamily] = []
+        known = {
+            name for name in prop_const
+            if (inst, name) not in self.bound_prop
+        } | {
+            name for name, flow in contribution.interfaces.items()
+            if flow.type == "predefined"
+        } | {TIMELINE_STEP_DURATION_VAR}
+        for relation in contribution.relations:
+            refs = _refs_of(relation.ast.lhs_root) | _refs_of(relation.ast.rhs_root)
+            family = RelationFamily(
+                identity=f"{inst}.{relation.id}",
+                relation=relation,
+                domain=IndexDomain("step", self.point_count),
+                referenced_symbols=tuple(sorted(refs)),
+                output_symbol=relation.ast.output,
+                known_coefficients=tuple(sorted(refs & known)),
+                source=SourceLocation(
+                    f"equations.relations.{relation.id}.expression",
+                    inst, contribution.device_id,
+                    dev["definition"].get("revision"),
+                    relation.id,
+                ),
+            )
+            families.append(family)
+            self.inventory.relations.append(family)
+        self._instance_relations[inst] = tuple(families)
         return {
             "symbols": symbols,
             "initial": initial,
             "prop_const": prop_const,
             "flows": flow_names,
+            "columns": column_specs,
+            "caps": caps,
         }
+
+    def _expand_instance(self, inst: str, statics: Mapping[str, Any]) -> None:
+        """Allocate step columns and variable capacity rows AFTER global binding."""
+        for local, lower, upper, unit in statics["columns"]:
+            for step in range(self.point_count):
+                cname = self._tech_name(inst, local, step)
+                self._declare(cname, lower, upper, "continuous", unit)
+                self._step_columns.setdefault((inst, local), []).append(cname)
+            self._step_units[(inst, local)] = unit
+        for local, pname, sense in statics["caps"]:
+            for step in range(self.point_count):
+                vname = self._tech_name(inst, local, step)
+                suffix = "plan_max" if sense == "le" else "plan_min"
+                self.rows.append(LinearConstraint(
+                    name=f"{inst}__{local}__{suffix}__t{step}",
+                    expression=LinearExpression(
+                        terms=tuple(sorted((
+                            ((vname, 0), 1.0), ((pname, 0), -1.0),
+                        ))),
+                        constant=0.0,
+                    ),
+                    sense=sense, rhs=0.0,
+                ))
 
     def _referenced_flows(
         self, inst: str, contribution: DeviceMathContribution,
@@ -690,7 +819,8 @@ class _ProjectBuilder:
             for name in predefined:
                 series_si = self._series_si(inst, name, contribution)
                 step_symbols[name] = ("const", series_si[step])
-            for relation in contribution.relations:
+            for family in self._instance_relations[inst]:
+                relation = family.relation
                 lowered = lower_relation(
                     relation, step_symbols, step=step, initial=initial,
                 )
@@ -2597,8 +2727,10 @@ class _ProjectBuilder:
         if not self._step_columns:
             buses = self._compute_buses()
             bus_flows = self._bus_flow_index(buses)
+            self._declare_global_symbols()
             for inst in sorted(self.devices):
-                self._declare_instance_statics(inst, bus_flows.get(inst, frozenset()))
+                bound = self._bind_instance_symbols(inst, bus_flows.get(inst, frozenset()))
+                self._expand_instance(inst, bound)
         out: list[Mapping[str, object]] = []
         for inst, local in sorted(self._step_columns):
             out.append({
@@ -2783,12 +2915,18 @@ class _ProjectBuilder:
                 raise ComputationUnavailableError("项目模型生成已停止", reason=reason)
         buses = self._compute_buses()
         bus_flows = self._bus_flow_index(buses)
+        self._declare_global_symbols()
+        bound_instances: dict[str, dict[str, Any]] = {}
         for inst in sorted(self.devices):
             self._checkpoint()
-            statics = self._declare_instance_statics(
+            bound_instances[inst] = self._bind_instance_symbols(
                 inst, bus_flows.get(inst, frozenset())
             )
-            self._build_relations(inst, statics)
+        # Global barrier: every instance symbol and technical AST now exists.
+        for inst in sorted(bound_instances):
+            self._expand_instance(inst, bound_instances[inst])
+        for inst in sorted(bound_instances):
+            self._build_relations(inst, bound_instances[inst])
         self._build_bus_rows(buses)
         self._build_step_relations()
         self._build_monthly_demand()

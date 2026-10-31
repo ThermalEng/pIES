@@ -71,15 +71,21 @@ def _rows(battery, *, capacity=None, power=None, soc=0.5, minimum=0.1,
         }
     builder = _ProjectBuilder(
         doc=doc,
-        devices={"cell": {"asset_origin": "new", "properties": {
+        devices={"cell": {"definition": {"id": battery.device_id},
+                          "asset_origin": "new", "properties": {
             key: {"value": value, "unit": unit} for key, (value, unit) in props.items()
         }}},
         models={"cell": battery},
         series=(), finance=None, evaluation=None,
         point_count=2, step_s=3600,
     )
-    static = builder._declare_instance_statics("cell")
-    builder._build_relations("cell", static)
+    # The compiler now has an explicit declaration/binding barrier.
+    # This harness keeps its trusted two-hour synthetic domain rather than
+    # reintroducing the removed mixed declaration/expansion entrypoint.
+    builder._declare_global_symbols()
+    bound = builder._bind_instance_symbols("cell")
+    builder._expand_instance("cell", bound)
+    builder._build_relations("cell", bound)
     return builder
 
 
