@@ -257,6 +257,17 @@ class CompilerAnalysis:
                 uses[symbol].add(operation.identity)
         self._groups = {key: tuple(value) for key, value in groups.items()}
         self._by_id = {op.identity: op for op in inventory.operations}
+        # Dependency edges describe the order of *compilation outputs*, not
+        # the simultaneous physics equations; cycles in algebra are legal.
+        self.dependencies = {
+            op.identity: tuple(op.depends_on) for op in inventory.operations
+        }
+        for identity, dependencies in self.dependencies.items():
+            for dependency in dependencies:
+                if dependency not in self._by_id:
+                    raise RuntimeError(
+                        f"semantic relation {identity!r} lacks dependency {dependency!r}"
+                    )
         self.uses = {name: frozenset(ids) for name, ids in uses.items()}
         self.bound_requests: list[BoundRequest] = []
 
@@ -265,6 +276,52 @@ class CompilerAnalysis:
 
     def operation(self, identity: str) -> SemanticRelation:
         return self._by_id[identity]
+
+    def conversion_phases(self) -> tuple[str, ...]:
+        """Resolve existing conditional compilation phases from source edges.
+
+        A phase is scheduled once even when it contains many month/year
+        relations. Source-level dependencies contribute ordering constraints;
+        technical equations are intentionally excluded from this DAG.
+        """
+        kinds = (
+            "demand", "planning_scalar", "maintenance", "vat", "income",
+            "net_cash", "objective",
+        )
+        # Domain operations which produce the amount consumed by another
+        # conversion phase but are not themselves row-generating phases.
+        source_phase = {
+            "annual_cash": "objective", "construction_payment": "objective",
+        }
+        edges = {kind: set() for kind in kinds}
+        for relation in self.inventory.operations:
+            kind = relation.kind
+            if kind not in edges:
+                continue
+            for dependency in self.dependencies[relation.identity]:
+                parent = self._by_id[dependency].kind
+                parent = source_phase.get(parent, parent)
+                if parent in edges and parent != kind and kind != "objective":
+                    edges[kind].add(parent)
+        # Explicit quantity dependencies are part of the existing algorithm:
+        # tax bases consume the demand and maintenance amounts, cash output
+        # consumes the tax states and net payments, planning cost expressions
+        # may consume peak charge amounts.
+        edges["planning_scalar"].add("demand")
+        edges["vat"].update(("demand", "maintenance"))
+        edges["income"].update(("demand", "maintenance", "vat"))
+        edges["net_cash"].update(("maintenance", "income"))
+        edges["objective"].update(set(kinds) - {"objective"})
+        result: list[str] = []
+        remaining = set(kinds)
+        while remaining:
+            ready = next((kind for kind in kinds
+                          if kind in remaining and not (edges[kind] & remaining)), None)
+            if ready is None:
+                raise RuntimeError(f"conditional compilation dependencies cycle: {edges}")
+            result.append(ready)
+            remaining.remove(ready)
+        return tuple(result)
 
     def variable_bounds(
         self, name: str, *, relation: SemanticRelation | None = None,
