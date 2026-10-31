@@ -3030,12 +3030,7 @@ class _ProjectBuilder:
         operations = self.analysis.relations("income")
         if not operations:
             return None
-        credits = self._income_vat_credits({
-            op.payload.pool_id: op.payload.rules
-            for op in self.analysis.relations("vat")
-        } or None)
         evaluation = self.evaluation
-        years = evaluation.evaluation_years
         var_bounds = {
             variable.name: (variable.lower, variable.upper)
             for variable in self.variables.values()
@@ -3103,11 +3098,6 @@ class _ProjectBuilder:
             seq_next = len(vintages)
             for year_relation in year_relations:
                 year = year_relation.payload.year
-                span = (
-                    None
-                    if year_relation.payload.start is None
-                    else (year_relation.payload.start, year_relation.payload.end)
-                )
                 location = f"所得税规则 {rule_id!r} 第 {year} 年"
                 expired: list[tuple[str, int, _AffineAcc]] = []
                 for vintage in vintages:
@@ -3120,8 +3110,7 @@ class _ProjectBuilder:
                             )
                         )
                 base = self._income_annual_base(
-                    rule, rule_id, year, span, credits, var_bounds,
-                    location,
+                    year_relation, var_bounds, location,
                 )
                 base_kept = base.snapshot()
                 base_hi = self.analysis.affine_side(
