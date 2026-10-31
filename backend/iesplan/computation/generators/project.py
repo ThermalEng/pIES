@@ -1112,11 +1112,11 @@ class _ProjectBuilder:
             for name in predefined:
                 series_si = self._series_si(inst, name, contribution)
                 step_symbols[name] = ("const", series_si[step])
+            step_symbols = self.analysis.modeling_symbols(inst, step, step_symbols)
             for family in self._instance_relations[inst]:
                 relation = family.relation
                 lowered = lower_relation(
-                    relation, self.analysis.modeling_symbols(inst, step, step_symbols),
-                    step=step, initial=initial,
+                    relation, step_symbols, step=step, initial=initial,
                 )
                 self._emit_lowered(inst, relation.id, step, lowered)
 
