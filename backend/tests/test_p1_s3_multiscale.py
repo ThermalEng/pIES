@@ -230,6 +230,43 @@ def test_cross_year_untraced_normal_wall_comparison():
     sequence = ("s2_reference", "s3_production", "s3_production", "s2_reference")
     samples = []
     expected_signature = None
+    # The memory-tracing benchmark in this module is a separate test.
+    # Ensure this sample is truly untraced even if a caller enabled tracing.
+    preexisting_tracer = tracemalloc.is_tracing()
+    if preexisting_tracer:
+        tracemalloc.stop()
+    try:
+        _run_untraced_samples(sequence, samples, _full_two_year_builder)
+    finally:
+        if preexisting_tracer:
+            tracemalloc.start()
+    signatures = {tuple(sorted(s["signature"].items())) for s in samples}
+    assert len(signatures) == 1
+    expected_signature = samples[0]["signature"]
+    for sample in samples:
+        sample.pop("signature")
+    results = {
+        kind: [s["wall_ms"] for s in samples if s["kind"] == kind]
+        for kind in ("s2_reference", "s3_production")
+    }
+    logging.warning("P1_S3_MULTIYEAR_NORMAL_WALL %s", json.dumps({
+        "scope": "full 17520-step model build, 2 instances, 1 enabled step_relation",
+        "reference_scope": "test-frozen S2 technical/step loops; shared S3 columns and other S2 domains",
+        "method": "same Docker worker, AB/BA order, gc before each, tracemalloc off",
+        "samples": samples,
+        "median_wall_ms": {
+            kind: statistics.median(walls) for kind, walls in results.items()
+        },
+        "range_wall_ms": {
+            kind: max(walls) - min(walls) for kind, walls in results.items()
+        },
+        "model_shape": expected_signature,
+        "note": "No solver, MPS writer or Bundle metadata in timer; no universal speed claim",
+    }, sort_keys=True))
+
+
+def _run_untraced_samples(sequence, samples, builder_factory):
+    expected_signature = None
     for order, kind in enumerate(sequence):
         gc.collect()
         builder_type = (
@@ -237,7 +274,7 @@ def test_cross_year_untraced_normal_wall_comparison():
         )
         assert not tracemalloc.is_tracing()
         before = time.perf_counter()
-        builder = _full_two_year_builder(builder_type, block_size=256)
+        builder = builder_factory(builder_type, block_size=256)
         model, unit_map, objective_unit = builder.build()
         wall_ms = round((time.perf_counter() - before) * 1000, 3)
         signature = {
@@ -265,23 +302,6 @@ def test_cross_year_untraced_normal_wall_comparison():
             "wall_ms": wall_ms,
             "technical_direct_rows": builder.template_stats["affine_direct_rows"],
             "mutex_fallback_relations": builder.template_stats["mutex_fallback_relations"],
+            "signature": signature,
         })
         del builder, model, unit_map
-    results = {
-        kind: [s["wall_ms"] for s in samples if s["kind"] == kind]
-        for kind in ("s2_reference", "s3_production")
-    }
-    logging.warning("P1_S3_MULTIYEAR_NORMAL_WALL %s", json.dumps({
-        "scope": "full 17520-step model build, 2 instances, 1 enabled step_relation",
-        "reference_scope": "test-frozen S2 technical/step loops; shared S3 columns and other S2 domains",
-        "method": "same Docker worker, AB/BA order, gc before each, tracemalloc off",
-        "samples": samples,
-        "median_wall_ms": {
-            kind: statistics.median(walls) for kind, walls in results.items()
-        },
-        "range_wall_ms": {
-            kind: max(walls) - min(walls) for kind, walls in results.items()
-        },
-        "model_shape": expected_signature,
-        "note": "No solver, MPS writer or Bundle metadata in timer; no universal speed claim",
-    }, sort_keys=True))
