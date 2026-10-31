@@ -1038,13 +1038,30 @@ class _ProjectBuilder:
                     (f"depreciation.{rule_id}.{index}",),
                     requires_bounds=True,
                 ))
+            price_refs = set(rule.revenue) | set(rule.energy_cost)
+            cost_refs = set(rule.annual_om) | set(rule.variable_om)
+            demand_refs = set(rule.demand_cost)
+            income_inputs = {
+                output
+                for op in self.inventory.operations
+                for output in op.output_symbols
+                if (
+                    (op.kind == "tariff" and op.payload.price_id in price_refs)
+                    or (op.kind == "demand" and op.payload.charge_id in demand_refs)
+                    or (op.kind == "cost" and
+                        f"{op.payload.finance_type}.{op.payload.component}" in cost_refs)
+                    or (op.kind == "depreciation" and op.payload.rule_id == rule_id)
+                )
+            }
+            for item in rule.deductible_maintenance.items:
+                if item.deductible:
+                    income_inputs.add(f"maintenance.y{item.year}.p{item.position}")
             add(SemanticRelation(
                 f"income.{rule_id}", "income",
                 IndexDomain("year", self.evaluation.evaluation_years),
                 IncomeTaxOperation(rule_id, rule),
                 SourceLocation(f"finance.tax_rules.{rule_id}", relation_id=rule_id),
-                tuple(sorted({*rule.revenue, *rule.energy_cost,
-                              *rule.demand_cost})),
+                tuple(sorted(income_inputs)),
                 (f"income.{rule_id}.tax", f"income.{rule_id}.loss_balance"),
                 depends_on=tuple(sorted(
                     op.identity for op in self.inventory.operations
@@ -1053,7 +1070,17 @@ class _ProjectBuilder:
             ))
 
         for cash_id, entry in sorted(self.finance.net_cashflows.items()):
-            refs = (str(entry.amount.base_from.identity),) if entry.amount.kind != "fixed" else ()
+            refs: tuple[str, ...] = ()
+            if entry.amount.kind != "fixed":
+                source = entry.amount.base_from
+                if isinstance(source, MaintenanceExpenseNetBaseFrom):
+                    refs = (f"maintenance.y{source.year}.p{source.position}",)
+                else:
+                    refs = tuple(
+                        op.output_symbols[0] for op in self.inventory.operations
+                        if op.kind == "cost" and op.payload.component == "upfront_capex"
+                        and op.payload.finance_type == source.finance_type
+                    )
             add(SemanticRelation(
                 f"net_cash.{cash_id}", "net_cash", IndexDomain("year"),
                 NetCashPayment(cash_id, entry),
@@ -1088,13 +1115,24 @@ class _ProjectBuilder:
             ))
         raw = planning["objective"]["expression"]
         compiled = None
-        if raw.strip() != SYSTEM_AFTER_TAX_NPV:
+        if raw.strip() == SYSTEM_AFTER_TAX_NPV:
+            objective_inputs = tuple(sorted({
+                output for op in self.inventory.operations
+                if op.kind in ("annual_cash", "vat", "income", "net_cash")
+                for output in op.output_symbols
+            }))
+        else:
             compiled = compile_planning_expression(raw, dimensions, currency=None)
+            objective_template = lower_planning_expression(compiled, placeholders)
+            objective_inputs = tuple(sorted({
+                ident for (ident, _), coefficient in objective_template.terms
+                if coefficient
+            }))
         add(SemanticRelation(
             "planning.objective", "objective", IndexDomain("scalar"),
             ProjectObjective(raw, compiled),
             SourceLocation("planning.objective.expression"),
-            tuple(sorted(self.plan_vars)),
+            objective_inputs,
             ("objective",),
             depends_on=tuple(op.identity for op in self.inventory.operations
                              if op.kind in ("annual_cash", "vat", "income", "net_cash")),
