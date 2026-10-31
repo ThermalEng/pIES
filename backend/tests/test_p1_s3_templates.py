@@ -150,7 +150,7 @@ def test_battery_block_sizes_preserve_full_model_and_real_columns(battery):
 
 def test_two_instances_share_structure_not_values_and_cross_calendar_year():
     tank = _contribution(SOC_YAML)
-    steps = 8762  # 2026 year-end plus two real steps in 2027
+    steps = 17520  # two complete 8760-hour operating years, 2026 and 2027
     doc = {"planning": {"variables": {},
                         "objective": {"sense": "minimize", "expression": "0"}},
            "connections": {}, "finance_binding": {"instances": {}},
