@@ -100,6 +100,7 @@ def _rows(battery, *, capacity=None, power=None, soc=0.5, minimum=0.1,
     else:
         builder.inventory.seal()
         builder.analysis = CompilerAnalysis(builder.inventory, builder.variables)
+    builder._compile_templates({"cell": bound})
     builder._expand_instance("cell", bound)
     builder._build_relations("cell", bound)
     return builder
