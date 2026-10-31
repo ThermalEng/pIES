@@ -1270,9 +1270,7 @@ class _ProjectBuilder:
         """
         out = _AffineAcc()
         instances = (self.doc.get("finance_binding") or {}).get("instances") or {}
-        entry = instances[inst]
-        ft_entry = self.finance.finance_types[entry["finance_type"]]
-        comp = getattr(ft_entry, component)
+        comp = self.analysis.operation(f"cost.{inst}__{component}").payload.value
         if comp.fixed is not None and part in (None, "fixed"):
             out.add_const(_money_to_internal(comp.fixed))
         for driver, cost in (comp.linear or {}).items():
@@ -1344,14 +1342,15 @@ class _ProjectBuilder:
         取价，不重排价格序列）。
         """
         out = _AffineAcc()
-        binding = (self.doc.get("tariff_bindings") or {})[binding_id]
-        price = self.finance.energy_prices[binding["price"]]
+        relation = self.analysis.operation(f"tariff.{binding_id}")
+        spec = relation.payload
+        price = self.finance.energy_prices[spec.price_id]
         sign = 1.0 if price.direction == "purchase" else -1.0
         stop = self.point_count if end is None else end
         if price.kind == "constant":
             price_si = _to_internal(float(price.value.value), price.value.unit)  # type: ignore[union-attr]
             energy = self._driver_energy(
-                binding["instance"], binding["interface"], binding["aggregation"],
+                spec.instance, spec.interface, spec.aggregation,
                 start, stop,
             )
             out.add_scaled(energy, sign * price_si)
@@ -1360,10 +1359,9 @@ class _ProjectBuilder:
             raise LoweringUnsupportedError(
                 f"计费绑定 {binding_id!r} 的价格类型未知: {price.kind!r}"
             )
-        price_values = self.prices[binding["price"]]
+        price_values = self.prices[spec.price_id]
         energy_steps = self._driver_energy_steps(
-            binding["instance"], binding["interface"], binding["aggregation"],
-            start, stop,
+            spec.instance, spec.interface, spec.aggregation, start, stop,
         )
         for offset, (is_const, name_or_value, coeff) in enumerate(energy_steps):
             charge = sign * price_values[start + offset] * coeff
@@ -1817,10 +1815,9 @@ class _ProjectBuilder:
         比例只取当前实例的 upfront_capex 分量，既有资产只可贡献规模项。
         所有引用/量纲/币种和成本存在性均已在公开提交边界核对。
         """
-        positions: dict[int, int] = {}
-        for entry in self.evaluation.maintenance_expenses:
-            position = positions.get(entry.year, 0) + 1
-            positions[entry.year] = position
+        for relation in self.analysis.relations("maintenance"):
+            spec = relation.payload
+            entry, position = spec.entry, spec.position
             amount = _AffineAcc()
             amount.add_const(float(entry.amount))
             for term in entry.terms:
@@ -2615,7 +2612,9 @@ class _ProjectBuilder:
         income, VAT output or the income-tax base and are never inferred from
         book residual value.
         """
-        for cash_id, entry in sorted(self.finance.net_cashflows.items()):
+        for relation in self.analysis.relations("net_cash"):
+            spec = relation.payload
+            cash_id, entry = spec.cash_id, spec.entry
             t = (self.evaluation.evaluation_years if entry.at.kind == "evaluation_end"
                  else entry.at.year)
             amount = _AffineAcc()
