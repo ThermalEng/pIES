@@ -5,6 +5,7 @@ production project builder never executes it. All application CI uses Docker.
 """
 from __future__ import annotations
 
+import gc
 import json
 import logging
 import time
@@ -14,7 +15,7 @@ import pytest
 
 from iesplan.computation.generators.compiler_ir import CompilerAnalysis
 from iesplan.computation.generators.linear import (
-    LinearExpression, LinearModel, LoweringUnsupportedError, lower_relation,
+    LinearConstraint, LinearExpression, LinearModel, LoweringUnsupportedError, lower_relation,
 )
 from iesplan.computation.generators.mps import write_mps
 from iesplan.computation.generators.project import _ProjectBuilder
@@ -278,6 +279,152 @@ def _reference_technical_benchmark(builder):
     assert old["lowered_rows"] == new["lowered_rows"]
     assert old["auxiliary_variables"] == new["auxiliary_variables"]
     return {"s2_ast_kernel": old, "s3_template_kernel": new}
+
+
+
+class _S2ReferenceBuilder(_ProjectBuilder):
+    """Test-only frozen S2 per-step technical/step paths, never production fallback."""
+
+    def _compile_templates(self, bound_instances):
+        # All other builder stages stay IDENTICAL within this Docker process.
+        pass
+
+    def _build_relations(self, inst, statics):
+        model = self.models[inst]
+        symbols = statics["symbols"]
+        initial = {
+            op.payload.state: op.payload.value
+            for op in self.analysis.relations("initial")
+            if op.payload.instance == inst
+        }
+        predefined = {
+            name for name, flow in model.interfaces.items()
+            if flow.type == "predefined"
+        }
+        for step in range(self.point_count):
+            self._checkpoint()
+            current = dict(symbols)
+            for name in predefined:
+                current[name] = ("const", self._series_si(inst, name, model)[step])
+            current = self.analysis.modeling_symbols(inst, step, current)
+            for family in self._instance_relations[inst]:
+                lowered = lower_relation(
+                    family.relation, current, step=step, initial=initial,
+                )
+                self._emit_lowered(inst, family.relation.id, step, lowered)
+
+    def _build_step_relations(self):
+        from iesplan.computation.generators.project import _AffineAcc
+        for operation in self.analysis.relations("planning_step"):
+            spec = operation.payload
+            template = spec.template
+            references = spec.references
+            for step in range(self.point_count):
+                self._checkpoint()
+                acc = _AffineAcc()
+                acc.add_const(template.expression.constant)
+                for (name, offset), coefficient in template.expression.terms:
+                    if offset:
+                        raise LoweringUnsupportedError(
+                            f"step relation {spec.name!r} has an unsupported offset"
+                        )
+                    if name in references:
+                        target = references[name]
+                        key = (target["instance"], target["interface"])
+                        column = self._step_columns[key][step]
+                    elif name in self.plan_vars:
+                        column = name
+                    else:
+                        raise LoweringUnsupportedError(
+                            f"step relation {spec.name!r}: unknown symbol {name!r}"
+                        )
+                    acc.add_term(column, coefficient)
+                self.rows.append(
+                    LinearConstraint(
+                        name=f"step__{spec.name}__t{step}",
+                        expression=acc.freeze(), sense=template.sense,
+                        rhs=template.rhs,
+                    )
+                )
+
+
+def test_same_docker_s2_s3_full_campus_build_and_exact_mps(tmp_path):
+    """One public 8760-point input, same Docker Python, same builder+tracer.
+
+    S2 is a test-only reference preserving its AST and step-row operations;
+    no old builder/fallback reaches production. Both builds carry all other
+    S2 semantic/tax paths. This measures full model generation (not MPS
+    writing or worker execution) with independent tracemalloc peaks.
+    """
+    from test_highs_milp_provider import _campus_inputs
+
+    artifact, models, materialized, finance, config, evaluation = _campus_inputs()
+    from iesplan.computation.generators import project
+    def build_once(builder_type):
+        gc.collect()
+        # Use the public builder factory without changing inputs or horizon.
+        # The class is selected only here in the reference test harness.
+        from unittest.mock import patch
+        with patch.object(project, "_ProjectBuilder", builder_type):
+            tracemalloc.start()
+            try:
+                start = time.perf_counter()
+                builder = project._new_builder(
+                    artifact, models, materialized, finance, evaluation,
+                )
+                model, units, objective_unit = builder.build()
+                wall_ms = round((time.perf_counter() - start) * 1000, 3)
+                _current, peak = tracemalloc.get_traced_memory()
+            finally:
+                tracemalloc.stop()
+        metrics = {
+            "build_wall_ms": wall_ms,
+            "traced_peak_bytes": peak,
+            "columns": len(model.variables),
+            "rows": len(model.constraints),
+            "integer_columns": sum(v.kind == "binary" for v in model.variables),
+            "row_nonzeros": sum(len(row.expression.terms) for row in model.constraints),
+            "objective_nonzeros": len(model.objective.terms),
+        }
+        return model, units, objective_unit, builder, metrics
+
+    old, old_units, old_unit, old_builder, old_metrics = build_once(
+        _S2ReferenceBuilder,
+    )
+    old_mps, old_offset = write_mps(old)
+    old_blob = (tmp_path / "s2-reference.mps")
+    old_blob.write_text(old_mps, encoding="utf-8")
+    old_facts = old_builder.financial_facts()
+    old_components = old_builder.finance_components()
+    old_series = old_builder.step_series()
+    del old, old_builder, old_mps
+    gc.collect()
+
+    current, units, objective_unit, builder, current_metrics = build_once(
+        _ProjectBuilder,
+    )
+    current_mps, current_offset = write_mps(current)
+    assert current_metrics["columns"] == old_metrics["columns"]
+    assert current_metrics["rows"] == old_metrics["rows"]
+    assert current_metrics["integer_columns"] == old_metrics["integer_columns"]
+    assert current_metrics["row_nonzeros"] == old_metrics["row_nonzeros"]
+    assert current_metrics["objective_nonzeros"] == old_metrics["objective_nonzeros"]
+    assert current_offset == old_offset
+    assert objective_unit == old_unit
+    assert units == old_units
+    assert current_mps == old_blob.read_text(encoding="utf-8")
+    assert builder.financial_facts() == old_facts
+    assert builder.finance_components() == old_components
+    assert builder.step_series() == old_series
+    assert builder.template_stats["technical_binds"] > 0
+    logging.warning("P1_S3_SAME_DOCKER_BUILD %s", json.dumps({
+        "source": "public campus 8760 points, unchanged complete model",
+        "s2_reference": old_metrics,
+        "s3_production": current_metrics,
+        "timing_note": "both model builds traced separately; MPS/output comparisons are outside timers",
+        "resource_scope": "tracemalloc full build, not isolated process RSS",
+        "basis": "test-only S2 technical/step kernels, all other S2 domains shared",
+    }, sort_keys=True))
 
 
 def test_public_campus_production_template_counts_and_resource_comparison(measured_generate):
