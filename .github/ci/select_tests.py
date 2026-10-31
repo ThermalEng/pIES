@@ -133,6 +133,7 @@ GENERATOR_PROJECT_CONSUMERS = (
     "test_battery_planning.py",
     "test_step_relations_s2.py",
     "test_finance_s2_execution.py",
+    "test_issue06_s2.py",
     "test_p1_compiler_s1.py",
     "test_p1_s2_relation_analysis.py",
     "test_vat_monthly.py",
