@@ -156,9 +156,15 @@ class MaintenancePayment:
 
 
 @dataclass(frozen=True, slots=True)
+class VatRuleSource:
+    rule_id: str
+    rule: object
+
+
+@dataclass(frozen=True, slots=True)
 class VatPoolOperation:
     pool_id: str
-    rules: Mapping[str, list]
+    rules: Mapping[str, tuple]
 
 
 @dataclass(frozen=True, slots=True)
@@ -200,7 +206,7 @@ class ProjectObjective:
 
 SemanticPayload = (
     CapacityLimit | StateInitial | BusBalance | PlanningRule | CostComponent
-    | TariffCharge | DemandPeak | MaintenancePayment | VatPoolOperation
+    | TariffCharge | DemandPeak | MaintenancePayment | VatRuleSource | VatPoolOperation
     | IncomeTaxOperation | DepreciationCharge | NetCashPayment
     | ConstructionPayment | AnnualCash | ProjectObjective
 )
