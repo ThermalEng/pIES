@@ -483,6 +483,8 @@ class _ProjectBuilder:
         self.template_stats: dict[str, int | float] = {
             "technical_compiles": 0,
             "technical_binds": 0,
+            "affine_direct_rows": 0,
+            "mutex_fallback_relations": 0,
             "step_compiles": 0,
             "step_binds": 0,
             "technical_blocks": 0,
@@ -1770,9 +1772,39 @@ class _ProjectBuilder:
                 bounds[name] = self.analysis.variable_bounds(actual)
             else:
                 bounds[name] = (entry[1], entry[2])
+        # The bound property and step-column table are *already* declared.
+        # Capture them once per instance; only the step index changes. The
+        # shared template binder can now produce one final global-column
+        # LinearConstraint instead of local DTO -> qualified duplicate DTO.
+        current_step = 0
+        bound_properties = {
+            name: column for (device, name), column in self.bound_prop.items()
+            if device == inst
+        }
+        step_columns = {
+            name: columns for (device, name), columns in self._step_columns.items()
+            if device == inst
+        }
+
+        def global_column(key: tuple[str, int]) -> tuple[str, int]:
+            name, offset = key
+            if name in bound_properties:
+                if offset != 0:
+                    raise LoweringUnsupportedError(
+                        f"规划接管 property {name!r} 不得带时间索引"
+                    )
+                return (bound_properties[name], 0)
+            columns = step_columns.get(name)
+            if columns is not None:
+                return (columns[current_step + offset], 0)
+            # Preserve the legacy naming of auxiliary/initial affine symbols
+            # that are not published step-series columns.
+            return (self._tech_name(inst, name, current_step + offset), 0)
+
         for block in self._blocks():
             self.template_stats["technical_blocks"] += 1
             for step in block:
+                current_step = step
                 self._checkpoint()
                 for name, values in series_by_name.items():
                     known[name] = values[step]
@@ -1781,9 +1813,20 @@ class _ProjectBuilder:
                     lowered = bind_technical(
                         template, instance=inst, step=step, known=known,
                         initial=initial, bound=bounds,
+                        affine_column=global_column,
+                        affine_row_name=f"{inst}__{family.relation.id}__t{step}",
                     )
                     self.template_stats["technical_binds"] += 1
-                    self._emit_lowered(inst, family.relation.id, step, lowered)
+                    if lowered.variables:
+                        # Exact Big-M mutex lowering still requires declaring
+                        # and qualifying its new auxiliary binary column.
+                        self.template_stats["mutex_fallback_relations"] += 1
+                        self._emit_lowered(inst, family.relation.id, step, lowered)
+                    else:
+                        # Affine rows are already fully qualified and validated.
+                        # Constant tautologies produce no row as before.
+                        self.template_stats["affine_direct_rows"] += len(lowered.constraints)
+                        self.rows.extend(lowered.constraints)
 
     def _series_si(
         self, inst: str, iface: str, contribution: DeviceMathContribution,
