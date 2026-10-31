@@ -155,6 +155,7 @@ def test_cross_year_two_instance_resource_repeats_and_block_choices(tmp_path):
             mps_path.write_text(mps_text, encoding="utf-8")
             expected_offset = offset
         else:
+            assert offset == expected_offset
             assert mps_text == mps_path.read_text(encoding="utf-8")
         unit_json = json.dumps(dict(units), sort_keys=True)
         fact_json = json.dumps(dict(builder.financial_facts()), sort_keys=True)
