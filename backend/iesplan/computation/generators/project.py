@@ -2554,22 +2554,45 @@ class _ProjectBuilder:
         net.add_scaled(self._maintenance_items[key], 1.0 - credit)
         return net
 
-    def _source_net(self, source: Any) -> _AffineAcc:
-        """Resolve each typed money source once for depreciation and net cash."""
+    def _source_net(
+        self, source: Any, *, relation: SemanticRelation | None = None,
+    ) -> _AffineAcc:
+        """Resolve a typed money source through its collected dependency edges.
+
+        The semantic graph is the authority for which cost/maintenance amounts
+        form the source.  This prevents depreciation and net-cash lowering from
+        independently rescanning finance bindings after the collection barrier.
+        """
         key = source.identity
         if key not in self._net_sources:
             amount = _AffineAcc()
+            dependency_ids = (
+                relation.depends_on if relation is not None
+                else self._amount_source_links(source)[1]
+            )
+            dependencies = tuple(
+                self.analysis.operation(identity) for identity in dependency_ids
+            )
             if source.kind == "upfront_capex_net":
-                instances = self.doc["finance_binding"]["instances"]
-                for inst in sorted(self.devices):
-                    binding = instances.get(inst)
-                    if (binding is None or binding["type"] != "costed"
-                            or binding["finance_type"] != source.finance_type
-                            or self.devices[inst]["asset_origin"] != "new"):
-                        continue
-                    amount.add_scaled(self._cost_paid_net(inst, "upfront_capex")[1], 1.0)
+                for dependency in dependencies:
+                    if dependency.kind != "cost":
+                        raise RuntimeError(
+                            f"money source {source.identity!r} has non-cost dependency "
+                            f"{dependency.identity!r}"
+                        )
+                    spec = dependency.payload
+                    amount.add_scaled(
+                        self._cost_paid_net(spec.instance, "upfront_capex")[1], 1.0
+                    )
             else:
-                amount.add_scaled(self._maintenance_net(source.year, source.position), 1.0)
+                if len(dependencies) != 1 or dependencies[0].kind != "maintenance":
+                    raise RuntimeError(
+                        f"money source {source.identity!r} lacks its maintenance dependency"
+                    )
+                spec = dependencies[0].payload
+                amount.add_scaled(
+                    self._maintenance_net(spec.year, spec.position), 1.0
+                )
             self._net_sources[key] = amount
         return self._net_sources[key]
 
@@ -2607,7 +2630,7 @@ class _ProjectBuilder:
             ):
                 continue
             source = entry.base_from
-            depreciable = self._source_net(source)
+            depreciable = self._source_net(source, relation=relation)
             residual = float(entry.residual.value)
             position = f"{location}折旧来源 {source.identity!r}"
             # A ratio residual is affine even when the asset can be absent.
@@ -2729,7 +2752,7 @@ class _ProjectBuilder:
             if entry.amount.kind == "fixed":
                 amount.add_const(float(entry.amount.value.value))
             else:
-                amount.add_scaled(self._source_net(entry.amount.base_from),
+                amount.add_scaled(self._source_net(entry.amount.base_from, relation=relation),
                                   float(entry.amount.ratio.value))
             direction = 1.0 if entry.direction == "inflow" else -1.0
             self._year_cash(t).add_scaled(amount, direction)
