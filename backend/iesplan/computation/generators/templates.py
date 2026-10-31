@@ -87,7 +87,9 @@ def _instructions(node: object, roles: Mapping[str, str]) -> tuple[Instruction, 
         if isinstance(expr, NumberNode):
             out.append(("number", expr.value))
         elif isinstance(expr, RefNode):
-            mode = roles[expr.name]
+            mode = roles.get(expr.name)
+            if mode is None:
+                raise LoweringUnsupportedError(f"未知符号: {expr.name!r}")
             if mode == "known":
                 if expr.offset != 0:
                     raise LoweringUnsupportedError(
@@ -204,7 +206,11 @@ def _formula(node: object, roles: Mapping[str, str]) -> AffineFormula:
         if not right.terms and right.constant == ("num", 1.0):
             return left
         if not right.terms and right.constant == ("num", 0.0):
-            return AffineFormula(("num", 1.0), ())
+            # The original lowerer evaluates the *entire* base before it
+            # applies x**0. Dropping the base also drops mandatory divide-by-
+            # zero, invalid domain and non-affine errors in later steps.
+            # Use the same compiled instruction interpreter for this case.
+            raise _GeneralBinding()
         raise _GeneralBinding()
     raise _GeneralBinding()
 
@@ -283,6 +289,44 @@ def _bind_formula(
         else:
             result.add_term((name, offset), coeff)
     return result.checked(where)
+
+
+def _bind_compiled_expression(
+    code: tuple[Instruction, ...], formula: AffineFormula | None, *,
+    step: int, known: Mapping[str, float],
+    initial: Mapping[str, float | LinearExpression], where: str,
+    cache: dict[Coeff, float],
+) -> _Affine:
+    """The ONLY modeling arithmetic/binding entry for public and project IR."""
+    if formula is not None:
+        return _bind_formula(
+            formula, known, cache, step=step, initial=initial, where=where,
+        )
+    return _evaluate(code, step=step, known=known, initial=initial, where=where)
+
+
+def lower_compiled_expression(
+    node: object, symbols: Mapping[str, tuple], *,
+    step: int = 0,
+    initial: Mapping[str, float | LinearExpression] | None = None,
+) -> LinearExpression:
+    """Standalone public expression adapter over the production binding core.
+
+    Compiling for this single call does not reintroduce any per-step
+    compilation into production: ProjectBuilder uses its existing saved plans.
+    """
+    roles = {
+        name: ("known" if entry[0] == "const" else "var")
+        for name, entry in symbols.items()
+    }
+    code = _instructions(node, roles)
+    formula = _try_formula(node, roles)
+    known = {k: v[1] for k, v in symbols.items() if v[0] == "const"}
+    bound = _bind_compiled_expression(
+        code, formula, step=step, known=known, initial=initial or {},
+        where="表达式", cache={},
+    )
+    return LinearExpression(tuple(bound.terms.items()), bound.constant)
 
 
 def compile_technical(
@@ -421,22 +465,16 @@ def bind_technical(
     where = f"关系 {template.relation_id!r} 实例 {instance!r} step {step}: "
     cache: dict[Coeff, float] = {}
     try:
-        lhs = (
-            _bind_formula(template.fast_lhs, known, cache, step=step,
-                          initial=initial, where=where)
-            if template.fast_lhs is not None
-            else _evaluate(template.lhs, step=step, known=known,
-                           initial=initial, where=where)
+        lhs = _bind_compiled_expression(
+            template.lhs, template.fast_lhs, step=step, known=known,
+            initial=initial, where=where, cache=cache,
         )
     except LoweringUnsupportedError as exc:
         lhs = exc
     try:
-        rhs = (
-            _bind_formula(template.fast_rhs, known, cache, step=step,
-                          initial=initial, where=where)
-            if template.fast_rhs is not None
-            else _evaluate(template.rhs, step=step, known=known,
-                           initial=initial, where=where)
+        rhs = _bind_compiled_expression(
+            template.rhs, template.fast_rhs, step=step, known=known,
+            initial=initial, where=where, cache=cache,
         )
     except LoweringUnsupportedError as exc:
         rhs = exc
