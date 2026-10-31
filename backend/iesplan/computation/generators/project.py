@@ -51,6 +51,7 @@ from iesplan.computation.generators.compiler_ir import (
     StateInitial,
     BusBalance,
     PlanningRule,
+    CostAmountTerm,
     CostComponent,
     TariffCharge,
     DemandPeak,
@@ -918,15 +919,40 @@ class _ProjectBuilder:
                 value = getattr(record, component)
                 if value is None:
                     continue
-                symbols = []
-                for driver in value.linear or {}:
+                terms: list[CostAmountTerm] = []
+                for driver, cost in sorted((value.linear or {}).items()):
                     target = binding["drivers"][driver]
+                    coefficient = (
+                        _unit_cost_to_internal(
+                            float(cost.unit_cost.value), cost.unit_cost.unit
+                        )
+                        if component == "upfront_capex"
+                        else _to_internal(
+                            float(cost.unit_cost.value), cost.unit_cost.unit
+                        )
+                    )
+                    coefficient_id = f"cost.{inst}__{component}.linear.{driver}"
+                    self.inventory.coefficients[coefficient_id] = KnownCoefficient(
+                        coefficient_id, "finance_unit_cost",
+                        SourceLocation(
+                            f"finance.finance_types.{ft}.{component}.linear.{driver}",
+                            inst, binding_id=inst,
+                        ),
+                        coefficient,
+                    )
                     if "property" in target:
-                        symbols.append(self.inventory.property_bindings[
-                            (inst, target["property"])
-                        ])
+                        local = target["property"]
+                        symbol = self.inventory.property_bindings[(inst, local)]
+                        target_kind = "property"
+                        aggregation = "scalar"
                     else:
-                        symbols.append(f'{inst}.{target["interface"]}')
+                        local = target["interface"]
+                        symbol = f"{inst}.{local}"
+                        target_kind = "interface"
+                        aggregation = target["aggregation"]
+                    terms.append(CostAmountTerm(
+                        driver, local, symbol, target_kind, aggregation, coefficient
+                    ))
                 ident = f"{inst}__{component}"
                 domain = (
                     IndexDomain("scalar") if component == "upfront_capex"
@@ -936,10 +962,15 @@ class _ProjectBuilder:
                 )
                 add(SemanticRelation(
                     f"cost.{ident}", "cost", domain,
-                    CostComponent(inst, component, ft, value),
+                    CostComponent(
+                        inst, component, ft,
+                        _money_to_internal(value.fixed)
+                        if value.fixed is not None else None,
+                        tuple(terms),
+                    ),
                     SourceLocation(f"finance.finance_types.{ft}.{component}",
                                    inst, binding_id=inst),
-                    tuple(sorted(symbols)), (ident,),
+                    tuple(term.symbol for term in terms), (ident,),
                 ))
 
         for binding_id in sorted(self.doc.get("tariff_bindings") or {}):
