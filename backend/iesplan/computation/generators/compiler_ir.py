@@ -256,11 +256,15 @@ class CompilerAnalysis:
             for symbol in operation.input_symbols:
                 uses[symbol].add(operation.identity)
         self._groups = {key: tuple(value) for key, value in groups.items()}
+        self._by_id = {op.identity: op for op in inventory.operations}
         self.uses = {name: frozenset(ids) for name, ids in uses.items()}
         self.bound_requests: list[BoundRequest] = []
 
     def relations(self, kind: str) -> tuple[SemanticRelation, ...]:
         return self._groups.get(kind, ())
+
+    def operation(self, identity: str) -> SemanticRelation:
+        return self._by_id[identity]
 
     def variable_bounds(
         self, name: str, *, relation: SemanticRelation | None = None,
