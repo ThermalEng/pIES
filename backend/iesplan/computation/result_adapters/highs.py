@@ -542,6 +542,18 @@ def _recover_financial_facts(
 
     out: dict[str, object] = {
         "currency": currency,
+        "construction_status": [
+            {
+                "instance_id": entry["instance_id"],
+                "status": int(round(float(amount(entry["built"], f"{entry['instance_id']}.built")))),
+                "built": bool(round(float(amount(entry["built"], f"{entry['instance_id']}.built")))),
+                "scales": {
+                    pname: amount(var_node, f"{pname}.scale")
+                    for pname, var_node in entry["scales"].items()
+                },
+            }
+            for entry in decl.get("construction_status", [])
+        ],
         "construction_total": amount(decl["construction_total"], "construction_total"),
         "annual_fixed_om": amount(decl["annual_fixed_om"], "annual_fixed_om"),
         "payments_applied": [

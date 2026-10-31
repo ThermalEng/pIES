@@ -739,6 +739,53 @@ class _ProjectBuilder:
             )
             self.inventory.bound_facts[name] = fact
             self.inventory.bound_facts[f"{inst}.{prop}"] = fact
+        # P2-S3: Construction activation variables
+        self._construction_configs: dict[str, dict[str, Any]] = {}
+        planning_doc = self.doc.get("planning") or {}
+        explicit_constructions = planning_doc.get("construction") or {}
+        for inst in sorted(self.devices):
+            if self.devices[inst].get("asset_origin") != "new":
+                continue
+            inst_pnames = [pname for (d, p), pname in self.bound_prop.items() if d == inst]
+            if not inst_pnames:
+                continue
+
+            config = None
+            if inst in explicit_constructions:
+                config = explicit_constructions[inst]
+            else:
+                for pname in inst_pnames:
+                    pspec = self.plan_vars[pname]
+                    if pspec.get("activation") or pspec.get("construction") or "optional" in pspec:
+                        config = pspec
+                        break
+
+            if config is not None:
+                has_pos_lo = any(
+                    self.variables[pname].lower is not None and self.variables[pname].lower > 0
+                    for pname in inst_pnames
+                )
+                is_mandatory = (
+                    config.get("mode") == "mandatory"
+                    or config.get("mandatory") is True
+                    or (config.get("optional") is False)
+                    or has_pos_lo
+                )
+                z_name = f"built_{inst}"
+                z_lo = 1.0 if is_mandatory else 0.0
+                z_hi = 1.0
+                self._declare(z_name, z_lo, z_hi, "binary", "1")
+                z_loc = SourceLocation(f"devices.{inst}.construction", inst)
+                self.inventory.symbols[z_name] = SymbolDeclaration(
+                    z_name, "construction", IndexDomain("scalar"), "1", z_loc,
+                )
+                self.inventory.bound_facts[z_name] = BoundFact(
+                    z_name, lower=z_lo, upper=z_hi,
+                )
+                self._construction_configs[inst] = {
+                    "mandatory": is_mandatory,
+                    "variables": inst_pnames,
+                }
         self.inventory.coefficients["step_duration"] = KnownCoefficient(
             "step_duration", "step_duration",
             SourceLocation("project_baseline.resolution"), self.step_s,
@@ -2177,8 +2224,15 @@ class _ProjectBuilder:
         """
         out = _AffineAcc()
         spec = self.analysis.operation(f"cost.{inst}__{component}").payload
+        z_name = f"built_{inst}"
+        is_optional = (
+            z_name in self.variables and self.variables[z_name].lower == 0.0
+        )
         if spec.fixed_amount is not None and part in (None, "fixed"):
-            out.add_const(spec.fixed_amount)
+            if is_optional:
+                out.add_term(z_name, spec.fixed_amount)
+            else:
+                out.add_const(spec.fixed_amount)
         for term in spec.terms:
             if part is not None and part != f"linear.{term.driver}":
                 continue
@@ -3281,27 +3335,42 @@ class _ProjectBuilder:
             residual_amount.add_scaled(depreciable, residual)
         else:
             residual_amount = _AffineAcc()
-            residual_amount.add_const(residual)
-            if residual > 0.0:
-                basis_lo = self.analysis.affine_side(
-                    depreciable, side="min", label=position,
-                    relation=relation, period=year,
-                )
-                basis_hi = self.analysis.affine_side(
-                    depreciable, side="max", label=position,
-                    relation=relation, period=year,
-                )
-                if basis_hi <= 0.0:
-                    residual_amount = _AffineAcc()
-                elif basis_lo <= 0.0:
-                    raise LoweringUnsupportedError(
-                        f"{position}的可变容量固定正残值在零建设与形成资产之间无法精确选择，"
-                        "超出当前选建能力"
+            inst = getattr(source.payload, "instance", None) if hasattr(source, "payload") else None
+            z_name = f"built_{inst}" if inst else None
+            is_optional = (
+                z_name is not None and z_name in self.variables and self.variables[z_name].lower == 0.0
+            )
+            if is_optional:
+                residual_amount.add_term(z_name, residual)
+                if residual > 0.0:
+                    basis_hi = self.analysis.affine_side(
+                        depreciable, side="max", label=position,
+                        relation=relation, period=year,
                     )
-                elif residual > basis_lo:
-                    raise LoweringUnsupportedError(
-                        f"{position}残值 {residual!r} 超过最小计税基础 {basis_lo!r}"
+                    if basis_hi <= 0.0:
+                        residual_amount = _AffineAcc()
+            else:
+                residual_amount.add_const(residual)
+                if residual > 0.0:
+                    basis_lo = self.analysis.affine_side(
+                        depreciable, side="min", label=position,
+                        relation=relation, period=year,
                     )
+                    basis_hi = self.analysis.affine_side(
+                        depreciable, side="max", label=position,
+                        relation=relation, period=year,
+                    )
+                    if basis_hi <= 0.0:
+                        residual_amount = _AffineAcc()
+                    elif basis_lo <= 0.0:
+                        raise LoweringUnsupportedError(
+                            f"{position}的可变容量固定正残值在零建设与形成资产之间无法精确选择，"
+                            "超出当前选建能力"
+                        )
+                    elif residual > basis_lo:
+                        raise LoweringUnsupportedError(
+                            f"{position}残值 {residual!r} 超过最小计税基础 {basis_lo!r}"
+                        )
         annual = _AffineAcc()
         life = float(entry.life_years)
         annual.add_scaled(depreciable, 1.0 / life)
@@ -3685,6 +3754,49 @@ class _ProjectBuilder:
                 name=spec.name, expression=substituted.freeze(),
                 sense=lowered.sense, rhs=lowered.rhs,
             ))
+        self._build_construction_rows()
+
+    def _build_construction_rows(self) -> None:
+        """Build construction activation linking constraints (q <= U * z and q >= L * z)."""
+        for inst, cfg in getattr(self, "_construction_configs", {}).items():
+            z_name = f"built_{inst}"
+            if z_name not in self.variables:
+                continue
+            inst_pnames = cfg["variables"]
+            for pname in sorted(inst_pnames):
+                U = self.variables[pname].upper
+                if U is None:
+                    raise LoweringUnsupportedError(
+                        f"建设激活缺有限上界：规划变量 {pname!r} 无有限上界，无法精确构建选建约束",
+                        model_source={
+                            "source": f"symbol:{pname}",
+                            "role": "construction_bound_missing",
+                            "axis": "scalar",
+                            "index": 0,
+                            "location": {"instance": inst, "planning_variable": pname},
+                        },
+                    )
+                self._source(f"{inst}.construction", "capacity", location=SourceLocation(f"devices.{inst}.construction", inst))
+                self.rows.append(LinearConstraint(
+                    name=f"{inst}__{pname}__build_max",
+                    expression=LinearExpression(
+                        terms=(((pname, 0), 1.0), ((z_name, 0), -U)),
+                        constant=0.0,
+                    ),
+                    sense="le",
+                    rhs=0.0,
+                ))
+                L_active = self.variables[pname].lower
+                if L_active is not None and L_active > 0:
+                    self.rows.append(LinearConstraint(
+                        name=f"{inst}__{pname}__build_min",
+                        expression=LinearExpression(
+                            terms=(((pname, 0), 1.0), ((z_name, 0), -L_active)),
+                            constant=0.0,
+                        ),
+                        sense="ge",
+                        rhs=0.0,
+                    ))
 
     # ------------------------------------------------------------------
     # 总装
@@ -3898,8 +4010,23 @@ class _ProjectBuilder:
                 "rate": row["rate"],
                 "charge": self._decl_affine(paid),
             })
+        construction_status: list[dict[str, object]] = []
+        for inst in sorted(getattr(self, "_construction_configs", {})):
+            z_name = f"built_{inst}"
+            if z_name in self.variables:
+                scales = {
+                    pname: self._decl_var(pname)
+                    for (d, _), pname in sorted(self.bound_prop.items())
+                    if d == inst
+                }
+                construction_status.append({
+                    "instance_id": inst,
+                    "built": self._decl_var(z_name),
+                    "scales": scales,
+                })
         out: dict[str, object] = {
             "currency": self.finance.currency,
+            "construction_status": construction_status,
             "monthly_demand": monthly_demand,
             "construction_total": self._decl_affine(self._fact_construction),
             "annual_fixed_om": self._decl_affine(self._fact_fixed_om),
