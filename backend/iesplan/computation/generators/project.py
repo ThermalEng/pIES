@@ -2485,10 +2485,30 @@ class _ProjectBuilder:
                                 ones += 1
                             else:
                                 select.add_term(flag, -slack)
+                        # A rigorously outward interval can legitimately be
+                        # narrower than HiGHS' matrix coefficient threshold.
+                        # Never delete that nonzero Big-M coefficient or treat
+                        # an approximately fixed flow as exactly fixed. Scale
+                        # the WHOLE row by a power of two, which preserves its
+                        # mathematical solution set and avoids changing source
+                        # units, variables, and physical bounds.
+                        scale = 1.0
+                        if 0.0 < slack < 1e-6:
+                            power = math.ceil(math.log2(1e-6 / slack))
+                            if power > 40:
+                                raise LoweringUnsupportedError(
+                                    f"需量绑定 {billing_id!r} 月 {month} "
+                                    f"精确选择行的系数尺度超出 MPS 可表示范围"
+                                )
+                            scale = math.ldexp(1.0, power)
+                        if scale != 1.0:
+                            normalized = _AffineAcc()
+                            normalized.add_scaled(select, scale)
+                            select = normalized
                         self.rows.append(LinearConstraint(
                             name=f"{peak_name}__select_{offset}",
                             expression=select.freeze(), sense="le",
-                            rhs=slack * ones,
+                            rhs=(slack * ones) * scale,
                         ))
                 self._demand_peaks[key] = peak
                 self._demand_peak_sources[key] = f"relation:{operation.identity}"
