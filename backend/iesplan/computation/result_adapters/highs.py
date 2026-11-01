@@ -53,7 +53,7 @@ from iesplan.computation.result_adapter import ResultAdapterDescriptor
 from iesplan.core.units import UnitError, dims_of, from_si, unit_meta
 
 ADAPTER_ID = "ies.result-adapter.highs"
-ADAPTER_VERSION = "6.1.0"
+ADAPTER_VERSION = "7.0.0"
 ADAPTER_REF = f"{ADAPTER_ID}@{ADAPTER_VERSION}"
 
 DESCRIPTOR = ResultAdapterDescriptor(
@@ -643,6 +643,43 @@ def _recover_financial_facts(
             for node in decl["annual_net_flows"]
         ],
     }
+    def construction_built(node: Mapping[str, Any], label: str) -> bool:
+        value = float(amount(node, label))
+        rounded = round(value)
+        if not math.isfinite(value) or rounded not in (0, 1) or abs(value - rounded) > 1e-6:
+            _fail(f"建设状态 {label!r} 不属于整数 0/1: {value!r}")
+        return bool(rounded)
+
+    def scale_value(node: Mapping[str, Any], unit: str, label: str) -> str:
+        raw = float(amount(node, label))
+        try:
+            business = from_si(raw, unit)
+        except UnitError as exc:
+            _fail(f"建设规模 {label!r} 换算失败: {exc}")
+        if not math.isfinite(business):
+            _fail(f"建设规模 {label!r} 非有限数值")
+        return str(Decimal(str(business)))
+
+    out["construction_units"] = [
+        {
+            "unit_id": entry["unit_id"],
+            "instance_id": entry["instance_id"],
+            "mode": entry["mode"],
+            "built": construction_built(entry["built"], f"{entry['unit_id']}.built"),
+            "scales": [
+                {
+                    "planning_variable_id": scale["planning_variable_id"],
+                    "value": scale_value(
+                        scale["value"], scale["unit"],
+                        f"{entry['unit_id']}.{scale['planning_variable_id']}",
+                    ),
+                    "unit": scale["unit"],
+                }
+                for scale in entry["scales"]
+            ],
+        }
+        for entry in decl["construction_units"]
+    ]
     return out
 
 

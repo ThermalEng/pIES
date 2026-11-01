@@ -26,7 +26,8 @@ from iesplan.finance import (
 )
 from test_highs_result_adapter import SOLUTION_PATH, _bundle, _receipt
 from test_vat_monthly import (
-    GRID_YAML, HEATER_YAML, LOAD_YAML, TANK_YAML,
+    GRID_YAML, HEATER_YAML, HEATER_UNBOUNDED_YAML,
+    LOAD_YAML, LOAD_UNBOUNDED_YAML, TANK_YAML,
     _contribution, _device_docs, _doc, _finance_payload, _solve_internal,
 )
 
@@ -163,7 +164,12 @@ def _inputs(*, resolution="1h", start_year=2024, rate="12",
             "opening_losses": [],
         }
     finance = merge_effective(FinanceProfile.from_dict(profile), None)
-    docs = _device_docs()
+    # Nonnegative alone is insufficient for the negative-bound test.
+    # A fixed load indirectly bounds the meter through the existing bus;
+    # use a genuinely unbounded connected sink when bounded=False.
+    heater_yaml = HEATER_YAML if bounded else HEATER_UNBOUNDED_YAML
+    load_yaml = LOAD_YAML if bounded else LOAD_UNBOUNDED_YAML
+    docs = _device_docs(heater_yaml=heater_yaml, load_yaml=load_yaml)
     grid_yaml = GRID_YAML
     if bounded:
         grid_yaml = grid_yaml.replace(
@@ -174,9 +180,9 @@ def _inputs(*, resolution="1h", start_year=2024, rate="12",
         assert parsed.ok, parsed.diagnostics
         docs["acme.device.grid"] = parsed.document
     models = {
-        "heater1": _contribution(HEATER_YAML),
+        "heater1": _contribution(heater_yaml),
         "tank1": _contribution(TANK_YAML),
-        "load1": _contribution(LOAD_YAML),
+        "load1": _contribution(load_yaml),
         "grid1": _contribution(grid_yaml),
     }
     if dispatch:
@@ -232,7 +238,7 @@ def test_zero_rate_non_economic_still_real_peak(tmp_path, resolution):
     facts, sealed, _ = _solved(inputs, tmp_path)
     rows = facts["monthly_demand"]
     assert len(rows) == 12
-    assert sealed["schema_version"] == "3.0.0"
+    assert sealed["schema_version"] == "4.0.0"
     assert sealed["monthly_demand"] == list(rows)
     assert [(r["calendar_year"], r["calendar_month"]) for r in rows] == [
         (2024, month) for month in range(1, 13)

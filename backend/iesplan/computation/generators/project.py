@@ -48,6 +48,7 @@ from iesplan.computation.generators.sources import SourceTrace, SourceRows, Sour
 from iesplan.computation.generators.compiler_ir import (
     CompilerInventory,
     CompilerAnalysis,
+    BoundFact,
     SemanticRelation,
     CapacityLimit,
     StateInitial,
@@ -459,6 +460,8 @@ class _ProjectBuilder:
         self._fact_balances: list[dict[str, Any]] = []
         self._fact_net_cashflows: list[dict[str, Any]] = []
         self._net_sources: dict[tuple, _AffineAcc] = {}
+        self._conditional_amounts: dict[tuple, _AffineAcc] = {}
+        self._fixed_residuals: dict[tuple, _AffineAcc] = {}
         self.point_count = point_count
         self.step_s = step_s
         self.series: dict[tuple[str, str], list[float]] = {}
@@ -615,47 +618,163 @@ class _ProjectBuilder:
 
         数值直接换算；未被接管的 property 引用按实例解析。被规划
         变量接管的 property 不再用实例旧值：静态安全界取规划变量
-        对应界（maximum 取 upper_bound，minimum 取 lower_bound，
-        缺失则 None），并返回规划变量名供逐时容量行使用。
+        对应界，并返回规划变量名供逐时容量行使用。
         """
+        num_internal = None if number is None else _to_internal(float(number), unit)
         if ref is not None and (inst, ref) in self.bound_prop:
             pname = self.bound_prop[(inst, ref)]
             spec = self.plan_vars[pname]
             punit = spec.get("unit") or unit
-            raw = spec.get("upper_bound" if side == "upper" else "lower_bound")
-            bound = None if raw is None else _to_internal(float(raw), punit)
+            var = self.variables.get(pname)
+            if side == "lower":
+                # The intersected planning variable carries the MODEL domain
+                # as well as the project boundary. Never reread a looser raw
+                # lower_bound directly from the unprocessed document.
+                p_bound = var.lower if var is not None else None
+            else:
+                p_bound = var.upper if var is not None else None
+            if num_internal is not None and p_bound is not None:
+                bound = min(num_internal, p_bound) if side == "upper" else max(num_internal, p_bound)
+            elif num_internal is not None:
+                bound = num_internal
+            else:
+                bound = p_bound
             return bound, pname
         if ref is not None:
             value, punit = self._prop_value_unit(inst, ref)
-            return _to_internal(value, punit), None
-        if number is None:
-            return None, None
-        return _to_internal(number, unit), None
+            ref_internal = _to_internal(value, punit)
+            if num_internal is not None:
+                bound = min(num_internal, ref_internal) if side == "upper" else max(num_internal, ref_internal)
+            else:
+                bound = ref_internal
+            return bound, None
+        return num_internal, None
 
     def _declare_global_symbols(self) -> None:
         """Declare each planning decision once, before binding any instance."""
         for name in sorted(self.plan_vars):
             spec = self.plan_vars[name]
             inst, prop = spec["device_ref"], spec["parameter"]
-            self._source(name, "planning", kind="symbol", location=SourceLocation(
+            project_source = SourceLocation(
                 f"planning.variables.{name}", inst, self.models[inst].device_id,
                 self.devices[inst]["definition"].get("revision"), binding_id=name,
-            ))
+            )
+            self._source(name, "planning", kind="symbol", location=project_source)
             model_var = self.models[inst].variables[prop]
             unit = spec.get("unit") or model_var.unit
-            lower = spec.get("lower_bound")
-            upper = spec.get("upper_bound")
-            lo = 0.0 if lower is None else _to_internal(float(lower), unit)
-            hi = None if upper is None else _to_internal(float(upper), unit)
+            model_source = SourceLocation(
+                f"properties.{prop}.valid_range", inst, self.models[inst].device_id,
+                self.devices[inst]["definition"].get("revision"),
+            )
+            m_lo = None
+            m_hi = None
+            m_range = getattr(model_var, "valid_range", None)
+            m_unit = getattr(model_var, "unit", unit)
+            if m_range is not None:
+                m_min, m_max = m_range
+                if m_min is not None:
+                    m_lo = _to_internal(float(m_min), m_unit)
+                if m_max is not None:
+                    m_hi = _to_internal(float(m_max), m_unit)
+            model_domain = (m_lo, m_hi) if (m_lo is not None or m_hi is not None) else None
+
+            raw_lower = spec.get("lower_bound")
+            raw_upper = spec.get("upper_bound")
+            p_lo = 0.0 if raw_lower is None else _to_internal(float(raw_lower), unit)
+            p_hi = None if raw_upper is None else _to_internal(float(raw_upper), unit)
+            project_boundary = (p_lo, p_hi) if (raw_lower is not None or raw_upper is not None) else None
+
+            # Lower bound intersection: max(m_lo, p_lo)
+            if m_lo is not None and p_lo is not None:
+                lo = max(m_lo, p_lo)
+                lo_source = project_source if p_lo >= m_lo else model_source
+            elif m_lo is not None:
+                lo = max(m_lo, 0.0)
+                lo_source = project_source if 0.0 >= m_lo else model_source
+            elif p_lo is not None:
+                lo = p_lo
+                lo_source = project_source
+            else:
+                lo = 0.0
+                lo_source = project_source
+
+            # Upper bound intersection: min(m_hi, p_hi)
+            if m_hi is not None and p_hi is not None:
+                hi = min(m_hi, p_hi)
+                hi_source = project_source if p_hi <= m_hi else model_source
+            elif m_hi is not None:
+                hi = m_hi
+                hi_source = model_source
+            elif p_hi is not None:
+                hi = p_hi
+                hi_source = project_source
+            else:
+                hi = None
+                hi_source = None
+
+            if lo is not None and hi is not None and lo > hi:
+                raise LoweringUnsupportedError(
+                    f"有效域冲突：规划变量 {name!r} 模型有效域 {model_domain} "
+                    f"与项目界 {project_boundary} 交集为空 (lower={lo} > upper={hi})",
+                    model_source={
+                        "source": f"symbol:{name}",
+                        "role": "planning_bound_conflict",
+                        "axis": "scalar",
+                        "index": 0,
+                        "location": {
+                            "planning_variable": name,
+                            "device_ref": inst,
+                            "parameter": prop,
+                            "model_domain": model_domain,
+                            "project_boundary": project_boundary,
+                        },
+                    },
+                )
+
             self._declare(name, lo, hi, "continuous", unit)
             self.inventory.symbols[name] = SymbolDeclaration(
-                name, "planning", IndexDomain("scalar"), unit,
-                SourceLocation(f"planning.variables.{name}", inst,
-                               self.models[inst].device_id,
-                               self.devices[inst]["definition"].get("revision"),
-                               binding_id=name),
+                name, "planning", IndexDomain("scalar"), unit, project_source,
             )
             self.inventory.property_bindings[(inst, prop)] = name
+            fact = BoundFact(
+                symbol=name,
+                lower=lo,
+                upper=hi,
+                lower_source=lo_source,
+                upper_source=hi_source,
+                model_domain=model_domain,
+                model_source=model_source if model_domain is not None else None,
+                project_boundary=project_boundary,
+                project_source=project_source if project_boundary is not None else None,
+            )
+            self.inventory.bound_facts[name] = fact
+            self.inventory.bound_facts[f"{inst}.{prop}"] = fact
+        # One explicitly named construction unit per new instance. Do not
+        # infer a build decision from a variable's hard bounds or a fixed cost.
+        self._construction_configs: dict[str, dict[str, Any]] = {}
+        for unit_id, unit in sorted((self.doc.get("planning") or {}).get(
+            "construction_units", {}
+        ).items()):
+            inst = unit["device_ref"]
+            mode = unit["mode"]
+            z_name = f"built__{unit_id}"
+            if z_name in self.variables:
+                raise LoweringUnsupportedError(
+                    f"建设单元 {unit_id!r} 的状态符号与已有规划变量冲突"
+                )
+            z_lower = 1.0 if mode == "mandatory" else 0.0
+            self._declare(z_name, z_lower, 1.0, "binary", "1")
+            z_loc = SourceLocation(f"planning.construction_units.{unit_id}", inst)
+            self.inventory.symbols[z_name] = SymbolDeclaration(
+                z_name, "construction", IndexDomain("scalar"), "1", z_loc,
+            )
+            self.inventory.bound_facts[z_name] = BoundFact(
+                z_name, lower=z_lower, upper=1.0,
+            )
+            self._construction_configs[inst] = {
+                "unit_id": unit_id, "mode": mode, "state": z_name,
+                "scales": unit["scales"],
+            }
         self.inventory.coefficients["step_duration"] = KnownCoefficient(
             "step_duration", "step_duration",
             SourceLocation("project_baseline.resolution"), self.step_s,
@@ -707,17 +826,8 @@ class _ProjectBuilder:
                 key = (inst, name)
                 if key in self.bound_prop:
                     pname = self.bound_prop[key]
-                    spec = self.plan_vars[pname]
-                    unit = spec.get("unit") or var.unit
-                    lower = spec.get("lower_bound")
-                    upper = spec.get("upper_bound")
-                    # 建设容量变量缺席下界即模型语义下界 0（规划契约；
-                    # 线性层 None 表 -inf，MPS 的 FR+UP 会被 HiGHS 判重复
-                    # 定义丢弃上界，必须在此落实为 LO 0）。
-                    lower_f = 0.0 if lower is None else _to_internal(float(lower), unit)
-                    upper_f = None if upper is None else _to_internal(float(upper), unit)
-                    symbols[name] = ("var", lower_f, upper_f)
-                    # Global declaration already owns this exact capacity symbol.
+                    var_decl = self.variables[pname]
+                    symbols[name] = ("var", var_decl.lower, var_decl.upper)
                 else:
                     symbols[name] = ("const", prop_const[name])
             else:
@@ -731,6 +841,17 @@ class _ProjectBuilder:
                     var.valid_range[1] if var.valid_range else None,
                     var.maximum_property_ref, "upper",
                 )
+                if lower is not None and upper is not None and lower > upper:
+                    raise LoweringUnsupportedError(
+                        f"有效域冲突：变量 {inst}.{name} 界颠倒 (lower={lower} > upper={upper})",
+                        model_source={
+                            "source": f"variable:{inst}.{name}",
+                            "role": "bound_conflict",
+                            "axis": "step",
+                            "index": 0,
+                            "location": {"instance": inst, "variable": name},
+                        },
+                    )
                 symbols[name] = ("var", lower, upper)
                 if pname_lo is not None:
                     caps.append((name, pname_lo, "ge"))
@@ -750,6 +871,17 @@ class _ProjectBuilder:
                 inst, flow.unit, flow.valid_range[1],
                 flow.maximum_property_ref, "upper",
             )
+            if lower is not None and upper is not None and lower > upper:
+                raise LoweringUnsupportedError(
+                    f"有效域冲突：接口 {inst}.{iface_name} 界颠倒 (lower={lower} > upper={upper})",
+                    model_source={
+                        "source": f"interface:{inst}.{iface_name}",
+                        "role": "bound_conflict",
+                        "axis": "step",
+                        "index": 0,
+                        "location": {"instance": inst, "interface": iface_name},
+                    },
+                )
             symbols[iface_name] = ("var", lower, upper)
             if pname_lo is not None:
                 caps.append((iface_name, pname_lo, "ge"))
@@ -768,6 +900,17 @@ class _ProjectBuilder:
             self.inventory.outputs.append(OutputReference(
                 identity, identity, IndexDomain("step", self.point_count), origin,
             ))
+            m_domain = (
+                _to_internal(float(flow.valid_range[0]), flow.unit) if flow.valid_range[0] is not None else None,
+                _to_internal(float(flow.valid_range[1]), flow.unit) if flow.valid_range[1] is not None else None,
+            ) if (flow.valid_range and (flow.valid_range[0] is not None or flow.valid_range[1] is not None)) else None
+            self.inventory.bound_facts[identity] = BoundFact(
+                symbol=identity,
+                lower=lower,
+                upper=upper,
+                model_domain=m_domain,
+                model_source=origin if m_domain is not None else None,
+            )
         for name, var in contribution.variables.items():
             if var.kind == "property":
                 continue
@@ -785,6 +928,17 @@ class _ProjectBuilder:
             self.inventory.outputs.append(OutputReference(
                 identity, identity, IndexDomain("step", self.point_count), origin,
             ))
+            m_domain = (
+                _to_internal(float(var.valid_range[0]), var.unit) if var.valid_range and var.valid_range[0] is not None else None,
+                _to_internal(float(var.valid_range[1]), var.unit) if var.valid_range and var.valid_range[1] is not None else None,
+            ) if (var.valid_range and (var.valid_range[0] is not None or var.valid_range[1] is not None)) else None
+            self.inventory.bound_facts[identity] = BoundFact(
+                symbol=identity,
+                lower=lower,
+                upper=upper,
+                model_domain=m_domain,
+                model_source=origin if m_domain is not None else None,
+            )
         initial: dict[str, float | LinearExpression] = {}
         for state in contribution.states:
             variable = contribution.variables[state]
@@ -855,6 +1009,10 @@ class _ProjectBuilder:
                                contribution.device_id, dev["definition"].get("revision")),
                 (f"{inst}.{local}", pname),
             ))
+        for local, _lo, _hi, _unit in column_specs:
+            self.inventory.step_columns[(inst, local)] = tuple(
+                self._tech_name(inst, local, t) for t in range(self.point_count)
+            )
         for name, value in initial.items():
             # Initial ASTs are lowered with model-local identifiers, but the
             # semantic graph must expose the globally bound identity.  In
@@ -904,6 +1062,9 @@ class _ProjectBuilder:
                 and isinstance(op.payload, CostComponent)
                 and op.payload.component == "upfront_capex"
                 and op.payload.finance_type == source.finance_type
+                and self.devices[op.payload.instance]["asset_origin"] == "new"
+                and (source.scope_kind == "all_new_instances"
+                     or op.payload.instance in source.instances)
             )
         else:
             identity = f"maintenance.y{source.year}.p{source.position}"
@@ -1695,6 +1856,36 @@ class _ProjectBuilder:
                                  if op.kind in ("annual_cash", "vat", "income", "net_cash")),
             ))
 
+        # Bind the SAME P1 technical templates before running P2 analysis;
+        # production expansion reuses these compiled objects below.
+        shared_technical: dict[tuple, TechnicalTemplate] = {}
+        for inst, statics in bound_instances.items():
+            contribution = self.models[inst]
+            known = dict(statics["prop_const"])
+            known[TIMELINE_STEP_DURATION_VAR] = self.step_s
+            predefined = {
+                name: self._series_si(inst, name, contribution)
+                for name, flow in contribution.interfaces.items()
+                if flow.type == "predefined"
+            }
+            for family in self._instance_relations[inst]:
+                roles = {
+                    name: ("known" if name in predefined
+                           or statics["symbols"][name][0] == "const" else "var")
+                    for name in family.referenced_symbols
+                }
+                cache_key = (
+                    id(family.relation.ast), tuple(sorted(roles.items())),
+                )
+                template = shared_technical.get(cache_key)
+                if template is None:
+                    template = compile_technical(family.relation, roles)
+                    shared_technical[cache_key] = template
+                    self.template_stats["technical_compiles"] += 1
+                self._technical_templates[family.identity] = template
+                self.inventory.technical_contexts[family.identity] = (
+                    template, known, statics["initial"], predefined, statics["symbols"],
+                )
         self.inventory.seal()
         self.analysis = CompilerAnalysis(self.inventory, self.variables)
         self._register_sources()
@@ -1736,12 +1927,14 @@ class _ProjectBuilder:
                     for name in family.referenced_symbols
                 }
                 key = (id(family.relation.ast), tuple(sorted(roles.items())))
-                template = compiled.get(key)
+                template = self._technical_templates.get(family.identity)
                 if template is None:
-                    template = compile_technical(family.relation, roles)
-                    compiled[key] = template
-                    self.template_stats["technical_compiles"] += 1
-                self._technical_templates[family.identity] = template
+                    template = compiled.get(key)
+                    if template is None:
+                        template = compile_technical(family.relation, roles)
+                        compiled[key] = template
+                        self.template_stats["technical_compiles"] += 1
+                    self._technical_templates[family.identity] = template
         for operation in self.analysis.relations("planning_step"):
             self._checkpoint()
             spec = operation.payload
@@ -1841,17 +2034,8 @@ class _ProjectBuilder:
             for name, flow in contribution.interfaces.items()
             if flow.type == "predefined"
         }
-        # S2's exact declared box bounds are time-independent for technical
-        # columns; evaluate through its shared analysis entry *once* per local.
-        bounds = {}
-        for name, entry in statics["symbols"].items():
-            if entry[0] != "var":
-                continue
-            actual = self.bound_prop.get((inst, name), self._tech_name(inst, name, 0))
-            if actual in self.variables:
-                bounds[name] = self.analysis.variable_bounds(actual)
-            else:
-                bounds[name] = (entry[1], entry[2])
+        # Each production step consumes its *own* proven interval. Do not
+        # reuse point-0 inference for the rest of the operating horizon.
         # The bound property and step-column table are *already* declared.
         # Capture them once per instance; only the step index changes. The
         # shared template binder can now produce one final global-column
@@ -1888,6 +2072,14 @@ class _ProjectBuilder:
                 self._checkpoint()
                 for name, values in series_by_name.items():
                     known[name] = values[step]
+                bounds = {}
+                for name, entry in statics["symbols"].items():
+                    if entry[0] != "var":
+                        continue
+                    column = self.bound_prop.get((inst, name))
+                    if column is None:
+                        column = self._step_columns[(inst, name)][step]
+                    bounds[name] = self.analysis.variable_bounds(column)
                 for family in families:
                     template = self._technical_templates[family.identity]
                     self._source(family.identity, "equation", "step", step, kind="technical")
@@ -2047,26 +2239,94 @@ class _ProjectBuilder:
     # 财务分量仿射式
     # ------------------------------------------------------------------
 
+    def _cost_occurrence(
+        self, inst: str, component: str, leaf: str,
+    ) -> Mapping[str, Any]:
+        binding = ((self.doc.get("finance_binding") or {}).get("instances") or {}).get(
+            inst, {}
+        )
+        conditions = binding.get("cost_occurrence") or {}
+        return conditions.get(component, conditions.get(
+            f"{component}.{leaf}", {"kind": "always"}
+        ))
+
+    def _conditional_cost_affine(
+        self, inst: str, component: str, leaf: str, amount: _AffineAcc,
+        start: int, end: int | None,
+    ) -> _AffineAcc:
+        condition = self._cost_occurrence(inst, component, leaf)
+        if condition["kind"] == "always":
+            return amount
+        cfg = self._construction_configs[inst]
+        if condition["unit_ref"] != cfg["unit_id"]:
+            raise RuntimeError("已校验费用发生条件与实例建设单元不一致")
+        if cfg["mode"] == "mandatory":
+            return amount
+        z_name = cfg["state"]
+        if not amount.terms:
+            result = _AffineAcc()
+            result.add_term(z_name, amount.constant)
+            return result
+        cache_key = (inst, component, leaf, start, end)
+        cached = self._conditional_amounts.get(cache_key)
+        if cached is not None:
+            return cached
+        label = f"finance_binding.instances.{inst}.cost_occurrence.{component}.{leaf}"
+        low = self.analysis.affine_side(amount, side="min", label=label)
+        high = self.analysis.affine_side(amount, side="max", label=label)
+        name = f"conditional_cost__{len(self._conditional_amounts)}"
+        self._declare(name, min(0.0, low), max(0.0, high), "continuous", None)
+        # y = z * x, exactly, for x in [low, high].
+        for suffix, sense, rhs, coeff in (
+            ("upper", "le", 0.0, {name: 1.0, z_name: -high}),
+            ("lower", "ge", 0.0, {name: 1.0, z_name: -low}),
+        ):
+            row = _AffineAcc()
+            for symbol, factor in coeff.items():
+                row.add_term(symbol, factor)
+            self.rows.append(LinearConstraint(
+                f"{name}__{suffix}", row.freeze(), sense, rhs,
+            ))
+        for suffix, sense, rhs, z_factor in (
+            ("match_upper", "le", -low, -low),
+            ("match_lower", "ge", -high, -high),
+        ):
+            row = _AffineAcc()
+            row.add_term(name, 1.0)
+            row.add_scaled(amount, -1.0)
+            row.add_term(z_name, z_factor)
+            self.rows.append(LinearConstraint(
+                f"{name}__{suffix}", row.freeze(), sense, rhs,
+            ))
+        result = _AffineAcc()
+        result.add_term(name, 1.0)
+        self._conditional_amounts[cache_key] = result
+        return result
+
     def _cost_affine(
         self, inst: str, component: str, start: int = 0, end: int | None = None,
         *, part: str | None = None,
     ) -> _AffineAcc:
-        """Lower the already collected cost amount expression.
-
-        Finance driver binding, aggregation and unit-cost conversion are frozen
-        in the cost relation before the collection barrier.  This stage only
-        expands its semantic driver identities to the current solver columns.
-        """
+        """Evaluate each declared money leaf once, with its own occurrence."""
         out = _AffineAcc()
         spec = self.analysis.operation(f"cost.{inst}__{component}").payload
         if spec.fixed_amount is not None and part in (None, "fixed"):
-            out.add_const(spec.fixed_amount)
+            fixed = _AffineAcc()
+            fixed.add_const(spec.fixed_amount)
+            out.add_scaled(self._conditional_cost_affine(
+                inst, component, "fixed", fixed, start, end,
+            ), 1.0)
         for term in spec.terms:
-            if part is not None and part != f"linear.{term.driver}":
+            leaf = f"linear.{term.driver}"
+            if part is not None and part != leaf:
                 continue
-            out.add_scaled(
+            amount = _AffineAcc()
+            amount.add_scaled(
                 self._driver_affine(inst, term, start, end), term.coefficient
             )
+            out.add_scaled(self._conditional_cost_affine(
+                inst, component, leaf, amount, start, end,
+            ), 1.0)
         return out
 
     def _driver_affine(
@@ -2270,10 +2530,30 @@ class _ProjectBuilder:
                                 ones += 1
                             else:
                                 select.add_term(flag, -slack)
+                        # A rigorously outward interval can legitimately be
+                        # narrower than HiGHS' matrix coefficient threshold.
+                        # Never delete that nonzero Big-M coefficient or treat
+                        # an approximately fixed flow as exactly fixed. Scale
+                        # the WHOLE row by a power of two, which preserves its
+                        # mathematical solution set and avoids changing source
+                        # units, variables, and physical bounds.
+                        scale = 1.0
+                        if 0.0 < slack < 1e-6:
+                            power = math.ceil(math.log2(1e-6 / slack))
+                            if power > 40:
+                                raise LoweringUnsupportedError(
+                                    f"需量绑定 {billing_id!r} 月 {month} "
+                                    f"精确选择行的系数尺度超出 MPS 可表示范围"
+                                )
+                            scale = math.ldexp(1.0, power)
+                        if scale != 1.0:
+                            normalized = _AffineAcc()
+                            normalized.add_scaled(select, scale)
+                            select = normalized
                         self.rows.append(LinearConstraint(
                             name=f"{peak_name}__select_{offset}",
                             expression=select.freeze(), sense="le",
-                            rhs=slack * ones,
+                            rhs=(slack * ones) * scale,
                         ))
                 self._demand_peaks[key] = peak
                 self._demand_peak_sources[key] = f"relation:{operation.identity}"
@@ -3162,28 +3442,45 @@ class _ProjectBuilder:
             residual_amount = _AffineAcc()
             residual_amount.add_scaled(depreciable, residual)
         else:
+            # A fixed R belongs to the *whole scoped money source*, not any
+            # arbitrarily chosen finance_type instance. B=0 implies R_eff=0;
+            # for B>0, the exact model requires B>=R.
             residual_amount = _AffineAcc()
-            residual_amount.add_const(residual)
             if residual > 0.0:
-                basis_lo = self.analysis.affine_side(
-                    depreciable, side="min", label=position,
-                    relation=relation, period=year,
-                )
-                basis_hi = self.analysis.affine_side(
-                    depreciable, side="max", label=position,
-                    relation=relation, period=year,
-                )
-                if basis_hi <= 0.0:
-                    residual_amount = _AffineAcc()
-                elif basis_lo <= 0.0:
-                    raise LoweringUnsupportedError(
-                        f"{position}的可变容量固定正残值在零建设与形成资产之间无法精确选择，"
-                        "超出当前选建能力"
+                key = (source.identity, residual)
+                existing = self._fixed_residuals.get(key)
+                if existing is not None:
+                    residual_amount.add_scaled(existing, 1.0)
+                else:
+                    basis_hi = self.analysis.affine_side(
+                        depreciable, side="max", label=position,
+                        relation=relation, period=year,
                     )
-                elif residual > basis_lo:
-                    raise LoweringUnsupportedError(
-                        f"{position}残值 {residual!r} 超过最小计税基础 {basis_lo!r}"
+                    basis_lo = self.analysis.affine_side(
+                        depreciable, side="min", label=position,
+                        relation=relation, period=year,
                     )
+                    if basis_hi <= 0.0:
+                        pass
+                    elif basis_lo >= residual:
+                        residual_amount.add_const(residual)
+                    else:
+                        name = f"asset_formed__{len(self._fixed_residuals)}"
+                        self._declare(name, 0.0, 1.0, "binary", "1")
+                        # B <= U*y; B >= R*y. When y=0 B=0, when B>0
+                        # y=1 and R<=B. No fictitious residual or epsilon.
+                        upper = depreciable.snapshot()
+                        upper.add_term(name, -basis_hi)
+                        self.rows.append(LinearConstraint(
+                            f"{name}__upper", upper.freeze(), "le", 0.0,
+                        ))
+                        lower = depreciable.snapshot()
+                        lower.add_term(name, -residual)
+                        self.rows.append(LinearConstraint(
+                            f"{name}__lower", lower.freeze(), "ge", 0.0,
+                        ))
+                        residual_amount.add_term(name, residual)
+                    self._fixed_residuals[key] = residual_amount.snapshot()
         annual = _AffineAcc()
         life = float(entry.life_years)
         annual.add_scaled(depreciable, 1.0 / life)
@@ -3567,6 +3864,53 @@ class _ProjectBuilder:
                 name=spec.name, expression=substituted.freeze(),
                 sense=lowered.sense, rhs=lowered.rhs,
             ))
+        self._build_construction_rows()
+
+    def _build_construction_rows(self) -> None:
+        """Exact activity constraints; mandatory units need no artificial M."""
+        for inst, cfg in sorted(self._construction_configs.items()):
+            unit_id, z_name = cfg["unit_id"], cfg["state"]
+            for pname, scale in sorted(cfg["scales"].items()):
+                unit = self.plan_vars[pname].get("unit") or self.models[inst].variables[
+                    self.plan_vars[pname]["parameter"]
+                ].unit
+                L = _to_internal(float(scale.get("active_lower_bound", "0")), unit)
+                raw_U = scale.get("active_upper_bound")
+                active_U = None if raw_U is None else _to_internal(float(raw_U), unit)
+                label = f"planning.construction_units.{unit_id}.scales.{pname}"
+                if cfg["mode"] == "optional":
+                    if active_U is None:
+                        candidate = _AffineAcc()
+                        candidate.add_term(pname, 1.0)
+                        U = self.analysis.affine_side(
+                            candidate, side="max", label=label,
+                        )
+                    else:
+                        U = active_U
+                    self._source(f"{unit_id}.construction", "capacity",
+                                 location=SourceLocation(label, inst))
+                    self.rows.append(LinearConstraint(
+                        name=f"{unit_id}__{pname}__build_max",
+                        expression=LinearExpression(
+                            terms=(((pname, 0), 1.0), ((z_name, 0), -U)),
+                            constant=0.0,
+                        ), sense="le", rhs=0.0,
+                    ))
+                elif active_U is not None:
+                    self.rows.append(LinearConstraint(
+                        name=f"{unit_id}__{pname}__active_max",
+                        expression=LinearExpression(
+                            terms=(((pname, 0), 1.0),), constant=0.0,
+                        ), sense="le", rhs=active_U,
+                    ))
+                if L > 0.0:
+                    self.rows.append(LinearConstraint(
+                        name=f"{unit_id}__{pname}__active_min",
+                        expression=LinearExpression(
+                            terms=(((pname, 0), 1.0), ((z_name, 0), -L)),
+                            constant=0.0,
+                        ), sense="ge", rhs=0.0,
+                    ))
 
     # ------------------------------------------------------------------
     # 总装
@@ -3780,6 +4124,27 @@ class _ProjectBuilder:
                 "rate": row["rate"],
                 "charge": self._decl_affine(paid),
             })
+        construction_units: list[dict[str, object]] = []
+        for inst, cfg in sorted(self._construction_configs.items(),
+                                key=lambda item: item[1]["unit_id"]):
+            scales = []
+            for pname in sorted(cfg["scales"]):
+                spec = self.plan_vars[pname]
+                unit = spec.get("unit") or self.models[inst].variables[
+                    spec["parameter"]
+                ].unit
+                scales.append({
+                    "planning_variable_id": pname,
+                    "value": self._decl_var(pname),
+                    "unit": unit,
+                })
+            construction_units.append({
+                "unit_id": cfg["unit_id"],
+                "instance_id": inst,
+                "mode": cfg["mode"],
+                "built": self._decl_var(cfg["state"]),
+                "scales": scales,
+            })
         out: dict[str, object] = {
             "currency": self.finance.currency,
             "monthly_demand": monthly_demand,
@@ -3833,6 +4198,7 @@ class _ProjectBuilder:
                 for t in range(years + 1)
             ],
         }
+        out["construction_units"] = construction_units
         return MappingProxyType(out)
 
     def build(self) -> tuple[LinearModel, Mapping[str, str], str]:

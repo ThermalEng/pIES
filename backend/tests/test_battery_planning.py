@@ -157,7 +157,8 @@ def test_planned_capacity_power_and_soc_boundaries_are_affine(battery):
             bound = _row(b, f"cell__{flow}__plan_max__t{step}")
             assert _terms(bound)["battery_kw"] == -1
     cap = b.variables["battery_size"]
-    assert cap.lower == 0 and cap.upper is None
+    # P2: 保留模型声明的有效域上界 10,000,000 kWh (3.6e13 J)，不因规划未给上界而丢失
+    assert cap.lower == 0 and cap.upper == pytest.approx(36_000_000_000_000.0)
     assert b.unit_map["battery_size"] == "kWh"
     assert b.unit_map["battery_kw"] == "kW"
 

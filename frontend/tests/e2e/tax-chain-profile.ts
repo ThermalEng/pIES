@@ -56,7 +56,7 @@ const taxProfileTemplate = {
     region: '合成税务验收区',
   },
   schema: 'ies.finance-profile',
-  schema_version: '6.0.0',
+  schema_version: '7.0.0',
   net_cashflows: {},
   tax_rules: {
     building_vat: {
@@ -79,7 +79,7 @@ const taxProfileTemplate = {
       },
       depreciation: [
         {
-          base_from: { kind: 'upfront_capex_net', finance_type: 'pv_system' },
+          base_from: { kind: 'upfront_capex_net', finance_type: 'pv_system', scope: { kind: 'all_new_instances' } },
           first_year: 1,
           life_years: 20,
           method: 'straight_line',

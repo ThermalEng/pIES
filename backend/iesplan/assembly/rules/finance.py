@@ -273,6 +273,107 @@ def check_finance_binding(
             )
             continue
         _check_drivers(doc, snapshot, registry, inst_id, finance_type, ft_entry, entry, diags)
+        _check_cost_occurrence(doc, inst_id, ft_entry, entry, diags)
+    _check_scoped_asset_sources(doc, snapshot, diags)
+
+
+def _check_cost_occurrence(
+    doc: Mapping[str, Any], inst_id: str, finance_type: FinanceTypeEntry,
+    binding: Mapping, diags: list[Diagnostic],
+) -> None:
+    """Validate occurrence on real cost leaves at the public assembly boundary."""
+    raw = binding.get("cost_occurrence", {})
+    if not isinstance(raw, Mapping):
+        _cost_fail(diags, f"finance_binding.instances.{inst_id}.cost_occurrence",
+                   "occurrence_invalid", {"instance": inst_id})
+        return
+    origin = doc["devices"][inst_id]["asset_origin"]
+    available: dict[str, set[str]] = {}
+    for component in required_components(origin):
+        comp = getattr(finance_type, component)
+        if comp is None:
+            continue
+        leaves = set()
+        if comp.fixed is not None:
+            leaves.add(f"{component}.fixed")
+        if comp.linear:
+            leaves.update(f"{component}.linear.{driver}" for driver in comp.linear)
+        available[component] = leaves
+
+    construction_units = (doc.get("planning") or {}).get("construction_units") or {}
+    used_leaves: set[str] = set()
+    for path, condition in sorted(raw.items()):
+        field = f"finance_binding.instances.{inst_id}.cost_occurrence.{path}"
+        if path in available:
+            covered = available[path]
+        else:
+            covered = {
+                leaf for leaves in available.values() for leaf in leaves if leaf == path
+            }
+        if not covered:
+            _cost_fail(diags, field, "occurrence_unknown_cost_leaf",
+                       {"instance": inst_id, "path": path})
+            continue
+        collision = used_leaves.intersection(covered)
+        if collision:
+            _cost_fail(diags, field, "occurrence_overlapping_paths",
+                       {"instance": inst_id, "paths": sorted(collision)})
+        used_leaves.update(covered)
+        if not isinstance(condition, Mapping):
+            _cost_fail(diags, field, "occurrence_invalid", {"instance": inst_id})
+            continue
+        if condition.get("kind") == "always":
+            if set(condition) != {"kind"}:
+                _cost_fail(diags, field, "occurrence_invalid", {"instance": inst_id})
+        elif condition.get("kind") == "construction_unit":
+            unit = construction_units.get(condition.get("unit_ref"))
+            if set(condition) != {"kind", "unit_ref"} or not isinstance(unit, Mapping) or unit.get("device_ref") != inst_id:
+                _cost_fail(diags, field, "occurrence_unit_wrong_instance",
+                           {"instance": inst_id, "unit_ref": condition.get("unit_ref")})
+        else:
+            _cost_fail(diags, field, "occurrence_kind_invalid", {"instance": inst_id})
+
+def _check_scoped_asset_sources(
+    doc: Mapping[str, Any], snapshot: EffectiveFinanceConfig,
+    diags: list[Diagnostic],
+) -> None:
+    """Resolve scoped capex references only with this project's actual bindings."""
+    devices = doc.get("devices") or {}
+    bindings = (doc.get("finance_binding") or {}).get("instances") or {}
+    sources = []
+    for rule_id, rule in snapshot.tax_rules.items():
+        if not hasattr(rule, "depreciation"):
+            continue
+        for index, entry in enumerate(rule.depreciation):
+            sources.append((f"tax_rules.{rule_id}.depreciation.{index}", entry.base_from, True))
+    for cash_id, entry in snapshot.net_cashflows.items():
+        amount = entry.amount
+        if amount.kind == "source_share":
+            sources.append((f"net_cashflows.{cash_id}.amount.base_from", amount.base_from, False))
+
+    depreciated: set[str] = set()
+    for field, source, is_depreciation in sources:
+        if source.kind != "upfront_capex_net":
+            continue
+        all_matching = {
+            inst_id for inst_id, bind in bindings.items()
+            if isinstance(bind, Mapping) and bind.get("type") == "costed"
+            and bind.get("finance_type") == source.finance_type
+            and isinstance(devices.get(inst_id), Mapping)
+            and devices[inst_id].get("asset_origin") == "new"
+        }
+        chosen = (all_matching if source.scope_kind == "all_new_instances"
+                  else set(source.instances))
+        for inst_id in sorted(chosen):
+            if inst_id not in all_matching:
+                _cost_fail(diags, field, "asset_scope_wrong_new_instance",
+                           {"instance": inst_id, "finance_type": source.finance_type})
+        if is_depreciation:
+            overlap = depreciated & chosen
+            if overlap:
+                _cost_fail(diags, field, "asset_scope_duplicate_depreciation",
+                           {"instances": sorted(overlap)})
+            depreciated.update(chosen)
 
 
 def _check_drivers(

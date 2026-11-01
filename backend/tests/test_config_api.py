@@ -118,7 +118,7 @@ def _valid_payload() -> dict[str, Any]:
         "schema_version": "2.0.0",
         "mode": "planning",
         "predictions": [],
-        "generator": "ies.generator.highs_milp@7.1.0",
+        "generator": "ies.generator.highs_milp@8.0.0",
         "solver": "ies.solver.highs@1.7.2",
         "precision": "medium",
         "convergence": None,

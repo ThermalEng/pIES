@@ -178,10 +178,10 @@ def test_assembly_reference_scope_currency_and_units() -> None:
 
 def test_affine_capability_only_required_for_nonempty_terms() -> None:
     plain = parse_evaluation_input(_input([{"year": 2, "amount": "10", "currency": "CNY"}]))
-    _check_maintenance_capability(plain, "ies.generator.highs_milp@7.1.0", ())
+    _check_maintenance_capability(plain, "ies.generator.highs_milp@8.0.0", ())
     affine = parse_evaluation_input(_input([_expense(_scale())]))
     with pytest.raises(InvalidRequestError) as raised:
-        _check_maintenance_capability(affine, "ies.generator.highs_milp@7.1.0", ())
+        _check_maintenance_capability(affine, "ies.generator.highs_milp@8.0.0", ())
     assert raised.value.code == "TASK-REQ-007"
     assert raised.value.params["missing_capabilities"] == ["finance.affine_maintenance"]
     _check_maintenance_capability(affine, "candidate", ("finance.affine_maintenance",))

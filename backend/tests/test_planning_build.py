@@ -311,9 +311,9 @@ class TestSubmitBoundaryBuildScope:
         )
         assert result.artifact is not None, [d.to_dict() for d in result.diagnostics]
 
-    def test_optional_build_with_positive_fixed_rejected(self, init_registry):
-        # 可选建设变量(下界为 0/缺席) + 正固定费：LP 内无精确触发表达，
-        # 在离散建模实现前明确拒收，不放行旧按常数计费路径。
+    def test_optional_build_with_unconditional_fixed_cost_passes(self, init_registry):
+        # 未声明 cost_occurrence 时固定费始终无条件发生。
+        # 可选规模不会隐式把固定费变成 F*z；条件费用须显式声明。
         text = self._object_finance_text(
             _strip_year_offset(_load("campus.assembly.yaml"))
         )
@@ -321,7 +321,7 @@ class TestSubmitBoundaryBuildScope:
             text,
             finance_snapshots={"fin:test-fixed": self._fixed_snapshot()},
         )
-        _reason(result, "positive_fixed_cost_unsupported")
+        assert result.artifact is not None, [d.to_dict() for d in result.diagnostics]
 
     def test_zero_fixed_cost_passes(self, init_registry):
         # 园区样例 pv_system upfront fixed 为 0: 去掉上界仍签发。

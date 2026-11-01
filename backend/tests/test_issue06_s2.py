@@ -67,7 +67,7 @@ def _builder(
         "depreciation": [], "loss_carryforward_years": 5, "opening_losses": [],
     }
     payload = {
-        "schema": "ies.finance-profile", "schema_version": "6.0.0",
+        "schema": "ies.finance-profile", "schema_version": "7.0.0",
         "profile": {
             "id": "maintenance-tiny", "region": "CN-North", "currency": currency,
             "base_year": 2025, "price_basis": "tax_inclusive",
@@ -185,6 +185,7 @@ def test_pre_lowering_amount_sources_bind_cost_and_maintenance_to_income() -> No
             {
                 "base_from": {
                     "kind": "upfront_capex_net", "finance_type": "same",
+                    "scope": {"kind": "all_new_instances"},
                 },
                 "method": "straight_line", "life_years": 4,
                 "residual": {"value": "0", "unit": "1"}, "first_year": 1,
@@ -353,3 +354,79 @@ def test_finite_bound_only_required_when_tax_expression_needs_it() -> None:
     _builder(items, upper=None).build()
     with pytest.raises(LoweringUnsupportedError, match="VAT 池.*缺有限界.*cap_a"):
         _builder(items, upper=None, taxes=True).build()
+
+
+def test_s3_scoped_fixed_residual_is_invariant_to_binding_order(tmp_path) -> None:
+    """Same category a off / b on: source R belongs once to the whole scope.
+
+    Reversing JSON insertion order must not change depreciation or tax/NPV.
+    A positive active lower bound makes a's inactive state unambiguous.
+    """
+    from collections import OrderedDict
+
+    def patch(profile: dict) -> None:
+        profile["tax_rules"]["maint_income"]["depreciation"] = [{
+            "base_from": {
+                "kind": "upfront_capex_net", "finance_type": "same",
+                "scope": {"kind": "instances", "instances": ["b", "a"]},
+            },
+            "method": "straight_line", "life_years": 4, "first_year": 1,
+            "residual": {"value": "100", "unit": "CNY"},
+        }]
+
+    def make(reverse: bool) -> _ProjectBuilder:
+        builder = _builder([_expense("0"), _expense("0")], taxes=True,
+                           second_planned=True, finance_patch=patch)
+        doc = builder.doc
+        doc["planning"]["variables"]["cap_a"]["upper_bound"] = "0"
+        doc["planning"]["variables"]["cap_b"]["lower_bound"] = "5"
+        doc["planning"]["variables"]["cap_b"]["upper_bound"] = "5"
+        doc["planning"]["constraints"] = {}
+        doc["planning"]["construction_units"] = {
+            "a_unit": {
+                "device_ref": "a", "mode": "optional",
+                "scales": {"cap_a": {
+                    "active_lower_bound": "1", "active_upper_bound": "10",
+                }},
+            },
+            "b_unit": {
+                "device_ref": "b", "mode": "mandatory",
+                "scales": {"cap_b": {
+                    "active_lower_bound": "5", "active_upper_bound": "5",
+                }},
+            },
+        }
+        bindings = doc["finance_binding"]["instances"]
+        for inst_id, unit_id in (("a", "a_unit"), ("b", "b_unit")):
+            bindings[inst_id]["cost_occurrence"] = {
+                "upfront_capex": {
+                    "kind": "construction_unit", "unit_ref": unit_id,
+                },
+            }
+        order = ("b", "a", "old") if reverse else ("a", "b", "old")
+        doc["finance_binding"]["instances"] = OrderedDict(
+            (name, bindings[name]) for name in order
+        )
+        # The builder references this planning mapping, and no additional
+        # planning variable is created; only its declared bounds change.
+        return _ProjectBuilder(
+            doc=doc, devices=doc["devices"], models=builder.models,
+            series=(), finance=builder.finance, evaluation=builder.evaluation,
+            point_count=0, step_s=3600.0,
+        )
+
+    outcomes = []
+    for reverse, name in ((False, "ab"), (True, "ba")):
+        builder = make(reverse)
+        solved, facts = _tiny_solve(builder, tmp_path / name)
+        assert solved["built__a_unit"] == pytest.approx(0)
+        assert solved["built__b_unit"] == pytest.approx(1)
+        dep = next(row for row in facts["tax_cash"]["depreciation"]
+                   if row["year"] == 1 and row["rule"] == "maint_income")
+        outcomes.append((
+            _amount(dep["amount"], **solved),
+            _amount(facts["annual_net_flows"][0], **solved),
+            _amount(facts["tax_cash"]["income"][0]["tax"], **solved),
+        ))
+    assert outcomes[0] == pytest.approx(outcomes[1])
+    assert outcomes[0][0] == pytest.approx((1000 - 100) / 4)

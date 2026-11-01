@@ -19,7 +19,7 @@ generator/solver 选项(属于计算配置)。
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation, Overflow, localcontext
 import re
 from types import MappingProxyType
@@ -164,7 +164,7 @@ class PlanningVariable:
             raise PlanningConfigError("规划变量 unit 必须为非空字符串")
 
     def to_dict(self) -> dict:
-        return {
+        res: dict[str, Any] = {
             "device_ref": self.device_ref,
             "parameter": self.parameter,
             "lower_bound": (
@@ -179,6 +179,7 @@ class PlanningVariable:
             ),
             "unit": self.unit,
         }
+        return res
 
     @classmethod
     def from_dict(cls, mapping: object) -> "PlanningVariable":
@@ -285,6 +286,86 @@ class Constraint:
             references=mapping.get("references"),
         )
 
+@dataclass(frozen=True, slots=True)
+class ConstructionScale:
+    """Activity-only interval in the planning variable's business unit."""
+
+    active_lower_bound: Decimal = Decimal("0")
+    active_upper_bound: Decimal | None = None
+
+    def __post_init__(self) -> None:
+        if self.active_lower_bound < 0:
+            raise PlanningConfigError("active_lower_bound 必须非负")
+        if self.active_upper_bound is not None and (
+            self.active_upper_bound < 0 or self.active_lower_bound > self.active_upper_bound
+        ):
+            raise PlanningConfigError("construction scale 活动上下界非法")
+
+    def to_dict(self) -> dict:
+        return {
+            "active_lower_bound": _decimal_to_canonical(self.active_lower_bound),
+            "active_upper_bound": (
+                _decimal_to_canonical(self.active_upper_bound)
+                if self.active_upper_bound is not None else None
+            ),
+        }
+
+    @classmethod
+    def from_dict(cls, mapping: object) -> "ConstructionScale":
+        if not isinstance(mapping, Mapping):
+            raise PlanningConfigError("construction_units.scales 项必须为映射")
+        unknown = set(mapping) - {"active_lower_bound", "active_upper_bound"}
+        if unknown:
+            raise PlanningConfigError(f"construction scale 未知字段: {sorted(unknown)}")
+        lower = mapping.get("active_lower_bound", "0")
+        upper = mapping.get("active_upper_bound")
+        if not isinstance(lower, str) or (upper is not None and not isinstance(upper, str)):
+            raise PlanningConfigError("活动规模界必须为十进制字符串或 null")
+        return cls(
+            _to_decimal(lower, "active_lower_bound"),
+            _to_decimal(upper, "active_upper_bound") if upper is not None else None,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class ConstructionUnit:
+    """One new instance and its related planning scales."""
+
+    device_ref: str
+    mode: str
+    scales: Mapping[str, ConstructionScale]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.device_ref, str) or not self.device_ref:
+            raise PlanningConfigError("construction_unit.device_ref 必须为实例 ID")
+        if self.mode not in ("mandatory", "optional"):
+            raise PlanningConfigError("construction_unit.mode 必须为 mandatory 或 optional")
+        if not isinstance(self.scales, Mapping) or not self.scales:
+            raise PlanningConfigError("construction_unit.scales 必须为非空映射")
+        object.__setattr__(
+            self, "scales", MappingProxyType(dict(sorted(self.scales.items())))
+        )
+
+    def to_dict(self) -> dict:
+        return {
+            "device_ref": self.device_ref,
+            "mode": self.mode,
+            "scales": {name: scale.to_dict() for name, scale in self.scales.items()},
+        }
+
+    @classmethod
+    def from_dict(cls, mapping: object) -> "ConstructionUnit":
+        if not isinstance(mapping, Mapping) or set(mapping) != {"device_ref", "mode", "scales"}:
+            raise PlanningConfigError("construction_unit 必须且仅含 device_ref/mode/scales")
+        raw = mapping["scales"]
+        if not isinstance(raw, Mapping):
+            raise PlanningConfigError("construction_unit.scales 必须为映射")
+        return cls(
+            device_ref=mapping["device_ref"], mode=mapping["mode"],
+            scales={str(k): ConstructionScale.from_dict(v) for k, v in raw.items()},
+        )
+
+
 # ---------------------------------------------------------------------------
 # PlanningConfig
 # ---------------------------------------------------------------------------
@@ -303,10 +384,29 @@ class PlanningConfig:
     objective: Objective
     variables: Mapping[str, PlanningVariable]
     constraints: Mapping[str, Constraint]
+    construction_units: Mapping[str, ConstructionUnit] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not self.variables:
             raise PlanningConfigError("规划配置必须至少声明一个规划变量")
+        used_instances: set[str] = set()
+        used_scales: set[str] = set()
+        for unit_id, unit in self.construction_units.items():
+            if not re.fullmatch(r"[a-z][a-z0-9_]*", unit_id) or "__" in unit_id:
+                raise PlanningConfigError(f"construction_unit ID 非法: {unit_id!r}")
+            if unit.device_ref in used_instances:
+                raise PlanningConfigError(f"实例 {unit.device_ref!r} 重复绑定建设单元")
+            used_instances.add(unit.device_ref)
+            for name in unit.scales:
+                if name not in self.variables or self.variables[name].device_ref != unit.device_ref:
+                    raise PlanningConfigError(f"建设单元 {unit_id!r} 的规模 {name!r} 归属错误")
+                if name in used_scales:
+                    raise PlanningConfigError(f"规划变量 {name!r} 重复用于建设单元")
+                used_scales.add(name)
+        object.__setattr__(
+            self, "construction_units",
+            MappingProxyType(dict(sorted(self.construction_units.items()))),
+        )
         # 深度不可变 + 稳定键序
         object.__setattr__(
             self, "variables",
@@ -336,6 +436,9 @@ class PlanningConfig:
             "constraints": {
                 k: v.to_dict() for k, v in sorted(self.constraints.items())
             },
+            **({"construction_units": {
+                k: v.to_dict() for k, v in self.construction_units.items()
+            }} if self.construction_units else {}),
         }
 
     @classmethod
@@ -346,7 +449,7 @@ class PlanningConfig:
                 f"规划配置必须是字典, 实际 {type(mapping).__name__}"
             )
         unknown = set(mapping) - {
-            "objective", "variables", "constraints",
+            "objective", "variables", "constraints", "construction_units",
         }
         if unknown:
             raise PlanningConfigError(f"规划配置存在未知字段: {sorted(unknown)}")
@@ -365,10 +468,16 @@ class PlanningConfig:
         constraints = {
             str(k): Constraint.from_dict(v) for k, v in constraints_raw.items()
         }
+        raw_units = mapping.get("construction_units", {})
+        if not isinstance(raw_units, Mapping):
+            raise PlanningConfigError("construction_units 必须为映射")
         config = cls(
             objective=Objective.from_dict(mapping["objective"]),
             variables=variables,
             constraints=constraints,
+            construction_units={
+                str(k): ConstructionUnit.from_dict(v) for k, v in raw_units.items()
+            },
         )
         return config
 

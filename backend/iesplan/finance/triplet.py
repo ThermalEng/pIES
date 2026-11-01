@@ -38,7 +38,7 @@ from iesplan.finance.monthly_daily import DAY_POINTS
 SCHEMA_PROFILE: Final[str] = "ies.finance-profile"
 SCHEMA_OVERRIDES: Final[str] = "ies.finance-overrides"
 SCHEMA_EFFECTIVE: Final[str] = "ies.effective-finance-config"
-SCHEMA_VERSION: Final[str] = "6.0.0"
+SCHEMA_VERSION: Final[str] = "7.0.0"
 
 CURRENCIES: Final[tuple[str, ...]] = ("CNY", "USD")
 PRICE_BASIS_VALUES: Final[tuple[str, ...]] = ("tax_inclusive", "tax_exclusive")
@@ -853,14 +853,33 @@ class DeductibleMaintenance:
 @dataclass(frozen=True, slots=True)
 class UpfrontCapexNetBaseFrom:
     finance_type: str
+    scope_kind: str
+    instances: tuple[str, ...] = ()
     kind: str = "upfront_capex_net"
 
+    def __post_init__(self) -> None:
+        if self.scope_kind not in ("all_new_instances", "instances"):
+            raise FinanceTripletError("upfront_capex_net.scope.kind 非法")
+        if self.scope_kind == "all_new_instances" and self.instances:
+            raise FinanceTripletError("all_new_instances 不接受实例列表")
+        if self.scope_kind == "instances":
+            if not self.instances or len(set(self.instances)) != len(self.instances):
+                raise FinanceTripletError("scope.instances 必须为非空且无重复的实例集合")
+            for instance in self.instances:
+                _validate_local_id(instance, "scope.instances")
+            object.__setattr__(self, "instances", tuple(sorted(self.instances)))
+
     def to_dict(self) -> dict:
-        return {"kind": "upfront_capex_net", "finance_type": self.finance_type}
+        scope = {"kind": self.scope_kind}
+        if self.scope_kind == "instances":
+            scope["instances"] = list(self.instances)
+        return {
+            "kind": "upfront_capex_net", "finance_type": self.finance_type, "scope": scope
+        }
 
     @property
-    def identity(self) -> tuple[str, str]:
-        return ("upfront_capex_net", self.finance_type)
+    def identity(self) -> tuple:
+        return ("upfront_capex_net", self.finance_type, self.scope_kind, self.instances)
 
 
 @dataclass(frozen=True, slots=True)
@@ -885,9 +904,28 @@ def _parse_amount_base_from(mapping: object, field: str) -> AmountBaseFrom:
         raise FinanceTripletError(f"{field} 必须是字典")
     kind = mapping.get("kind")
     if kind == "upfront_capex_net":
-        _require_keys(mapping, {"kind", "finance_type"}, field)
+        _require_keys(mapping, {"kind", "finance_type", "scope"}, field)
         ft = _validate_local_id(mapping["finance_type"], f"{field}.finance_type")
-        return UpfrontCapexNetBaseFrom(finance_type=ft)
+        scope = mapping["scope"]
+        if not isinstance(scope, Mapping) or "kind" not in scope:
+            raise FinanceTripletError(f"{field}.scope 必须显式声明 kind")
+        scope_kind = scope["kind"]
+        if scope_kind == "all_new_instances":
+            _require_keys(scope, {"kind"}, f"{field}.scope")
+            instances = ()
+        elif scope_kind == "instances":
+            _require_keys(scope, {"kind", "instances"}, f"{field}.scope")
+            raw = scope["instances"]
+            if not isinstance(raw, list) or not raw:
+                raise FinanceTripletError(f"{field}.scope.instances 必须为非空列表")
+            if any(not isinstance(x, str) for x in raw):
+                raise FinanceTripletError(f"{field}.scope.instances 项必须为实例 ID")
+            instances = tuple(raw)
+        else:
+            raise FinanceTripletError(f"{field}.scope.kind 未知: {scope_kind!r}")
+        return UpfrontCapexNetBaseFrom(
+            finance_type=ft, scope_kind=scope_kind, instances=instances
+        )
     elif kind == "maintenance_expense_net":
         _require_keys(mapping, {"kind", "year", "position"}, field)
         year = _pos_int(mapping["year"], f"{field}.year")

@@ -60,7 +60,7 @@ ELEC_KW = LOAD_KW / EFFICIENCY
 def _finance_payload(*, refunds=(), opening="0", basis="tax_inclusive", rules="all", maintenance_tax=True):
     payload = {
         "schema": "ies.finance-profile",
-        "schema_version": "6.0.0",
+        "schema_version": "7.0.0",
         "profile": {
             "id": "vat-demo",
             "region": "CN-North",
@@ -283,7 +283,7 @@ equations:
 def _doc(*, variables: dict | None = None, tank_origin: str = "new"):
     return {
         "schema": "ies.assembly",
-        "schema_version": "5.0.0",
+        "schema_version": "6.0.0",
         "assembly": {"id": "vat-mini", "name": "VAT 手算装配"},
         "project_baseline": {
             "resolution": "1h",
@@ -395,12 +395,28 @@ def _contribution(yaml_text: str):
     return built.contribution
 
 
-def _device_docs(*, heater_yaml: str = HEATER_YAML, grid_yaml: str = GRID_YAML):
+# A genuinely unbounded heat sink: unlike the ordinary fixed-load fixture,
+# its heat_in has no equality to a known demand, so the connected electricity
+# meter cannot acquire an upper bound via the existing bus and heater relation.
+LOAD_UNBOUNDED_YAML = (
+    LOAD_YAML.replace(
+        "valid_range: {minimum: 0, maximum: 100}",
+        "valid_range: {minimum: 0, maximum: null}",
+    ).replace(
+        '  relations:\n    - id: serve\n      expression: "heat_in[t] = heat_demand[t]"',
+        '  relations: []',
+    )
+)
+
+
+def _device_docs(*, heater_yaml: str = HEATER_YAML,
+                 grid_yaml: str = GRID_YAML,
+                 load_yaml: str = LOAD_YAML):
     docs = {}
     for device_id, yaml_text in (
         ("acme.device.heater", heater_yaml),
         ("acme.device.tank", TANK_YAML),
-        ("acme.device.load", LOAD_YAML),
+        ("acme.device.load", load_yaml),
         ("acme.device.grid", grid_yaml),
     ):
         result = parse_device_model_v2(yaml_load(yaml_text), file="test.yaml")
@@ -438,6 +454,7 @@ def _inputs(
     opening="0",
     objective=None,
     heater_yaml=HEATER_YAML,
+    load_yaml=LOAD_YAML,
     basis="tax_inclusive",
     rules="all",
     tank_origin="new",
@@ -462,7 +479,7 @@ def _inputs(
     models = {
         "heater1": _contribution(heater_yaml),
         "tank1": _contribution(TANK_YAML),
-        "load1": _contribution(LOAD_YAML),
+        "load1": _contribution(load_yaml),
         "grid1": _contribution(grid_yaml),
     }
     if payload is None:
@@ -478,7 +495,9 @@ def _inputs(
     result = validate_assembly_doc(
         doc,
         finance_snapshots={"obj-finance": finance},
-        device_documents=_device_docs(heater_yaml=heater_yaml, grid_yaml=grid_yaml),
+        device_documents=_device_docs(
+            heater_yaml=heater_yaml, grid_yaml=grid_yaml, load_yaml=load_yaml
+        ),
     )
     assert result.artifact is not None, [d.to_dict() for d in result.diagnostics]
     materialized = materialize_non_predictive_series(result.artifact, {}, operation_years=2)
@@ -1001,7 +1020,8 @@ equations:
 
 def test_vat_unbounded_flow_is_unsupported() -> None:
     """缺有限界即明确不支持：无界交易流无法精确互斥，不猜大常量。"""
-    artifact, models, materialized, finance, config, evaluation = _inputs(heater_yaml=HEATER_UNBOUNDED_YAML)
+    artifact, models, materialized, finance, config, evaluation = _inputs(heater_yaml=HEATER_UNBOUNDED_YAML,
+                                                                load_yaml=LOAD_UNBOUNDED_YAML)
     with pytest.raises(LoweringUnsupportedError):
         build_project_model(artifact, models, materialized, finance, config, evaluation)
 

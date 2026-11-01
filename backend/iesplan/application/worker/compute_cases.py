@@ -731,7 +731,7 @@ def build_financial_evaluation(
     )
     return {
         "schema": "ies.financial-evaluation",
-        "schema_version": "3.0.0",
+        "schema_version": "4.0.0",
         "status": "evaluated",
         "evaluation_years": years,
         # K/N 回显冻结输入(展示时轴映射用, 不做第二权威读取)。
@@ -751,6 +751,7 @@ def build_financial_evaluation(
             for entry in facts["payments_applied"]
         ],
         "net_cashflows": thaw_json_value(facts["net_cashflows"]),
+        "construction_units": thaw_json_value(facts["construction_units"]),
         "annual_operation": [
             {
                 "financial_year": entry["financial_year"],

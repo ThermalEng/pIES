@@ -139,6 +139,11 @@ GENERATOR_PROJECT_CONSUMERS = (
     "test_p1_s3_templates.py",
     "test_p1_s3_multiscale.py",
     "test_p1_s4_sources.py",
+    "test_p2_s1_bounds.py",
+    "test_p2_s2_derivation.py",
+    "test_p2_s3_activation.py",
+    "test_p2_s4_integration.py",
+    "test_pr38_review_probes.py",
     "test_linear_lowering.py",
     "test_issue04_d2.py",
     "test_vat_monthly.py",
@@ -239,7 +244,7 @@ BACKEND_SECONDS = {
     "test_config_revisions.py": 27,
     "test_local_process.py": 22,
     "test_npv_objective.py": 60,
-    "test_income_annual.py": 55,
+    "test_income_annual.py": 55,  # partitioned by function in four-lane runs
     "test_auth_api.py": 51,
     "test_package_project_models.py": 40,
     "test_project_api.py": 35,
@@ -262,6 +267,26 @@ COMPUTATION_CHAIN_NODE_SECONDS = {
     "test_gas_volume_driver_same_source_across_gates": 7,
     "test_chain_policy_rejected_never_executes": 8,
 }
+# Docker CI 41279935541 after sparse bound inference repair: heavy income
+# cases now complete in roughly 5-8s. These are scheduling estimates, not
+# runtime guarantees; keep every real solver and negative assertion.
+INCOME_ANNUAL_NODE_SECONDS = {
+    "test_pre_lowering_income_years_and_loss_claims_are_explicit": 5,
+    "test_income_reversal_selects_post_tax_optimum": 7,  # 6.85s observed
+    "test_income_reversal_pretax_prefers_build": 12,
+    "test_income_loss_expiry_and_order": 7,  # 6.83s observed
+    "test_income_same_expiry_input_order": 7,  # 6.77s observed
+    "test_income_generated_loss_expires_without_carry": 6,  # 5.17s observed
+    "test_income_non_npv_objective_keeps_exact_balances": 6,  # 5.42s observed
+    "test_income_vat_mix_matches_hand_and_b0": 15,  # 12.79s observed
+    "test_income_vat_mix_exclusive_matches_hand_and_b0": 15,  # 10.44s observed
+    "test_income_equivalent_gross_net_statement_matches": 25,  # 20.82s observed
+    "test_income_depreciation_zero_build_no_fictitious_income": 8,  # 7.49s observed
+    "test_income_depreciation_variable_capacity_positive_residual_solves_exactly": 25,
+    "test_income_depreciation_static_residual_matches_hand": 15,  # 10.47s observed
+    "test_income_depreciation_excess_residual_rejected": 10,
+    "test_income_depreciation_skipped_without_new_asset": 10,
+}
 BROWSER_SECONDS = {
     "hourly-steps.spec.ts": 345, "task-draft-load.spec.ts": 220,
     "task-selection.spec.ts": 220, "tax-chain.spec.ts": 145,
@@ -271,13 +296,13 @@ BROWSER_SECONDS = {
 }
 
 
-def computation_chain_nodes() -> set[str]:
-    """Derive every pytest node from the long-running chain file, not an allowlist.
+def _file_test_nodes(filename: str) -> set[str]:
+    """Enumerate all static pytest nodes; dynamic collection falls back to file.
 
-    A nodeid selects all parametrizations of that function. Unknown dynamic
-    collection falls back to the complete original file without dropping cases.
+    A function node selects all parametrizations of that test. No manual
+    selection list may silently omit a new negative or real-solver test.
     """
-    source = BACKEND_DIR / "test_computation_chain.py"
+    source = BACKEND_DIR / filename
     tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
     nodes: set[str] = set()
     for node in tree.body:
@@ -285,11 +310,11 @@ def computation_chain_nodes() -> set[str]:
             if node.name == "pytest_generate_tests":
                 return set()
             if node.name.startswith("test_"):
-                nodes.add(f"test_computation_chain.py::{node.name}")
+                nodes.add(f"{filename}::{node.name}")
         elif isinstance(node, ast.ClassDef) and node.name.startswith("Test"):
             for case in node.body:
                 if isinstance(case, (ast.FunctionDef, ast.AsyncFunctionDef)) and case.name.startswith("test_"):
-                    nodes.add(f"test_computation_chain.py::{node.name}::{case.name}")
+                    nodes.add(f"{filename}::{node.name}::{case.name}")
         elif isinstance(node, ast.ImportFrom) and any(
             item.name.startswith("test_") or item.name == "*" for item in node.names
         ):
@@ -297,12 +322,28 @@ def computation_chain_nodes() -> set[str]:
     return nodes
 
 
+def computation_chain_nodes() -> set[str]:
+    return _file_test_nodes("test_computation_chain.py")
+
+
+def income_annual_nodes() -> set[str]:
+    return _file_test_nodes("test_income_annual.py")
+
+
 def backend_test_units(files: set[str], lane_count: int) -> set[str]:
-    """Only this verified 35-minute chain may partition at testcase granularity."""
-    if lane_count != 4 or "test_computation_chain.py" not in files:
-        return set(files)
-    nodes = computation_chain_nodes()
-    return (files - {"test_computation_chain.py"}) | nodes if nodes else set(files)
+    """Partition expensive static files across any multi-lane CI of >=4."""
+    result = set(files)
+    if lane_count >= 4:
+        for filename, nodes in (
+            ("test_computation_chain.py", computation_chain_nodes),
+            ("test_income_annual.py", income_annual_nodes),
+        ):
+            if filename in result:
+                selected = nodes()
+                if selected:
+                    result.remove(filename)
+                    result.update(selected)
+    return result
 
 
 def assert_backend_coverage(files: set[str], groups: list[dict[str, str | int]]) -> None:
@@ -312,8 +353,14 @@ def assert_backend_coverage(files: set[str], groups: list[dict[str, str | int]])
     assert {item.split("::")[0] for item in items} == files, "backend test file missing"
     for filename in files:
         selection = [item for item in items if item.split("::")[0] == filename]
-        if filename == "test_computation_chain.py" and len(selection) > 1:
-            assert set(selection) == computation_chain_nodes(), "missing chain node"
+        partitioned = {
+            "test_computation_chain.py": computation_chain_nodes,
+            "test_income_annual.py": income_annual_nodes,
+        }
+        if filename in partitioned and len(selection) > 1:
+            assert set(selection) == partitioned[filename](), (
+                f"missing or duplicated pytest node: {filename}"
+            )
         else:
             assert selection == [filename], f"partial test file: {filename}"
 
@@ -411,7 +458,12 @@ def pick(changed: list[str], full: bool = False) -> dict[str, str]:
             pg_concurrency = True
         elif path.startswith("backend/tests/"):
             name = path.rsplit("/", 1)[-1]
-            if name == "conftest.py":
+            if name == "p2_mutex_measurement.py":
+                # Test-only experiment helper; evaluate it with real solver
+                # checks rather than treating it as a production subsystem.
+                backend.update((SMOKE_BACKEND, "test_p2_mutex_measurement.py",
+                                "test_p2_s4_integration.py", "test_pr38_review_probes.py"))
+            elif name == "conftest.py":
                 backend_all = True
             elif name in backend_available:
                 backend.add(name)
@@ -455,6 +507,7 @@ def pick(changed: list[str], full: bool = False) -> dict[str, str]:
                 "backend/iesplan/computation/generators/templates.py",
                 "backend/iesplan/computation/generators/sources.py",
                 "backend/iesplan/computation/generators/compiler_ir.py",
+                "backend/iesplan/computation/generators/bound_inference.py",
             ):
                 backend.update(GENERATOR_PROJECT_CONSUMERS)
                 browser.update(("tax-chain.spec.ts", "result-planning-solution.spec.ts"))
@@ -562,12 +615,21 @@ def pick(changed: list[str], full: bool = False) -> dict[str, str]:
         backend.add(SMOKE_BACKEND)
     if browser and SMOKE_BROWSER not in browser:
         browser.add(SMOKE_BROWSER)
-    backend_count = 4 if len(backend) >= 16 else 2 if len(backend) >= 7 else 1
+    # Sparse bound inference restored annual-income runtimes; use the normal
+    # 1/2/4-lane policy, retaining function-level lossless test partitioning.
+    backend_count = (4 if len(backend) >= 16
+                     else 2 if len(backend) >= 7 else 1)
     backend_units = backend_test_units(backend, backend_count)
     case_weights = {f"test_computation_chain.py::{name}": seconds
                     for name, seconds in COMPUTATION_CHAIN_NODE_SECONDS.items()}
-    backend_groups = balanced_shards(backend_units, backend_count,
-                                     {**BACKEND_SECONDS, **case_weights}, "tests/")
+    income_weights = {
+        f"test_income_annual.py::{name}": seconds
+        for name, seconds in INCOME_ANNUAL_NODE_SECONDS.items()
+    }
+    backend_groups = balanced_shards(
+        backend_units, backend_count,
+        {**BACKEND_SECONDS, **case_weights, **income_weights}, "tests/",
+    )
     assert_backend_coverage(backend, backend_groups)
     browser_count = 4 if len(browser) >= 20 else 2 if len(browser) >= 2 else 1
     browser_groups = balanced_shards(browser, browser_count, BROWSER_SECONDS)
@@ -588,7 +650,7 @@ def pick(changed: list[str], full: bool = False) -> dict[str, str]:
     }
 
 
-# CI changes are high-impact: verify both 4-lane schedulers and all
+# CI changes are high-impact: verify backend 4-lane, browser 4-lane and all
 # real assertions *automatically on the PR* before merge. Ordinary business
 # changes still use dependency-based selective testing.
 AUTO_FULL_PR_PATHS = frozenset({
@@ -667,6 +729,40 @@ def self_test() -> None:
                   for unit in group["tests"].split()}
     assert chain_nodes <= full_units
     assert "test_computation_chain.py" not in full_units
+    income_nodes = income_annual_nodes()
+    assert {name.rsplit("::", 1)[-1] for name in income_nodes} == set(
+        INCOME_ANNUAL_NODE_SECONDS
+    ), "income tests added/removed: update time weights without dropping any node"
+    assert income_nodes <= full_units
+    assert "test_income_annual.py" not in full_units
+    income_only = pick(["backend/tests/test_income_annual.py"])
+    assert len(json.loads(income_only["backend_shards"])) == 1
+    assert_backend_coverage(
+        {"test_income_annual.py", SMOKE_BACKEND},
+        json.loads(income_only["backend_shards"]),
+    )
+    # The previously slow tax cases must all remain selected; their post-fix
+    # weights no longer justify artificial separation into eight lanes.
+    time_critical = {
+        "test_income_reversal_selects_post_tax_optimum",
+        "test_income_loss_expiry_and_order",
+        "test_income_generated_loss_expires_without_carry",
+        "test_income_depreciation_zero_build_no_fictitious_income",
+    }
+    # A small targeted run has one/two lanes and deliberately selects the
+    # entire file. Only the four-lane full suite partitions pytest nodes.
+    income_selected = {token
+                       for lane in json.loads(income_only["backend_shards"])
+                       for token in lane["tests"].split()}
+    assert "tests/test_income_annual.py" in income_selected
+    full_selected = {token.rsplit("::", 1)[-1]
+                     for lane in json.loads(all_specs["backend_shards"])
+                     for token in lane["tests"].split()
+                     if token.startswith("tests/test_income_annual.py::")}
+    assert time_critical <= full_selected
+    assert backend_test_units({"test_income_annual.py"}, 1) == {
+        "test_income_annual.py"
+    }
     assert backend_test_units({"test_computation_chain.py"}, 1) == {"test_computation_chain.py"}
     docs = pick(["docs/reviews/style.md"])
     assert docs["browser_run"] == "false" and docs["browser_total"] == "1"
@@ -712,6 +808,13 @@ def self_test() -> None:
     assert all("tests/" + test in generator["backend_tests"].split() for test in GENERATOR_PROJECT_CONSUMERS)
     # Protect the battery optimization/zero-capacity tests from future silent
     # omission when the shared project generator is refactored.
+    inference = pick(["backend/iesplan/computation/generators/bound_inference.py"])
+    assert all("tests/" + test in inference["backend_tests"].split()
+               for test in GENERATOR_PROJECT_CONSUMERS)
+    assert "tax-chain.spec.ts" in inference["browser_specs"]
+    measurement = pick(["backend/tests/p2_mutex_measurement.py"])
+    assert "tests/test_p2_mutex_measurement.py" in measurement["backend_tests"].split()
+    assert "tests/test_pr38_review_probes.py" in measurement["backend_tests"].split()
     assert "tests/test_battery_planning.py" in generator["backend_tests"].split()
     assert "tests/test_step_relations_s2.py" in generator["backend_tests"].split()
     assert "tests/test_finance_s2_execution.py" in generator["backend_tests"].split()

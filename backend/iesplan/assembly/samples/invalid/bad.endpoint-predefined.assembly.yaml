@@ -1,6 +1,6 @@
 # 非法样例: 连接端点为 predefined 接口 → ASM-EDGE-011
 schema: ies.assembly
-schema_version: "5.0.0"
+schema_version: "6.0.0"
 
 assembly:
   id: bad_endpoint_predefined

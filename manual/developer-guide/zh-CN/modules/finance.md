@@ -176,11 +176,12 @@ IRR 与 `normal、no_solution、multiple、degenerate、out_of_domain、numeric_
 
 Worker 对同次已求解结果计算一次评价，随结果载荷同一证据单元封存（`status` 为 `"evaluated"`）；未求解或缺解输出不写财务块。读取与导出只消费该封存事实，不重算、不读最新配置。金额均为十进制字符串（不舍入），单位独立字段：
 
-该封存块以 `schema: ies.financial-evaluation`、`schema_version: 3.0.0` 标识，保留折旧金额来源身份及显式净现金项目。建设、付款、逐年运行及税务事实与完整现金流均来自适配器恢复的[同次解财务事实](../formats/solver-bundle.md#同次解财务事实映射)，原样投影，不在 application 按序列、成本规则或税务规则重算。`finance` 的既有评价纯函数仅对该完整现金流与冻结评价参数计算指标。税后NPV目标与评价值的一致性由定向测试证明，不新增运行期重复比对。
+建设激活的目标封存块以 `schema: ies.financial-evaluation`、`schema_version: 4.0.0` 标识，保留有明确范围的折旧来源、建设状态及显式净现金项目；这不是已交付声明。建设、付款、逐年运行及税务事实与完整现金流均来自适配器恢复的[同次解财务事实](../formats/solver-bundle.md#同次解财务事实映射)，原样投影，不在 application 按序列、成本规则或税务规则重算。`finance` 的既有评价纯函数仅对该完整现金流与冻结评价参数计算指标。税后NPV目标与评价值的一致性由定向测试证明，不新增运行期重复比对。
 
 - `evaluation_years`／`construction_period`／`operation_years`：整数（K/N 回显冻结输入，供时轴映射展示）；
 - `currency`、`price_basis`、`base_year`、`profile_id`、`discount_rate`：冻结值原样；
 - `construction_total` + `construction_total_unit`、`annual_fixed_om`：十进制字符串；
+- `construction_units`：原样保留同次解建设单元、实例、mode、built 及带业务单位的各规模，无单元为 `[]`；形状以同次解财务事实为准，读取和导出不重新判选建；
 - `payments_applied`：`[{t, ratio, amount}]` 数组；`t` 为整数财务时点，`ratio`／`amount` 为十进制字符串；同一 `t` 可多笔，不设时点唯一；
 - `net_cashflows`：原样保留同次解的显式净现金项目身份、时点、方向及金额；无项目为空数组，不由账面残值补造；
 - `annual_operation`：`[{financial_year, energy_net, variable_om, fixed_om, maintenance, demand_charge, net}]` 数组；金额十进制字符串，`maintenance` 为该年逐项维护合计，`demand_charge` 为当年需量费合计，`net` 已扣除各项费用一次；
@@ -203,7 +204,7 @@ Worker 对同次已求解结果计算一次评价，随结果载荷同一证据�
 
 ### 项目建设安排与全周期现金流
 
-本计算课题在项目首年启动建设，建设期与建设费用支付安排由项目明确，不将何年启动建设或中期新增容量作为求解变量。首年启动不等于首年年初立即建成投产，也不等于投资一次付清。建设选择与容量仍由规划求解决定：选建实例收取一次固定建设费，并按选定容量计算容量建设费；未选建实例不收固定建设费。总建设费用与付款时点分开处理，不因费用固定或随容量变化就推断支付年份，不自动均摊。中期扩建另建计算课题。
+本计算课题在项目首年启动建设，建设期与建设费用支付安排由项目明确，不将何年启动建设或中期新增容量作为求解变量。首年启动不等于首年年初立即建成投产，也不等于投资一次付清。建设选择与规模由规划求解决定；明确随建设发生的费用消费同一建设状态，无条件费用不因未建而删除。固定项只表示与规模无关，不决定发生条件。总费用与付款时点分开处理，不因金额形式推断支付年份或自动均摊。中期扩建另建计算课题。
 
 令 `K = construction_period`、`N = operation_years`。项目在 `t=0` 开工，`t=K` 建设期末投产，第 `j` 个完整运营年末位于 `t=K+j`（`j=1..N`）；评价期为 `K+N` 年。运行仿真只覆盖投产后的连续 `N` 年，不生成建设阶段的虚假运行 step。基线 `start_year` 是运行起始公历年，而不是开工年；运行年界仍按实际公历推导。
 

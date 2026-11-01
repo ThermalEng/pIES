@@ -300,6 +300,21 @@ class BoundRequest:
     value: float | None
 
 
+@dataclass(frozen=True, slots=True)
+class BoundFact:
+    """Declared, intersected, or derived bound fact with provenance."""
+
+    symbol: str
+    lower: float | None = None
+    upper: float | None = None
+    lower_source: SourceLocation | None = None
+    upper_source: SourceLocation | None = None
+    model_domain: tuple[float | None, float | None] | None = None
+    model_source: SourceLocation | None = None
+    project_boundary: tuple[float | None, float | None] | None = None
+    project_source: SourceLocation | None = None
+
+
 class CompilerAnalysis:
     """One read-only relation/usage view and one existing-box-bound entrypoint.
 
@@ -339,6 +354,8 @@ class CompilerAnalysis:
                     )
         self.uses = {name: frozenset(ids) for name, ids in uses.items()}
         self.bound_requests: list[BoundRequest] = []
+        from iesplan.computation.generators.bound_inference import BoundInferenceEngine
+        self.inference = BoundInferenceEngine(inventory, variables)
 
     def relations(self, kind: str) -> tuple[SemanticRelation, ...]:
         return self._groups.get(kind, ())
@@ -392,14 +409,90 @@ class CompilerAnalysis:
             remaining.remove(ready)
         return tuple(result)
 
+    def bound_fact(self, name: str) -> BoundFact | None:
+        """Query unified bound fact and provenance for a symbol."""
+        resolved_name = name
+        if "." in name:
+            inst, _, prop = name.partition(".")
+            resolved_name = self.inventory.property_bindings.get((inst, prop), name)
+
+        fact = self.inventory.bound_facts.get(resolved_name) or self.inventory.bound_facts.get(name)
+        inf_lo, inf_hi = self.inference.bounds.get(resolved_name, (None, None))
+        if inf_lo is None and inf_hi is None:
+            inf_lo, inf_hi = self.inference.bounds.get(name, (None, None))
+
+        if fact is not None:
+            lo = fact.lower if inf_lo is None else (inf_lo if fact.lower is None else max(fact.lower, inf_lo))
+            hi = fact.upper if inf_hi is None else (inf_hi if fact.upper is None else min(fact.upper, inf_hi))
+            lo_src, hi_src = self.inference.provenance.get(resolved_name, (fact.lower_source, fact.upper_source))
+            return BoundFact(
+                symbol=name,
+                lower=lo,
+                upper=hi,
+                lower_source=lo_src or fact.lower_source,
+                upper_source=hi_src or fact.upper_source,
+                model_domain=fact.model_domain,
+                model_source=fact.model_source,
+                project_boundary=fact.project_boundary,
+                project_source=fact.project_source,
+            )
+
+        var = self.variables.get(resolved_name) or self.variables.get(name)
+        if var is not None or inf_lo is not None or inf_hi is not None:
+            var_lo = var.lower if var else None
+            var_hi = var.upper if var else None
+            lo = var_lo if inf_lo is None else (inf_lo if var_lo is None else max(var_lo, inf_lo))
+            hi = var_hi if inf_hi is None else (inf_hi if var_hi is None else min(var_hi, inf_hi))
+            lo_src, hi_src = self.inference.provenance.get(resolved_name, (None, None))
+            return BoundFact(
+                symbol=name,
+                lower=lo,
+                upper=hi,
+                lower_source=lo_src,
+                upper_source=hi_src,
+            )
+        return None
+
     def variable_bounds(
         self, name: str, *, relation: SemanticRelation | None = None,
         period: int | None = None,
     ) -> tuple[float | None, float | None]:
-        variable = self.variables.get(name)
-        if variable is None:
-            raise LoweringUnsupportedError(f"查询未知求解变量 {name!r}")
-        result = (variable.lower, variable.upper)
+        resolved_name = name
+        if "." in name:
+            inst, _, prop = name.partition(".")
+            resolved_name = self.inventory.property_bindings.get((inst, prop), name)
+
+        variable = self.variables.get(resolved_name) or self.variables.get(name)
+        inf_lo, inf_hi = self.inference.bounds.get(resolved_name, (None, None))
+        if inf_lo is None and inf_hi is None:
+            inf_lo, inf_hi = self.inference.bounds.get(name, (None, None))
+        # An unindexed source identity denotes a safe envelope of all steps;
+        # only explicitly registered step columns receive step-specific bounds.
+        if "." in name and name == resolved_name:
+            inst, _, local = name.partition(".")
+            columns = self.inventory.step_columns.get((inst, local))
+            if columns:
+                step_bounds = [self.inference.bounds.get(col, (None, None)) for col in columns]
+                if all(lo is not None for lo, _ in step_bounds):
+                    envelope_lo = min(lo for lo, _ in step_bounds)
+                    inf_lo = envelope_lo if inf_lo is None else max(inf_lo, envelope_lo)
+                if all(hi is not None for _, hi in step_bounds):
+                    envelope_hi = max(hi for _, hi in step_bounds)
+                    inf_hi = envelope_hi if inf_hi is None else min(inf_hi, envelope_hi)
+
+        if variable is None and inf_lo is None and inf_hi is None:
+            fact = self.inventory.bound_facts.get(resolved_name) or self.inventory.bound_facts.get(name)
+            if fact is not None:
+                result = (fact.lower, fact.upper)
+            else:
+                raise LoweringUnsupportedError(f"查询未知求解变量 {name!r}")
+        else:
+            var_lo = variable.lower if variable else None
+            var_hi = variable.upper if variable else None
+            lo = var_lo if inf_lo is None else (inf_lo if var_lo is None else max(var_lo, inf_lo))
+            hi = var_hi if inf_hi is None else (inf_hi if var_hi is None else min(var_hi, inf_hi))
+            result = (lo, hi)
+
         if relation is not None:
             self.bound_requests.extend(
                 BoundRequest(relation.identity, relation.source, period, side,
@@ -412,28 +505,33 @@ class CompilerAnalysis:
         self, affine: object, *, side: str, label: str,
         relation: SemanticRelation | None = None, period: int | None = None,
     ) -> float:
-        # Both the income and VAT lowerers share exactly this existing
-        # coefficient-sign box interval; no invented Big-M / global propagation.
-        total = affine.constant
-        for name, coeff in affine.terms.items():
-            if coeff == 0.0:
-                continue
-            lo, hi = self.variable_bounds(name)
-            value = hi if (coeff > 0.0) == (side == "max") else lo
-            if value is None or not math.isfinite(value):
-                raise LoweringUnsupportedError(
-                    f"{label}缺有限界：变量 {name!r} 界不足，无法精确",
-                    model_source=({
-                        "source": f"relation:{relation.identity}", "role": "bound",
-                        "axis": relation.domain.kind, "index": period or 0,
-                        "location": {k: v for k, v in asdict(relation.source).items() if v is not None},
-                    } if relation is not None else None),
-                )
-            total += coeff * value
+        terms = getattr(affine, "terms", {})
+        constant = float(getattr(affine, "constant", 0.0))
+        inferred = self.inference.bound_affine(terms, constant, side=side)
+        if inferred is not None and math.isfinite(inferred):
+            total = inferred
+        else:
+            total = constant
+            for name, coeff in terms.items():
+                if coeff == 0.0:
+                    continue
+                lo, hi = self.variable_bounds(name)
+                value = hi if (coeff > 0.0) == (side == "max") else lo
+                if value is None or not math.isfinite(value):
+                    raise LoweringUnsupportedError(
+                        f"{label}缺有限界：变量 {name!r} 界不足，无法精确",
+                        model_source=({
+                            "source": f"relation:{relation.identity}", "role": "bound",
+                            "axis": relation.domain.kind, "index": period or 0,
+                            "location": {k: v for k, v in asdict(relation.source).items() if v is not None},
+                        } if relation is not None else None),
+                    )
+                total += coeff * value
+
         if relation is not None:
             self.bound_requests.append(BoundRequest(
                 relation.identity, relation.source, period, side,
-                tuple(sorted(k for k, v in affine.terms.items() if v)), total,
+                tuple(sorted(k for k, v in terms.items() if v)), total,
             ))
         return total
 
@@ -446,7 +544,8 @@ class CompilerAnalysis:
             if entry[0] != "var":
                 continue
             global_name = self.inventory.property_bindings.get((instance, local))
-            name = global_name or f"{instance}__{local}__t{step}"
+            columns = self.inventory.step_columns.get((instance, local))
+            name = global_name or (columns[step] if columns is not None else f"{instance}.{local}")
             if name in self.variables:
                 lo, hi = self.variable_bounds(name)
                 result[local] = ("var", lo, hi)
@@ -470,16 +569,26 @@ class CompilerInventory:
 
     symbols: dict[str, SymbolDeclaration] = field(default_factory=dict)
     property_bindings: dict[tuple[str, str], str] = field(default_factory=dict)
+    # Internal preallocation slot map and P1 template contexts. A typed
+    # instance/step association, never a decoded MPS column string.
+    step_columns: dict[tuple[str, str], tuple[str, ...]] = field(default_factory=dict)
+    technical_contexts: dict[str, object] = field(default_factory=dict)
     coefficients: dict[str, KnownCoefficient] = field(default_factory=dict)
     relations: list[RelationFamily] = field(default_factory=list)
     outputs: list[OutputReference] = field(default_factory=list)
     operations: list[SemanticRelation] = field(default_factory=list)
+    bound_facts: dict[str, BoundFact] = field(default_factory=dict)
     sealed: bool = False
 
     def collect(self, operation: SemanticRelation) -> None:
         if self.sealed:
             raise RuntimeError("no source relations after collection barrier")
         self.operations.append(operation)
+
+    def register_bound_fact(self, fact: BoundFact) -> None:
+        if self.sealed:
+            raise RuntimeError("no bound facts after collection barrier")
+        self.bound_facts[fact.symbol] = fact
 
     def seal(self) -> None:
         self.sealed = True

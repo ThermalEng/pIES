@@ -1,10 +1,10 @@
 # 财务 YAML 契约
 
-> 契约标识与版本：`ies.finance-profile@6.0.0`、`ies.finance-overrides@6.0.0`、`ies.effective-finance-config@6.0.0`。本版统一年度固定项的年率单位，以明确金额来源表达初建／换新折旧，并独立声明净现金项目；旧消费者不能安全解释这些关系，三件套同步提升主版本，不接受旧字头或双轨解析。
+> 契约标识与目标版本：`ies.finance-profile@7.0.0`、`ies.finance-overrides@7.0.0`、`ies.effective-finance-config@7.0.0`。本版为初建金额来源增加显式实例范围，并明确建设条件与固定残值的关系；三件套同步提升主版本，不接受在旧字头下增加字段或改变金额含义。
 > 推荐文件名（项目包内固定名称）：`finance_profile.yaml`、`finance_overrides.yaml`、`effective_finance.yaml`
-> 文档状态：生效契约；本页定义文件语义。
+> 文档状态：生效目标契约；本页定义文件语义，不声明实现已经交付。
 
-本页版本仅升级财务三件套；评价输入与 `CalcSnapshot@5.0.0`、装配、设备模型、CalculationConfig、通用 Bundle 和 ComputeResult 顶层结构不变。折旧输出改为来源身份并新增净现金明细，配套生成器为 `7.0.0`、适配器为 `6.0.0`，封存财务评价为 `3.0.0`，见[同次解财务事实映射](solver-bundle.md#同次解财务事实映射)。输入解析、合并、生成、恢复及展示使用同一版本语义；不通过在旧字头下放宽校验代替版本切换。
+配套目标为装配 `6.0.0`、生成器 `8.0.0`、适配器 `7.0.0` 与封存财务评价 `4.0.0`，见[同次解财务事实映射](solver-bundle.md#同次解财务事实映射)。评价输入、`CalcSnapshot@5.0.0`、设备模型、CalculationConfig、通用 Bundle 和 ComputeResult 顶层结构不变；精确版本及迁移见[格式版本表](../file-formats.md#建设激活配套版本与迁移)。
 
 本页定义财务三件套的完整 YAML 结构与校验语义，是 [文件格式标准](../file-formats.md) 与[财务计算](../modules/finance.md)的字段级权威正文。装配如何引用有效快照见[装配 YAML](assembly-yaml.md)。
 
@@ -26,7 +26,7 @@ assembly / computation / 项目包（精确引用 Effective YAML）
 
 ## 通用金额引用目标语义
 
-本节规定财务扩展的语义约束，不放宽下文 `6.0.0` 字段表或其来源判别联合。后续输入格式以本页为唯一权威：在实现新公开输入前集中定义完整字段、版本、覆盖及迁移规则；不在各调用方分别扩充来源，不把语义示例当作当前可上传文件。
+本节规定后续通用财务扩展的语义约束，不放宽下文 `7.0.0` 字段表。建设发生条件及来源范围按本页和装配格式的明确字段执行；命名费用、任意税额派生及基准方案仍是后续能力，不据这些语义示例增加字段。
 
 ### 金额项与驱动量
 
@@ -46,7 +46,7 @@ assembly / computation / 项目包（精确引用 Effective YAML）
 
 ### 合成语义示例
 
-以下是具有单位与期间的关系说明，不是 `6.0.0` YAML 字段示例，也不代表工程默认参数：
+以下是具有单位与期间的关系说明，不是可直接上传的 YAML 字段示例，也不代表工程默认参数：
 
 | 声明 | 要求 |
 | --- | --- |
@@ -57,13 +57,13 @@ assembly / computation / 项目包（精确引用 Effective YAML）
 
 评价范围、税务边界与基准来源以[财务模块](../modules/finance.md#评价边界与基准)为准。上述引用扩展贯通输入、合并、冻结、生成及结果后才发布执行能力，不能只接受字段而忽略其金额或用途。
 
-## `ies.finance-profile@6.0.0`
+## `ies.finance-profile@7.0.0`
 
 ### 完整示例
 
 ```yaml
 schema: ies.finance-profile
-schema_version: "6.0.0"
+schema_version: "7.0.0"
 profile:
   id: cn-north-demo
   region: CN-North
@@ -132,7 +132,7 @@ net_cashflows: {}              # 无额外净现金项目，不从折旧残值�
 | 路径 | 必需 | 规则 |
 |---|---|---|
 | `schema` | 是 | 固定 `ies.finance-profile` |
-| `schema_version` | 是 | 固定 `"6.0.0"` |
+| `schema_version` | 是 | 固定 `"7.0.0"` |
 | `profile.id` | 是 | 稳定 ASCII 小写 ID（命名空间点分式、`lower_snake_case` 或短横线，同文件内保持一致），如 `cn-north-demo`；Overrides 与 Effective 沿用它做引用 |
 | `profile.region` | 是 | 地区标识（展示与追溯，不参与计算） |
 | `profile.currency` | 是 | `CNY` / `USD` |
@@ -162,7 +162,7 @@ net_cashflows: {}              # 无额外净现金项目，不从折旧残值�
 单位与范围校验：
 
 - 成本分量金额非负（允许 `0`）；每个线性分量的 `unit_cost` 单位与装配绑定的规范化 driver 单位相乘后必须得到 `currency`（upfront/period）或 `currency/year`（annual_fixed_om）量纲；
-- `annual_fixed_om.fixed` 与 linear 的年度量相加后，每个完整运营年计取一次年金额。业务年率与内部单位只在生成器边界转换；年度金额不按该年实际运行步数积分，不因闰年增加，也不进入物理能量平衡。固定项仍遵守实例资产身份与选建范围；不能精确表达选建触发的生成器在公开能力边界拒收，不擅自抬高容量下界；
+- `annual_fixed_om.fixed` 与 linear 的年度量相加后，每个完整运营年计取一次年金额。业务年率与内部单位只在生成器边界转换；年度金额不按该年实际运行步数积分，不因闰年增加，也不进入物理能量平衡。费用发生条件由[实例成本绑定](assembly-yaml.md#费用发生条件)明确指定；不能精确表达所声明关系时报告对应能力或转换条件不足，不擅自抬高容量下界；
 - 能源价格为有限 Decimal（正、零、负均合法），单位量纲 = currency /（对应 carrier 的能源量纲）；constant 的 `value.unit`、time_series 的 `series_meta.unit` 与 monthly_daily 各月的 `series_meta.unit` 遵循同一价格单位，覆盖时保持不变；禁止 NaN/Infinity；
 - `taxes.*.applies_to` 引用的 price_id、`finance_types` 分量路径或 `demand_charges.<charge_id>` 必须存在；计算规则中的税率、可抵比例为 `0..1` 的 `{value, unit: "1"}` 原子。
 
@@ -292,7 +292,7 @@ tax_rules:
     variable_om: [pv_system.period_variable_om]
     deductible_maintenance: {mode: explicit_items, items: []}
     depreciation:
-      - {base_from: {kind: upfront_capex_net, finance_type: pv_system}, method: straight_line, life_years: 20, residual: {value: "0.04", unit: "1"}, first_year: 1}
+      - {base_from: {kind: upfront_capex_net, finance_type: pv_system, scope: {kind: all_new_instances}}, method: straight_line, life_years: 20, residual: {value: "0.04", unit: "1"}, first_year: 1}
     loss_carryforward_years: 5
     opening_losses: []
 ```
@@ -305,16 +305,20 @@ tax_rules:
 
 | `kind` | 完整形态与金额含义 |
 | --- | --- |
-| `upfront_capex_net` | `{kind: upfront_capex_net, finance_type}`；finance_type 必须已登记且声明 upfront_capex，取本课题绑定该类别的新建实例实际建设总额，按含税／不含税口径形成实际付款，再减明确可抵建设进项；既有沉没投资不计入 |
+| `upfront_capex_net` | `{kind: upfront_capex_net, finance_type, scope}`；finance_type 必须已登记且声明 upfront_capex。scope 必填：`{kind: all_new_instances}` 明确汇总本课题绑定该类别的所有新建实例；`{kind: instances, instances: [<instance_id>, ...]}` 引用指定非空实例集合（单实例也是单元素集合），每项必须为绑定该类别的新建实例。取这些实例按声明发生条件形成的实际建设付款，减明确可抵建设进项；不计既有沉没投资 |
 | `maintenance_expense_net` | `{kind: maintenance_expense_net, year, position}`；引用评价清单同一笔实际含税付款，减其明确可抵进项。year 为评价年，position 为同年冻结顺序，从 1 开始；组合金额仍是一笔支付，不按 terms 拆分 |
 
 来源金额均随同次规划解求值，未声明抵扣资格时不猜进项。可抵额从计税基础剔除，与留抵实际消耗／退款到账时点分开。引用冻结输入，不读取当前草稿；维护引用是否存在在任务提交边界核对。评价输入继续只保存既有 `year/currency/amount/terms`，不新增 position、资本化标记或另一份金额。
 
-直线折旧的年额为 `(B-R)/life_years`。`residual.unit` 为文件币种时 R 为确定金额；为 `"1"` 时 R 为 `residual.value × B`，比例包含 0 和 1，不接受空单位。未形成资产时无折旧；已形成资产须满足 `0<=R<=B`。确定金额残值不改变仿射性，适用条件仍须成立；生成器不能精确表达时报告能力不足，不预代规模、不猜建设阈值。
+初建来源以 `(kind, finance_type, scope)` 标识；instances 是无序集合，拒绝重复 ID，规范化时按 ID 排序。类别汇总与集合引用在本次装配上下文中解析成明确的实例范围，任务冻结该装配及 Effective 引用。Profile 登记检查来源形状与类别；项目采用、提交及项目包导入在其公开边界结合各自装配核对实例范围，不在 Worker 读取时重验，也不把项目实例写回共享 Profile。不同实例的状态分别进入自己的金额，再求和；不按 finance_type 找一个代表实例。
+
+直线折旧的年额为 `(B-R_effective)/life_years`，B 为该条来源的非负计税净基础，不是全项目或首个实例的基础。比例残值为 `R_effective = residual.value × B`，`unit: "1"` 且比例包含 0 和 1；确定残值使用文件币种。确定残值 R 属于整条来源，既不为集合内每个实例复制一次，也不按容量比例暗中分摊。需要逐实例残值时显式写不同的单实例来源。
+
+确定残值的合法范围为：B=0 时 `R_effective=0`、不计折旧；B>0 时 `R_effective=R` 且 `R<=B`。因此正 R 允许的基础是零或不少于 R，不能在小于 R 的正基础上产生负折旧，也不能把 R 限幅为 B 来改写输入含义。这一分支按来源金额定义，和某建设单元 z 是否恰好为 1 分开；不取第一个建设状态，不用 epsilon 判定资产。固定残值关系在已形成资产分支仍是仿射，分支所需的有限界和精确转换归统一分析；条件不足就报告该来源的转换限制。零残值无需引入金额正性判别。折旧不自动产生残值回款，回款仍由 net_cashflows 明确声明。
 
 `first_year` 始终为运营年序号，计提的评价年为 `K+first_year` 至 `K+first_year+life_years-1`，超出评价期的部分不进入期内税额，也不自动转成终期回款。初建最早从首个运营年计提；维护支付在评价年末发生，换新折旧首年须晚于该支付年，不自动替用户指定计提起点。
 
-同一来源可形成不同期间的结果行，但只能由一个所得税折旧条目认领，不得跨同类规则重复计提。唯一性使用来源身份：初建为 `(kind, finance_type)`，维护为 `(kind, year, position)`，不再仅按财务类别去重。这样同类设备的初建及多次换新可以并存；Overrides 仍按下文规则完整替换列表。已作为折旧来源的维护项若同时声明 `deductible: true`，在公开输入边界报冲突；不暗中删除或改写用户的当期费用扣除。
+同一来源可形成不同期间的结果行，但同一初建实例的计税基础只能由一个所得税折旧条目认领，不得用类别汇总与其子集、相交集合或跨同类规则重复计提。静态集合重叠在可取得实例范围的公开边界核对；不相交的同类实例可以分别计提。维护来源身份仍为 `(kind, year, position)`，与初建分开；同笔维护只能由一个折旧条目认领。Overrides 按下文规则完整替换列表。已作为折旧来源的维护项若同时声明 `deductible: true`，在公开输入边界报冲突；不暗中删除或改写当期费用扣除。
 
 例如明确 K=2 时，运营第4年末的支付位于评价年6；从下一运营年计提，应引用 `{kind: maintenance_expense_net, year: 6, position: 1}` 并填写 `first_year: 5`。year 不是公历年份，也不是数组下标。
 
@@ -341,7 +345,7 @@ net_cashflows:
     direction: inflow
     amount:
       kind: source_share
-      base_from: {kind: upfront_capex_net, finance_type: pv_system}
+      base_from: {kind: upfront_capex_net, finance_type: pv_system, scope: {kind: all_new_instances}}
       ratio: {value: "0.03", unit: "1"}
 ```
 
@@ -383,13 +387,13 @@ Overrides 可用 `demand_charges.<charge_id>.rate` 原子替换 Profile 已有�
 - Overrides 对既有 `demand_input_tax` 条目按 `charge` 匹配，只覆盖税率与可抵比例，不改变范围；`demand_cost` 是 Profile 的范围，不允许覆盖。
 - 需量费沿用 `price_basis`：含税口径不重复加税，不含税口径按明确税率形成实际付款。未声明的税额与抵扣不自动生成；同一需量费税基不能重复抵扣或扣除，实际现金只支出一次。
 
-## `ies.finance-overrides@6.0.0`
+## `ies.finance-overrides@7.0.0`
 
 ### 完整示例
 
 ```yaml
 schema: ies.finance-overrides
-schema_version: "6.0.0"
+schema_version: "7.0.0"
 profile_ref:
   id: cn-north-demo
 finance_types:
@@ -415,7 +419,7 @@ energy_prices:
 
 | 路径 | 规则 |
 |---|---|
-| `schema` / `schema_version` | 固定 `ies.finance-overrides` / `"6.0.0"` |
+| `schema` / `schema_version` | 固定 `ies.finance-overrides` / `"7.0.0"` |
 | `profile_ref` | 必填 `{id}`：与目标 Profile 的 `id` 一致（文本文件按字头校验，不做内容摘要） |
 | `finance_types` | 只允许覆盖目标 Profile **已存在** 的 `finance_type`；禁止新增或删除 `finance_type` |
 | `finance_types.*` | 只允许按 Profile 实际存在的叶子路径整体替换 `Money` 原子：`<分量>.fixed`（如 `upfront_capex.fixed`）替换为 `{value, unit}`；`<分量>.linear.<driver>.unit_cost` 替换为 `{value, unit}`。被替换叶子必须已在 Profile 声明；禁止新增或删除分量、`fixed` 节点或 `driver`（`driver` 集合不可增删）、禁止改分量类型与 `cost_method`、禁止改 `unit`（规范化后必须与 Profile 相同）；替换值必须为完整 `{value, unit}` 原子，禁止部分金额与 `null`；成本金额非负 |
@@ -432,7 +436,7 @@ energy_prices:
 
 ```yaml
 schema: ies.finance-overrides
-schema_version: "6.0.0"
+schema_version: "7.0.0"
 profile_ref: {id: cn-north-demo}
 tax_rules:
   operating_vat:
@@ -466,7 +470,7 @@ tax_rules:
 
 ```yaml
 schema: ies.finance-overrides
-schema_version: "6.0.0"
+schema_version: "7.0.0"
 profile_ref: {id: cn-north-demo}
 tax_rules:
   operating_vat:
@@ -479,7 +483,7 @@ tax_rules:
         - {year: 6, position: 1, deductible: false}
         - {year: 6, position: 2, deductible: false}
     depreciation:
-      - base_from: {kind: upfront_capex_net, finance_type: pv_system}
+      - base_from: {kind: upfront_capex_net, finance_type: pv_system, scope: {kind: all_new_instances}}
         method: straight_line
         life_years: 20
         residual: {value: "0.04", unit: "1"}
@@ -498,7 +502,7 @@ tax_rules:
 
 此组维护净基础分别为 `4500-4500×0.1/1.1` 与 `7000`；可抵进项是否已被抵扣不改变它们。首笔从评价年7计提3年、第二笔从评价年7计提4年，各只扣一次现金，折旧不再次扣现金。同一来源的年额、期间和输入顺序随 Effective 与评价输入冻结，合并结果保留完整列表，不压成类别合计。
 
-## `ies.effective-finance-config@6.0.0`
+## `ies.effective-finance-config@7.0.0`
 
 ### 完整示例
 
@@ -506,7 +510,7 @@ tax_rules:
 
 ```yaml
 schema: ies.effective-finance-config
-schema_version: "6.0.0"
+schema_version: "7.0.0"
 profile_id: cn-north-demo
 currency: CNY
 base_year: 2025
@@ -580,7 +584,7 @@ net_cashflows: {}
 
 ```yaml
 schema: ies.finance-overrides
-schema_version: "6.0.0"
+schema_version: "7.0.0"
 profile_ref:
   id: <profile-id>
 ```
