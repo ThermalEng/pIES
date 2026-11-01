@@ -1,6 +1,6 @@
 # 非法样例: definition.id 携带 @版本钉选 → ASM-SYN-007
 schema: ies.assembly
-schema_version: "4.0.0"
+schema_version: "6.0.0"
 
 assembly:
   id: bad_version_pin
@@ -23,7 +23,27 @@ devices:
     predefined_interfaces: {}
 connections: {}
 
-constraints: {}
+finance:
+  ref:
+    kind: relative_file
+    path: finance/campus.effective-finance.yaml
+  profile_id: cn-north-demo
+
+finance_binding:
+  instances:
+    hp1:
+      type: none
+
+tariff_bindings: {}
+
+demand_bindings: {}
+
+planning:
+  objective:
+    sense: minimize
+    expression: "0"
+  variables: {}
+  constraints: {}
 
 outputs:
   series: []

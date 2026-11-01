@@ -111,8 +111,8 @@ class TestSchemaFile:
         schema_path = ASSEMBLY_DIR / ASSEMBLY_SCHEMA_PATH
         assert schema_path.exists(), f"缺少 {ASSEMBLY_SCHEMA_PATH}"
         schema = json.loads(schema_path.read_text(encoding="utf-8"))
-        assert schema["$id"] == f"{SCHEMA_ID}/5.0.0"
-        assert schema["title"] == "ies.assembly 5.0.0 装配 YAML 契约"
+        assert schema["$id"] == f"{SCHEMA_ID}/6.0.0"
+        assert schema["title"] == "ies.assembly 6.0.0 装配 YAML 契约"
         required = schema["required"]
         assert "schema" in required and "schema_version" in required
         assert set(required) >= {
@@ -1291,7 +1291,7 @@ class TestArtifact:
             "id": CANON_ALGORITHM_ID,
             "version": CANON_ALGORITHM_VERSION,
         }
-        assert CANON_ALGORITHM_VERSION == "5.0.0"
+        assert CANON_ALGORITHM_VERSION == "6.0.0"
         assert set(receipt["dependencies"]["devices"]) >= {
             "ies.device.pv",
             "ies.device.electric_load",

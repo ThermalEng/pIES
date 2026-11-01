@@ -484,13 +484,13 @@ def test_600_vat_subcomponent_reference_and_overlap():
 
 
 def test_600_yaml_roundtrip_lossless():
-    """7. 6.0.0 序列化与 YAML 往返无损。"""
+    """7. 7.0.0 序列化与 YAML 往返无损。"""
     p = _valid_profile_dict()
     profile = FinanceProfile.from_dict(p)
     effective = merge_effective(profile, None)
     text = effective_to_yaml(effective)
     assert 'ies.effective-finance-config' in text
-    assert '6.0.0' in text
+    assert '7.0.0' in text
     assert 'net_cashflows' in text
 
     restored = effective_from_yaml(text)

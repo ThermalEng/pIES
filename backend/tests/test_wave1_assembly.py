@@ -132,11 +132,11 @@ class TestPublicEntries:
 class TestContract:
     def test_schema_identity(self):
         assert SCHEMA_ID == "ies.assembly"
-        assert SCHEMA_VERSION == "5.0.0"
+        assert SCHEMA_VERSION == "6.0.0"
         assert VALIDATOR_ID == "ies.assembly.validator"
-        assert VALIDATOR_VERSION == "5.0.0"
+        assert VALIDATOR_VERSION == "6.0.0"
         assert CANON_ALGORITHM_ID == "ies.assembly.canonical"
-        assert CANON_ALGORITHM_VERSION == "5.0.0"
+        assert CANON_ALGORITHM_VERSION == "6.0.0"
 
     def test_schema_file_loads(self):
         path = ASSEMBLY_DIR / ASSEMBLY_SCHEMA_PATH

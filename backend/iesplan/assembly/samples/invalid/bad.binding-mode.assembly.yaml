@@ -1,6 +1,6 @@
 # 非法样例: 预定义模式非法 → ASM-SYN-005
 schema: ies.assembly
-schema_version: "5.0.0"
+schema_version: "6.0.0"
 
 assembly:
   id: bad_binding_mode
@@ -26,7 +26,27 @@ devices:
         path: data/campus_load.data.csv
 connections: {}
 
-constraints: {}
+finance:
+  ref:
+    kind: relative_file
+    path: finance/campus.effective-finance.yaml
+  profile_id: cn-north-demo
+
+finance_binding:
+  instances:
+    elec_load:
+      type: none
+
+tariff_bindings: {}
+
+demand_bindings: {}
+
+planning:
+  objective:
+    sense: minimize
+    expression: "0"
+  variables: {}
+  constraints: {}
 
 outputs:
   series: []

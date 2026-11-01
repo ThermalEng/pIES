@@ -1,6 +1,6 @@
 # 非法样例: 属性未在模型声明 → ASM-INPUT-006
 schema: ies.assembly
-schema_version: "5.0.0"
+schema_version: "6.0.0"
 
 assembly:
   id: bad_property_undeclared
@@ -45,10 +45,7 @@ planning:
   objective:
     sense: minimize
     expression: "0"
-  variables:
-    v_struct:
-      device_ref: any_device
-      parameter: any_param
+  variables: {}
   constraints: {}
 
 outputs:

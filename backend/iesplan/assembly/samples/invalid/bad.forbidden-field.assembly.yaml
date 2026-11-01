@@ -1,6 +1,6 @@
 # 非法样例: 装配 YAML 携带可执行字段(command)→ ASM-SYN-008
 schema: ies.assembly
-schema_version: "5.0.0"
+schema_version: "6.0.0"
 
 assembly:
   id: bad_forbidden
@@ -24,7 +24,27 @@ devices:
     command: "/bin/sh -c solver"
 connections: {}
 
-constraints: {}
+finance:
+  ref:
+    kind: relative_file
+    path: finance/campus.effective-finance.yaml
+  profile_id: cn-north-demo
+
+finance_binding:
+  instances:
+    hp1:
+      type: none
+
+tariff_bindings: {}
+
+demand_bindings: {}
+
+planning:
+  objective:
+    sense: minimize
+    expression: "0"
+  variables: {}
+  constraints: {}
 
 outputs:
   series: []

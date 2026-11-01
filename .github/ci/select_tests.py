@@ -282,7 +282,7 @@ INCOME_ANNUAL_NODE_SECONDS = {
     "test_income_vat_mix_exclusive_matches_hand_and_b0": 15,  # 10.44s observed
     "test_income_equivalent_gross_net_statement_matches": 25,  # 20.82s observed
     "test_income_depreciation_zero_build_no_fictitious_income": 8,  # 7.49s observed
-    "test_income_depreciation_variable_capacity_positive_residual_rejected": 10,
+    "test_income_depreciation_variable_capacity_positive_residual_solves_exactly": 25,
     "test_income_depreciation_static_residual_matches_hand": 15,  # 10.47s observed
     "test_income_depreciation_excess_residual_rejected": 10,
     "test_income_depreciation_skipped_without_new_asset": 10,
