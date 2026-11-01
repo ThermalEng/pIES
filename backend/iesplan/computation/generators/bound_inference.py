@@ -87,9 +87,17 @@ class BoundInferenceEngine:
 
         self._init_bounds()
         self._collect_relations()
-        # Deterministic size-scaled work limit; incomplete derivation is not
-        # a proof of mathematical unboundedness.
+        # A contradictory source relation belongs to the exact model. Analysis
+        # does not replace the solver's infeasibility diagnosis with a failed
+        # generator: if propagation discovers a conflict, retain only declared
+        # domain facts and leave ALL rows to the production generator.
+        self.conflicts: list[tuple[str, str | None]] = []
+        declared_bounds = dict(self.bounds)
+        declared_provenance = dict(self.provenance)
         self._propagate(budget=max(budget, min(100_000, 4 * len(self.relations))))
+        if self.conflicts:
+            self.bounds = declared_bounds
+            self.provenance = declared_provenance
 
     def _init_bounds(self) -> None:
         # Load from inventory.bound_facts
@@ -271,7 +279,21 @@ class BoundInferenceEngine:
                     else:
                         roles[name] = "var"
                 template = compile_technical(family.relation, roles)
-                initial, series, box = {}, {}, {}
+                initial, series = {}, {}
+                box = {}
+                for name in refs:
+                    if roles[name] == "var":
+                        identity = self.inventory.property_bindings.get(
+                            (inst, name), f"{inst}.{name}"
+                        )
+                        fact = self.inventory.bound_facts.get(identity)
+                        if fact is not None:
+                            box[name] = (fact.lower, fact.upper)
+                        elif identity in self.variables:
+                            var = self.variables[identity]
+                            box[name] = (var.lower, var.upper)
+                        else:
+                            box[name] = (None, None)
                 count = family.domain.count if family.domain.kind == "step" else 1
             known = dict(constants)
             for step in range(count):
@@ -303,113 +325,119 @@ class BoundInferenceEngine:
                     )
 
     def _propagate(self, budget: int) -> None:
-        """Sparse dependency propagation with deterministic work budget."""
+        """Sparse, deterministic propagation using exact binary64 input values.
+
+        Arithmetic is rational until the final bound is rounded outward. This
+        avoids both false equality from an arbitrary epsilon and the spurious
+        subnormal 5e-324 created by nextafter(0) on *exact* zero.
+        """
+        from functools import lru_cache
+
+        @lru_cache(maxsize=8192)
+        def exact(value: float) -> Fraction:
+            return Fraction.from_float(float(value))
+
+        def outward(value: Fraction, upper: bool) -> float | None:
+            try:
+                rounded = float(value)
+            except OverflowError:
+                return None
+            if not math.isfinite(rounded):
+                return None
+            nearest = exact(rounded)
+            if upper and nearest < value:
+                rounded = math.nextafter(rounded, math.inf)
+            elif not upper and nearest > value:
+                rounded = math.nextafter(rounded, -math.inf)
+            return rounded if math.isfinite(rounded) else None
+
         uses: dict[str, list[int]] = defaultdict(list)
         for idx, rel in enumerate(self.relations):
             for sym, _ in rel.terms:
                 uses[sym].append(idx)
 
-        queue = deque(sym for sym, (lo, hi) in self.bounds.items() if lo is not None or hi is not None)
+        queue = deque(
+            sym for sym, (lo, hi) in self.bounds.items()
+            if lo is not None or hi is not None
+        )
         in_queue = set(queue)
-
         steps = 0
         while queue and steps < budget:
             steps += 1
-            var = queue.popleft()
-            in_queue.discard(var)
-
-            for rel_idx in uses.get(var, ()):
+            name = queue.popleft()
+            in_queue.discard(name)
+            for rel_idx in uses.get(name, ()):
                 rel = self.relations[rel_idx]
-                term_dict = rel.term_dict()
-
-                for target_sym, a_k in rel.terms:
-                    if a_k == 0.0:
+                coefficients = [(sym, exact(coeff)) for sym, coeff in rel.terms]
+                rhs = -exact(rel.constant)
+                for target, a_k in coefficients:
+                    if a_k == 0:
                         continue
-
-                    # Each primitive operation is rounded outward to enclose
-                    # the exact result of the binary64 coefficients and boxes.
-                    # Non-finite results simply cannot establish a finite side.
-                    def outward(value: float, upper: bool) -> float | None:
-                        if not math.isfinite(value):
-                            return None
-                        return math.nextafter(value, math.inf if upper else -math.inf)
-
-                    min_rest: float | None = -rel.constant
-                    max_rest: float | None = -rel.constant
-                    for other_sym, a_i in rel.terms:
-                        if other_sym == target_sym:
+                    lower_rest: Fraction | None = rhs
+                    upper_rest: Fraction | None = rhs
+                    for other, a_i in coefficients:
+                        if other == target:
                             continue
-                        coeff = -a_i
-                        o_lo, o_hi = self.bounds.get(other_sym, (None, None))
-                        lower_endpoint = o_lo if coeff > 0 else o_hi
-                        upper_endpoint = o_hi if coeff > 0 else o_lo
-                        if min_rest is not None:
-                            if lower_endpoint is None:
-                                min_rest = None
-                            else:
-                                term = outward(coeff * lower_endpoint, False)
-                                min_rest = (outward(min_rest + term, False)
-                                            if term is not None else None)
-                        if max_rest is not None:
-                            if upper_endpoint is None:
-                                max_rest = None
-                            else:
-                                term = outward(coeff * upper_endpoint, True)
-                                max_rest = (outward(max_rest + term, True)
-                                            if term is not None else None)
-
+                        factor = -a_i
+                        lo, hi = self.bounds.get(other, (None, None))
+                        left = lo if factor > 0 else hi
+                        right = hi if factor > 0 else lo
+                        if lower_rest is not None:
+                            lower_rest = (
+                                None if left is None
+                                else lower_rest + factor * exact(left)
+                            )
+                        if upper_rest is not None:
+                            upper_rest = (
+                                None if right is None
+                                else upper_rest + factor * exact(right)
+                            )
                     new_lo: float | None = None
                     new_hi: float | None = None
                     if rel.sense == "eq":
-                        lower_rest, upper_rest = (
-                            (min_rest, max_rest) if a_k > 0
-                            else (max_rest, min_rest)
-                        )
-                        if lower_rest is not None:
-                            new_lo = outward(lower_rest / a_k, False)
-                        if upper_rest is not None:
-                            new_hi = outward(upper_rest / a_k, True)
+                        if a_k > 0:
+                            new_lo = (outward(lower_rest / a_k, False)
+                                      if lower_rest is not None else None)
+                            new_hi = (outward(upper_rest / a_k, True)
+                                      if upper_rest is not None else None)
+                        else:
+                            new_lo = (outward(upper_rest / a_k, False)
+                                      if upper_rest is not None else None)
+                            new_hi = (outward(lower_rest / a_k, True)
+                                      if lower_rest is not None else None)
                     elif rel.sense == "le":
-                        if a_k > 0 and max_rest is not None:
-                            new_hi = outward(max_rest / a_k, True)
-                        elif a_k < 0 and max_rest is not None:
-                            new_lo = outward(max_rest / a_k, False)
+                        if a_k > 0 and upper_rest is not None:
+                            new_hi = outward(upper_rest / a_k, True)
+                        elif a_k < 0 and upper_rest is not None:
+                            new_lo = outward(upper_rest / a_k, False)
                     elif rel.sense == "ge":
-                        if a_k > 0 and min_rest is not None:
-                            new_lo = outward(min_rest / a_k, False)
-                        elif a_k < 0 and min_rest is not None:
-                            new_hi = outward(min_rest / a_k, True)
+                        if a_k > 0 and lower_rest is not None:
+                            new_lo = outward(lower_rest / a_k, False)
+                        elif a_k < 0 and lower_rest is not None:
+                            new_hi = outward(lower_rest / a_k, True)
 
-                    # Check tightening
-                    cur_lo, cur_hi = self.bounds.get(target_sym, (None, None))
-                    tightened = False
-                    next_lo = cur_lo
-                    next_hi = cur_hi
-
-                    if new_lo is not None:
-                        if cur_lo is None or new_lo > cur_lo:
-                            next_lo = new_lo
-                            tightened = True
-                    if new_hi is not None:
-                        if cur_hi is None or new_hi < cur_hi:
-                            next_hi = new_hi
-                            tightened = True
-
-                    if tightened:
-                        if next_lo is not None and next_hi is not None and next_lo > next_hi:
-                            raise LoweringUnsupportedError(
-                                f"关系推导冲突：符号 {target_sym!r} 推导下界 {next_lo} > 上界 {next_hi}",
-                                model_source=({"location": asdict(rel.source)} if rel.source else None),
-                            )
-                        self.bounds[target_sym] = (next_lo, next_hi)
-                        cur_lo_src, cur_hi_src = self.provenance.get(target_sym, (None, None))
-                        self.provenance[target_sym] = (
-                            rel.source if next_lo != cur_lo else cur_lo_src,
-                            rel.source if next_hi != cur_hi else cur_hi_src,
-                        )
-                        if target_sym not in in_queue:
-                            queue.append(target_sym)
-                            in_queue.add(target_sym)
+                    current_lo, current_hi = self.bounds.get(target, (None, None))
+                    next_lo = (
+                        new_lo if current_lo is None else max(current_lo, new_lo)
+                    ) if new_lo is not None else current_lo
+                    next_hi = (
+                        new_hi if current_hi is None else min(current_hi, new_hi)
+                    ) if new_hi is not None else current_hi
+                    if next_lo == current_lo and next_hi == current_hi:
+                        continue
+                    if (next_lo is not None and next_hi is not None
+                            and next_lo > next_hi):
+                        self.conflicts.append((target, rel.relation_id))
+                        return
+                    self.bounds[target] = (next_lo, next_hi)
+                    old_lo_src, old_hi_src = self.provenance.get(target, (None, None))
+                    self.provenance[target] = (
+                        rel.source if next_lo != current_lo else old_lo_src,
+                        rel.source if next_hi != current_hi else old_hi_src,
+                    )
+                    if target not in in_queue:
+                        queue.append(target)
+                        in_queue.add(target)
 
     def simplify_affine(
         self, terms: Mapping[str, float], constant: float,
