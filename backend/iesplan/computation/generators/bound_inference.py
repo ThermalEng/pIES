@@ -12,6 +12,7 @@ from __future__ import annotations
 from collections import defaultdict, deque
 from dataclasses import asdict, dataclass, field
 import math
+from fractions import Fraction
 from typing import Any, Mapping
 
 from iesplan.computation.generators.compiler_ir import (
@@ -81,7 +82,7 @@ class BoundInferenceEngine:
         self.bounds: dict[str, tuple[float | None, float | None]] = {}
         self.provenance: dict[str, tuple[SourceLocation | None, SourceLocation | None]] = {}
         self.relations: list[AffineRelation] = []
-        self.equalities: dict[str, tuple[dict[str, float], float]] = {}  # var -> (other_terms, const)
+        self.equalities: dict[str, tuple[dict[str, Fraction], Fraction]] = {}  # exact affine substitutions
         self.inequalities: list[AffineRelation] = []
 
         self._init_bounds()
@@ -113,7 +114,7 @@ class BoundInferenceEngine:
             hi = cur_hi if var.upper is None else (var.upper if cur_hi is None else min(cur_hi, var.upper))
             self.bounds[name] = (lo, hi)
             # Check for immediate contradiction
-            if lo is not None and hi is not None and lo > hi + _TOLERANCE:
+            if lo is not None and hi is not None and lo > hi:
                 raise LoweringUnsupportedError(
                     f"变量 {name!r} 初始界冲突 (lower={lo} > upper={hi})",
                     model_source={
@@ -157,10 +158,12 @@ class BoundInferenceEngine:
             term_dict = dict(filtered)
             lead_var = next((k for k, v in term_dict.items() if v == 1.0 or v == -1.0), filtered[0][0])
             lead_coeff = term_dict[lead_var]
+            divisor = Fraction.from_float(lead_coeff)
             sub_terms = {
-                k: -v / lead_coeff for k, v in term_dict.items() if k != lead_var
+                k: -Fraction.from_float(v) / divisor
+                for k, v in term_dict.items() if k != lead_var
             }
-            sub_const = -constant / lead_coeff
+            sub_const = -Fraction.from_float(constant) / divisor
             if lead_var not in self.equalities:
                 self.equalities[lead_var] = (sub_terms, sub_const)
         else:
@@ -315,57 +318,59 @@ class BoundInferenceEngine:
                     if a_k == 0.0:
                         continue
 
-                    # Calculate Rest = -c - sum_{i != target} a_i * x_i
+                    # Each primitive operation is rounded outward to enclose
+                    # the exact result of the binary64 coefficients and boxes.
+                    # Non-finite results simply cannot establish a finite side.
+                    def outward(value: float, upper: bool) -> float | None:
+                        if not math.isfinite(value):
+                            return None
+                        return math.nextafter(value, math.inf if upper else -math.inf)
+
                     min_rest: float | None = -rel.constant
                     max_rest: float | None = -rel.constant
-
                     for other_sym, a_i in rel.terms:
                         if other_sym == target_sym:
                             continue
                         coeff = -a_i
                         o_lo, o_hi = self.bounds.get(other_sym, (None, None))
-
-                        if coeff > 0:
-                            if o_lo is None:
+                        lower_endpoint = o_lo if coeff > 0 else o_hi
+                        upper_endpoint = o_hi if coeff > 0 else o_lo
+                        if min_rest is not None:
+                            if lower_endpoint is None:
                                 min_rest = None
-                            elif min_rest is not None:
-                                min_rest += coeff * o_lo
-
-                            if o_hi is None:
+                            else:
+                                term = outward(coeff * lower_endpoint, False)
+                                min_rest = (outward(min_rest + term, False)
+                                            if term is not None else None)
+                        if max_rest is not None:
+                            if upper_endpoint is None:
                                 max_rest = None
-                            elif max_rest is not None:
-                                max_rest += coeff * o_hi
-                        elif coeff < 0:
-                            if o_hi is None:
-                                min_rest = None
-                            elif min_rest is not None:
-                                min_rest += coeff * o_hi
-
-                            if o_lo is None:
-                                max_rest = None
-                            elif max_rest is not None:
-                                max_rest += coeff * o_lo
+                            else:
+                                term = outward(coeff * upper_endpoint, True)
+                                max_rest = (outward(max_rest + term, True)
+                                            if term is not None else None)
 
                     new_lo: float | None = None
                     new_hi: float | None = None
-
                     if rel.sense == "eq":
-                        if a_k > 0:
-                            new_lo = min_rest / a_k if min_rest is not None else None
-                            new_hi = max_rest / a_k if max_rest is not None else None
-                        else:
-                            new_lo = max_rest / a_k if max_rest is not None else None
-                            new_hi = min_rest / a_k if min_rest is not None else None
+                        lower_rest, upper_rest = (
+                            (min_rest, max_rest) if a_k > 0
+                            else (max_rest, min_rest)
+                        )
+                        if lower_rest is not None:
+                            new_lo = outward(lower_rest / a_k, False)
+                        if upper_rest is not None:
+                            new_hi = outward(upper_rest / a_k, True)
                     elif rel.sense == "le":
-                        if a_k > 0:
-                            new_hi = max_rest / a_k if max_rest is not None else None
-                        else:
-                            new_lo = max_rest / a_k if max_rest is not None else None
+                        if a_k > 0 and max_rest is not None:
+                            new_hi = outward(max_rest / a_k, True)
+                        elif a_k < 0 and max_rest is not None:
+                            new_lo = outward(max_rest / a_k, False)
                     elif rel.sense == "ge":
-                        if a_k > 0:
-                            new_lo = min_rest / a_k if min_rest is not None else None
-                        else:
-                            new_hi = min_rest / a_k if min_rest is not None else None
+                        if a_k > 0 and min_rest is not None:
+                            new_lo = outward(min_rest / a_k, False)
+                        elif a_k < 0 and min_rest is not None:
+                            new_hi = outward(min_rest / a_k, True)
 
                     # Check tightening
                     cur_lo, cur_hi = self.bounds.get(target_sym, (None, None))
@@ -383,7 +388,7 @@ class BoundInferenceEngine:
                             tightened = True
 
                     if tightened:
-                        if next_lo is not None and next_hi is not None and next_lo > next_hi + 1e-9:
+                        if next_lo is not None and next_hi is not None and next_lo > next_hi:
                             raise LoweringUnsupportedError(
                                 f"关系推导冲突：符号 {target_sym!r} 推导下界 {next_lo} > 上界 {next_hi}",
                                 model_source=({"location": asdict(rel.source)} if rel.source else None),
@@ -398,31 +403,35 @@ class BoundInferenceEngine:
                             queue.append(target_sym)
                             in_queue.add(target_sym)
 
-    def simplify_affine(self, terms: Mapping[str, float], constant: float) -> tuple[dict[str, float], float]:
-        """Substitute known equalities into an affine expression to preserve correlations."""
-        cur_terms = dict(terms)
-        cur_const = constant
+    def simplify_affine(
+        self, terms: Mapping[str, float], constant: float,
+    ) -> tuple[dict[str, Fraction], Fraction]:
+        """Algebraically exact substitutions of the original float inputs.
 
-        # Repeat substitution passes up to small limit
-        for _ in range(5):
-            changed = False
-            for var in list(cur_terms):
-                if var in self.equalities:
-                    coeff = cur_terms.pop(var)
-                    sub_terms, sub_const = self.equalities[var]
-                    cur_const += coeff * sub_const
-                    for k, v in sub_terms.items():
-                        total = cur_terms.get(k, 0.0) + coeff * v
-                        if total == 0.0:
-                            cur_terms.pop(k, None)
-                        else:
-                            cur_terms[k] = total
-                    changed = True
-                    break
-            if not changed:
+        No tolerance-based cancellation or float coefficient loss is permitted.
+        """
+        current = {
+            k: Fraction.from_float(float(v))
+            for k, v in terms.items() if v != 0
+        }
+        offset = Fraction.from_float(float(constant))
+        seen: set[str] = set()
+        for _ in range(min(len(self.equalities), 1000)):
+            lead = next((k for k in current if k in self.equalities
+                         and k not in seen), None)
+            if lead is None:
                 break
-
-        return (cur_terms, cur_const)
+            seen.add(lead)
+            multiplier = current.pop(lead)
+            replacement, base = self.equalities[lead]
+            offset += multiplier * base
+            for k, coeff in replacement.items():
+                value = current.get(k, Fraction(0)) + multiplier * coeff
+                if value:
+                    current[k] = value
+                else:
+                    current.pop(k, None)
+        return current, offset
 
     def bound_affine(
         self,
@@ -431,26 +440,45 @@ class BoundInferenceEngine:
         *,
         side: str,
     ) -> float | None:
-        """Query lower (min) or upper (max) bound for an affine expression."""
-        simp_terms, simp_const = self.simplify_affine(terms, constant)
+        """Conservatively bound a correlated linear form, without guesswork."""
+        coeffs, base = self.simplify_affine(terms, constant)
+        if side not in ("min", "max"):
+            raise ValueError(side)
 
-        # If all terms cancelled, expression is constant!
-        if not simp_terms:
-            return simp_const
+        def as_float(value: Fraction) -> float | None:
+            try:
+                result = float(value)
+            except OverflowError:
+                return None
+            if not math.isfinite(result):
+                return None
+            exact_result = Fraction.from_float(result)
+            if side == "max" and exact_result < value:
+                return math.nextafter(result, math.inf)
+            if side == "min" and exact_result > value:
+                return math.nextafter(result, -math.inf)
+            return result
 
-        # A linear relation bounds other affine forms only after accounting
-        # for their exact residual. Approximate coefficient matching is unsound
-        # at large scales; never treat near-equal ratios as equal.
-        best_rel_bound: float | None = None
+        def interval_bound(values: Mapping[str, Fraction], seed: Fraction) -> Fraction | None:
+            total = seed
+            for sym, coeff in values.items():
+                lo, hi = self.bounds.get(sym, (None, None))
+                endpoint = (hi if coeff > 0 else lo) if side == "max" else (lo if coeff > 0 else hi)
+                if endpoint is None or not math.isfinite(endpoint):
+                    return None
+                total += coeff * Fraction.from_float(endpoint)
+            return total
+
+        candidate = interval_bound(coeffs, base)
+        # An inequality a*x+c <=/>= 0 bounds the *whole* correlated
+        # expression, plus the exact coefficient difference, not a near match.
         for rel in self.inequalities:
-            r_dict = rel.term_dict()
-            shared = sorted(set(r_dict) & set(simp_terms))
+            rel_coeff = {k: Fraction.from_float(v) for k, v in rel.terms}
+            shared = sorted(set(rel_coeff) & set(coeffs))
             if not shared:
                 continue
             pivot = shared[0]
-            factor = simp_terms[pivot] / r_dict[pivot]
-            if factor == 0.0 or not math.isfinite(factor):
-                continue
+            factor = coeffs[pivot] / rel_coeff[pivot]
             allowed = (
                 (factor > 0 and rel.sense == "le" and side == "max")
                 or (factor > 0 and rel.sense == "ge" and side == "min")
@@ -459,51 +487,20 @@ class BoundInferenceEngine:
             )
             if not allowed:
                 continue
-            # Compute the mismatch with high precision, retaining every
-            # nonzero term and directing final float conversion outwards.
-            from decimal import Decimal, localcontext
-            with localcontext() as ctx:
-                ctx.prec = 100
-                scale = Decimal.from_float(factor)
-                residual = {}
-                for k in sorted(set(simp_terms) | set(r_dict)):
-                    c = Decimal.from_float(simp_terms.get(k, 0.0)) - scale * Decimal.from_float(r_dict.get(k, 0.0))
-                    if c:
-                        residual[k] = c
-                total_dec = Decimal.from_float(simp_const) - scale * Decimal.from_float(rel.constant)
-                valid = True
-                for k, coeff in residual.items():
-                    lo, hi = self.bounds.get(k, (None, None))
-                    bound = (hi if coeff > 0 else lo) if side == "max" else (lo if coeff > 0 else hi)
-                    if bound is None or not math.isfinite(bound):
-                        valid = False
-                        break
-                    total_dec += coeff * Decimal.from_float(bound)
-                if not valid:
-                    continue
-                val = float(total_dec)
-                if not math.isfinite(val):
-                    continue
-                if side == "max" and Decimal.from_float(val) < total_dec:
-                    val = math.nextafter(val, math.inf)
-                elif side == "min" and Decimal.from_float(val) > total_dec:
-                    val = math.nextafter(val, -math.inf)
-                best_rel_bound = (
-                    val if best_rel_bound is None
-                    else (min(best_rel_bound, val) if side == "max" else max(best_rel_bound, val))
-                )
-
-        # Interval evaluation on remaining terms
-        total = simp_const
-        for sym, coeff in simp_terms.items():
-            if coeff == 0.0:
-                continue
-            lo, hi = self.bounds.get(sym, (None, None))
-            val = hi if (coeff > 0.0) == (side == "max") else lo
-            if val is None or not math.isfinite(val):
-                return best_rel_bound
-            total += coeff * val
-
-        if best_rel_bound is not None:
-            return min(best_rel_bound, total) if side == "max" else max(best_rel_bound, total)
-        return total
+            remainder = {
+                k: coeffs.get(k, Fraction(0)) - factor * rel_coeff.get(k, Fraction(0))
+                for k in set(coeffs) | set(rel_coeff)
+            }
+            remainder = {k: value for k, value in remainder.items() if value}
+            bound = interval_bound(
+                remainder,
+                base - factor * Fraction.from_float(rel.constant),
+            )
+            if bound is not None:
+                if candidate is None:
+                    candidate = bound
+                elif side == "max":
+                    candidate = min(candidate, bound)
+                else:
+                    candidate = max(candidate, bound)
+        return None if candidate is None else as_float(candidate)
