@@ -2081,13 +2081,14 @@ class _ProjectBuilder:
                 self._checkpoint()
                 for name, values in series_by_name.items():
                     known[name] = values[step]
-                bounds = {
-                    name: self.analysis.variable_bounds(
-                        self.bound_prop.get((inst, name),
-                            self._step_columns[(inst, name)][step])
-                    ) for name, entry in statics["symbols"].items()
-                    if entry[0] == "var"
-                }
+                bounds = {}
+                for name, entry in statics["symbols"].items():
+                    if entry[0] != "var":
+                        continue
+                    column = self.bound_prop.get((inst, name))
+                    if column is None:
+                        column = self._step_columns[(inst, name)][step]
+                    bounds[name] = self.analysis.variable_bounds(column)
                 for family in families:
                     template = self._technical_templates[family.identity]
                     self._source(family.identity, "equation", "step", step, kind="technical")

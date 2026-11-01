@@ -86,7 +86,9 @@ class BoundInferenceEngine:
 
         self._init_bounds()
         self._collect_relations()
-        self._propagate(budget=budget)
+        # Deterministic size-scaled work limit; incomplete derivation is not
+        # a proof of mathematical unboundedness.
+        self._propagate(budget=max(budget, min(100_000, 4 * len(self.relations))))
 
     def _init_bounds(self) -> None:
         # Load from inventory.bound_facts

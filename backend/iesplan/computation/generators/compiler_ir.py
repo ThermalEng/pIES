@@ -466,8 +466,19 @@ class CompilerAnalysis:
         inf_lo, inf_hi = self.inference.bounds.get(resolved_name, (None, None))
         if inf_lo is None and inf_hi is None:
             inf_lo, inf_hi = self.inference.bounds.get(name, (None, None))
-        # Column identities are registered with their actual time slots.
-        # Never peel '__t' from an arbitrary solver name to borrow a bound.
+        # An unindexed source identity denotes a safe envelope of all steps;
+        # only explicitly registered step columns receive step-specific bounds.
+        if "." in name and name == resolved_name:
+            inst, _, local = name.partition(".")
+            columns = self.inventory.step_columns.get((inst, local))
+            if columns:
+                step_bounds = [self.inference.bounds.get(col, (None, None)) for col in columns]
+                if all(lo is not None for lo, _ in step_bounds):
+                    envelope_lo = min(lo for lo, _ in step_bounds)
+                    inf_lo = envelope_lo if inf_lo is None else max(inf_lo, envelope_lo)
+                if all(hi is not None for _, hi in step_bounds):
+                    envelope_hi = max(hi for _, hi in step_bounds)
+                    inf_hi = envelope_hi if inf_hi is None else min(inf_hi, envelope_hi)
 
         if variable is None and inf_lo is None and inf_hi is None:
             fact = self.inventory.bound_facts.get(resolved_name) or self.inventory.bound_facts.get(name)
