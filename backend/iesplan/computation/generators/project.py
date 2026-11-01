@@ -1874,6 +1874,7 @@ class _ProjectBuilder:
 
         # Bind the SAME P1 technical templates before running P2 analysis;
         # production expansion reuses these compiled objects below.
+        shared_technical: dict[tuple, TechnicalTemplate] = {}
         for inst, statics in bound_instances.items():
             contribution = self.models[inst]
             known = dict(statics["prop_const"])
@@ -1889,9 +1890,15 @@ class _ProjectBuilder:
                            or statics["symbols"][name][0] == "const" else "var")
                     for name in family.referenced_symbols
                 }
-                template = compile_technical(family.relation, roles)
+                cache_key = (
+                    id(family.relation.ast), tuple(sorted(roles.items())),
+                )
+                template = shared_technical.get(cache_key)
+                if template is None:
+                    template = compile_technical(family.relation, roles)
+                    shared_technical[cache_key] = template
+                    self.template_stats["technical_compiles"] += 1
                 self._technical_templates[family.identity] = template
-                self.template_stats["technical_compiles"] += 1
                 self.inventory.technical_contexts[family.identity] = (
                     template, known, statics["initial"], predefined, statics["symbols"],
                 )
