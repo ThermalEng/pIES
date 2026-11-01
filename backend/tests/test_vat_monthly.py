@@ -60,7 +60,7 @@ ELEC_KW = LOAD_KW / EFFICIENCY
 def _finance_payload(*, refunds=(), opening="0", basis="tax_inclusive", rules="all", maintenance_tax=True):
     payload = {
         "schema": "ies.finance-profile",
-        "schema_version": "6.0.0",
+        "schema_version": "7.0.0",
         "profile": {
             "id": "vat-demo",
             "region": "CN-North",
@@ -283,7 +283,7 @@ equations:
 def _doc(*, variables: dict | None = None, tank_origin: str = "new"):
     return {
         "schema": "ies.assembly",
-        "schema_version": "5.0.0",
+        "schema_version": "6.0.0",
         "assembly": {"id": "vat-mini", "name": "VAT 手算装配"},
         "project_baseline": {
             "resolution": "1h",
