@@ -269,3 +269,28 @@ def test_highs_solve_optional_construction_zero_and_active(tmp_path) -> None:
     # Total upfront = fixed 50000 + 3500 CNY/kW * 50 kW = 50000 + 175000 = 225000 CNY
     assert float(facts_b["construction_total"]) == pytest.approx(225000.0)
 
+
+
+def test_explicit_mandatory_construction_survives_public_value_roundtrip() -> None:
+    """Do not silently turn activation:true/optional:false into optional."""
+    from iesplan.core.contracts.planning_config import PlanningVariable
+    source = {
+        "device_ref": "gen1", "parameter": "cap_kw",
+        "lower_bound": "0", "upper_bound": "500", "unit": "kW",
+        "activation": True, "optional": False,
+    }
+    encoded = PlanningVariable.from_dict(source).to_dict()
+    assert encoded["activation"] is True
+    assert "optional" in encoded and encoded["optional"] is False
+    assert PlanningVariable.from_dict(encoded).to_dict() == encoded
+    artifact, models, materialized, finance, config, evaluation = _activation_inputs(
+        optional=False, fixed_fee=50000.0, lower_kw=0,
+    )
+    doc = json.loads(artifact.canonical_text)
+    doc["planning"]["variables"]["gen_cap"] = encoded
+    rebuilt = replace(artifact, canonical_text=json.dumps(doc))
+    linear, _, _ = build_project_model(
+        rebuilt, models, materialized, finance, config, evaluation,
+    )
+    status = next(v for v in linear.variables if v.name == "built_gen1")
+    assert status.lower == status.upper == 1.0
