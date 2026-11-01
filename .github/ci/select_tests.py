@@ -267,23 +267,21 @@ COMPUTATION_CHAIN_NODE_SECONDS = {
     "test_gas_volume_driver_same_source_across_gates": 7,
     "test_chain_policy_rejected_never_executes": 8,
 }
-# Verified Docker CI 41273882424: an 8k-point annual tax solve can take
-# 18-23 minutes (and a second one 19-22 minutes); four lanes cancel after
-# 45 minutes even though the completed tests passed. Retain every real solver
-# and negative test, using conservative *observed* estimates for scheduling.
-# Actual CI is still required: these weights are not performance guarantees.
+# Docker CI 41279935541 after sparse bound inference repair: heavy income
+# cases now complete in roughly 5-8s. These are scheduling estimates, not
+# runtime guarantees; keep every real solver and negative assertion.
 INCOME_ANNUAL_NODE_SECONDS = {
     "test_pre_lowering_income_years_and_loss_claims_are_explicit": 5,
-    "test_income_reversal_selects_post_tax_optimum": 1400,  # 1394s observed
+    "test_income_reversal_selects_post_tax_optimum": 7,  # 6.85s observed
     "test_income_reversal_pretax_prefers_build": 12,
-    "test_income_loss_expiry_and_order": 1150,  # 1111s observed
-    "test_income_same_expiry_input_order": 1300,  # not reached on cancelled lane
-    "test_income_generated_loss_expires_without_carry": 1350,  # 1311s observed
-    "test_income_non_npv_objective_keeps_exact_balances": 1300,  # not reached
+    "test_income_loss_expiry_and_order": 7,  # 6.83s observed
+    "test_income_same_expiry_input_order": 7,  # 6.77s observed
+    "test_income_generated_loss_expires_without_carry": 6,  # 5.17s observed
+    "test_income_non_npv_objective_keeps_exact_balances": 6,  # 5.42s observed
     "test_income_vat_mix_matches_hand_and_b0": 15,  # 12.79s observed
     "test_income_vat_mix_exclusive_matches_hand_and_b0": 15,  # 10.44s observed
     "test_income_equivalent_gross_net_statement_matches": 25,  # 20.82s observed
-    "test_income_depreciation_zero_build_no_fictitious_income": 1200,  # 1153.70s observed
+    "test_income_depreciation_zero_build_no_fictitious_income": 8,  # 7.49s observed
     "test_income_depreciation_variable_capacity_positive_residual_rejected": 10,
     "test_income_depreciation_static_residual_matches_hand": 15,  # 10.47s observed
     "test_income_depreciation_excess_residual_rejected": 10,
@@ -617,16 +615,10 @@ def pick(changed: list[str], full: bool = False) -> dict[str, str]:
         backend.add(SMOKE_BACKEND)
     if browser and SMOKE_BROWSER not in browser:
         browser.add(SMOKE_BROWSER)
-    # Four shards were repeatedly cancelled after 45m by the annual-income
-    # *real* solver suite, while other lanes finished in <1m. With this suite
-    # selected, schedule eight disjoint jobs (at most four running in parallel
-    # per docker-ci.yml); no timeout relaxation or test selection reduction.
-    # All other affected selections keep their established 1/2/4-lane policy.
-    backend_count = (
-        8 if "test_income_annual.py" in backend
-        else 4 if len(backend) >= 16
-        else 2 if len(backend) >= 7 else 1
-    )
+    # Sparse bound inference restored annual-income runtimes; use the normal
+    # 1/2/4-lane policy, retaining function-level lossless test partitioning.
+    backend_count = (4 if len(backend) >= 16
+                     else 2 if len(backend) >= 7 else 1)
     backend_units = backend_test_units(backend, backend_count)
     case_weights = {f"test_computation_chain.py::{name}": seconds
                     for name, seconds in COMPUTATION_CHAIN_NODE_SECONDS.items()}
@@ -658,7 +650,7 @@ def pick(changed: list[str], full: bool = False) -> dict[str, str]:
     }
 
 
-# CI changes are high-impact: verify backend 8-lane, browser 4-lane and all
+# CI changes are high-impact: verify backend 4-lane, browser 4-lane and all
 # real assertions *automatically on the PR* before merge. Ordinary business
 # changes still use dependency-based selective testing.
 AUTO_FULL_PR_PATHS = frozenset({
@@ -716,7 +708,7 @@ def self_test() -> None:
     all_specs = pick([".github/ci/select_tests.py"], full=True)
     assert len(all_specs["browser_specs"].split()) > 40
     assert all_specs["browser_total"] == "4"
-    assert len(json.loads(all_specs["backend_shards"])) == 8
+    assert len(json.loads(all_specs["backend_shards"])) == 4
     for plan in (one, multi, all_specs):
         for field, shards in (("browser_specs", "browser_shards"),
                               ("backend_tests", "backend_shards")):
@@ -744,13 +736,13 @@ def self_test() -> None:
     assert income_nodes <= full_units
     assert "test_income_annual.py" not in full_units
     income_only = pick(["backend/tests/test_income_annual.py"])
-    assert len(json.loads(income_only["backend_shards"])) == 8
+    assert len(json.loads(income_only["backend_shards"])) == 1
     assert_backend_coverage(
         {"test_income_annual.py", SMOKE_BACKEND},
         json.loads(income_only["backend_shards"]),
     )
-    # The slowest confirmed tax solves must not be co-located, even in the
-    # reduced fixture selection. This is a scheduling check, not a green solve.
+    # The previously slow tax cases must all remain selected; their post-fix
+    # weights no longer justify artificial separation into eight lanes.
     time_critical = {
         "test_income_reversal_selects_post_tax_optimum",
         "test_income_loss_expiry_and_order",
@@ -758,13 +750,11 @@ def self_test() -> None:
         "test_income_depreciation_zero_build_no_fictitious_income",
     }
     for plan in (income_only, all_specs):
-        for lane in json.loads(plan["backend_shards"]):
-            critical = {
-                token.rsplit("::", 1)[-1]
-                for token in lane["tests"].split()
-                if token.startswith("tests/test_income_annual.py::")
-            } & time_critical
-            assert len(critical) <= 1, f"multiple slow tax solves in lane {lane['lane']}"
+        selected = {token.rsplit("::", 1)[-1]
+                    for lane in json.loads(plan["backend_shards"])
+                    for token in lane["tests"].split()
+                    if token.startswith("tests/test_income_annual.py::")}
+        assert time_critical <= selected
     assert backend_test_units({"test_income_annual.py"}, 1) == {
         "test_income_annual.py"
     }
