@@ -52,6 +52,9 @@ def test_small_nonzero_coefficient_preserves_feasible_witness():
 def test_derived_step_bound_reaches_actual_solver_column():
     inv = CompilerInventory()
     inv.property_bindings[("m", "capacity")] = "cap"
+    # The P1 inventory publishes actual step columns; no consumer is allowed
+    # to deduce symbol identity by splitting solver-variable name strings.
+    inv.step_columns[("m", "flow")] = ("m__flow__t0", "m__flow__t1")
     inv.relations.append(replace(_make_family(
         "flow", RefNode("flow"), BinaryNode("*", NumberNode(2), RefNode("capacity")), inst="m",
     ), domain=IndexDomain("step", 2)))
@@ -109,7 +112,13 @@ def test_optional_fixed_residual_uses_real_source_identity():
 
 def test_strategy_evaluation_fixture_actually_contains_mutex(tmp_path):
     from iesplan.computation.generators.on_demand_mutex import evaluate_mutex_strategies
-    result = evaluate_mutex_strategies(*_gen_inputs(), tmp_path)
+    args = list(_gen_inputs())
+    args[1]["gen1"] = _contribution(
+        GEN_YAML
+        + '    - id: dispatch_spare_mutex\n'
+        + '      expression: "dispatch[t] * spare[t] = 0"\n'
+    )
+    result = evaluate_mutex_strategies(*args, tmp_path)
     print(result)
     assert result.full_integers > 0, "Cannot assess mutex strategy using a model with zero binaries"
 
