@@ -125,7 +125,7 @@ def test_facts_mix_seal_matches_hand_and_objective(tmp_path) -> None:
     value, _, solution_raw = _solve_internal(bundle, tmp_path)
     adapted, sealed, facts = _seal(bundle, solution_raw, finance, _snapshot())
     assert sealed["schema"] == "ies.financial-evaluation"
-    assert sealed["schema_version"] == "3.0.0"
+    assert sealed["schema_version"] == "4.0.0"
     assert sealed["status"] == "evaluated"
     assert facts["currency"] == "CNY"
     # 公开形状：顶层键、tax_cash 嵌套、金额裸字符串、CF 顺序数组。

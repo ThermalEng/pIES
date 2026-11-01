@@ -67,9 +67,9 @@ def test_valid_assembly_canonical_roundtrip(doc):
     result = _validate(original)
     assert result.artifact is not None, [d.to_dict() for d in result.diagnostics]
     restored = json.loads(result.artifact.canonical_text)
-    assert restored["schema_version"] == "5.0.0"
+    assert restored["schema_version"] == "6.0.0"
     assert restored["planning"]["constraints"]["port_limit"] == _relation()
-    assert result.artifact.receipt.canonical_algorithm == "ies.assembly.canonical@5.0.0" if hasattr(result.artifact.receipt, "canonical_algorithm") else True
+    assert result.artifact.receipt.canonical_algorithm == "ies.assembly.canonical@6.0.0" if hasattr(result.artifact.receipt, "canonical_algorithm") else True
     cfg = PlanningConfig.from_dict(restored["planning"])
     plain = cfg.to_dict()
     assert PlanningConfig.from_dict(yaml_load(yaml_dump(plain))).to_dict() == plain
@@ -127,8 +127,8 @@ def test_disabled_relation_preserved_and_no_generator_capability_required(doc):
 def test_enabled_relation_requires_advertised_capability_and_freezes(doc):
     result = _validate(_insert(doc))
     assert result.artifact is not None
-    assert DESCRIPTOR.version == "7.1.0"
-    assert DESCRIPTOR.assembly_schema_version == "5.0.0"
+    assert DESCRIPTOR.version == "8.0.0"
+    assert DESCRIPTOR.assembly_schema_version == "6.0.0"
     assert "technical.step_constraints" in DESCRIPTOR.capabilities
     _check_step_constraint_capability(result.artifact, DESCRIPTOR.ref, DESCRIPTOR.capabilities)
     # Any other provider without the capability still fails at TASK-REQ-007.
