@@ -84,6 +84,9 @@ class BoundInferenceEngine:
         self.relations: list[AffineRelation] = []
         self.equalities: dict[str, tuple[dict[str, Fraction], Fraction]] = {}  # exact affine substitutions
         self.inequalities: list[AffineRelation] = []
+        # Sparse reverse index: do not rescan every per-step inequality for
+        # each annual VAT / income expression bound request.
+        self._inequalities_by_symbol: dict[str, list[int]] = defaultdict(list)
 
         self._init_bounds()
         self._collect_relations()
@@ -175,7 +178,10 @@ class BoundInferenceEngine:
             if lead_var not in self.equalities:
                 self.equalities[lead_var] = (sub_terms, sub_const)
         else:
+            index = len(self.inequalities)
             self.inequalities.append(rel)
+            for sym, _ in filtered:
+                self._inequalities_by_symbol[sym].append(index)
 
     def _column(self, inst: str, local: str, step: int) -> str:
         """Resolve the very same typed instance/step slot as the generator."""
@@ -448,20 +454,28 @@ class BoundInferenceEngine:
             for k, v in terms.items() if v != 0
         }
         offset = Fraction.from_float(float(constant))
+        # A worklist preserves dict-insertion order (including replacement
+        # keys) without repeatedly scanning a year-sized expression for the
+        # next substitutable variable. Each equality lead is visited at most
+        # once, as in the previous implementation.
         seen: set[str] = set()
-        for _ in range(min(len(self.equalities), 1000)):
-            lead = next((k for k in current if k in self.equalities
-                         and k not in seen), None)
-            if lead is None:
-                break
+        queue = deque(k for k in current if k in self.equalities)
+        limit = min(len(self.equalities), 1000)
+        while queue and len(seen) < limit:
+            lead = queue.popleft()
+            if lead in seen or lead not in current:
+                continue
             seen.add(lead)
             multiplier = current.pop(lead)
             replacement, base = self.equalities[lead]
             offset += multiplier * base
             for k, coeff in replacement.items():
+                existed = k in current
                 value = current.get(k, Fraction(0)) + multiplier * coeff
                 if value:
                     current[k] = value
+                    if not existed and k in self.equalities and k not in seen:
+                        queue.append(k)
                 else:
                     current.pop(k, None)
         return current, offset
@@ -473,7 +487,15 @@ class BoundInferenceEngine:
         *,
         side: str,
     ) -> float | None:
-        """Conservatively bound a correlated linear form, without guesswork."""
+        """Conservatively bound a correlated linear form, without guesswork.
+
+        The expression may contain an entire year of hourly variables. Scan
+        only inequalities sharing a nonzero symbol, and adjust only each
+        sparse row's coefficients. Rebuilding the whole annual expression
+        for every hourly capacity row would be quadratic in time slots.
+        Exact Fraction math, full cancellation of unbounded terms, and
+        outward rounding of the final result are retained.
+        """
         coeffs, base = self.simplify_affine(terms, constant)
         if side not in ("min", "max"):
             raise ValueError(side)
@@ -492,26 +514,52 @@ class BoundInferenceEngine:
                 return math.nextafter(result, -math.inf)
             return result
 
-        def interval_bound(values: Mapping[str, Fraction], seed: Fraction) -> Fraction | None:
-            total = seed
-            for sym, coeff in values.items():
-                lo, hi = self.bounds.get(sym, (None, None))
-                endpoint = (hi if coeff > 0 else lo) if side == "max" else (lo if coeff > 0 else hi)
-                if endpoint is None or not math.isfinite(endpoint):
-                    return None
-                total += coeff * Fraction.from_float(endpoint)
-            return total
+        def endpoint_term(sym: str, coeff: Fraction) -> Fraction | None:
+            if not coeff:
+                return Fraction(0)
+            lo, hi = self.bounds.get(sym, (None, None))
+            endpoint = (
+                (hi if coeff > 0 else lo) if side == "max"
+                else (lo if coeff > 0 else hi)
+            )
+            if endpoint is None or not math.isfinite(endpoint):
+                return None
+            return coeff * Fraction.from_float(endpoint)
 
-        candidate = interval_bound(coeffs, base)
-        # An inequality a*x+c <=/>= 0 bounds the *whole* correlated
-        # expression, plus the exact coefficient difference, not a near match.
-        for rel in self.inequalities:
-            rel_coeff = {k: Fraction.from_float(v) for k, v in rel.terms}
-            shared = sorted(set(rel_coeff) & set(coeffs))
-            if not shared:
+        # Store the finite part even when some symbols are unbounded. An
+        # inequality may cancel all missing endpoints (e.g. x-y <= 5 when
+        # neither x nor y has a finite upper bound).
+        per_symbol = {
+            sym: endpoint_term(sym, coeff)
+            for sym, coeff in coeffs.items()
+        }
+        base_sum = base
+        missing = 0
+        for contribution in per_symbol.values():
+            if contribution is None:
+                missing += 1
+            else:
+                base_sum += contribution
+        candidate = base_sum if missing == 0 else None
+
+        # In a two-year model, thousands of per-step capacity limits coexist
+        # with 8,760-term annual tax bases. Query the inverse source index,
+        # rather than scanning all rows and allocating a dense remainder dict
+        # for each one. Sorting retains prior source-order tie behavior.
+        relevant = sorted({
+            index
+            for sym in coeffs
+            for index in self._inequalities_by_symbol.get(sym, ())
+        })
+        for index in relevant:
+            rel = self.inequalities[index]
+            # rel.terms is already sorted; the first shared key is exactly the
+            # same pivot chosen by the previous dense algorithm.
+            pivot = next((sym for sym, _ in rel.terms if sym in coeffs), None)
+            if pivot is None:
                 continue
-            pivot = shared[0]
-            factor = coeffs[pivot] / rel_coeff[pivot]
+            pivot_coeff = next(a for sym, a in rel.terms if sym == pivot)
+            factor = coeffs[pivot] / Fraction.from_float(pivot_coeff)
             allowed = (
                 (factor > 0 and rel.sense == "le" and side == "max")
                 or (factor > 0 and rel.sense == "ge" and side == "min")
@@ -520,20 +568,30 @@ class BoundInferenceEngine:
             )
             if not allowed:
                 continue
-            remainder = {
-                k: coeffs.get(k, Fraction(0)) - factor * rel_coeff.get(k, Fraction(0))
-                for k in set(coeffs) | set(rel_coeff)
-            }
-            remainder = {k: value for k, value in remainder.items() if value}
-            bound = interval_bound(
-                remainder,
-                base - factor * Fraction.from_float(rel.constant),
-            )
-            if bound is not None:
-                if candidate is None:
-                    candidate = bound
-                elif side == "max":
-                    candidate = min(candidate, bound)
+
+            # The new expression is base - factor*row. Every symbol outside
+            # the sparse row has an unchanged contribution. Update only row
+            # symbols, and keep the exact count of unbounded endpoints.
+            total = base_sum - factor * Fraction.from_float(rel.constant)
+            unbounded = missing
+            for sym, a in rel.terms:
+                previous = per_symbol.get(sym, Fraction(0))
+                if previous is None:
+                    unbounded -= 1
                 else:
-                    candidate = max(candidate, bound)
+                    total -= previous
+                coeff = coeffs.get(sym, Fraction(0)) - factor * Fraction.from_float(a)
+                adjusted = endpoint_term(sym, coeff)
+                if adjusted is None:
+                    unbounded += 1
+                else:
+                    total += adjusted
+            if unbounded:
+                continue
+            if candidate is None:
+                candidate = total
+            elif side == "max":
+                candidate = min(candidate, total)
+            else:
+                candidate = max(candidate, total)
         return None if candidate is None else as_float(candidate)
