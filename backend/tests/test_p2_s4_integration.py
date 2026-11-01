@@ -84,8 +84,10 @@ def test_on_demand_mutex_isolated_comparison(tmp_path) -> None:
     )
     assert comparison.full_status in ("HighsModelStatus.kOptimal", "HighsModelStatus.kNotset", "HighsModelStatus.kModelEmpty", "HighsModelStatus.kInfeasible") or comparison.full_status.startswith("HighsModelStatus")
     assert comparison.candidate_all_relations_feasible is True
-    # 推荐结论为继续采用完整精确模型，不擅自修改生产执行协议
-    assert comparison.recommendation == "retain_full_exact_model"
+    # No mutex in the explicit fixture: no strategy conclusion is justified.
+    assert comparison.full_integers == 0
+    assert comparison.candidate_integers_added == 0
+    assert comparison.recommendation == "not_evaluated"
 
 
 def test_generation_determinism() -> None:

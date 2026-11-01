@@ -71,15 +71,6 @@ def evaluate_mutex_strategies(
     """Run isolated benchmark comparing full exact MILP vs candidate on-demand additions."""
     full_model, _, _ = build_project_model(artifact, models, materialized, finance, config, evaluation)
     mutex_var_names = {v.name for v in full_model.variables if "mutex" in v.name and v.kind == "binary"}
-    if not mutex_var_names and "gen1" in models:
-        from test_project_model import GEN_YAML, _contribution
-        models_aug = dict(models)
-        models_aug["gen1"] = _contribution(
-            GEN_YAML + '    - id: dispatch_spare_mutex\n      expression: "dispatch[t] * spare[t] = 0"\n'
-        )
-        full_model, _, _ = build_project_model(artifact, models_aug, materialized, finance, config, evaluation)
-        mutex_var_names = {v.name for v in full_model.variables if "mutex" in v.name and v.kind == "binary"}
-
     # 1. Full exact model
     mps_text, _ = write_mps(full_model)
     full_dir = tmp_path / "full_exact"
@@ -168,5 +159,5 @@ def evaluate_mutex_strategies(
         candidate_all_relations_feasible=all_feasible,
         candidate_objective=final_obj,
         candidate_wall_ms=round(cand_wall_ms, 2),
-        recommendation="retain_full_exact_model",
+        recommendation="not_evaluated",
     )

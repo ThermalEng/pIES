@@ -231,9 +231,8 @@ class BoundInferenceEngine:
 
         for sym, _ in filtered:
             if sym not in self.bounds:
-                base_sym = sym.split("[")[0] if "[" in sym else sym
-                base_lo, base_hi = self.bounds.get(base_sym, (None, None))
-                self.bounds[sym] = (base_lo, base_hi)
+                # Indexed identities are not interchangeable with their base.
+                self.bounds[sym] = (None, None)
 
         rel = AffineRelation(filtered, constant, sense, source, relation_id)
         self.relations.append(rel)
@@ -335,7 +334,7 @@ class BoundInferenceEngine:
                 term_dict = rel.term_dict()
 
                 for target_sym, a_k in rel.terms:
-                    if abs(a_k) < _TOLERANCE:
+                    if a_k == 0.0:
                         continue
 
                     # Calculate Rest = -c - sum_{i != target} a_i * x_i
@@ -412,12 +411,6 @@ class BoundInferenceEngine:
                                 model_source=({"location": asdict(rel.source)} if rel.source else None),
                             )
                         self.bounds[target_sym] = (next_lo, next_hi)
-                        if "[" in target_sym:
-                            base_sym = target_sym.split("[")[0]
-                            b_lo, b_hi = self.bounds.get(base_sym, (None, None))
-                            n_b_lo = next_lo if b_lo is None else (next_lo if next_lo is not None and next_lo > b_lo else b_lo)
-                            n_b_hi = next_hi if b_hi is None else (next_hi if next_hi is not None and next_hi < b_hi else b_hi)
-                            self.bounds[base_sym] = (n_b_lo, n_b_hi)
                         cur_lo_src, cur_hi_src = self.provenance.get(target_sym, (None, None))
                         self.provenance[target_sym] = (
                             rel.source if next_lo != cur_lo else cur_lo_src,
@@ -467,28 +460,60 @@ class BoundInferenceEngine:
         if not simp_terms:
             return simp_const
 
-        # Check if proportional to a known inequality
+        # A linear relation bounds other affine forms only after accounting
+        # for their exact residual. Approximate coefficient matching is unsound
+        # at large scales; never treat near-equal ratios as equal.
         best_rel_bound: float | None = None
         for rel in self.inequalities:
             r_dict = rel.term_dict()
-            if set(r_dict) == set(simp_terms):
-                first_k = next(iter(simp_terms))
-                factor = r_dict[first_k] / simp_terms[first_k]
-                if all(abs(r_dict[k] - factor * simp_terms[k]) < 1e-9 for k in simp_terms):
-                    if factor > 0:
-                        if rel.sense == "le" and side == "max":
-                            val = simp_const - rel.constant / factor
-                            best_rel_bound = val if best_rel_bound is None else min(best_rel_bound, val)
-                        elif rel.sense == "ge" and side == "min":
-                            val = simp_const - rel.constant / factor
-                            best_rel_bound = val if best_rel_bound is None else max(best_rel_bound, val)
-                    elif factor < 0:
-                        if rel.sense == "le" and side == "min":
-                            val = simp_const - rel.constant / factor
-                            best_rel_bound = val if best_rel_bound is None else max(best_rel_bound, val)
-                        elif rel.sense == "ge" and side == "max":
-                            val = simp_const - rel.constant / factor
-                            best_rel_bound = val if best_rel_bound is None else min(best_rel_bound, val)
+            shared = sorted(set(r_dict) & set(simp_terms))
+            if not shared:
+                continue
+            pivot = shared[0]
+            factor = simp_terms[pivot] / r_dict[pivot]
+            if factor == 0.0 or not math.isfinite(factor):
+                continue
+            allowed = (
+                (factor > 0 and rel.sense == "le" and side == "max")
+                or (factor > 0 and rel.sense == "ge" and side == "min")
+                or (factor < 0 and rel.sense == "le" and side == "min")
+                or (factor < 0 and rel.sense == "ge" and side == "max")
+            )
+            if not allowed:
+                continue
+            # Compute the mismatch with high precision, retaining every
+            # nonzero term and directing final float conversion outwards.
+            from decimal import Decimal, localcontext
+            with localcontext() as ctx:
+                ctx.prec = 100
+                scale = Decimal.from_float(factor)
+                residual = {}
+                for k in sorted(set(simp_terms) | set(r_dict)):
+                    c = Decimal.from_float(simp_terms.get(k, 0.0)) - scale * Decimal.from_float(r_dict.get(k, 0.0))
+                    if c:
+                        residual[k] = c
+                total_dec = Decimal.from_float(simp_const) - scale * Decimal.from_float(rel.constant)
+                valid = True
+                for k, coeff in residual.items():
+                    lo, hi = self.bounds.get(k, (None, None))
+                    bound = (hi if coeff > 0 else lo) if side == "max" else (lo if coeff > 0 else hi)
+                    if bound is None or not math.isfinite(bound):
+                        valid = False
+                        break
+                    total_dec += coeff * Decimal.from_float(bound)
+                if not valid:
+                    continue
+                val = float(total_dec)
+                if not math.isfinite(val):
+                    continue
+                if side == "max" and Decimal.from_float(val) < total_dec:
+                    val = math.nextafter(val, math.inf)
+                elif side == "min" and Decimal.from_float(val) > total_dec:
+                    val = math.nextafter(val, -math.inf)
+                best_rel_bound = (
+                    val if best_rel_bound is None
+                    else (min(best_rel_bound, val) if side == "max" else max(best_rel_bound, val))
+                )
 
         # Interval evaluation on remaining terms
         total = simp_const
