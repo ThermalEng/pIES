@@ -193,6 +193,7 @@ class TestSchemaFile:
         assert set(variables["properties"]) == {
             "device_ref", "parameter",
             "lower_bound", "upper_bound", "unit",
+            "activation", "optional",
         }
         assert variables["additionalProperties"] is False
         assert "year_offset" not in variables["properties"]
