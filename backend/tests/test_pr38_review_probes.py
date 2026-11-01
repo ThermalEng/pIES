@@ -111,7 +111,7 @@ def test_optional_fixed_residual_uses_real_source_identity():
 
 
 def test_strategy_evaluation_fixture_actually_contains_mutex(tmp_path):
-    from iesplan.computation.generators.on_demand_mutex import evaluate_mutex_strategies
+    from p2_mutex_measurement import evaluate_mutex_strategies
     args = list(_gen_inputs())
     args[1]["gen1"] = _contribution(
         GEN_YAML

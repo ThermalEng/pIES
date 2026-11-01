@@ -24,7 +24,7 @@ from iesplan.computation.generators.compiler_ir import (
 )
 from iesplan.computation.generators.highs_milp import HIGHS_MILP_PROVIDER
 from iesplan.computation.generators.linear import LoweringUnsupportedError
-from iesplan.computation.generators.on_demand_mutex import evaluate_mutex_strategies
+from p2_mutex_measurement import evaluate_mutex_strategies
 from iesplan.computation.generators.project import build_project_model, _new_builder
 from iesplan.computation.protocols import CalculationConfig, StopProbe
 from iesplan.computation.sequences import materialize_non_predictive_series
