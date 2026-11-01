@@ -316,3 +316,45 @@ def test_state_lag_across_blocks_and_year_with_changing_known_coefficient() -> N
         lo, hi = analysis.variable_bounds(f"s_{step}")
         assert lo == pytest.approx(expected, abs=1e-6)
         assert hi == pytest.approx(expected, abs=1e-6)
+
+
+def test_exact_zero_propagates_without_artificial_subnormal() -> None:
+    """A mathematically zero bound must stay 0, never nextafter(0) epsilon."""
+    inventory = CompilerInventory()
+    inventory.relations.append(_make_family(
+        "zero", RefNode("x"), NumberNode(0.0), inst="m",
+    ))
+    inventory.register_bound_fact(BoundFact("m.x", 0.0, 10.0))
+    inventory.seal()
+    analysis = CompilerAnalysis(inventory, {})
+    assert analysis.variable_bounds("m.x") == (0.0, 0.0)
+
+
+def test_infeasible_source_rows_do_not_get_rewritten_as_invalid_bounds() -> None:
+    """Retain original rows for the exact MILP to diagnose infeasibility.
+
+    Contradictory *derived* intervals are not a license to remove a planning
+    row, create a fake Big-M, or prevent the public generator emitting rows.
+    """
+    from iesplan.computation.generators.compiler_ir import PlanningRule
+    from iesplan.computation.generators.linear import LinearConstraint, LinearExpression
+
+    inventory = CompilerInventory()
+    for name, sense, rhs in (("upper", "le", 0.0), ("lower", "ge", 1.0)):
+        row = LinearConstraint(
+            name,
+            LinearExpression(terms=((("x", 0), 1.0),), constant=0.0),
+            sense, rhs,
+        )
+        inventory.collect(SemanticRelation(
+            f"planning.{name}", "planning_scalar", IndexDomain("scalar"),
+            PlanningRule(name, row, False, {}),
+            SourceLocation(f"planning.constraints.{name}"),
+            input_symbols=("x",),
+        ))
+    inventory.register_bound_fact(BoundFact("x", 0.0, 2.0))
+    inventory.seal()
+    analysis = CompilerAnalysis(inventory, {})
+    assert analysis.inference.conflicts
+    assert analysis.variable_bounds("x") == (0.0, 2.0)
+    assert len(analysis.relations("planning_scalar")) == 2
