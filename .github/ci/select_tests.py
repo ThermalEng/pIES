@@ -749,12 +749,17 @@ def self_test() -> None:
         "test_income_generated_loss_expires_without_carry",
         "test_income_depreciation_zero_build_no_fictitious_income",
     }
-    for plan in (income_only, all_specs):
-        selected = {token.rsplit("::", 1)[-1]
-                    for lane in json.loads(plan["backend_shards"])
-                    for token in lane["tests"].split()
-                    if token.startswith("tests/test_income_annual.py::")}
-        assert time_critical <= selected
+    # A small targeted run has one/two lanes and deliberately selects the
+    # entire file. Only the four-lane full suite partitions pytest nodes.
+    income_selected = {token
+                       for lane in json.loads(income_only["backend_shards"])
+                       for token in lane["tests"].split()}
+    assert "tests/test_income_annual.py" in income_selected
+    full_selected = {token.rsplit("::", 1)[-1]
+                     for lane in json.loads(all_specs["backend_shards"])
+                     for token in lane["tests"].split()
+                     if token.startswith("tests/test_income_annual.py::")}
+    assert time_critical <= full_selected
     assert backend_test_units({"test_income_annual.py"}, 1) == {
         "test_income_annual.py"
     }
