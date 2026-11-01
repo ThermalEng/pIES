@@ -358,3 +358,57 @@ def test_infeasible_source_rows_do_not_get_rewritten_as_invalid_bounds() -> None
     assert analysis.inference.conflicts
     assert analysis.variable_bounds("x") == (0.0, 2.0)
     assert len(analysis.relations("planning_scalar")) == 2
+
+
+def test_sparse_inequality_preserves_exact_correlated_bounds() -> None:
+    """Sparse interval updates must match the dense correlated proof, even if
+    the unmodified x/y terms have infinite independent endpoints.
+    """
+    inv = CompilerInventory()
+    inv.register_bound_fact(BoundFact("z", lower=-2.0, upper=6.0))
+    inv.seal()
+    analysis = CompilerAnalysis(inv, {})
+    engine = analysis.inference
+    # Neither x nor y has any independent finite endpoint. This source row
+    # proves 2*x - 4*y <= 6, so +0.5*z yields <=9 (not an invented Big-M).
+    engine._add_affine({"x": 1.0, "y": -2.0}, -3.0, "le")
+    engine._add_affine({"unrelated": 1.0}, -1.0, "le")
+    expr = {"x": 2.0, "y": -4.0, "z": 0.5}
+    assert engine.bound_affine(expr, 0.0, side="max") == pytest.approx(9.0)
+    assert engine.bound_affine(expr, 0.0, side="min") is None
+    # Flipping the expression and requesting the other side must preserve
+    # the same proof, and near-proportional adjustments remain exact.
+    flipped = {sym: -coeff for sym, coeff in expr.items()}
+    assert engine.bound_affine(flipped, 0.0, side="min") == pytest.approx(-9.0)
+
+
+def test_large_sparse_annual_expression_bound_is_not_quadratic() -> None:
+    """The tax-base-sized query may not build 2,048 dense residual vectors.
+
+    A genuine source-index regression was observed as 18-23 minute income
+    tests in Docker CI 41273882424. Time only the bound query, not image
+    build, pytest collection or 2,048-row inference initialization.
+    """
+    from time import perf_counter
+
+    count = 2048
+    inv = CompilerInventory()
+    inv.register_bound_fact(BoundFact("cap", 0.0, 7.0))
+    for i in range(count):
+        name = f"m.x{i}"
+        inv.register_bound_fact(BoundFact(name, 0.0, 7.0))
+        inv.collect(SemanticRelation(
+            f"cap_{i}", "capacity", IndexDomain("scalar"),
+            CapacityLimit("m", f"x{i}", "cap", "le"),
+            SourceLocation(f"interfaces.x{i}"),
+        ))
+    inv.seal()
+    analysis = CompilerAnalysis(inv, {})
+    annual = {f"m.x{i}": 1.0 for i in range(count)}
+    start = perf_counter()
+    upper = analysis.inference.bound_affine(annual, 0.0, side="max")
+    elapsed = perf_counter() - start
+    assert upper == pytest.approx(7.0 * count)
+    # Deliberately generous headroom for shared CI runners. The old
+    # implementation performed ~4 million full-expression allocations.
+    assert elapsed < 10.0, f"sparse annual bound query regressed: {elapsed:.2f}s"
