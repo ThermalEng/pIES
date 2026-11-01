@@ -22,8 +22,7 @@ finance:
   profile_id: cn-north-demo
 
 finance_binding:
-  instances:
-    {}
+  instances: {}
 
 tariff_bindings: {}
 
