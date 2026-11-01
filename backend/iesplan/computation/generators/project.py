@@ -625,8 +625,10 @@ class _ProjectBuilder:
             punit = spec.get("unit") or unit
             var = self.variables.get(pname)
             if side == "lower":
-                raw_lo = spec.get("lower_bound")
-                p_bound = None if raw_lo is None else _to_internal(float(raw_lo), punit)
+                # The intersected planning variable carries the MODEL domain
+                # as well as the project boundary. Never reread a looser raw
+                # lower_bound directly from the unprocessed document.
+                p_bound = var.lower if var is not None else None
             else:
                 p_bound = var.upper if var is not None else None
             if num_internal is not None and p_bound is not None:
@@ -1026,6 +1028,10 @@ class _ProjectBuilder:
                                contribution.device_id, dev["definition"].get("revision")),
                 (f"{inst}.{local}", pname),
             ))
+        for local, _lo, _hi, _unit in column_specs:
+            self.inventory.step_columns[(inst, local)] = tuple(
+                self._tech_name(inst, local, t) for t in range(self.point_count)
+            )
         for name, value in initial.items():
             # Initial ASTs are lowered with model-local identifiers, but the
             # semantic graph must expose the globally bound identity.  In
@@ -1866,6 +1872,29 @@ class _ProjectBuilder:
                                  if op.kind in ("annual_cash", "vat", "income", "net_cash")),
             ))
 
+        # Bind the SAME P1 technical templates before running P2 analysis;
+        # production expansion reuses these compiled objects below.
+        for inst, statics in bound_instances.items():
+            contribution = self.models[inst]
+            known = dict(statics["prop_const"])
+            known[TIMELINE_STEP_DURATION_VAR] = self.step_s
+            predefined = {
+                name: self._series_si(inst, name, contribution)
+                for name, flow in contribution.interfaces.items()
+                if flow.type == "predefined"
+            }
+            for family in self._instance_relations[inst]:
+                roles = {
+                    name: ("known" if name in predefined
+                           or statics["symbols"][name][0] == "const" else "var")
+                    for name in family.referenced_symbols
+                }
+                template = compile_technical(family.relation, roles)
+                self._technical_templates[family.identity] = template
+                self.template_stats["technical_compiles"] += 1
+                self.inventory.technical_contexts[family.identity] = (
+                    template, known, statics["initial"], predefined, statics["symbols"],
+                )
         self.inventory.seal()
         self.analysis = CompilerAnalysis(self.inventory, self.variables)
         self._register_sources()
@@ -1907,12 +1936,14 @@ class _ProjectBuilder:
                     for name in family.referenced_symbols
                 }
                 key = (id(family.relation.ast), tuple(sorted(roles.items())))
-                template = compiled.get(key)
+                template = self._technical_templates.get(family.identity)
                 if template is None:
-                    template = compile_technical(family.relation, roles)
-                    compiled[key] = template
-                    self.template_stats["technical_compiles"] += 1
-                self._technical_templates[family.identity] = template
+                    template = compiled.get(key)
+                    if template is None:
+                        template = compile_technical(family.relation, roles)
+                        compiled[key] = template
+                        self.template_stats["technical_compiles"] += 1
+                    self._technical_templates[family.identity] = template
         for operation in self.analysis.relations("planning_step"):
             self._checkpoint()
             spec = operation.payload
@@ -2012,17 +2043,8 @@ class _ProjectBuilder:
             for name, flow in contribution.interfaces.items()
             if flow.type == "predefined"
         }
-        # S2's exact declared box bounds are time-independent for technical
-        # columns; evaluate through its shared analysis entry *once* per local.
-        bounds = {}
-        for name, entry in statics["symbols"].items():
-            if entry[0] != "var":
-                continue
-            actual = self.bound_prop.get((inst, name), self._tech_name(inst, name, 0))
-            if actual in self.variables:
-                bounds[name] = self.analysis.variable_bounds(actual)
-            else:
-                bounds[name] = (entry[1], entry[2])
+        # Each production step consumes its *own* proven interval. Do not
+        # reuse point-0 inference for the rest of the operating horizon.
         # The bound property and step-column table are *already* declared.
         # Capture them once per instance; only the step index changes. The
         # shared template binder can now produce one final global-column
@@ -2059,6 +2081,13 @@ class _ProjectBuilder:
                 self._checkpoint()
                 for name, values in series_by_name.items():
                     known[name] = values[step]
+                bounds = {
+                    name: self.analysis.variable_bounds(
+                        self.bound_prop.get((inst, name),
+                            self._step_columns[(inst, name)][step])
+                    ) for name, entry in statics["symbols"].items()
+                    if entry[0] == "var"
+                }
                 for family in families:
                     template = self._technical_templates[family.identity]
                     self._source(family.identity, "equation", "step", step, kind="technical")

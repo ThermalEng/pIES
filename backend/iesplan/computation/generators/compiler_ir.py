@@ -466,16 +466,8 @@ class CompilerAnalysis:
         inf_lo, inf_hi = self.inference.bounds.get(resolved_name, (None, None))
         if inf_lo is None and inf_hi is None:
             inf_lo, inf_hi = self.inference.bounds.get(name, (None, None))
-        if (inf_lo is None or inf_hi is None) and "__t" in name:
-            base, _, step_str = name.rpartition("__t")
-            if step_str.isdigit():
-                inst, _, local = base.partition("__")
-                base_sym = f"{inst}.{local}"
-                b_lo, b_hi = self.inference.bounds.get(base_sym, (None, None))
-                if inf_lo is None:
-                    inf_lo = b_lo
-                if inf_hi is None:
-                    inf_hi = b_hi
+        # Column identities are registered with their actual time slots.
+        # Never peel '__t' from an arbitrary solver name to borrow a bound.
 
         if variable is None and inf_lo is None and inf_hi is None:
             fact = self.inventory.bound_facts.get(resolved_name) or self.inventory.bound_facts.get(name)
@@ -541,7 +533,8 @@ class CompilerAnalysis:
             if entry[0] != "var":
                 continue
             global_name = self.inventory.property_bindings.get((instance, local))
-            name = global_name or f"{instance}__{local}__t{step}"
+            columns = self.inventory.step_columns.get((instance, local))
+            name = global_name or (columns[step] if columns is not None else f"{instance}.{local}")
             if name in self.variables:
                 lo, hi = self.variable_bounds(name)
                 result[local] = ("var", lo, hi)
@@ -565,6 +558,10 @@ class CompilerInventory:
 
     symbols: dict[str, SymbolDeclaration] = field(default_factory=dict)
     property_bindings: dict[tuple[str, str], str] = field(default_factory=dict)
+    # Internal preallocation slot map and P1 template contexts. A typed
+    # instance/step association, never a decoded MPS column string.
+    step_columns: dict[tuple[str, str], tuple[str, ...]] = field(default_factory=dict)
+    technical_contexts: dict[str, object] = field(default_factory=dict)
     coefficients: dict[str, KnownCoefficient] = field(default_factory=dict)
     relations: list[RelationFamily] = field(default_factory=list)
     outputs: list[OutputReference] = field(default_factory=list)

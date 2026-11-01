@@ -34,7 +34,8 @@ from iesplan.computation.generators.linear import (
     LinearVariable,
     LoweringUnsupportedError,
 )
-from iesplan.modeling import BinaryNode, MathRelation, NumberNode, RefNode, UnaryNode
+from iesplan.modeling import BinaryNode, RefNode, UnaryNode
+from iesplan.computation.generators.templates import bind_technical, compile_technical
 
 
 _TOLERANCE = 1e-12
@@ -54,113 +55,15 @@ class AffineRelation:
         return dict(self.terms)
 
 
-def _node_to_affine(
-    node: object,
-    inst: str | None,
-    inventory: CompilerInventory,
-    step: int = 0,
-) -> tuple[dict[str, float], float] | None:
-    """Convert an AST node into an affine accumulator (terms, constant).
-
-    Returns None if the node contains non-linear expressions (e.g. var * var).
-    """
-    if isinstance(node, NumberNode):
-        val = float(node.value)
-        return ({}, val) if math.isfinite(val) else None
-
+def _reference_names(node: object) -> set[str]:
+    """Collect local names only; P1's compiler owns expression arithmetic."""
     if isinstance(node, RefNode):
-        local = node.name
-        # Check if local is a known coefficient
-        if inst is not None:
-            bound_identity = inventory.property_bindings.get((inst, local))
-            if bound_identity and bound_identity in inventory.coefficients:
-                coeff = inventory.coefficients[bound_identity]
-                if coeff.value is not None:
-                    return ({}, float(coeff.value))
-            # Also check direct local coefficient
-            if local in inventory.coefficients:
-                coeff = inventory.coefficients[local]
-                if coeff.value is not None:
-                    return ({}, float(coeff.value))
-
-        if local in inventory.coefficients:
-            coeff = inventory.coefficients[local]
-            if coeff.value is not None:
-                return ({}, float(coeff.value))
-
-        # It is a variable symbol
-        symbol_name: str
-        if inst is not None:
-            symbol_name = inventory.property_bindings.get((inst, local), f"{inst}.{local}")
-        else:
-            symbol_name = local
-        if node.offset != 0:
-            symbol_name = f"{symbol_name}[t{node.offset:+d}]"
-        return ({symbol_name: 1.0}, 0.0)
-
+        return {node.name}
     if isinstance(node, UnaryNode):
-        res = _node_to_affine(node.operand, inst, inventory, step)
-        if res is None:
-            return None
-        terms, const = res
-        if node.op == "-":
-            return ({k: -v for k, v in terms.items()}, -const)
-        if node.op == "+":
-            return (terms, const)
-        return None
-
+        return _reference_names(node.operand)
     if isinstance(node, BinaryNode):
-        left_res = _node_to_affine(node.left, inst, inventory, step)
-        right_res = _node_to_affine(node.right, inst, inventory, step)
-        if left_res is None or right_res is None:
-            return None
-        l_terms, l_const = left_res
-        r_terms, r_const = right_res
-
-        if node.op == "+":
-            merged = dict(l_terms)
-            for k, v in r_terms.items():
-                total = merged.get(k, 0.0) + v
-                if total == 0.0:
-                    merged.pop(k, None)
-                else:
-                    merged[k] = total
-            return (merged, l_const + r_const)
-
-        if node.op == "-":
-            merged = dict(l_terms)
-            for k, v in r_terms.items():
-                total = merged.get(k, 0.0) - v
-                if total == 0.0:
-                    merged.pop(k, None)
-                else:
-                    merged[k] = total
-            return (merged, l_const - r_const)
-
-        if node.op == "*":
-            # Linear if at most one side has variable terms
-            if l_terms and r_terms:
-                return None  # var * var: non-linear
-            if not l_terms:
-                # Left is constant: scale right
-                factor = l_const
-                scaled = {k: v * factor for k, v in r_terms.items() if (v * factor) != 0.0}
-                return (scaled, r_const * factor)
-            else:
-                # Right is constant: scale left
-                factor = r_const
-                scaled = {k: v * factor for k, v in l_terms.items() if (v * factor) != 0.0}
-                return (scaled, l_const * factor)
-
-        if node.op == "/":
-            # Linear only if right is non-zero constant
-            if r_terms or r_const == 0.0:
-                return None
-            factor = 1.0 / r_const
-            scaled = {k: v * factor for k, v in l_terms.items() if (v * factor) != 0.0}
-            return (scaled, l_const * factor)
-
-    return None
+        return _reference_names(node.left) | _reference_names(node.right)
+    return set()
 
 
 class BoundInferenceEngine:
@@ -190,6 +93,16 @@ class BoundInferenceEngine:
         for sym, fact in self.inventory.bound_facts.items():
             self.bounds[sym] = (fact.lower, fact.upper)
             self.provenance[sym] = (fact.lower_source, fact.upper_source)
+
+        # Materialize every explicit time slot's *own* domain. The same
+        # declared box may be reused at each time, but derived bounds cannot.
+        for (inst, local), columns in self.inventory.step_columns.items():
+            fact = self.inventory.bound_facts.get(f"{inst}.{local}")
+            if fact is None:
+                continue
+            for column in columns:
+                self.bounds[column] = (fact.lower, fact.upper)
+                self.provenance[column] = (fact.lower_source, fact.upper_source)
 
         # Load from variables
         for name, var in self.variables.items():
@@ -251,19 +164,38 @@ class BoundInferenceEngine:
         else:
             self.inequalities.append(rel)
 
+    def _column(self, inst: str, local: str, step: int) -> str:
+        """Resolve the very same typed instance/step slot as the generator."""
+        scalar = self.inventory.property_bindings.get((inst, local))
+        if scalar is not None:
+            return scalar
+        columns = self.inventory.step_columns.get((inst, local))
+        if columns is not None:
+            return columns[step]
+        # Standalone scalar inventory tests have no declared time slots.
+        return f"{inst}.{local}"
+
     def _collect_relations(self) -> None:
-        # 1. Collect from SemanticRelations (operations)
+        # Every operation consumes the sealed P1 source identities and index
+        # domain. Never infer a time reference by parsing a solver column name.
         for op in self.inventory.operations:
             payload = op.payload
+            count = op.domain.count if op.domain.kind == "step" else 1
             if isinstance(payload, CapacityLimit):
-                local_sym = f"{payload.instance}.{payload.local}"
-                plan_sym = payload.planning_symbol
-                # local_sym <= plan_sym (if le) => local_sym - plan_sym <= 0
-                if payload.sense == "le":
-                    self._add_affine({local_sym: 1.0, plan_sym: -1.0}, 0.0, "le", op.source, op.identity)
-                elif payload.sense == "ge":
-                    self._add_affine({local_sym: 1.0, plan_sym: -1.0}, 0.0, "ge", op.source, op.identity)
-
+                for t in range(count):
+                    local = self._column(payload.instance, payload.local, t)
+                    self._add_affine(
+                        {local: 1.0, payload.planning_symbol: -1.0},
+                        0.0, payload.sense, op.source, op.identity,
+                    )
+            elif isinstance(payload, BusBalance):
+                # Existing bus conservation (not the future port-level P3-N).
+                for t in range(count):
+                    terms: dict[str, float] = {}
+                    for inst, local, sign in payload.ports:
+                        col = self._column(inst, local, t)
+                        terms[col] = terms.get(col, 0.0) + sign
+                    self._add_affine(terms, 0.0, "eq", op.source, op.identity)
             elif isinstance(payload, StateInitial):
                 initial_sym = f"{payload.instance}.{payload.state}.initial"
                 val = payload.value
@@ -271,47 +203,91 @@ class BoundInferenceEngine:
                     self.bounds[initial_sym] = (float(val), float(val))
                     self.provenance[initial_sym] = (op.source, op.source)
                 elif isinstance(val, LinearExpression):
-                    terms = {}
-                    for (ref, _), coeff in val.terms:
-                        if coeff == 0.0:
-                            continue
-                        ref_name = self.inventory.property_bindings.get((payload.instance, ref))
-                        if not ref_name:
-                            if ref in self.inventory.symbols or ref in self.inventory.bound_facts or ref in self.variables:
-                                ref_name = ref
-                            else:
-                                ref_name = f"{payload.instance}.{ref}"
-                        terms[ref_name] = coeff
-                    terms[initial_sym] = -1.0
+                    terms: dict[str, float] = {initial_sym: -1.0}
+                    for (ref, offset), coeff in val.terms:
+                        if coeff:
+                            local = self._column(payload.instance, ref, offset)
+                            terms[local] = terms.get(local, 0.0) + coeff
                     self._add_affine(terms, val.constant, "eq", op.source, op.identity)
-
             elif isinstance(payload, PlanningRule):
                 template = payload.template
-                terms = {}
-                for (sym, _), coeff in template.expression.terms:
-                    if coeff != 0.0:
-                        ref_name = sym
-                        if op.source and op.source.instance_id:
-                            ref_name = self.inventory.property_bindings.get((op.source.instance_id, sym), sym)
-                        terms[ref_name] = coeff
-                const = template.expression.constant - template.rhs
-                self._add_affine(terms, const, template.sense, op.source, op.identity)
+                for t in range(count):
+                    terms: dict[str, float] = {}
+                    for (sym, offset), coeff in template.expression.terms:
+                        if coeff == 0:
+                            continue
+                        if payload.step and sym in payload.references:
+                            ref = payload.references[sym]
+                            col = self._column(ref["instance"], ref["interface"], t + offset)
+                        elif op.source.instance_id:
+                            col = self._column(op.source.instance_id, sym, t + offset)
+                        else:
+                            col = sym
+                        terms[col] = terms.get(col, 0.0) + coeff
+                    self._add_affine(
+                        terms, template.expression.constant - template.rhs,
+                        template.sense, op.source, op.identity,
+                    )
 
-        # 2. Collect from RelationFamily (technical equations)
+        # P1's *actual* template/binder performs every arithmetic operation,
+        # resolves known coefficients at the correct step and connects t=0
+        # lagged references to the same initial declaration as production.
         for family in self.inventory.relations:
             inst = family.source.instance_id
-            lhs = family.relation.ast.lhs_root
-            rhs = family.relation.ast.rhs_root
-            lhs_res = _node_to_affine(lhs, inst, self.inventory)
-            rhs_res = _node_to_affine(rhs, inst, self.inventory)
-            if lhs_res is not None and rhs_res is not None:
-                l_terms, l_const = lhs_res
-                r_terms, r_const = rhs_res
-                diff_terms = dict(l_terms)
-                for k, v in r_terms.items():
-                    diff_terms[k] = diff_terms.get(k, 0.0) - v
-                diff_const = l_const - r_const
-                self._add_affine(diff_terms, diff_const, "eq", family.source, family.identity)
+            if inst is None:
+                continue
+            context = self.inventory.technical_contexts.get(family.identity)
+            if context is not None:
+                template, constants, initial, series, symbols = context
+                count = family.domain.count
+                box = {name: (entry[1], entry[2]) for name, entry in symbols.items()
+                       if entry[0] == "var"}
+            else:
+                # Scalar inventories in isolated tests share P1's binder too.
+                refs = (_reference_names(family.relation.ast.lhs_root)
+                        | _reference_names(family.relation.ast.rhs_root))
+                constants: dict[str, float] = {}
+                roles: dict[str, str] = {}
+                for name in refs:
+                    identity = self.inventory.property_bindings.get((inst, name), f"{inst}.{name}")
+                    coefficient = (self.inventory.coefficients.get(identity)
+                                   or self.inventory.coefficients.get(name))
+                    if coefficient is not None and coefficient.value is not None:
+                        roles[name] = "known"
+                        constants[name] = float(coefficient.value)
+                    else:
+                        roles[name] = "var"
+                template = compile_technical(family.relation, roles)
+                initial, series, box = {}, {}, {}
+                count = family.domain.count if family.domain.kind == "step" else 1
+            known = dict(constants)
+            for step in range(count):
+                for name, values in series.items():
+                    known[name] = values[step]
+                def resolve(key: tuple[str, int]) -> tuple[str, int]:
+                    name, offset = key
+                    return (self._column(inst, name, step + offset), 0)
+                try:
+                    lowered = bind_technical(
+                        template, instance=inst, step=step, known=known,
+                        initial=initial, bound=box, affine_column=resolve,
+                    )
+                except LoweringUnsupportedError:
+                    # Non-affine mutex is lowered exactly by the production
+                    # consumer, not used to invent an affine analysis relation.
+                    continue
+                if lowered.variables:
+                    continue
+                for row in lowered.constraints:
+                    terms: dict[str, float] = {}
+                    for (name, offset), coeff in row.expression.terms:
+                        if offset:
+                            raise RuntimeError("bound analysis expects bound solver columns")
+                        terms[name] = terms.get(name, 0.0) + coeff
+                    self._add_affine(
+                        terms, row.expression.constant - row.rhs,
+                        row.sense, family.source, family.identity,
+                    )
 
     def _propagate(self, budget: int) -> None:
         """Sparse dependency propagation with deterministic work budget."""
