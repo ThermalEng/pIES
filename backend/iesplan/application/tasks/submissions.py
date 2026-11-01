@@ -352,7 +352,9 @@ def _resolve_pinned_calculation_config(
         raise NotFoundError(
             "指定的计算配置 revision 在本项目不存在",
             params={"project_id": project_id, "config_revision": raw},
-            location={"object_type": "calculation_config", "object_id": project_id, "field": "config_revision"},
+            location={
+                "object_type": "calculation_config", "object_id": project_id, "field": "config_revision",
+            },
         )
     return dict(row.content), row.version
 
@@ -682,6 +684,9 @@ def _assemble_snapshot(
     # 提交边界税务能力闸门(C3): 凭本次已解析所选生成器描述符能力核对，
     # 缺项明确 007，不静默按税前执行。复用执行引用解析带回的能力元组与
     # 闸门实际消费的不可变快照，不二次取目录、不二次解析。
+    _check_construction_capabilities(
+        artifact, effective, calc_config.get("generator"), generator_capabilities
+    )
     _check_tax_capabilities(
         calc_config.get("generator"), generator_capabilities, effective
     )
@@ -1016,6 +1021,67 @@ def _check_tax_evaluation_refs(
                     )
 
 
+def _check_construction_capabilities(
+    artifact: Any, effective: EffectiveFinanceConfig,
+    generator_ref: object, capabilities: tuple[str, ...],
+) -> None:
+    """实际建设、条件费用与初建来源使用所选描述符，不重复装配校验。"""
+    from iesplan.finance import IncomeTaxRule, UpfrontCapexNetBaseFrom
+
+    doc = json.loads(artifact.canonical_text)
+    required: dict[str, list[str]] = {}
+    for unit_id in sorted((doc.get("planning") or {}).get("construction_units") or {}):
+        required.setdefault("planning.construction_activation", []).append(
+            f"planning.construction_units.{unit_id}"
+        )
+    bindings = doc["finance_binding"]["instances"]
+    for inst_id, binding in sorted(bindings.items()):
+        for path, condition in sorted(binding.get("cost_occurrence", {}).items()):
+            if condition["kind"] != "always":
+                required.setdefault("finance.cost_occurrence", []).append(
+                    f"finance_binding.instances.{inst_id}.cost_occurrence.{path}"
+                )
+
+    # 只识别正在消费的来源；闲置财务类别或没有新增成本实例的空来源不触发。
+    sources = [
+        (f"effective_finance.tax_rules.{rule_id}.depreciation[{index}].base_from", entry.base_from)
+        for rule_id, rule in sorted(effective.tax_rules.items())
+        if isinstance(rule, IncomeTaxRule)
+        for index, entry in enumerate(rule.depreciation)
+    ]
+    sources.extend(
+        (f"effective_finance.net_cashflows.{cash_id}.amount.base_from", entry.amount.base_from)
+        for cash_id, entry in sorted(effective.net_cashflows.items())
+        if entry.amount.kind == "source_share"
+    )
+    new_cost_types = {
+        inst_id: binding["finance_type"]
+        for inst_id, binding in bindings.items()
+        if binding["type"] == "costed" and doc["devices"][inst_id]["asset_origin"] == "new"
+        and effective.finance_types[binding["finance_type"]].upfront_capex is not None
+    }
+    for field, source in sources:
+        if isinstance(source, UpfrontCapexNetBaseFrom) and any(
+            finance_type == source.finance_type
+            and (source.scope_kind == "all_new_instances" or inst_id in source.instances)
+            for inst_id, finance_type in new_cost_types.items()
+        ):
+            required.setdefault("finance.scoped_amount_sources", []).append(field)
+    if required:
+        required["finance.financial_facts"] = sorted({
+            field for fields in required.values() for field in fields
+        })
+    missing = sorted(set(required).difference(capabilities))
+    if missing:
+        fields = sorted({field for marker in missing for field in required[marker]})
+        raise InvalidRequestError(
+            "所选生成器缺建设激活、条件费用或金额来源及同次恢复能力",
+            code="TASK-REQ-007",
+            params={"generator": generator_ref, "missing_capabilities": missing, "fields": fields},
+            location={"object_type": "task", "field": fields[0]},
+        )
+
+
 def _check_demand_capabilities(artifact: Any, generator_ref: object, capabilities: tuple[str, ...]) -> None:
     """实际需量绑定须同时具备精确月峰和同次财务事实恢复能力。
 
@@ -1084,7 +1150,7 @@ def _check_tax_capabilities(
             f"effective_finance.tax_rules.{rule_id}"
             for rule_id in sorted(effective.tax_rules)
         )
-    # 6.0.0 新扩展计算能力闸门（未接通生成器的关系明确拒收）
+    # 通用财务计算能力闸门（未接通生成器的关系明确拒收）。
     if effective.net_cashflows:
         if "finance.net_cashflows" not in capabilities:
             required.setdefault("finance.net_cashflows", []).extend(
@@ -1231,8 +1297,7 @@ def _check_submit_coverage(
     project resolution. Reused object IDs are parsed once; declared metadata
     is compared separately for each referring month.
     """
-    from iesplan.finance import parse_price_series_file
-    from iesplan.finance import DAY_POINTS
+    from iesplan.finance import DAY_POINTS, parse_price_series_file
     from iesplan.storage.contracts import ObjectCorruptError
 
     canonical = json.loads(artifact.canonical_text)

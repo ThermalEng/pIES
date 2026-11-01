@@ -1,4 +1,4 @@
-"""财务三件套 6.0.0 S1 通用能力定向契约测试。
+"""财务三件套 S1 通用能力定向契约测试。
 
 覆盖 S1 输入链全部核心要求：
 1. annual_fixed_om 支持固定年费（单位货币/年如 CNY/a）与规模关联年费共存；拒绝纯币种金额冒充年率；
@@ -17,6 +17,7 @@ from decimal import Decimal
 import pytest
 
 from iesplan.application.tasks.submissions import (
+    _check_construction_capabilities,
     _check_tax_capabilities,
     _check_tax_evaluation_refs,
 )
@@ -37,6 +38,37 @@ from iesplan.finance import (
 )
 from iesplan.finance.confirmation import EvaluationInput, MaintenanceExpense
 from iesplan.tasks.contracts import InvalidRequestError
+
+
+@pytest.mark.parametrize("origin", ["new", "existing"])
+def test_scoped_depreciation_capability_only_for_consumed_new_assets(origin):
+    import json
+    from types import SimpleNamespace
+
+    payload = _valid_profile_dict()
+    payload["net_cashflows"] = {}
+    effective = merge_effective(FinanceProfile.from_dict(payload), None)
+    artifact = SimpleNamespace(canonical_text=json.dumps({
+        "planning": {}, "devices": {"unit1": {"asset_origin": origin}},
+        "finance_binding": {"instances": {
+            "unit1": {"type": "costed", "finance_type": "pv_system"},
+        }},
+    }))
+    if origin == "existing":
+        _check_construction_capabilities(artifact, effective, "test.generator@1.0.0", ())
+        return
+    with pytest.raises(InvalidRequestError) as caught:
+        _check_construction_capabilities(artifact, effective, "test.generator@1.0.0", ())
+    assert caught.value.code == "TASK-REQ-007"
+    assert caught.value.params["missing_capabilities"] == [
+        "finance.financial_facts", "finance.scoped_amount_sources",
+    ]
+    assert caught.value.params["fields"] == [
+        "effective_finance.tax_rules.cit_rule.depreciation[0].base_from",
+    ]
+    _check_construction_capabilities(artifact, effective, "test.generator@1.0.0", (
+        "finance.financial_facts", "finance.scoped_amount_sources",
+    ))
 
 
 def _valid_profile_dict() -> dict:

@@ -49,7 +49,7 @@
 
 ### 建设激活与有范围金额来源能力
 
-建设激活的目标发布组合为 `ies.generator.highs_milp@1.0.0` 与 `ies.result-adapter.highs@1.0.0`，消费装配 `1.0.0` 和财务三件套 `1.0.0`；与本页已交付版本说明分开，版本表见[文件格式标准](../file-formats.md#建设激活配套版本与迁移)。
+内置 HiGHS 生成器与结果适配器使用当前 `1.0.0` 契约，声明并执行下列建设与金额来源能力；不让用户另行协调契约版本组合。
 
 复用既有描述符与提交闸门：`planning.construction_activation` 表示执行明确建设单元、活动区间及同次状态恢复；`finance.cost_occurrence` 表示执行实例成本的显式发生条件；`finance.scoped_amount_sources` 表示执行初建来源的明确实例范围及相应残值关系。非空建设单元、实际非 always 的费用条件、被使用的初建金额来源分别要求对应能力；使用新关系的任务同时要求 `finance.financial_facts`。空声明和未使用来源不额外触发能力要求。只有输入、冻结、求解、恢复全部接通后才发布相应能力。
 

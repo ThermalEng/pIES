@@ -781,6 +781,109 @@ def test_submit_rejects_tax_rules_without_provider_capabilities(
         assert db.execute(select(func.count(CalcSnapshot.id))).scalar() == 0
 
 
+@pytest.mark.parametrize("missing", [
+    "planning.construction_activation", "finance.cost_occurrence",
+    "finance.scoped_amount_sources", "finance.financial_facts", None, "unused",
+])
+def test_submit_construction_capabilities_from_selected_descriptor(client, db, missing):
+    """公开提交：逐项撤去能力不建任务／快照；换名完整 provider 与空关系放行。"""
+    from copy import deepcopy
+    from dataclasses import replace
+    import json
+    from types import SimpleNamespace
+
+    from test_config_revisions import PROFILE_PAYLOAD
+    from iesplan.application import configuration as config_cases
+    from iesplan.computation.generators.highs_milp import DESCRIPTOR
+    from iesplan.computation.generators.registry import GeneratorRegistry
+
+    markers = {
+        "planning.construction_activation", "finance.cost_occurrence",
+        "finance.scoped_amount_sources", "finance.financial_facts",
+    }
+    assert markers.issubset(DESCRIPTOR.capabilities)
+    caps = tuple(c for c in DESCRIPTOR.capabilities if c != missing)
+    if missing == "unused":
+        caps = tuple(c for c in caps if c not in markers)
+    descriptor = replace(
+        DESCRIPTOR, generator_id="test.generator.construction", capabilities=caps,
+        options_schema=DESCRIPTOR.to_dict()["options_schema"],
+    )
+    client.app.state.bootstrap_context = SimpleNamespace(
+        generator_registry=GeneratorRegistry({descriptor.ref: SimpleNamespace(descriptor=descriptor)}),
+        predictor_registry=None,
+    )
+    owner = make_user(db, "construction_gate_owner")
+    pid = _create_project(client, owner, "能力闸门合成项目")
+    payload = deepcopy(PROFILE_PAYLOAD)
+    payload["finance_types"] = {
+        "storage": {"upfront_capex": {"fixed": {"value": "1000", "unit": "CNY"}}},
+    }
+    payload["net_cashflows"] = {} if missing == "unused" else {
+        "recovery": {
+            "at": {"kind": "evaluation_end"}, "direction": "inflow",
+            "amount": {"kind": "source_share", "ratio": {"value": "0.05", "unit": "1"},
+                       "base_from": {"kind": "upfront_capex_net", "finance_type": "storage",
+                                     "scope": {"kind": "instances", "instances": ["bat1"]}}},
+        },
+    }
+    config_cases.register_finance_profile(db, payload, owner.id)
+    config_cases.set_project_finance_profile(db, pid, payload["profile"]["id"], owner.id)
+    device_ref, revision = _declare_device_and_planning(client, db, owner, pid)
+    config_cases.save_planning_config(db, pid, {
+        "objective": {"sense": "minimize", "expression": "0"},
+        "variables": {"cap": {"device_ref": device_ref, "parameter": "capacity_kwh",
+                               "lower_bound": "0", "upper_bound": "1000", "unit": "kWh"}},
+        "constraints": {},
+        "construction_units": {} if missing == "unused" else {
+            "build": {"device_ref": device_ref, "mode": "optional", "scales": {"cap": {}}},
+        },
+    }, 1, owner.id)
+    binding = {"type": "costed", "finance_type": "storage", "drivers": {},
+               "cost_occurrence": {"upfront_capex.fixed": (
+                   {"kind": "always"} if missing == "unused"
+                   else {"kind": "construction_unit", "unit_ref": "build"})}}
+    revision = _declare_assembly_sections(client, pid, owner, revision, {device_ref: binding})
+    _bind_and_freeze(client, pid, owner, None, revision=revision)
+    config = dict(_CONFIG_BODY, generator=descriptor.ref)
+    resp = client.put(f"/api/projects/{pid}/config",
+                      json={"calculation_config": config, "expected_revision": None},
+                      headers=_h(client, owner))
+    assert resp.status_code == 200, resp.text
+    status, body = _submit_task(client, pid, owner,
+                              config={"config_revision": resp.json()["revision"]},
+                              idempotency_key="construction-capabilities")
+    if missing in markers:
+        assert status == 400, body
+        error = body["error"]
+        assert error["code"] == "TASK-REQ-007"
+        assert error["params"]["generator"] == descriptor.ref
+        assert error["params"]["missing_capabilities"] == [missing]
+        expected = {
+            "planning.construction_activation": "planning.construction_units.build",
+            "finance.cost_occurrence": "finance_binding.instances.bat1.cost_occurrence.upfront_capex.fixed",
+            "finance.scoped_amount_sources": "effective_finance.net_cashflows.recovery.amount.base_from",
+        }
+        if missing in expected:
+            assert error["params"]["fields"] == [expected[missing]]
+        else:
+            assert set(error["params"]["fields"]) == set(expected.values())
+        assert db.execute(select(func.count(Task.id))).scalar() == 0
+        assert db.execute(select(func.count(CalcSnapshot.id))).scalar() == 0
+    else:
+        assert status == 201, body
+        assert db.execute(select(func.count(Task.id))).scalar() == 1
+        snapshot = db.execute(select(CalcSnapshot)).scalar_one()
+        frozen = json.loads(snapshot.canonical_assembly_text)
+        assert frozen["finance_binding"]["instances"][device_ref] == binding
+        units = frozen["planning"].get("construction_units", {})
+        assert units == ({} if missing == "unused" else {
+            "build": {"device_ref": device_ref, "mode": "optional", "scales": {
+                "cap": {"active_lower_bound": "0", "active_upper_bound": None},
+            }},
+        })
+
+
 def _prepare_taxref_project(client: TestClient, db: Session, owner, profile_payload: dict) -> tuple:
     """建项目 + 登记/引用税则画像 + 保存覆盖 + 规划/计算/装配/固化(返回 pid 与 device_ref)。"""
     pid = _create_project(client, owner, "税则跨输入项目")
