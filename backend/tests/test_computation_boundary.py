@@ -115,7 +115,7 @@ def _manifest() -> SolverBundleManifest:
 
 _FINANCE_PAYLOAD = {
     "schema": "ies.finance-profile",
-    "schema_version": "6.0.0",
+    "schema_version": "7.0.0",
     "profile": {
         "id": "cn-north-demo",
         "region": "CN-North",
