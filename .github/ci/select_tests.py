@@ -244,7 +244,7 @@ BACKEND_SECONDS = {
     "test_config_revisions.py": 27,
     "test_local_process.py": 22,
     "test_npv_objective.py": 60,
-    "test_income_annual.py": 55,
+    "test_income_annual.py": 55,  # partitioned by function in four-lane runs
     "test_auth_api.py": 51,
     "test_package_project_models.py": 40,
     "test_project_api.py": 35,
@@ -267,6 +267,26 @@ COMPUTATION_CHAIN_NODE_SECONDS = {
     "test_gas_volume_driver_same_source_across_gates": 7,
     "test_chain_policy_rejected_never_executes": 8,
 }
+# CI 41267844149: three full income solves consumed nearly 45m on
+# the same backend lane before GitHub cancelled its 45m job. Preserve every
+# real-solver test and use per-node estimates for deterministic scheduling.
+INCOME_ANNUAL_NODE_SECONDS = {
+    "test_pre_lowering_income_years_and_loss_claims_are_explicit": 5,
+    "test_income_reversal_selects_post_tax_optimum": 940,
+    "test_income_reversal_pretax_prefers_build": 12,
+    "test_income_loss_expiry_and_order": 940,
+    "test_income_same_expiry_input_order": 900,
+    "test_income_generated_loss_expires_without_carry": 900,
+    "test_income_non_npv_objective_keeps_exact_balances": 900,
+    "test_income_vat_mix_matches_hand_and_b0": 900,
+    "test_income_vat_mix_exclusive_matches_hand_and_b0": 900,
+    "test_income_equivalent_gross_net_statement_matches": 900,
+    "test_income_depreciation_zero_build_no_fictitious_income": 900,
+    "test_income_depreciation_variable_capacity_positive_residual_rejected": 10,
+    "test_income_depreciation_static_residual_matches_hand": 900,
+    "test_income_depreciation_excess_residual_rejected": 10,
+    "test_income_depreciation_skipped_without_new_asset": 10,
+}
 BROWSER_SECONDS = {
     "hourly-steps.spec.ts": 345, "task-draft-load.spec.ts": 220,
     "task-selection.spec.ts": 220, "tax-chain.spec.ts": 145,
@@ -276,13 +296,13 @@ BROWSER_SECONDS = {
 }
 
 
-def computation_chain_nodes() -> set[str]:
-    """Derive every pytest node from the long-running chain file, not an allowlist.
+def _file_test_nodes(filename: str) -> set[str]:
+    """Enumerate all static pytest nodes; dynamic collection falls back to file.
 
-    A nodeid selects all parametrizations of that function. Unknown dynamic
-    collection falls back to the complete original file without dropping cases.
+    A function node selects all parametrizations of that test. No manual
+    selection list may silently omit a new negative or real-solver test.
     """
-    source = BACKEND_DIR / "test_computation_chain.py"
+    source = BACKEND_DIR / filename
     tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
     nodes: set[str] = set()
     for node in tree.body:
@@ -290,11 +310,11 @@ def computation_chain_nodes() -> set[str]:
             if node.name == "pytest_generate_tests":
                 return set()
             if node.name.startswith("test_"):
-                nodes.add(f"test_computation_chain.py::{node.name}")
+                nodes.add(f"{filename}::{node.name}")
         elif isinstance(node, ast.ClassDef) and node.name.startswith("Test"):
             for case in node.body:
                 if isinstance(case, (ast.FunctionDef, ast.AsyncFunctionDef)) and case.name.startswith("test_"):
-                    nodes.add(f"test_computation_chain.py::{node.name}::{case.name}")
+                    nodes.add(f"{filename}::{node.name}::{case.name}")
         elif isinstance(node, ast.ImportFrom) and any(
             item.name.startswith("test_") or item.name == "*" for item in node.names
         ):
@@ -302,12 +322,28 @@ def computation_chain_nodes() -> set[str]:
     return nodes
 
 
+def computation_chain_nodes() -> set[str]:
+    return _file_test_nodes("test_computation_chain.py")
+
+
+def income_annual_nodes() -> set[str]:
+    return _file_test_nodes("test_income_annual.py")
+
+
 def backend_test_units(files: set[str], lane_count: int) -> set[str]:
-    """Only this verified 35-minute chain may partition at testcase granularity."""
-    if lane_count != 4 or "test_computation_chain.py" not in files:
-        return set(files)
-    nodes = computation_chain_nodes()
-    return (files - {"test_computation_chain.py"}) | nodes if nodes else set(files)
+    """Partition only expensive, statically complete files on the four-lane CI."""
+    result = set(files)
+    if lane_count == 4:
+        for filename, nodes in (
+            ("test_computation_chain.py", computation_chain_nodes),
+            ("test_income_annual.py", income_annual_nodes),
+        ):
+            if filename in result:
+                selected = nodes()
+                if selected:
+                    result.remove(filename)
+                    result.update(selected)
+    return result
 
 
 def assert_backend_coverage(files: set[str], groups: list[dict[str, str | int]]) -> None:
@@ -317,8 +353,14 @@ def assert_backend_coverage(files: set[str], groups: list[dict[str, str | int]])
     assert {item.split("::")[0] for item in items} == files, "backend test file missing"
     for filename in files:
         selection = [item for item in items if item.split("::")[0] == filename]
-        if filename == "test_computation_chain.py" and len(selection) > 1:
-            assert set(selection) == computation_chain_nodes(), "missing chain node"
+        partitioned = {
+            "test_computation_chain.py": computation_chain_nodes,
+            "test_income_annual.py": income_annual_nodes,
+        }
+        if filename in partitioned and len(selection) > 1:
+            assert set(selection) == partitioned[filename](), (
+                f"missing or duplicated pytest node: {filename}"
+            )
         else:
             assert selection == [filename], f"partial test file: {filename}"
 
@@ -577,8 +619,14 @@ def pick(changed: list[str], full: bool = False) -> dict[str, str]:
     backend_units = backend_test_units(backend, backend_count)
     case_weights = {f"test_computation_chain.py::{name}": seconds
                     for name, seconds in COMPUTATION_CHAIN_NODE_SECONDS.items()}
-    backend_groups = balanced_shards(backend_units, backend_count,
-                                     {**BACKEND_SECONDS, **case_weights}, "tests/")
+    income_weights = {
+        f"test_income_annual.py::{name}": seconds
+        for name, seconds in INCOME_ANNUAL_NODE_SECONDS.items()
+    }
+    backend_groups = balanced_shards(
+        backend_units, backend_count,
+        {**BACKEND_SECONDS, **case_weights, **income_weights}, "tests/",
+    )
     assert_backend_coverage(backend, backend_groups)
     browser_count = 4 if len(browser) >= 20 else 2 if len(browser) >= 2 else 1
     browser_groups = balanced_shards(browser, browser_count, BROWSER_SECONDS)
@@ -678,6 +726,15 @@ def self_test() -> None:
                   for unit in group["tests"].split()}
     assert chain_nodes <= full_units
     assert "test_computation_chain.py" not in full_units
+    income_nodes = income_annual_nodes()
+    assert {name.rsplit("::", 1)[-1] for name in income_nodes} == set(
+        INCOME_ANNUAL_NODE_SECONDS
+    ), "income tests added/removed: update time weights without dropping any node"
+    assert income_nodes <= full_units
+    assert "test_income_annual.py" not in full_units
+    assert backend_test_units({"test_income_annual.py"}, 1) == {
+        "test_income_annual.py"
+    }
     assert backend_test_units({"test_computation_chain.py"}, 1) == {"test_computation_chain.py"}
     docs = pick(["docs/reviews/style.md"])
     assert docs["browser_run"] == "false" and docs["browser_total"] == "1"
