@@ -907,21 +907,44 @@ def test_income_depreciation_zero_build_no_fictitious_income(tmp_path) -> None:
     assert value == pytest.approx(0.0, abs=1e-6)
 
 
-def test_income_depreciation_variable_capacity_positive_residual_rejected(tmp_path) -> None:
-    """可变容量 + 固定正残值：无法静态判定是否形成资产，明确拒绝。
+def test_income_depreciation_variable_capacity_positive_residual_solves_exactly(tmp_path) -> None:
+    """可变规模 + 固定残值必须进入同次优化，不再沿用旧拒收规则。
 
-    不猜形成状态，不提高容量下界强迫建设，不把残值擅改比例。
+    通过真实 HiGHS 求解，核对建设容量、折旧、亏损结转、所得税和税后 NPV。
     """
-    from iesplan.computation.generators.linear import LoweringUnsupportedError
-
-    payload = _residual_payload(_gen_finance_payload, "100")
-    inputs = _gen_inputs(
-        {"sense": "maximize", "expression": NPV_MARKER},
-        cap_bounds=("0", "10"),
-        payload=payload,
+    objective = {"sense": "maximize", "expression": NPV_MARKER}
+    value, solved = _gen_solve(
+        _gen_inputs(objective, cap_bounds=("0", "10"),
+                    payload=_residual_payload(_gen_finance_payload, "100")),
+        tmp_path,
     )
-    with pytest.raises(LoweringUnsupportedError, match="可变容量"):
-        HIGHS_MILP_PROVIDER.generate(*inputs)
+    baseline, baseline_solved = _gen_solve(
+        _gen_inputs(objective, cap_bounds=("0", "10")), tmp_path,
+    )
+    cap = GEN_CAP_MAX
+    assert solved["gen_cap"] == pytest.approx(float(cap * 1000), rel=1e-6)
+    assert baseline_solved["gen_cap"] == pytest.approx(float(cap * 1000), rel=1e-6)
+    depreciation = (GEN_UPFRONT * cap - Decimal("100")) / Decimal(DEPR_LIFE)
+    fixed = GEN_FIXED * cap
+    base_y2 = -fixed - depreciation
+    base_y3 = GEN_PRICE_Y3 * GEN_HOURS * cap - fixed - depreciation
+    year2 = use_losses(
+        taxable_base=base_y2, balances=(), year=2,
+        carryforward_years=INC_CARRY_YEARS,
+    )
+    year3 = use_losses(
+        taxable_base=base_y3, balances=year2.remaining, year=3,
+        carryforward_years=INC_CARRY_YEARS,
+    )
+    tax = income_tax_payable(
+        taxable_base=base_y3, loss_used=sum(year3.uses, Decimal("0")),
+        rate=INC_RATE,
+    )
+    assert solved["inc__income_gen__gen__y2"] == pytest.approx(float(-base_y2), rel=1e-6)
+    assert solved["inc__income_gen__profit__y3"] == pytest.approx(float(base_y3), rel=1e-6)
+    expected = _gen_pretax_npv(cap) - tax / Decimal(str(1.0 + RATE)) ** 3
+    assert value == pytest.approx(float(expected), rel=1e-6)
+    assert value < baseline  # 正残值减少折旧抵扣，不凭空增加税后收益
 
 
 def test_income_depreciation_static_residual_matches_hand(tmp_path) -> None:

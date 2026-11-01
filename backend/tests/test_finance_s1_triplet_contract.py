@@ -42,7 +42,7 @@ from iesplan.tasks.contracts import InvalidRequestError
 def _valid_profile_dict() -> dict:
     return {
         "schema": "ies.finance-profile",
-        "schema_version": "6.0.0",
+        "schema_version": "7.0.0",
         "profile": {
             "id": "syn-600-base",
             "region": "CN-East",
@@ -161,7 +161,7 @@ def _valid_profile_dict() -> dict:
                 "deductible_maintenance": {"mode": "explicit_items", "items": []},
                 "depreciation": [
                     {
-                        "base_from": {"kind": "upfront_capex_net", "finance_type": "pv_system"},
+                        "base_from": {"kind": "upfront_capex_net", "finance_type": "pv_system", "scope": {"kind": "all_new_instances"}},
                         "method": "straight_line",
                         "life_years": 20,
                         "residual": {"value": "0.05", "unit": "1"},
@@ -185,7 +185,7 @@ def _valid_profile_dict() -> dict:
                 "direction": "inflow",
                 "amount": {
                     "kind": "source_share",
-                    "base_from": {"kind": "upfront_capex_net", "finance_type": "pv_system"},
+                    "base_from": {"kind": "upfront_capex_net", "finance_type": "pv_system", "scope": {"kind": "all_new_instances"}},
                     "ratio": {"value": "0.03", "unit": "1"},
                 },
             },
@@ -256,7 +256,7 @@ def test_600_depreciation_and_residual():
     # 拒绝同一来源身份重复计提折旧
     p_dup_source = _valid_profile_dict()
     p_dup_source["tax_rules"]["cit_rule"]["depreciation"].append({
-        "base_from": {"kind": "upfront_capex_net", "finance_type": "pv_system"},
+        "base_from": {"kind": "upfront_capex_net", "finance_type": "pv_system", "scope": {"kind": "all_new_instances"}},
         "method": "straight_line",
         "life_years": 10,
         "residual": {"value": "0", "unit": "CNY"},
@@ -287,7 +287,7 @@ def test_600_net_cashflows_forms_and_overrides():
     # Overrides 覆盖 net_cashflows
     overrides_dict = {
         "schema": "ies.finance-overrides",
-        "schema_version": "6.0.0",
+        "schema_version": "7.0.0",
         "profile_ref": {"id": "syn-600-base"},
         "net_cashflows": {
             "salvage_recovery": {
@@ -317,7 +317,7 @@ def test_600_net_cashflow_override_typed_roundtrip(bound):
     """两条公开入口均签发同一合法 Effective；时点/金额与来源身份无损。"""
     profile = FinanceProfile.from_dict(_valid_profile_dict())
     payload = {
-        "schema": "ies.finance-overrides", "schema_version": "6.0.0",
+        "schema": "ies.finance-overrides", "schema_version": "7.0.0",
         "profile_ref": {"id": profile.profile_id},
         "net_cashflows": {
             "salvage_recovery": {
@@ -345,13 +345,13 @@ def test_600_net_cashflow_override_typed_roundtrip(bound):
     {"amount": {"ratio": {"value": "0.2", "unit": "1"}}},
     {"amount": {"kind": "source_share", "ratio": {"value": "0.2", "unit": "1"}}},
     {"amount": {"value": {"value": "1", "unit": "CNY"},
-                "base_from": {"kind": "upfront_capex_net", "finance_type": "pv_system"}}},
+                "base_from": {"kind": "upfront_capex_net", "finance_type": "pv_system", "scope": {"kind": "all_new_instances"}}}},
     {"direction": "inflow"},
 ], ids=["foreign-currency", "unknown-field", "kind-change", "kind-key", "base-from", "direction"])
 def test_600_net_cashflow_override_rejects_scope(bound, patch):
     profile = FinanceProfile.from_dict(_valid_profile_dict())
     payload = {
-        "schema": "ies.finance-overrides", "schema_version": "6.0.0",
+        "schema": "ies.finance-overrides", "schema_version": "7.0.0",
         "profile_ref": {"id": profile.profile_id},
         "net_cashflows": {"year10_bonus": patch},
     }
@@ -367,7 +367,7 @@ def test_600_net_cashflow_override_rejects_scope(bound, patch):
 def test_600_net_cashflow_source_share_cannot_change_base_from(bound):
     profile = FinanceProfile.from_dict(_valid_profile_dict())
     payload = {
-        "schema": "ies.finance-overrides", "schema_version": "6.0.0",
+        "schema": "ies.finance-overrides", "schema_version": "7.0.0",
         "profile_ref": {"id": profile.profile_id},
         "net_cashflows": {"salvage_recovery": {"amount": {
             "ratio": {"value": "0.08", "unit": "1"},
@@ -570,7 +570,7 @@ def test_600_task_submission_gate_and_period_checks():
         "finance.financial_facts",
     )
     with pytest.raises(InvalidRequestError) as exc_info:
-        _check_tax_capabilities("ies.generator.highs_milp@7.1.0", base_caps, effective)
+        _check_tax_capabilities("ies.generator.highs_milp@8.0.0", base_caps, effective)
     assert exc_info.value.code == "TASK-REQ-007"
     missing = exc_info.value.params["missing_capabilities"]
     assert "finance.net_cashflows" in missing
