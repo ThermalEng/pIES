@@ -77,3 +77,23 @@ def test_genuinely_infeasible_original_not_reported_feasible(tmp_path):
     assert result.candidate_all_relations_feasible is False
     assert result.candidate_best_bound is None
     assert result.recommendation == "not_evaluated"
+
+
+def test_nonoptimal_resource_status_never_claims_feasible(monkeypatch, tmp_path):
+    """A simulated time-limit status is not evidence of a feasible primal.
+
+    This is a status-handling test, NOT a real solver resource benchmark.
+    """
+    import p2_mutex_measurement as measure
+
+    def limited_solver(model, directory, iteration):
+        return {"status": "HighsModelStatus.kTimeLimit",
+                "objective": None, "primal": {}}, 64
+
+    monkeypatch.setattr(measure, "_solve", limited_solver)
+    result = measure.compare_mutex_model(_model(), tmp_path)
+    assert result.full_status == result.candidate_status == "HighsModelStatus.kTimeLimit"
+    assert result.full_best_bound is None
+    assert result.candidate_best_bound is None
+    assert result.candidate_all_relations_feasible is False
+    assert result.recommendation == "not_evaluated"
