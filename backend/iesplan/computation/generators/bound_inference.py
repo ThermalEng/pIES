@@ -325,11 +325,11 @@ class BoundInferenceEngine:
                     )
 
     def _propagate(self, budget: int) -> None:
-        """Sparse, deterministic propagation using exact binary64 input values.
+        """Sparse relation worklist with exact arithmetic and directed rounding.
 
-        Arithmetic is rational until the final bound is rounded outward. This
-        avoids both false equality from an arbitrary epsilon and the spurious
-        subnormal 5e-324 created by nextafter(0) on *exact* zero.
+        A source row is examined once, then only when a symbol it uses tightens.
+        This never infers identity from a solver-column spelling, and work
+        exhaustion retains only established facts without claiming unboundedness.
         """
         from functools import lru_cache
 
@@ -344,100 +344,97 @@ class BoundInferenceEngine:
                 return None
             if not math.isfinite(rounded):
                 return None
-            nearest = exact(rounded)
-            if upper and nearest < value:
+            rounded_exact = exact(rounded)
+            if upper and rounded_exact < value:
                 rounded = math.nextafter(rounded, math.inf)
-            elif not upper and nearest > value:
+            elif not upper and rounded_exact > value:
                 rounded = math.nextafter(rounded, -math.inf)
             return rounded if math.isfinite(rounded) else None
 
         uses: dict[str, list[int]] = defaultdict(list)
         for idx, rel in enumerate(self.relations):
-            for sym, _ in rel.terms:
-                uses[sym].append(idx)
+            for symbol, _ in rel.terms:
+                uses[symbol].append(idx)
 
-        queue = deque(
-            sym for sym, (lo, hi) in self.bounds.items()
-            if lo is not None or hi is not None
-        )
-        in_queue = set(queue)
+        queue = deque(range(len(self.relations)))
+        pending = set(queue)
         steps = 0
         while queue and steps < budget:
             steps += 1
-            name = queue.popleft()
-            in_queue.discard(name)
-            for rel_idx in uses.get(name, ()):
-                rel = self.relations[rel_idx]
-                coefficients = [(sym, exact(coeff)) for sym, coeff in rel.terms]
-                rhs = -exact(rel.constant)
-                for target, a_k in coefficients:
-                    if a_k == 0:
+            rel_idx = queue.popleft()
+            pending.discard(rel_idx)
+            rel = self.relations[rel_idx]
+            coefficients = [(sym, exact(a)) for sym, a in rel.terms]
+            rhs = -exact(rel.constant)
+            for target, a_k in coefficients:
+                if not a_k:
+                    continue
+                lower_rest: Fraction | None = rhs
+                upper_rest: Fraction | None = rhs
+                for other, a_i in coefficients:
+                    if other == target:
                         continue
-                    lower_rest: Fraction | None = rhs
-                    upper_rest: Fraction | None = rhs
-                    for other, a_i in coefficients:
-                        if other == target:
-                            continue
-                        factor = -a_i
-                        lo, hi = self.bounds.get(other, (None, None))
-                        left = lo if factor > 0 else hi
-                        right = hi if factor > 0 else lo
-                        if lower_rest is not None:
-                            lower_rest = (
-                                None if left is None
-                                else lower_rest + factor * exact(left)
-                            )
-                        if upper_rest is not None:
-                            upper_rest = (
-                                None if right is None
-                                else upper_rest + factor * exact(right)
-                            )
-                    new_lo: float | None = None
-                    new_hi: float | None = None
-                    if rel.sense == "eq":
-                        if a_k > 0:
-                            new_lo = (outward(lower_rest / a_k, False)
-                                      if lower_rest is not None else None)
-                            new_hi = (outward(upper_rest / a_k, True)
-                                      if upper_rest is not None else None)
-                        else:
-                            new_lo = (outward(upper_rest / a_k, False)
-                                      if upper_rest is not None else None)
-                            new_hi = (outward(lower_rest / a_k, True)
-                                      if lower_rest is not None else None)
-                    elif rel.sense == "le":
-                        if a_k > 0 and upper_rest is not None:
-                            new_hi = outward(upper_rest / a_k, True)
-                        elif a_k < 0 and upper_rest is not None:
-                            new_lo = outward(upper_rest / a_k, False)
-                    elif rel.sense == "ge":
-                        if a_k > 0 and lower_rest is not None:
-                            new_lo = outward(lower_rest / a_k, False)
-                        elif a_k < 0 and lower_rest is not None:
-                            new_hi = outward(lower_rest / a_k, True)
+                    coeff = -a_i
+                    lo, hi = self.bounds.get(other, (None, None))
+                    min_endpoint = lo if coeff > 0 else hi
+                    max_endpoint = hi if coeff > 0 else lo
+                    if lower_rest is not None:
+                        lower_rest = (
+                            None if min_endpoint is None
+                            else lower_rest + coeff * exact(min_endpoint)
+                        )
+                    if upper_rest is not None:
+                        upper_rest = (
+                            None if max_endpoint is None
+                            else upper_rest + coeff * exact(max_endpoint)
+                        )
 
-                    current_lo, current_hi = self.bounds.get(target, (None, None))
-                    next_lo = (
-                        new_lo if current_lo is None else max(current_lo, new_lo)
-                    ) if new_lo is not None else current_lo
-                    next_hi = (
-                        new_hi if current_hi is None else min(current_hi, new_hi)
-                    ) if new_hi is not None else current_hi
-                    if next_lo == current_lo and next_hi == current_hi:
-                        continue
-                    if (next_lo is not None and next_hi is not None
-                            and next_lo > next_hi):
-                        self.conflicts.append((target, rel.relation_id))
-                        return
-                    self.bounds[target] = (next_lo, next_hi)
-                    old_lo_src, old_hi_src = self.provenance.get(target, (None, None))
-                    self.provenance[target] = (
-                        rel.source if next_lo != current_lo else old_lo_src,
-                        rel.source if next_hi != current_hi else old_hi_src,
-                    )
-                    if target not in in_queue:
-                        queue.append(target)
-                        in_queue.add(target)
+                new_lo: float | None = None
+                new_hi: float | None = None
+                if rel.sense == "eq":
+                    if a_k > 0:
+                        new_lo = (outward(lower_rest / a_k, False)
+                                  if lower_rest is not None else None)
+                        new_hi = (outward(upper_rest / a_k, True)
+                                  if upper_rest is not None else None)
+                    else:
+                        new_lo = (outward(upper_rest / a_k, False)
+                                  if upper_rest is not None else None)
+                        new_hi = (outward(lower_rest / a_k, True)
+                                  if lower_rest is not None else None)
+                elif rel.sense == "le":
+                    if a_k > 0 and upper_rest is not None:
+                        new_hi = outward(upper_rest / a_k, True)
+                    elif a_k < 0 and upper_rest is not None:
+                        new_lo = outward(upper_rest / a_k, False)
+                elif rel.sense == "ge":
+                    if a_k > 0 and lower_rest is not None:
+                        new_lo = outward(lower_rest / a_k, False)
+                    elif a_k < 0 and lower_rest is not None:
+                        new_hi = outward(lower_rest / a_k, True)
+
+                cur_lo, cur_hi = self.bounds.get(target, (None, None))
+                next_lo = (new_lo if cur_lo is None else max(cur_lo, new_lo)
+                           ) if new_lo is not None else cur_lo
+                next_hi = (new_hi if cur_hi is None else min(cur_hi, new_hi)
+                           ) if new_hi is not None else cur_hi
+                if next_lo == cur_lo and next_hi == cur_hi:
+                    continue
+                if next_lo is not None and next_hi is not None and next_lo > next_hi:
+                    # A source-level inconsistent system must keep all exact
+                    # production rows and let the solver report infeasibility.
+                    self.conflicts.append((target, rel.relation_id))
+                    return
+                self.bounds[target] = (next_lo, next_hi)
+                prior_lo, prior_hi = self.provenance.get(target, (None, None))
+                self.provenance[target] = (
+                    rel.source if next_lo != cur_lo else prior_lo,
+                    rel.source if next_hi != cur_hi else prior_hi,
+                )
+                for dependent in uses[target]:
+                    if dependent not in pending:
+                        queue.append(dependent)
+                        pending.add(dependent)
 
     def simplify_affine(
         self, terms: Mapping[str, float], constant: float,
