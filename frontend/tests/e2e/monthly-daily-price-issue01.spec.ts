@@ -70,7 +70,7 @@ test.describe('ISSUE-01 月份日曲线财务页面与真实计费', () => {
     await kind.selectOption('monthly_daily')
     const authoredPrice = JSON.parse(await rawOverrides.inputValue())
     expect(authoredPrice.schema).toBe('ies.finance-overrides')
-    expect(authoredPrice.schema_version).toBe('7.0.0')
+    expect(authoredPrice.schema_version).toBe('1.0.0')
     expect(authoredPrice.profile_ref).toEqual({ id: profileId })
     const month = (m: number) => page.locator(`#overrides-price-grid_import-month-${m}`)
     await expect(month(12)).toBeVisible()
@@ -199,7 +199,7 @@ test.describe('ISSUE-01 月份日曲线财务页面与真实计费', () => {
     const profileDoc = page.locator('#finance-profile-doc')
     const partialProfile = JSON.stringify({
       schema: 'ies.finance-profile',
-      schema_version: '7.0.0',
+      schema_version: '1.0.0',
       energy_prices: { grid_import: null },
     })
     await profileDoc.fill(partialProfile)

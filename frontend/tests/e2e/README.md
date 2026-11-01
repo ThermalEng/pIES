@@ -76,7 +76,7 @@ docker compose -p pies-ext-dev -f docker-compose.yml \
 ### 0.15 外部数据 CSV 验收(既有公开路径, 含缺口边界)
 
 `device-data-csv-extension.spec.ts` 验收仓库外设备数据 step CSV
-(`device-data-external/electric_load_repeat_24h.csv`, `ies.device-data` 2.1.0,
+(`device-data-external/electric_load_repeat_24h.csv`, `ies.device-data` 1.0.0,
 24h `data_repeat` 基线: 偶数步 30 kW / 奇数步 50 kW, `device_id:
 ies.device.electric_load`)的公开消费链: 数据页真实 GUI 上传(真实文件 +
 质量报告“已通过校验”) → 公开草稿命令声明预定义槽来源(`{mode:

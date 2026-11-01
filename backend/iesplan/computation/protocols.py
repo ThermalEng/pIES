@@ -44,7 +44,7 @@ if TYPE_CHECKING:
 
 #: 公开计算配置 schema(进入业务事实前须校验字头)。
 CALCULATION_CONFIG_SCHEMA = "ies.calculation-config"
-CALCULATION_CONFIG_VERSION = "2.0.0"
+CALCULATION_CONFIG_VERSION = "1.0.0"
 
 #: 求解包 schema(生产者 GeneratorProvider, 消费者执行层)。
 SOLVER_BUNDLE_SCHEMA = "ies.solver-bundle"
@@ -52,7 +52,7 @@ SOLVER_BUNDLE_VERSION = "1.0.0"
 
 #: 统一计算结果 schema。
 COMPUTE_RESULT_SCHEMA = "ies.compute-result"
-COMPUTE_RESULT_VERSION = "2.0.0"
+COMPUTE_RESULT_VERSION = "1.0.0"
 
 #: 执行回执 schema(后续 ResultAdapter 的公共载体)。
 EXECUTION_RECEIPT_SCHEMA = "ies.execution-receipt"

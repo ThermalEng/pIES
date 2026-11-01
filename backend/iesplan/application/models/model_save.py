@@ -603,7 +603,7 @@ def _save_project_model(
     # 实例化器算法标识)与最终模型
     final_receipt = dict(final_receipt)
     if template_provenance is not None:
-        final_receipt["instantiator"] = "ies.device-model.instantiator@2.0.0"
+        final_receipt["instantiator"] = "ies.device-model.instantiator@1.0.0"
         final_receipt.update(template_provenance)
         if validation.receipt and "data_bindings" in validation.receipt:
             final_receipt["data_bindings"] = validation.receipt["data_bindings"]

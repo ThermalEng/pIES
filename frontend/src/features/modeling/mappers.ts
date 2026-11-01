@@ -650,7 +650,7 @@ export function isValidDeviceId(id: string): boolean {
 export function buildYamlSkeleton(): string {
   return [
     'schema: ies.device-model',
-    'schema_version: "2.2.0"',
+    'schema_version: "1.0.0"',
     '',
     'device:',
     '  id: your.namespace.device_id',

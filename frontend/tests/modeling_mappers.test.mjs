@@ -262,7 +262,7 @@ const catalogItem = {
   revision: {
     id: '55',
     revision: 1,
-    schema_version: '2.0.0',
+    schema_version: '1.0.0',
     input_count: 4,
     yaml_object_id: '61',
     receipt_object_id: '62',
@@ -277,7 +277,7 @@ check('模板: 状态与描述透传', summary.status === 'published' && summary
 check('模板: 草稿/发布修订透传', summary.draft_revision === 2 && summary.published_revision === 1)
 check('模板: revision 精确视图解析', summary.revision !== null && summary.revision.revision === 1 && summary.revision.input_count === 4)
 check('模板: has_inputs 透传', summary.has_inputs === true)
-check('模板: schema_version 来自权威 revision', summary.schema_version === '2.0.0')
+check('模板: schema_version 来自权威 revision', summary.schema_version === '1.0.0')
 check('模板: 无 revision 时 schema_version 为 null', (() => {
   const s = md.templateSummaryFromServer({ ...catalogItem, revision: null })
   return s.schema_version === null && s.revision === null
@@ -285,7 +285,7 @@ check('模板: 无 revision 时 schema_version 为 null', (() => {
 
 const detailBody = {
   template: catalogItem,
-  document: { schema: 'ies.device-model', schema_version: '2.0.0', inputs: inputsRaw },
+  document: { schema: 'ies.device-model', schema_version: '1.0.0', inputs: inputsRaw },
   diagnostics: [],
 }
 const detail = md.templateDetailFromServer(detailBody, 'zh')
@@ -294,7 +294,7 @@ check('模板详情: 诊断列表解析', Array.isArray(detail.diagnostics) && d
 const exactRevision = {
   id: '19',
   revision: 3,
-  schema_version: '2.0.0',
+  schema_version: '1.0.0',
   input_count: 3,
   yaml_object_id: '31',
   receipt_object_id: '32',
@@ -463,7 +463,7 @@ check('ID: 空串拒绝', md.isValidDeviceId('') === false)
 
 const skeleton = md.buildYamlSkeleton()
 check('骨架: 顶层 schema', skeleton.includes('schema: ies.device-model'))
-check('骨架: schema_version 2.2.0', skeleton.includes('schema_version: "2.2.0"'))
+check('骨架: schema_version 1.0.0', skeleton.includes('schema_version: "1.0.0"'))
 check('骨架: 五顶层字段齐全', ['device:', 'properties: {}', 'interfaces: {}', 'equations:'].every((k) => skeleton.includes(k)))
 check('骨架: 空映射可直接提交后端校验(不产生 null 类型诊断)', !skeleton.includes('properties:\n') && !skeleton.includes('interfaces:\n'))
 check('骨架: 不含经济字段', !skeleton.includes('price') && !skeleton.includes('cost'))

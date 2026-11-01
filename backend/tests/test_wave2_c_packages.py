@@ -156,7 +156,7 @@ def _seed_evidence(
         calc_config_snapshot={"params": {"horizon_years": 1}, "algorithm": "milp"},
         program_version="0.1.0", extension_versions={}, random_seed=42,
         schema_version="1.0.0",
-        result_adapter="ies.result-adapter.highs@3.0.0",
+        result_adapter="ies.result-adapter.highs@1.0.0",
         executor="ies.executor.local_process@1.0.0", created_by=owner_id,
     )
     db.add(snapshot)
@@ -203,7 +203,7 @@ def test_export_package_usecase_commits(
     assert user is not None
 
     result = packages_uc.export_package(db, user, pid)
-    assert result.manifest["format_version"] == "3.0.0"
+    assert result.manifest["format_version"] == "1.0.0"
     assert result.token
 
     # 事务提交证明: 新会话可读出包对象
@@ -308,7 +308,7 @@ def _sealed_k1n2() -> dict:
     """最小 K1N2 3.0.0 封存评价块(展示用, 双维护已合计)。"""
     return {
         "schema": "ies.financial-evaluation",
-        "schema_version": "3.0.0",
+        "schema_version": "1.0.0",
         "status": "evaluated",
         "evaluation_years": 3,
         "construction_period": 1,

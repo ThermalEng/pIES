@@ -687,7 +687,7 @@ def build_financial_evaluation(
     finance: EffectiveFinanceConfig,
     result: ComputeResult,
 ) -> dict[str, object] | None:
-    """同次解财务事实 → 封存评价(ies.financial-evaluation@3.0.0)。
+    """同次解财务事实 → 封存评价(ies.financial-evaluation@1.0.0)。
 
     只处理已求解且含 solution 输出的结果; 其余状态返回 None(调用方
     不写财务块, 不把不可行/缺证据结果伪装为有现金流的方案, 缺块语义
@@ -731,7 +731,7 @@ def build_financial_evaluation(
     )
     return {
         "schema": "ies.financial-evaluation",
-        "schema_version": "4.0.0",
+        "schema_version": "1.0.0",
         "status": "evaluated",
         "evaluation_years": years,
         # K/N 回显冻结输入(展示时轴映射用, 不做第二权威读取)。

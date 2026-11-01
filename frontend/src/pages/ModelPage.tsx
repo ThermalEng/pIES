@@ -1009,7 +1009,7 @@ function ModelCanvas({ projectId }: { projectId: number }) {
 /** 注册表缺失时兜底的空 spec(节点仍可渲染,参数表单为空)。 */
 const EMPTY_SPEC: ExtendedDeviceTypeSpec = {
   type_id: '',
-  schema_version: '2.0.0',
+  schema_version: '1.0.0',
   name_zh: '',
   name_en: '',
   energy_carriers: [],

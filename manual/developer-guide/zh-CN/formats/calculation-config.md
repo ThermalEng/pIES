@@ -1,6 +1,6 @@
 # CalculationConfig
 
-> 文档状态：生效目标契约；契约标识：`ies.calculation-config`；目标 schema：`2.0.0`；选择方：计算提交；消费者：GeneratorProvider（生成前能力核对）。
+> 文档状态：生效目标契约；契约标识：`ies.calculation-config`；目标 schema：`1.0.0`；选择方：计算提交；消费者：GeneratorProvider（生成前能力核对）。
 
 CalculationConfig 固定一次计算的全部选择：mode、预测目标所用算法与参数、generator、solver、计算精度、耦合预测收敛条件、时间限制、选项、随机种子和输出选择。计算按项目基线完整连续序列进行，不采用典型日、分段近似、容量步长或场景缩减；本契约不含离散化字段，也不含规划目标/变量/约束、设备参数、财务配置、资源或装配内容。
 
@@ -11,7 +11,7 @@ CalculationConfig 不进入 assembly，在计算包生成时与 `ValidatedAssemb
 | 字段 | 形态 | 说明 |
 |---|---|---|
 | `schema` | `ies.calculation-config` | 字头 |
-| `schema_version` | `2.0.0` | 字头 |
+| `schema_version` | `1.0.0` | 字头 |
 | `mode` | 非空字符串 | 计算模式，由 GeneratorDescriptor.modes 声明；首个内置模式为 `planning` |
 | `predictions` | 列表（可空列表，不接受 null） | 预测配置；每项 `{target: {instance, interface}, algorithm, parameters}`，`algorithm` 为精确 provider 引用，`parameters` 为对象；`target` 不得重复 |
 | `generator` | `<稳定ID>@<语义化版本>` | 所选生成器精确引用 |
@@ -30,7 +30,7 @@ CalculationConfig 不进入 assembly，在计算包生成时与 `ValidatedAssemb
 ```json
 {
   "schema": "ies.calculation-config",
-  "schema_version": "2.0.0",
+  "schema_version": "1.0.0",
   "mode": "planning",
   "predictions": [
     {
@@ -54,6 +54,6 @@ CalculationConfig 不进入 assembly，在计算包生成时与 `ValidatedAssemb
 
 ## 校验边界
 
-公开 CalculationConfig 输入边界校验全部字段形态与领域规则；生成前由 GeneratorDescriptor 核对 mode、精度与 solver 兼容性。预测目标按绑定和算法输入要求校验，收敛配置按预测能力声明的计算依赖确定。`2.0.0` 以依赖关系取代旧版按目标数量选择流程的规则。
+公开 CalculationConfig 输入边界校验全部字段形态与领域规则；生成前由 GeneratorDescriptor 核对 mode、精度与 solver 兼容性。预测目标按绑定和算法输入要求校验，收敛配置按预测能力声明的计算依赖确定。`1.0.0` 以依赖关系取代旧版按目标数量选择流程的规则。
 
-算法参数与收敛调用以[预测能力契约](../modules/engines.md#预测参数与收敛能力)为准；不要求所有算法提供同名尺度参数。该目标契约的输入与执行统一使用 `2.0.0`，不保留旧数量分流或双版本解析入口。
+算法参数与收敛调用以[预测能力契约](../modules/engines.md#预测参数与收敛能力)为准；不要求所有算法提供同名尺度参数。该目标契约的输入与执行统一使用 `1.0.0`，不保留旧数量分流或双版本解析入口。

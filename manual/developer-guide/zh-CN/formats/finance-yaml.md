@@ -1,10 +1,10 @@
 # 财务 YAML 契约
 
-> 契约标识与目标版本：`ies.finance-profile@7.0.0`、`ies.finance-overrides@7.0.0`、`ies.effective-finance-config@7.0.0`。本版为初建金额来源增加显式实例范围，并明确建设条件与固定残值的关系；三件套同步提升主版本，不接受在旧字头下增加字段或改变金额含义。
+> 契约标识：`ies.finance-profile`、`ies.finance-overrides`、`ies.effective-finance-config`；格式标记统一固定为 `1.0.0`，只维护本页当前结构和语义，不逐次升版。
 > 推荐文件名（项目包内固定名称）：`finance_profile.yaml`、`finance_overrides.yaml`、`effective_finance.yaml`
 > 文档状态：生效目标契约；本页定义文件语义，不声明实现已经交付。
 
-配套目标为装配 `6.0.0`、生成器 `8.0.0`、适配器 `7.0.0` 与封存财务评价 `4.0.0`，见[同次解财务事实映射](solver-bundle.md#同次解财务事实映射)。评价输入、`CalcSnapshot@5.0.0`、设备模型、CalculationConfig、通用 Bundle 和 ComputeResult 顶层结构不变；精确版本及迁移见[格式版本表](../file-formats.md#建设激活配套版本与迁移)。
+配套目标为装配 `1.0.0`、生成器 `1.0.0`、适配器 `1.0.0` 与封存财务评价 `1.0.0`，见[同次解财务事实映射](solver-bundle.md#同次解财务事实映射)。评价输入、`CalcSnapshot@1.0.0`、设备模型、CalculationConfig、通用 Bundle 和 ComputeResult 顶层结构不变；精确版本及迁移见[格式版本表](../file-formats.md#建设激活配套版本与迁移)。
 
 本页定义财务三件套的完整 YAML 结构与校验语义，是 [文件格式标准](../file-formats.md) 与[财务计算](../modules/finance.md)的字段级权威正文。装配如何引用有效快照见[装配 YAML](assembly-yaml.md)。
 
@@ -26,7 +26,7 @@ assembly / computation / 项目包（精确引用 Effective YAML）
 
 ## 通用金额引用目标语义
 
-本节规定后续通用财务扩展的语义约束，不放宽下文 `7.0.0` 字段表。建设发生条件及来源范围按本页和装配格式的明确字段执行；命名费用、任意税额派生及基准方案仍是后续能力，不据这些语义示例增加字段。
+本节规定后续通用财务扩展的语义约束，不放宽下文 `1.0.0` 字段表。建设发生条件及来源范围按本页和装配格式的明确字段执行；命名费用、任意税额派生及基准方案仍是后续能力，不据这些语义示例增加字段。
 
 ### 金额项与驱动量
 
@@ -57,13 +57,13 @@ assembly / computation / 项目包（精确引用 Effective YAML）
 
 评价范围、税务边界与基准来源以[财务模块](../modules/finance.md#评价边界与基准)为准。上述引用扩展贯通输入、合并、冻结、生成及结果后才发布执行能力，不能只接受字段而忽略其金额或用途。
 
-## `ies.finance-profile@7.0.0`
+## `ies.finance-profile@1.0.0`
 
 ### 完整示例
 
 ```yaml
 schema: ies.finance-profile
-schema_version: "7.0.0"
+schema_version: "1.0.0"
 profile:
   id: cn-north-demo
   region: CN-North
@@ -132,7 +132,7 @@ net_cashflows: {}              # 无额外净现金项目，不从折旧残值�
 | 路径 | 必需 | 规则 |
 |---|---|---|
 | `schema` | 是 | 固定 `ies.finance-profile` |
-| `schema_version` | 是 | 固定 `"7.0.0"` |
+| `schema_version` | 是 | 固定 `"1.0.0"` |
 | `profile.id` | 是 | 稳定 ASCII 小写 ID（命名空间点分式、`lower_snake_case` 或短横线，同文件内保持一致），如 `cn-north-demo`；Overrides 与 Effective 沿用它做引用 |
 | `profile.region` | 是 | 地区标识（展示与追溯，不参与计算） |
 | `profile.currency` | 是 | `CNY` / `USD` |
@@ -387,13 +387,13 @@ Overrides 可用 `demand_charges.<charge_id>.rate` 原子替换 Profile 已有�
 - Overrides 对既有 `demand_input_tax` 条目按 `charge` 匹配，只覆盖税率与可抵比例，不改变范围；`demand_cost` 是 Profile 的范围，不允许覆盖。
 - 需量费沿用 `price_basis`：含税口径不重复加税，不含税口径按明确税率形成实际付款。未声明的税额与抵扣不自动生成；同一需量费税基不能重复抵扣或扣除，实际现金只支出一次。
 
-## `ies.finance-overrides@7.0.0`
+## `ies.finance-overrides@1.0.0`
 
 ### 完整示例
 
 ```yaml
 schema: ies.finance-overrides
-schema_version: "7.0.0"
+schema_version: "1.0.0"
 profile_ref:
   id: cn-north-demo
 finance_types:
@@ -419,7 +419,7 @@ energy_prices:
 
 | 路径 | 规则 |
 |---|---|
-| `schema` / `schema_version` | 固定 `ies.finance-overrides` / `"7.0.0"` |
+| `schema` / `schema_version` | 固定 `ies.finance-overrides` / `"1.0.0"` |
 | `profile_ref` | 必填 `{id}`：与目标 Profile 的 `id` 一致（文本文件按字头校验，不做内容摘要） |
 | `finance_types` | 只允许覆盖目标 Profile **已存在** 的 `finance_type`；禁止新增或删除 `finance_type` |
 | `finance_types.*` | 只允许按 Profile 实际存在的叶子路径整体替换 `Money` 原子：`<分量>.fixed`（如 `upfront_capex.fixed`）替换为 `{value, unit}`；`<分量>.linear.<driver>.unit_cost` 替换为 `{value, unit}`。被替换叶子必须已在 Profile 声明；禁止新增或删除分量、`fixed` 节点或 `driver`（`driver` 集合不可增删）、禁止改分量类型与 `cost_method`、禁止改 `unit`（规范化后必须与 Profile 相同）；替换值必须为完整 `{value, unit}` 原子，禁止部分金额与 `null`；成本金额非负 |
@@ -436,7 +436,7 @@ energy_prices:
 
 ```yaml
 schema: ies.finance-overrides
-schema_version: "7.0.0"
+schema_version: "1.0.0"
 profile_ref: {id: cn-north-demo}
 tax_rules:
   operating_vat:
@@ -470,7 +470,7 @@ tax_rules:
 
 ```yaml
 schema: ies.finance-overrides
-schema_version: "7.0.0"
+schema_version: "1.0.0"
 profile_ref: {id: cn-north-demo}
 tax_rules:
   operating_vat:
@@ -502,7 +502,7 @@ tax_rules:
 
 此组维护净基础分别为 `4500-4500×0.1/1.1` 与 `7000`；可抵进项是否已被抵扣不改变它们。首笔从评价年7计提3年、第二笔从评价年7计提4年，各只扣一次现金，折旧不再次扣现金。同一来源的年额、期间和输入顺序随 Effective 与评价输入冻结，合并结果保留完整列表，不压成类别合计。
 
-## `ies.effective-finance-config@7.0.0`
+## `ies.effective-finance-config@1.0.0`
 
 ### 完整示例
 
@@ -510,7 +510,7 @@ tax_rules:
 
 ```yaml
 schema: ies.effective-finance-config
-schema_version: "7.0.0"
+schema_version: "1.0.0"
 profile_id: cn-north-demo
 currency: CNY
 base_year: 2025
@@ -584,7 +584,7 @@ net_cashflows: {}
 
 ```yaml
 schema: ies.finance-overrides
-schema_version: "7.0.0"
+schema_version: "1.0.0"
 profile_ref:
   id: <profile-id>
 ```

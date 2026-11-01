@@ -113,7 +113,7 @@ def test_result_is_deeply_immutable_and_versioned() -> None:
     2.0.0 为破坏性 schema 变更(双层状态 + receipt_id 追溯, 无旧字段
     兼容), 版本号钉死以防无声回退。
     """
-    assert COMPUTE_RESULT_VERSION == "2.0.0"
+    assert COMPUTE_RESULT_VERSION == "1.0.0"
     result = _result(outputs={"k": {"nested": [1]}})
     assert dataclasses.is_dataclass(result)
     assert result.schema == COMPUTE_RESULT_SCHEMA

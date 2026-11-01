@@ -58,7 +58,7 @@ from iesplan.tasks.persistence import Task as _TaskForDDL  # noqa: E402,F401
 
 PROFILE_PAYLOAD: dict = {
     "schema": "ies.finance-profile",
-    "schema_version": "7.0.0",
+    "schema_version": "1.0.0",
     "profile": {
         "id": "cn-north-demo",
         "region": "CN-North",
@@ -117,7 +117,7 @@ PROFILE_PAYLOAD: dict = {
 def _overrides_payload(profile: FinanceProfile) -> dict:
     return {
         "schema": "ies.finance-overrides",
-        "schema_version": "7.0.0",
+        "schema_version": "1.0.0",
         "profile_ref": {"id": profile.profile_id},
         "finance_types": {
             "pv_system": {
@@ -427,7 +427,7 @@ def test_tax_rules_revision_roundtrip_and_effective(client: TestClient, db_sessi
     assert resp.status_code == 200, resp.text
     tax_overrides = {
         "schema": "ies.finance-overrides",
-        "schema_version": "7.0.0",
+        "schema_version": "1.0.0",
         "profile_ref": {"id": "cn-tax-demo"},
         "credit_pools": {
             "main_pool": {
@@ -979,7 +979,7 @@ def test_net_cashflow_effective_content_and_project_version_freeze(
     assert frozen["planning_config"] == {"revision": planning_rev}
 
     override = {
-        "schema": "ies.finance-overrides", "schema_version": "7.0.0",
+        "schema": "ies.finance-overrides", "schema_version": "1.0.0",
         "profile_ref": {"id": "cn-cashflow-freeze"},
         "net_cashflows": {"rebate": {"amount": {"value": {"value": "200", "unit": "CNY"}}}},
     }
@@ -989,7 +989,7 @@ def test_net_cashflow_effective_content_and_project_version_freeze(
     )
     assert resp.status_code == 200, resp.text
     assert resp.json()["effective_finance_config"]["net_cashflows"]["rebate"]["amount"]["value"]["value"] == "200"
-    assert resp.json()["effective_finance_config"]["schema_version"] == "7.0.0"
+    assert resp.json()["effective_finance_config"]["schema_version"] == "1.0.0"
 
     old_row = db_session.execute(
         select(EffectiveFinanceRevision).where(

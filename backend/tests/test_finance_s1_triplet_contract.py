@@ -42,7 +42,7 @@ from iesplan.tasks.contracts import InvalidRequestError
 def _valid_profile_dict() -> dict:
     return {
         "schema": "ies.finance-profile",
-        "schema_version": "7.0.0",
+        "schema_version": "1.0.0",
         "profile": {
             "id": "syn-600-base",
             "region": "CN-East",
@@ -287,7 +287,7 @@ def test_600_net_cashflows_forms_and_overrides():
     # Overrides 覆盖 net_cashflows
     overrides_dict = {
         "schema": "ies.finance-overrides",
-        "schema_version": "7.0.0",
+        "schema_version": "1.0.0",
         "profile_ref": {"id": "syn-600-base"},
         "net_cashflows": {
             "salvage_recovery": {
@@ -317,7 +317,7 @@ def test_600_net_cashflow_override_typed_roundtrip(bound):
     """两条公开入口均签发同一合法 Effective；时点/金额与来源身份无损。"""
     profile = FinanceProfile.from_dict(_valid_profile_dict())
     payload = {
-        "schema": "ies.finance-overrides", "schema_version": "7.0.0",
+        "schema": "ies.finance-overrides", "schema_version": "1.0.0",
         "profile_ref": {"id": profile.profile_id},
         "net_cashflows": {
             "salvage_recovery": {
@@ -351,7 +351,7 @@ def test_600_net_cashflow_override_typed_roundtrip(bound):
 def test_600_net_cashflow_override_rejects_scope(bound, patch):
     profile = FinanceProfile.from_dict(_valid_profile_dict())
     payload = {
-        "schema": "ies.finance-overrides", "schema_version": "7.0.0",
+        "schema": "ies.finance-overrides", "schema_version": "1.0.0",
         "profile_ref": {"id": profile.profile_id},
         "net_cashflows": {"year10_bonus": patch},
     }
@@ -367,7 +367,7 @@ def test_600_net_cashflow_override_rejects_scope(bound, patch):
 def test_600_net_cashflow_source_share_cannot_change_base_from(bound):
     profile = FinanceProfile.from_dict(_valid_profile_dict())
     payload = {
-        "schema": "ies.finance-overrides", "schema_version": "7.0.0",
+        "schema": "ies.finance-overrides", "schema_version": "1.0.0",
         "profile_ref": {"id": profile.profile_id},
         "net_cashflows": {"salvage_recovery": {"amount": {
             "ratio": {"value": "0.08", "unit": "1"},
@@ -490,7 +490,7 @@ def test_600_yaml_roundtrip_lossless():
     effective = merge_effective(profile, None)
     text = effective_to_yaml(effective)
     assert 'ies.effective-finance-config' in text
-    assert '7.0.0' in text
+    assert '1.0.0' in text
     assert 'net_cashflows' in text
 
     restored = effective_from_yaml(text)
@@ -570,7 +570,7 @@ def test_600_task_submission_gate_and_period_checks():
         "finance.financial_facts",
     )
     with pytest.raises(InvalidRequestError) as exc_info:
-        _check_tax_capabilities("ies.generator.highs_milp@8.0.0", base_caps, effective)
+        _check_tax_capabilities("ies.generator.highs_milp@1.0.0", base_caps, effective)
     assert exc_info.value.code == "TASK-REQ-007"
     missing = exc_info.value.params["missing_capabilities"]
     assert "finance.net_cashflows" in missing

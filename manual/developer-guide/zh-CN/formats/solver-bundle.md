@@ -93,7 +93,7 @@ extensions: {}
 
 声明由生成器在建立对应变量时形成，与真实求解列同源，覆盖该序列的完整运营时域；不复制装配或以物化输入冒充求解结果。无可发布步变量时声明空数组。ResultAdapter 直接使用明确列引用恢复同一次求解的结果，application、Worker 和前端不得按求解变量名反解实例或时步。
 
-声明属于配套 generator/result adapter 的版本化协议，不改变通用 Bundle manifest 或封闭 CalculationConfig。若新版本将该声明改为必需，必须提升配套 provider 协议主版本并同步精确引用；不得以旧解析器忽略未知键证明兼容，也不实现旧声明回退。统一结果形状见 [计算生成与求解](../modules/engines.md)。
+声明由当前 generator/result adapter 配套解释，不改变通用 Bundle manifest 或封闭 CalculationConfig。2.0 正式发布前统一固定 `1.0.0`，声明变化直接同步生成与恢复，不保留旧声明回退。统一结果形状见 [计算生成与求解](../modules/engines.md)。
 
 ## 结构化命令
 
@@ -113,7 +113,7 @@ extensions: {}
 
 配套生成器在 `parameters.json` 的 `financial_facts` 声明结构化财务事实映射，ResultAdapter 使用同一次主解恢复为 `ComputeResult.outputs.financial_facts`。声明复用既有仿射求值方式，包含明确字段、业务身份、期间、单位与求解列引用；消费者不拆解分量键、序列 ID 或列名。现金流声明与规划目标中的现金表达式同源，不重新建立税务模型。声明不复制完整财务配置，也不是新的用户公式语言。
 
-以下为建设激活目标生成器 `ies.generator.highs_milp@8.0.0` 与适配器 `ies.result-adapter.highs@7.0.0` 的业务输出；版本发布及迁移见[格式版本表](../file-formats.md#建设激活配套版本与迁移)：
+以下为建设激活目标生成器 `ies.generator.highs_milp@1.0.0` 与适配器 `ies.result-adapter.highs@1.0.0` 的业务输出；版本发布及迁移见[格式版本表](../file-formats.md#建设激活配套版本与迁移)：
 
 | 字段 | 语义 |
 | --- | --- |
@@ -133,7 +133,7 @@ extensions: {}
 
 `t`、`month`、`year`、`period`、`arrival_period`、`last_usable_year` 及日历／评价年、日历月均为整数；`ratio` 与金额均为十进制字符串。期间映射以财务契约为准，池与规则保持显式身份，共享池不得按规则重复计入。没有适用规则时对应数组为空，含义为不适用；适用规则的零税额、零余额显式发布，不省略为未知。无税则的完整现金流仍须声明并恢复，不以缺映射冒充零税。
 
-需量费与能源电量费分列，不重复包含于 `energy_net` 或 O&M；显式净现金项目也不重复写入 `annual_operation.net`，只在其时点进入完整现金流。月明细按 `(billing_id, calendar_year, calendar_month)` 排序，年度正费用与净额在模型中同源产生；适配器只恢复声明，不重新取 max、重新计税或扣费。目标财务结果按 `ies.financial-evaluation@4.0.0` 封存，不在旧结果上注入新字段。
+需量费与能源电量费分列，不重复包含于 `energy_net` 或 O&M；显式净现金项目也不重复写入 `annual_operation.net`，只在其时点进入完整现金流。月明细按 `(billing_id, calendar_year, calendar_month)` 排序，年度正费用与净额在模型中同源产生；适配器只恢复声明，不重新取 max、重新计税或扣费。目标财务结果按 `ies.financial-evaluation@1.0.0` 封存，不在旧结果上注入新字段。
 
 建设声明的 unit_id、instance_id、mode 及规划变量 ID/单位是冻结字面量；built 和各规模的数值复用既有仿射求值节点，引用实际建设决策列和规划列，必建状态可为常数 1。ResultAdapter 由声明的二元状态恢复布尔值，不解析列名或新增容量阈值。单元按 unit_id、规模按 planning_variable_id 排序。Worker、结果读取、页面及 Excel 原样消费同次解状态与业务单位；不能用 SI 内部值冒充 kW/kWh，也不能用当前草稿补单位或重判选建。
 
@@ -149,7 +149,7 @@ extensions: {}
 
 ## 构模来源映射
 
-内置生成器 `ies.generator.highs_milp@7.1.0` 与适配器 `ies.result-adapter.highs@6.1.0` 配套使用 `input/parameters.json.model_sources`。该新增输出不改变现有解与财务字段、六项生成输入或通用 Bundle manifest；各 provider 按精确版本选择，不以新适配器补写旧任务。
+内置生成器 `ies.generator.highs_milp@1.0.0` 与适配器 `ies.result-adapter.highs@1.0.0` 配套使用 `input/parameters.json.model_sources`。该新增输出不改变现有解与财务字段、六项生成输入或通用 Bundle manifest；各 provider 按精确版本选择，不以新适配器补写旧任务。
 
 来源映射为 `schema: ies.model-sources`、`schema_version: 1.0.0` 的对象：
 

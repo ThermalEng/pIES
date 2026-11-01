@@ -238,7 +238,7 @@ def test_zero_rate_non_economic_still_real_peak(tmp_path, resolution):
     facts, sealed, _ = _solved(inputs, tmp_path)
     rows = facts["monthly_demand"]
     assert len(rows) == 12
-    assert sealed["schema_version"] == "4.0.0"
+    assert sealed["schema_version"] == "1.0.0"
     assert sealed["monthly_demand"] == list(rows)
     assert [(r["calendar_year"], r["calendar_month"]) for r in rows] == [
         (2024, month) for month in range(1, 13)

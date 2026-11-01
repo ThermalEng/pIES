@@ -208,7 +208,7 @@ globalThis.fetch = async (url, init = {}) => {
 {
   const typeDto = {
     type_id: 'ies.device.solar_collector',
-    schema_version: '2.1.0',
+    schema_version: '1.0.0',
     names: { 'zh-CN': '太阳能集热器', 'en-US': 'Solar Collector' },
     ports: [
       { name: 'water_in', direction: 'in', energy_carrier: 'water', unit: 'm3/h' },
@@ -222,7 +222,7 @@ globalThis.fetch = async (url, init = {}) => {
     },
   }
   const spec = deviceTypeFromServer(typeDto)
-  check('deviceTypeFromServer: 真实非 2.0.0 schema_version 直读', spec.schema_version === '2.1.0')
+  check('deviceTypeFromServer: 真实非 1.0.0 schema_version 直读', spec.schema_version === '1.0.0')
   check('deviceTypeFromServer: 多语言名称', spec.name_zh === '太阳能集热器' && spec.name_en === 'Solar Collector')
   check('deviceTypeFromServer: 开放载能 ID 保留', spec.energy_carriers.join(',') === 'water,heat,thermal_oil,solar_radiation,ambient_heat')
   check('deviceTypeFromServer: 全部五种接口方向保留', spec.ports.map((p) => p.direction).join(',') === 'in,out,bidirectional,predefined,blind')

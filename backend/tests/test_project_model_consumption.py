@@ -61,7 +61,7 @@ AUX_TYPE_FINAL = f"{AUX_TYPE_BASE}_2"
 
 SINK_YAML = """
 schema: ies.device-model
-schema_version: "2.2.0"
+schema_version: "1.0.0"
 device:
   id: acme.device.consumption_load
   names:
@@ -92,7 +92,7 @@ equations:
 #: 第二样例(同形态、不同稳定 ID; 引用重建语义回归)。
 AUX_YAML = """
 schema: ies.device-model
-schema_version: "2.2.0"
+schema_version: "1.0.0"
 device:
   id: acme.device.standby_load
   names:
@@ -123,10 +123,10 @@ equations:
 #: 计算配置正文(与 test_wave2_c_tasks._CONFIG_BODY 同构)。
 CONFIG_BODY: dict = {
     "schema": "ies.calculation-config",
-    "schema_version": "2.0.0",
+    "schema_version": "1.0.0",
     "mode": "planning",
     "predictions": [],
-    "generator": "ies.generator.highs_milp@8.0.0",
+    "generator": "ies.generator.highs_milp@1.0.0",
     "solver": "ies.solver.highs@1.7.2",
     "precision": "medium",
     "convergence": None,
@@ -138,7 +138,7 @@ CONFIG_BODY: dict = {
 
 EXPLICIT_CALC_PATCH = {
     "mode": "fixed_operation",
-    "generator": "ies.generator.highs_milp@8.0.0",
+    "generator": "ies.generator.highs_milp@1.0.0",
     "solver": "ies.solver.highs@1.7.2",
     "time_axis": {"resolution": "1h", "start": "2025-01-01T00:00:00Z"},
 }
@@ -511,7 +511,7 @@ def test_snapshot_freezes_project_model_math(
     assert assembly["devices"]["load2"]["definition"]["id"] == SINK_TYPE_FINAL
     assert assembly["devices"]["load2"]["properties"]["rated_demand_kw"]["value"] == 20
     # 依赖锁记录项目模型的契约版本。
-    assert snapshot.assembly_receipt["dependencies"]["devices"][SINK_TYPE_FINAL] == "2.2.0"
+    assert snapshot.assembly_receipt["dependencies"]["devices"][SINK_TYPE_FINAL] == "1.0.0"
 
     # 历史任务不读当前草稿: 删除项目模型后, 既有快照冻结内容原样保留。
     frozen_before = snapshot.device_models

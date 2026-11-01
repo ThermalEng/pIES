@@ -56,7 +56,7 @@ const taxProfileTemplate = {
     region: '合成税务验收区',
   },
   schema: 'ies.finance-profile',
-  schema_version: '7.0.0',
+  schema_version: '1.0.0',
   net_cashflows: {},
   tax_rules: {
     building_vat: {

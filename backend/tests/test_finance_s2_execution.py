@@ -249,7 +249,7 @@ def test_recovery_and_annual_fee_switch_main_solution(tmp_path, recovery, annual
             "solution": {}, "financial_facts": restored,
         }),
     )
-    assert sealed["schema_version"] == "4.0.0"
+    assert sealed["schema_version"] == "1.0.0"
     assert sealed["net_cashflows"] == restored["net_cashflows"]
     assert sealed["annual_net_flows"] == restored["annual_net_flows"]
     objective = model.objective.constant + sum(

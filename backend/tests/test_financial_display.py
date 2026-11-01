@@ -16,7 +16,7 @@ def _sealed() -> dict:
     """K1N2 封存评价块(当前 3.0.0 形态, 无需量绑定)。"""
     return {
         "schema": "ies.financial-evaluation",
-        "schema_version": "3.0.0",
+        "schema_version": "1.0.0",
         "status": "evaluated",
         "evaluation_years": 3,
         "construction_period": 1,

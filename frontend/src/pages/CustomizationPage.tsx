@@ -36,7 +36,7 @@ import { isValidDeviceId } from '../features/modeling'
 /** 标准 ies.device-model 2.0.0 模板骨架(含顶层 inputs 声明)。 */
 const TEMPLATE_SKELETON = [
   'schema: ies.device-model',
-  'schema_version: "2.0.0"',
+  'schema_version: "1.0.0"',
   '',
   'device:',
   '  id: your.namespace.template_id',

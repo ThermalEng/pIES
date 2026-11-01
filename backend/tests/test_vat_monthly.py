@@ -60,7 +60,7 @@ ELEC_KW = LOAD_KW / EFFICIENCY
 def _finance_payload(*, refunds=(), opening="0", basis="tax_inclusive", rules="all", maintenance_tax=True):
     payload = {
         "schema": "ies.finance-profile",
-        "schema_version": "7.0.0",
+        "schema_version": "1.0.0",
         "profile": {
             "id": "vat-demo",
             "region": "CN-North",
@@ -196,7 +196,7 @@ def _finance_payload(*, refunds=(), opening="0", basis="tax_inclusive", rules="a
 
 HEATER_YAML = """
 schema: ies.device-model
-schema_version: "2.2.0"
+schema_version: "1.0.0"
 device: {id: acme.device.heater, names: {zh-CN: 加热器, en-US: Heater}}
 properties:
   efficiency: {value: 0.9, unit: "1", valid_range: {minimum: 0, maximum: 1}}
@@ -220,7 +220,7 @@ equations:
 
 TANK_YAML = """
 schema: ies.device-model
-schema_version: "2.2.0"
+schema_version: "1.0.0"
 device: {id: acme.device.tank, names: {zh-CN: 罐, en-US: Tank}}
 properties:
   soc0: {value: 0.5, unit: "1", valid_range: {minimum: 0, maximum: 1}}
@@ -242,7 +242,7 @@ equations:
 
 LOAD_YAML = """
 schema: ies.device-model
-schema_version: "2.2.0"
+schema_version: "1.0.0"
 device: {id: acme.device.load, names: {zh-CN: 负荷, en-US: Load}}
 properties: {}
 interfaces:
@@ -265,7 +265,7 @@ equations:
 
 GRID_YAML = """
 schema: ies.device-model
-schema_version: "2.2.0"
+schema_version: "1.0.0"
 device: {id: acme.device.grid, names: {zh-CN: 电网, en-US: Grid}}
 properties: {}
 interfaces:
@@ -283,7 +283,7 @@ equations:
 def _doc(*, variables: dict | None = None, tank_origin: str = "new"):
     return {
         "schema": "ies.assembly",
-        "schema_version": "6.0.0",
+        "schema_version": "1.0.0",
         "assembly": {"id": "vat-mini", "name": "VAT 手算装配"},
         "project_baseline": {
             "resolution": "1h",
@@ -995,7 +995,7 @@ def test_vat_maintenance_credit_basis_independent(tmp_path) -> None:
 
 HEATER_UNBOUNDED_YAML = """
 schema: ies.device-model
-schema_version: "2.2.0"
+schema_version: "1.0.0"
 device: {id: acme.device.heater, names: {zh-CN: 加热器, en-US: Heater}}
 properties:
   efficiency: {value: 0.9, unit: "1", valid_range: {minimum: 0, maximum: 1}}

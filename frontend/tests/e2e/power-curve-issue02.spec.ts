@@ -11,7 +11,7 @@ const CURVE_TYPE = 'ies.device.power_curve'
 function syntheticCsv(): string {
   return [
     '# schema: ies.device-data',
-    '# schema_version: 2.1.0',
+    '# schema_version: 1.0.0',
     '# dataset_id: synthetic_output_issue02',
     `# device_id: ${CURVE_TYPE}`,
     '# source_mode: data_repeat',

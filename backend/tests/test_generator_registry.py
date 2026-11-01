@@ -65,7 +65,7 @@ def _descriptor(**kwargs) -> GeneratorDescriptor:
     kwargs.setdefault("unit_system", "SI")
     kwargs.setdefault("media_types", ("application/mps",))
     kwargs.setdefault("seed_semantics", "options.seed 为空时使用固定种子 0")
-    kwargs.setdefault("assembly_schema_version", "1.0")
+    kwargs.setdefault("assembly_schema_version", "1.0.0")
     kwargs.setdefault("result_adapter", "acme.result-adapter@1.0.0")
     return GeneratorDescriptor(**kwargs)
 
@@ -202,6 +202,9 @@ def test_descriptor_rejects_missing_required_trio() -> None:
         _descriptor(assembly_schema_version="1")
     with pytest.raises(ValueError, match="assembly_schema_version"):
         _descriptor(assembly_schema_version="v1.0")
+    for alias in ("1.0", "ies.assembly@1.0.0"):
+        with pytest.raises(ValueError, match="assembly_schema_version"):
+            _descriptor(assembly_schema_version=alias)
     with pytest.raises(ValueError, match="solvers"):
         _descriptor(solvers=())
     with pytest.raises(ValueError, match="solvers"):
@@ -209,10 +212,10 @@ def test_descriptor_rejects_missing_required_trio() -> None:
     with pytest.raises(ValueError, match="result_adapter"):
         _descriptor(result_adapter="")
     valid = _descriptor(
-        assembly_schema_version="ies.assembly@1.0.0",
+        assembly_schema_version="1.0.0",
         solvers=(SOLVER, "other.solver@2.1.0"),
     )
-    assert valid.assembly_schema_version == "ies.assembly@1.0.0"
+    assert valid.assembly_schema_version == "1.0.0"
     assert valid.supports_solver("other.solver@2.1.0") is True
 
 

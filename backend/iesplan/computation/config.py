@@ -18,7 +18,7 @@ from jsonschema import Draft202012Validator
 from iesplan.computation.protocols import CalculationConfig
 
 SCHEMA_PATH = (
-    pathlib.Path(__file__).parent / "schema" / "calculation-config-2.0.0.schema.json"
+    pathlib.Path(__file__).parent / "schema" / "calculation-config-1.0.0.schema.json"
 )
 
 

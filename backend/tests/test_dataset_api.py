@@ -622,7 +622,7 @@ def test_api_upload_obsolete_device_model_metadata_rejected(client: TestClient, 
 
     metadata = [
         "# schema: ies.device-data",
-        "# schema_version: 2.1.0",
+        "# schema_version: 1.0.0",
         "# dataset_id: valid_step_upload",
         "# device_id: ies.device.electric_load",
         "# source_mode: data_repeat",

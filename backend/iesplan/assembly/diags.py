@@ -20,7 +20,7 @@ from iesplan.core.diagnostics import make_diag as _make_diag
 # ---------------------------------------------------------------------------
 ASM_SYN_PARSE = "ASM-SYN-001"  # YAML 解析失败/类型错误(键非字符串、值类型不符、未知键)
 ASM_SYN_SECTION = "ASM-SYN-002"  # 未知章节
-ASM_SYN_VERSION = "ASM-SYN-003"  # schema_version 不受支持(≠ "3.0.0")
+ASM_SYN_VERSION = "ASM-SYN-003"  # schema_version 不受支持(≠ "1.0.0")
 ASM_SYN_FIELD = "ASM-SYN-004"  # 必填字段缺失
 ASM_SYN_TYPE = "ASM-SYN-005"  # 键类型错误(如 params 非 map、枚举值非法)
 

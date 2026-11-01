@@ -87,7 +87,7 @@ def test_valid_sample_still_parseable():
     result = parse_device_model_v2(raw, file=str(VALID_SAMPLE))
     assert result.ok, f"合法样例应可解析，诊断: {[dict(d.params) for d in result.diagnostics]}"
     assert result.document is not None
-    assert result.document.schema_version == "2.2.0"
+    assert result.document.schema_version == "1.0.0"
 
 
 @pytest.mark.parametrize("filename", sorted(EXPECTED.keys()))

@@ -176,7 +176,7 @@ IRR 与 `normal、no_solution、multiple、degenerate、out_of_domain、numeric_
 
 Worker 对同次已求解结果计算一次评价，随结果载荷同一证据单元封存（`status` 为 `"evaluated"`）；未求解或缺解输出不写财务块。读取与导出只消费该封存事实，不重算、不读最新配置。金额均为十进制字符串（不舍入），单位独立字段：
 
-建设激活的目标封存块以 `schema: ies.financial-evaluation`、`schema_version: 4.0.0` 标识，保留有明确范围的折旧来源、建设状态及显式净现金项目；这不是已交付声明。建设、付款、逐年运行及税务事实与完整现金流均来自适配器恢复的[同次解财务事实](../formats/solver-bundle.md#同次解财务事实映射)，原样投影，不在 application 按序列、成本规则或税务规则重算。`finance` 的既有评价纯函数仅对该完整现金流与冻结评价参数计算指标。税后NPV目标与评价值的一致性由定向测试证明，不新增运行期重复比对。
+建设激活的目标封存块以 `schema: ies.financial-evaluation`、`schema_version: 1.0.0` 标识，保留有明确范围的折旧来源、建设状态及显式净现金项目；这不是已交付声明。建设、付款、逐年运行及税务事实与完整现金流均来自适配器恢复的[同次解财务事实](../formats/solver-bundle.md#同次解财务事实映射)，原样投影，不在 application 按序列、成本规则或税务规则重算。`finance` 的既有评价纯函数仅对该完整现金流与冻结评价参数计算指标。税后NPV目标与评价值的一致性由定向测试证明，不新增运行期重复比对。
 
 - `evaluation_years`／`construction_period`／`operation_years`：整数（K/N 回显冻结输入，供时轴映射展示）；
 - `currency`、`price_basis`、`base_year`、`profile_id`、`discount_rate`：冻结值原样；
@@ -200,7 +200,7 @@ Worker 对同次已求解结果计算一次评价，随结果载荷同一证据�
 - `discount_rate` 为无量纲比例（API 规范值 `0..1`，无默认，`r=0` 合法）；确认同时包含明确的建设付款比例计划和维护／换新支出清单，公开字段见[公共契约](../contracts.md)；`confirmed_by`/`confirmed_at` 由服务端记录（追加审计不可覆盖）；
 - 运行起始年归项目计算基线（创建时固定），与 `base_year`（金额口径基年）不得互相推断；
 - 评价确认在发起计算时一次完成，服务端随提交记录确认证据并冻结输入；项目预检不要求另行完成自由字典式 `baseline-confirm`，其审计记录也不作为计算参数来源；
-- 以上确认随提交冻结进 `CalcSnapshot`（破坏性修改提升快照主版本）；运行年度边界 step 下标只由基线运行起始年、分辨率与 `operation_years` 推导并随快照冻结。参数关系与输入范围在公开提交边界校验，内部快照读取与交接不重复校核。
+- 以上确认随提交冻结进 `CalcSnapshot`，与当前契约同步更新，不另行升版；运行年度边界 step 下标只由基线运行起始年、分辨率与 `operation_years` 推导并随快照冻结。参数关系与输入范围在公开提交边界校验，内部快照读取与交接不重复校核。
 
 ### 项目建设安排与全周期现金流
 

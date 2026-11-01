@@ -34,10 +34,10 @@ test.describe('场景 4: 数据上传 / 质量报告 / 绑定', () => {
     await requestJson(apiCtx.request, 'PUT', `/api/projects/${createdProj.project?.id ?? createdProj.id}/config`, {
       calculation_config: {
         schema: 'ies.calculation-config',
-        schema_version: '2.0.0',
+        schema_version: '1.0.0',
         mode: 'planning',
         predictions: [],
-        generator: 'ies.generator.highs_milp@8.0.0',
+        generator: 'ies.generator.highs_milp@1.0.0',
         solver: 'ies.solver.highs@1.7.2',
         precision: 'medium',
         convergence: null,
@@ -99,8 +99,8 @@ test.describe('PR #26: 两份数据集绑定状态与读回失败恢复', () => 
     const projectId = created.project?.id ?? created.id
     await requestJson(setup.request, 'PUT', `/api/projects/${projectId}/config`, {
       calculation_config: {
-        schema: 'ies.calculation-config', schema_version: '2.0.0',
-        mode: 'planning', predictions: [], generator: 'ies.generator.highs_milp@8.0.0',
+        schema: 'ies.calculation-config', schema_version: '1.0.0',
+        mode: 'planning', predictions: [], generator: 'ies.generator.highs_milp@1.0.0',
         solver: 'ies.solver.highs@1.7.2', precision: 'medium', convergence: null,
         time_limit_seconds: 600, options: {}, seed: null, outputs: ['solution'],
       },

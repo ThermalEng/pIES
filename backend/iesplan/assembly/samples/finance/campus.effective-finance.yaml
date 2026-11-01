@@ -1,6 +1,6 @@
 # 园区样例有效快照(合并器 merge_effective 产物, 非人工 authoring; profile cn-north-demo)
 schema: ies.effective-finance-config
-schema_version: "7.0.0"
+schema_version: "1.0.0"
 profile_id: cn-north-demo
 currency: CNY
 base_year: 2025

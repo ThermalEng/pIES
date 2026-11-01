@@ -157,7 +157,7 @@ def _seed_dataset(db: Session, user, pid: int, *, quota_bytes: int = 0) -> int:
 #: time_axis 缺一即阻断(ASM-CONV-001)。夹具必须显式声明, 不得依赖回退。
 EXPLICIT_CALC_PATCH = {
     "mode": "fixed_operation",
-    "generator": "ies.generator.highs_milp@8.0.0",
+    "generator": "ies.generator.highs_milp@1.0.0",
     "solver": "ies.solver.highs@1.7.2",
     "time_axis": {"resolution": "1h", "start": "2025-01-01T00:00:00Z"},
 }
@@ -282,10 +282,10 @@ def _prepare_project(
 #: 计算配置正文(12 字段契约; 与 test_http_contract._CALC_PAYLOAD 同构)。
 _CONFIG_BODY: dict[str, Any] = {
     "schema": "ies.calculation-config",
-    "schema_version": "2.0.0",
+    "schema_version": "1.0.0",
     "mode": "planning",
     "predictions": [],
-    "generator": "ies.generator.highs_milp@8.0.0",
+    "generator": "ies.generator.highs_milp@1.0.0",
     "solver": "ies.solver.highs@1.7.2",
     "precision": "medium",
     "convergence": None,
@@ -584,9 +584,9 @@ def test_submit_accepts_tax_rules_with_capable_generator(
     snapshot = db.execute(
         select(CalcSnapshot).where(CalcSnapshot.id == body["task"]["calc_snapshot_id"])
     ).scalar_one()
-    assert snapshot.result_adapter == "ies.result-adapter.highs@7.0.0"
+    assert snapshot.result_adapter == "ies.result-adapter.highs@1.0.0"
     assert snapshot.executor == "ies.executor.local_process@1.0.0"
-    assert snapshot.calc_config_snapshot["generator"] == "ies.generator.highs_milp@8.0.0"
+    assert snapshot.calc_config_snapshot["generator"] == "ies.generator.highs_milp@1.0.0"
     assert db.execute(select(func.count(Task.id))).scalar() == 1
     config_cases.set_project_finance_profile(db, pid, "cn-north-demo", owner.id)
     save_compute_planning(db, pid, owner.id, device_ref)
@@ -640,7 +640,7 @@ def test_submit_accepts_pool_only_with_capable_generator(
     snapshot = db.execute(
         select(CalcSnapshot).where(CalcSnapshot.id == body["task"]["calc_snapshot_id"])
     ).scalar_one()
-    assert snapshot.result_adapter == "ies.result-adapter.highs@7.0.0"
+    assert snapshot.result_adapter == "ies.result-adapter.highs@1.0.0"
     assert snapshot.executor == "ies.executor.local_process@1.0.0"
     assert db.execute(select(func.count(Task.id))).scalar() == 1
 
@@ -662,7 +662,7 @@ def test_submit_legacy_path_freezes_and_new_cashflow_is_accepted(
     legacy_snapshot = db.get(CalcSnapshot, body["task"]["calc_snapshot_id"])
     assert legacy_snapshot is not None
     assert legacy_snapshot.canonical_assembly_text
-    assert legacy_snapshot.schema_version == "5.0.0"  # 独立 CalcSnapshot 协议不迁移
+    assert legacy_snapshot.schema_version == "1.0.0"  # 独立 CalcSnapshot 协议不迁移
 
     profile_payload = {
         **PROFILE_PAYLOAD,
@@ -685,9 +685,9 @@ def test_submit_legacy_path_freezes_and_new_cashflow_is_accepted(
     assert body["task"]["status"] == "queued"
     cashflow_snapshot = db.get(CalcSnapshot, body["task"]["calc_snapshot_id"])
     assert cashflow_snapshot is not None
-    assert cashflow_snapshot.schema_version == "5.0.0"  # CalcSnapshot remains independent
-    assert cashflow_snapshot.calc_config_snapshot["generator"] == "ies.generator.highs_milp@8.0.0"
-    assert cashflow_snapshot.result_adapter == "ies.result-adapter.highs@7.0.0"
+    assert cashflow_snapshot.schema_version == "1.0.0"  # CalcSnapshot remains independent
+    assert cashflow_snapshot.calc_config_snapshot["generator"] == "ies.generator.highs_milp@1.0.0"
+    assert cashflow_snapshot.result_adapter == "ies.result-adapter.highs@1.0.0"
     assert cashflow_snapshot.canonical_assembly_text
     assert db.execute(select(func.count(Task.id))).scalar() == 2
     assert db.execute(select(func.count(CalcSnapshot.id))).scalar() == 2
@@ -722,7 +722,7 @@ def test_submit_rejects_tax_rules_without_provider_capabilities(
         precisions=("medium",),
         solvers=("ies.solver.highs@1.7.2",),
         executors=("ies.executor.local_process@1.0.0",),
-        result_adapter="ies.result-adapter.highs@7.0.0",
+        result_adapter="ies.result-adapter.highs@1.0.0",
         unit_system="SI",
         seed_semantics="测试合成 provider，无税务能力标记",
     )
@@ -828,7 +828,7 @@ def _evaluation_2y(expenses: list) -> dict:
 def _maint_ref_overrides(items: list) -> dict:
     return {
         "schema": "ies.finance-overrides",
-        "schema_version": "7.0.0",
+        "schema_version": "1.0.0",
         "profile_ref": {"id": "cn-tax-demo"},
         "tax_rules": {
             "operating_vat": {
@@ -979,7 +979,7 @@ def _sched_profile_payload() -> dict:
 def _sched_refund_overrides(schedule: list | None, refund_period: int, arrival: int) -> dict:
     patch: dict = {
         "schema": "ies.finance-overrides",
-        "schema_version": "7.0.0",
+        "schema_version": "1.0.0",
         "profile_ref": {"id": "cn-tax-sched"},
         "credit_pools": {
             "main_pool": {

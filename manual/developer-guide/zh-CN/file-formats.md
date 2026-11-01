@@ -18,7 +18,7 @@
 | [有效财务快照](formats/finance-yaml.md) | `*.effective-finance.yaml` / `effective_finance.yaml` | 合并器确定性产物：来源标识与完整成本、价格、规则及抵扣池 | 装配校验、计算生成与求解 |
 | [装配 YAML](formats/assembly-yaml.md) | `*.assembly.yaml` | 固定项目计算基线、设备实例、规范数据与来源绑定、连接、指向有效财务快照的精确引用、成本／能源／需量绑定及规划配置；跨实例逐步技术关系归规划约束 | 装配校验器 |
 | [Solver Bundle](formats/solver-bundle.md) | 一个目录或不可变归档 | 固定求解器输入文件、受控命令、预期输出和结果适配器 | 求解运行时 |
-| [计算配置](formats/calculation-config.md) | 计算提交输入（JSON 兼容映射），目标 `2.0.0` | 固定 mode、预测算法与参数、generator、solver、精度、耦合预测收敛条件、时间限制、选项、种子和输出选择 | 生成器（生成前能力核对） |
+| [计算配置](formats/calculation-config.md) | 计算提交输入（JSON 兼容映射），目标 `1.0.0` | 固定 mode、预测算法与参数、generator、solver、精度、耦合预测收敛条件、时间限制、选项、种子和输出选择 | 生成器（生成前能力核对） |
 | [项目包](formats/project-package.md) | `*.zip`（`manifest.json` 在根） | 离线交换：当前工作状态、包内历史版本及其精确财务/规划/数据依赖 | 项目包导入器 |
 
 人工 authoring：设备模型 YAML、设备数据 CSV、`FinanceProfile`、`FinanceOverrides` 与装配 YAML 允许人工编写。`EffectiveFinanceConfig` 只能由合并器生成，可导出、导入和进入快照，不能人工 authoring（导入时连同来源 Profile 与 Overrides 重新合并验证）。Solver Bundle 必须由生成器产生，不作为用户手写的项目输入。
@@ -71,26 +71,17 @@ YAML 采用 YAML 1.2 的安全子集：两个空格缩进，禁止 Tab、自定�
 
 ### 项目包的可移植历史依赖
 
-项目包现行目标格式为 `3.0.0`，以 `format_version` 声明；该目标改变历史依赖的携带与引用语义，不保留旧 `1.x` / `2.x` 解析路径。完整布局见[项目包](formats/project-package.md)；后端导出/导入往返与导入 GUI 均已交付。
+项目包格式标记固定为 `1.0.0`，以 `format_version` 声明；只解析当前结构。完整布局见[项目包](formats/project-package.md)。当前草稿与历史修订是项目内容修订，不是两种文件协议。
 
 ### 建设激活配套版本与迁移
 
-下表为建设激活的生效目标，不表示实现已完成。输入与结果语义只在所属格式页定义，本表固定发布组合；不在现有旧字头下放宽字段或替换结果含义。
-
-| 契约或扩展 | 目标版本及影响 |
-| --- | --- |
-| 装配 schema、装配校验器、规范化算法 | `6.0.0`；规划含明确 construction_units，成本绑定含 cost_occurrence，见[装配格式](formats/assembly-yaml.md#建设激活目标语义) |
-| FinanceProfile / FinanceOverrides / EffectiveFinanceConfig | 均为 `7.0.0`；初建来源必须显式 scope，见[金额来源](formats/finance-yaml.md#金额来源与折旧期间) |
-| `ies.generator.highs_milp` / `ies.result-adapter.highs` | 分别为 `8.0.0` / `7.0.0`；冻结声明、精确关系及带单位建设结果配套消费 |
-| `ies.financial-evaluation` | `4.0.0`；完整保留来源范围与 construction_units，不回填旧封存块 |
-| CalcSnapshot / CalculationConfig | 仍为 `5.0.0` / `2.0.0`；外层字段不变，分别冻结新装配/财务对象及所选 provider 精确版本 |
-| Solver Bundle / ComputeResult / model_sources / 项目包 | 外层仍为 `1.0.0` / `2.0.0` / `1.0.0` / `3.0.0`；新语义由内部对象和配套 provider 的精确版本解释，不机械升版 |
+建设激活不再产生单独的配套版本组合。装配、财务、生成器及结果使用当前一套 `1.0.0` 契约：规划含 construction_units，实例成本绑定含 cost_occurrence，初建金额来源明确 scope，结果保留建设状态和业务单位。字段以各自格式页为正文。
 
 嵌入规划及规划保存 HTTP DTO 共用装配格式定义的字段，不再增加一套规划文件字头。工作区、完整文档编辑、规范装配、包内当前及历史依赖、任务冻结和恢复保留 construction_units、cost_occurrence 和 scope，不按表单字段白名单裁剪；覆盖规划配置时整体替换规划正文，成本发生条件随其实例绑定修订，财务来源随 Profile/Overrides 的既有合并规则冻结。修改草稿只产生新修订，不改旧任务。
 
-旧初建来源的类别汇总改写为显式 `scope: {kind: all_new_instances}`，保持原汇总范围；无建设声明的旧规划转换为 construction_units 空映射，未声明费用条件的成本保持 always。不能把旧正固定费自动改成条件费，或从容量下界反推 mode。PR 中尚未发布的 activation/optional 等试验字段不作为迁移格式保留。版本切换时同步更新公开 schema、规范化标识、注册描述符、样例及用户计算配置中的精确 provider 引用；不引入运行期旧字段兼容分支。
+初建来源显式声明 scope；没有建设声明的规划使用空 construction_units，未声明费用条件的成本保持 always。不能把正固定费自动改成条件费，或从容量下界反推 mode；不保留 activation/optional 等试验别名。当前结构、生产者、样例与测试一起更新，不提供运行期格式迁移。
 
-历史已封存结果保留原版本、原字段并原样读取/导出；不添加虚构建设状态。历史重新执行仍引用其冻结的精确依赖，不套用最新契约解释；依赖不可用按既有依赖错误报告。新任务只采用新目标发布组合，不为历史记录保留第二套计算逻辑。内部读取与恢复不重复公开输入校验。
+历史已封存结果原样保留，不添加虚构建设状态；不承诺当前程序重新执行旧结构。任务依赖与输入冻结用于追溯，不为历史记录保留第二套计算逻辑。内部读取与恢复不重复公开输入校验。
 
 - 数据集元数据和数据文件按数据版本唯一定位，同一数据集的不同版本不能共用一个元数据条目。
 - 包须携带当前工作状态及包内历史版本恢复所需的精确财务、规划与数据依赖，包括当前已不再启用、但仍被历史引用的依赖；不导出无关配置历史或全库内容。

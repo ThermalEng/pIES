@@ -47,7 +47,7 @@ PASSWORD = "Test12345"
 
 TEMPLATE_YAML = """
 schema: ies.device-model
-schema_version: "2.2.0"
+schema_version: "1.0.0"
 device: {id: acme.device.electric_load, names: {zh-CN: 电负荷, en-US: Electric Load}}
 inputs:
   properties:
@@ -335,7 +335,7 @@ def test_publish_revision_immutable_and_idempotent(client: TestClient, db_sessio
     assert body["duplicate"] is False
     rev = body["revision"]
     assert rev["revision"] == 1
-    assert rev["schema_version"] == "2.2.0"
+    assert rev["schema_version"] == "1.0.0"
     # 模板状态推进
     detail = client.get(f"/api/model-templates/{tpl['template_id']}", headers=headers).json()
     assert detail["template"]["status"] == "published"

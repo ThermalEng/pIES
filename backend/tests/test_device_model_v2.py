@@ -27,7 +27,7 @@ from iesplan.devices.template2 import instantiate_template
 
 HEAT_PUMP_YAML = """
 schema: ies.device-model
-schema_version: "2.2.0"
+schema_version: "1.0.0"
 
 device:
   id: acme.device.heat_pump
@@ -119,7 +119,7 @@ class TestValidModel:
     def test_equations_with_state_variable(self):
         text = """
 schema: ies.device-model
-schema_version: "2.2.0"
+schema_version: "1.0.0"
 device: {id: acme.device.battery, names: {zh-CN: 电池, en-US: Battery}}
 properties:
   charge_efficiency: {value: 0.95, unit: "1", valid_range: {minimum: 0, maximum: 1}}
@@ -146,7 +146,7 @@ equations:
     def test_empty_sections(self):
         text = """
 schema: ies.device-model
-schema_version: "2.2.0"
+schema_version: "1.0.0"
 device: {id: acme.device.minimal, names: {zh-CN: 最小, en-US: Minimal}}
 properties: {}
 interfaces: {}
@@ -160,7 +160,7 @@ equations:
     def test_boolean_and_string_property(self):
         text = """
 schema: ies.device-model
-schema_version: "2.2.0"
+schema_version: "1.0.0"
 device: {id: acme.device.switch, names: {zh-CN: 开关, en-US: Switch}}
 properties:
   enabled: {value: true, unit: "-"}
@@ -230,17 +230,17 @@ class TestInvalidModel:
         assert any("Additional properties" in x or "version" in x for x in d)
 
     def test_wrong_schema_version(self):
-        d = self._diag_details(HEAT_PUMP_YAML.replace('schema_version: "2.2.0"', 'schema_version: "9.9.9"'))
+        d = self._diag_details(HEAT_PUMP_YAML.replace('schema_version: "1.0.0"', 'schema_version: "9.9.9"'))
         # jsonschema const 错误消息为 "'2.2.0' was expected"；确保版本被拒绝
         assert d
-        assert any("2.2.0" in x for x in d)
+        assert any("1.0.0" in x for x in d)
 
     @pytest.mark.parametrize("old_version", ["2.0.0", "2.1.0"])
     def test_old_header_rejected(self, old_version):
         """现行字头唯一，不设置旧版本解析旁路。"""
-        d = self._diag_details(HEAT_PUMP_YAML.replace('schema_version: "2.2.0"', f'schema_version: "{old_version}"'))
+        d = self._diag_details(HEAT_PUMP_YAML.replace('schema_version: "1.0.0"', f'schema_version: "{old_version}"'))
         assert d
-        assert any("2.2.0" in x for x in d)
+        assert any("1.0.0" in x for x in d)
 
     def test_embedded_source_on_predefined_rejected(self):
         """predefined 槽不得内嵌项目 source; 来源由装配实例绑定。"""
@@ -335,7 +335,7 @@ class TestInvalidModel:
     def test_equation_cycle(self):
         text = """
 schema: ies.device-model
-schema_version: "2.2.0"
+schema_version: "1.0.0"
 device: {id: acme.device.cycle, names: {zh-CN: 环, en-US: Cycle}}
 properties: {}
 interfaces: {}
@@ -368,7 +368,7 @@ equations:
         # 多个独立错误一次返回（interfaces type + property unit + equation）
         text = """
 schema: ies.device-model
-schema_version: "2.2.0"
+schema_version: "1.0.0"
 device: {id: acme.device.multi, names: {zh-CN: 多错, en-US: Multi}}
 properties:
   p1: {value: 1, unit: not-a-unit, valid_range: {minimum: 0, maximum: 1}}
@@ -386,7 +386,7 @@ equations:
         # 多个独立错误一次返回（interfaces type + property unit + equation）
         text = """
 schema: ies.device-model
-schema_version: "2.2.0"
+schema_version: "1.0.0"
 device: {id: acme.device.multi, names: {zh-CN: 多错, en-US: Multi}}
 properties:
   p1: {value: 1, unit: not-a-unit, valid_range: {minimum: 0, maximum: 1}}
@@ -411,7 +411,7 @@ equations:
 class TestTemplateInstantiation:
     TEMPLATE = """
 schema: ies.device-model
-schema_version: "2.2.0"
+schema_version: "1.0.0"
 device: {id: acme.device.electric_load, names: {zh-CN: 电负荷, en-US: Electric Load}}
 inputs:
   properties:
@@ -539,7 +539,7 @@ equations:
         assert res is not None, [d.params.get("detail") for d in diags]
         direct = """
 schema: ies.device-model
-schema_version: "2.2.0"
+schema_version: "1.0.0"
 device: {id: acme.device.electric_load, names: {zh-CN: 电负荷, en-US: Electric Load}}
 properties:
   cop: {value: 3.0, unit: "1", valid_range: {minimum: 1, maximum: 10}}
@@ -576,12 +576,12 @@ equations:
     def test_receipt_contains_traceability(self):
         res, _ = instantiate_template(yaml_load(self.TEMPLATE), self._inputs())
         receipt = res.receipt
-        assert receipt["instantiator"] == "ies.device-model.instantiator@2.0.0"
+        assert receipt["instantiator"] == "ies.device-model.instantiator@1.0.0"
 
 
 ARRAY_TEMPLATE = """
 schema: ies.device-model
-schema_version: "2.2.0"
+schema_version: "1.0.0"
 device: {id: acme.device.relations, names: {zh-CN: 关系模板, en-US: Relations Template}}
 inputs:
   equations:

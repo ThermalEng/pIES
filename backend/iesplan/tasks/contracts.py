@@ -120,7 +120,7 @@ def _freeze_snapshot_value(value: object) -> object:
 #: 只冻结存档, 不参与复用判定。
 #: 5.0.0 维护条目增加有序仿射关联项（含显式空列表）；提交边界冻结，
 #: 恢复直接消费同一结构，不提供旧快照回退。其他财务/装配版本不变。
-SNAPSHOT_SCHEMA_VERSION: str = "5.0.0"
+SNAPSHOT_SCHEMA_VERSION: str = "1.0.0"
 
 
 #: 评价确认输入合法键(任务提交边界唯一权威; 未知键拒绝, 不静默忽略)。

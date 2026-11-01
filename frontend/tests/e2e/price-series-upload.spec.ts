@@ -44,10 +44,10 @@ async function prepareProject(browser: Browser, tag: string): Promise<{ username
   await requestJson(apiCtx.request, 'PUT', `/api/projects/${projectId}/config`, {
     calculation_config: {
       schema: 'ies.calculation-config',
-      schema_version: '2.0.0',
+      schema_version: '1.0.0',
       mode: 'planning',
       predictions: [],
-      generator: 'ies.generator.highs_milp@8.0.0',
+      generator: 'ies.generator.highs_milp@1.0.0',
       solver: 'ies.solver.highs@1.7.2',
       precision: 'medium',
       convergence: null,

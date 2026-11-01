@@ -207,7 +207,7 @@ export default function ConfigPage(props: ConfigPageProps) {
     return {
       body: {
         schema: 'ies.calculation-config',
-        schema_version: '2.0.0',
+        schema_version: '1.0.0',
         mode: mode.trim(),
         predictions: predictions.value as CalculationConfigBody['predictions'],
         generator: generator.trim(),
@@ -327,7 +327,7 @@ export default function ConfigPage(props: ConfigPageProps) {
             id="calc-generator"
             value={generator}
             onChange={(e) => setGenerator(e.target.value)}
-            placeholder="ies.generator.highs_milp@8.0.0"
+            placeholder="ies.generator.highs_milp@1.0.0"
             invalid={!!fieldErrors.generator}
           />
         </FormField>

@@ -104,11 +104,11 @@ _FIXTURE_FINANCE_PROFILE_ID = "cn-fixture-demo"
 #: 机械夹具依赖锁固定版本(非实时设备目录值；夹具只保证二件套非空、
 #: schema 3.0、文本与回执相互一致，不代表真实签发时的内容锁)。
 _FIXTURE_DEVICE_LOCK = {
-    "ies.device.battery": "2.0.0",
-    "ies.device.grid_connection": "2.0.0",
+    "ies.device.battery": "1.0.0",
+    "ies.device.grid_connection": "1.0.0",
 }
 _FIXTURE_EQUATION_LOCK = {
-    "contract": "ies.modeling.contribution@2.1.0",
+    "contract": "ies.modeling.contribution@1.0.0",
     "ast": "ies.equation.ast@2.0.0",
 }
 
@@ -290,8 +290,8 @@ def setup_environment(
             program_version="0.1.0",
             extension_versions={},
             random_seed=int(config.get("seed", 42)) if config else 42,
-            schema_version="3.0.0",
-            result_adapter="ies.result-adapter.highs@3.0.0",
+            schema_version="1.0.0",
+            result_adapter="ies.result-adapter.highs@1.0.0",
             executor="ies.executor.local_process@1.0.0",
             canonical_assembly_text=artifact.canonical_text,
             assembly_receipt=artifact.receipt.to_dict(),

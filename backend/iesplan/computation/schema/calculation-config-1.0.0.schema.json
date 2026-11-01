@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "ies.calculation-config/2.0.0",
-  "title": "ies.calculation-config 2.0.0 计算配置契约",
+  "$id": "ies.calculation-config/1.0.0",
+  "title": "ies.calculation-config 1.0.0 计算配置契约",
   "description": "CalculationConfig 固定一次计算的全部选择：mode、预测目标所用算法与参数、generator、solver、计算精度、耦合预测适用的收敛容差与最大迭代数、时间限制、选项、随机种子和输出选择。计算按项目基线完整连续序列进行，不含离散化字段。预测流程按所选算法的计算依赖声明选择（任一耦合目标即迭代），不按目标数量。收敛容差为无量纲阈值，与各耦合算法返回的无量纲收敛量比较。未知字段一律拒绝，不静默丢弃。",
   "type": "object",
   "required": [
@@ -21,7 +21,7 @@
   "additionalProperties": false,
   "properties": {
     "schema": { "const": "ies.calculation-config" },
-    "schema_version": { "const": "2.0.0" },
+    "schema_version": { "const": "1.0.0" },
     "mode": { "type": "string", "minLength": 1 },
     "predictions": {
       "type": "array",

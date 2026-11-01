@@ -1,6 +1,6 @@
-"""首个真实 ResultAdapterProvider：``ies.result-adapter.highs@6.1.0``。
+"""首个真实 ResultAdapterProvider：``ies.result-adapter.highs@1.0.0``。
 
-与 ``ies.generator.highs_milp@6.0.0`` 配套，在 2.0.0 主解/序列/度量
+与 ``ies.generator.highs_milp@1.0.0`` 配套，在 2.0.0 主解/序列/度量
 恢复基础上增加同次解结构化财务事实映射（映射协议改变故升版；仿射
 求值复用同一路径），解释其声明输出
 ``output/solution.sol``。该文件由求解 executable
@@ -53,7 +53,7 @@ from iesplan.computation.result_adapter import ResultAdapterDescriptor
 from iesplan.core.units import UnitError, dims_of, from_si, unit_meta
 
 ADAPTER_ID = "ies.result-adapter.highs"
-ADAPTER_VERSION = "7.0.0"
+ADAPTER_VERSION = "1.0.0"
 ADAPTER_REF = f"{ADAPTER_ID}@{ADAPTER_VERSION}"
 
 DESCRIPTOR = ResultAdapterDescriptor(

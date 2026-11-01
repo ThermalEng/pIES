@@ -59,7 +59,7 @@ def test_schema_file_meta() -> None:
     """schema 文件标识与计算配置必需结构；无 hash/摘要/完整性字段。"""
     schema = load_calculation_config_schema()
     assert schema["$id"] == f"{CALCULATION_CONFIG_SCHEMA}/{CALCULATION_CONFIG_VERSION}"
-    assert schema["title"] == "ies.calculation-config 2.0.0 计算配置契约"
+    assert schema["title"] == "ies.calculation-config 1.0.0 计算配置契约"
     assert set(schema["required"]) == {
         "schema", "schema_version", "mode", "predictions", "generator",
         "solver", "precision", "convergence", "time_limit_seconds",

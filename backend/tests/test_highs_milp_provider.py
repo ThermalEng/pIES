@@ -359,7 +359,7 @@ def _fake_descriptor(ref: str):
             "properties": {},
             "additionalProperties": False,
         },
-        assembly_schema_version="2.0.0",
+        assembly_schema_version="1.0.0",
         modes=("planning",),
         outputs=("solution",),
         precisions=("medium",),
@@ -457,7 +457,7 @@ def test_step_series_declared_from_variable_path() -> None:
     assert len(lengths) == 1
     metadata = json.loads(bundle.files["input/parameters.json"].decode("utf-8"))
     assert metadata["step_series"] == [dict(d) for d in decls]
-    assert metadata["generator"] == GENERATOR_REF == "ies.generator.highs_milp@8.0.0"
-    assert metadata["result_adapter"] == ADAPTER_REF == "ies.result-adapter.highs@7.0.0"
+    assert metadata["generator"] == GENERATOR_REF == "ies.generator.highs_milp@1.0.0"
+    assert metadata["result_adapter"] == ADAPTER_REF == "ies.result-adapter.highs@1.0.0"
     assert bundle.manifest.bundle["generator"] == GENERATOR_REF
     assert bundle.manifest.result_adapter == ADAPTER_REF

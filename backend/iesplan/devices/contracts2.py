@@ -1,7 +1,7 @@
 """`ies.device-model` 2.2.0 公开契约：深度不可变值对象与唯一规范化。
 
 对应格式标准 [device-model-yaml.md](../../../manual/developer-guide/zh-CN/formats/device-model-yaml.md)
-与包内 `schema/device-model-2.2.0.contract.md`。
+与包内 `schema/device-model-1.0.0.contract.md`。
 
 顶层只允许 `schema/schema_version/device/properties/interfaces/equations`；
 模板额外允许顶层 `inputs`（见 ``DeviceModelTemplate``）。设备不声明独立语义版本，
@@ -21,7 +21,7 @@ from typing import Any, Mapping
 
 #: 统一文件契约标识与版本
 SCHEMA_ID = "ies.device-model"
-SCHEMA_VERSION = "2.2.0"
+SCHEMA_VERSION = "1.0.0"
 
 #: 模板 inputs 叶子类型（标量 + 预定义数据 + 结构容器）
 INPUT_SCALAR_TYPES: tuple[str, ...] = ("number", "boolean", "string")
@@ -316,7 +316,7 @@ def canonical_receipt(document: DeviceModelDocument) -> dict[str, Any]:
     return {
         "schema": SCHEMA_ID,
         "schema_version": document.schema_version,
-        "canonicalizer": "ies.device-model.canonical@2.2.0",
+        "canonicalizer": "ies.device-model.canonical@1.0.0",
         "device_id": document.device.id if document.device is not None else None,
         "property_count": len(document.properties),
         "interface_count": len(document.interfaces),

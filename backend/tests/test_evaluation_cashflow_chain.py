@@ -97,7 +97,7 @@ def _hp_demo_profile() -> dict:
 
 FIXED_PROFILE: dict = {
     "schema": "ies.finance-profile",
-    "schema_version": "7.0.0",
+    "schema_version": "1.0.0",
     "profile": {
         "id": "t2-fixed-demo",
         "region": "CN-North",
@@ -792,7 +792,7 @@ class TestT2CashflowChain:
         )
         fin = sealed["financial_evaluation"]
         facts = sealed["compute_result"]["outputs"]["financial_facts"]
-        assert fin["schema_version"] == "4.0.0"
+        assert fin["schema_version"] == "1.0.0"
         assert fin["construction_period"] == 1
         assert fin["operation_years"] == 2
         # Real heat-pump planning decision (not a placeholder): its rated
@@ -981,7 +981,7 @@ def test_monthly_daily_real_task_uses_calendar_tariff_in_cashflow(
         json={
             "finance_overrides": {
                 "schema": "ies.finance-overrides",
-                "schema_version": "7.0.0",
+                "schema_version": "1.0.0",
                 "profile_ref": {"id": profile["profile"]["id"]},
                 "energy_prices": {"grid_import": {
                     "kind": "constant",

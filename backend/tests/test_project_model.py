@@ -39,7 +39,7 @@ from iesplan.modeling import build_math_contribution
 
 HEATER_YAML = """
 schema: ies.device-model
-schema_version: "2.2.0"
+schema_version: "1.0.0"
 device: {id: acme.device.heater, names: {zh-CN: 加热器, en-US: Heater}}
 properties:
   efficiency: {value: 0.9, unit: "1", valid_range: {minimum: 0, maximum: 1}}
@@ -55,7 +55,7 @@ equations:
 
 TANK_YAML = """
 schema: ies.device-model
-schema_version: "2.2.0"
+schema_version: "1.0.0"
 device: {id: acme.device.tank, names: {zh-CN: 罐, en-US: Tank}}
 properties:
   soc0: {value: 0.5, unit: "1", valid_range: {minimum: 0, maximum: 1}}
@@ -73,7 +73,7 @@ equations:
 
 LOAD_YAML = """
 schema: ies.device-model
-schema_version: "2.2.0"
+schema_version: "1.0.0"
 device: {id: acme.device.load, names: {zh-CN: 负荷, en-US: Load}}
 properties: {}
 interfaces:
@@ -88,7 +88,7 @@ equations:
 
 HUB_YAML = """
 schema: ies.device-model
-schema_version: "2.2.0"
+schema_version: "1.0.0"
 device: {id: acme.device.hub, names: {zh-CN: 枢纽, en-US: Hub}}
 properties: {}
 interfaces:
@@ -103,7 +103,7 @@ equations:
 
 BILINEAR_YAML = """
 schema: ies.device-model
-schema_version: "2.2.0"
+schema_version: "1.0.0"
 device: {id: acme.device.bl, names: {zh-CN: 双线性, en-US: Bilinear}}
 properties: {}
 interfaces:
@@ -134,7 +134,7 @@ def _finance_payload(direction: str = "purchase", tariff_kind: str = "constant")
         }
     return {
         "schema": "ies.finance-profile",
-        "schema_version": "7.0.0",
+        "schema_version": "1.0.0",
         "profile": {
             "id": "cn-north-demo",
             "region": "CN-North",
@@ -230,7 +230,7 @@ def _artifact_doc(*, bilinear: bool = False) -> dict:
         bindings["hub1"] = {"type": "none"}
     return {
         "schema": "ies.assembly",
-        "schema_version": "6.0.0",
+        "schema_version": "1.0.0",
         "assembly": {"id": "mini", "name": "最小真实装配"},
         "project_baseline": {
             "resolution": "1h", "start_year": 2026, "scenario_mode": "single",
@@ -545,7 +545,7 @@ def test_mps_deterministic_bytes() -> None:
 
 SRC_YAML = """
 schema: ies.device-model
-schema_version: "2.2.0"
+schema_version: "1.0.0"
 device: {id: acme.device.src, names: {zh-CN: 电源, en-US: Source}}
 properties: {}
 interfaces:
@@ -560,7 +560,7 @@ equations:
 
 GEN_YAML = """
 schema: ies.device-model
-schema_version: "2.2.0"
+schema_version: "1.0.0"
 device: {id: acme.device.gen, names: {zh-CN: 机组, en-US: Unit}}
 properties:
   cap_kw: {value: 60, unit: kW, valid_range: {minimum: 0, maximum: 1000}}
@@ -596,7 +596,7 @@ def _island_doc() -> dict:
         }
     return {
         "schema": "ies.assembly",
-        "schema_version": "6.0.0",
+        "schema_version": "1.0.0",
         "assembly": {"id": "islands", "name": "双电岛共热网"},
         "project_baseline": {
             "resolution": "1h", "start_year": 2026, "scenario_mode": "single",
@@ -976,7 +976,7 @@ def _pv_25c_inputs():
     contribution = _contribution(catalog.read_text(encoding="utf-8"))
     doc = {
         "schema": "ies.assembly",
-        "schema_version": "6.0.0",
+        "schema_version": "1.0.0",
         "assembly": {"id": "pv-temp", "name": "PV 温度口径"},
         "project_baseline": {
             "resolution": "1h", "start_year": 2025, "scenario_mode": "single",

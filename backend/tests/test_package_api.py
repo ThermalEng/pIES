@@ -230,7 +230,7 @@ def _seed_evidence(
         },
         program_version="0.1.0", extension_versions={}, random_seed=42,
         schema_version="1.0.0",
-        result_adapter="ies.result-adapter.highs@3.0.0",
+        result_adapter="ies.result-adapter.highs@1.0.0",
         executor="ies.executor.local_process@1.0.0",
         created_by=owner_id,
     )
@@ -328,7 +328,7 @@ def test_export_package_owner_only_with_manifest(
     assert resp.status_code == 200, resp.text
     body = resp.json()
     assert body["token"]
-    assert body["manifest"]["format_version"] == "3.0.0"
+    assert body["manifest"]["format_version"] == "1.0.0"
     assert body["file_name"].endswith(".zip")
 
     status, content, ctype = _download(
@@ -342,7 +342,7 @@ def test_export_package_owner_only_with_manifest(
     # 清单与对象存在性（不做内部哈希重算比对）
     with zipfile.ZipFile(io.BytesIO(content)) as zf:
         manifest = json.loads(zf.read("manifest.json").decode("utf-8"))
-        assert manifest["format_version"] == "3.0.0"
+        assert manifest["format_version"] == "1.0.0"
         assert manifest["package_type"] == "project"
         assert "project.json" in zf.namelist()
         assert "draft.json" in zf.namelist()

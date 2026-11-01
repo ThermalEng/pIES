@@ -31,7 +31,7 @@ from iesplan.tasks.contracts import InvalidRequestError
 def _base_profile() -> dict:
     return {
         "schema": "ies.finance-profile",
-        "schema_version": "7.0.0",
+        "schema_version": "1.0.0",
         "profile": {
             "id": "cn-north-demo",
             "region": "CN-North",
@@ -157,7 +157,7 @@ def _base_profile() -> dict:
 def _base_overrides(profile: FinanceProfile) -> dict:
     return {
         "schema": "ies.finance-overrides",
-        "schema_version": "7.0.0",
+        "schema_version": "1.0.0",
         "profile_ref": {"id": profile.profile_id},
         "tax_rules": {
             "operating_vat": {
@@ -309,7 +309,7 @@ def test_explicit_schedule_method_and_replace() -> None:
     overrides = FinanceOverrides.from_dict(
         {
             "schema": "ies.finance-overrides",
-            "schema_version": "7.0.0",
+            "schema_version": "1.0.0",
             "profile_ref": {"id": profile.profile_id},
             "tax_rules": {"building_vat": {"confirmation": {"schedule": [{"period": 2, "ratio": "1"}]}}},
         },
@@ -330,7 +330,7 @@ def test_payment_period_schedule_override_rejected() -> None:
         FinanceOverrides.from_dict(
             {
                 "schema": "ies.finance-overrides",
-                "schema_version": "7.0.0",
+                "schema_version": "1.0.0",
                 "profile_ref": {"id": profile.profile_id},
                 "tax_rules": {"building_vat": {"confirmation": {"schedule": [{"period": 2, "ratio": "1"}]}}},
             },
@@ -363,7 +363,7 @@ def test_same_year_maintenance_dimensions_independent() -> None:
 
 
 def test_old_versions_rejected() -> None:
-    for version in ("1.0.0", "2.0.0"):
+    for version in ("0.0.0", "9.9.9"):
         payload = _base_profile()
         payload["schema_version"] = version
         with pytest.raises(FinanceTripletError):
@@ -388,7 +388,7 @@ def test_override_method_scope_pool_changes_rejected() -> None:
     profile = FinanceProfile.from_dict(_base_profile())
     base = {
         "schema": "ies.finance-overrides",
-        "schema_version": "7.0.0",
+        "schema_version": "1.0.0",
         "profile_ref": {"id": profile.profile_id},
     }
     cases = [

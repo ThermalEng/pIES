@@ -48,7 +48,7 @@ from iesplan.core.namespace import build_stable_id
 
 TEMPLATE_YAML = """
 schema: ies.device-model
-schema_version: "2.2.0"
+schema_version: "1.0.0"
 device: {id: acme.device.electric_load, names: {zh-CN: 电负荷, en-US: Electric Load}}
 inputs:
   properties:
@@ -86,7 +86,7 @@ def _dd_csv(device_id: str, mode: str = "data_repeat") -> bytes:
     rows = [f"{i},{10 + (i % 3)}" for i in range(24)]
     lines = [
         "# schema: ies.device-data",
-        "# schema_version: 2.1.0",
+        "# schema_version: 1.0.0",
         "# dataset_id: synth_template_data",
         f"# device_id: {device_id}",
         f"# source_mode: {mode}",
@@ -461,7 +461,7 @@ def test_data_predict_binding_with_explicit_target_passes_assembly() -> None:
     solar_csv = (SAMPLES / "data" / "pv_irradiance.data.csv").read_text(encoding="utf-8")
     predict_csv = "\n".join([
         "# schema: ies.device-data",
-        "# schema_version: 2.1.0",
+        "# schema_version: 1.0.0",
         "# dataset_id: synthetic_predict",
         "# device_id: ies.device.pv",
         "# source_mode: data_predict",

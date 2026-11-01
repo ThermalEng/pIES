@@ -1,6 +1,6 @@
 # 0.15 首切片外部内容样例: 恒定电负荷(仓库外新增设备)。
 #
-# - 实际 schema_version 为 2.0.0 (当前解析器只接受 2.0.0; 格式页目标
+# - 实际 schema_version 为 1.0.0 (当前解析器只接受 1.0.0; 格式页目标
 #   2.1.0 是既有差距, 本样例不宣称 2.1.0 已交付、不引入兼容分支);
 # - 稳定 ID 位于内置 ies.device.* 之外, 核心代码/前端/GUI 无该 ID 分支;
 # - 仅使用现有公共载能/单位/方程: electricity_in(in) 由属性 rated_demand_kw
@@ -8,7 +8,7 @@
 # - 运行期经 docker-compose.ext-device.yml 只读挂载到扫描目录新子目录,
 #   不写入内置 catalog。
 schema: ies.device-model
-schema_version: "2.0.0"
+schema_version: "1.0.0"
 device:
   id: acme.device.constant_load
   names:

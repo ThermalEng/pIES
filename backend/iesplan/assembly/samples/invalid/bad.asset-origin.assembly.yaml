@@ -1,6 +1,6 @@
 # 非法样例: asset_origin 非法枚举 → ASM-SYN-005
 schema: ies.assembly
-schema_version: "6.0.0"
+schema_version: "1.0.0"
 
 assembly:
   id: bad_asset_origin

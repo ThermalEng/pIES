@@ -102,10 +102,10 @@ test.describe('0.15 外部数据 CSV: 合法来源声明经任务中心 GUI 提�
     const placeholderConfig = await requestJson(apiCtx.request, 'PUT', `/api/projects/${pid}/config`, {
       calculation_config: {
         schema: 'ies.calculation-config',
-        schema_version: '2.0.0',
+        schema_version: '1.0.0',
         mode: 'planning',
         predictions: [],
-        generator: 'ies.generator.highs_milp@8.0.0',
+        generator: 'ies.generator.highs_milp@1.0.0',
         solver: 'ies.solver.highs@1.7.2',
         precision: 'medium',
         convergence: null,
@@ -217,7 +217,7 @@ test.describe('0.15 外部数据 CSV: 合法来源声明经任务中心 GUI 提�
           id: 'guicsv-calc', unit: 'config', type: 'config.patch',
           payload: {
             mode: 'fixed_operation',
-            generator: 'ies.generator.highs_milp@8.0.0',
+            generator: 'ies.generator.highs_milp@1.0.0',
             solver: 'ies.solver.highs@1.7.2',
             time_axis: { resolution: '1h', start: '2025-01-01T00:00:00Z' },
           },
@@ -288,10 +288,10 @@ test.describe('0.15 外部数据 CSV: 合法来源声明经任务中心 GUI 提�
     await requestJson(apiCtx.request, 'PUT', `/api/projects/${pid}/config`, {
       calculation_config: {
         schema: 'ies.calculation-config',
-        schema_version: '2.0.0',
+        schema_version: '1.0.0',
         mode: 'planning',
         predictions: [],
-        generator: 'ies.generator.highs_milp@8.0.0',
+        generator: 'ies.generator.highs_milp@1.0.0',
         solver: 'ies.solver.highs@1.7.2',
         precision: 'medium',
         convergence: null,

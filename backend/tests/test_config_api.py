@@ -115,10 +115,10 @@ def _valid_payload() -> dict[str, Any]:
     """合法 12 字段 CalculationConfig(已发布契约形态)。"""
     return {
         "schema": "ies.calculation-config",
-        "schema_version": "2.0.0",
+        "schema_version": "1.0.0",
         "mode": "planning",
         "predictions": [],
-        "generator": "ies.generator.highs_milp@8.0.0",
+        "generator": "ies.generator.highs_milp@1.0.0",
         "solver": "ies.solver.highs@1.7.2",
         "precision": "medium",
         "convergence": None,

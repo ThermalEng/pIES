@@ -155,7 +155,7 @@ class TestPrecheckAlignment:
 def _repeat_csv() -> bytes:
     lines = [
         "# schema: ies.device-data",
-        "# schema_version: 2.1.0",
+        "# schema_version: 1.0.0",
         "# dataset_id: load_repeat_day",
         "# device_id: ies.device.electric_load",
         "# source_mode: data_repeat",

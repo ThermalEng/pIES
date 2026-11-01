@@ -24,7 +24,7 @@ from iesplan.core.units import units_compatible
 from iesplan.devices.contracts2 import DeviceModelDocument, is_valid_id
 
 SCHEMA_ID = "ies.device-data"
-SCHEMA_VERSION = "2.1.0"
+SCHEMA_VERSION = "1.0.0"
 STEP_COL = "step"
 SOURCE_MODES = ("constant", "data_repeat", "data_full", "data_predict")
 RESOLUTION_VALUES = tuple(RESOLUTIONS)

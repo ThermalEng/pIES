@@ -49,7 +49,7 @@
 
 ### 建设激活与有范围金额来源能力
 
-建设激活的目标发布组合为 `ies.generator.highs_milp@8.0.0` 与 `ies.result-adapter.highs@7.0.0`，消费装配 `6.0.0` 和财务三件套 `7.0.0`；与本页已交付版本说明分开，版本表见[文件格式标准](../file-formats.md#建设激活配套版本与迁移)。
+建设激活的目标发布组合为 `ies.generator.highs_milp@1.0.0` 与 `ies.result-adapter.highs@1.0.0`，消费装配 `1.0.0` 和财务三件套 `1.0.0`；与本页已交付版本说明分开，版本表见[文件格式标准](../file-formats.md#建设激活配套版本与迁移)。
 
 复用既有描述符与提交闸门：`planning.construction_activation` 表示执行明确建设单元、活动区间及同次状态恢复；`finance.cost_occurrence` 表示执行实例成本的显式发生条件；`finance.scoped_amount_sources` 表示执行初建来源的明确实例范围及相应残值关系。非空建设单元、实际非 always 的费用条件、被使用的初建金额来源分别要求对应能力；使用新关系的任务同时要求 `finance.financial_facts`。空声明和未使用来源不额外触发能力要求。只有输入、冻结、求解、恢复全部接通后才发布相应能力。
 
@@ -59,7 +59,7 @@
 
 `technical.step_constraints` 表示生成器能把[逐步技术约束](../formats/assembly-yaml.md#逐步技术约束)的显式引用绑定到同一项目模型的真实端口变量，并在完整运营时域逐步施加关系。规划变量保持决策量，单位转换沿用生成器唯一边界。启用关系参与同一次求解，不能只在求解后检查或按样例设备名补约束。
 
-当前配套内置生成器为 `ies.generator.highs_milp@7.1.0`，消费装配 `5.0.0`；逐步约束在 `7.0.0` 接通，`7.1.0` 增加同次构模来源说明。母线守恒、财务三件套 `6.0.0` 和既有结果数值映射不变，适配器为 `ies.result-adapter.highs@6.1.0`；solver、executor 和通用 Bundle 不随输入版本机械升版。相同端口的结果继续使用既有步序列映射，不另建约束专用结果协议。
+当前配套内置生成器为 `ies.generator.highs_milp@1.0.0`，消费装配 `1.0.0`；逐步约束在 `1.0.0` 接通，`1.0.0` 增加同次构模来源说明。母线守恒、财务三件套 `1.0.0` 和既有结果数值映射不变，适配器为 `ies.result-adapter.highs@1.0.0`；solver、executor 和通用 Bundle 不随输入版本机械升版。相同端口的结果继续使用既有步序列映射，不另建约束专用结果协议。
 
 ## 输出
 
@@ -149,7 +149,7 @@ Bundle 规范化与原子发布
 
 ## 首个内置 provider 与完整 Bundle 聚合
 
-首个内置 provider 为 `ies.generator.highs_milp@7.1.0`（见“首个内置链”）：mode 只要 `planning`、精度只要 `medium`、solver 只要 `ies.solver.highs@1.7.2`；options 只接受空对象；输出请求支持 `solution` 与 `metrics`（`metrics` 为 ResultAdapter 后处理请求，不对应求解器第二个原始文件，未知输出明确拒绝）；只消费装配实际绑定的 constant/time_series/monthly_daily 计费价格（快照中未绑定的价格条目不触发拒绝），未知价格类型明确拒绝；`seed` 为 null 时使用固定种子 `0`，种子同时固定进求解命令与元数据，不读取随机全局状态。
+首个内置 provider 为 `ies.generator.highs_milp@1.0.0`（见“首个内置链”）：mode 只要 `planning`、精度只要 `medium`、solver 只要 `ies.solver.highs@1.7.2`；options 只接受空对象；输出请求支持 `solution` 与 `metrics`（`metrics` 为 ResultAdapter 后处理请求，不对应求解器第二个原始文件，未知输出明确拒绝）；只消费装配实际绑定的 constant/time_series/monthly_daily 计费价格（快照中未绑定的价格条目不触发拒绝），未知价格类型明确拒绝；`seed` 为 null 时使用固定种子 `0`，种子同时固定进求解命令与元数据，不读取随机全局状态。
 
 `generate` 返回唯一完整聚合：manifest（即 `bundle.yaml` 内容）加按规范相对路径索引的只读输入文件字节映射（`input/problem.mps` 与 `input/parameters.json`）。`input/parameters.json` 为最小规范 JSON 元数据，只保存 ResultAdapter 后续必需的 `unit_map`、`objective_offset`、`objective_unit`（目标业务单位，按编译期根量纲确定：金额取财务币种，无量纲取 `"1"`，单一物理量纲取 SI 基准单位）、财务分量求值声明 `components`（分量 ident → `{unit, caliber, constant, terms}`，与目标同一分量展开路径，不依赖目标写法）、请求 outputs、固定 seed、precision 与装配/引用追溯，不复制完整装配、模型与财务，不写 hash。结构化命令按真实 HiGHS CLI 语法逐项存储（非 shell），`time_limit_seconds` 同时进入硬资源声明与求解器选项且语义一致；同一组直接输入与 provider 版本逐字节相同，不写临时目录，不启动 solver。
 
@@ -166,7 +166,7 @@ Bundle 规范化与原子发布
 descriptor 至少声明：
 
 - 稳定 generator ID 和版本；
-- 支持的 assembly schema MAJOR/MINOR、计算 mode、precision 和问题能力；
+- 当前 assembly 契约标识、计算 mode、precision 和问题能力；
 - 兼容 solver ID/版本及所需 executor 能力；
 - 支持的输出请求 `outputs`，请求集合必须是声明集合的子集；
 - 支持的方程 contract、AST 和数学贡献能力；
@@ -226,9 +226,9 @@ Bundle 以规范 manifest 与全部输入文件作为身份，不另放随机 ID
 
 ## 首个内置链
 
-首个内置 provider 为 `ies.generator.highs_milp@7.1.0`，兼容求解器 `ies.solver.highs@1.7.2`，结构化命令执行器前向引用 `ies.executor.local_process@1.0.0`，结果适配器前向引用 `ies.result-adapter.highs@6.1.0`。技术模型支持可证明的仿射关系，以及有限非负上下界下 `x*y=0` 的确定性二进制 Big-M 转换；设备状态仅允许 `t` 与 `t-1`；公开规划变量为连续变量。生成器可为受支持的互斥关系及[财务税务关系](finance.md#求解能力边界)引入必要的内部离散变量，所需界由业务参数和变量边界推导。电池“规划容量参与 SOC 分母”一类双线性明确不支持。
+首个内置 provider 为 `ies.generator.highs_milp@1.0.0`，兼容求解器 `ies.solver.highs@1.7.2`，结构化命令执行器前向引用 `ies.executor.local_process@1.0.0`，结果适配器前向引用 `ies.result-adapter.highs@1.0.0`。技术模型支持可证明的仿射关系，以及有限非负上下界下 `x*y=0` 的确定性二进制 Big-M 转换；设备状态仅允许 `t` 与 `t-1`；公开规划变量为连续变量。生成器可为受支持的互斥关系及[财务税务关系](finance.md#求解能力边界)引入必要的内部离散变量，所需界由业务参数和变量边界推导。电池“规划容量参与 SOC 分母”一类双线性明确不支持。
 
-独立评价确认是必需生成输入，不提供默认评价值。生成器、结果适配协议与通用 Bundle manifest 分别按自身契约独立版本化。
+独立评价确认是必需生成输入，不提供默认评价值。生成器、结果适配协议与通用 Bundle 同步当前契约；2.0 正式发布前格式标记统一固定为 `1.0.0`，不另行升版。
 
 显式全周期 NPV 目标消费完整现金流；金额及期间以财务契约为准。未支持的关系类别在公开提交能力检查中拒绝；具体模型的转换条件不足在生成阶段定位报告。
 
@@ -236,13 +236,13 @@ Bundle 以规范 manifest 与全部输入文件作为身份，不另放随机 ID
 
 所得税关系依财务配置将计税基础、直线折旧及先到期先用的亏损结转纳入同次求解，所得税按对应财务年度进入现金流；折旧与亏损使用不作为现金支出重复扣除，税额与抵扣顺序不依赖规划目标压紧。
 
-已交付财务三件套 `6.0.0` 使用年度固定项、明确初建／维护来源及显式净现金项目；建设激活目标为 `7.0.0`，新增初建来源的实例范围，具体字段与金额、期间语义以[财务格式](../formats/finance-yaml.md)为准。适配器恢复来源身份与净现金明细，不在求解后追加金额；能力未完整接通前，不以旧 provider 版本接受新版输入。
+已交付财务三件套 `1.0.0` 使用年度固定项、明确初建／维护来源及显式净现金项目；建设激活目标为 `1.0.0`，新增初建来源的实例范围，具体字段与金额、期间语义以[财务格式](../formats/finance-yaml.md)为准。适配器恢复来源身份与净现金明细，不在求解后追加金额；能力未完整接通前，不以旧 provider 版本接受新版输入。
 
 生成器声明与模型同源的实际现金及税务事实，使配套适配器恢复完整年度现金流；已有财务分量和求解序列保持原有用途，不以新增通用分量口径或解析命名替代结构化财务映射。字段以[财务事实映射](../formats/solver-bundle.md#同次解财务事实映射)为准。
 
 ## 月份日价格能力
 
-`finance.monthly_daily_prices` 表示生成器能够消费月份日价格已物化的完整运营期序列。只有实际计费绑定使用该来源时，提交才要求此能力；未使用条目不触发能力拒绝。内置 `ies.generator.highs_milp@7.1.0` 声明此能力，配套 `ies.result-adapter.highs@6.1.0`；来源扩展不改变既有财务事实输出形态。其他生成器精确版本是否支持按其公开能力声明判断，不依赖名称或版本字符串猜测。
+`finance.monthly_daily_prices` 表示生成器能够消费月份日价格已物化的完整运营期序列。只有实际计费绑定使用该来源时，提交才要求此能力；未使用条目不触发能力拒绝。内置 `ies.generator.highs_milp@1.0.0` 声明此能力，配套 `ies.result-adapter.highs@1.0.0`；来源扩展不改变既有财务事实输出形态。其他生成器精确版本是否支持按其公开能力声明判断，不依赖名称或版本字符串猜测。
 
 生成器保留来源类型，识别新来源后进入既有已物化价格逐点计价路径，不改写冻结财务为 `time_series`，不再展开公历规则、不读来源对象或重复核对点数。计价、VAT、所得税及财务结果继续消费同一逐点价格关系。
 

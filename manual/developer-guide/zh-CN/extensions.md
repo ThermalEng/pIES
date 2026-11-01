@@ -20,7 +20,7 @@
 | 算法插件/provider | 命名空间 ID | 发布记录 | 独立三段式语义版本 |
 | 数据版本 | dataset ID | 变换记录 | 文件 schema 版本 |
 
-禁止给单个设备添加 `version`，也禁止用同 ID 的当前内容解释历史 revision。设备 schema 的破坏性变化提升统一 schema MAJOR；可执行 provider 的破坏性 contract 变化提升其自身 MAJOR。
+禁止给单个设备添加 `version`，也禁止用同 ID 的当前内容覆盖历史 revision。2.0 正式发布前，自有设备、方程及 provider 协议固定为 `1.0.0`，直接同步当前实现，不逐次升版。设备内容 revision 与第三方插件软件版本仍用于固定具体内容，不代表多套自有文件协议。
 
 ## 设备内容接入
 

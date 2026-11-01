@@ -67,7 +67,7 @@ const EXPECTED_OBJECTIVE =
 
 /** 项目模型 YAML(与后端 test_project_model_consumption.SINK_YAML 同构)。 */
 const SINK_YAML = `schema: ies.device-model
-schema_version: "2.2.0"
+schema_version: "1.0.0"
 device:
   id: acme.device.consumption_load
   names:

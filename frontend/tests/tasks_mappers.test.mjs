@@ -153,7 +153,7 @@ function summary(over = {}) {
     calc_config_snapshot: { mode: 'planning' },
     device_models: { hp1: {} },
     evaluation: { evaluation_years: 2 },
-    schema_version: '5.0.0',
+    schema_version: '1.0.0',
     random_seed: null,
   }
   const full = tk.taskInputsFromServer({
@@ -163,7 +163,7 @@ function summary(over = {}) {
       frozen_refs: { planning_revision: 9, finance_profile_id: 'rg', finance_revision: 2 },
     },
   })
-  check('冻结快照透传', full.snapshot !== null && full.snapshot.schema_version === '5.0.0' && full.snapshot.dataset_version_ids.length === 2)
+  check('冻结快照透传', full.snapshot !== null && full.snapshot.schema_version === '1.0.0' && full.snapshot.dataset_version_ids.length === 2)
   check('冻结引用透传', full.frozen_refs.planning_revision === 9 && full.frozen_refs.finance_profile_id === 'rg')
   const none = tk.taskInputsFromServer({
     inputs: {

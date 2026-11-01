@@ -38,7 +38,7 @@ function check(name, cond) {
 
 const STEP_HEAD = [
   '# schema: ies.device-data',
-  '# schema_version: 2.0.0',
+  '# schema_version: 1.0.0',
   '# resolution: 1h',
   'step,electricity_demand',
   '0,48',

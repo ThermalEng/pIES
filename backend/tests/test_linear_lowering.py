@@ -31,7 +31,7 @@ from iesplan.modeling import (
 
 HEATER_YAML = """
 schema: ies.device-model
-schema_version: "2.2.0"
+schema_version: "1.0.0"
 device: {id: acme.device.heater, names: {zh-CN: 加热器, en-US: Heater}}
 properties:
   efficiency: {value: 0.9, unit: "1", valid_range: {minimum: 0, maximum: 1}}
@@ -47,7 +47,7 @@ equations:
 
 SOC_YAML = """
 schema: ies.device-model
-schema_version: "2.2.0"
+schema_version: "1.0.0"
 device: {id: acme.device.tank, names: {zh-CN: 罐, en-US: Tank}}
 properties:
   soc0: {value: 0.5, unit: "1", valid_range: {minimum: 0, maximum: 1}}
@@ -64,7 +64,7 @@ equations:
 
 MUTEX_YAML = """
 schema: ies.device-model
-schema_version: "2.2.0"
+schema_version: "1.0.0"
 device: {id: acme.device.hub, names: {zh-CN: 枢纽, en-US: Hub}}
 properties: {}
 interfaces:
@@ -79,7 +79,7 @@ equations:
 
 BILINEAR_YAML = """
 schema: ies.device-model
-schema_version: "2.2.0"
+schema_version: "1.0.0"
 device: {id: acme.device.bl, names: {zh-CN: 双线性, en-US: Bilinear}}
 properties: {}
 interfaces:
@@ -179,7 +179,7 @@ def test_mutex_big_m_with_finite_bounds() -> None:
 
 NEG_MUTEX_YAML = """
 schema: ies.device-model
-schema_version: "2.2.0"
+schema_version: "1.0.0"
 device: {id: acme.device.hub2, names: {zh-CN: 枢纽二, en-US: Hub2}}
 properties: {}
 interfaces:
@@ -194,7 +194,7 @@ equations:
 
 PRODUCT_BOTH_SIDES_YAML = """
 schema: ies.device-model
-schema_version: "2.2.0"
+schema_version: "1.0.0"
 device: {id: acme.device.quad, names: {zh-CN: 四元, en-US: Quad}}
 properties: {}
 interfaces:

@@ -81,7 +81,7 @@ def main():
     s, body = call("GET", f"/projects/{project_id}/config", token=token)
     check("config.get unsaved → 404", s == 404, str(s))
     payload = {
-        "schema": "ies.calculation-config", "schema_version": "2.0.0", "mode": "planning",
+        "schema": "ies.calculation-config", "schema_version": "1.0.0", "mode": "planning",
         "predictions": [], "generator": "ies.generator.highs_milp@3.4.0", "solver": "ies.solver.highs@1.7.2",
         "precision": "medium", "convergence": None, "time_limit_seconds": 600,
         "options": {}, "seed": None, "outputs": ["solution"],

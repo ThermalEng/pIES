@@ -1,4 +1,4 @@
-"""财务三件套领域结构: FinanceProfile / FinanceOverrides / EffectiveFinanceConfig (finance-yaml@3.0.0)。
+"""财务三件套领域结构: FinanceProfile / FinanceOverrides / EffectiveFinanceConfig (finance-yaml@1.0.0)。
 
 契约权威: manual/developer-guide/zh-CN/formats/finance-yaml.md。
 代码边界: finance 模块(宪法 §4.6)。本模块只依赖标准库与 core.diagnostics / core.units，
@@ -38,7 +38,7 @@ from iesplan.finance.monthly_daily import DAY_POINTS
 SCHEMA_PROFILE: Final[str] = "ies.finance-profile"
 SCHEMA_OVERRIDES: Final[str] = "ies.finance-overrides"
 SCHEMA_EFFECTIVE: Final[str] = "ies.effective-finance-config"
-SCHEMA_VERSION: Final[str] = "7.0.0"
+SCHEMA_VERSION: Final[str] = "1.0.0"
 
 CURRENCIES: Final[tuple[str, ...]] = ("CNY", "USD")
 PRICE_BASIS_VALUES: Final[tuple[str, ...]] = ("tax_inclusive", "tax_exclusive")

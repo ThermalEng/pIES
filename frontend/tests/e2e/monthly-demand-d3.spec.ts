@@ -143,7 +143,7 @@ test.describe('D3 natural-month demand GUI → task → export', () => {
     await rate.fill('20')
     const authoredRate = JSON.parse(await raw.inputValue())
     expect(authoredRate.schema).toBe('ies.finance-overrides')
-    expect(authoredRate.schema_version).toBe('7.0.0')
+    expect(authoredRate.schema_version).toBe('1.0.0')
     expect(authoredRate.profile_ref).toEqual({ id: firstId })
     // Make a real first GUI save, so the clear action has an active revision.
     await save.click()

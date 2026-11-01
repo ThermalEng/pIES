@@ -1,4 +1,4 @@
-"""财务三件套(finance-yaml@4.0.0)契约切片测试: FinanceProfile / Overrides / Effective 与确定性合并器。
+"""财务三件套(finance-yaml@1.0.0)契约切片测试: FinanceProfile / Overrides / Effective 与确定性合并器。
 
 0.6.5 条目 1(契约)的首个可验收切片。覆盖:
 - Profile: 完整示例往返、金额 Decimal 纪律(float/int/NaN/Infinity/null 拒绝)、
@@ -36,7 +36,7 @@ from iesplan.finance.triplet import (
 def _profile_payload() -> dict:
     return {
         "schema": "ies.finance-profile",
-        "schema_version": "7.0.0",
+        "schema_version": "1.0.0",
         "profile": {
             "id": "cn-north-demo",
             "region": "CN-North",
@@ -116,7 +116,7 @@ def _profile() -> FinanceProfile:
 def _overrides_payload(profile: FinanceProfile) -> dict:
     return {
         "schema": "ies.finance-overrides",
-        "schema_version": "7.0.0",
+        "schema_version": "1.0.0",
         "profile_ref": {"id": profile.profile_id},
         "finance_types": {
             "pv_system": {
@@ -507,7 +507,7 @@ def test_effective_from_yaml_rejects_non_effective_document():
     from iesplan.finance.yaml_io import effective_from_yaml
 
     with pytest.raises(FinanceTripletError):
-        effective_from_yaml("schema: ies.finance-profile\nschema_version: \"3.0.0\"\n")
+        effective_from_yaml("schema: ies.finance-profile\nschema_version: \"1.0.0\"\n")
     with pytest.raises(FinanceTripletError):
         effective_from_yaml("not: a-mapping-with-schema\n")
 
@@ -586,7 +586,7 @@ def test_monthly_daily_override_entire_source_and_cross_kind() -> None:
     before = profile.energy_prices["grid_import"].to_dict()
     override = {
         "schema": "ies.finance-overrides",
-        "schema_version": "7.0.0",
+        "schema_version": "1.0.0",
         "profile_ref": {"id": profile.profile_id},
         "energy_prices": {"grid_import": _monthly_daily_source()},
     }

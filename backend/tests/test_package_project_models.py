@@ -61,7 +61,7 @@ AUX_BASE = "acme.device.package_aux_load"
 
 SINK_YAML = """
 schema: ies.device-model
-schema_version: "2.2.0"
+schema_version: "1.0.0"
 device:
   id: acme.device.consumption_load
   names:
@@ -91,7 +91,7 @@ equations:
 
 AUX_YAML = """
 schema: ies.device-model
-schema_version: "2.2.0"
+schema_version: "1.0.0"
 device:
   id: acme.device.package_aux_load
   names:
@@ -395,7 +395,7 @@ def test_export_carries_draft_and_version_referenced_models(
 
     raw = _export_bytes(db, owner, pid)
     manifest, entries = _load_zip(raw)
-    assert manifest["format_version"] == "3.0.0"
+    assert manifest["format_version"] == "1.0.0"
     models_meta = manifest["files"]["models"]
     assert [item["device_id"] for item in models_meta] == [
         f"{SINK_BASE}_1",
@@ -565,14 +565,14 @@ def test_import_rejects_missing_and_extra_model_dependencies(
     reasons = resp.json()["error"]["params"]["reasons"]
     assert any("内容未引用" in reason for reason in reasons)
 
-    # 旧主版本(2.x)不保留解析。
+    # 非当前格式标记不选择兼容解析器。
     manifest, entries = _load_zip(raw)
-    manifest["format_version"] = "2.0.0"
+    manifest["format_version"] = "9.9.9"
     entries["manifest.json"] = json.dumps(manifest, ensure_ascii=False).encode()
     resp = _propose(client, importer, _rebuilt_zip(entries))
     assert resp.status_code == 400, resp.text
     reasons = resp.json()["error"]["params"]["reasons"]
-    assert any("格式版本不兼容" in reason for reason in reasons)
+    assert any("格式标记非法" in reason for reason in reasons)
 
     # files.models 结构非法: 拒绝而不是按空清单继续。
     manifest, entries = _load_zip(raw)

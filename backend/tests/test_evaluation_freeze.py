@@ -440,7 +440,7 @@ def test_snapshot_freezes_evaluation_and_identity(  # noqa: F811
     first = _submit_eval(_k1n2(), "eval-snap-1")
     snap = tasks_domain.get_snapshot(factory(), first["calc_snapshot_id"])
     assert snap is not None
-    assert snap.schema_version == "5.0.0"
+    assert snap.schema_version == "1.0.0"
     frozen = jsonable(dict(snap.calc_config_snapshot))
     assert "evaluation" not in frozen
     assert "evaluation" not in frozen.get("task_params", {})

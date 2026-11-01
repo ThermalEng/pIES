@@ -119,8 +119,8 @@ class TestHappyPath:
         # 回执依赖锁包含全部设备(裸 ID → 统一 schema 版本)
         deps = artifact.receipt.dependencies
         devices_lock = deps["devices"]
-        assert devices_lock.get("ies.device.heat_pump") == "2.2.0"
-        assert devices_lock.get("ies.device.grid_connection") == "2.2.0"
+        assert devices_lock.get("ies.device.heat_pump") == "1.0.0"
+        assert devices_lock.get("ies.device.grid_connection") == "1.0.0"
         assert "calculation" not in deps
         # 规范文本携带项目基线,不含 calculation/time_axis/resources;
         # 文件绑定保留 path 与 content 身份
@@ -197,7 +197,7 @@ class TestUnhappyPath:
         # (预定义数据接口不参与边连接, 用真实 in 端口覆盖该规则)
         text = (
             "schema: ies.assembly\n"
-            'schema_version: "6.0.0"\n'
+            'schema_version: "1.0.0"\n'
             "assembly:\n  id: bad\n  name: bad\n"
             "project_baseline:\n  resolution: 1h\n  start_year: 2026\n  scenario_mode: single\n"
             "devices:\n"
@@ -422,7 +422,7 @@ class TestProjectExport:
         artifact = result.artifact
         assert artifact is not None
         # 显式管道进入设备依赖锁(与手写样例的依赖锁断言同口径)
-        assert artifact.receipt.dependencies["devices"].get("ies.device.transport_pipe") == "2.2.0"
+        assert artifact.receipt.dependencies["devices"].get("ies.device.transport_pipe") == "1.0.0"
         # 管道实例与其损耗方程进入规范文本(显式设备非隐式合成)
         assert "pipe1" in artifact.canonical_text
         assert "loss_rate" in artifact.canonical_text

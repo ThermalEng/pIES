@@ -1,7 +1,7 @@
 """`ies.device-model` 2.2.0 解析与校验（纯协议入口，不访问注册表/数据库）。
 
 职责（宪法 §7.8 + device-model-yaml.md「校验与规范化」）：
-1. 校验顶层 schema/schema_version 与未知字段（JSON Schema 2.0.0）；
+1. 校验顶层 schema/schema_version 与未知字段（JSON Schema 1.0.0）；
 2. 校验稳定 ID、property 标量、单位、有效区间与有限数值；
 3. 校验五类 interface、carrier、单位、source 组合与连接资格；
 4. 校验 equations 标识符、内部变量、单位、时间索引引用与循环引用；
@@ -51,7 +51,7 @@ from iesplan.devices.contracts2 import (
 )
 
 #: 包内 JSON Schema 相对路径
-SCHEMA_FILE = "schema/device-model-2.2.0.schema.json"
+SCHEMA_FILE = "schema/device-model-1.0.0.schema.json"
 
 _ID_PATTERN = re.compile(r"^[a-z0-9]+([._-][a-z0-9]+)*$")
 

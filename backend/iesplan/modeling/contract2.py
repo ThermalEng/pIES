@@ -47,10 +47,10 @@ from iesplan.devices.contracts2 import (
 # ---------------------------------------------------------------------------
 
 CONTRACT_SCHEMA_ID = "ies.modeling.contribution"
-CONTRACT_SCHEMA_VERSION = "2.1.0"
+CONTRACT_SCHEMA_VERSION = "1.0.0"
 
 EQUATION_AST_ID = "ies.equation.ast"
-EQUATION_AST_VERSION = "2.0.0"
+EQUATION_AST_VERSION = "1.0.0"
 
 #: 稳定 ID 模式(与 devices 2.0 一致)
 _ID_PATTERN = re.compile(r"^[a-z0-9]+([._-][a-z0-9]+)*$")

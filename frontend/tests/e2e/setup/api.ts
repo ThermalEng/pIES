@@ -287,7 +287,7 @@ const EXPLICIT_CALC_PATCH = {
   type: 'config.patch',
   payload: {
     mode: 'fixed_operation',
-    generator: 'ies.generator.highs_milp@8.0.0',
+    generator: 'ies.generator.highs_milp@1.0.0',
     solver: 'ies.solver.highs@1.7.2',
     time_axis: { resolution: '1h', start: '2025-01-01T00:00:00Z' },
   },
@@ -334,7 +334,7 @@ const BATTERY_COMMAND = {
 function financeProfile(profileId: string): Record<string, unknown> {
   return {
     schema: 'ies.finance-profile',
-    schema_version: '7.0.0',
+    schema_version: '1.0.0',
     profile: {
       id: profileId,
       region: 'CN-North',

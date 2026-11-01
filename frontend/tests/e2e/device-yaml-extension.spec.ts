@@ -1,7 +1,7 @@
 // 0.15 首切片: 外部设备 YAML 注入公开消费链验收。
 //
 // 外部内容: frontend/tests/e2e/device-catalog-external/constant_load.yaml
-//   (schema_version 2.0.0, 稳定 ID acme.device.constant_load) 经隔离覆盖
+//   (schema_version 1.0.0, 稳定 ID acme.device.constant_load) 经隔离覆盖
 //   frontend/tests/e2e/docker-compose.ext-device.yml 只读挂载到扫描目录
 //   新子目录; 不修改内置 catalog/生产 Compose/通用 runtime, 核心代码与
 //   前端无该 ID 分支。2.0.0 vs 格式页目标 2.1.0 是既有差距, 本用例不

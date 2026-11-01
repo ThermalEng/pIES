@@ -60,7 +60,7 @@ def _load(path: pathlib.Path) -> dict:
 def _descriptor(**kwargs) -> GeneratorDescriptor:
     kwargs.setdefault("generator_id", "acme.generator")
     kwargs.setdefault("version", "1.0.0")
-    kwargs.setdefault("assembly_schema_version", "1.0")
+    kwargs.setdefault("assembly_schema_version", "1.0.0")
     kwargs.setdefault("modes", ("planning",))
     kwargs.setdefault("precisions", ("low", "medium", "high"))
     kwargs.setdefault("outputs", ("solution",))

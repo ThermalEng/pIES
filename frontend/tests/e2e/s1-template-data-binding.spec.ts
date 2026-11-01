@@ -12,7 +12,7 @@ import { createEngineer, loginToken, requestJson } from './setup/api'
 import { APP, scaffoldProject } from './financial-scaffold'
 
 const TEMPLATE_HEAD = `schema: ies.device-model
-schema_version: "2.2.0"
+schema_version: "1.0.0"
 device:
   id: __DEVICE_ID__
   names:
@@ -52,7 +52,7 @@ const NODE_NAME = 'S1 Data Load 1'
 function ddCsv(deviceId: string): string {
   return [
     '# schema: ies.device-data',
-    '# schema_version: 2.1.0',
+    '# schema_version: 1.0.0',
     '# dataset_id: synth_template_data',
     `# device_id: ${deviceId}`,
     '# source_mode: data_repeat',

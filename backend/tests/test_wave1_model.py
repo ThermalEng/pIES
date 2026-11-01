@@ -57,7 +57,7 @@ _NO_ORM_MODULES = (
 
 TEMPLATE_YAML = """
 schema: ies.device-model
-schema_version: "2.2.0"
+schema_version: "1.0.0"
 device: {id: acme.device.electric_load, names: {zh-CN: 电负荷, en-US: Electric Load}}
 inputs:
   properties:
@@ -81,7 +81,7 @@ equations:
 
 DIRECT_YAML = """
 schema: ies.device-model
-schema_version: "2.2.0"
+schema_version: "1.0.0"
 device: {id: acme.device.electric_load, names: {zh-CN: 电负荷, en-US: Electric Load}}
 properties:
   cop: {value: 3.0, unit: "1", valid_range: {minimum: 1, maximum: 10}}

@@ -39,7 +39,7 @@ from iesplan.devices.contracts2 import (
 from iesplan.devices.parser2 import ParseError, parse_device_model_v2, parse_template_inputs
 
 #: 实例化算法标识，只用于回执追溯；不是模型类型或 schema_version。
-INSTANTIATOR_VERSION = "ies.device-model.instantiator@2.0.0"
+INSTANTIATOR_VERSION = "ies.device-model.instantiator@1.0.0"
 
 #: 允许的叶子路径第一段 → 模型容器（用于“添加”场景与非法路径拒绝）
 _ALLOWED_FIRST_SEGMENTS = ("properties", "interfaces", "equations")

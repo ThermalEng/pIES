@@ -45,7 +45,7 @@ def device_catalog():
 def _curve_csv() -> bytes:
     return ("\n".join([
         "# schema: ies.device-data",
-        "# schema_version: 2.1.0",
+        "# schema_version: 1.0.0",
         "# dataset_id: synthetic_curve_issue02",
         f"# device_id: {CURVE_ID}",
         "# source_mode: data_repeat",
@@ -61,7 +61,7 @@ def _finance() -> EffectiveFinanceConfig:
     # 装配的必需空财务快照；无任何价格、成本、税或案例假设。
     return EffectiveFinanceConfig.from_dict({
         "schema": "ies.effective-finance-config",
-        "schema_version": "7.0.0",
+        "schema_version": "1.0.0",
         "profile_id": "synthetic-curve",
         "currency": "CNY",
         "base_year": 2026,
@@ -85,7 +85,7 @@ def _assembly(capacity_kw: float, *, optimize: bool) -> str:
     lower = "0" if optimize else "1000"
     upper = "100" if optimize else "1000"
     return f"""schema: ies.assembly
-schema_version: "6.0.0"
+schema_version: "1.0.0"
 assembly:
   id: synthetic_curve
   name: Synthetic curve

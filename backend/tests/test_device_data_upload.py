@@ -111,7 +111,7 @@ def plane():
 
 BASE_META = [
     "# schema: ies.device-data",
-    "# schema_version: 2.1.0",
+    "# schema_version: 1.0.0",
     "# dataset_id: predict_history",
     "# device_id: ies.device.electric_load",
     "# source_mode: data_predict",
@@ -180,7 +180,7 @@ class TestDeviceDataUploadRejected:
         ("meta", "rows", "code", "resolution"),
         [
             (
-                [m.replace("2.1.0", "9.9.9") for m in BASE_META],
+                [m.replace("1.0.0", "9.9.9") for m in BASE_META],
                 _rows([48.0]), "DATA-META-003", "1h",
             ),
             (

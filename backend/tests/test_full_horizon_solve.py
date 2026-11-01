@@ -106,7 +106,7 @@ def _full_csv(n1: int, v1: float, n2: int, v2: float) -> bytes:
     """全期 device-data 字节：文件顺序即 step 顺序，年界可区分。"""
     lines = [
         "# schema: ies.device-data",
-        "# schema_version: 2.1.0",
+        "# schema_version: 1.0.0",
         "# dataset_id: load_full_two_years",
         "# device_id: ies.device.electric_load",
         "# source_mode: data_full",
@@ -520,7 +520,7 @@ class TestFullHorizonTrueSolve:
 
 STORE_YAML = """
 schema: ies.device-model
-schema_version: "2.2.0"
+schema_version: "1.0.0"
 device: {id: acme.device.store, names: {zh-CN: 储能, en-US: Store}}
 properties:
   soc0: {value: 200, unit: kWh, valid_range: {minimum: 0, maximum: 1000}}
@@ -545,7 +545,7 @@ def _store_doc() -> dict:
     """
     return {
         "schema": "ies.assembly",
-        "schema_version": "6.0.0",
+        "schema_version": "1.0.0",
         "assembly": {"id": "mini-store", "name": "无序列储能"},
         "project_baseline": {
             "resolution": "1h", "start_year": START_YEAR, "scenario_mode": "single",
@@ -980,7 +980,7 @@ class TestGeneratorEmptySeriesHorizon:
         finance = merge_effective(FinanceProfile.from_dict(payload), None)
         config = CalculationConfig(
             mode="planning",
-            generator="ies.generator.highs_milp@8.0.0",
+            generator="ies.generator.highs_milp@1.0.0",
             solver="ies.solver.highs@1.7.2",
             precision="medium",
             time_limit_seconds=600,
@@ -1347,7 +1347,7 @@ def _annual_csv(dataset_id: str, device_id: str, column: str, unit: str, value: 
     """两年恒定值的全期 device-data 字节（年界可区分，由长度保证）。"""
     lines = [
         "# schema: ies.device-data",
-        "# schema_version: 2.1.0",
+        "# schema_version: 1.0.0",
         f"# dataset_id: {dataset_id}",
         f"# device_id: {device_id}",
         "# source_mode: data_full",
@@ -1752,7 +1752,7 @@ def _heat_demand_csv() -> bytes:
     """两年分段恒定热负荷（首年 30kW、次年 62.5kW）。"""
     lines = [
         "# schema: ies.device-data",
-        "# schema_version: 2.1.0",
+        "# schema_version: 1.0.0",
         "# dataset_id: heat_two_years",
         "# device_id: ies.device.heat_load",
         "# source_mode: data_full",
@@ -2000,7 +2000,7 @@ class TestConstructionPeriodSubmitFreeze:
         ).scalar_one()
         snap = task_store.get_snapshot(db, task_row.calc_snapshot_id)
         assert snap is not None
-        assert snap.schema_version == "5.0.0"
+        assert snap.schema_version == "1.0.0"
         frozen = dict(snap.evaluation)
         assert frozen["evaluation_years"] == 3
         assert frozen["construction_period"] == 1

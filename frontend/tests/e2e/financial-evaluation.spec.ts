@@ -363,7 +363,7 @@ test.describe('T3: K1N2 财务评价确认/求解/结果/导出', () => {
     const before = await requestJson(page.request, 'GET', `/api/projects/${pid}/tasks/${taskId}/result`)
     const frozen = await requestJson(page.request, 'GET', `/api/projects/${pid}/tasks/${taskId}/inputs`)
     const frozenExpenses = frozen.inputs.snapshot.evaluation.maintenance_expenses as typeof AFFINE_MAINTENANCE
-    expect(frozen.inputs.snapshot.schema_version).toBe('5.0.0')
+    expect(frozen.inputs.snapshot.schema_version).toBe('1.0.0')
     expect(frozenExpenses.map((entry) => entry.year)).toEqual([3, 3])
     expect(frozenExpenses.map((entry) => entry.terms)).toEqual(AFFINE_MAINTENANCE.map((entry) => entry.terms))
     expect(frozenExpenses.map((entry) => Number(entry.amount))).toEqual([1000, 2500.5])

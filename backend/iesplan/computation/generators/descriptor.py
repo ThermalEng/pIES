@@ -7,7 +7,6 @@
 
 from __future__ import annotations
 
-import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
@@ -20,9 +19,6 @@ from iesplan.computation.protocols import (
     freeze_json_value,
     thaw_json_value,
 )
-
-_ASSEMBLY_SCHEMA_VERSION_PATTERN = re.compile(r"^\d+\.\d+(\.\d+)?$")
-
 
 def _check_options_schema(schema: object) -> Mapping[str, object]:
     """校验 options_schema 为完整 Draft 2020-12 JSON Schema 对象。
@@ -47,14 +43,8 @@ def _check_options_schema(schema: object) -> Mapping[str, object]:
 
 
 def _check_assembly_schema_version(value: object) -> str:
-    """校验支持的装配 schema 版本（手册：MAJOR/MINOR）。
-
-    接受裸版本（``1.0``，可带 patch）或完整精确引用
-    （``<稳定ID>@<语义化版本>``）；其他形态一律拒绝。
-    """
-    if isinstance(value, str) and "@" in value:
-        return check_provider_ref(value, "assembly_schema_version")
-    if isinstance(value, str) and _ASSEMBLY_SCHEMA_VERSION_PATTERN.match(value):
+    """只声明当前装配契约，不接受版本范围或引用别名。"""
+    if value == "1.0.0":
         return value
     raise ValueError(f"assembly_schema_version 非法: {value!r}")
 

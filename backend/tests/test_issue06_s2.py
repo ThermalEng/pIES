@@ -67,7 +67,7 @@ def _builder(
         "depreciation": [], "loss_carryforward_years": 5, "opening_losses": [],
     }
     payload = {
-        "schema": "ies.finance-profile", "schema_version": "7.0.0",
+        "schema": "ies.finance-profile", "schema_version": "1.0.0",
         "profile": {
             "id": "maintenance-tiny", "region": "CN-North", "currency": currency,
             "base_year": 2025, "price_basis": "tax_inclusive",

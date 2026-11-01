@@ -104,7 +104,7 @@ class TestMetadata:
     def test_old_minor_header_rejected_without_dual_track(self) -> None:
         # 2.1.0 统一字头：旧 2.0.0 不再接受，不建双版本解析
         text = _csv_text().replace(
-            f"# schema_version: {SCHEMA_VERSION}", "# schema_version: 2.0.0"
+            f"# schema_version: {SCHEMA_VERSION}", "# schema_version: 9.9.9"
         )
         result = canonicalize_device_data_v2(text.encode(), _device_doc())
         assert "DATA-META-003" in _codes(result)

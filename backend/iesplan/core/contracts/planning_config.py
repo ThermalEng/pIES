@@ -2,7 +2,7 @@
 
 规划配置只描述规划问题: 目标函数/目标权重、规划变量、容量上下界和规划/系统
 约束。它不保存财务参数(财务参数由 FinanceProfile/FinanceOverrides 确定性合并
-生成的不可变 EffectiveFinanceConfig 承载, finance-yaml@3.0.0)或
+生成的不可变 EffectiveFinanceConfig 承载, finance-yaml@1.0.0)或
 generator/solver 选项(属于计算配置)。
 
 - 规划与结果财务计算必须固定同一不可变 EffectiveFinanceConfig
