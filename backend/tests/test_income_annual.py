@@ -336,9 +336,43 @@ def _balances(opening: tuple) -> tuple[LossBalance, ...]:
 
 
 def _gen_solve(inputs, tmp_path):
-    """真实求解，返回（目标值 + 偏移，列名 → 取值）。"""
-    bundle = HIGHS_MILP_PROVIDER.generate(*inputs)
-    return _solve_internal(bundle, tmp_path, check_soc_pin=False)[:2]
+    """Real solve with separated generation / bound-query / solver timing.
+
+    Test-only diagnostics of the P2 performance regression: no model or
+    solver input changes, no replaced assertions, no production instrumentation.
+    """
+    import logging
+    from time import perf_counter
+    from unittest.mock import patch
+    from iesplan.computation.generators.bound_inference import BoundInferenceEngine
+
+    original = BoundInferenceEngine.bound_affine
+    bound_calls = 0
+    bound_seconds = 0.0
+
+    def timed_bound(self, terms, constant, *, side):
+        nonlocal bound_calls, bound_seconds
+        started = perf_counter()
+        try:
+            return original(self, terms, constant, side=side)
+        finally:
+            bound_calls += 1
+            bound_seconds += perf_counter() - started
+
+    started = perf_counter()
+    with patch.object(BoundInferenceEngine, "bound_affine", timed_bound):
+        bundle = HIGHS_MILP_PROVIDER.generate(*inputs)
+    generation_seconds = perf_counter() - started
+    logging.getLogger(__name__).warning(
+        "P2_INCOME_PROFILE generation_seconds=%.3f bound_seconds=%.3f calls=%d",
+        generation_seconds, bound_seconds, bound_calls,
+    )
+    started = perf_counter()
+    result = _solve_internal(bundle, tmp_path, check_soc_pin=False)
+    logging.getLogger(__name__).warning(
+        "P2_INCOME_PROFILE solver_seconds=%.3f", perf_counter() - started,
+    )
+    return result[:2]
 
 
 def test_income_reversal_selects_post_tax_optimum(tmp_path) -> None:
