@@ -219,3 +219,100 @@ def test_deterministic_stopping_on_cyclic_relations() -> None:
     b_lo, b_hi = analysis.variable_bounds("c.B")
     assert b_lo == pytest.approx(10.0)
     assert b_hi == pytest.approx(20.0)
+
+
+def test_state_lag_keeps_actual_step_and_initial_boundary() -> None:
+    """s[0]=1, s[1]=2, s[2]=3; no indexed bound poisons another step."""
+    from dataclasses import replace
+    from iesplan.computation.generators.templates import compile_technical
+    inv = CompilerInventory()
+    inst = "m"
+    inv.step_columns[(inst, "s")] = tuple(f"state_step_{i}" for i in range(3))
+    inv.register_bound_fact(BoundFact("m.s", lower=0.0, upper=3.0))
+    rhs = BinaryNode("+", RefNode("s", offset=-1), NumberNode(1.0))
+    family = replace(
+        _make_family("recurrence", RefNode("s"), rhs, inst),
+        domain=IndexDomain("step", 3),
+    )
+    inv.relations.append(family)
+    inv.technical_contexts[family.identity] = (
+        compile_technical(family.relation, {"s": "var"}),
+        {}, {"s": 0.0}, {}, {"s": ("var", 0.0, 3.0)},
+    )
+    inv.seal()
+    analysis = CompilerAnalysis(inv, {})
+    for i, expected in enumerate((1.0, 2.0, 3.0)):
+        lo, hi = analysis.variable_bounds(f"state_step_{i}")
+        assert lo == pytest.approx(expected, abs=1e-10)
+        assert hi == pytest.approx(expected, abs=1e-10)
+
+
+def test_near_proportional_inequality_retains_large_witness() -> None:
+    """x=y=1e15 remains feasible despite nonidentical query coefficients."""
+    inv = CompilerInventory()
+    inv.collect(SemanticRelation(
+        "x_less_y", "capacity", IndexDomain("scalar"),
+        CapacityLimit("m", "x", "y", "le"), SourceLocation("comparison"),
+    ))
+    inv.register_bound_fact(BoundFact("m.x", 0.0, 1e15))
+    inv.register_bound_fact(BoundFact("y", 0.0, 1e15))
+    inv.seal()
+    analysis = CompilerAnalysis(inv, {})
+    expr = _AffineAcc()
+    expr.add_term("m.x", 1.0)
+    expr.add_term("y", -(1.0 - 1e-10))
+    upper = analysis.affine_side(expr, side="max", label="near_ratio")
+    witness = 1e15 - (1.0 - 1e-10) * 1e15
+    assert upper >= witness - 1e-5
+    assert upper < 100_001.0
+
+
+def test_existing_bus_balance_propagates_to_actual_time_slots() -> None:
+    """The old m.out=n.in bus and n.in<=7 bound every actual m.out column."""
+    from iesplan.computation.generators.compiler_ir import BusBalance
+    inv = CompilerInventory()
+    inv.step_columns[("m", "out")] = ("m_out_0", "m_out_1")
+    inv.step_columns[("n", "in")] = ("n_in_0", "n_in_1")
+    inv.register_bound_fact(BoundFact("n.in", 0.0, 7.0))
+    inv.collect(SemanticRelation(
+        "bus.carrier", "bus", IndexDomain("step", 2),
+        BusBalance("heat", 0, (("m", "out", 1.0), ("n", "in", -1.0))),
+        SourceLocation("connections"),
+    ))
+    inv.seal()
+    analysis = CompilerAnalysis(inv, {})
+    for step in range(2):
+        lo, hi = analysis.variable_bounds(f"m_out_{step}")
+        assert lo == pytest.approx(0.0, abs=1e-10)
+        assert hi == pytest.approx(7.0, abs=1e-10)
+
+
+def test_state_lag_across_blocks_and_year_with_changing_known_coefficient() -> None:
+    """P1 coefficient binding honors the 256-step block and annual boundary."""
+    from dataclasses import replace
+    from iesplan.computation.generators.templates import compile_technical
+    n = 8761  # hourly year plus the first step of the next year
+    inv = CompilerInventory()
+    inv.step_columns[("m", "s")] = tuple(f"s_{i}" for i in range(n))
+    inv.register_bound_fact(BoundFact("m.s", lower=0.0, upper=10000.0))
+    rhs = BinaryNode("+", RefNode("s", offset=-1), RefNode("increment"))
+    family = replace(
+        _make_family("step", RefNode("s"), rhs, "m"),
+        domain=IndexDomain("step", n),
+    )
+    inv.relations.append(family)
+    inv.technical_contexts[family.identity] = (
+        compile_technical(family.relation, {"s": "var", "increment": "known"}),
+        {}, {"s": 0.0},
+        {"increment": tuple(2.0 if i == 8760 else 1.0 for i in range(n))},
+        {"s": ("var", 0.0, 10000.0)},
+    )
+    inv.seal()
+    analysis = CompilerAnalysis(inv, {})
+    for step, expected in (
+        (0, 1.0), (255, 256.0), (256, 257.0),
+        (8759, 8760.0), (8760, 8762.0),
+    ):
+        lo, hi = analysis.variable_bounds(f"s_{step}")
+        assert lo == pytest.approx(expected, abs=1e-6)
+        assert hi == pytest.approx(expected, abs=1e-6)
