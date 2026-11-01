@@ -278,7 +278,7 @@ class _SyntheticGenerator:
         self.descriptor = GeneratorDescriptor(
             generator_id="test.generator.flex",
             version="1.0.0",
-            assembly_schema_version="2.0",
+            assembly_schema_version="1.0.0",
             options_schema={"type": "object", "additionalProperties": False},
             modes=("dispatch",),
             precisions=("low", "high"),

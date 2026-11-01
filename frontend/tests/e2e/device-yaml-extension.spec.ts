@@ -4,8 +4,7 @@
 //   (schema_version 1.0.0, 稳定 ID acme.device.constant_load) 经隔离覆盖
 //   frontend/tests/e2e/docker-compose.ext-device.yml 只读挂载到扫描目录
 //   新子目录; 不修改内置 catalog/生产 Compose/通用 runtime, 核心代码与
-//   前端无该 ID 分支。2.0.0 vs 格式页目标 2.1.0 是既有差距, 本用例不
-//   宣称 2.1.0 已交付。
+//   前端无该 ID 分支。使用当前唯一的 1.0.0 设备契约。
 //
 // 被测动作(真实 GUI, 不可替代): 设备选择器 → 画布拖放 → 侧栏参数 →
 // 连线 → 服务端草稿。项目/画像/装配/冻结/配置复用公开 API 脚手架
@@ -122,7 +121,7 @@ test.describe('0.15 外部设备 YAML 注入', () => {
     const page: Page = await context.newPage()
     const session = await createSession(page, username, password)
     await page.getByText(projectName).click({ timeout: 30_000 })
-    await expect(page).toHaveURL(/\/projects\/\d+$/)
+    await expect(page).toHaveURL(new RegExp(`/projects/${pid}(?:/|$)`))
 
     await page.getByRole('navigation', { name: /工作台|Workspace/i }).getByText('系统建模').click()
     await expect(page).toHaveURL(/\/model$/)

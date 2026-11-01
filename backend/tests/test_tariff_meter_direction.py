@@ -216,9 +216,9 @@ def test_property_ref_meter_uses_effective_planning_floor(
     variables = {var.name: var for var in model.variables}
     assert variables["floor_plan"].lower == 0
     assert variables["floor_plan"].upper == 1000
-    # Missing explicit planning lower keeps the generator's step bound None,
-    # with the nonnegative planned capacity enforced by its linked row.
-    assert variables["heater1__heat_out__t0"].lower == (0 if lower is not None else None)
+    # Unified bound analysis propagates the planned floor's effective lower
+    # bound through the linked row, including the default nonnegative floor.
+    assert variables["heater1__heat_out__t0"].lower == 0
     rows = {row.name: row for row in model.constraints}
     linked = rows["heater1__heat_out__plan_min__t0"]
     assert (linked.sense, linked.rhs) == ("ge", 0)

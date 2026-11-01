@@ -164,6 +164,10 @@ test('parameter and rename save responses preserve the next input; graph survive
   await page.getByRole('region', { name: '编辑设备' }).getByRole('button', { name: '关闭', exact: true }).click()
   await dragTo(page, page.getByLabel('放置 电负荷 设备'), canvas, .75, .65)
   await saved()
+  // Adding a device opens its editor and narrows the canvas. Restore the
+  // workspace and fit both endpoints before performing the pointer gesture.
+  await page.getByRole('region', { name: '编辑设备' }).getByRole('button', { name: '关闭', exact: true }).click()
+  await page.getByRole('button', { name: '适应视图', exact: true }).click()
   // Use actual endpoint labels and current geometry, not screen coordinates.
   const renamed = page.getByRole('button', { name: '电池储能: Storage edited', exact: true })
   const load = page.getByRole('button', { name: '电负荷: 电负荷 1', exact: true })

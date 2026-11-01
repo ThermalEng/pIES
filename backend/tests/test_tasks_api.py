@@ -716,7 +716,7 @@ def test_submit_rejects_tax_rules_without_provider_capabilities(
         generator_id="ies.generator.stub",
         version="1.0.0",
         options_schema={"type": "object", "additionalProperties": False},
-        assembly_schema_version="2.0",
+        assembly_schema_version="1.0.0",
         modes=("planning",),
         outputs=("solution",),
         precisions=("medium",),

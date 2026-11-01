@@ -729,7 +729,7 @@ def test_ambiguous_executors_blocked_without_guessing() -> None:
         generator_id="ies.generator.multi",
         version="1.0.0",
         options_schema={"type": "object", "additionalProperties": False},
-        assembly_schema_version="2.0",
+        assembly_schema_version="1.0.0",
         modes=("planning",),
         outputs=("solution",),
         precisions=("medium",),
