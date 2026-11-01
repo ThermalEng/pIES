@@ -125,6 +125,7 @@ def _facts() -> dict:
         "annual_fixed_om": {"constant": 0.0, "terms": {}},
         "payments_applied": [],
         "net_cashflows": [],
+        "construction_units": [],
         "annual_operation": [],
         "monthly_demand": [],
         "tax_cash": {

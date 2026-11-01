@@ -1006,36 +1006,38 @@ def test_step_relation_real_task_freezes_ports_and_survives_later_draft(
     assert get_object(db, evidence.object_id) == sealed_bytes
 
 
-def test_unbounded_mutex_generation_failure_keeps_source_in_task_diagnostic(
+def test_unbounded_declared_capacity_uses_proven_technical_bounds(
     client: TestClient, db: Session, engine: Engine, plane,
 ):
+    """Missing explicit cap upper bound is valid if device physics proves it finite.
+
+    P2 relation inference now bounds the mutually exclusive flows from actual
+    technical constraints, so it must not manufacture an unsupported Big-M error.
+    A genuinely unbounded mutex remains a strict generator failure elsewhere.
+    """
     from copy import deepcopy
     planning = deepcopy(PLANNING_BODY)
     planning["variables"]["cap"]["upper_bound"] = None
-    user = make_user(db, "source_failure_owner")
+    user = make_user(db, "source_bounded_owner")
     pid = _prepare_with_planning(client, db, user, planning)
     revision = _save_config_body(client, pid, user, dict(_CONFIG_BODY))
-    status, body = _submit_task(client, pid, user, config={"config_revision": revision},
-                                idempotency_key="source-failure-task")
+    status, body = _submit_task(
+        client, pid, user, config={"config_revision": revision},
+        idempotency_key="source-bounded-task",
+    )
     assert status == 201, body
     task_id = int(body["task"]["id"])
     claim = _claim(db, task_id)
-    assert _run(engine, claim, plane) == "failed"
+    assert _run(engine, claim, plane) == "completed"
     db.expire_all()
     diagnostics = db.execute(select(TaskDiagnostic).where(
         TaskDiagnostic.task_id == task_id,
         TaskDiagnostic.code == "TASK-SOLVE-001",
     )).scalars().all()
-    source_diagnostics = [item for item in diagnostics
-                          if item.context and "model_source" in item.context]
-    assert len(source_diagnostics) == 1
-    location = source_diagnostics[0].context["model_source"]
-    assert location["location"]["instance_id"] == "bat1"
-    assert location["location"]["relation_id"] == "charge_discharge_exclusivity"
-    assert location["axis"] == "step" and location["index"] == 0
-    assert results_store.latest_evidence_for_task(db, task_id) is None
-    response = client.get(f"/api/projects/{pid}/tasks/{task_id}", headers=_h(client, user))
+    assert diagnostics == []
+    assert results_store.latest_evidence_for_task(db, task_id) is not None
+    response = client.get(
+        f"/api/projects/{pid}/tasks/{task_id}", headers=_h(client, user),
+    )
     assert response.status_code == 200, response.text
-    public = response.json()["task"]["diagnostics"]
-    assert any(item["context"] and item["context"].get("model_source") == location for item in public)
-    assert all(item["stack_trace"] is None for item in public)
+    assert response.json()["task"]["status"] == "completed"

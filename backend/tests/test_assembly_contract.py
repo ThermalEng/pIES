@@ -193,9 +193,14 @@ class TestSchemaFile:
         assert set(variables["properties"]) == {
             "device_ref", "parameter",
             "lower_bound", "upper_bound", "unit",
-            "activation", "optional",
         }
         assert variables["additionalProperties"] is False
+        # P2 将建设激活从规划变量本身分离为显式 construction_units。
+        units = planning["properties"]["construction_units"]
+        assert units["additionalProperties"] is False
+        entry = units["patternProperties"]["^[a-z][a-z0-9_]*$"]
+        assert set(entry["required"]) == {"device_ref", "mode", "scales"}
+        assert set(entry["properties"]["mode"]["enum"]) == {"mandatory", "optional"}
         assert "year_offset" not in variables["properties"]
         assert variables["properties"]["lower_bound"]["type"] == ["integer", "string", "null"]
         assert variables["properties"]["upper_bound"]["type"] == ["integer", "string", "null"]

@@ -45,7 +45,10 @@ planning:
   objective:
     sense: minimize
     expression: "0"
-  variables: {}
+  variables:
+    v_struct:
+      device_ref: any_device
+      parameter: any_param
   constraints: {}
 
 outputs:

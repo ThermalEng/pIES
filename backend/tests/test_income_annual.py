@@ -908,24 +908,33 @@ def test_income_depreciation_zero_build_no_fictitious_income(tmp_path) -> None:
 
 
 def test_income_depreciation_variable_capacity_positive_residual_solves_exactly(tmp_path) -> None:
-    """可变规模 + 固定残值必须进入同次优化，不再沿用旧拒收规则。
+    """真实求解同时覆盖可选零建设和固定残值实际建设，不预设最优必须建满。
 
-    通过真实 HiGHS 求解，核对建设容量、折旧、亏损结转、所得税和税后 NPV。
+    本例税后最优是零建设。另锁定 10kW 实际建成，独立手算验证折旧、
+    亏损抵扣、所得税以及现金流目标；不通过改业务目标人为强迫最优。
     """
     objective = {"sense": "maximize", "expression": NPV_MARKER}
-    value, solved = _gen_solve(
-        _gen_inputs(objective, cap_bounds=("0", "10"),
-                    payload=_residual_payload(_gen_finance_payload, "100")),
+    payload = _residual_payload(_gen_finance_payload, "100")
+    optional_value, optional = _gen_solve(
+        _gen_inputs(objective, cap_bounds=("0", "10"), payload=payload),
         tmp_path,
     )
-    baseline, baseline_solved = _gen_solve(
-        _gen_inputs(objective, cap_bounds=("0", "10")), tmp_path,
+    assert optional["gen_cap"] == pytest.approx(0.0, abs=1e-6)
+    assert optional["inc__income_gen__profit__y2"] == pytest.approx(0.0, abs=1e-6)
+    assert optional_value == pytest.approx(0.0, abs=1e-6)
+
+    forced_value, built = _gen_solve(
+        _gen_inputs(objective, cap_bounds=("10", "10"), payload=payload),
+        tmp_path,
+    )
+    base_value, base = _gen_solve(
+        _gen_inputs(objective, cap_bounds=("10", "10")), tmp_path,
     )
     cap = GEN_CAP_MAX
-    assert solved["gen_cap"] == pytest.approx(float(cap * 1000), rel=1e-6)
-    assert baseline_solved["gen_cap"] == pytest.approx(float(cap * 1000), rel=1e-6)
-    depreciation = (GEN_UPFRONT * cap - Decimal("100")) / Decimal(DEPR_LIFE)
+    assert built["gen_cap"] == pytest.approx(float(cap * 1000), rel=1e-6)
+    assert base["gen_cap"] == pytest.approx(float(cap * 1000), rel=1e-6)
     fixed = GEN_FIXED * cap
+    depreciation = (GEN_UPFRONT * cap - Decimal("100")) / Decimal(DEPR_LIFE)
     base_y2 = -fixed - depreciation
     base_y3 = GEN_PRICE_Y3 * GEN_HOURS * cap - fixed - depreciation
     year2 = use_losses(
@@ -940,12 +949,12 @@ def test_income_depreciation_variable_capacity_positive_residual_solves_exactly(
         taxable_base=base_y3, loss_used=sum(year3.uses, Decimal("0")),
         rate=INC_RATE,
     )
-    assert solved["inc__income_gen__gen__y2"] == pytest.approx(float(-base_y2), rel=1e-6)
-    assert solved["inc__income_gen__profit__y3"] == pytest.approx(float(base_y3), rel=1e-6)
-    expected = _gen_pretax_npv(cap) - tax / Decimal(str(1.0 + RATE)) ** 3
-    assert value == pytest.approx(float(expected), rel=1e-6)
-    assert value < baseline  # 正残值减少折旧抵扣，不凭空增加税后收益
-
+    assert built["inc__income_gen__gen__y2"] == pytest.approx(float(-base_y2), rel=1e-6)
+    assert built["inc__income_gen__profit__y3"] == pytest.approx(float(base_y3), rel=1e-6)
+    assert forced_value == pytest.approx(
+        float(_gen_pretax_npv(cap) - tax / Decimal(str(1.0 + RATE)) ** 3), rel=1e-6,
+    )
+    assert forced_value < base_value  # 正残值减少折旧抵扣，不能凭空增加收益
 
 def test_income_depreciation_static_residual_matches_hand(tmp_path) -> None:
     """静态已形成资产 + 合法正残值：残值 100 在计税基础内，精确计提。
@@ -978,14 +987,28 @@ def test_income_depreciation_static_residual_matches_hand(tmp_path) -> None:
 
 
 def test_income_depreciation_excess_residual_rejected(tmp_path) -> None:
-    """已形成资产但残值超计税基础：不得以负折旧放行，明确拒绝。"""
-    from iesplan.computation.generators.linear import LoweringUnsupportedError
+    """固定新增资产残值超过计税基础时必须在同次真实求解中判不可行。
+
+    P2 不再静态拒绝可选建设：B=0 时残值不发生；已形成资产若 B<R，
+    B<=U*z、B>=R*z 应证明模型不可行，而非生成负折旧金额。
+    """
+    import subprocess
+    from iesplan.computation.result_adapters.highs import _parse_solution
+    from test_vat_monthly import HIGHS_ADAPTER_PATH
 
     payload = _residual_payload(_mix_payload, "100000")
-    artifact, models, materialized, finance, config, evaluation = _inputs(payload=payload)
-    with pytest.raises(LoweringUnsupportedError, match="超过最小计税基础"):
-        HIGHS_MILP_PROVIDER.generate(artifact, models, materialized, finance, config, evaluation)
-
+    bundle = HIGHS_MILP_PROVIDER.generate(*_inputs(payload=payload))
+    (tmp_path / "input").mkdir(exist_ok=True)
+    (tmp_path / "output").mkdir(exist_ok=True)
+    (tmp_path / "input" / "problem.mps").write_bytes(bundle.files["input/problem.mps"])
+    completed = subprocess.run(
+        [HIGHS_ADAPTER_PATH, "input/problem.mps", "--solution_file",
+         "output/solution.sol", "--time_limit", "300", "--random_seed", "0"],
+        cwd=tmp_path, capture_output=True, text=True, timeout=330, check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    solution = _parse_solution((tmp_path / "output" / "solution.sol").read_bytes())
+    assert solution["model_status"] == "HighsModelStatus.kInfeasible"
 
 def test_income_depreciation_skipped_without_new_asset(tmp_path) -> None:
     """无本课题新增可折旧资产：既有资产不计提，残值无影响。
