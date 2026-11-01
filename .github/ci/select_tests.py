@@ -460,6 +460,7 @@ def pick(changed: list[str], full: bool = False) -> dict[str, str]:
                 "backend/iesplan/computation/generators/templates.py",
                 "backend/iesplan/computation/generators/sources.py",
                 "backend/iesplan/computation/generators/compiler_ir.py",
+                "backend/iesplan/computation/generators/bound_inference.py",
             ):
                 backend.update(GENERATOR_PROJECT_CONSUMERS)
                 browser.update(("tax-chain.spec.ts", "result-planning-solution.spec.ts"))
@@ -717,6 +718,10 @@ def self_test() -> None:
     assert all("tests/" + test in generator["backend_tests"].split() for test in GENERATOR_PROJECT_CONSUMERS)
     # Protect the battery optimization/zero-capacity tests from future silent
     # omission when the shared project generator is refactored.
+    inference = pick(["backend/iesplan/computation/generators/bound_inference.py"])
+    assert all("tests/" + test in inference["backend_tests"].split()
+               for test in GENERATOR_PROJECT_CONSUMERS)
+    assert "tax-chain.spec.ts" in inference["browser_specs"]
     assert "tests/test_battery_planning.py" in generator["backend_tests"].split()
     assert "tests/test_step_relations_s2.py" in generator["backend_tests"].split()
     assert "tests/test_finance_s2_execution.py" in generator["backend_tests"].split()
