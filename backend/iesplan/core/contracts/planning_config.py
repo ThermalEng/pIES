@@ -182,8 +182,11 @@ class PlanningVariable:
             "unit": self.unit,
         }
         if self.activation:
+            # Explicit mandatory construction is materially different from
+            # an absent optional flag; always retain false on round-trip.
             res["activation"] = True
-        if self.optional:
+            res["optional"] = self.optional
+        elif self.optional:
             res["optional"] = True
         return res
 
