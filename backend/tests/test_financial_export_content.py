@@ -34,7 +34,7 @@ def _load_fixtures():
 
 def test_downloaded_xlsx_matches_sealed_facts_exactly():
     sealed, pairs = _load_fixtures()
-    assert sealed["schema_version"] == "3.0.0"
+    assert sealed["schema_version"] == "4.0.0"
     assert sealed["net_cashflows"] == []
     assert all("base_from" in row for row in sealed["tax_cash"]["depreciation"])
     assert_block_exact(pairs, sealed)
