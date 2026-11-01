@@ -71,7 +71,7 @@ DEPR_LIFE = 10
 def _gen_finance_payload(*, opening=(), carry_years=INC_CARRY_YEARS):
     return {
         "schema": "ies.finance-profile",
-        "schema_version": "6.0.0",
+        "schema_version": "7.0.0",
         "profile": {
             "id": "income-gen",
             "region": "CN-North",
@@ -119,7 +119,7 @@ def _gen_finance_payload(*, opening=(), carry_years=INC_CARRY_YEARS):
                 "deductible_maintenance": {"mode": "explicit_items", "items": []},
                 "depreciation": [
                     {
-                        "base_from": {"kind": "upfront_capex_net", "finance_type": "gen_choice"},
+                        "base_from": {"kind": "upfront_capex_net", "finance_type": "gen_choice", "scope": {"kind": "all_new_instances"}},
                         "method": "straight_line",
                         "life_years": DEPR_LIFE,
                         "residual": {"value": "0", "unit": "CNY"},
@@ -141,7 +141,7 @@ def _gen_finance_payload(*, opening=(), carry_years=INC_CARRY_YEARS):
 def _gen_doc(objective: dict, *, cap_bounds: tuple[str, str] = ("0", "10")) -> dict:
     return {
         "schema": "ies.assembly",
-        "schema_version": "5.0.0",
+        "schema_version": "6.0.0",
         "assembly": {"id": "income-gen", "name": "所得税选择算例"},
         "project_baseline": {
             "resolution": "1h",
@@ -560,7 +560,7 @@ def _mix_payload():
         },
         "depreciation": [
             {
-                "base_from": {"kind": "upfront_capex_net", "finance_type": "sys1"},
+                "base_from": {"kind": "upfront_capex_net", "finance_type": "sys1", "scope": {"kind": "all_new_instances"}},
                 "method": "straight_line",
                 "life_years": 20,
                 "residual": {"value": "0", "unit": "CNY"},

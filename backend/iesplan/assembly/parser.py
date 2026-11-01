@@ -87,13 +87,12 @@ _TARIFF_AGGREGATIONS: tuple[str, ...] = ("integrate_positive", "sum_positive")
 #: 计费绑定条目键
 _TARIFF_BINDING_KEYS: tuple[str, ...] = ("price", "instance", "interface", "aggregation")
 #: planning 章节键(objective 必需；variables/constraints 缺席视为空)
-_PLANNING_KEYS: tuple[str, ...] = ("objective", "variables", "constraints")
+_PLANNING_KEYS: tuple[str, ...] = ("objective", "variables", "constraints", "construction_units")
 
 #: planning 变量条目允许键(公共 PlanningVariable 契约的结构侧；无年度索引)
 _VARIABLE_KEYS: tuple[str, ...] = (
     "device_ref", "parameter",
     "lower_bound", "upper_bound", "unit",
-    "activation", "optional",
 )
 
 #: 全项目统一计算分辨率(均能确定性切分一天:96/48/24 步)
@@ -602,10 +601,10 @@ class _DocBuilder:
             return
         bind_type = self._enum(entry.get("type"), _COST_BIND_TYPES, f"{field}.type")
         for key in entry:
-            if key not in ("type", "finance_type", "drivers"):
+            if key not in ("type", "finance_type", "drivers", "cost_occurrence"):
                 self._diag(ASM_SYN_PARSE, f"{field}.{key}", {"reason": "unknown_key", "key": key})
         if bind_type == "none":
-            for forbidden in ("finance_type", "drivers"):
+            for forbidden in ("finance_type", "drivers", "cost_occurrence"):
                 if forbidden in entry:
                     self._diag(
                         ASM_SYN_TYPE,
@@ -616,6 +615,21 @@ class _DocBuilder:
         if bind_type != "costed":
             return
         self._str(entry, "finance_type", f"{field}.finance_type", required=True)
+        conditions = entry.get("cost_occurrence", {})
+        cm = self._require_map(conditions, f"{field}.cost_occurrence")
+        if cm is not None:
+            for path, condition in cm.items():
+                sub = f"{field}.cost_occurrence.{path}"
+                c = self._require_map(condition, sub)
+                if c is None:
+                    continue
+                kind = self._enum(c.get("kind"), ("always", "construction_unit"), f"{sub}.kind")
+                required = {"kind", "unit_ref"} if kind == "construction_unit" else {"kind"}
+                if kind == "construction_unit":
+                    self._str(c, "unit_ref", f"{sub}.unit_ref", required=True)
+                for key in c:
+                    if key not in required:
+                        self._diag(ASM_SYN_PARSE, f"{sub}.{key}", {"reason": "unknown_key", "key": key})
         drivers = entry.get("drivers")
         if drivers is None:
             return
@@ -771,6 +785,37 @@ class _DocBuilder:
                     )
                     if entry is not None:
                         self._variable_entry(entry, f"{field}.variables.{var_name}")
+        units = m.get("construction_units", {})
+        um = self._require_map(units, f"{field}.construction_units")
+        if um is not None:
+            for unit_id, raw in um.items():
+                self._local_id(unit_id, f"{field}.construction_units.{unit_id}")
+                u = self._require_map(raw, f"{field}.construction_units.{unit_id}")
+                if u is None:
+                    continue
+                for key in u:
+                    if key not in ("device_ref", "mode", "scales"):
+                        self._diag(ASM_SYN_PARSE, f"{field}.construction_units.{unit_id}.{key}",
+                                   {"reason": "unknown_key", "key": key})
+                self._str(u, "device_ref", f"{field}.construction_units.{unit_id}.device_ref", required=True)
+                self._enum(u.get("mode"), ("mandatory", "optional"),
+                           f"{field}.construction_units.{unit_id}.mode")
+                scales = self._require_map(u.get("scales"), f"{field}.construction_units.{unit_id}.scales")
+                if scales is not None:
+                    if not scales:
+                        self._diag(ASM_SYN_FIELD, f"{field}.construction_units.{unit_id}.scales",
+                                   {"reason": "empty_scales"})
+                    for variable_id, raw_scale in scales.items():
+                        self._local_id(variable_id, f"{field}.construction_units.{unit_id}.scales.{variable_id}")
+                        scale = self._require_map(raw_scale, f"{field}.construction_units.{unit_id}.scales.{variable_id}")
+                        if scale is not None:
+                            for key, val in scale.items():
+                                if key not in ("active_lower_bound", "active_upper_bound"):
+                                    self._diag(ASM_SYN_PARSE, f"{field}.construction_units.{unit_id}.scales.{variable_id}.{key}",
+                                               {"reason": "unknown_key", "key": key})
+                                elif val is not None and not isinstance(val, str):
+                                    self._diag(ASM_SYN_TYPE, f"{field}.construction_units.{unit_id}.scales.{variable_id}.{key}",
+                                               {"reason": "wrong_type"})
         constraints = m.get("constraints")
         if constraints is not None:
             cm = self._require_map(constraints, f"{field}.constraints")

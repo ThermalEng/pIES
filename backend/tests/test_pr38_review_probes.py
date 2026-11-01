@@ -17,10 +17,24 @@ from test_project_model import GEN_YAML, _contribution, _gen_inputs, _finance_pa
 
 
 def test_activation_reaches_public_planning_contract():
-    PlanningVariable.from_dict({
-        "device_ref": "gen1", "parameter": "cap_kw", "lower_bound": "0",
-        "upper_bound": "500", "unit": "kW", "activation": True, "optional": True,
-    })
+    from iesplan.core.contracts.planning_config import PlanningConfig, PlanningConfigError
+    import pytest
+    valid = {
+        "objective": {"sense": "minimize", "expression": "gen_cap"},
+        "variables": {"gen_cap": {
+            "device_ref": "gen1", "parameter": "cap_kw", "lower_bound": "0",
+            "upper_bound": "500", "unit": "kW",
+        }},
+        "construction_units": {"gen_build": {
+            "device_ref": "gen1", "mode": "optional",
+            "scales": {"gen_cap": {"active_lower_bound": "0", "active_upper_bound": None}},
+        }},
+    }
+    assert PlanningConfig.from_dict(valid).to_dict()["construction_units"]["gen_build"]["mode"] == "optional"
+    old = dict(valid)
+    old["variables"] = {"gen_cap": dict(valid["variables"]["gen_cap"], activation=True)}
+    with pytest.raises(PlanningConfigError):
+        PlanningConfig.from_dict(old)
 
 
 def test_valid_accumulator_survives_real_project_generation():
@@ -101,7 +115,7 @@ def test_optional_fixed_residual_uses_real_source_identity():
         "revenue": [], "energy_cost": [], "annual_om": [], "variable_om": [],
         "deductible_maintenance": {"mode": "explicit_items", "items": []},
         "depreciation": [{
-            "base_from": {"kind": "upfront_capex_net", "finance_type": "tank_sys"},
+            "base_from": {"kind": "upfront_capex_net", "finance_type": "tank_sys", "scope": {"kind": "all_new_instances"}},
             "method": "straight_line", "life_years": 20, "first_year": 1,
             "residual": {"value": "100", "unit": "CNY"},
         }], "loss_carryforward_years": 5, "opening_losses": [],

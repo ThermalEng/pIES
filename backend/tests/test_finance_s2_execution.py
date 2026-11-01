@@ -1,6 +1,6 @@
 """S2 synthetic affine, tax-base, depreciation and decision evidence.
 
-Only public 6.0.0 finance documents are varied; the small model has no
+Only public 7.0.0 finance documents are varied; the small model has no
 hourly decision columns.  Solver tests use the existing HiGHS CI adapter.
 """
 
@@ -82,14 +82,14 @@ def _construction_and_annual(profile: dict) -> None:
             "confirmation": "same_period",
         },
         "income": _income([
-            _depr({"kind": "upfront_capex_net", "finance_type": "same"}, 4, 1,
+            _depr({"kind": "upfront_capex_net", "finance_type": "same", "scope": {"kind": "all_new_instances"}}, 4, 1,
                   _money("0.1", "1")),
         ], annual=True),
     }
     profile["net_cashflows"] = {
         "recovery": {"at": {"kind": "evaluation_end"}, "direction": "inflow",
                      "amount": {"kind": "source_share", "base_from": {
-                         "kind": "upfront_capex_net", "finance_type": "same"},
+                         "kind": "upfront_capex_net", "finance_type": "same", "scope": {"kind": "all_new_instances"}},
                          "ratio": _money("0.1", "1")}},
     }
 
@@ -116,7 +116,7 @@ def test_annual_rates_subcomponent_net_basis_and_cash_periods(tmp_path):
     assert _amount(facts["annual_net_flows"][2], **values) == pytest.approx(-yearly + net * .1)
     rows = facts["tax_cash"]["depreciation"]
     assert [row["base_from"] for row in rows] == [
-        {"kind": "upfront_capex_net", "finance_type": "same"}
+        {"kind": "upfront_capex_net", "finance_type": "same", "scope": {"kind": "all_new_instances"}}
     ] * 2
     assert all(_amount(row["amount"], **values) == pytest.approx(net * .9 / 4)
                for row in rows)
@@ -162,7 +162,7 @@ def _replacement_profile(profile: dict) -> None:
             ], "credit_pool": "pool", "confirmation": "same_period",
         },
         "income": _income([
-            _depr({"kind": "upfront_capex_net", "finance_type": "same"}, 4, 1),
+            _depr({"kind": "upfront_capex_net", "finance_type": "same", "scope": {"kind": "all_new_instances"}}, 4, 1),
             _depr({"kind": "maintenance_expense_net", "year": 2, "position": 1}, 2, 2),
             _depr({"kind": "maintenance_expense_net", "year": 2, "position": 2},
                   2, 2, _money("50")),
@@ -209,7 +209,7 @@ def _decision_profile(recovery: str, annual_rate: str):
             profile["net_cashflows"] = {
                 "recovery": {"at": {"kind": "evaluation_end"}, "direction": "inflow",
                              "amount": {"kind": "source_share", "base_from": {
-                                 "kind": "upfront_capex_net", "finance_type": "same"},
+                                 "kind": "upfront_capex_net", "finance_type": "same", "scope": {"kind": "all_new_instances"}},
                                  "ratio": _money(recovery, "1")}},
             }
     return patch
@@ -249,7 +249,7 @@ def test_recovery_and_annual_fee_switch_main_solution(tmp_path, recovery, annual
             "solution": {}, "financial_facts": restored,
         }),
     )
-    assert sealed["schema_version"] == "3.0.0"
+    assert sealed["schema_version"] == "4.0.0"
     assert sealed["net_cashflows"] == restored["net_cashflows"]
     assert sealed["annual_net_flows"] == restored["annual_net_flows"]
     objective = model.objective.constant + sum(

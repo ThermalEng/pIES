@@ -134,7 +134,7 @@ def _finance_payload(direction: str = "purchase", tariff_kind: str = "constant")
         }
     return {
         "schema": "ies.finance-profile",
-        "schema_version": "6.0.0",
+        "schema_version": "7.0.0",
         "profile": {
             "id": "cn-north-demo",
             "region": "CN-North",
@@ -230,7 +230,7 @@ def _artifact_doc(*, bilinear: bool = False) -> dict:
         bindings["hub1"] = {"type": "none"}
     return {
         "schema": "ies.assembly",
-        "schema_version": "5.0.0",
+        "schema_version": "6.0.0",
         "assembly": {"id": "mini", "name": "最小真实装配"},
         "project_baseline": {
             "resolution": "1h", "start_year": 2026, "scenario_mode": "single",
@@ -596,7 +596,7 @@ def _island_doc() -> dict:
         }
     return {
         "schema": "ies.assembly",
-        "schema_version": "5.0.0",
+        "schema_version": "6.0.0",
         "assembly": {"id": "islands", "name": "双电岛共热网"},
         "project_baseline": {
             "resolution": "1h", "start_year": 2026, "scenario_mode": "single",
@@ -976,7 +976,7 @@ def _pv_25c_inputs():
     contribution = _contribution(catalog.read_text(encoding="utf-8"))
     doc = {
         "schema": "ies.assembly",
-        "schema_version": "5.0.0",
+        "schema_version": "6.0.0",
         "assembly": {"id": "pv-temp", "name": "PV 温度口径"},
         "project_baseline": {
             "resolution": "1h", "start_year": 2025, "scenario_mode": "single",

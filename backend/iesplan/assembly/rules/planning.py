@@ -30,6 +30,7 @@ from iesplan.assembly.diags import ASM_PLAN_DIM, ASM_PLAN_SYNTAX, ASM_PLAN_UNDEF
 from iesplan.assembly.diags import make_asm_diag as make_diag
 from iesplan.assembly.rules.finance import required_components
 from iesplan.assembly.rules.tariff import binding_prices
+from iesplan.core.contracts.planning_config import ConstructionUnit
 from iesplan.core.contracts import (
     SYSTEM_AFTER_TAX_NPV,
     Constraint,
@@ -216,52 +217,6 @@ def _check_expression(
         )
 
 
-def _check_build_scope(
-    doc: Mapping[str, Any],
-    snapshot: EffectiveFinanceConfig,
-    var_name: str,
-    variable: PlanningVariable,
-    diags: list[Diagnostic],
-) -> None:
-    """输入边界建设变量核对(首年建设；无年度索引)。
-
-    - 固定建设成本或年固定运维费为正的 new/costed 实例：必建变量(下界 > 0，建设必然
-      发生)在离散语义实现前按常数计一次放行；可选建设变量(下界为
-      0/缺席)的触发在纯 LP 内无精确表达，明确拒收
-      (``positive_fixed_cost_unsupported``)，不猜 ε/最小建设量，
-      不重定义下界，不放行旧按常数计费路径。
-      ``upfront_capex.fixed`` 缺席或为零 → 无固定成本，不在拒收范畴。
-      无建设变量的固定成本实例走既有静态路径，不在本次核对。
-    """
-    field = f"planning.variables.{var_name}"
-    instances = (doc.get("finance_binding") or {}).get("instances") or {}
-    entry = instances.get(variable.device_ref)
-    if not isinstance(entry, Mapping) or entry.get("type") != "costed":
-        return
-    ft_entry = snapshot.finance_types.get(entry.get("finance_type"))
-    if ft_entry is None or doc["devices"][variable.device_ref]["asset_origin"] != "new":
-        return
-    upfront = ft_entry.upfront_capex
-    annual = ft_entry.annual_fixed_om
-    fixed_costs = (upfront.fixed if upfront is not None else None,
-                   annual.fixed if annual is not None else None)
-    if not any(cost is not None and cost.value > 0 for cost in fixed_costs):
-        return
-    lower = variable.lower_bound
-    if lower is not None and lower > 0:
-        return
-    if variable.activation:
-        return
-    _plan_fail(
-        diags, ASM_PLAN_UNDEF, field, "positive_fixed_cost_unsupported",
-        {
-            "variable": var_name,
-            "device_ref": variable.device_ref,
-            "finance_type": entry.get("finance_type"),
-        },
-    )
-
-
 def check_planning(
     doc: Mapping[str, Any],
     snapshot: EffectiveFinanceConfig,
@@ -320,7 +275,6 @@ def check_planning(
                 },
             )
             continue
-        _check_build_scope(doc, snapshot, var_name, variable, diags)
         if var_name == "step_duration":
             _plan_fail(
                 diags, ASM_PLAN_UNDEF, field, "variable_reserved_collision",
@@ -402,6 +356,41 @@ def check_planning(
                 {"variable": var_name, "unit": unit, "detail": str(exc)},
             )
             allowed[var_name] = Counter()
+    # A construction unit binds one *new* instance and one or more of its
+    # existing planning variables. Never infer mode from hard bounds or costs.
+    seen_units: set[str] = set()
+    seen_scales: set[str] = set()
+    raw_units = planning.get("construction_units", {})
+    if not isinstance(raw_units, Mapping):
+        _plan_fail(diags, ASM_PLAN_UNDEF, "planning.construction_units",
+                   "construction_units_invalid", {"detail": "必须为映射"})
+        raw_units = {}
+    for unit_id, spec in sorted(raw_units.items()):
+        field = f"planning.construction_units.{unit_id}"
+        try:
+            unit = ConstructionUnit.from_dict(spec)
+        except PlanningConfigError as exc:
+            _plan_fail(diags, ASM_PLAN_UNDEF, field, "construction_unit_invalid",
+                       {"detail": str(exc)})
+            continue
+        dev = devices.get(unit.device_ref)
+        if not isinstance(dev, Mapping) or dev.get("asset_origin") != "new":
+            _plan_fail(diags, ASM_PLAN_UNDEF, field, "construction_unit_requires_new",
+                       {"device_ref": unit.device_ref})
+        if unit.device_ref in seen_units:
+            _plan_fail(diags, ASM_PLAN_UNDEF, field, "construction_unit_duplicate_instance",
+                       {"device_ref": unit.device_ref})
+        seen_units.add(unit.device_ref)
+        for variable_id in unit.scales:
+            entry = variables.get(variable_id)
+            if not isinstance(entry, Mapping) or entry.get("device_ref") != unit.device_ref:
+                _plan_fail(diags, ASM_PLAN_UNDEF, f"{field}.scales.{variable_id}",
+                           "construction_unit_scale_wrong_instance",
+                           {"variable": variable_id, "device_ref": unit.device_ref})
+            if variable_id in seen_scales:
+                _plan_fail(diags, ASM_PLAN_UNDEF, f"{field}.scales.{variable_id}",
+                           "construction_unit_duplicate_scale", {"variable": variable_id})
+            seen_scales.add(variable_id)
     instance_ids = {str(k) for k in devices}
     binding_ids = {str(k) for k in binding_prices(doc, snapshot)}
     demand_ids = {str(k) for k in (doc.get("demand_bindings") or {})}
