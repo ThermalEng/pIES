@@ -416,7 +416,12 @@ def pick(changed: list[str], full: bool = False) -> dict[str, str]:
             pg_concurrency = True
         elif path.startswith("backend/tests/"):
             name = path.rsplit("/", 1)[-1]
-            if name == "conftest.py":
+            if name == "p2_mutex_measurement.py":
+                # Test-only experiment helper; evaluate it with real solver
+                # checks rather than treating it as a production subsystem.
+                backend.update((SMOKE_BACKEND, "test_p2_mutex_measurement.py",
+                                "test_p2_s4_integration.py", "test_pr38_review_probes.py"))
+            elif name == "conftest.py":
                 backend_all = True
             elif name in backend_available:
                 backend.add(name)
@@ -722,6 +727,9 @@ def self_test() -> None:
     assert all("tests/" + test in inference["backend_tests"].split()
                for test in GENERATOR_PROJECT_CONSUMERS)
     assert "tax-chain.spec.ts" in inference["browser_specs"]
+    measurement = pick(["backend/tests/p2_mutex_measurement.py"])
+    assert "tests/test_p2_mutex_measurement.py" in measurement["backend_tests"].split()
+    assert "tests/test_pr38_review_probes.py" in measurement["backend_tests"].split()
     assert "tests/test_battery_planning.py" in generator["backend_tests"].split()
     assert "tests/test_step_relations_s2.py" in generator["backend_tests"].split()
     assert "tests/test_finance_s2_execution.py" in generator["backend_tests"].split()
