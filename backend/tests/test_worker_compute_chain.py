@@ -265,11 +265,11 @@ class _StubRuntime:
                 attempt_id=attempt.attempt_id,
                 assembly_id=attempt.assembly_id,
                 calculation_config_id=attempt.calculation_config_id,
-                generator_ref="ies.generator.highs_milp@7.1.0",
+                generator_ref="ies.generator.highs_milp@8.0.0",
                 solver_ref="ies.solver.highs@1.7.2",
                 executor_ref="ies.executor.local_process@1.0.0",
                 executable_ref="ies.solver.highs@1.7.2",
-                result_adapter_ref="ies.result-adapter.highs@6.1.0",
+                result_adapter_ref="ies.result-adapter.highs@7.0.0",
                 status=self._status,
                 termination_reason=self._status,
             ),
@@ -322,7 +322,7 @@ class TestComputeChainEndToEnd:
         assert sealed["compute_result"]["receipt_id"] == sealed["receipt"]["receipt_id"]
         assert sealed["receipt"]["status"] == "succeeded"
         assert sealed["receipt"]["executable_ref"] == "ies.solver.highs@1.7.2"
-        assert sealed["bundle_manifest"]["bundle"]["generator"] == ("ies.generator.highs_milp@7.1.0")
+        assert sealed["bundle_manifest"]["bundle"]["generator"] == ("ies.generator.highs_milp@8.0.0")
         snapshot = worker_app.get_snapshot_record(db, task.calc_snapshot_id)
         assert snapshot is not None
         args = sealed["bundle_manifest"]["command"]["arguments"]
@@ -360,7 +360,7 @@ class TestComputeChainEndToEnd:
         assert task.business_outcome == "normal_completion"
         snapshot = worker_app.get_snapshot_record(db, task.calc_snapshot_id)
         assert snapshot is not None
-        assert snapshot.result_adapter == "ies.result-adapter.highs@6.1.0"
+        assert snapshot.result_adapter == "ies.result-adapter.highs@7.0.0"
 
         evidence = results_store.latest_evidence_for_task(db, task_id)
         assert evidence is not None
@@ -368,11 +368,11 @@ class TestComputeChainEndToEnd:
         assert sealed["outcome"] == "normal_completion"
         assert sealed["compute_result"]["math_status"] == "solved"
         assert sealed["receipt"]["bundle_id"] == f"snapshot-{snapshot.id}:attempt-{claim.attempt_id}"
-        assert sealed["bundle_manifest"]["bundle"]["generator"] == "ies.generator.highs_milp@7.1.0"
+        assert sealed["bundle_manifest"]["bundle"]["generator"] == "ies.generator.highs_milp@8.0.0"
 
         fin = sealed["financial_evaluation"]
         assert fin["schema"] == "ies.financial-evaluation"
-        assert fin["schema_version"] == "3.0.0"
+        assert fin["schema_version"] == "4.0.0"
         assert fin["currency"] == "CNY"
         assert set(fin) == {
             "schema", "schema_version", "status", "evaluation_years",
@@ -741,7 +741,7 @@ class _ControlledGenerator:
                 "network": False,
             },
             outputs=[{"path": "output/solution", "media_type": "text/plain", "required": True}],
-            result_adapter="ies.result-adapter.highs@6.1.0",
+            result_adapter="ies.result-adapter.highs@7.0.0",
         )
         return SolverBundle(manifest=manifest, files={"input/probe": b"synthetic"})
 
@@ -786,7 +786,7 @@ def _controlled_plane(plane, mode: str, started: threading.Event, timeout: float
     )
     controlled = worker_app.ComputeExecutionPlane(
         generator_registry=GeneratorRegistry({
-            "ies.generator.highs_milp@7.1.0": _ControlledGenerator(mode, started, timeout),
+            "ies.generator.highs_milp@8.0.0": _ControlledGenerator(mode, started, timeout),
         }),
         executor_registry=registry,
         adapter_registry=plane.adapter_registry,
@@ -985,7 +985,7 @@ def test_step_relation_real_task_freezes_ports_and_survives_later_draft(
     assert group["indices"]["start"] == 0
     assert result["execution_status"] == "completed"
     assert sealed["receipt"]["status"] == "succeeded"
-    assert sealed["bundle_manifest"]["bundle"]["generator"] == "ies.generator.highs_milp@7.1.0"
+    assert sealed["bundle_manifest"]["bundle"]["generator"] == "ies.generator.highs_milp@8.0.0"
     # Port series is restored from the precise same MPS columns, not rewritten
     # after solve. Immutable sealed series remains attached to the old task.
     series = result["outputs"]["series"]["bat1.electricity"]
