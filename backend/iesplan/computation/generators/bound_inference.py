@@ -211,7 +211,15 @@ class BoundInferenceEngine:
                     terms: dict[str, float] = {initial_sym: -1.0}
                     for (ref, offset), coeff in val.terms:
                         if coeff:
-                            local = self._column(payload.instance, ref, offset)
+                            # P1 initial expressions may directly reference a
+                            # global planning decision rather than a local
+                            # device property; preserve that binding.
+                            if (ref in self.inventory.bound_facts
+                                    or ref in self.inventory.symbols
+                                    or ref in self.variables):
+                                local = ref
+                            else:
+                                local = self._column(payload.instance, ref, offset)
                             terms[local] = terms.get(local, 0.0) + coeff
                     self._add_affine(terms, val.constant, "eq", op.source, op.identity)
             elif isinstance(payload, PlanningRule):
