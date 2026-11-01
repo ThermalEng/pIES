@@ -298,12 +298,6 @@ class BoundInferenceEngine:
                 const = template.expression.constant - template.rhs
                 self._add_affine(terms, const, template.sense, op.source, op.identity)
 
-            elif isinstance(payload, BusBalance):
-                terms = {}
-                for inst, iface, sign in payload.ports:
-                    terms[f"{inst}.{iface}"] = terms.get(f"{inst}.{iface}", 0.0) + sign
-                self._add_affine(terms, 0.0, "eq", op.source, op.identity)
-
         # 2. Collect from RelationFamily (technical equations)
         for family in self.inventory.relations:
             inst = family.source.instance_id
