@@ -70,6 +70,15 @@ def evaluate_mutex_strategies(
 ) -> MutexStrategyComparison:
     """Run isolated benchmark comparing full exact MILP vs candidate on-demand additions."""
     full_model, _, _ = build_project_model(artifact, models, materialized, finance, config, evaluation)
+    mutex_var_names = {v.name for v in full_model.variables if "mutex" in v.name and v.kind == "binary"}
+    if not mutex_var_names and "gen1" in models:
+        from test_project_model import GEN_YAML, _contribution
+        models_aug = dict(models)
+        models_aug["gen1"] = _contribution(
+            GEN_YAML + '    - id: dispatch_spare_mutex\n      expression: "dispatch[t] * spare[t] = 0"\n'
+        )
+        full_model, _, _ = build_project_model(artifact, models_aug, materialized, finance, config, evaluation)
+        mutex_var_names = {v.name for v in full_model.variables if "mutex" in v.name and v.kind == "binary"}
 
     # 1. Full exact model
     mps_text, _ = write_mps(full_model)
@@ -92,7 +101,6 @@ def evaluate_mutex_strategies(
 
     # 2. Candidate on-demand relaxation:
     # Identify mutex auxiliary binary variables and mutex constraints
-    mutex_var_names = {v.name for v in full_model.variables if "mutex" in v.name and v.kind == "binary"}
     mutex_row_names = {r.name for r in full_model.constraints if "mutex" in r.name}
 
     # Base model with mutex constraints relaxed
@@ -135,9 +143,10 @@ def evaluate_mutex_strategies(
             all_feasible = True
             break
 
-        # Check violation: add missing mutex constraints
-        to_add_vars = [v for v in full_model.variables if v.name in mutex_var_names and v not in active_vars]
-        to_add_rows = [r for r in full_model.constraints if r.name in mutex_row_names and r not in active_rows]
+        active_var_names = {v.name for v in active_vars}
+        active_row_names = {r.name for r in active_rows}
+        to_add_vars = [v for v in full_model.variables if v.name in mutex_var_names and v.name not in active_var_names]
+        to_add_rows = [r for r in full_model.constraints if r.name in mutex_row_names and r.name not in active_row_names]
         if not to_add_rows:
             all_feasible = True
             break

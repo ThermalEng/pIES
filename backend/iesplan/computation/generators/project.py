@@ -623,8 +623,12 @@ class _ProjectBuilder:
             pname = self.bound_prop[(inst, ref)]
             spec = self.plan_vars[pname]
             punit = spec.get("unit") or unit
-            raw = spec.get("upper_bound" if side == "upper" else "lower_bound")
-            p_bound = None if raw is None else _to_internal(float(raw), punit)
+            var = self.variables.get(pname)
+            if side == "lower":
+                raw_lo = spec.get("lower_bound")
+                p_bound = None if raw_lo is None else _to_internal(float(raw_lo), punit)
+            else:
+                p_bound = var.upper if var is not None else None
             if num_internal is not None and p_bound is not None:
                 bound = min(num_internal, p_bound) if side == "upper" else max(num_internal, p_bound)
             elif num_internal is not None:
@@ -3337,7 +3341,18 @@ class _ProjectBuilder:
             residual_amount.add_scaled(depreciable, residual)
         else:
             residual_amount = _AffineAcc()
-            inst = getattr(source.payload, "instance", None) if hasattr(source, "payload") else None
+            inst = None
+            if hasattr(source, "instance"):
+                inst = source.instance
+            elif hasattr(source, "payload") and hasattr(source.payload, "instance"):
+                inst = source.payload.instance
+            elif hasattr(source, "finance_type"):
+                ft = source.finance_type
+                instances = (self.doc.get("finance_binding") or {}).get("instances") or {}
+                for dev_id, b_entry in instances.items():
+                    if isinstance(b_entry, Mapping) and b_entry.get("finance_type") == ft:
+                        inst = dev_id
+                        break
             z_name = f"built_{inst}" if inst else None
             is_optional = (
                 z_name is not None and z_name in self.variables and self.variables[z_name].lower == 0.0

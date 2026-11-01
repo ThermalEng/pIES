@@ -139,6 +139,8 @@ class PlanningVariable:
     lower_bound: Decimal | None = None
     upper_bound: Decimal | None = None
     unit: str | None = None
+    activation: bool = False
+    optional: bool = False
 
     def __post_init__(self) -> None:
         if not isinstance(self.device_ref, str) or not self.device_ref.strip():
@@ -164,7 +166,7 @@ class PlanningVariable:
             raise PlanningConfigError("规划变量 unit 必须为非空字符串")
 
     def to_dict(self) -> dict:
-        return {
+        res: dict[str, Any] = {
             "device_ref": self.device_ref,
             "parameter": self.parameter,
             "lower_bound": (
@@ -179,6 +181,11 @@ class PlanningVariable:
             ),
             "unit": self.unit,
         }
+        if self.activation:
+            res["activation"] = True
+        if self.optional:
+            res["optional"] = True
+        return res
 
     @classmethod
     def from_dict(cls, mapping: object) -> "PlanningVariable":
@@ -187,6 +194,7 @@ class PlanningVariable:
         unknown = set(mapping) - {
             "device_ref", "parameter",
             "lower_bound", "upper_bound", "unit",
+            "activation", "optional",
         }
         if unknown:
             raise PlanningConfigError(f"规划变量存在未知字段: {sorted(unknown)}")
@@ -209,6 +217,8 @@ class PlanningVariable:
                 if mapping.get("unit") is not None
                 else None
             ),
+            activation=bool(mapping.get("activation", False)),
+            optional=bool(mapping.get("optional", False)),
         )
 
 @dataclass(frozen=True, slots=True)

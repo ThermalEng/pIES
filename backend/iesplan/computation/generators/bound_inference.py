@@ -16,10 +16,12 @@ from typing import Any, Mapping
 
 from iesplan.computation.generators.compiler_ir import (
     BoundFact,
+    BusBalance,
     CapacityLimit,
     CompilerInventory,
     IndexDomain,
     KnownCoefficient,
+    PlanningRule,
     RelationFamily,
     SemanticRelation,
     SourceLocation,
@@ -92,6 +94,8 @@ def _node_to_affine(
             symbol_name = inventory.property_bindings.get((inst, local), f"{inst}.{local}")
         else:
             symbol_name = local
+        if node.offset != 0:
+            symbol_name = f"{symbol_name}[t{node.offset:+d}]"
         return ({symbol_name: 1.0}, 0.0)
 
     if isinstance(node, UnaryNode):
@@ -117,7 +121,7 @@ def _node_to_affine(
             merged = dict(l_terms)
             for k, v in r_terms.items():
                 total = merged.get(k, 0.0) + v
-                if abs(total) < _TOLERANCE:
+                if total == 0.0:
                     merged.pop(k, None)
                 else:
                     merged[k] = total
@@ -127,7 +131,7 @@ def _node_to_affine(
             merged = dict(l_terms)
             for k, v in r_terms.items():
                 total = merged.get(k, 0.0) - v
-                if abs(total) < _TOLERANCE:
+                if total == 0.0:
                     merged.pop(k, None)
                 else:
                     merged[k] = total
@@ -140,20 +144,20 @@ def _node_to_affine(
             if not l_terms:
                 # Left is constant: scale right
                 factor = l_const
-                scaled = {k: v * factor for k, v in r_terms.items() if abs(v * factor) >= _TOLERANCE}
+                scaled = {k: v * factor for k, v in r_terms.items() if (v * factor) != 0.0}
                 return (scaled, r_const * factor)
             else:
                 # Right is constant: scale left
                 factor = r_const
-                scaled = {k: v * factor for k, v in l_terms.items() if abs(v * factor) >= _TOLERANCE}
+                scaled = {k: v * factor for k, v in l_terms.items() if (v * factor) != 0.0}
                 return (scaled, l_const * factor)
 
         if node.op == "/":
             # Linear only if right is non-zero constant
-            if r_terms or abs(r_const) < _TOLERANCE:
+            if r_terms or r_const == 0.0:
                 return None
             factor = 1.0 / r_const
-            scaled = {k: v * factor for k, v in l_terms.items() if abs(v * factor) >= _TOLERANCE}
+            scaled = {k: v * factor for k, v in l_terms.items() if (v * factor) != 0.0}
             return (scaled, l_const * factor)
 
     return None
@@ -213,8 +217,8 @@ class BoundInferenceEngine:
         source: SourceLocation | None = None,
         relation_id: str | None = None,
     ) -> None:
-        filtered = tuple(sorted((k, v) for k, v in terms.items() if abs(v) >= _TOLERANCE))
-        if not filtered and abs(constant) > _TOLERANCE:
+        filtered = tuple(sorted((k, v) for k, v in terms.items() if v != 0.0))
+        if not filtered and constant != 0.0:
             # 0 (sense) -constant
             if sense == "eq" or (sense == "le" and constant > 0) or (sense == "ge" and constant < 0):
                 raise LoweringUnsupportedError(
@@ -227,7 +231,9 @@ class BoundInferenceEngine:
 
         for sym, _ in filtered:
             if sym not in self.bounds:
-                self.bounds[sym] = (None, None)
+                base_sym = sym.split("[")[0] if "[" in sym else sym
+                base_lo, base_hi = self.bounds.get(base_sym, (None, None))
+                self.bounds[sym] = (base_lo, base_hi)
 
         rel = AffineRelation(filtered, constant, sense, source, relation_id)
         self.relations.append(rel)
@@ -235,8 +241,7 @@ class BoundInferenceEngine:
         # Register direct substitution for equalities
         if sense == "eq":
             term_dict = dict(filtered)
-            # Find a variable with unit magnitude if possible
-            lead_var = next((k for k, v in term_dict.items() if abs(abs(v) - 1.0) < _TOLERANCE), filtered[0][0])
+            lead_var = next((k for k, v in term_dict.items() if v == 1.0 or v == -1.0), filtered[0][0])
             lead_coeff = term_dict[lead_var]
             sub_terms = {
                 k: -v / lead_coeff for k, v in term_dict.items() if k != lead_var
@@ -269,7 +274,7 @@ class BoundInferenceEngine:
                 elif isinstance(val, LinearExpression):
                     terms = {}
                     for (ref, _), coeff in val.terms:
-                        if abs(coeff) < _TOLERANCE:
+                        if coeff == 0.0:
                             continue
                         ref_name = self.inventory.property_bindings.get((payload.instance, ref))
                         if not ref_name:
@@ -280,6 +285,24 @@ class BoundInferenceEngine:
                         terms[ref_name] = coeff
                     terms[initial_sym] = -1.0
                     self._add_affine(terms, val.constant, "eq", op.source, op.identity)
+
+            elif isinstance(payload, PlanningRule):
+                template = payload.template
+                terms = {}
+                for (sym, _), coeff in template.expression.terms:
+                    if coeff != 0.0:
+                        ref_name = sym
+                        if op.source and op.source.instance_id:
+                            ref_name = self.inventory.property_bindings.get((op.source.instance_id, sym), sym)
+                        terms[ref_name] = coeff
+                const = template.expression.constant - template.rhs
+                self._add_affine(terms, const, template.sense, op.source, op.identity)
+
+            elif isinstance(payload, BusBalance):
+                terms = {}
+                for inst, iface, sign in payload.ports:
+                    terms[f"{inst}.{iface}"] = terms.get(f"{inst}.{iface}", 0.0) + sign
+                self._add_affine(terms, 0.0, "eq", op.source, op.identity)
 
         # 2. Collect from RelationFamily (technical equations)
         for family in self.inventory.relations:
@@ -380,21 +403,27 @@ class BoundInferenceEngine:
                     next_hi = cur_hi
 
                     if new_lo is not None:
-                        if cur_lo is None or new_lo > cur_lo + _TOLERANCE:
+                        if cur_lo is None or new_lo > cur_lo:
                             next_lo = new_lo
                             tightened = True
                     if new_hi is not None:
-                        if cur_hi is None or new_hi < cur_hi - _TOLERANCE:
+                        if cur_hi is None or new_hi < cur_hi:
                             next_hi = new_hi
                             tightened = True
 
                     if tightened:
-                        if next_lo is not None and next_hi is not None and next_lo > next_hi + _TOLERANCE:
+                        if next_lo is not None and next_hi is not None and next_lo > next_hi + 1e-9:
                             raise LoweringUnsupportedError(
                                 f"关系推导冲突：符号 {target_sym!r} 推导下界 {next_lo} > 上界 {next_hi}",
                                 model_source=({"location": asdict(rel.source)} if rel.source else None),
                             )
                         self.bounds[target_sym] = (next_lo, next_hi)
+                        if "[" in target_sym:
+                            base_sym = target_sym.split("[")[0]
+                            b_lo, b_hi = self.bounds.get(base_sym, (None, None))
+                            n_b_lo = next_lo if b_lo is None else (next_lo if next_lo is not None and next_lo > b_lo else b_lo)
+                            n_b_hi = next_hi if b_hi is None else (next_hi if next_hi is not None and next_hi < b_hi else b_hi)
+                            self.bounds[base_sym] = (n_b_lo, n_b_hi)
                         cur_lo_src, cur_hi_src = self.provenance.get(target_sym, (None, None))
                         self.provenance[target_sym] = (
                             rel.source if next_lo != cur_lo else cur_lo_src,
@@ -419,7 +448,7 @@ class BoundInferenceEngine:
                     cur_const += coeff * sub_const
                     for k, v in sub_terms.items():
                         total = cur_terms.get(k, 0.0) + coeff * v
-                        if abs(total) < _TOLERANCE:
+                        if total == 0.0:
                             cur_terms.pop(k, None)
                         else:
                             cur_terms[k] = total
@@ -451,13 +480,9 @@ class BoundInferenceEngine:
             if set(r_dict) == set(simp_terms):
                 first_k = next(iter(simp_terms))
                 factor = r_dict[first_k] / simp_terms[first_k]
-                if all(abs(r_dict[k] - factor * simp_terms[k]) < _TOLERANCE for k in simp_terms):
-                    # rel: factor * (simp_terms) + rel.constant (sense) 0
-                    # factor * simp_expr + (rel.constant - factor * simp_const) (sense) 0
+                if all(abs(r_dict[k] - factor * simp_terms[k]) < 1e-9 for k in simp_terms):
                     if factor > 0:
                         if rel.sense == "le" and side == "max":
-                            # factor * simp_terms <= -rel.constant
-                            # simp_terms <= -rel.constant / factor
                             val = simp_const - rel.constant / factor
                             best_rel_bound = val if best_rel_bound is None else min(best_rel_bound, val)
                         elif rel.sense == "ge" and side == "min":
@@ -474,12 +499,11 @@ class BoundInferenceEngine:
         # Interval evaluation on remaining terms
         total = simp_const
         for sym, coeff in simp_terms.items():
-            if abs(coeff) < _TOLERANCE:
+            if coeff == 0.0:
                 continue
             lo, hi = self.bounds.get(sym, (None, None))
             val = hi if (coeff > 0.0) == (side == "max") else lo
             if val is None or not math.isfinite(val):
-                # Cannot determine from interval alone
                 return best_rel_bound
             total += coeff * val
 

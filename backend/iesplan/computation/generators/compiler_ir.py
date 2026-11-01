@@ -466,6 +466,16 @@ class CompilerAnalysis:
         inf_lo, inf_hi = self.inference.bounds.get(resolved_name, (None, None))
         if inf_lo is None and inf_hi is None:
             inf_lo, inf_hi = self.inference.bounds.get(name, (None, None))
+        if (inf_lo is None or inf_hi is None) and "__t" in name:
+            base, _, step_str = name.rpartition("__t")
+            if step_str.isdigit():
+                inst, _, local = base.partition("__")
+                base_sym = f"{inst}.{local}"
+                b_lo, b_hi = self.inference.bounds.get(base_sym, (None, None))
+                if inf_lo is None:
+                    inf_lo = b_lo
+                if inf_hi is None:
+                    inf_hi = b_hi
 
         if variable is None and inf_lo is None and inf_hi is None:
             fact = self.inventory.bound_facts.get(resolved_name) or self.inventory.bound_facts.get(name)

@@ -93,6 +93,7 @@ _PLANNING_KEYS: tuple[str, ...] = ("objective", "variables", "constraints")
 _VARIABLE_KEYS: tuple[str, ...] = (
     "device_ref", "parameter",
     "lower_bound", "upper_bound", "unit",
+    "activation", "optional",
 )
 
 #: 全项目统一计算分辨率(均能确定性切分一天:96/48/24 步)

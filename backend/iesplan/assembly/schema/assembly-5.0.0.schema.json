@@ -493,6 +493,12 @@
                   "null"
                 ],
                 "minLength": 1
+              },
+              "activation": {
+                "type": "boolean"
+              },
+              "optional": {
+                "type": "boolean"
               }
             },
             "additionalProperties": false

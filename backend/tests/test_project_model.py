@@ -786,7 +786,8 @@ def test_planning_takeover_bounds_follow_planning_var() -> None:
     assert by_var["gen1__power_out__t0"].upper == pytest.approx(500000.0)
     assert by_var["gen1__power_out__t0"].lower == pytest.approx(10000.0)
     assert by_var["gen1__dispatch__t0"].upper == pytest.approx(500000.0)
-    assert by_var["gen1__spare__t0"].upper is None
+    # P2: 规划未给上界时保留模型硬上界 1000 kW (1000000 W)
+    assert by_var["gen1__spare__t0"].upper == pytest.approx(1000000.0)
     rows = {row.name: row for row in model.constraints}
     # 首年建设：全期所有 step 的容量行引用同一建设容量变量。
     cap = rows["gen1__power_out__plan_max__t0"]

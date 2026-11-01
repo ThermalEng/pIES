@@ -250,6 +250,8 @@ def _check_build_scope(
     lower = variable.lower_bound
     if lower is not None and lower > 0:
         return
+    if variable.activation:
+        return
     _plan_fail(
         diags, ASM_PLAN_UNDEF, field, "positive_fixed_cost_unsupported",
         {
