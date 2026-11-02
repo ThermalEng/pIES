@@ -158,7 +158,7 @@ def test_fixed_residual_zero_basis_does_not_request_a_lower_bound() -> None:
         def __init__(self) -> None:
             self.sides: list[str] = []
 
-        def affine_side(self, affine, *, side, label, relation, period):
+        def affine_side(self, affine, *, side, label, relation, period, required=True):
             self.sides.append(side)
             return 0.0
 
@@ -180,6 +180,37 @@ def test_fixed_residual_zero_basis_does_not_request_a_lower_bound() -> None:
     assert builder.analysis.sides == ["max"]
     assert amount.terms == {}
     assert amount.constant == 0.0
+
+
+def test_fixed_residual_formed_basis_uses_only_its_proven_lower_side() -> None:
+    """B=50000+3500q, q>=0, R=100 needs no finite capacity upper bound."""
+    from iesplan.computation.generators.compiler_ir import CompilerAnalysis, CompilerInventory
+
+    inventory = CompilerInventory()
+    inventory.seal()
+    source = SimpleNamespace(identity="formed_asset", to_dict=lambda: {})
+    entry = SimpleNamespace(
+        base_from=source, residual=SimpleNamespace(value=100.0, unit="CNY"),
+        life_years=10,
+    )
+    relation = SimpleNamespace(
+        identity="depreciation.income.0", source=None,
+        payload=SimpleNamespace(entry=entry, rule_id="income"),
+    )
+    basis = _AffineAcc()
+    basis.add_const(50000.0)
+    basis.add_term("q", 3500.0)
+    builder = object.__new__(_ProjectBuilder)
+    builder.analysis = CompilerAnalysis(inventory, {"q": LinearVariable("q", 0.0, None)})
+    builder._source_net = lambda _source, relation=None: basis
+    builder._fixed_residuals = {}
+    builder._fact_depr = []
+    builder.rows = []
+
+    annual = builder._income_depreciation_affine(relation, 1, {}, "income")
+    assert annual.constant == 4990.0
+    assert annual.terms == {"q": 350.0}
+    assert builder.rows == []
 
 
 def test_mandatory_construction_fixes_status_to_one() -> None:

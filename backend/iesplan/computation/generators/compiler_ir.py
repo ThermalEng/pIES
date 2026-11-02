@@ -7,7 +7,7 @@ source references leave this inventory in the paired Bundle metadata.
 from __future__ import annotations
 
 from collections import defaultdict
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass, field
 import math
 
@@ -323,7 +323,8 @@ class CompilerAnalysis:
     P2 can replace the interval logic here without changing the consumers.
     """
 
-    def __init__(self, inventory: CompilerInventory, variables: Mapping[str, LinearVariable]):
+    def __init__(self, inventory: CompilerInventory, variables: Mapping[str, LinearVariable],
+                 *, checkpoint: Callable[[], None] | None = None):
         if not inventory.sealed:
             raise RuntimeError("relation collection must be complete before analysis")
         self.inventory = inventory
@@ -355,10 +356,20 @@ class CompilerAnalysis:
         self.uses = {name: frozenset(ids) for name, ids in uses.items()}
         self.bound_requests: list[BoundRequest] = []
         from iesplan.computation.generators.bound_inference import BoundInferenceEngine
-        self.inference = BoundInferenceEngine(inventory, variables)
+        self.inference = BoundInferenceEngine(inventory, variables, checkpoint=checkpoint)
+
+    def technical_rows(self, identity: str, step: int) -> tuple[LinearConstraint, ...] | None:
+        """Reuse bound-independent affine rows from this same analysis pass."""
+        rows = self.inference.technical_rows.get(identity)
+        return None if rows is None else rows[step]
 
     def relations(self, kind: str) -> tuple[SemanticRelation, ...]:
         return self._groups.get(kind, ())
+
+    @property
+    def propagation_stats(self):
+        """Return work counters from the completed bound-analysis pass."""
+        return self.inference.propagation_stats
 
     def operation(self, identity: str) -> SemanticRelation:
         return self._by_id[identity]
@@ -504,7 +515,8 @@ class CompilerAnalysis:
     def affine_side(
         self, affine: object, *, side: str, label: str,
         relation: SemanticRelation | None = None, period: int | None = None,
-    ) -> float:
+        required: bool = True,
+    ) -> float | None:
         terms = getattr(affine, "terms", {})
         constant = float(getattr(affine, "constant", 0.0))
         inferred = self.inference.bound_affine(terms, constant, side=side)
@@ -513,19 +525,6 @@ class CompilerAnalysis:
         else:
             if self.inference.conflicts:
                 raise self.inference.conflict_error()
-            unresolved = sorted(
-                name for name, coefficient in terms.items()
-                if coefficient and name in self.inference.incomplete_symbols
-            )
-            if self.inference.budget_exhausted and unresolved:
-                raise LoweringUnsupportedError(
-                    f"{label}界分析工作预算耗尽：变量 {unresolved[0]!r} 的界尚未确定",
-                    model_source=({
-                        "source": f"relation:{relation.identity}", "role": "bound",
-                        "axis": relation.domain.kind, "index": period or 0,
-                        "location": {k: v for k, v in asdict(relation.source).items() if v is not None},
-                    } if relation is not None else None),
-                )
             total = constant
             for name, coeff in terms.items():
                 if coeff == 0.0:
@@ -533,10 +532,15 @@ class CompilerAnalysis:
                 lo, hi = self.variable_bounds(name)
                 value = hi if (coeff > 0.0) == (side == "max") else lo
                 if value is None or not math.isfinite(value):
-                    if self.inference.conflicts:
-                        raise self.inference.conflict_error()
+                    if not required:
+                        return None
+                    incomplete = (self.inference.budget_exhausted
+                                  and name in self.inference.incomplete_symbols)
+                    direction = "上界" if side == "max" else "下界"
+                    detail = (f"界分析工作预算耗尽：{direction}尚未确定"
+                              if incomplete else f"缺有限界（所需表达式{direction}）")
                     raise LoweringUnsupportedError(
-                        f"{label}缺有限界：变量 {name!r} 界不足，无法精确",
+                        f"{label}{detail}：变量 {name!r} 界不足，无法精确",
                         model_source=({
                             "source": f"relation:{relation.identity}", "role": "bound",
                             "axis": relation.domain.kind, "index": period or 0,

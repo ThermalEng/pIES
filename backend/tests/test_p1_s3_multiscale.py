@@ -118,7 +118,8 @@ def test_cross_year_two_instance_resource_repeats_and_block_choices(tmp_path):
         # every execution still binds 17,520 distinct actual time rows.
         if kind == "s3_production":
             assert builder.template_stats["technical_compiles"] == 1
-            assert builder.template_stats["technical_binds"] == 2 * 17520
+            assert builder.template_stats["technical_binds"] == 0
+            assert builder.template_stats["technical_reuses"] == 2 * 17520
             assert builder.template_stats["step_compiles"] == 1
             assert builder.template_stats["step_binds"] == 17520
         else:
@@ -314,7 +315,8 @@ def test_direct_global_row_emitter_against_prior_s3_in_same_docker(tmp_path):
                 assert objective_offset == reference_offset
             direct = builder.template_stats["affine_direct_rows"]
             assert (direct > 0) == (name == "s3_direct_global_row")
-            assert builder.template_stats["technical_binds"] == 35040
+            assert (builder.template_stats["technical_binds"]
+                    + builder.template_stats["technical_reuses"]) == 35040
             assert builder.template_stats["step_binds"] == 17520
             report.append({
                 "order": index + 1, "path": name, "wall_ms": wall_ms,
@@ -417,7 +419,8 @@ def _run_untraced_samples(sequence, samples, builder_factory):
         assert signature == expected_signature
         if kind == "s3_production":
             assert builder.template_stats["technical_compiles"] == 1
-            assert builder.template_stats["technical_binds"] == 35040
+            assert builder.template_stats["technical_binds"] == 0
+            assert builder.template_stats["technical_reuses"] == 35040
             assert builder.template_stats["step_binds"] == 17520
             assert builder.template_stats["affine_direct_rows"] > 0
         else:

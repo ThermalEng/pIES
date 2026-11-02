@@ -493,6 +493,7 @@ class _ProjectBuilder:
         self.template_stats: dict[str, int | float] = {
             "technical_compiles": 0,
             "technical_binds": 0,
+            "technical_reuses": 0,
             "affine_direct_rows": 0,
             "mutex_fallback_relations": 0,
             "step_compiles": 0,
@@ -1914,7 +1915,9 @@ class _ProjectBuilder:
                     template, known, statics["initial"], predefined, statics["symbols"],
                 )
         self.inventory.seal()
-        self.analysis = CompilerAnalysis(self.inventory, self.variables)
+        self.analysis = CompilerAnalysis(
+            self.inventory, self.variables, checkpoint=self._checkpoint,
+        )
         self._register_sources()
 
     def _blocks(self):
@@ -2110,6 +2113,12 @@ class _ProjectBuilder:
                 for family in families:
                     template = self._technical_templates[family.identity]
                     self._source(family.identity, "equation", "step", step, kind="technical")
+                    reused = self.analysis.technical_rows(family.identity, step)
+                    if reused is not None:
+                        self.rows.extend(reused)
+                        self.template_stats["technical_reuses"] += 1
+                        self.template_stats["affine_direct_rows"] += len(reused)
+                        continue
                     lowered = bind_technical(
                         template, instance=inst, step=step, known=known,
                         initial=initial, bound=bounds,
@@ -3484,18 +3493,23 @@ class _ProjectBuilder:
                 else:
                     basis_hi = self.analysis.affine_side(
                         depreciable, side="max", label=position,
-                        relation=relation, period=year,
+                        relation=relation, period=year, required=False,
                     )
-                    if basis_hi <= 0.0:
+                    if basis_hi is not None and basis_hi <= 0.0:
                         pass
                     else:
                         basis_lo = self.analysis.affine_side(
                             depreciable, side="min", label=position,
-                            relation=relation, period=year,
+                            relation=relation, period=year, required=False,
                         )
-                        if basis_lo >= residual:
+                        if basis_lo is not None and basis_lo >= residual:
                             residual_amount.add_const(residual)
                         else:
+                            if basis_hi is None:
+                                basis_hi = self.analysis.affine_side(
+                                    depreciable, side="max", label=position,
+                                    relation=relation, period=year,
+                                )
                             name = f"asset_formed__{len(self._fixed_residuals)}"
                             self._declare(name, 0.0, 1.0, "binary", "1")
                             # B <= U*y; B >= R*y. When y=0 B=0, when B>0
