@@ -11,7 +11,7 @@ Requirements verified:
 from __future__ import annotations
 
 import json
-from dataclasses import replace
+from dataclasses import asdict, replace
 from types import SimpleNamespace
 
 import pytest
@@ -33,6 +33,7 @@ from iesplan.computation.generators.project import (
 )
 from iesplan.computation.result_adapters.highs import HIGHS_ADAPTER
 from iesplan.finance import (
+    ConstructionPayment,
     EffectiveFinanceConfig,
     EvaluationInput,
     FinanceProfile,
@@ -325,9 +326,51 @@ def test_highs_solve_optional_construction_zero_and_active(tmp_path) -> None:
     from iesplan.computation.protocols import ExecutionReceipt
     SOLUTION_PATH = "output/solution.sol"
 
-    # Case A: 最小化 upfront 且无负荷需求 => 最优解为零建设 (built__gen_build=0, gen_cap=0)
+    # Case A: 无负荷收入，明确支付全额建设费 => 税后最优为零建设。
     artifact, models, materialized, finance, config, evaluation = _activation_inputs(
         optional=True, fixed_fee=50000.0, lower_kw=0.0,
+    )
+    # Tax and terminal recovery consume the same optional asset, including
+    # a positive fixed annual fee and a fixed residual. Zero build must not
+    # create a payment, deductible expense, depreciation or recovery.
+    payload = _finance_payload()
+    payload["finance_types"]["tank_sys"]["upfront_capex"] = {
+        "fixed": {"value": "50000", "unit": "CNY"},
+        "linear": {"cap": {"unit_cost": {"value": "3500", "unit": "CNY/kW"}}},
+    }
+    payload["finance_types"]["tank_sys"]["annual_fixed_om"]["fixed"] = {
+        "value": "200", "unit": "CNY/a",
+    }
+    payload["taxes"] = {"income_tag": {
+        "display_name": "Synthetic income", "tax_type": "income_tax",
+        "applies_to": "tank_sys.upfront_capex",
+    }}
+    source = {"kind": "upfront_capex_net", "finance_type": "tank_sys",
+              "scope": {"kind": "all_new_instances"}}
+    payload["tax_rules"] = {"income": {
+        "kind": "income_tax", "label_ref": "income_tag", "rate": {"value": "0.25", "unit": "1"},
+        "revenue": [], "energy_cost": [], "annual_om": ["tank_sys.annual_fixed_om"],
+        "variable_om": [], "deductible_maintenance": {"mode": "explicit_items", "items": []},
+        "depreciation": [{
+            "base_from": source, "method": "straight_line", "life_years": 10,
+            "first_year": 1, "residual": {"value": "100", "unit": "CNY"},
+        }],
+        "loss_carryforward_years": 5, "opening_losses": [],
+    }}
+    payload["net_cashflows"] = {"recovery": {
+        "at": {"kind": "evaluation_end"}, "direction": "inflow",
+        "amount": {"kind": "source_share", "base_from": source,
+                   "ratio": {"value": "0.05", "unit": "1"}},
+    }}
+    finance = merge_effective(FinanceProfile.from_dict(payload), None)
+    doc = json.loads(artifact.canonical_text)
+    doc["planning"]["objective"] = {"sense": "maximize", "expression": "system.after_tax_npv"}
+    doc["finance_binding"]["instances"]["gen1"]["cost_occurrence"]["annual_fixed_om.fixed"] = {
+        "kind": "construction_unit", "unit_ref": "gen_build",
+    }
+    artifact = replace(artifact, canonical_text=json.dumps(doc))
+    evaluation = replace(
+        evaluation, construction_payments=(ConstructionPayment(t=0, ratio=1.0),),
     )
     bundle = HIGHS_MILP_PROVIDER.generate(artifact, models, materialized, finance, config, evaluation)
     mps_bytes = bundle.files["input/problem.mps"]
@@ -350,11 +393,39 @@ def test_highs_solve_optional_construction_zero_and_active(tmp_path) -> None:
     facts = adapted.outputs["financial_facts"]
     assert "construction_units" in facts
     status_entry = next(s for s in facts["construction_units"] if s["instance_id"] == "gen1")
+    assert status_entry["built"] is False, {
+        "status": status_entry, "capex": facts["construction_total"],
+        "om": facts["annual_fixed_om"], "flows": facts["annual_net_flows"],
+    }
+    scale = next(v for v in status_entry["scales"] if v["planning_variable_id"] == "gen_cap")
+    assert type(scale["value"]) is float
+    assert scale["value"] == 0.0 and scale["unit"] == "kW"
+    assert float(facts["construction_total"]) == 0.0
+    assert float(facts["annual_fixed_om"]) == 0.0
+    assert len(facts["payments_applied"]) == len(facts["net_cashflows"]) == 1
+    assert len(facts["tax_cash"]["depreciation"]) == len(facts["tax_cash"]["income"]) == 1
+    assert all(float(item["amount"]) == 0.0 for item in facts["payments_applied"])
+    assert all(float(item["amount"]) == 0.0 for item in facts["net_cashflows"])
+    assert all(float(item["amount"]) == 0.0 for item in facts["tax_cash"]["depreciation"])
+    assert all(float(item["tax"]) == 0.0 for item in facts["tax_cash"]["income"])
+    assert all(float(value) == 0.0 for value in facts["annual_net_flows"])
+    from iesplan.application.worker.compute_cases import build_financial_evaluation
+
+    sealed = build_financial_evaluation(
+        SimpleNamespace(evaluation=asdict(evaluation)), finance, adapted,
+    )
+    assert sealed["construction_units"] == [{
+        "unit_id": "gen_build", "instance_id": "gen1", "mode": "optional", "built": False,
+        "scales": [{"planning_variable_id": "gen_cap", "value": 0.0, "unit": "kW"}],
+    }]
+    assert json.loads(json.dumps(sealed))["construction_units"][0]["scales"][0]["value"] == 0.0
     # Case B: 强制建设 (lower_bound = 50 kW) => 最优解为建成 (built__gen_build=1, gen_cap=50kW)
     artifact_b, models_b, materialized_b, finance_b, config_b, evaluation_b = _activation_inputs(
         optional=True, fixed_fee=50000.0, lower_kw=50.0,
     )
-    bundle_b = HIGHS_MILP_PROVIDER.generate(artifact_b, models_b, materialized_b, finance_b, config_b, evaluation_b)
+    bundle_b = HIGHS_MILP_PROVIDER.generate(
+        artifact_b, models_b, materialized_b, finance_b, config_b, evaluation_b,
+    )
     mps_b = bundle_b.files["input/problem.mps"]
     (tmp_path / "case_b").mkdir(exist_ok=True)
     (tmp_path / "case_b" / "problem.mps").write_bytes(mps_b)
@@ -374,9 +445,34 @@ def test_highs_solve_optional_construction_zero_and_active(tmp_path) -> None:
     facts_b = adapted_b.outputs["financial_facts"]
     status_entry_b = next(s for s in facts_b["construction_units"] if s["instance_id"] == "gen1")
     assert status_entry_b["built"] is True
-    assert float(next(v["value"] for v in status_entry_b["scales"] if v["planning_variable_id"] == "gen_cap")) == pytest.approx(50.0)  # business unit kW
+    scale_b = next(v for v in status_entry_b["scales"] if v["planning_variable_id"] == "gen_cap")
+    assert type(scale_b["value"]) is float
+    assert scale_b["value"] == pytest.approx(50.0) and scale_b["unit"] == "kW"
     # Total upfront = fixed 50000 + 3500 CNY/kW * 50 kW = 50000 + 175000 = 225000 CNY
     assert float(facts_b["construction_total"]) == pytest.approx(225000.0)
+
+    # Case C: mandatory does not imply a positive minimum scale. Preserve
+    # built=True, q=0, and the explicitly triggered fixed construction fee.
+    inputs_c = _activation_inputs(optional=False, fixed_fee=50000.0, lower_kw=0.0)
+    bundle_c = HIGHS_MILP_PROVIDER.generate(*inputs_c)
+    directory = tmp_path / "case_c"
+    directory.mkdir()
+    (directory / "problem.mps").write_bytes(bundle_c.files["input/problem.mps"])
+    solved_c = subprocess.run(
+        ["/usr/local/bin/ies-highs-solver", "problem.mps", "--solution_file", "values.sol",
+         "--time_limit", "30", "--random_seed", "0"],
+        cwd=directory, text=True, capture_output=True, check=False,
+    )
+    assert solved_c.returncode == 0, solved_c.stderr
+    adapted_c = HIGHS_ADAPTER.adapt(bundle_c, _receipt(), {
+        SOLUTION_PATH: (directory / "values.sol").read_bytes(),
+    })
+    assert adapted_c.math_status == "solved"
+    facts_c = adapted_c.outputs["financial_facts"]
+    unit_c = facts_c["construction_units"][0]
+    assert unit_c["built"] is True and unit_c["mode"] == "mandatory"
+    assert unit_c["scales"][0]["value"] == 0.0
+    assert float(facts_c["construction_total"]) == 50000.0
 
 
 

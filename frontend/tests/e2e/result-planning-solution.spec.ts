@@ -2,7 +2,8 @@
 //
 // 场景: 真实 HiGHS 优化求解, 同类型不同实例(hp1/hp2, 均为 heat_pump)
 // 各带一个规划变量, 下界不同(50/200 kW), 最小化建设费 → 解唯一确定
-// (hp1_cap=50, hp2_cap=200), 证明实例级绑定而非按类型猜。
+// (hp1_cap=50, hp2_cap=200), 证明实例级绑定而非按类型猜；另保留同一
+// 流程的必建零规模分支，建设状态不能被容量阈值覆盖。
 // 项目/画像/财务/冻结脚手架走公开 API(复用 financial-scaffold), 求解提交、
 // 预览查看、选择走 GUI; 不注库、不伪造 ComputeResult, 画布拖放不测。
 
@@ -23,7 +24,8 @@ interface PlanParam {
 test.describe('S3-A: 规划解参数预览与历史来源', () => {
   test.setTimeout(900_000)
 
-  test('双实例规划解预览同源, 历史来源不受当前编辑影响', async ({ browser }) => {
+  for (const secondCapacity of [200, 0]) {
+  test(`双实例规划解预览同源, 历史来源不受当前编辑影响 (hp2=${secondCapacity}kW)`, async ({ browser }) => {
     const username = uniqueName('es-s3a')
     const password = strongPassword('Init')
     const projectName = uniqueName('S3A规划解项目')
@@ -90,7 +92,13 @@ test.describe('S3-A: 规划解参数预览与历史来源', () => {
         },
         variables: {
           hp1_cap: { device_ref: 'hp1', parameter: 'rated_heat_kw', lower_bound: '50', upper_bound: '1000', unit: 'kW' },
-          hp2_cap: { device_ref: 'hp2', parameter: 'rated_heat_kw', lower_bound: '200', upper_bound: '1000', unit: 'kW' },
+          hp2_cap: { device_ref: 'hp2', parameter: 'rated_heat_kw', lower_bound: String(secondCapacity), upper_bound: secondCapacity === 0 ? '0' : '1000', unit: 'kW' },
+        },
+        construction_units: {
+          first_build: { device_ref: 'hp1', mode: 'optional',
+            scales: { hp1_cap: { active_lower_bound: '0', active_upper_bound: null } } },
+          second_build: { device_ref: 'hp2', mode: 'mandatory',
+            scales: { hp2_cap: { active_lower_bound: '0', active_upper_bound: null } } },
         },
         constraints: {},
       },
@@ -145,7 +153,14 @@ test.describe('S3-A: 规划解参数预览与历史来源', () => {
     await expect(hp1Row.getByText('hp1', { exact: true })).toBeVisible()
     await expect(hp1Row.getByText(/50\.0000/)).toBeVisible()
     await expect(hp2Row.getByText('hp2', { exact: true })).toBeVisible()
-    await expect(hp2Row.getByText(/200\.0000/)).toBeVisible()
+    await expect(hp2Row.getByText(`${secondCapacity.toFixed(4)} kW`, { exact: true })).toBeVisible()
+    const decisions = page.getByRole('table', { name: '建设决策（封存）', exact: true })
+    const secondBuild = decisions.getByRole('row').filter({
+      has: page.getByRole('cell', { name: 'second_build', exact: true }),
+    })
+    await expect(secondBuild.getByRole('cell', { name: '必建', exact: true })).toBeVisible()
+    await expect(secondBuild.getByRole('cell', { name: '建设', exact: true })).toBeVisible()
+    await expect(secondBuild.getByText(`hp2_cap: ${secondCapacity} kW`, { exact: true })).toBeVisible()
     // 单解证据无候选列表: 不提供选择, 不伪造候选。
     await expect(page.getByText('暂无候选')).toBeVisible()
 
@@ -169,7 +184,13 @@ test.describe('S3-A: 规划解参数预览与历史来源', () => {
     const params = ps.params as PlanParam[]
     const byVar = Object.fromEntries(params.map((p) => [p.variable, p]))
     expect(byVar.hp1_cap).toMatchObject({ device_ref: 'hp1', parameter: 'rated_heat_kw', value: 50, unit: 'kW' })
-    expect(byVar.hp2_cap).toMatchObject({ device_ref: 'hp2', parameter: 'rated_heat_kw', value: 200, unit: 'kW' })
+    expect(byVar.hp2_cap).toMatchObject({ device_ref: 'hp2', parameter: 'rated_heat_kw', value: secondCapacity, unit: 'kW' })
+    expect(result.result.financial_evaluation.construction_units).toEqual([
+      { unit_id: 'first_build', instance_id: 'hp1', mode: 'optional', built: true,
+        scales: [{ planning_variable_id: 'hp1_cap', value: 50, unit: 'kW' }] },
+      { unit_id: 'second_build', instance_id: 'hp2', mode: 'mandatory', built: true,
+        scales: [{ planning_variable_id: 'hp2_cap', value: secondCapacity, unit: 'kW' }] },
+    ])
     expect(ps.refs.project_version_id).toBe(v2.version.id)
     expect(result.result.snapshot_refs.project_version_id).toBe(v2.version.id)
 
@@ -192,6 +213,7 @@ test.describe('S3-A: 规划解参数预览与历史来源', () => {
 
     const result2 = await requestJson(apiCtx.request, 'GET', `/api/projects/${pid}/tasks/${taskId}/result`, undefined, token2)
     expect(result2.result.planning_solution.refs.calc_snapshot_id).toBe(ps.refs.calc_snapshot_id)
+    expect(result2.result.financial_evaluation.construction_units).toEqual(result.result.financial_evaluation.construction_units)
 
     // token2 已顶替浏览器会话(单登录): 重新 GUI 登录后重进历史结果。
     // 重登录时 App 壳用旧会话探活各一次(下文精确声明), 属测试自身双登录
@@ -216,4 +238,5 @@ test.describe('S3-A: 规划解参数预览与历史来源', () => {
     ])
     await context.close()
   })
+  }
 })

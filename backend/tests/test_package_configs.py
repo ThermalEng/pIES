@@ -1726,6 +1726,107 @@ def _step_package_fixture(client: TestClient, db: Session, owner, *, version=Fal
     return pid, declaration
 
 
+def test_construction_package_roundtrip_preserves_current_and_historical_declarations(
+    client: TestClient, db: Session,
+) -> None:
+    """Current/history packages retain construction, occurrence and scoped amounts."""
+    from copy import deepcopy
+
+    from assembly_fixture import declare_compute_device
+
+    from iesplan.application import configuration as config_cases
+
+    owner = make_user(db, "p2pkg_owner")
+    importer = make_user(db, "p2pkg_importer")
+    pid = _create_project(client, owner, "P2 包往返")
+    instance, _ = declare_compute_device(client, pid, _h(client, owner))
+    profile = deepcopy(PROFILE_PAYLOAD)
+    profile["profile"]["id"] = "p2pkg-profile"
+    profile["finance_types"]["pv_system"].pop("period_variable_om")
+    source = {"kind": "upfront_capex_net", "finance_type": "pv_system",
+              "scope": {"kind": "instances", "instances": [instance]}}
+    profile["net_cashflows"] = {"recovery": {
+        "at": {"kind": "evaluation_end"}, "direction": "inflow",
+        "amount": {"kind": "source_share", "base_from": source,
+                   "ratio": {"value": "0.05", "unit": "1"}},
+    }}
+    _register_profile(client, owner, profile)
+    # The referenced instance must have its explicit finance binding before
+    # the profile is adopted at the public project boundary.
+    view = client.get(f"/api/projects/{pid}", headers=_h(client, owner)).json()
+    response = client.put(f"/api/projects/{pid}/draft", json={
+        "expected_revision": view["draft"]["revision"],
+        "commands": [{"id": "p2pkg-binding", "unit": "assembly",
+                      "type": "assembly.set_finance_binding", "payload": {"instances": {
+                          instance: {"type": "costed", "finance_type": "pv_system",
+                                     "drivers": {"capacity_kw": {"property": "rated_power_kw"}}},
+                      }}}],
+    }, headers=_h(client, owner))
+    assert response.status_code == 200, response.text
+    _set_profile(client, owner, pid, profile["profile"]["id"])
+    planning = {
+        "objective": {"sense": "minimize", "expression": "0"},
+        "variables": {"capacity": {
+            "device_ref": instance, "parameter": "capacity_kwh", "unit": "kWh",
+            "lower_bound": "0", "upper_bound": "200",
+        }},
+        "constraints": {},
+        "construction_units": {"storage_build": {
+            "device_ref": instance, "mode": "optional",
+            "scales": {"capacity": {"active_lower_bound": "12.5", "active_upper_bound": "180"}},
+        }},
+    }
+    config_cases.save_planning_config(db, pid, planning, None, owner.id)
+    view = client.get(f"/api/projects/{pid}", headers=_h(client, owner)).json()
+    binding = {
+        "type": "costed", "finance_type": "pv_system",
+        "drivers": {"capacity_kw": {"property": "rated_power_kw"}},
+        "cost_occurrence": {"upfront_capex.fixed": {
+            "kind": "construction_unit", "unit_ref": "storage_build",
+        }},
+    }
+    response = client.put(f"/api/projects/{pid}/draft", json={
+        "expected_revision": view["draft"]["revision"],
+        "commands": [{"id": "p2pkg-occurrence", "unit": "assembly",
+                      "type": "assembly.set_finance_binding", "payload": {"instances": {instance: binding}}}],
+    }, headers=_h(client, owner))
+    assert response.status_code == 200, response.text
+    _create_hist_version(client, owner, pid, "optional-build")
+
+    current = deepcopy(planning)
+    current["construction_units"]["storage_build"]["mode"] = "mandatory"
+    current["construction_units"]["storage_build"]["scales"]["capacity"]["active_lower_bound"] = "20"
+    config_cases.save_planning_config(db, pid, current, 1, owner.id)
+    _create_hist_version(client, owner, pid, "mandatory-build")
+    exported = _export_zip(client, owner, pid)
+    proposal = packages_uc.propose_import(db, importer, exported)
+    imported = packages_uc.confirm_import(db, importer, proposal.id)
+    db.commit()
+
+    saved, _, _ = config_cases.get_planning_config(db, imported.id)
+    assert saved.to_dict()["construction_units"] == current["construction_units"]
+    for name, expected in (("optional-build", planning), ("mandatory-build", current)):
+        versions = client.get(
+            f"/api/projects/{imported.id}/versions", headers=_h(client, importer),
+        ).json()["versions"]
+        version = next(item for item in versions if item["name"] == name)
+        restored = client.post(
+            f"/api/projects/{imported.id}/versions/{version['id']}/restore",
+            headers=_h(client, importer),
+        )
+        assert restored.status_code == 200, restored.text
+        saved, _, _ = config_cases.get_planning_config(db, imported.id)
+        assert saved.to_dict()["construction_units"] == expected["construction_units"]
+        draft = client.get(
+            f"/api/projects/{imported.id}", headers=_h(client, importer),
+        ).json()["draft"]["content"]
+        assert draft["finance_binding"]["instances"][instance] == binding
+        effective = client.get(
+            f"/api/projects/{imported.id}/effective-finance", headers=_h(client, importer),
+        ).json()["effective_finance_config"]
+        assert effective["net_cashflows"]["recovery"]["amount"]["base_from"] == source
+
+
 def _rewrite_step_package(raw: bytes, planning_path: str, *, instance=None,
                           interface=None, expression=None) -> bytes:
     """仅变更规划 YAML 并同步对象清单大小，不因 ZIP 清单失配掩盖业务门禁。"""

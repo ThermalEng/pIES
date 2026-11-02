@@ -650,7 +650,7 @@ def _recover_financial_facts(
             _fail(f"建设状态 {label!r} 不属于整数 0/1: {value!r}")
         return bool(rounded)
 
-    def scale_value(node: Mapping[str, Any], unit: str, label: str) -> str:
+    def scale_value(node: Mapping[str, Any], unit: str, label: str) -> float:
         raw = float(amount(node, label))
         try:
             business = from_si(raw, unit)
@@ -658,7 +658,7 @@ def _recover_financial_facts(
             _fail(f"建设规模 {label!r} 换算失败: {exc}")
         if not math.isfinite(business):
             _fail(f"建设规模 {label!r} 非有限数值")
-        return str(Decimal(str(business)))
+        return business
 
     out["construction_units"] = [
         {

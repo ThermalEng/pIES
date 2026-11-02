@@ -24,6 +24,7 @@ import path from 'node:path'
 import { execFileSync } from 'node:child_process'
 import { test, expect } from '@playwright/test'
 import type { BrowserContext, Locator, Page } from '@playwright/test'
+import type { FinancialConstructionUnit } from '../../src/types'
 import { createSession, uniqueName, strongPassword } from './fixtures'
 import { createEngineer, loginToken, requestJson } from './setup/api'
 import { APP, scaffoldProject } from './financial-scaffold'
@@ -61,6 +62,7 @@ interface SealedEvaluation {
   base_year: number
   discount_rate: number
   payments_applied: Array<{ t: number; ratio: string; amount: string }>
+  construction_units: FinancialConstructionUnit[]
   annual_operation: SealedAnnualOperation[]
   annual_net_flows: string[]
   evaluation: {
@@ -94,7 +96,7 @@ const AFFINE_MAINTENANCE = [
 ]
 
 /** 从下载的 xlsx 财务摘要提取 A/B 单元格；仅用 Docker 内 Python 标准库。 */
-function excelSummaryPairs(xlsxPath: string): Map<string, string | number> {
+function excelRows(xlsxPath: string, sheetName: string): unknown[][] {
   const script = String.raw`
 import json, sys, zipfile, xml.etree.ElementTree as ET
 z = zipfile.ZipFile(sys.argv[1])
@@ -102,7 +104,7 @@ ns = {'m':'http://schemas.openxmlformats.org/spreadsheetml/2006/main', 'r':'http
 wb = ET.fromstring(z.read('xl/workbook.xml'))
 rels = ET.fromstring(z.read('xl/_rels/workbook.xml.rels'))
 targets = {x.attrib['Id']: x.attrib['Target'] for x in rels}
-sheet = next(s for s in wb.find('m:sheets', ns) if s.attrib['name'] == '财务摘要')
+sheet = next(s for s in wb.find('m:sheets', ns) if s.attrib['name'] == sys.argv[2])
 target = targets[sheet.attrib['{'+ns['r']+'}id']]
 sheet_path = target.lstrip('/') if target.startswith('/') else 'xl/' + target
 shared = []
@@ -119,6 +121,7 @@ for row in ET.fromstring(z.read(sheet_path)).findall('.//m:sheetData/m:row', ns)
     inline = cell.find('m:is', ns)
     if cell.attrib.get('t') == 's' and v is not None: value = shared[int(v.text)]
     elif inline is not None: value = ''.join(t.text or '' for t in inline.findall('.//m:t', ns))
+    elif cell.attrib.get('t') == 'b' and v is not None: value = v.text == '1'
     elif v is not None:
       raw = v.text or ''
       try: value = int(raw)
@@ -128,10 +131,14 @@ for row in ET.fromstring(z.read(sheet_path)).findall('.//m:sheetData/m:row', ns)
     else: value = None
     cells[col] = value
   if cells.get('A') is None: break
-  rows.append([cells.get('A'), cells.get('B')])
+  rows.append([cells[col] for col in sorted(cells)])
 print(json.dumps(rows, ensure_ascii=False))
 `
-  return new Map(JSON.parse(execFileSync('python3', ['-c', script, xlsxPath], { encoding: 'utf8' })) as Array<[string, string | number]>)
+  return JSON.parse(execFileSync('python3', ['-c', script, xlsxPath, sheetName], { encoding: 'utf8' }))
+}
+
+function excelSummaryPairs(xlsxPath: string): Map<string, string | number> {
+  return new Map(excelRows(xlsxPath, '财务摘要') as Array<[string, string | number]>)
 }
 
 /** 已知封存 irr_status → 页面徽章标签(测试 oracle; 未知状态直接失败, 不猜测)。 */
@@ -319,6 +326,55 @@ async function openResults(page: Page): Promise<void> {
   await expect(page).toHaveURL(/\/results/)
 }
 
+/** Construction declarations use the existing full-document editor, not a new form. */
+async function saveConstructionPlanning(page: Page, pid: number): Promise<void> {
+  await page.goto(`/projects/${pid}/planning`)
+  await expect(page.locator('#planning-expression')).toBeVisible()
+  const current = await requestJson(page.request, 'GET', `/api/projects/${pid}/planning-config`)
+  const config = {
+    ...current.planning_config,
+    construction_units: {
+      heat_build: {
+        device_ref: 'hp1', mode: 'optional',
+        scales: { hp_cap: { active_lower_bound: '0', active_upper_bound: null } },
+      },
+    },
+  }
+  await page.getByRole('button', { name: /完整 YAML 文档|Full YAML document/ }).click()
+  await page.locator('#planning-yaml').fill(JSON.stringify(config, null, 2))
+  await page.getByRole('button', { name: /表单编辑|Form editor/ }).click()
+  await page.getByRole('button', { name: /完整 YAML 文档|Full YAML document/ }).click()
+  expect(await page.locator('#planning-yaml').inputValue()).toContain('heat_build')
+  await page.getByRole('button', { name: /保存规划配置|Save planning config/ }).click()
+  await expect(page.getByText(/规划配置已保存 revision|Planning config saved/)).toBeVisible()
+  await page.reload()
+  await expect(page.locator('#planning-expression')).toBeVisible()
+  await page.getByRole('button', { name: /完整 YAML 文档|Full YAML document/ }).click()
+  expect(await page.locator('#planning-yaml').inputValue()).toContain('heat_build')
+  const saved = await requestJson(page.request, 'GET', `/api/projects/${pid}/planning-config`)
+  expect(saved.planning_config.construction_units).toEqual(config.construction_units)
+  await page.goto(`/projects/${pid}/versions`)
+  await page.getByRole('button', { name: /创建版本|Create version/ }).first().click()
+  await page.locator('#version-name').fill('Construction decisions')
+  await page.getByRole('button', { name: /^创建$|^Create$/ }).click()
+  await expect(page.getByText('Construction decisions', { exact: true })).toBeVisible()
+}
+
+async function expectConstructionDecisions(page: Page, units: FinancialConstructionUnit[]): Promise<void> {
+  const table = page.getByRole('table', { name: '建设决策（封存）', exact: true })
+  await expect(table).toBeVisible()
+  await expect(table.locator('tbody tr')).toHaveCount(units.length)
+  for (const unit of units) {
+    const row = table.getByRole('row').filter({ has: page.getByRole('cell', { name: unit.unit_id, exact: true }) })
+    await expect(row.getByRole('cell', { name: unit.instance_id, exact: true })).toBeVisible()
+    await expect(row.getByRole('cell', { name: unit.mode === 'mandatory' ? '必建' : '可选建', exact: true })).toBeVisible()
+    await expect(row.getByRole('cell', { name: unit.built ? '建设' : '不建设', exact: true })).toBeVisible()
+    for (const scale of unit.scales) {
+      await expect(row.getByText(`${scale.planning_variable_id}: ${scale.value} ${scale.unit}`, { exact: true })).toBeVisible()
+    }
+  }
+}
+
 test.describe('T3: K1N2 财务评价确认/求解/结果/导出', () => {
   // 真实 HiGHS 全期求解耗时超过默认 90s 用例超时, 本文件单独放宽。
   test.setTimeout(900_000)
@@ -344,6 +400,7 @@ test.describe('T3: K1N2 财务评价确认/求解/结果/导出', () => {
     await expect(page).toHaveURL(/\/projects\/\d+\/tasks$/)
     await expect(page.getByRole('button', { name: /提交任务|Submit task/i }).first()).toBeVisible()
 
+    await saveConstructionPlanning(page, pid)
     // 确认 → 草稿保存/重开 → 提交(原入口, 固定+规划容量+本实例capex组合)。
     await submitEvaluationViaUI(page, JSON.stringify(AFFINE_MAINTENANCE), true)
     await waitCompleted(page)
@@ -375,6 +432,12 @@ test.describe('T3: K1N2 财务评价确认/求解/结果/导出', () => {
     const capacity = Number(cap.value)
     expect(capacity).toBeGreaterThanOrEqual(50)
     expect(capacity).toBeLessThanOrEqual(1000)
+    expect(finBefore.construction_units).toEqual([{
+      unit_id: 'heat_build', instance_id: 'hp1', mode: 'optional', built: true,
+      scales: [{ planning_variable_id: 'hp_cap', value: capacity, unit: 'kW' }],
+    }])
+    expect(typeof finBefore.construction_units[0].scales[0].value).toBe('number')
+    await expectConstructionDecisions(page, finBefore.construction_units)
     expect(Number(finBefore.construction_total)).toBeCloseTo(2800 * capacity, 5)
     const handMaintenance = 1000 + 2 * capacity + 0.01 * (2800 * capacity) + 2500.5
     expect(Number(finBefore.annual_operation[0].maintenance)).toBe(0)
@@ -396,6 +459,11 @@ test.describe('T3: K1N2 财务评价确认/求解/结果/导出', () => {
 
     // 提交后修改当前草稿, 不创建第二个大模型任务；结果页旧任务必须不变。
     const changedMaintenance = '[{"year":3,"amount":"9999.00","currency":"CNY"}]'
+    await page.goto(`/projects/${pid}/planning`)
+    await expect(page.locator('#planning-expression')).toBeVisible()
+    await page.locator('[id^="planning-var-lower-"]').first().fill('90')
+    await page.getByRole('button', { name: /保存规划配置|Save planning config/ }).click()
+    await expect(page.getByText(/规划配置已保存 revision|Planning config saved/)).toBeVisible()
     await page.getByRole('navigation', { name: /工作台|Workspace/i }).getByText('任务中心').click({ timeout: 30_000 })
     await page.getByRole('button', { name: /提交任务|Submit task/i }).first().click({ timeout: 30_000 })
     await page.locator('#task-maintenance-expenses').fill(changedMaintenance)
@@ -407,6 +475,7 @@ test.describe('T3: K1N2 财务评价确认/求解/结果/导出', () => {
     await page.getByRole('navigation', { name: /工作台|Workspace/i }).getByText('结果分析').click({ timeout: 30_000 })
     await expect(page).toHaveURL(/\/results/)
     expectSealedCardMatches(await captureSealedCard(page), finBefore)
+    await expectConstructionDecisions(page, finBefore.construction_units)
     const after = await requestJson(page.request, 'GET', `/api/projects/${pid}/tasks/${taskId}/result`)
     expect(after.result.financial_evaluation).toEqual(finBefore)
     const inputsAfter = await requestJson(page.request, 'GET', `/api/projects/${pid}/tasks/${taskId}/inputs`)
@@ -435,6 +504,10 @@ test.describe('T3: K1N2 财务评价确认/求解/结果/导出', () => {
     // 真正解析下载的工作簿单元格: 关联金额应出现在同任务的年度净额、
     // 完整税后 CF、NPV；不能仅检查下载成功或页面与自身互证。
     const workbook = excelSummaryPairs(reportPath)
+    expect(excelRows(reportPath, '建设决策')).toEqual(finBefore.construction_units.flatMap((unit) =>
+      unit.scales.map((scale) => [unit.unit_id, unit.instance_id, unit.mode, unit.built,
+        scale.planning_variable_id, scale.value, scale.unit]),
+    ))
     const excelText = (value: string) => (/^[=+\-@]/.test(value) ? `'${value}` : value)
     expect(workbook.get('运营年第 2 年(t=3) / Year 2')).toBe(
       `能源 ${op3.energy_net} − 可变 ${op3.variable_om} ` +

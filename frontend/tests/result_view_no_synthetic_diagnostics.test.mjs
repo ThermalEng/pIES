@@ -38,12 +38,22 @@ function installStub(resultBody) {
 
 // 1. 有封存财务块：financial 原样透传，不合成 diagnostics。
 {
+  const constructionUnits = [
+    { unit_id: 'idle', instance_id: 'a', mode: 'optional', built: false,
+      scales: [{ planning_variable_id: 'p', value: 0, unit: 'kW' }] },
+    { unit_id: 'zero_build', instance_id: 'b', mode: 'mandatory', built: true,
+      scales: [{ planning_variable_id: 'p0', value: 0, unit: 'kW' }] },
+    { unit_id: 'storage', instance_id: 'c', mode: 'optional', built: true,
+      scales: [{ planning_variable_id: 'energy', value: 12.5, unit: 'kWh' },
+        { planning_variable_id: 'power', value: 6.25, unit: 'kW' }] },
+  ]
   installStub({
     evidence_status: 'available',
     evidence: { id: 26, object_id: 99, status: 'complete' },
     metrics_summary: {},
     financial_evaluation: {
       evaluation: { irr_status: 'normal' },
+      construction_units: constructionUnits,
     },
     financial_absence: null,
     candidates: [],
@@ -58,6 +68,8 @@ function installStub(resultBody) {
     JSON.stringify(res.financial),
   )
   check('有块时缺席为null', res.financialAbsence === null, String(res.financialAbsence))
+  check('建设状态与带单位数字规模原样透传',
+    JSON.stringify(res.financial.construction_units) === JSON.stringify(constructionUnits))
 }
 
 // 2. 无封存财务块：缺席原因透传，同样不合成 diagnostics。

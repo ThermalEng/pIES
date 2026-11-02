@@ -952,6 +952,14 @@ export interface FinancialTaxCash {
   loss_balances: FinancialTaxCashLossBalance[]
 }
 
+export interface FinancialConstructionUnit {
+  unit_id: string
+  instance_id: string
+  mode: 'mandatory' | 'optional'
+  built: boolean
+  scales: Array<{ planning_variable_id: string; value: number; unit: string }>
+}
+
 export interface FinancialEvaluationBlock {
   status: string
   evaluation_years: number
@@ -966,6 +974,7 @@ export interface FinancialEvaluationBlock {
   annual_fixed_om: string
   payments_applied: FinancialEvaluationPayment[]
   net_cashflows: FinancialNetCashflow[]
+  construction_units: FinancialConstructionUnit[]
   annual_operation: FinancialEvaluationYear[]
   monthly_demand: FinancialMonthlyDemand[]
   tax_cash: FinancialTaxCash
