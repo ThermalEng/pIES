@@ -629,6 +629,35 @@ def test_series_unknown_column_fails() -> None:
     assert exc_info.value.reason == "result-protocol-failure"
 
 
+def test_construction_scales_are_numbers_in_business_units() -> None:
+    """Power/energy convert once; a zero scale does not determine built."""
+    params = json.loads(_parameters())
+    zero = {"constant": 0.0, "terms": {}}
+    one = {"constant": 1.0, "terms": {}}
+    params["financial_facts"]["construction_units"] = [
+        {"unit_id": "store", "instance_id": "a", "mode": "optional",
+         "built": {"constant": 0.0, "terms": {"x": 1.0 / 3000.0}},
+         "scales": [
+             {"planning_variable_id": "energy", "unit": "kWh",
+              "value": {"constant": 0.0, "terms": {"x": 7200.0}}},
+             {"planning_variable_id": "power", "unit": "kW",
+              "value": {"constant": 0.0, "terms": {"x": 1.0}}},
+         ]},
+        {"unit_id": "idle", "instance_id": "b", "mode": "optional", "built": zero,
+         "scales": [{"planning_variable_id": "p0", "unit": "kW", "value": zero}]},
+        {"unit_id": "zero_built", "instance_id": "c", "mode": "mandatory", "built": one,
+         "scales": [{"planning_variable_id": "p1", "unit": "kW", "value": zero}]},
+    ]
+    result = _adapt({PROBLEM_PATH: TINY_MPS.encode(), PARAMETERS_PATH: json.dumps(params).encode()},
+                    _receipt(), SHIM_OPTIMAL.encode())
+    units = result.outputs["financial_facts"]["construction_units"]
+    assert units[0]["built"] is True
+    assert [(s["value"], s["unit"]) for s in units[0]["scales"]] == [(6.0, "kWh"), (3.0, "kW")]
+    assert all(type(s["value"]) is float for u in units for s in u["scales"])
+    assert units[1]["built"] is False and units[2]["built"] is True
+    assert units[1]["scales"][0]["value"] == units[2]["scales"][0]["value"] == 0.0
+
+
 def test_monthly_demand_facts_recovered_from_same_primal() -> None:
     """适配器只求值声明：x=3000 W、实际月峰3kW、每月支付90CNY。
 

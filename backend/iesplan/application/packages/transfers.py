@@ -2027,6 +2027,29 @@ def _sealed_evaluation_rows(fin: dict[str, Any]) -> list[tuple[str, Any]]:
     return rows
 
 
+def _write_sealed_construction_units(ws, fin: dict[str, Any]) -> None:
+    """原样导出同次解建设决策；状态不由规模推断，规模保留数值与业务单位。"""
+    _set_sheet_title(ws, "建设决策（封存）", "Sealed Construction Decisions")
+    headers = (
+        "建设单元 / Unit ID", "实例 / Instance ID", "建设方式 / Mode",
+        "建设状态 / Built", "规划变量 / Planning variable", "规模 / Value", "单位 / Unit",
+    )
+    for column, header in enumerate(headers, 1):
+        ws.cell(row=2, column=column, value=header)
+    if not fin["construction_units"]:
+        ws.cell(row=3, column=1, value="未声明建设单元 / No construction units declared")
+    row_no = 3
+    for unit in fin["construction_units"]:
+        for scale in unit["scales"]:
+            values = (
+                unit["unit_id"], unit["instance_id"], unit["mode"], unit["built"],
+                scale["planning_variable_id"], scale["value"], scale["unit"],
+            )
+            for column, value in enumerate(values, 1):
+                ws.cell(row=row_no, column=column, value=_excel_safe(value))
+            row_no += 1
+
+
 def _write_sealed_monthly_demand(ws, fin: dict[str, Any]) -> None:
     """只抄录同次解封存的月账单；不取 max、不乘费率或汇总年费。"""
     _set_sheet_title(ws, "自然月需量账单", "Monthly Demand Bills")
@@ -2280,6 +2303,8 @@ def export_excel(
         _write_kv(ws_s, rows if rows else [("无摘要数据 / No summary data", "—")])
 
         if sheet_name == "财务摘要" and _is_sealed_evaluation(section):
+            construction_sheet = wb.create_sheet("建设决策")
+            _write_sealed_construction_units(construction_sheet, section)
             demand_sheet = wb.create_sheet("需量月账单")
             _write_sealed_monthly_demand(demand_sheet, section)
 

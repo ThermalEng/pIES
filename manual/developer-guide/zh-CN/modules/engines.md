@@ -126,7 +126,7 @@ SolverRuntime 根据 allowlist 解析结构化命令，在隔离目录执行，�
 
 配套适配器 `ies.result-adapter.highs@1.0.0` 消费生成器 `ies.generator.highs_milp@1.0.0` 的明确财务映射，以同次主解恢复 `outputs.financial_facts`，字段以[Solver Bundle 财务事实映射](../formats/solver-bundle.md#同次解财务事实映射)为唯一正文。既有solution、metrics和series语义保持；新协议必需映射不作旧版回退。只有已请求solution且存在可用数学解时发布财务事实，并同时发布[构模来源映射](../formats/solver-bundle.md#构模来源映射)到 `outputs.model_sources`。application仅投影财务事实并调用财务评价，Worker将来源说明随原结果封存；均不解释内部列名或重复税务／现金流建模。ComputeResult顶层状态及身份不因此升版。
 
-建设激活的生效目标组合另为生成器 `1.0.0` / 适配器 `1.0.0`，上述 `1.0.0` / `1.0.0` 是已交付链而非新契约的支持声明。目标财务映射增加 construction_units，并原样保留有 scope 的金额来源，形状以 Bundle 格式页为准，封存版本为 `ies.financial-evaluation@1.0.0`。外层 ComputeResult、Bundle 及构模来源协议不变；旧证据不由新适配器补写字段。
+建设激活沿当前一套生成器／适配器契约交付，不增加另一套版本组合。财务映射保留 construction_units 及有 scope 的金额来源，形状以 Bundle 格式页为准，封存标识为 `ies.financial-evaluation@1.0.0`。外层 ComputeResult、Bundle 及构模来源协议不变；旧证据不由新适配器补写字段。
 
 ### 统一求解步序列
 

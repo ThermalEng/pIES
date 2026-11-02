@@ -1631,6 +1631,41 @@ function FinancialEvaluationCard({ fin }: { fin: FinancialEvaluationBlock }) {
       <p style={{ fontSize: 'var(--ies-fs-sm)', color: 'var(--ies-color-text-secondary)' }}>
         {t('ies.result.fin_axis_note')}
       </p>
+      <div style={{ marginTop: 'var(--ies-space-3)' }}>
+        <h3 style={{ fontSize: 'var(--ies-fs-sm)', fontWeight: 700, marginBottom: 'var(--ies-space-2)' }}>
+          {t('ies.result.fin_construction_units')}
+        </h3>
+        {fin.construction_units.length === 0 ? (
+          <p>{t('ies.result.fin_construction_none')}</p>
+        ) : (
+          <div style={{ overflowX: 'auto' }}>
+            <table className="ies-metric-table" aria-label={t('ies.result.fin_construction_units')}>
+              <thead><tr>
+                <th>{t('ies.result.fin_construction_unit')}</th>
+                <th>{t('ies.result.fin_construction_instance')}</th>
+                <th>{t('ies.result.fin_construction_mode')}</th>
+                <th>{t('ies.result.fin_construction_built')}</th>
+                <th>{t('ies.result.fin_construction_scales')}</th>
+              </tr></thead>
+              <tbody>
+                {fin.construction_units.map((unit) => (
+                  <tr key={unit.unit_id}>
+                    <td>{unit.unit_id}</td>
+                    <td>{unit.instance_id}</td>
+                    <td>{t(`ies.result.fin_construction_${unit.mode}`)}</td>
+                    <td>{t(unit.built ? 'ies.result.fin_construction_yes' : 'ies.result.fin_construction_no')}</td>
+                    <td>{unit.scales.map((scale) => (
+                      <div key={scale.planning_variable_id}>
+                        {scale.planning_variable_id}: {scale.value} {scale.unit}
+                      </div>
+                    ))}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
       {payments.length > 0 ? (
         <div style={{ marginTop: 'var(--ies-space-3)' }}>
           <h3 style={{ fontSize: 'var(--ies-fs-sm)', fontWeight: 700, marginBottom: 'var(--ies-space-2)' }}>

@@ -336,6 +336,7 @@ def _sealed_k1n2() -> dict:
         ],
         "monthly_demand": [],
         "net_cashflows": [],
+        "construction_units": [],
         "annual_net_flows": ["-84000.0", "-56000.0", "8500", "6979.50"],
         # 无税展示夹具: 五个数组显式为空(合法"不适用"), 不用缺字段伪装。
         "tax_cash": {
@@ -393,7 +394,42 @@ def test_export_excel_renders_sealed_financial_evaluation(
     assert "净现值 NPV" in text and "-123020.31" in text
     assert "no_solution" in text and "not_recovered" in text
     wb = load_workbook(io.BytesIO(new_bytes))
+    assert wb["建设决策"].cell(row=3, column=1).value == "未声明建设单元 / No construction units declared"
     assert wb["需量月账单"].cell(row=3, column=1).value == "无计量绑定 / No demand meter bindings"
+
+
+def test_export_excel_preserves_construction_status_and_numeric_scales(
+    client: TestClient, db: Session,
+) -> None:
+    """Same sealed decisions, not inferred from scale; physical values stay numeric."""
+    owner = _user(db, "p2_xls_build")
+    pid = _project(client, owner, "P2 建设结果")
+    vid = _version(client, owner, pid)
+    fin = _sealed_k1n2()
+    fin["construction_units"] = [
+        {"unit_id": "idle", "instance_id": "first", "mode": "optional", "built": False,
+         "scales": [{"planning_variable_id": "q0", "value": 0.0, "unit": "kW"}]},
+        {"unit_id": "zero_built", "instance_id": "second", "mode": "mandatory", "built": True,
+         "scales": [{"planning_variable_id": "q1", "value": 0.0, "unit": "kW"}]},
+        {"unit_id": "storage", "instance_id": "third", "mode": "optional", "built": True,
+         "scales": [
+             {"planning_variable_id": "capacity", "value": 12.5, "unit": "kWh"},
+             {"planning_variable_id": "power", "value": 6.25, "unit": "kW"},
+         ]},
+    ]
+    sealed = json.dumps({"financial_evaluation": fin}, ensure_ascii=False).encode()
+    evidence_id, assessment_id = _seed_evidence(db, pid, vid, owner.id, content_text=sealed)
+    user = identity_domain.get_user(db, owner.id)
+    raw = transfers_uc.export_excel(db, user, pid, evidence_id, assessment_id)
+    sheet = load_workbook(io.BytesIO(raw))["建设决策"]
+    assert list(sheet.iter_rows(min_row=3, values_only=True)) == [
+        ("idle", "first", "optional", False, "q0", 0.0, "kW"),
+        ("zero_built", "second", "mandatory", True, "q1", 0.0, "kW"),
+        ("storage", "third", "optional", True, "capacity", 12.5, "kWh"),
+        ("storage", "third", "optional", True, "power", 6.25, "kW"),
+    ]
+    assert sheet["D3"].data_type == sheet["D4"].data_type == "b"
+    assert sheet["F3"].data_type == sheet["F5"].data_type == "n"
 
 
 def test_export_excel_consumes_frozen_monthly_demand_with_units_and_ids(

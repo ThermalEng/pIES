@@ -1,5 +1,9 @@
 # P1 开发计划：关系汇集、统一分析与方程结构复用
 
+> 状态：已完成并归档。归档日期：2026-11-02。
+> 归档原因：S1～S4 已分别交付，S4 随 PR #37 合入 `f055523`；后续 P2 及性能修复已沿该基础推进。下文保留当时实施计划与进度表述，不代表当前待办。
+> 现行替代来源：[生成器指南](../../../manual/developer-guide/zh-CN/modules/generators.md)、[Solver Bundle 格式](../../../manual/developer-guide/zh-CN/formats/solver-bundle.md)、[更新日志](../../../manual/changelog/README.md)与[剩余阶段 Roadmap](../../../manual/changelog/roadmap.md#通用建模与计算升级的剩余阶段)。历史相对链接可能随归档失效，不作为当前规范入口。
+
 > 文档类型：一次实施计划，不是新的产品／文件契约。状态：实施中；S1～S3 已验收收口，S4 已实现，正在集成验证，尚未合并。
 > 日期：2026-10-31；审查基线：`8ed9badb315263c25a3b06ff976b14192e0f7925`（P0 文档已提交）。
 > 计划与验收负责人：主审；实现由独立开发者承担。

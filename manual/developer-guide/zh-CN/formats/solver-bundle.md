@@ -119,7 +119,7 @@ extensions: {}
 | --- | --- |
 | `currency` | 冻结财务币种，所有金额使用该单位和十进制字符串，不作展示舍入 |
 | `construction_total`、`annual_fixed_om` | 实际含税建设总额与年度固定运维金额，按本课题增量范围计取 |
-| `construction_units` | `[{unit_id, instance_id, mode, built, scales}]`，每个冻结建设单元一项；mode 原样为 mandatory/optional，built 为同次解的布尔建设状态。scales 为 `[{planning_variable_id, value, unit}]`，value 是反向换算后的有限业务数值，unit 沿用规划变量。不按规模是否大于零重算 built，无单元时为 `[]` |
+| `construction_units` | `[{unit_id, instance_id, mode, built, scales}]`，每个冻结建设单元一项；mode 原样为 mandatory/optional，built 为同次解的布尔建设状态。scales 为 `[{planning_variable_id, value, unit}]`，value 是反向换算后的有限业务数值（JSON number，不是金额字符串），unit 沿用规划变量。不按规模是否大于零重算 built，无单元时为 `[]` |
 | `payments_applied` | `[{t, ratio, amount}]`，明确建设付款时点、比例与实际含税付款；不合并或丢失同一时点的多笔付款 |
 | `net_cashflows` | `[{id, t, direction, amount}]`，显式净现金项目的同次解金额；amount 为非负金额字符串，direction 保留 inflow／outflow，t 为实际财务时点；无项目为 `[]`，按 `(t,id)` 排序 |
 | `annual_operation` | `[{financial_year, energy_net, variable_om, fixed_om, maintenance, demand_charge, net}]`，实际含税收付；`demand_charge` 为当年需量费正金额合计，无费用为 `"0"`；`net` 扣除所列费用各一次，尚未扣税款结算或折旧 |
