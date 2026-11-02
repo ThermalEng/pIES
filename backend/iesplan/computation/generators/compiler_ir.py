@@ -360,6 +360,11 @@ class CompilerAnalysis:
     def relations(self, kind: str) -> tuple[SemanticRelation, ...]:
         return self._groups.get(kind, ())
 
+    @property
+    def propagation_stats(self):
+        """Return work counters from the completed bound-analysis pass."""
+        return self.inference.propagation_stats
+
     def operation(self, identity: str) -> SemanticRelation:
         return self._by_id[identity]
 

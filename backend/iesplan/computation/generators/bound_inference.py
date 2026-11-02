@@ -57,6 +57,28 @@ class AffineRelation:
         return dict(self.terms)
 
 
+@dataclass(frozen=True, slots=True)
+class PropagationStats:
+    """Observable work performed by one bound-propagation pass.
+
+    The counters describe the analysis pass only. They are intentionally
+    separate from mathematical results so performance investigations cannot
+    change the conservative bound semantics.
+    """
+
+    relation_count: int
+    budget: int
+    step_limit: int
+    steps: int
+    bound_updates: int
+    requeues: int
+    self_requeues: int
+    dependent_requeues: int
+    max_queue_size: int
+    budget_exhausted: bool
+    incomplete_symbols: tuple[str, ...]
+
+
 def _reference_names(node: object) -> set[str]:
     """Collect local names only; P1's compiler owns expression arithmetic."""
     if isinstance(node, RefNode):
@@ -88,6 +110,19 @@ class BoundInferenceEngine:
         self.conflicts: list[dict[str, Any]] = []
         self.budget_exhausted = False
         self.incomplete_symbols: frozenset[str] = frozenset()
+        self.propagation_stats = PropagationStats(
+            relation_count=0,
+            budget=0,
+            step_limit=0,
+            steps=0,
+            bound_updates=0,
+            requeues=0,
+            self_requeues=0,
+            dependent_requeues=0,
+            max_queue_size=0,
+            budget_exhausted=False,
+            incomplete_symbols=(),
+        )
         self._indexes_ready = False
         # Sparse reverse index: do not rescan every per-step inequality for
         # each annual VAT / income expression bound request.
@@ -416,6 +451,28 @@ class BoundInferenceEngine:
         queue = deque(range(initial_count))
         pending = set(queue)
         steps = 0
+        bound_updates = 0
+        requeues = 0
+        self_requeues = 0
+        dependent_requeues = 0
+        max_queue_size = len(queue)
+        step_limit = initial_count + budget
+
+        def finish() -> None:
+            self.propagation_stats = PropagationStats(
+                relation_count=initial_count,
+                budget=budget,
+                step_limit=step_limit,
+                steps=steps,
+                bound_updates=bound_updates,
+                requeues=requeues,
+                self_requeues=self_requeues,
+                dependent_requeues=dependent_requeues,
+                max_queue_size=max_queue_size,
+                budget_exhausted=self.budget_exhausted,
+                incomplete_symbols=tuple(sorted(self.incomplete_symbols)),
+            )
+
         while queue and steps < initial_count + budget:
             steps += 1
             rel_idx = queue.popleft()
@@ -484,8 +541,10 @@ class BoundInferenceEngine:
                     self._record_conflict(
                         target, rel, self.provenance.get(target, (None, None)),
                     )
+                    finish()
                     return
                 self.bounds[target] = (next_lo, next_hi)
+                bound_updates += 1
                 prior_lo, prior_hi = self.provenance.get(target, (None, None))
                 self.provenance[target] = (
                     rel.source if next_lo != cur_lo else prior_lo,
@@ -495,6 +554,12 @@ class BoundInferenceEngine:
                     if dependent not in initial and dependent not in pending:
                         queue.append(dependent)
                         pending.add(dependent)
+                        requeues += 1
+                        if dependent == rel_idx:
+                            self_requeues += 1
+                        else:
+                            dependent_requeues += 1
+                max_queue_size = max(max_queue_size, len(queue))
         if queue:
             self.budget_exhausted = True
             self.incomplete_symbols = frozenset(
@@ -502,6 +567,7 @@ class BoundInferenceEngine:
                 for rel_idx in pending
                 for symbol, _ in self.relations[rel_idx].terms
             )
+        finish()
 
     def conflict_error(self) -> BoundConflictError:
         conflict = self.conflicts[0]
