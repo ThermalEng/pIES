@@ -1,7 +1,7 @@
 """阶段 D:整体可解性(母线级约束不足/过度)。
 
-母线构造:按载体 + 无向连通分量(边连通;双向端口视为双向连通,管道设备的两条边
-同属一个分量)分组,得 BusSummary{carrier, ports, sources, sinks, controllable,
+母线构造:理想连接按真实端口分区，设备内部输入输出不自动合并，
+得 BusSummary{carrier, ports, sources, sinks, controllable,
 fixed_supply_max, demand_max, has_storage}。
 
 规则(04 §3.4):
@@ -37,6 +37,7 @@ from iesplan.assembly.diags import (
     ASM_SOLV_OVER_CONSTRAINED,
 )
 from iesplan.assembly.diags import make_asm_diag as make_diag
+from iesplan.assembly.network import build_port_buses
 from iesplan.assembly.schema import prop_map
 from iesplan.core.diagnostics import Diagnostic
 
@@ -51,98 +52,39 @@ BUS_DIRECTIONS: tuple[str, ...] = ("in", "out", "bidirectional")
 
 
 def build_buses(spec: AssemblySpec, ctx) -> list[dict]:
-    """载体 × 无向连通分量 → 母线字典列表(内部表示,阶段 D 与外部审计共用)。
+    """Use the same port partition as generation; orphan devices warn separately.
 
-    连通性:同一载体下经边连通的设备集合;边载体取 from 端端口载体(未定义端口的边跳过)。
-    无任何边的设备也构成单设备母线(便于统一告警)。
-    predefined/blind 端口不进入母线端口/源汇集合(外生边界，阶段 2 已确认
-    其槽覆盖与文件内容；需求侧能量平衡由生成器在数学问题中表达)。
-    返回 [{carrier, device_ids, port_refs, source_refs, sink_refs, edge_ids}]。
+    Invalid endpoints have already produced public input diagnostics. Exclude
+    those edges from diagnostic summaries only; their blocking errors prevent
+    any executable assembly artifact from being issued.
     """
     ports = ensure_ports(spec, ctx)
-    carrier_adj: dict[str, dict[str, set[str]]] = {}
-    edge_by_carrier: dict[str, list] = {}
-    for edge in spec.edges:
-        from_port = ports.get(edge.from_port)
-        if from_port is None:
-            continue
-        carrier = from_port.carrier
-        from_dev, _, _ = edge.from_port.partition(".")
-        to_dev, _, _ = edge.to_port.partition(".")
-        adj = carrier_adj.setdefault(carrier, {})
-        adj.setdefault(from_dev, set()).add(to_dev)
-        adj.setdefault(to_dev, set()).add(from_dev)
-        edge_by_carrier.setdefault(carrier, []).append(edge)
-
+    connectable = {
+        ref: port.carrier for ref, port in ports.items()
+        if port.direction in BUS_DIRECTIONS
+    }
+    connections = {
+        edge.id: (edge.from_port, edge.to_port)
+        for edge in spec.edges
+        if edge.from_port in connectable and edge.to_port in connectable
+        and connectable[edge.from_port] == connectable[edge.to_port]
+    }
     buses: list[dict] = []
-    for carrier, adj in carrier_adj.items():
-        visited: set[str] = set()
-        for start in adj:
-            if start in visited:
-                continue
-            component = {start}
-            frontier = [start]
-            while frontier:
-                node = frontier.pop()
-                for nb in adj.get(node, ()):
-                    if nb not in component:
-                        component.add(nb)
-                        frontier.append(nb)
-            visited |= component
-            bus_ports = sorted(
-                p.ref
-                for p in ports.values()
-                if p.device in component
-                and p.carrier == carrier
-                and p.direction in BUS_DIRECTIONS
-            )
-            edge_ids = sorted(
-                e.id
-                for e in edge_by_carrier.get(carrier, ())
-                if {e.from_port.partition(".")[0], e.to_port.partition(".")[0]} & component
-            )
-            buses.append(
-                {
-                    "carrier": carrier,
-                    "device_ids": sorted(component),
-                    "port_refs": bus_ports,
-                    "source_refs": [
-                        r
-                        for r in bus_ports
-                        if ports[r].direction in ("out", "bidirectional")
-                    ],
-                    "sink_refs": [
-                        r for r in bus_ports if ports[r].direction in ("in", "bidirectional")
-                    ],
-                    "edge_ids": edge_ids,
-                }
-            )
-    # 无任何边的设备 → 单设备母线(孤立)；仅可连接端口参与，无可连接端口
-    # (如纯 predefined 需求设备)不构成母线，仅由 ORPHAN 告警覆盖
-    connected = {d for bus in buses for d in bus["device_ids"]}
-    for dev in spec.devices:
-        if dev.id in connected:
-            continue
-        dev_port_refs = sorted(
-            p.ref
-            for p in ports.values()
-            if p.device == dev.id and p.direction in BUS_DIRECTIONS
-        )
-        if not dev_port_refs:
-            continue
-        carrier = ports[dev_port_refs[0]].carrier
+    for bus in build_port_buses(connectable, connections):
         buses.append(
             {
-                "carrier": carrier,
-                "device_ids": [dev.id],
-                "port_refs": dev_port_refs,
+                "carrier": bus.carrier,
+                "device_ids": sorted({ports[ref].device for ref in bus.port_refs}),
+                "port_refs": list(bus.port_refs),
                 "source_refs": [
-                    r for r in dev_port_refs if ports[r].direction in ("out", "bidirectional")
+                    ref for ref in bus.port_refs
+                    if ports[ref].direction in ("out", "bidirectional")
                 ],
                 "sink_refs": [
-                    r for r in dev_port_refs if ports[r].direction in ("in", "bidirectional")
+                    ref for ref in bus.port_refs
+                    if ports[ref].direction in ("in", "bidirectional")
                 ],
-                "edge_ids": [],
+                "edge_ids": list(bus.connection_ids),
             }
         )
     return buses
@@ -172,33 +114,31 @@ def _float_param(params: dict, key: str) -> float | None:
     return result if _math.isfinite(result) else None
 
 
-def _grid_caps(spec: AssemblySpec, bus_device_ids: list[str], ctx) -> tuple[bool, bool, bool]:
+def _grid_caps(spec: AssemblySpec, bus: dict, ctx) -> tuple[bool, bool, bool]:
     """母线电网能力:(has_grid, 可进口, 可反送)。
 
     可进口:max_import_power_kw 缺省/ > 0;可反送:max_export_power_kw > 0 或 export_tariff > 0。
     """
-    grid_dev = next(
-        (
-            d
-            for d in spec.devices
-            if d.id in bus_device_ids
-            and resolve_model(ctx, d.definition_id) is not None
-            and {
-                "electricity_import", "electricity_export"
-            }.issubset(resolve_model(ctx, d.definition_id).interfaces)
-        ),
-        None,
-    )
-    if grid_dev is None:
-        return False, False, False
-    max_import = _float_param(prop_map(grid_dev), "max_import_power_kw")
-    max_export = _float_param(prop_map(grid_dev), "max_export_power_kw")
-    export_tariff = _float_param(prop_map(grid_dev), "export_tariff")
-    can_import = max_import is None or max_import > 0
-    can_export = (max_export is not None and max_export > 0) or (
-        export_tariff is not None and export_tariff > 0
-    )
-    return True, can_import, can_export
+    grids = [
+        d
+        for d in spec.devices
+        if d.id in bus["device_ids"]
+        and resolve_model(ctx, d.definition_id) is not None
+        and {
+            "electricity_import", "electricity_export"
+        }.issubset(resolve_model(ctx, d.definition_id).interfaces)
+    ]
+    can_import = can_export = False
+    for grid in grids:
+        max_import = _float_param(prop_map(grid), "max_import_power_kw")
+        max_export = _float_param(prop_map(grid), "max_export_power_kw")
+        export_tariff = _float_param(prop_map(grid), "export_tariff")
+        can_import |= (f"{grid.id}.electricity_import" in bus["port_refs"]
+                       and (max_import is None or max_import > 0))
+        can_export |= (f"{grid.id}.electricity_export" in bus["port_refs"]
+                       and ((max_export is not None and max_export > 0)
+                            or (export_tariff is not None and export_tariff > 0)))
+    return bool(grids), can_import, can_export
 
 
 def _is_adjustable_source(interfaces) -> bool:
@@ -285,7 +225,7 @@ def _bus_controllable(spec: AssemblySpec, ctx, bus: dict) -> int:
         if _has_storage_state(type_spec):
             n += 2
         elif {"electricity_import", "electricity_export"}.issubset(interfaces):
-            _, can_import, can_export = _grid_caps(spec, bus["device_ids"], ctx)
+            _, can_import, can_export = _grid_caps(spec, {**bus, "device_ids": [dev_id]}, ctx)
             n += (1 if can_import else 0) + (1 if can_export else 0)
         elif any(i.type in ("out", "bidirectional") for i in interfaces.values()):
             n += 1
@@ -307,7 +247,7 @@ def run_phase_d(spec: AssemblySpec, ctx) -> tuple[list[Diagnostic], list[BusSumm
     for bus in build_buses(spec, ctx):
         carrier = bus["carrier"]
         loc = {"object_type": "bus", "field": f"carrier:{carrier}"}
-        has_grid, can_import, can_export = _grid_caps(spec, bus["device_ids"], ctx)
+        has_grid, can_import, can_export = _grid_caps(spec, bus, ctx)
         devices = [d for d in spec.devices if d.id in bus["device_ids"]]
         type_specs = {d.id: resolve_model(ctx, d.definition_id) for d in devices}
         has_storage = any(_has_storage_state(ts) for ts in type_specs.values())
@@ -323,24 +263,10 @@ def run_phase_d(spec: AssemblySpec, ctx) -> tuple[list[Diagnostic], list[BusSumm
             for ts in type_specs.values()
         )
 
-        # 电网端口语义:可进口 → 计入源;可反送 → 计入汇(方向表为 out,需显式并入)
+        # Only actual member ports contribute directions. A grid's other
+        # interface cannot become an implicit source/sink on this bus.
         source_refs = list(bus["source_refs"])
         sink_refs = list(bus["sink_refs"])
-        if has_grid:
-            grid_dev_ids = {
-                d.id
-                for d in spec.devices
-                if d.id in bus["device_ids"]
-                and resolve_model(ctx, d.definition_id) is not None
-                and {"electricity_import", "electricity_export"}.issubset(
-                    resolve_model(ctx, d.definition_id).interfaces
-                )
-            }
-            grid_port_refs = [r for r in bus["port_refs"] if r.partition(".")[0] in grid_dev_ids]
-            if can_import:
-                source_refs = sorted(set(source_refs) | set(grid_port_refs))
-            if can_export:
-                sink_refs = sorted(set(sink_refs) | set(grid_port_refs))
 
         # ASM-SOLV-001:母线无源(只有汇)
         if not source_refs:

@@ -41,6 +41,7 @@ from iesplan.assembly.contracts import (
     ValidationReceipt,
 )
 from iesplan.assembly.diags import ASM_ALL_CODES
+from iesplan.assembly.network import PortBus, build_port_buses
 from iesplan.assembly.parser import ParseDocResult, parse_assembly_doc
 from iesplan.assembly.rules.step import check_step_relations
 from iesplan.assembly.validator import (
@@ -82,5 +83,7 @@ __all__ = [
     "canonical_algorithm_ref",
     "CheckContext",
     "BusSummary",
+    "PortBus",
+    "build_port_buses",
     "ASM_ALL_CODES",
 ]

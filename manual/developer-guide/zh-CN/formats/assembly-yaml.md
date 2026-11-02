@@ -191,7 +191,7 @@ extensions: {}
 连接端点使用 `<device-instance>.<interface-id>`。装配校验必须确认：
 
 - 两个实例和 interface 存在；
-- `out → in`、与语义相容的 `bidirectional` 连接成立；
+- `out → in`、`out → out` 的母线汇合及与语义相容的 `bidirectional` 连接成立；
 - carrier 相同、单位量纲兼容、取值区间不冲突；
 - `predefined` 和 `blind` 从不出现在 connections；
 - 无禁止的自环、重复边和未满足的必需连接；

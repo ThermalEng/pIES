@@ -92,9 +92,9 @@ def prop_map(device: AssemblyDevice) -> dict[str, object]:
 
 @dataclass(slots=True, frozen=True)
 class AssemblyEdge:
-    """边:from 端输出 → to 端输入,两端参数同一时间步数值严格相等。
+    """理想连接:from/to 实际端口加入同一公共母线，不单独分配流量。
 
-    输出对输出(母线汇合写法,04 §2.3.4)亦合法:同一母线上各源输出端口即母线汇合点。
+    共享端口的多条连接形成混合母线，端口总流量不逐边相等。
     """
 
     id: str

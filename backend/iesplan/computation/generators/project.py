@@ -20,7 +20,7 @@ MPS-ready 的 ``LinearModel``，并附带结果反向换算所需的最小单位
 ``1 year`` → 31536000）已由公共编译入口换算为同一体系，
 显式时间跨度与按年费率相乘后自然落到窗口金额。
 
-母线：连接只定义连通性，按 carrier + 无向连通分量逐 step 生成一条
+母线：理想连接按真实端口分区，逐 step 生成一条
 守恒式（out/bidirectional 为供给正项，in 为消耗负项）；孤立端口
 不建平衡式。值域界可引用实例 property（额定能力），实例级解析。
 时变电价由第三项价格区逐点计价（``constant`` 同一逐点语义），
@@ -42,7 +42,7 @@ from datetime import datetime, timedelta
 from types import MappingProxyType
 from typing import Any
 
-from iesplan.assembly.contracts import ValidatedAssemblyArtifact
+from iesplan.assembly import ValidatedAssemblyArtifact, build_port_buses
 from iesplan.computation.errors import ComputationUnavailableError
 from iesplan.computation.generators.sources import SourceTrace, SourceRows, SourceColumns
 from iesplan.computation.generators.compiler_ir import (
@@ -2188,7 +2188,7 @@ class _ProjectBuilder:
             )
 
     # ------------------------------------------------------------------
-    # 母线守恒（carrier + 无向连通分量；连接只定义连通性）
+    # 母线守恒（理想连接的端口分区；设备内部方程不合并端口）
     # ------------------------------------------------------------------
 
     def _compute_buses(
@@ -2196,60 +2196,30 @@ class _ProjectBuilder:
     ) -> list[tuple[str, tuple[str, ...], tuple[tuple[str, str, float], ...]]]:
         """母线表：(carrier, 成员实例排序元组, ((实例, 接口, 符号)…))。
 
-        先按 carrier 分图、再分别求无向连通分量（与装配
-        ``solvability.build_buses`` 的 ``carrier_adj`` 语义一致；边载体
-        取 from 端端口载体）。跨 carrier 的转换设备不合并对侧同载体
-        子网。out/bidirectional 为供给正项，in 为消耗负项；
-        bidirectional 以设备公开符号约定作为有符号净流量。
-        不按设备 ID 分支。
+        装配域拥有理想连接的端口分区。仅该母线的真实端口进入
+        守恒，同实例其他端口由设备内部方程独立关联。
+        out/bidirectional 为供给正项，in 为消耗负项。
         """
-        connections = self.doc.get("connections") or {}
-        carrier_adj: dict[str, dict[str, set[str]]] = {}
-        for conn in connections.values():
-            dev_a, _, iface_a = conn["from"].partition(".")
-            dev_b, _, _ = conn["to"].partition(".")
-            carrier = self.models[dev_a].interfaces[iface_a].carrier
-            adj = carrier_adj.setdefault(carrier, {})
-            adj.setdefault(dev_a, set()).add(dev_b)
-            adj.setdefault(dev_b, set()).add(dev_a)
+        connections = {
+            identity: (connection["from"], connection["to"])
+            for identity, connection in (self.doc.get("connections") or {}).items()
+        }
+        port_carriers = {
+            f"{inst}.{name}": flow.carrier
+            for inst, contribution in self.models.items()
+            for name, flow in contribution.interfaces.items()
+        }
         buses: list[
             tuple[str, tuple[str, ...], tuple[tuple[str, str, float], ...]]
         ] = []
-        for carrier in sorted(carrier_adj):
-            adj = carrier_adj[carrier]
-            seen: set[str] = set()
-            components: list[tuple[str, ...]] = []
-            for root in sorted(adj):
-                if root in seen:
-                    continue
-                members = set([root])
-                frontier = [root]
-                while frontier:
-                    current = frontier.pop()
-                    for peer in adj.get(current, ()):
-                        if peer not in members:
-                            members.add(peer)
-                            frontier.append(peer)
-                seen |= members
-                components.append(tuple(sorted(members)))
-            for members in sorted(components):
-                ports: list[tuple[str, str, float]] = []
-                for inst in members:
-                    contribution = self.models[inst]
-                    for iface_name, flow in contribution.interfaces.items():
-                        if flow.carrier != carrier:
-                            continue
-                        if flow.type == "out" or flow.type == "bidirectional":
-                            sign = 1.0
-                        elif flow.type == "in":
-                            sign = -1.0
-                        else:
-                            continue
-                        ports.append((inst, iface_name, sign))
-                ordered = tuple(sorted(ports))
-                if not ordered:
-                    continue
-                buses.append((carrier, members, ordered))
+        for bus in build_port_buses(port_carriers, connections):
+            ports: list[tuple[str, str, float]] = []
+            for ref in bus.port_refs:
+                inst, _, name = ref.partition(".")
+                flow = self.models[inst].interfaces[name]
+                ports.append((inst, name, -1.0 if flow.type == "in" else 1.0))
+            members = tuple(sorted({inst for inst, _name, _sign in ports}))
+            buses.append((bus.carrier, members, tuple(ports)))
         return buses
 
     def _build_bus_rows(self) -> None:

@@ -97,7 +97,7 @@ class CheckContext:
 class BusSummary:
     """母线汇总(阶段 D 产物,随 CheckResult 返回供 UI/审计)。
 
-    母线 = 载体 × 无向连通分量(边连通;双向端口视为双向连通)。
+    母线 = 理想连接的真实端口分区；设备内部端口不自动连通。
     """
 
     carrier: str
