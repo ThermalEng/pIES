@@ -652,6 +652,17 @@ class _ProjectBuilder:
 
     def _declare_global_symbols(self) -> None:
         """Declare each planning decision once, before binding any instance."""
+        construction_limits = {}
+        for unit_id, unit in sorted((self.doc.get("planning") or {}).get(
+            "construction_units", {}
+        ).items()):
+            inst = unit["device_ref"]
+            for name, scale in unit["scales"].items():
+                raw_upper = scale.get("active_upper_bound")
+                if raw_upper is not None:
+                    construction_limits[name] = (
+                        inst, unit_id, raw_upper,
+                    )
         for name in sorted(self.plan_vars):
             spec = self.plan_vars[name]
             inst, prop = spec["device_ref"], spec["parameter"]
@@ -682,7 +693,23 @@ class _ProjectBuilder:
             raw_upper = spec.get("upper_bound")
             p_lo = 0.0 if raw_lower is None else _to_internal(float(raw_lower), unit)
             p_hi = None if raw_upper is None else _to_internal(float(raw_upper), unit)
-            project_boundary = (p_lo, p_hi) if (raw_lower is not None or raw_upper is not None) else None
+            active_source = None
+            if name in construction_limits:
+                active_inst, unit_id, raw_active_upper = construction_limits[name]
+                active_upper = _to_internal(float(raw_active_upper), unit)
+                if p_hi is None or active_upper < p_hi:
+                    p_hi = active_upper
+                    active_source = SourceLocation(
+                        f"planning.construction_units.{unit_id}.scales.{name}.active_upper_bound",
+                        active_inst, self.models[active_inst].device_id,
+                        self.devices[active_inst]["definition"].get("revision"),
+                        binding_id=name,
+                    )
+            project_boundary = (
+                (p_lo, p_hi)
+                if raw_lower is not None or raw_upper is not None or active_source is not None
+                else None
+            )
 
             # Lower bound intersection: max(m_lo, p_lo)
             if m_lo is not None and p_lo is not None:
@@ -701,13 +728,13 @@ class _ProjectBuilder:
             # Upper bound intersection: min(m_hi, p_hi)
             if m_hi is not None and p_hi is not None:
                 hi = min(m_hi, p_hi)
-                hi_source = project_source if p_hi <= m_hi else model_source
+                hi_source = (active_source or project_source) if p_hi <= m_hi else model_source
             elif m_hi is not None:
                 hi = m_hi
                 hi_source = model_source
             elif p_hi is not None:
                 hi = p_hi
-                hi_source = project_source
+                hi_source = active_source or project_source
             else:
                 hi = None
                 hi_source = None
@@ -2267,6 +2294,9 @@ class _ProjectBuilder:
             result = _AffineAcc()
             result.add_term(z_name, amount.constant)
             return result
+        if amount.constant == 0.0 and set(amount.terms).issubset(cfg["scales"]):
+            # The construction rows force every linked scale to zero when z=0.
+            return amount
         cache_key = (inst, component, leaf, start, end)
         cached = self._conditional_amounts.get(cache_key)
         if cached is not None:
@@ -3456,30 +3486,31 @@ class _ProjectBuilder:
                         depreciable, side="max", label=position,
                         relation=relation, period=year,
                     )
-                    basis_lo = self.analysis.affine_side(
-                        depreciable, side="min", label=position,
-                        relation=relation, period=year,
-                    )
                     if basis_hi <= 0.0:
                         pass
-                    elif basis_lo >= residual:
-                        residual_amount.add_const(residual)
                     else:
-                        name = f"asset_formed__{len(self._fixed_residuals)}"
-                        self._declare(name, 0.0, 1.0, "binary", "1")
-                        # B <= U*y; B >= R*y. When y=0 B=0, when B>0
-                        # y=1 and R<=B. No fictitious residual or epsilon.
-                        upper = depreciable.snapshot()
-                        upper.add_term(name, -basis_hi)
-                        self.rows.append(LinearConstraint(
-                            f"{name}__upper", upper.freeze(), "le", 0.0,
-                        ))
-                        lower = depreciable.snapshot()
-                        lower.add_term(name, -residual)
-                        self.rows.append(LinearConstraint(
-                            f"{name}__lower", lower.freeze(), "ge", 0.0,
-                        ))
-                        residual_amount.add_term(name, residual)
+                        basis_lo = self.analysis.affine_side(
+                            depreciable, side="min", label=position,
+                            relation=relation, period=year,
+                        )
+                        if basis_lo >= residual:
+                            residual_amount.add_const(residual)
+                        else:
+                            name = f"asset_formed__{len(self._fixed_residuals)}"
+                            self._declare(name, 0.0, 1.0, "binary", "1")
+                            # B <= U*y; B >= R*y. When y=0 B=0, when B>0
+                            # y=1 and R<=B. No fictitious residual or epsilon.
+                            upper = depreciable.snapshot()
+                            upper.add_term(name, -basis_hi)
+                            self.rows.append(LinearConstraint(
+                                f"{name}__upper", upper.freeze(), "le", 0.0,
+                            ))
+                            lower = depreciable.snapshot()
+                            lower.add_term(name, -residual)
+                            self.rows.append(LinearConstraint(
+                                f"{name}__lower", lower.freeze(), "ge", 0.0,
+                            ))
+                            residual_amount.add_term(name, residual)
                     self._fixed_residuals[key] = residual_amount.snapshot()
         annual = _AffineAcc()
         life = float(entry.life_years)

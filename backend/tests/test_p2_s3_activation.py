@@ -10,8 +10,10 @@ Requirements verified:
 """
 from __future__ import annotations
 
-from dataclasses import replace
 import json
+from dataclasses import replace
+from types import SimpleNamespace
+
 import pytest
 
 from iesplan.assembly.contracts import ValidatedAssemblyArtifact, ValidationReceipt
@@ -24,6 +26,8 @@ from iesplan.computation.generators.linear import (
     LoweringUnsupportedError,
 )
 from iesplan.computation.generators.project import (
+    _AffineAcc,
+    _ProjectBuilder,
     build_project_model,
     finance_component_declarations,
 )
@@ -123,6 +127,59 @@ def test_optional_construction_declares_binary_and_conditional_cost() -> None:
     assert upfront["constant"] == pytest.approx(0.0)
     assert upfront["terms"]["built__gen_build"] == pytest.approx(50000.0)
     assert upfront["terms"]["gen_cap"] == pytest.approx(3.5)  # 3500 CNY/kW = 3.5 CNY/W
+    assert not any(var.name.startswith("conditional_cost__") for var in model.variables)
+
+
+def test_construction_active_upper_is_an_effective_scale_bound() -> None:
+    """An explicit active upper bound must reach unified analysis before finance lowering."""
+    artifact, models, materialized, finance, config, evaluation = _activation_inputs(
+        optional=True, fixed_fee=50000.0, lower_kw=0.0,
+    )
+    doc = json.loads(artifact.canonical_text)
+    doc["planning"]["variables"]["gen_cap"]["upper_bound"] = None
+    doc["planning"]["construction_units"]["gen_build"]["scales"]["gen_cap"][
+        "active_upper_bound"
+    ] = "100"
+    artifact = replace(artifact, canonical_text=json.dumps(doc))
+
+    model, _, _ = build_project_model(
+        artifact, models, materialized, finance, config, evaluation,
+    )
+    scale = next(var for var in model.variables if var.name == "gen_cap")
+    assert scale.upper == pytest.approx(100_000.0)
+    max_row = next(row for row in model.constraints if row.name == "gen_build__gen_cap__build_max")
+    assert dict(max_row.expression.terms)[("built__gen_build", 0)] == pytest.approx(-100_000.0)
+
+
+def test_fixed_residual_zero_basis_does_not_request_a_lower_bound() -> None:
+    """B <= 0 needs only max(B); an unrelated missing lower bound is irrelevant."""
+
+    class AnalysisSpy:
+        def __init__(self) -> None:
+            self.sides: list[str] = []
+
+        def affine_side(self, affine, *, side, label, relation, period):
+            self.sides.append(side)
+            return 0.0
+
+    source = SimpleNamespace(identity="asset_source", to_dict=lambda: {"identity": "asset_source"})
+    entry = SimpleNamespace(
+        base_from=source,
+        residual=SimpleNamespace(value=100.0, unit="CNY"),
+        life_years=10,
+    )
+    relation = SimpleNamespace(payload=SimpleNamespace(entry=entry, rule_id="depreciation"))
+    builder = object.__new__(_ProjectBuilder)
+    builder._source_net = lambda _source, relation=None: _AffineAcc()
+    builder.analysis = AnalysisSpy()
+    builder._fixed_residuals = {}
+    builder._fact_depr = []
+    builder.rows = []
+
+    amount = builder._income_depreciation_affine(relation, 1, {}, "evaluation")
+    assert builder.analysis.sides == ["max"]
+    assert amount.terms == {}
+    assert amount.constant == 0.0
 
 
 def test_mandatory_construction_fixes_status_to_one() -> None:

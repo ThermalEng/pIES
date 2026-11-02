@@ -30,6 +30,7 @@ from iesplan.computation.generators.compiler_ir import (
     SymbolDeclaration,
 )
 from iesplan.computation.generators.linear import (
+    BoundConflictError,
     LinearConstraint,
     LinearExpression,
     LinearVariable,
@@ -84,6 +85,10 @@ class BoundInferenceEngine:
         self.relations: list[AffineRelation] = []
         self.equalities: dict[str, tuple[dict[str, Fraction], Fraction]] = {}  # exact affine substitutions
         self.inequalities: list[AffineRelation] = []
+        self.conflicts: list[dict[str, Any]] = []
+        self.budget_exhausted = False
+        self.incomplete_symbols: frozenset[str] = frozenset()
+        self._indexes_ready = False
         # Sparse reverse index: do not rescan every per-step inequality for
         # each annual VAT / income expression bound request.
         self._inequalities_by_symbol: dict[str, list[int]] = defaultdict(list)
@@ -91,13 +96,11 @@ class BoundInferenceEngine:
         self._init_bounds()
         self._collect_relations()
         # A contradictory source relation belongs to the exact model. Analysis
-        # does not replace the solver's infeasibility diagnosis with a failed
-        # generator: if propagation discovers a conflict, retain only declared
-        # domain facts and leave ALL rows to the production generator.
-        self.conflicts: list[tuple[str, str | None]] = []
+        # keeps all rows for the solver and only reports the conflict if a
+        # downstream exact lowering would otherwise misreport a missing bound.
         declared_bounds = dict(self.bounds)
         declared_provenance = dict(self.provenance)
-        self._propagate(budget=max(budget, min(100_000, 4 * len(self.relations))))
+        self._propagate(budget=max(budget, 4 * len(self.relations)))
         if self.conflicts:
             self.bounds = declared_bounds
             self.provenance = declared_provenance
@@ -148,10 +151,9 @@ class BoundInferenceEngine:
         if not filtered and constant != 0.0:
             # 0 (sense) -constant
             if sense == "eq" or (sense == "le" and constant > 0) or (sense == "ge" and constant < 0):
-                raise LoweringUnsupportedError(
-                    f"关系常数冲突：0 {sense} {-constant}",
-                    model_source=({"location": asdict(source)} if source else None),
-                )
+                rel = AffineRelation((), constant, sense, source, relation_id)
+                self.relations.append(rel)
+                self._record_conflict("<constant>", rel)
             return
         if not filtered:
             return
@@ -163,25 +165,68 @@ class BoundInferenceEngine:
 
         rel = AffineRelation(filtered, constant, sense, source, relation_id)
         self.relations.append(rel)
+        if self._indexes_ready:
+            self._index_relation(rel)
 
-        # Register direct substitution for equalities
-        if sense == "eq":
-            term_dict = dict(filtered)
-            lead_var = next((k for k, v in term_dict.items() if v == 1.0 or v == -1.0), filtered[0][0])
-            lead_coeff = term_dict[lead_var]
+    def _index_relations(self) -> None:
+        """Build deterministic equality and inequality indexes after collection."""
+        def key(rel: AffineRelation) -> tuple:
+            source = repr(asdict(rel.source)) if rel.source is not None else ""
+            if rel.relation_id is not None:
+                # A relation family is already expanded in its declared domain
+                # order. Keep that order within the family: sorting solver
+                # column names lexically puts t10 before t2 and can turn a
+                # single forward pass into thousands of worklist retries.
+                return (0, rel.relation_id, source)
+            return (1, rel.terms, rel.sense, rel.constant, source)
+
+        self.equalities.clear()
+        self.inequalities.clear()
+        self._inequalities_by_symbol.clear()
+        for rel in sorted(self.relations, key=key):
+            self._index_relation(rel)
+        self._indexes_ready = True
+
+    def _index_relation(self, rel: AffineRelation) -> None:
+        if not rel.terms:
+            return
+        if rel.sense == "eq":
+            lead_var = next(
+                (name for name, coeff in rel.terms if coeff in (1.0, -1.0)),
+                rel.terms[0][0],
+            )
+            lead_coeff = next(coeff for name, coeff in rel.terms if name == lead_var)
             divisor = Fraction.from_float(lead_coeff)
             sub_terms = {
-                k: -Fraction.from_float(v) / divisor
-                for k, v in term_dict.items() if k != lead_var
+                name: -Fraction.from_float(coeff) / divisor
+                for name, coeff in rel.terms if name != lead_var
             }
-            sub_const = -Fraction.from_float(constant) / divisor
-            if lead_var not in self.equalities:
-                self.equalities[lead_var] = (sub_terms, sub_const)
+            sub_const = -Fraction.from_float(rel.constant) / divisor
+            current = self.equalities.get(lead_var)
+            candidate = (sub_terms, sub_const)
+            if current is None or repr(candidate) < repr(current):
+                self.equalities[lead_var] = candidate
         else:
             index = len(self.inequalities)
             self.inequalities.append(rel)
-            for sym, _ in filtered:
+            for sym, _ in rel.terms:
                 self._inequalities_by_symbol[sym].append(index)
+
+    @staticmethod
+    def _source_dict(source: SourceLocation | None) -> dict[str, Any] | None:
+        return ({key: value for key, value in asdict(source).items() if value is not None}
+                if source is not None else None)
+
+    def _record_conflict(
+        self, symbol: str, relation: AffineRelation,
+        prior_sources: tuple[SourceLocation | None, SourceLocation | None] = (None, None),
+    ) -> None:
+        self.conflicts.append({
+            "symbol": symbol,
+            "relation_id": relation.relation_id,
+            "source": relation.source,
+            "prior_sources": prior_sources,
+        })
 
     def _column(self, inst: str, local: str, step: int) -> str:
         """Resolve the very same typed instance/step slot as the generator."""
@@ -339,6 +384,10 @@ class BoundInferenceEngine:
         """
         from functools import lru_cache
 
+        self._index_relations()
+        self.budget_exhausted = False
+        self.incomplete_symbols = frozenset()
+
         @lru_cache(maxsize=8192)
         def exact(value: float) -> Fraction:
             return Fraction.from_float(float(value))
@@ -362,13 +411,16 @@ class BoundInferenceEngine:
             for symbol, _ in rel.terms:
                 uses[symbol].append(idx)
 
-        queue = deque(range(len(self.relations)))
+        initial_count = len(self.relations)
+        initial = set(range(initial_count))
+        queue = deque(range(initial_count))
         pending = set(queue)
         steps = 0
-        while queue and steps < budget:
+        while queue and steps < initial_count + budget:
             steps += 1
             rel_idx = queue.popleft()
             pending.discard(rel_idx)
+            initial.discard(rel_idx)
             rel = self.relations[rel_idx]
             coefficients = [(sym, exact(a)) for sym, a in rel.terms]
             rhs = -exact(rel.constant)
@@ -429,7 +481,9 @@ class BoundInferenceEngine:
                 if next_lo is not None and next_hi is not None and next_lo > next_hi:
                     # A source-level inconsistent system must keep all exact
                     # production rows and let the solver report infeasibility.
-                    self.conflicts.append((target, rel.relation_id))
+                    self._record_conflict(
+                        target, rel, self.provenance.get(target, (None, None)),
+                    )
                     return
                 self.bounds[target] = (next_lo, next_hi)
                 prior_lo, prior_hi = self.provenance.get(target, (None, None))
@@ -438,9 +492,37 @@ class BoundInferenceEngine:
                     rel.source if next_hi != cur_hi else prior_hi,
                 )
                 for dependent in uses[target]:
-                    if dependent not in pending:
+                    if dependent not in initial and dependent not in pending:
                         queue.append(dependent)
                         pending.add(dependent)
+        if queue:
+            self.budget_exhausted = True
+            self.incomplete_symbols = frozenset(
+                symbol
+                for rel_idx in pending
+                for symbol, _ in self.relations[rel_idx].terms
+            )
+
+    def conflict_error(self) -> BoundConflictError:
+        conflict = self.conflicts[0]
+        source = conflict["source"]
+        symbol = conflict["symbol"]
+        model_source = {
+            "source": f"relation:{conflict['relation_id']}",
+            "role": "relation_conflict",
+            "axis": "scalar",
+            "index": 0,
+            "location": {
+                "symbol": symbol,
+                "relation": self._source_dict(source),
+                "prior_sources": [self._source_dict(item) for item in conflict["prior_sources"]],
+            },
+        }
+        return BoundConflictError(
+            ("已证明模型约束冲突：存在恒假的约束" if symbol == "<constant>"
+             else f"已证明模型约束冲突：变量 {symbol!r} 的有效上下界矛盾"),
+            model_source=model_source,
+        )
 
     def simplify_affine(
         self, terms: Mapping[str, float], constant: float,
