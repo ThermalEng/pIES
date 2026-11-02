@@ -160,3 +160,42 @@ def test_stop_during_source_serialization_does_not_publish_bundle(monkeypatch, r
     with pytest.raises(ComputationUnavailableError) as raised:
         HIGHS_MILP_PROVIDER.generate_with_stop(*_campus_inputs(), stop=lambda: reason if stopped else None)
     assert raised.value.reason == reason
+
+
+@pytest.mark.parametrize("phase", ["collection", "propagation"])
+def test_stop_during_analysis_never_enters_output_expansion(monkeypatch, phase):
+    from test_project_model import _gen_inputs
+
+    from iesplan.computation.generators.bound_inference import BoundInferenceEngine
+
+    stopped = False
+    original_add = BoundInferenceEngine._add_affine
+    original_propagate = BoundInferenceEngine._propagate
+    collected = 0
+
+    def add(self, *args, **kwargs):
+        nonlocal stopped, collected
+        collected += 1
+        if phase == "collection" and collected == 32:
+            stopped = True
+        return original_add(self, *args, **kwargs)
+
+    def propagate(self, *args, **kwargs):
+        nonlocal stopped
+        if phase == "propagation":
+            stopped = True
+        return original_propagate(self, *args, **kwargs)
+
+    def output_must_not_start(*args):
+        raise AssertionError("cancellation must interrupt analysis before output expansion")
+
+    monkeypatch.setattr(BoundInferenceEngine, "_add_affine", add)
+    monkeypatch.setattr(BoundInferenceEngine, "_propagate", propagate)
+    monkeypatch.setattr(_ProjectBuilder, "_expand_instance", output_must_not_start)
+    with pytest.raises(ComputationUnavailableError) as raised:
+        HIGHS_MILP_PROVIDER.generate_with_stop(
+            *_gen_inputs(), stop=lambda: "cancelled" if stopped else None,
+        )
+    assert raised.value.reason == "cancelled"
+    if phase == "collection":
+        assert collected < 256

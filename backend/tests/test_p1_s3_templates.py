@@ -200,7 +200,8 @@ def test_battery_block_sizes_preserve_full_model_and_real_columns(battery):
     for result in models:
         assert _battery_model(result) == a
         assert result.template_stats["technical_compiles"] == len(battery.relations)
-        assert result.template_stats["technical_binds"] == (
+        assert (result.template_stats["technical_binds"]
+                + result.template_stats["technical_reuses"]) == (
             result.point_count * len(battery.relations)
         )
         # Affine rows go directly to final global solver columns. Exact
@@ -249,7 +250,8 @@ def test_two_instances_share_structure_not_values_and_cross_calendar_year():
         builder._expand_instance(inst, bound[inst])
         builder._build_relations(inst, bound[inst])
     assert builder.template_stats["technical_compiles"] == len(tank.relations)
-    assert builder.template_stats["technical_binds"] == 2 * steps * len(tank.relations)
+    assert (builder.template_stats["technical_binds"]
+            + builder.template_stats["technical_reuses"]) == 2 * steps * len(tank.relations)
     for inst, initial, factor in (("a", 0.2, 1.0), ("b", 0.7, 0.5)):
         first = next(r for r in builder.rows if r.name == f"{inst}__soc_step__t0")
         assert first.expression.constant == pytest.approx(-initial)
@@ -516,7 +518,9 @@ def test_public_campus_production_template_counts_and_resource_comparison(measur
     bundle, builder, full = measured_generate
     count = sum(len(builder.models[inst].relations) for inst in builder.models)
     assert builder.inventory.sealed
-    assert builder.template_stats["technical_binds"] == builder.point_count * count
+    assert (builder.template_stats["technical_binds"]
+            + builder.template_stats["technical_reuses"]) == builder.point_count * count
+    assert builder.template_stats["technical_reuses"] > 0
     assert 0 < builder.template_stats["technical_compiles"] <= count
     assert builder.template_stats["step_compiles"] == len(
         builder.analysis.relations("planning_step")

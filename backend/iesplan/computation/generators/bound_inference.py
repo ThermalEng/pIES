@@ -9,11 +9,12 @@ Infers conservative effective bounds from the complete relation inventory:
 """
 from __future__ import annotations
 
-from collections import defaultdict, deque
-from dataclasses import asdict, dataclass, field
 import math
+from collections import defaultdict, deque
+from collections.abc import Callable, Mapping
+from dataclasses import asdict, dataclass, field
 from fractions import Fraction
-from typing import Any, Mapping
+from typing import Any
 
 from iesplan.computation.generators.compiler_ir import (
     BoundFact,
@@ -36,8 +37,8 @@ from iesplan.computation.generators.linear import (
     LinearVariable,
     LoweringUnsupportedError,
 )
-from iesplan.modeling import BinaryNode, RefNode, UnaryNode
 from iesplan.computation.generators.templates import bind_technical, compile_technical
+from iesplan.modeling import BinaryNode, RefNode, UnaryNode
 
 
 _TOLERANCE = 1e-12
@@ -99,9 +100,15 @@ class BoundInferenceEngine:
         variables: Mapping[str, LinearVariable],
         *,
         budget: int = 5000,
+        checkpoint: Callable[[], None] | None = None,
     ) -> None:
         self.inventory = inventory
         self.variables = variables
+        self.checkpoint = checkpoint
+        # References to the final affine rows already bound for analysis.
+        # Production reuses these objects; no second mathematical model or
+        # additional copy of their coefficients is constructed.
+        self.technical_rows: dict[str, list[tuple[LinearConstraint, ...] | None]] = {}
         self.bounds: dict[str, tuple[float | None, float | None]] = {}
         self.provenance: dict[str, tuple[SourceLocation | None, SourceLocation | None]] = {}
         self.relations: list[AffineRelation] = []
@@ -205,8 +212,17 @@ class BoundInferenceEngine:
 
     def _index_relations(self) -> None:
         """Build deterministic equality and inequality indexes after collection."""
+        source_keys: dict[int, str] = {}
+
         def key(rel: AffineRelation) -> tuple:
-            source = repr(asdict(rel.source)) if rel.source is not None else ""
+            if self.checkpoint is not None:
+                self.checkpoint()
+            source = ""
+            if rel.source is not None:
+                source = source_keys.get(id(rel.source))
+                if source is None:
+                    source = repr(asdict(rel.source))
+                    source_keys[id(rel.source)] = source
             if rel.relation_id is not None:
                 # A relation family is already expanded in its declared domain
                 # order. Keep that order within the family: sorting solver
@@ -219,6 +235,8 @@ class BoundInferenceEngine:
         self.inequalities.clear()
         self._inequalities_by_symbol.clear()
         for rel in sorted(self.relations, key=key):
+            if self.checkpoint is not None:
+                self.checkpoint()
             self._index_relation(rel)
         self._indexes_ready = True
 
@@ -278,10 +296,14 @@ class BoundInferenceEngine:
         # Every operation consumes the sealed P1 source identities and index
         # domain. Never infer a time reference by parsing a solver column name.
         for op in self.inventory.operations:
+            if self.checkpoint is not None:
+                self.checkpoint()
             payload = op.payload
             count = op.domain.count if op.domain.kind == "step" else 1
             if isinstance(payload, CapacityLimit):
                 for t in range(count):
+                    if self.checkpoint is not None:
+                        self.checkpoint()
                     local = self._column(payload.instance, payload.local, t)
                     self._add_affine(
                         {local: 1.0, payload.planning_symbol: -1.0},
@@ -290,6 +312,8 @@ class BoundInferenceEngine:
             elif isinstance(payload, BusBalance):
                 # Existing bus conservation (not the future port-level P3-N).
                 for t in range(count):
+                    if self.checkpoint is not None:
+                        self.checkpoint()
                     terms: dict[str, float] = {}
                     for inst, local, sign in payload.ports:
                         col = self._column(inst, local, t)
@@ -319,6 +343,8 @@ class BoundInferenceEngine:
             elif isinstance(payload, PlanningRule):
                 template = payload.template
                 for t in range(count):
+                    if self.checkpoint is not None:
+                        self.checkpoint()
                     terms: dict[str, float] = {}
                     for (sym, offset), coeff in template.expression.terms:
                         if coeff == 0:
@@ -382,7 +408,13 @@ class BoundInferenceEngine:
                             box[name] = (None, None)
                 count = family.domain.count if family.domain.kind == "step" else 1
             known = dict(constants)
+            reusable = template.fast_lhs is not None and template.fast_rhs is not None
+            cached_rows = [] if reusable else None
+            if cached_rows is not None:
+                self.technical_rows[family.identity] = cached_rows
             for step in range(count):
+                if self.checkpoint is not None:
+                    self.checkpoint()
                 for name, values in series.items():
                     known[name] = values[step]
                 def resolve(key: tuple[str, int]) -> tuple[str, int]:
@@ -392,11 +424,16 @@ class BoundInferenceEngine:
                     lowered = bind_technical(
                         template, instance=inst, step=step, known=known,
                         initial=initial, bound=box, affine_column=resolve,
+                        affine_row_name=f"{inst}__{family.relation.id}__t{step}",
                     )
                 except LoweringUnsupportedError:
                     # Non-affine mutex is lowered exactly by the production
                     # consumer, not used to invent an affine analysis relation.
+                    if cached_rows is not None:
+                        cached_rows.append(None)
                     continue
+                if cached_rows is not None:
+                    cached_rows.append(lowered.constraints)
                 if lowered.variables:
                     continue
                 for row in lowered.constraints:
@@ -443,6 +480,8 @@ class BoundInferenceEngine:
 
         uses: dict[str, list[int]] = defaultdict(list)
         for idx, rel in enumerate(self.relations):
+            if self.checkpoint is not None:
+                self.checkpoint()
             for symbol, _ in rel.terms:
                 uses[symbol].append(idx)
 
@@ -474,6 +513,8 @@ class BoundInferenceEngine:
             )
 
         while queue and steps < initial_count + budget:
+            if self.checkpoint is not None:
+                self.checkpoint()
             steps += 1
             rel_idx = queue.popleft()
             pending.discard(rel_idx)
@@ -481,28 +522,40 @@ class BoundInferenceEngine:
             rel = self.relations[rel_idx]
             coefficients = [(sym, exact(a)) for sym, a in rel.terms]
             rhs = -exact(rel.constant)
+            # Sum the interval of -a*x once. Removing the target contribution
+            # gives exactly the previous nested-loop calculation. Update the
+            # totals after each tightening to retain within-row propagation.
+            # A count of unknown endpoints handles single-sided/free variables
+            # without ever subtracting infinities.
+            endpoints: dict[str, tuple[Fraction | None, Fraction | None]] = {}
+            lower_sum = upper_sum = rhs
+            lower_missing = upper_missing = 0
+            for symbol, coefficient in coefficients:
+                if self.checkpoint is not None:
+                    self.checkpoint()
+                lo, hi = self.bounds.get(symbol, (None, None))
+                low, high = (lo, hi) if coefficient < 0 else (hi, lo)
+                low_term = None if low is None else -coefficient * exact(low)
+                high_term = None if high is None else -coefficient * exact(high)
+                endpoints[symbol] = (low_term, high_term)
+                if low_term is None:
+                    lower_missing += 1
+                else:
+                    lower_sum += low_term
+                if high_term is None:
+                    upper_missing += 1
+                else:
+                    upper_sum += high_term
             for target, a_k in coefficients:
+                if self.checkpoint is not None:
+                    self.checkpoint()
                 if not a_k:
                     continue
-                lower_rest: Fraction | None = rhs
-                upper_rest: Fraction | None = rhs
-                for other, a_i in coefficients:
-                    if other == target:
-                        continue
-                    coeff = -a_i
-                    lo, hi = self.bounds.get(other, (None, None))
-                    min_endpoint = lo if coeff > 0 else hi
-                    max_endpoint = hi if coeff > 0 else lo
-                    if lower_rest is not None:
-                        lower_rest = (
-                            None if min_endpoint is None
-                            else lower_rest + coeff * exact(min_endpoint)
-                        )
-                    if upper_rest is not None:
-                        upper_rest = (
-                            None if max_endpoint is None
-                            else upper_rest + coeff * exact(max_endpoint)
-                        )
+                old_low_term, old_high_term = endpoints[target]
+                lower_rest = (lower_sum - (old_low_term or 0)
+                              if lower_missing == (old_low_term is None) else None)
+                upper_rest = (upper_sum - (old_high_term or 0)
+                              if upper_missing == (old_high_term is None) else None)
 
                 new_lo: float | None = None
                 new_hi: float | None = None
@@ -544,6 +597,14 @@ class BoundInferenceEngine:
                     finish()
                     return
                 self.bounds[target] = (next_lo, next_hi)
+                low, high = (next_lo, next_hi) if a_k < 0 else (next_hi, next_lo)
+                low_term = None if low is None else -a_k * exact(low)
+                high_term = None if high is None else -a_k * exact(high)
+                lower_missing += (low_term is None) - (old_low_term is None)
+                upper_missing += (high_term is None) - (old_high_term is None)
+                lower_sum += (low_term or 0) - (old_low_term or 0)
+                upper_sum += (high_term or 0) - (old_high_term or 0)
+                endpoints[target] = (low_term, high_term)
                 bound_updates += 1
                 prior_lo, prior_hi = self.provenance.get(target, (None, None))
                 self.provenance[target] = (
@@ -551,14 +612,18 @@ class BoundInferenceEngine:
                     rel.source if next_hi != cur_hi else prior_hi,
                 )
                 for dependent in uses[target]:
+                    # Tightening a bound from one affine row cannot improve
+                    # that same row again: its opposite-side interval already
+                    # used the other variables' endpoints. Only a DIFFERENT
+                    # relation can provide new information. Avoid an otherwise
+                    # redundant second visit for every state-transition row.
+                    if dependent == rel_idx:
+                        continue
                     if dependent not in initial and dependent not in pending:
                         queue.append(dependent)
                         pending.add(dependent)
                         requeues += 1
-                        if dependent == rel_idx:
-                            self_requeues += 1
-                        else:
-                            dependent_requeues += 1
+                        dependent_requeues += 1
                 max_queue_size = max(max_queue_size, len(queue))
         if queue:
             self.budget_exhausted = True

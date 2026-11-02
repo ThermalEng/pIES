@@ -35,8 +35,8 @@ def _add_step_relation(
     )
 
 
-def test_forward_state_chain_records_self_requeues() -> None:
-    """The current baseline exposes same-row re-entry on an ordered chain."""
+def test_forward_state_chain_does_not_revisit_its_own_proof() -> None:
+    """An ordered forward chain needs one visit per affine relation."""
     count = 128
     engine = _engine_with_bound("s_0", 0.0, 0.0)
     for step in range(1, count + 1):
@@ -53,10 +53,10 @@ def test_forward_state_chain_records_self_requeues() -> None:
     stats = engine.propagation_stats
     assert isinstance(stats, PropagationStats)
     assert stats.relation_count == count
-    assert stats.steps == 2 * count
+    assert stats.steps == count
     assert stats.bound_updates == count
-    assert stats.requeues == count
-    assert stats.self_requeues == count
+    assert stats.requeues == 0
+    assert stats.self_requeues == 0
     assert stats.dependent_requeues == 0
     assert stats.max_queue_size == count
     assert stats.budget_exhausted is False
@@ -81,7 +81,7 @@ def test_terminal_bound_reports_single_reverse_sweep_work() -> None:
     assert count < stats.steps <= 3 * count
     assert stats.bound_updates == count
     assert stats.dependent_requeues >= count - 1
-    assert stats.self_requeues >= count - 1
+    assert stats.self_requeues == 0
     assert stats.budget_exhausted is False
 
 
@@ -136,3 +136,32 @@ def test_budget_exhaustion_keeps_established_bounds_and_does_not_invent_limits()
     assert x_upper is not None and 0.0 <= x_upper <= 10.0
     assert engine.bounds["unknown"] == (None, None)
     assert engine.propagation_stats.budget_exhausted is True
+
+
+def test_wide_affine_row_reuses_interval_totals(monkeypatch) -> None:
+    """Prove linear arithmetic work instead of a machine-dependent time limit."""
+    from fractions import Fraction
+
+    count = 256
+    inventory = CompilerInventory()
+    for i in range(count):
+        inventory.register_bound_fact(BoundFact(f"x{i}", 0.0, 1.0))
+    inventory.seal()
+    engine = BoundInferenceEngine(inventory, {})
+    engine._add_affine(
+        {"free": 1.0, **{f"x{i}": 1.0 + i / count for i in range(count)}},
+        -7.0, "le", relation_id="wide_row",
+    )
+    multiplications = 0
+    original = Fraction.__mul__
+
+    def multiply(left, right):
+        nonlocal multiplications
+        multiplications += 1
+        return original(left, right)
+
+    monkeypatch.setattr(Fraction, "__mul__", multiply)
+    engine._propagate(budget=10)
+    assert engine.bounds["free"] == (None, 7.0)
+    assert engine.propagation_stats.steps == 1
+    assert multiplications < 12 * (count + 1)

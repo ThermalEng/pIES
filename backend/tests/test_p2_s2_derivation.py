@@ -183,10 +183,10 @@ def test_budget_exhaustion_is_explicit_when_requeued_relations_remain() -> None:
     """An incomplete worklist must not masquerade as a genuinely missing bound."""
     inventory = CompilerInventory()
     inventory.seal()
-    variables = {name: LinearVariable(name) for name in ("x", "y")}
+    variables = {"x": LinearVariable("x", None, 1.0), "y": LinearVariable("y")}
     engine = BoundInferenceEngine(inventory, variables)
-    engine._add_affine({"x": 1.0, "y": -1.0}, 0.0, "eq")
-    engine._add_affine({"x": 1.0}, 0.0, "le")
+    engine._add_affine({"x": 1.0, "y": -0.999}, 0.0, "eq")
+    engine._add_affine({"y": 1.0, "x": -0.999}, 0.0, "eq")
     engine._propagate(budget=2)
     assert engine.budget_exhausted
 
@@ -197,6 +197,31 @@ def test_budget_exhaustion_is_explicit_when_requeued_relations_remain() -> None:
             SimpleNamespace(terms={"x": 1.0}, constant=0.0),
             side="min", label="budget probe",
         )
+
+
+def test_budget_exhaustion_does_not_reject_a_proven_live_variable_bound() -> None:
+    """Later auxiliary declarations remain usable even if propagation stopped."""
+    inventory = CompilerInventory()
+    inventory.seal()
+    variables = {"x": LinearVariable("x")}
+    analysis = CompilerAnalysis(inventory, variables)
+    analysis.inference.budget_exhausted = True
+    analysis.inference.incomplete_symbols = frozenset({"x"})
+    variables["x"] = LinearVariable("x", 0.0, 10.0)
+    amount = SimpleNamespace(terms={"x": 1.0}, constant=2.0)
+    assert analysis.affine_side(amount, side="max", label="known") == 12.0
+    assert analysis.affine_side(amount, side="min", label="known") == 2.0
+
+
+def test_optional_side_query_keeps_unknown_distinct_from_invalid_input() -> None:
+    inventory = CompilerInventory()
+    inventory.seal()
+    analysis = CompilerAnalysis(inventory, {"q": LinearVariable("q", 0.0, None)})
+    amount = SimpleNamespace(terms={"q": 1.0}, constant=0.0)
+    assert analysis.affine_side(amount, side="max", label="capacity", required=False) is None
+    assert analysis.affine_side(amount, side="min", label="capacity") == 0.0
+    with pytest.raises(LoweringUnsupportedError, match="表达式上界"):
+        analysis.affine_side(amount, side="max", label="capacity")
 
 
 def test_proven_constraint_conflict_is_not_misreported_as_missing_bound() -> None:
