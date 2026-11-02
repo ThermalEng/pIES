@@ -53,6 +53,8 @@ class AffineRelation:
     sense: str = "eq"  # "eq", "le", "ge"
     source: SourceLocation | None = None
     relation_id: str | None = None
+    axis: str = "scalar"
+    index: int = 0
 
     def term_dict(self) -> dict[str, float]:
         return dict(self.terms)
@@ -188,12 +190,15 @@ class BoundInferenceEngine:
         sense: str = "eq",
         source: SourceLocation | None = None,
         relation_id: str | None = None,
+        *,
+        axis: str = "scalar",
+        index: int = 0,
     ) -> None:
         filtered = tuple(sorted((k, v) for k, v in terms.items() if v != 0.0))
         if not filtered and constant != 0.0:
             # 0 (sense) -constant
             if sense == "eq" or (sense == "le" and constant > 0) or (sense == "ge" and constant < 0):
-                rel = AffineRelation((), constant, sense, source, relation_id)
+                rel = AffineRelation((), constant, sense, source, relation_id, axis, index)
                 self.relations.append(rel)
                 self._record_conflict("<constant>", rel)
             return
@@ -205,7 +210,7 @@ class BoundInferenceEngine:
                 # Indexed identities are not interchangeable with their base.
                 self.bounds[sym] = (None, None)
 
-        rel = AffineRelation(filtered, constant, sense, source, relation_id)
+        rel = AffineRelation(filtered, constant, sense, source, relation_id, axis, index)
         self.relations.append(rel)
         if self._indexes_ready:
             self._index_relation(rel)
@@ -278,6 +283,8 @@ class BoundInferenceEngine:
             "symbol": symbol,
             "relation_id": relation.relation_id,
             "source": relation.source,
+            "axis": relation.axis,
+            "index": relation.index,
             "prior_sources": prior_sources,
         })
 
@@ -308,6 +315,7 @@ class BoundInferenceEngine:
                     self._add_affine(
                         {local: 1.0, payload.planning_symbol: -1.0},
                         0.0, payload.sense, op.source, op.identity,
+                        axis=op.domain.kind, index=t,
                     )
             elif isinstance(payload, BusBalance):
                 # Existing bus conservation (not the future port-level P3-N).
@@ -318,7 +326,10 @@ class BoundInferenceEngine:
                     for inst, local, sign in payload.ports:
                         col = self._column(inst, local, t)
                         terms[col] = terms.get(col, 0.0) + sign
-                    self._add_affine(terms, 0.0, "eq", op.source, op.identity)
+                    self._add_affine(
+                        terms, 0.0, "eq", op.source, op.identity,
+                        axis=op.domain.kind, index=t,
+                    )
             elif isinstance(payload, StateInitial):
                 initial_sym = f"{payload.instance}.{payload.state}.initial"
                 val = payload.value
@@ -339,7 +350,10 @@ class BoundInferenceEngine:
                             else:
                                 local = self._column(payload.instance, ref, offset)
                             terms[local] = terms.get(local, 0.0) + coeff
-                    self._add_affine(terms, val.constant, "eq", op.source, op.identity)
+                    self._add_affine(
+                        terms, val.constant, "eq", op.source, op.identity,
+                        axis=op.domain.kind, index=0,
+                    )
             elif isinstance(payload, PlanningRule):
                 template = payload.template
                 for t in range(count):
@@ -360,6 +374,7 @@ class BoundInferenceEngine:
                     self._add_affine(
                         terms, template.expression.constant - template.rhs,
                         template.sense, op.source, op.identity,
+                        axis=op.domain.kind, index=t,
                     )
 
         # P1's *actual* template/binder performs every arithmetic operation,
@@ -445,6 +460,7 @@ class BoundInferenceEngine:
                     self._add_affine(
                         terms, row.expression.constant - row.rhs,
                         row.sense, family.source, family.identity,
+                        axis=family.domain.kind, index=step,
                     )
 
     def _propagate(self, budget: int) -> None:
@@ -641,8 +657,8 @@ class BoundInferenceEngine:
         model_source = {
             "source": f"relation:{conflict['relation_id']}",
             "role": "relation_conflict",
-            "axis": "scalar",
-            "index": 0,
+            "axis": conflict["axis"],
+            "index": conflict["index"],
             "location": {
                 "symbol": symbol,
                 "relation": self._source_dict(source),
