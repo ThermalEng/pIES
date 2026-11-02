@@ -247,6 +247,8 @@ def test_proven_constraint_conflict_is_not_misreported_as_missing_bound() -> Non
             side="max", label="conflict probe",
         )
     assert error.value.reason == "constraint-conflict"
+    assert error.value.model_source["axis"] == "scalar"
+    assert error.value.model_source["index"] == 0
     assert error.value.model_source["location"]["symbol"] == "x"
 
 
@@ -403,6 +405,41 @@ def test_state_lag_keeps_actual_step_and_initial_boundary() -> None:
         lo, hi = analysis.variable_bounds(f"state_step_{i}")
         assert lo == pytest.approx(expected, abs=1e-10)
         assert hi == pytest.approx(expected, abs=1e-10)
+
+
+def test_state_conflict_preserves_triggering_step_not_conflicting_symbol() -> None:
+    """The step=2 row conflicts on the prior state; neither its name nor slot is the row index."""
+    from dataclasses import replace
+
+    from iesplan.computation.generators.templates import compile_technical
+
+    inv = CompilerInventory()
+    inv.step_columns[("m", "s")] = ("alpha", "beta", "gamma")
+    inv.register_bound_fact(BoundFact("m.s", lower=0.0, upper=2.0))
+    family = replace(
+        _make_family("recurrence", RefNode("s"),
+                     BinaryNode("+", RefNode("s", offset=-1), NumberNode(1.0)), "m"),
+        domain=IndexDomain("step", 3),
+    )
+    inv.relations.append(family)
+    inv.technical_contexts[family.identity] = (
+        compile_technical(family.relation, {"s": "var"}),
+        {}, {"s": 0.0}, {}, {"s": ("var", 0.0, 2.0)},
+    )
+    inv.seal()
+    analysis = CompilerAnalysis(inv, {})
+    with pytest.raises(BoundConflictError, match="已证明") as raised:
+        analysis.affine_side(
+            SimpleNamespace(terms={"unbounded_probe": 1.0}, constant=0.0),
+            side="max", label="state conflict probe",
+        )
+    source = raised.value.model_source
+    assert source["source"] == "relation:m.recurrence"
+    assert source["axis"] == "step"
+    assert source["index"] == 2
+    assert source["location"]["symbol"] == "beta"
+    assert source["location"]["relation"]["instance_id"] == "m"
+    assert source["location"]["relation"]["field_path"] == "equations.recurrence"
 
 
 def test_near_proportional_inequality_retains_large_witness() -> None:
