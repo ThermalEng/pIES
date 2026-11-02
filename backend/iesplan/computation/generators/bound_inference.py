@@ -100,7 +100,7 @@ class BoundInferenceEngine:
         # downstream exact lowering would otherwise misreport a missing bound.
         declared_bounds = dict(self.bounds)
         declared_provenance = dict(self.provenance)
-        self._propagate(budget=max(budget, len(self.relations), min(100_000, 4 * len(self.relations))))
+        self._propagate(budget=max(budget, 4 * len(self.relations)))
         if self.conflicts:
             self.bounds = declared_bounds
             self.provenance = declared_provenance
@@ -172,7 +172,13 @@ class BoundInferenceEngine:
         """Build deterministic equality and inequality indexes after collection."""
         def key(rel: AffineRelation) -> tuple:
             source = repr(asdict(rel.source)) if rel.source is not None else ""
-            return rel.terms, rel.sense, rel.constant, rel.relation_id or "", source
+            if rel.relation_id is not None:
+                # A relation family is already expanded in its declared domain
+                # order. Keep that order within the family: sorting solver
+                # column names lexically puts t10 before t2 and can turn a
+                # single forward pass into thousands of worklist retries.
+                return (0, rel.relation_id, source)
+            return (1, rel.terms, rel.sense, rel.constant, source)
 
         self.equalities.clear()
         self.inequalities.clear()

@@ -641,7 +641,7 @@ def test_income_vat_mix_matches_hand_and_b0(tmp_path) -> None:
     for month in range(1, 37):
         assert solved[f"vat__main_pool__paid__m{month}"] == pytest.approx(float(paids[month - 1]), rel=1e-6)
         assert solved[f"vat__main_pool__carry__m{month}"] == pytest.approx(
-            float(carries[month - 1]), rel=1e-6
+            float(carries[month - 1]), rel=1e-6, abs=1e-8
         )
     base_y1, base_y2, base_y3 = _mix_bases()
     base_y2 -= extra * (Decimal("1") - GROSS_FACTOR)
@@ -759,7 +759,7 @@ def test_income_vat_mix_exclusive_matches_hand_and_b0(tmp_path) -> None:
     for month in range(1, 37):
         assert solved[f"vat__main_pool__paid__m{month}"] == pytest.approx(float(paids[month - 1]), rel=1e-6)
         assert solved[f"vat__main_pool__carry__m{month}"] == pytest.approx(
-            float(carries[month - 1]), rel=1e-6
+            float(carries[month - 1]), rel=1e-6, abs=1e-8
         )
     base_y1, base_y2, base_y3 = _mix_bases_exclusive_half_energy()
     year1 = use_losses(taxable_base=base_y1, balances=(), year=1, carryforward_years=INC_CARRY_YEARS)

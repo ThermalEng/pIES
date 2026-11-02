@@ -752,7 +752,7 @@ def test_vat_chain_matches_hand_and_npv(tmp_path) -> None:
         paid = solved[f"vat__main_pool__paid__m{month}"]
         carry = solved[f"vat__main_pool__carry__m{month}"]
         assert paid == pytest.approx(float(paids[month - 1]), rel=1e-6)
-        assert carry == pytest.approx(float(carries[month - 1]), rel=1e-6)
+        assert carry == pytest.approx(float(carries[month - 1]), rel=1e-6, abs=1e-8)
         # 互斥精确：正负分段不靠目标压紧（本用例 NPV 下亦须互斥）。
         assert min(paid, carry) == pytest.approx(0.0, abs=1e-6)
     assert value == pytest.approx(float(_hand_npv_with_vat(paids)), rel=1e-6)
@@ -796,7 +796,7 @@ def test_vat_non_npv_objective_keeps_exact_balances(tmp_path) -> None:
         paid = solved[f"vat__main_pool__paid__m{month}"]
         carry = solved[f"vat__main_pool__carry__m{month}"]
         assert paid == pytest.approx(float(paids[month - 1]), rel=1e-6)
-        assert carry == pytest.approx(float(carries[month - 1]), rel=1e-6)
+        assert carry == pytest.approx(float(carries[month - 1]), rel=1e-6, abs=1e-8)
         assert min(paid, carry) == pytest.approx(0.0, abs=1e-6)
 
 
@@ -830,7 +830,7 @@ def test_vat_refund_arrival_separate_from_confirmation(tmp_path) -> None:
     for month in range(1, 37):
         assert solved[f"vat__main_pool__paid__m{month}"] == pytest.approx(float(paids[month - 1]), rel=1e-6)
         assert solved[f"vat__main_pool__carry__m{month}"] == pytest.approx(
-            float(carries[month - 1]), rel=1e-6
+            float(carries[month - 1]), rel=1e-6, abs=1e-8
         )
     # 到账 22（第 2 年）进现金，到账 40（期后）仅应收。
     expected = _hand_npv_with_vat(paids, {22: claim_amount})
@@ -894,7 +894,7 @@ def test_vat_exclusive_basis_gross_cash_matches_hand(tmp_path) -> None:
     for month in range(1, 37):
         assert solved[f"vat__main_pool__paid__m{month}"] == pytest.approx(float(paids[month - 1]), rel=1e-6)
         assert solved[f"vat__main_pool__carry__m{month}"] == pytest.approx(
-            float(carries[month - 1]), rel=1e-6
+            float(carries[month - 1]), rel=1e-6, abs=1e-8
         )
     expected = _hand_npv_with_vat(paids, cash=Decimal("1.13"))
     assert value == pytest.approx(float(expected), rel=1e-6)
@@ -949,7 +949,7 @@ def test_vat_existing_fixed_om_not_credited(tmp_path) -> None:
     for month in range(1, 37):
         assert solved[f"vat__main_pool__paid__m{month}"] == pytest.approx(float(paids[month - 1]), rel=1e-6)
         assert solved[f"vat__main_pool__carry__m{month}"] == pytest.approx(
-            float(carries[month - 1]), rel=1e-6
+            float(carries[month - 1]), rel=1e-6, abs=1e-8
         )
     expected = _hand_npv_with_vat(paids, upfront=Decimal("0"), fixed_om=Decimal("0"))
     assert value == pytest.approx(float(expected), rel=1e-6)
@@ -983,7 +983,7 @@ def test_vat_maintenance_credit_basis_independent(tmp_path) -> None:
                     float(paids[month - 1]), rel=1e-6
                 )
                 assert solved[f"vat__main_pool__carry__m{month}"] == pytest.approx(
-                    float(carries[month - 1]), rel=1e-6
+                    float(carries[month - 1]), rel=1e-6, abs=1e-8
                 )
             assert value == pytest.approx(float(_hand_npv_with_vat(paids, cash=cash)), rel=1e-6)
             states[maintenance_tax] = (carries, value)

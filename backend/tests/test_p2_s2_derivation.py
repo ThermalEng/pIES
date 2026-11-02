@@ -449,6 +449,7 @@ def test_state_lag_across_blocks_and_year_with_changing_known_coefficient() -> N
         lo, hi = analysis.variable_bounds(f"s_{step}")
         assert lo == pytest.approx(expected, abs=1e-6)
         assert hi == pytest.approx(expected, abs=1e-6)
+    assert not analysis.inference.budget_exhausted
 
 
 def test_exact_zero_propagates_without_artificial_subnormal() -> None:
