@@ -511,6 +511,21 @@ class CompilerAnalysis:
         if inferred is not None and math.isfinite(inferred):
             total = inferred
         else:
+            if self.inference.conflicts:
+                raise self.inference.conflict_error()
+            unresolved = sorted(
+                name for name, coefficient in terms.items()
+                if coefficient and name in self.inference.incomplete_symbols
+            )
+            if self.inference.budget_exhausted and unresolved:
+                raise LoweringUnsupportedError(
+                    f"{label}界分析工作预算耗尽：变量 {unresolved[0]!r} 的界尚未确定",
+                    model_source=({
+                        "source": f"relation:{relation.identity}", "role": "bound",
+                        "axis": relation.domain.kind, "index": period or 0,
+                        "location": {k: v for k, v in asdict(relation.source).items() if v is not None},
+                    } if relation is not None else None),
+                )
             total = constant
             for name, coeff in terms.items():
                 if coeff == 0.0:
@@ -518,6 +533,8 @@ class CompilerAnalysis:
                 lo, hi = self.variable_bounds(name)
                 value = hi if (coeff > 0.0) == (side == "max") else lo
                 if value is None or not math.isfinite(value):
+                    if self.inference.conflicts:
+                        raise self.inference.conflict_error()
                     raise LoweringUnsupportedError(
                         f"{label}缺有限界：变量 {name!r} 界不足，无法精确",
                         model_source=({

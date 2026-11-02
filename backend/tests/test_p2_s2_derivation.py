@@ -11,21 +11,28 @@ Requirements verified:
 """
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
+from iesplan.computation.generators.bound_inference import BoundInferenceEngine
 from iesplan.computation.generators.compiler_ir import (
     BoundFact,
+    CapacityLimit,
     CompilerAnalysis,
     CompilerInventory,
     IndexDomain,
     KnownCoefficient,
+    PlanningRule,
     RelationFamily,
     SemanticRelation,
     SourceLocation,
     StateInitial,
-    CapacityLimit,
 )
 from iesplan.computation.generators.linear import (
+    BoundConflictError,
+    LinearConstraint,
+    LinearExpression,
     LinearVariable,
     LoweringUnsupportedError,
 )
@@ -114,6 +121,132 @@ def test_relation_order_independence() -> None:
     assert b1 == b2
     # 2*1 + 10 = 12, 2*5 + 10 = 20
     assert b1 == (pytest.approx(12.0), pytest.approx(20.0))
+
+
+def test_competing_equality_substitutions_are_independent_of_source_order() -> None:
+    """Canonical equality selection must not depend on declaration order."""
+    def build(order: tuple[str, str]) -> float | None:
+        inventory = CompilerInventory()
+        rows = {
+            "a_xy": LinearConstraint(
+                "a_xy",
+                LinearExpression(terms=((('x', 0), 1.0), (('y', 0), -1.0))),
+                "eq", 0.0,
+            ),
+            "b_xz": LinearConstraint(
+                "b_xz",
+                LinearExpression(terms=((('x', 0), 1.0), (('z', 0), -1.0))),
+                "eq", 1.0,
+            ),
+        }
+        for identity in order:
+            row = rows[identity]
+            inventory.collect(SemanticRelation(
+                f"planning.{identity}", "planning_scalar", IndexDomain("scalar"),
+                PlanningRule(identity, row, False, {}),
+                SourceLocation(f"planning.constraints.{identity}"),
+                input_symbols=tuple(name for (name, _), _coeff in row.expression.terms),
+            ))
+        inventory.seal()
+        analysis = CompilerAnalysis(inventory, {})
+        return analysis.inference.bound_affine(
+            {"x": 1.0, "y": -1.0}, 0.0, side="max",
+        )
+
+    assert build(("a_xy", "b_xz")) == build(("b_xz", "a_xy")) == 0.0
+
+
+def test_propagation_budget_processes_relations_after_one_hundred_thousand(monkeypatch) -> None:
+    """The initial propagation pass must include every collected relation."""
+
+    def collect(engine: BoundInferenceEngine) -> None:
+        for index in range(100_000):
+            engine._add_affine(
+                {"x": 1.0}, 0.0, "le", relation_id=f"padding_{index:06d}",
+            )
+        engine._add_affine(
+            {"y": 1.0, "x": -1.0}, 0.0, "le", relation_id="tail_bound",
+        )
+
+    monkeypatch.setattr(BoundInferenceEngine, "_collect_relations", collect)
+    inventory = CompilerInventory()
+    inventory.seal()
+    engine = BoundInferenceEngine(
+        inventory,
+        {"x": LinearVariable("x"), "y": LinearVariable("y")},
+        budget=1,
+    )
+    assert engine.bounds["y"][1] == 0.0
+
+
+def test_budget_exhaustion_is_explicit_when_requeued_relations_remain() -> None:
+    """An incomplete worklist must not masquerade as a genuinely missing bound."""
+    inventory = CompilerInventory()
+    inventory.seal()
+    variables = {name: LinearVariable(name) for name in ("x", "y")}
+    engine = BoundInferenceEngine(inventory, variables)
+    engine._add_affine({"x": 1.0, "y": -1.0}, 0.0, "eq")
+    engine._add_affine({"x": 1.0}, 0.0, "le")
+    engine._propagate(budget=2)
+    assert engine.budget_exhausted
+
+    analysis = CompilerAnalysis(inventory, variables)
+    analysis.inference = engine
+    with pytest.raises(LoweringUnsupportedError, match="工作预算耗尽"):
+        analysis.affine_side(
+            SimpleNamespace(terms={"x": 1.0}, constant=0.0),
+            side="min", label="budget probe",
+        )
+
+
+def test_proven_constraint_conflict_is_not_misreported_as_missing_bound() -> None:
+    """A proved infeasibility takes precedence over a later bound shortfall."""
+    inventory = CompilerInventory()
+    for name, sense, rhs in (("upper", "le", 0.0), ("lower", "ge", 1.0)):
+        row = LinearConstraint(
+            name,
+            LinearExpression(terms=((('x', 0), 1.0),)),
+            sense, rhs,
+        )
+        inventory.collect(SemanticRelation(
+            f"planning.{name}", "planning_scalar", IndexDomain("scalar"),
+            PlanningRule(name, row, False, {}),
+            SourceLocation(f"planning.constraints.{name}"),
+            input_symbols=("x",),
+        ))
+    inventory.seal()
+    analysis = CompilerAnalysis(inventory, {"y": LinearVariable("y")})
+    with pytest.raises(BoundConflictError, match="已证明") as error:
+        analysis.affine_side(
+            SimpleNamespace(terms={"y": 1.0}, constant=0.0),
+            side="max", label="conflict probe",
+        )
+    assert error.value.reason == "constraint-conflict"
+    assert error.value.model_source["location"]["symbol"] == "x"
+
+
+def test_constant_constraint_conflict_is_reported_without_indexing_a_missing_variable() -> None:
+    """A constant contradiction remains a conflict fact, not an equality substitution."""
+    row = LinearConstraint(
+        "constant_false", LinearExpression(constant=1.0), "eq", 0.0,
+    )
+    inventory = CompilerInventory()
+    inventory.collect(SemanticRelation(
+        "planning.constant_false", "planning_scalar", IndexDomain("scalar"),
+        PlanningRule("constant_false", row, False, {}),
+        SourceLocation("planning.constraints.constant_false"),
+    ))
+    inventory.seal()
+
+    analysis = CompilerAnalysis(inventory, {"y": LinearVariable("y")})
+    with pytest.raises(BoundConflictError, match="恒假") as error:
+        analysis.affine_side(
+            SimpleNamespace(terms={"y": 1.0}, constant=0.0),
+            side="max", label="constant conflict probe",
+        )
+    assert error.value.model_source["location"]["relation"]["field_path"] == (
+        "planning.constraints.constant_false"
+    )
 
 
 def test_avoid_false_backpropagation_to_capacity() -> None:
@@ -336,9 +469,6 @@ def test_infeasible_source_rows_do_not_get_rewritten_as_invalid_bounds() -> None
     Contradictory *derived* intervals are not a license to remove a planning
     row, create a fake Big-M, or prevent the public generator emitting rows.
     """
-    from iesplan.computation.generators.compiler_ir import PlanningRule
-    from iesplan.computation.generators.linear import LinearConstraint, LinearExpression
-
     inventory = CompilerInventory()
     for name, sense, rhs in (("upper", "le", 0.0), ("lower", "ge", 1.0)):
         row = LinearConstraint(

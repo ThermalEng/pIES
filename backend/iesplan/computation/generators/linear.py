@@ -62,6 +62,14 @@ class LoweringUnsupportedError(ComputationUnavailableError, ValueError):
         super().__init__(message, reason="unsupported-model", model_source=model_source)
 
 
+class BoundConflictError(LoweringUnsupportedError):
+    """Combined source relations prove a contradiction, not a missing bound."""
+
+    def __init__(self, message, *, model_source):
+        super().__init__(message, model_source=model_source)
+        self.reason = "constraint-conflict"
+
+
 # ---------------------------------------------------------------------------
 # 不可变线性 IR
 # ---------------------------------------------------------------------------
