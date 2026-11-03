@@ -164,13 +164,6 @@ function heatPumpDevices(includeElectricLoad: boolean): unknown[] {
       },
     },
     {
-      id: 'e2e-dev-gassupply', unit: 'model', type: 'model.upsert_device',
-      payload: {
-        name: 'gassupply', device_type: 'acme.device.e2e_gas_supply_1', kind: 'existing',
-        params: {}, position: { x: 1.0, y: 1.0 },
-      },
-    },
-    {
       id: 'e2e-dev-heatload', unit: 'model', type: 'model.upsert_device',
       payload: {
         name: 'heatload', device_type: 'ies.device.heat_load', kind: 'new',
@@ -258,6 +251,13 @@ function pvExportDevices(): unknown[] {
         name: 'boiler1', device_type: 'ies.device.gas_boiler', kind: 'existing',
         params: { rated_heat_kw: 50, thermal_efficiency: 0.9, lhv_kwh_per_m3: 9.97 },
         position: { x: 2.0, y: 1.0 },
+      },
+    },
+    {
+      id: 'e2e-dev-gassupply', unit: 'model', type: 'model.upsert_device',
+      payload: {
+        name: 'gassupply', device_type: 'acme.device.e2e_gas_supply_1', kind: 'existing',
+        params: {}, position: { x: 1.0, y: 1.0 },
       },
     },
     {
