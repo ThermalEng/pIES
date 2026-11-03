@@ -220,7 +220,7 @@ function heatPumpDevices(includeElectricLoad: boolean): unknown[] {
 }
 
 /**
- * 'pv_export' 场景命令(光伏上网 + 外购热 + 既有热负荷)。
+ * 'pv_export' 场景命令(光伏上网 + 显式燃气供给 + 锅炉供热)。
  *
  * 售电计量口落在 grid1.electricity_export(in 接口, 界由
  * max_export_power_kw 给出); 购热计量口落在既有燃气锅炉的 heat_out
@@ -254,6 +254,13 @@ function pvExportDevices(): unknown[] {
       },
     },
     {
+      id: 'e2e-dev-gassupply', unit: 'model', type: 'model.upsert_device',
+      payload: {
+        name: 'gassupply', device_type: 'acme.device.e2e_gas_supply_1', kind: 'existing',
+        params: {}, position: { x: 1.0, y: 1.0 },
+      },
+    },
+    {
       id: 'e2e-dev-heatload', unit: 'model', type: 'model.upsert_device',
       payload: {
         name: 'heatload', device_type: 'ies.device.heat_load', kind: 'existing',
@@ -266,6 +273,13 @@ function pvExportDevices(): unknown[] {
       payload: {
         name: 'c-pv-grid', from_device: 'pv1', from_port: 'electric_out',
         to_device: 'grid1', to_port: 'electricity_export',
+      },
+    },
+    {
+      id: 'e2e-conn-gas-boiler', unit: 'model', type: 'model.upsert_connection',
+      payload: {
+        name: 'c-gas-boiler', from_device: 'gassupply', from_port: 'gas_out',
+        to_device: 'boiler1', to_port: 'gas_in',
       },
     },
     {
@@ -295,6 +309,7 @@ function pvExportDevices(): unknown[] {
             drivers: { capacity_kwp: { property: 'rated_capacity_kwp' } },
           },
           boiler1: { type: 'none' },
+          gassupply: { type: 'none' },
           heatload: { type: 'none' },
         },
       },
@@ -357,6 +372,35 @@ export async function scaffoldProject(
     profile_ref: { id: profileId },
   }, token)
 
+  // N2 closes every unconnected connectable port. Register an explicit gas
+  // supply for the PV/export tax scenario instead of relying on free fuel at
+  // boiler1.gas_in. This project-local test model has a finite, nonbinding
+  // capacity; it introduces no tariff or cost and preserves the tax oracle.
+  if (scenario === 'pv_export') {
+    const before = await requestJson(api, 'GET', `/api/projects/${pid}`, undefined, token)
+    const sourceYaml = [
+      'schema: ies.device-model',
+      'schema_version: "1.0.0"',
+      'device:',
+      '  id: acme.device.e2e_gas_supply',
+      '  names: {zh-CN: 测试燃气供给, en-US: Test Gas Supply}',
+      'properties: {}',
+      'interfaces:',
+      '  gas_out:',
+      '    type: out',
+      '    carrier: gas',
+      '    unit: m3/h',
+      '    valid_range: {minimum: 0, maximum: 100}',
+      'equations: {variables: {}, relations: []}',
+    ].join('\n') + '\n'
+    const saved = await requestJson(api, 'POST', `/api/projects/${pid}/models`, {
+      source: 'direct_yaml', model_yaml: sourceYaml,
+      expected_revision: before.draft.revision,
+    }, token)
+    if (saved.project_model?.device_id !== 'acme.device.e2e_gas_supply_1') {
+      throw new Error('Gas source project model did not receive its expected revisioned device ID')
+    }
+  }
   const view = await requestJson(api, 'GET', `/api/projects/${pid}`, undefined, token)
   const includeElectricLoad = opts.includeElectricLoad !== false
   const devices = scenario === 'pv_export'

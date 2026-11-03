@@ -66,6 +66,7 @@ from iesplan.application.projects import (
 from iesplan.assembly import (
     AssemblyValidationError,
     AssemblyValidationResult,
+    build_port_network,
     validate_project_export,
 )
 from iesplan.computation.errors import ComputationUnavailableError
@@ -699,6 +700,9 @@ def _assemble_snapshot(
     _check_step_constraint_capability(
         artifact, calc_config.get("generator"), generator_capabilities
     )
+    _check_network_capability(
+        artifact, device_models, calc_config.get("generator"), generator_capabilities
+    )
     _check_maintenance_refs(evaluation, artifact, device_models, effective)
     _check_maintenance_capability(evaluation, calc_config.get("generator"), generator_capabilities)
     receipt = artifact.receipt.to_dict()
@@ -1258,6 +1262,36 @@ def _check_step_constraint_capability(
             },
             location={"object_type": "task", "field": fields[0]},
         )
+
+def _check_network_capability(
+    artifact: Any, models: Mapping[str, Any], generator_ref: object,
+    capabilities: tuple[str, ...],
+) -> None:
+    """Require closure only when frozen connectable ports actually need it."""
+    if "network.closed_ports" in capabilities:
+        return
+    canonical = json.loads(artifact.canonical_text)
+    network = build_port_network(
+        {f"{inst}.{name}": flow["carrier"]
+         for inst in canonical["devices"] for name, flow in models[inst]["interfaces"].items()
+         if flow["type"] in ("in", "out", "bidirectional")},
+        {identity: (edge["from"], edge["to"])
+         for identity, edge in canonical["connections"].items()},
+    )
+    if network.closed_ports:
+        inst, _, iface = network.closed_ports[0].partition(".")
+        raise InvalidRequestError(
+            "所选生成器尚未实现未连接端口关闭关系，不允许静默忽略",
+            code="TASK-REQ-007",
+            params={
+                "generator": generator_ref,
+                "missing_capabilities": ["network.closed_ports"],
+                "fields": sorted({f"devices.{ref.partition('.')[0]}" for ref in network.closed_ports}),
+                "port_refs": list(network.closed_ports),
+            },
+            location={"object_type": "device", "object_id": inst, "field": f"interfaces.{iface}"},
+        )
+
 
 def _used_price_oids(artifact: Any, effective: EffectiveFinanceConfig) -> list[str]:
     """Distinct frozen object refs actually used by canonical tariff bindings."""

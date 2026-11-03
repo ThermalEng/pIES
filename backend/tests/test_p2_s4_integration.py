@@ -32,6 +32,7 @@ from iesplan.finance import FinanceProfile, merge_effective
 
 from test_project_model import (
     _gen_inputs,
+    _island_inputs,
     _island_doc,
     _finance_payload,
     _evaluation_n,
@@ -78,7 +79,9 @@ def test_no_arbitrary_big_m_guessing_when_unbounded() -> None:
 
 def test_on_demand_mutex_isolated_comparison(tmp_path) -> None:
     """按需互斥策略对照评估：在隔离环境下对照，结论为生产环境继续采用完整精确模型。"""
-    artifact, models, materialized, finance, config, evaluation = _gen_inputs()
+    # Compare a complete explicit network, not a generator with a positive
+    # output floor and no connected sink (infeasible under closed boundaries).
+    artifact, models, materialized, finance, config, evaluation = _island_inputs()
     comparison = evaluate_mutex_strategies(
         artifact, models, materialized, finance, config, evaluation, tmp_path,
     )

@@ -163,12 +163,9 @@ def _builder(
 def _collect_only(builder: _ProjectBuilder) -> _ProjectBuilder:
     """Stop exactly at the S2 collection/analysis barrier; allocate no rows."""
     buses = builder._compute_buses()
-    bus_flows = builder._bus_flow_index(buses)
     builder._declare_global_symbols()
     bound = {
-        inst: builder._bind_instance_symbols(
-            inst, bus_flows.get(inst, frozenset())
-        )
+        inst: builder._bind_instance_symbols(inst)
         for inst in sorted(builder.devices)
     }
     builder._collect_semantic_relations(buses, bound)

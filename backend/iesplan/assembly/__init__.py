@@ -41,7 +41,7 @@ from iesplan.assembly.contracts import (
     ValidationReceipt,
 )
 from iesplan.assembly.diags import ASM_ALL_CODES
-from iesplan.assembly.network import PortBus, build_port_buses
+from iesplan.assembly.network import PortBus, PortNetwork, build_port_buses, build_port_network
 from iesplan.assembly.parser import ParseDocResult, parse_assembly_doc
 from iesplan.assembly.rules.step import check_step_relations
 from iesplan.assembly.validator import (
@@ -85,5 +85,7 @@ __all__ = [
     "BusSummary",
     "PortBus",
     "build_port_buses",
+    "PortNetwork",
+    "build_port_network",
     "ASM_ALL_CODES",
 ]

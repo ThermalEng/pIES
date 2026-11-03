@@ -22,7 +22,7 @@ MPS-ready 的 ``LinearModel``，并附带结果反向换算所需的最小单位
 
 母线：理想连接按真实端口分区，逐 step 生成一条
 守恒式（out/bidirectional 为供给正项，in 为消耗负项）；孤立端口
-不建平衡式。值域界可引用实例 property（额定能力），实例级解析。
+每一步建立零流量关闭关系。值域界可引用实例 property（额定能力），实例级解析。
 时变电价由第三项价格区逐点计价（``constant`` 同一逐点语义），
 能力核对留待 GeneratorDescriptor 切片。
 
@@ -42,7 +42,7 @@ from datetime import datetime, timedelta
 from types import MappingProxyType
 from typing import Any
 
-from iesplan.assembly import ValidatedAssemblyArtifact, build_port_buses
+from iesplan.assembly import ValidatedAssemblyArtifact, build_port_network
 from iesplan.computation.errors import ComputationUnavailableError
 from iesplan.computation.generators.sources import SourceTrace, SourceRows, SourceColumns
 from iesplan.computation.generators.compiler_ir import (
@@ -53,6 +53,7 @@ from iesplan.computation.generators.compiler_ir import (
     CapacityLimit,
     StateInitial,
     BusBalance,
+    ClosedPort,
     PlanningRule,
     CostAmountTerm,
     CostComponent,
@@ -434,6 +435,13 @@ class _ProjectBuilder:
         self.doc = doc
         self.devices = devices
         self.models = models
+        self._network = build_port_network(
+            {f"{inst}.{name}": flow.carrier
+             for inst in devices for name, flow in models[inst].interfaces.items()
+             if flow.type in ("in", "out", "bidirectional")},
+            {identity: (edge["from"], edge["to"])
+             for identity, edge in doc["connections"].items()},
+        )
         self.finance = finance
         self.evaluation = evaluation
         self._vat_cash: _AffineAcc | None = None
@@ -808,9 +816,7 @@ class _ProjectBuilder:
             SourceLocation("project_baseline.resolution"), self.step_s,
         )
 
-    def _bind_instance_symbols(
-        self, inst: str, bus_flows: set[str] | frozenset[str] = frozenset(),
-    ) -> dict[str, Any]:
+    def _bind_instance_symbols(self, inst: str) -> dict[str, Any]:
         """Bind all instance-local symbols; do NOT allocate time columns or rows.
 
         The source, original AST and coefficient origin remain inspectable
@@ -886,9 +892,10 @@ class _ProjectBuilder:
                 if pname_hi is not None:
                     caps.append((name, pname_hi, "le"))
         symbols[TIMELINE_STEP_DURATION_VAR] = ("const", self.step_s)
-        flow_names = sorted(
-            set(self._referenced_flows(inst, contribution)) | set(bus_flows)
-        )
+        # Every connectable port has a network relation, including otherwise
+        # unused closed ports. No repeated scan of edges/fees per instance.
+        flow_names = sorted(name for name, flow in contribution.interfaces.items()
+                            if flow.type in ("in", "out", "bidirectional"))
         for iface_name in flow_names:
             flow = contribution.interfaces[iface_name]
             lower, pname_lo = self._limit(
@@ -1119,6 +1126,15 @@ class _ProjectBuilder:
         The only later authority for domain conversion is the sealed inventory.
         """
         add = self.inventory.collect
+        for ref in self._network.closed_ports:
+            inst, _, iface = ref.partition(".")
+            add(SemanticRelation(
+                f"network.closed.{ref}", "closed_port", IndexDomain("step", self.point_count),
+                ClosedPort(inst, iface),
+                SourceLocation(f"devices.{inst}", inst, self.models[inst].device_id,
+                               self.devices[inst]["definition"].get("revision"), binding_id=ref),
+                (ref,),
+            ))
         for index, (carrier, members, ports) in enumerate(buses):
             symbols = tuple(sorted(f"{inst}.{iface}" for inst, iface, _ in ports))
             add(SemanticRelation(
@@ -2007,41 +2023,6 @@ class _ProjectBuilder:
                     sense=sense, rhs=0.0,
                 ))
 
-    def _referenced_flows(
-        self, inst: str, contribution: DeviceMathContribution,
-    ) -> list[str]:
-        """被关系、连接、计费或成本 driver 实际引用的时序流接口（排序）。"""
-        refs = _relation_refs(contribution)
-        for conn in (self.doc.get("connections") or {}).values():
-            for end in (conn["from"], conn["to"]):
-                dev_id, _, iface_id = end.partition(".")
-                if dev_id == inst:
-                    refs.add(iface_id)
-        for binding in (self.doc.get("tariff_bindings") or {}).values():
-            if binding.get("instance") == inst:
-                refs.add(binding["interface"])
-        for binding in (self.doc.get("demand_bindings") or {}).values():
-            if binding.get("instance") == inst:
-                refs.add(binding["interface"])
-        instances = (self.doc.get("finance_binding") or {}).get("instances") or {}
-        drivers = ((instances.get(inst) or {}).get("drivers") or {})
-        for target in drivers.values():
-            if "interface" in target:
-                refs.add(target["interface"])
-        # Step relations consume the SAME port columns as device rows, bus rows,
-        # tariff bindings and the solution series (including otherwise unused ports).
-        for relation in (self.doc["planning"].get("constraints") or {}).values():
-            if relation.get("type") != "step_relation" or relation.get("enabled", True) is False:
-                continue
-            for target in relation["references"].values():
-                if target["instance"] == inst:
-                    refs.add(target["interface"])
-        return sorted(
-            name
-            for name, flow in contribution.interfaces.items()
-            if name in refs and flow.type in ("in", "out", "bidirectional")
-        )
-
     # ------------------------------------------------------------------
     # 技术关系
     # ------------------------------------------------------------------
@@ -2200,19 +2181,10 @@ class _ProjectBuilder:
         守恒，同实例其他端口由设备内部方程独立关联。
         out/bidirectional 为供给正项，in 为消耗负项。
         """
-        connections = {
-            identity: (connection["from"], connection["to"])
-            for identity, connection in (self.doc.get("connections") or {}).items()
-        }
-        port_carriers = {
-            f"{inst}.{name}": flow.carrier
-            for inst, contribution in self.models.items()
-            for name, flow in contribution.interfaces.items()
-        }
         buses: list[
             tuple[str, tuple[str, ...], tuple[tuple[str, str, float], ...]]
         ] = []
-        for bus in build_port_buses(port_carriers, connections):
+        for bus in self._network.buses:
             ports: list[tuple[str, str, float]] = []
             for ref in bus.port_refs:
                 inst, _, name = ref.partition(".")
@@ -2222,8 +2194,18 @@ class _ProjectBuilder:
             buses.append((bus.carrier, members, tuple(ports)))
         return buses
 
-    def _build_bus_rows(self) -> None:
-        """Expand sealed network conservation relations, not raw connections."""
+    def _build_network_rows(self) -> None:
+        """Expand sealed conservation and closure, not raw connections."""
+        for operation in self.analysis.relations("closed_port"):
+            spec = operation.payload
+            for step, column in enumerate(self._step_columns[(spec.instance, spec.interface)]):
+                self._checkpoint()
+                self._source(operation.identity, "closed_port", "step", step)
+                self.rows.append(LinearConstraint(
+                    name=f"closed__{spec.instance}__{spec.interface}__t{step}",
+                    expression=LinearExpression(terms=(((column, 0), 1.0),), constant=0.0),
+                    sense="eq", rhs=0.0,
+                ))
         for operation in self.analysis.relations("bus"):
             spec = operation.payload
             for step in range(self.point_count):
@@ -2710,13 +2692,10 @@ class _ProjectBuilder:
         if self.analysis is not None:
             return
         buses = self._compute_buses()
-        bus_flows = self._bus_flow_index(buses)
         self._declare_global_symbols()
         bound_instances: dict[str, dict[str, Any]] = {}
         for inst in sorted(self.devices):
-            bound_instances[inst] = self._bind_instance_symbols(
-                inst, bus_flows.get(inst, frozenset())
-            )
+            bound_instances[inst] = self._bind_instance_symbols(inst)
         self._collect_semantic_relations(
             buses, bound_instances,
             include_planning=False,
@@ -3931,15 +3910,6 @@ class _ProjectBuilder:
     # 总装
     # ------------------------------------------------------------------
 
-    def _bus_flow_index(
-        self, buses: list[tuple[str, tuple[str, ...], tuple[tuple[str, str, float], ...]]]
-    ) -> dict[str, set[str]]:
-        bus_flows: dict[str, set[str]] = {}
-        for _carrier, _members, ports in buses:
-            for inst, iface, _sign in ports:
-                bus_flows.setdefault(inst, set()).add(iface)
-        return bus_flows
-
     def step_series(self) -> tuple[Mapping[str, object], ...]:
         """可发布求解步序列声明（与建变量同一路径形成，不拆列名）。
 
@@ -3953,11 +3923,9 @@ class _ProjectBuilder:
         # _declare_instance_statics，否则步列会被重复追加，破坏时序长度。
         # 兼容此公开辅助函数的独立调用（未执行 build 的新构造器）。
         if not self._step_columns:
-            buses = self._compute_buses()
-            bus_flows = self._bus_flow_index(buses)
             self._declare_global_symbols()
             for inst in sorted(self.devices):
-                bound = self._bind_instance_symbols(inst, bus_flows.get(inst, frozenset()))
+                bound = self._bind_instance_symbols(inst)
                 self._expand_instance(inst, bound)
         out: list[Mapping[str, object]] = []
         for inst, local in sorted(self._step_columns):
@@ -4230,14 +4198,11 @@ class _ProjectBuilder:
             if reason is not None:
                 raise ComputationUnavailableError("项目模型生成已停止", reason=reason)
         buses = self._compute_buses()
-        bus_flows = self._bus_flow_index(buses)
         self._declare_global_symbols()
         bound_instances: dict[str, dict[str, Any]] = {}
         for inst in sorted(self.devices):
             self._checkpoint()
-            bound_instances[inst] = self._bind_instance_symbols(
-                inst, bus_flows.get(inst, frozenset())
-            )
+            bound_instances[inst] = self._bind_instance_symbols(inst)
         # S2 barrier retained. The actual production path consumes compiled
         # structures instead of a per-step AST lowerer or mutable alias table.
         timer = time.perf_counter()
@@ -4262,7 +4227,7 @@ class _ProjectBuilder:
         self.template_stats["technical_expand_ms"] = round(
             (time.perf_counter() - timer) * 1000, 3,
         )
-        self._build_bus_rows()
+        self._build_network_rows()
         timer = time.perf_counter()
         self._build_step_relations()
         self.template_stats["step_expand_ms"] = round(

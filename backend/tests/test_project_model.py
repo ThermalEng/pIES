@@ -405,7 +405,9 @@ def test_project_inventory_counts(built) -> None:
     model, units, _ = built
     # 首年建设：单个建设容量变量，无在产变量与累加定义行。
     assert len(model.variables) == 61321
-    assert len(model.constraints) == 52561
+    # Three unconnected ports now retain an explicit closure row per step.
+    assert len(model.constraints) == 52561 + 3 * POINTS
+    assert len([row for row in model.constraints if row.name.startswith("closed__")]) == 3 * POINTS
     assert model.sense == "minimize"
     assert "tank_cap" in units
     assert units["tank_cap"] == "kW"

@@ -25,7 +25,6 @@ from iesplan.assembly import (
 )
 from iesplan.assembly.diags import (
     ASM_INPUT_UNDECLARED,
-    ASM_INPUT_UNFED,
     ASM_OUTPUT_REF,
     ASM_REF_MODEL_UNREG,
     ASM_RES_INVALID,
@@ -192,9 +191,8 @@ class TestUnhappyPath:
         diag = next(d for d in result.diagnostics if d.code == ASM_OUTPUT_REF)
         assert diag.params["scope"] == "ghost"
 
-    def test_input_unfed_blocks(self, init_registry):
-        # 热泵 electricity_in 未连接任何 source → 阶段 3 报告 ASM-INPUT-001
-        # (预定义数据接口不参与边连接, 用真实 in 端口覆盖该规则)
+    def test_unconnected_input_is_closed_not_invalid(self, init_registry):
+        # A closed zero-flow boundary is a relation, not an input-completeness error.
         text = (
             "schema: ies.assembly\n"
             'schema_version: "1.0.0"\n'
@@ -241,8 +239,7 @@ class TestUnhappyPath:
             "extensions: {}\n"
         )
         result = validate_assembly_text(text, finance_snapshots=_finance_snapshots())
-        assert result.artifact is None
-        assert any(d.code == ASM_INPUT_UNFED for d in result.diagnostics)
+        assert result.ok, result.diagnostics
 
     def test_nonfinite_parameter_blocks(self, init_registry):
         parsed = parse_assembly_doc((VALID_DIR / "campus.assembly.yaml").read_text())
