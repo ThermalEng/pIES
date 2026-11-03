@@ -149,7 +149,7 @@ Bundle 规范化与原子发布
 
 显式财务目标入口按[装配规划契约](../formats/assembly-yaml.md#规划表达式中的财务分量标识符)识别。生成器以同一组建设、运行及财务关系构建逐年现金流表达式，再按冻结折现率组合 NPV 目标，不先求解另一税前方案。现金流保留建设付款时点、年度固定运维、实际运行量对应年度的可变运维与能源收支及维护清单，不把全期合计均摊为年值；税额关系按[财务模块](finance.md#税务参与规划与现金流)接入。
 
-`build_project_model` 把各项直接输入装配成项目级 `LinearModel`（变量声明、约束行、目标表达式与 min/max 方向）、单位映射与目标业务单位，不设包装层：按基线展开全部连续 `step`，实例与时步确定命名；技术关系经现有 lowerer 逐降（`t`/`t-1`、Big-M，有限界来自值域数值或实例额定引用）；公开原语 `step_duration` 以基线导出的 SI 秒注入；连接只定义连通性，按 carrier + 无向连通分量逐 step 生成一条母线守恒式（out/bidirectional 为正，in 为负），无边载体不建平衡式；负荷需求经可连接输入口与 serve 方程进入母线；规划目标/变量/约束与财务/计费分量按绑定展开；物理量归 SI、金额守币种；计费支持 constant、time_series 与 monthly_daily（时变价格由第三项价格区逐点 `price[t]×e[t]` 计价，`constant` 同一逐点语义；未知价格类型明确拒绝）。`write_mps` 只序列化已完成的 `LinearModel`（稳定 ROWS/COLUMNS/RHS/BOUNDS/整数标记/OBJSENSE，目标常数以偏移量单独报告），同一模型逐字节相同。
+`build_project_model` 把各项直接输入装配成项目级 `LinearModel`（变量声明、约束行、目标表达式与 min/max 方向）、单位映射与目标业务单位，不设包装层：按基线展开全部连续 `step`，实例与时步确定命名；技术关系经现有 lowerer 逐降（`t`/`t-1`、Big-M，有限界来自值域数值或实例额定引用）；公开原语 `step_duration` 以基线导出的 SI 秒注入；连接按[装配端口语义](../formats/assembly-yaml.md#连接)分区，每个端口母线逐 step 生成一条守恒式（out/bidirectional 为正，in 为负），不因同属设备而合并其端口，未连接端口不自动补入母线；负荷需求经可连接输入口与 serve 方程进入母线；规划目标/变量/约束与财务/计费分量按绑定展开；物理量归 SI、金额守币种；计费支持 constant、time_series 与 monthly_daily（时变价格由第三项价格区逐点 `price[t]×e[t]` 计价，`constant` 同一逐点语义；未知价格类型明确拒绝）。`write_mps` 只序列化已完成的 `LinearModel`（稳定 ROWS/COLUMNS/RHS/BOUNDS/整数标记/OBJSENSE，目标常数以偏移量单独报告），同一模型逐字节相同。
 
 ## 首个内置 provider 与完整 Bundle 聚合
 
