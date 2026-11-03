@@ -391,7 +391,7 @@ class BoundInferenceEngine:
         # resolves known coefficients at the correct step and connects t=0
         # lagged references to the same initial declaration as production.
         for family in self.inventory.relations:
-            inst = family.source.instance_id
+            inst = family.scope_id or family.source.instance_id
             if inst is None:
                 continue
             context = self.inventory.technical_contexts.get(family.identity)

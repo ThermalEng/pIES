@@ -4,6 +4,45 @@
   "title": "ies.assembly 1.0.0 装配 YAML 契约",
   "description": "装配 YAML 是系统模型与规划意图的完整、可审查文本:固定项目计算基线,实例化设备模型、绑定数据、连接真实端口、给出约束。装配不包含 calculation(计算配置在计算包生成时固定)。禁止 shell/command/executable/函数模块路径/环境变量/凭证。各节均必需,无内容写空 {} 或 []。",
   "type": "object",
+  "$defs": {
+    "system_limit": {
+      "oneOf": [
+        {"type": ["number", "null"]},
+        {"type": "object", "required": ["property_ref"], "properties": {"property_ref": {"type": "string"}}, "additionalProperties": false}
+      ]
+    },
+    "system_block": {
+      "type": "object", "required": ["constants", "references", "variables", "relations"], "additionalProperties": false,
+      "properties": {
+        "constants": {"type": "object", "propertyNames": {"type": "string", "pattern": "^[a-z][a-z0-9_]*$"}, "additionalProperties": {
+          "type": "object", "required": ["value", "unit"], "additionalProperties": false,
+          "properties": {"value": {"type": "number"}, "unit": {"type": "string", "minLength": 1}}
+        }},
+        "references": {"type": "object", "propertyNames": {"type": "string", "pattern": "^[a-z][a-z0-9_]*$"}, "additionalProperties": {"oneOf": [
+          {"type": "object", "required": ["kind", "instance", "interface"], "additionalProperties": false,
+           "properties": {"kind": {"const": "interface"}, "instance": {"type": "string"}, "interface": {"type": "string"}}},
+          {"type": "object", "required": ["kind", "instance", "property"], "additionalProperties": false,
+           "properties": {"kind": {"const": "property"}, "instance": {"type": "string"}, "property": {"type": "string"}}},
+          {"type": "object", "required": ["kind", "instance", "variable"], "additionalProperties": false,
+           "properties": {"kind": {"const": "variable"}, "instance": {"type": "string"}, "variable": {"type": "string"}}}
+        ]}},
+        "variables": {"type": "object", "propertyNames": {"type": "string", "pattern": "^[a-z][a-z0-9_]*$"}, "additionalProperties": {
+          "type": "object", "required": ["unit", "valid_range"], "additionalProperties": false,
+          "properties": {
+            "unit": {"type": "string", "minLength": 1},
+            "valid_range": {"type": "object", "required": ["minimum", "maximum"], "additionalProperties": false,
+              "properties": {"minimum": {"$ref": "#/$defs/system_limit"}, "maximum": {"$ref": "#/$defs/system_limit"}}},
+            "initial": {"oneOf": [
+              {"type": "object", "required": ["property_ref"], "additionalProperties": false, "properties": {"property_ref": {"type": "string"}}},
+              {"type": "object", "required": ["expression"], "additionalProperties": false, "properties": {"expression": {"type": "string"}}}
+            ]}
+          }
+        }},
+        "relations": {"type": "array", "items": {"type": "object", "required": ["id", "expression"], "additionalProperties": false,
+          "properties": {"id": {"type": "string", "pattern": "^[a-z][a-z0-9_]*$"}, "expression": {"type": "string", "minLength": 1}}}}
+      }
+    }
+  },
   "required": [
     "schema",
     "schema_version",
@@ -20,6 +59,7 @@
     "extensions"
   ],
   "properties": {
+    "system_equations": {"type": "object", "propertyNames": {"type": "string", "pattern": "^[a-z][a-z0-9_]*$"}, "additionalProperties": {"$ref": "#/$defs/system_block"}},
     "schema": {
       "const": "ies.assembly"
     },
@@ -684,6 +724,8 @@
         "metrics"
       ],
       "properties": {
+        "system_series": {"type": "array", "uniqueItems": true, "items": {"type": "object", "required": ["block", "variable"], "additionalProperties": false,
+          "properties": {"block": {"type": "string"}, "variable": {"type": "string"}}}},
         "series": {
           "type": "array",
           "items": {

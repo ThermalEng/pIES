@@ -24,12 +24,18 @@ function check(name, cond, detail = '') {
 
 // 17 条公开序列：身份/单位各异，值各异（含正/零/负）。
 const SERIES = Array.from({ length: 17 }, (_, i) => ({
+  kind: 'device',
   series_id: `inst${i}.var${i}`,
   instance_id: `inst${i}`,
   variable_id: `var${i}`,
   unit: i % 3 === 0 ? 'kW' : i % 3 === 1 ? 'kWh' : '1',
   values: Array.from({ length: 10 }, (_, t) => (i - 8) * 100 + t * (i % 2 === 0 ? 1 : -1)),
 }))
+const { values: systemValues, unit: systemUnit } = SERIES[16]
+SERIES[16] = {
+  kind: 'system', series_id: 'system:inst0.var0', block: 'inst0', variable: 'var0',
+  unit: systemUnit, values: systemValues,
+}
 const ROWS = 10
 const requestedFields = []
 
@@ -46,11 +52,10 @@ globalThis.fetch = async (url) => {
     requestedFields.push(field)
     const full = byId.get(field).values
     const chunkEnd = Math.min(end, start + limit)
+    const { values, series_id, ...identity } = byId.get(field)
     const body = {
       field,
-      unit: byId.get(field).unit,
-      instance_id: byId.get(field).instance_id,
-      variable_id: byId.get(field).variable_id,
+      ...identity,
       start,
       end: chunkEnd,
       values: full.slice(start, chunkEnd),
@@ -67,9 +72,7 @@ globalThis.fetch = async (url) => {
             object_id: 7,
             fields: SERIES.map((s) => s.series_id),
             rows: ROWS,
-            series: SERIES.map(({ series_id, instance_id, variable_id, unit }) => ({
-              series_id, instance_id, variable_id, unit,
-            })),
+            series: SERIES.map(({ values, ...identity }) => identity),
           }],
         },
       }),
@@ -92,7 +95,9 @@ check(
 let identitiesOk = true
 for (const s of SERIES) {
   const meta = out.series.find((m) => m.series_id === s.series_id)
-  if (!meta || meta.instance_id !== s.instance_id || meta.variable_id !== s.variable_id || meta.unit !== s.unit) {
+  if (!meta || meta.kind !== s.kind || meta.unit !== s.unit ||
+      (s.kind === 'device' ? meta.instance_id !== s.instance_id || meta.variable_id !== s.variable_id
+        : meta.block !== s.block || meta.variable !== s.variable || 'instance_id' in meta)) {
     identitiesOk = false
     break
   }

@@ -99,6 +99,8 @@ system_equations:
 
 完整装配文档保存、草稿修订、项目包当前／历史内容、规范化和任务冻结均保留本块，不按画布字段白名单裁剪。系统方程不进入共享设备文件，不改变设备黑盒的内部事实所有者。输入边界校验一次；内部传递消费类型化关系，不重复解析或做摘要复核。
 
+通用编辑入口位于规划页“系统技术方程”，编辑完整片段 `{system_equations, outputs}`。保存沿项目草稿命令 `assembly.set_system_equations`，payload 恰为这两个字段，受同一 `expected_revision` 控制；不另设顶层 `system_series` 别名。草稿允许暂存未完成的方程，正式引用、量纲和索引在装配输入边界确认。装配回执的 `system_equations` 保存已绑定的引用与序列化技术 AST，Worker 和生成器直接恢复并消费，不重解析作者公式。页面语法或并发错误保留原文，重载由用户明确触发。
+
 辅助变量的公开输出选择为 `outputs.system_series: [{block, variable}]`，省略等价于 `[]`；每项必须引用本块真实变量，不接受求解列名。原 `outputs.series` 的设备序列形态不变。所选生成器必须同时支持辅助声明、引用、状态和结果恢复，不能只接受表达式而忽略变量或输出。
 
 Bundle／适配器的输出身份与结构以[系统序列映射](solver-bundle.md#系统序列映射)为准，公共目录、分页与导出沿[求解步序列读取](../contracts.md#求解步序列读取)的device/system判别联合，不能把block放进instance_id。来源映射保留 `system_equations.<block>`、relation ID、变量 ID、被引用实例及实际 step；关闭端口关系保留端口来源。生成器统一汇集这些原关系后再做界分析与降级，不新增求解前验证器；Runtime 不解释网络。

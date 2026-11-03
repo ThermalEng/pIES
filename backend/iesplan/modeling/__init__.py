@@ -11,7 +11,10 @@ from iesplan.modeling.contract2 import (
     MathVariable, NumberNode, RefNode, RelationAst, ResultMappingEntry, TimeIndexedRef,
     UnaryNode, ast_from_dict, ast_to_dict, build_math_contribution, canonical_bytes, contribution_from_dict,
     contribution_to_dict,
+    parse_equation_expression, parse_equation_relation,
 )
+
+from iesplan.modeling.dimensions import equation_dimensions, equation_unit_dimensions
 
 __all__ = [
     "CONTRACT_SCHEMA_ID", "CONTRACT_SCHEMA_VERSION", "EQUATION_AST_ID", "EQUATION_AST_VERSION",
@@ -19,4 +22,6 @@ __all__ = [
     "MathVariable", "InterfaceFlow", "MathRelation", "ResultMappingEntry", "DeviceMathContribution",
     "MathContributionResult", "ast_from_dict", "ast_to_dict", "build_math_contribution", "canonical_bytes",
     "contribution_from_dict", "contribution_to_dict",
+    "parse_equation_expression", "parse_equation_relation",
+    "equation_dimensions", "equation_unit_dimensions",
 ]

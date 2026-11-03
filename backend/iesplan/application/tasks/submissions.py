@@ -703,6 +703,7 @@ def _assemble_snapshot(
     _check_network_capability(
         artifact, device_models, calc_config.get("generator"), generator_capabilities
     )
+    _check_system_capabilities(artifact, calc_config.get("generator"), generator_capabilities)
     _check_maintenance_refs(evaluation, artifact, device_models, effective)
     _check_maintenance_capability(evaluation, calc_config.get("generator"), generator_capabilities)
     receipt = artifact.receipt.to_dict()
@@ -1290,6 +1291,31 @@ def _check_network_capability(
                 "port_refs": list(network.closed_ports),
             },
             location={"object_type": "device", "object_id": inst, "field": f"interfaces.{iface}"},
+        )
+
+
+def _check_system_capabilities(artifact: Any, generator_ref: object, capabilities: tuple[str, ...]) -> None:
+    canonical = json.loads(artifact.canonical_text)
+    uses = []
+    active_blocks = [
+        block for block, entry in artifact.receipt.system_equations.items()
+        if entry["variables"] or entry["relations"]
+    ]
+    if active_blocks:
+        uses.append(("modeling.system_equations", f"system_equations.{active_blocks[0]}"))
+    if canonical["outputs"].get("system_series"):
+        uses.append(("outputs.system_series", "outputs.system_series"))
+    missing = [(capability, field) for capability, field in uses if capability not in capabilities]
+    if missing:
+        raise InvalidRequestError(
+            "所选生成器不支持已声明的系统关系/输出",
+            code="TASK-REQ-007",
+            params={
+                "generator": generator_ref,
+                "missing_capabilities": [cap for cap, _ in missing],
+                "fields": [field for _, field in missing],
+            },
+            location={"object_type": "system_equations", "field": missing[0][1]},
         )
 
 

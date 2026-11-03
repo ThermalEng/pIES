@@ -90,12 +90,10 @@ export interface SelectResultEnvelopeDto {
 }
 
 /** 逐时序列元数据 DTO(封存在结果视图 hourly_refs[].series)。 */
-export interface HourlySeriesMetaDto {
-  series_id: string
-  instance_id: string
-  variable_id: string
-  unit: string
-}
+export type HourlySeriesMetaDto = { series_id: string; unit: string } & (
+  | { kind: 'device'; instance_id: string; variable_id: string }
+  | { kind: 'system'; block: string; variable: string }
+)
 
 /** 逐时引用组 DTO。 */
 export interface HourlyRefGroupDto {
@@ -144,11 +142,12 @@ export interface ResultViewEnvelopeDto {
 }
 
 /** 逐时分页响应 DTO(GET .../result/hourly)。 */
-export interface HourlyResponseDto {
+export type HourlyResponseDto = (
+  | { kind: 'device'; instance_id: string; variable_id: string }
+  | { kind: 'system'; block: string; variable: string }
+) & {
   field: string
   unit: string
-  instance_id: string
-  variable_id: string
   start: number
   end: number
   values: number[]

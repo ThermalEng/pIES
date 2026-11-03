@@ -81,7 +81,7 @@ _COST_BIND_TYPES: tuple[str, ...] = ("costed", "none")
 #: driver 聚合(时序 interface 必需；property 禁止写)
 _DRIVER_AGGREGATIONS: tuple[str, ...] = ("integrate_positive", "sum_positive")
 _CONNECTION_KEYS: tuple[str, ...] = ("from", "to")
-_OUTPUTS_KEYS: tuple[str, ...] = ("series", "metrics")
+_OUTPUTS_KEYS: tuple[str, ...] = ("series", "metrics", "system_series")
 #: 计费聚合白名单(时序接口必需；scalar 不用于能源计价)
 _TARIFF_AGGREGATIONS: tuple[str, ...] = ("integrate_positive", "sum_positive")
 #: 计费绑定条目键
@@ -296,7 +296,7 @@ class _DocBuilder:
 
     def build(self, tree: dict[str, Any], *, source_name: str) -> dict[str, Any] | None:
         for key in tree:
-            if key not in TOP_SECTIONS:
+            if key not in TOP_SECTIONS and key != "system_equations":
                 self._diag(ASM_SYN_SECTION, key, {"reason": "unknown_section", "section": key})
         missing = [k for k in TOP_SECTIONS if k not in tree]
         for section in missing:
@@ -929,6 +929,8 @@ class _DocBuilder:
                 continue
             for i, ref in enumerate(arr):
                 self._ref_shape(ref, f"{field}.{list_key}[{i}]")
+        if "system_series" in m and not isinstance(m["system_series"], list):
+            self._diag(ASM_SYN_TYPE, f"{field}.system_series", {"reason": "expected_list"})
 
     def _build_extensions(self, value: Any, field: str) -> None:
         m = self._require_map(value, field)

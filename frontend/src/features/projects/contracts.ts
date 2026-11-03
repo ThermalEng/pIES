@@ -142,6 +142,8 @@ export interface DraftContentDto {
   /** assembly.set_demand_bindings: empty object means no demand meters. */
   demand_bindings?: Record<string, DemandBindingDto>
   task_working_inputs?: Record<string, unknown> | null
+  system_equations?: Record<string, unknown>
+  outputs?: Record<string, unknown>
   [key: string]: unknown
 }
 

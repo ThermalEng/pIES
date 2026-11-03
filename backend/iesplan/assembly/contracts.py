@@ -108,6 +108,7 @@ class ValidationReceipt:
     finance_snapshot: Mapping[str, object] = field(default_factory=dict)
     planning: Mapping[str, object] = field(default_factory=dict)
     diagnostics: tuple[Diagnostic, ...] = ()
+    system_equations: Mapping[str, object] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not isinstance(self.dependencies, Mapping):
@@ -126,6 +127,7 @@ class ValidationReceipt:
         object.__setattr__(self, "finance_snapshot", _freeze_value(self.finance_snapshot))
         object.__setattr__(self, "planning", _freeze_value(self.planning))
         object.__setattr__(self, "diagnostics", diagnostics)
+        object.__setattr__(self, "system_equations", _freeze_value(self.system_equations))
 
     def to_dict(self) -> dict:
         """序列化为 JSON 兼容独立副本（字段固定顺序、确定性）。"""
@@ -144,6 +146,7 @@ class ValidationReceipt:
             "resources": _thaw_value(self.resources),
             "finance_snapshot": _thaw_value(self.finance_snapshot),
             "planning": _thaw_value(self.planning),
+            "system_equations": _thaw_value(self.system_equations),
             "diagnostics": [_stable_diagnostic_dict(diag) for diag in self.diagnostics],
         }
 

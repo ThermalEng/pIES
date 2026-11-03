@@ -94,6 +94,7 @@ __all__ = [
     "predict_selected_round",
     "predict_target_round",
     "prediction_delta",
+    "result_step_series",
     "seal_output_objects",
     "split_predictions_by_dependency",
 ]
@@ -152,6 +153,7 @@ def _receipt_from_frozen(data: Mapping[str, Any]) -> ValidationReceipt:
         resources=dict(data["resources"]),
         finance_snapshot=dict(data["finance_snapshot"]),
         planning=dict(data["planning"]),
+        system_equations=dict(data["system_equations"]),
         diagnostics=tuple(Diagnostic(**dict(entry)) for entry in data["diagnostics"]),
     )
 
@@ -601,6 +603,15 @@ HOURLY_OBJECT_PATH = "hourly/series.json"
 HOURLY_OBJECT_MEDIA_TYPE = "application/json"
 
 
+def result_step_series(outputs: Mapping[str, object]) -> dict[str, dict]:
+    """Project the two adapter maps into the public discriminated directory."""
+    result = {}
+    for kind, key in (("device", "series"), ("system", "system_series")):
+        for identity, entry in outputs.get(key, {}).items():
+            result[identity] = {"series_id": identity, "kind": kind, **entry}
+    return result
+
+
 def build_hourly_files(
     outputs: Mapping[str, object],
 ) -> dict[str, tuple[bytes, str]]:
@@ -616,9 +627,7 @@ def build_hourly_files(
     无 ``series`` 键即未请求该输出（metrics-only），合法缺席；
     键存在但集合为空即无可发布步变量，同样缺席；其余形态直接消费。
     """
-    if "series" not in outputs:
-        return {}
-    series = outputs["series"]
+    series = result_step_series(outputs)
     if not series:
         return {}
     data: dict[str, list[float]] = {}
@@ -628,10 +637,7 @@ def build_hourly_files(
         entry = series[series_id]
         data[series_id] = list(entry["values"])  # type: ignore[index]
         units[series_id] = entry["unit"]  # type: ignore[index]
-        identities[series_id] = {
-            "instance_id": entry["instance_id"],  # type: ignore[index]
-            "variable_id": entry["variable_id"],  # type: ignore[index]
-        }
+        identities[series_id] = {key: value for key, value in entry.items() if key != "values"}
     blob = canonical_json({"data": data, "meta": {"units": units, "series": identities}})
     return {HOURLY_OBJECT_PATH: (blob.encode("utf-8"), HOURLY_OBJECT_MEDIA_TYPE)}
 

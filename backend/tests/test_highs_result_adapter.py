@@ -162,6 +162,7 @@ def _parameters(
         "seed": 0,
         "solver": "ies.solver.highs@1.7.2",
         "step_series": [] if step_series is None else step_series,
+        "system_series": [],
         "unit_map": {"x": "kW", "y": "kW"} if unit_map is None else unit_map,
     }
     return (json.dumps(doc, sort_keys=True) + "\n").encode("utf-8")
@@ -256,7 +257,7 @@ def test_optimal_money_objective_keeps_currency() -> None:
     assert result.math_status == "solved"
     assert result.bundle_id == "bundle-7"
     assert result.receipt_id == "receipt-7"
-    assert set(result.outputs) == {"solution", "metrics", "series", "financial_facts", "model_sources"}
+    assert set(result.outputs) == {"solution", "metrics", "series", "system_series", "financial_facts", "model_sources"}
     assert dict(result.outputs["series"]) == {}
     solution = result.outputs["solution"]
     assert solution["objective_value"] == 3001.5
@@ -315,14 +316,14 @@ def test_requested_subset_only() -> None:
         PARAMETERS_PATH: _parameters(outputs=["solution"]),
     }
     result = _adapt(files, _receipt(), SHIM_OPTIMAL.encode("utf-8"))
-    assert set(result.outputs) == {"solution", "series", "financial_facts", "model_sources"}
+    assert set(result.outputs) == {"solution", "series", "system_series", "financial_facts", "model_sources"}
     assert dict(result.outputs["series"]) == {}
     files = {
         PROBLEM_PATH: TINY_MPS.encode("utf-8"),
         PARAMETERS_PATH: _parameters(outputs=["solution", "nope"]),
     }
     result = _adapt(files, _receipt(), SHIM_OPTIMAL.encode("utf-8"))
-    assert set(result.outputs) == {"solution", "series", "financial_facts", "model_sources"}
+    assert set(result.outputs) == {"solution", "series", "system_series", "financial_facts", "model_sources"}
     assert dict(result.outputs["series"]) == {}
 
 
@@ -565,7 +566,7 @@ def test_series_recovers_by_declared_columns() -> None:
     }
     result = _adapt(files, _receipt(), SHIM_OPTIMAL.encode("utf-8"))
     assert result.math_status == "solved"
-    assert set(result.outputs) == {"solution", "metrics", "series", "financial_facts", "model_sources"}
+    assert set(result.outputs) == {"solution", "metrics", "series", "system_series", "financial_facts", "model_sources"}
     series = {key: dict(item) for key, item in result.outputs["series"].items()}
     assert series == {
         "inst.flow": {

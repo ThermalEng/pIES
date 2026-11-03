@@ -369,6 +369,7 @@ def _new_builder(
         point_count=point_count,
         step_s=step_s,
         stop=stop,
+        system_equations=artifact.receipt.system_equations,
     )
 
 
@@ -429,12 +430,19 @@ class _ProjectBuilder:
         point_count: int,
         step_s: float,
         stop: StopProbe | None = None,
+        system_equations: Mapping[str, Any] | None = None,
     ) -> None:
         self.stop = stop
         self._stop_ticks = 0
         self.doc = doc
         self.devices = devices
         self.models = models
+        self.system_equations = system_equations or {}
+        self._system_scopes = {f"system:{block}" for block in self.system_equations}
+        self._system_reference_ids = {}
+        self._system_interfaces = {(ref["instance"], ref["interface"])
+            for block in self.system_equations.values() for ref in block["references"].values()
+            if ref["kind"] == "interface"}
         self._network = build_port_network(
             {f"{inst}.{name}": flow.carrier
              for inst in devices for name, flow in models[inst].interfaces.items()
@@ -582,9 +590,10 @@ class _ProjectBuilder:
                 outputs=(identity,),
             )
         for family in self.inventory.relations:
-            inst = family.source.instance_id
+            inst = family.scope_id or family.source.instance_id
             refs = [("step_duration" if name == TIMELINE_STEP_DURATION_VAR else
-                     self.inventory.property_bindings.get((inst, name), f"{inst}.{name}"))
+                     self._system_reference_ids.get((inst, name),
+                     self.inventory.property_bindings.get((inst, name), f"{inst}.{name}")))
                     for name in family.referenced_symbols]
             self.source_trace.register(
                 f"technical:{family.identity}", "technical", family.source,
@@ -895,7 +904,8 @@ class _ProjectBuilder:
         # Every connectable port has a network relation, including otherwise
         # unused closed ports. No repeated scan of edges/fees per instance.
         flow_names = sorted(name for name, flow in contribution.interfaces.items()
-                            if flow.type in ("in", "out", "bidirectional"))
+                            if flow.type in ("in", "out", "bidirectional")
+                            or (flow.type == "blind" and (inst, name) in self._system_interfaces))
         for iface_name in flow_names:
             flow = contribution.interfaces[iface_name]
             lower, pname_lo = self._limit(
@@ -1077,8 +1087,162 @@ class _ProjectBuilder:
             "flows": flow_names,
             "columns": column_specs,
             "caps": caps,
+            "series": {name: self._series_si(inst, name, contribution)
+                       for name, flow in contribution.interfaces.items() if flow.type == "predefined"},
         }
 
+    def _bind_technical_scopes(self) -> dict:
+        bound = {}
+        for inst in sorted(self.devices):
+            self._checkpoint()
+            bound[inst] = self._bind_instance_symbols(inst)
+        for block_id, block in sorted(self.system_equations.items()):
+            self._checkpoint()
+            bound[f"system:{block_id}"] = self._bind_system_symbols(block_id, block, bound)
+        return bound
+
+    def _bind_system_symbols(self, block_id: str, block: Mapping, bound_instances: Mapping) -> dict:
+        """Bind local aliases to existing scalar/step slots; never clone a device."""
+        from iesplan.assembly import system_relations
+        from iesplan.modeling import ast_from_dict
+
+        scope = f"system:{block_id}"
+        base = f"system_equations.{block_id}"
+        symbols = {"step_duration": ("const", self.step_s)}
+        constants = {}
+        series = {}
+        for name, entry in block["constants"].items():
+            value = _to_internal(entry["value"], entry["unit"])
+            constants[name] = value
+            symbols[name] = ("const", value)
+            identity = f"{scope}.{name}"
+            location = SourceLocation(f"{base}.constants.{name}", block_id=block_id)
+            self.inventory.property_bindings[(scope, name)] = identity
+            self.inventory.coefficients[identity] = KnownCoefficient(
+                identity, "fixed_property", location, value
+            )
+        for alias, ref in block["references"].items():
+            inst, kind = ref["instance"], ref["kind"]
+            local = ref[kind]
+            identity = self.inventory.property_bindings.get((inst, local), f"{inst}.{local}")
+            self._system_reference_ids[(scope, alias)] = identity
+            if kind == "interface" and self.models[inst].interfaces[local].type == "predefined":
+                series[alias] = self._series_si(inst, local, self.models[inst])
+                continue
+            symbols[alias] = bound_instances[inst]["symbols"][local]
+            if symbols[alias][0] == "const":
+                constants[alias] = symbols[alias][1]
+                self.inventory.property_bindings[(scope, alias)] = identity
+            elif kind == "property":
+                self.bound_prop[(scope, alias)] = identity
+                self.inventory.property_bindings[(scope, alias)] = identity
+            else:
+                columns = self.inventory.step_columns[(inst, local)]
+                self.inventory.step_columns[(scope, alias)] = columns
+                self._step_columns[(scope, alias)] = columns
+                self.inventory.bound_facts[f"{scope}.{alias}"] = self.inventory.bound_facts[identity]
+        columns = []
+        caps = []
+        for name, entry in sorted(block["variables"].items()):
+            unit = entry["unit"]
+            limits = []
+            for side, sense in (("minimum", "ge"), ("maximum", "le")):
+                value = entry["valid_range"][side]
+                if isinstance(value, Mapping):
+                    ref = value["property_ref"]
+                    binding = symbols[ref]
+                    if binding[0] == "const":
+                        value = binding[1]
+                    else:
+                        value = binding[1 if sense == "ge" else 2]
+                        caps.append((name, self.bound_prop[(scope, ref)], sense))
+                elif value is not None:
+                    value = _to_internal(value, unit)
+                limits.append(value)
+            lower, upper = limits
+            symbols[name] = ("var", lower, upper)
+            columns.append((name, lower, upper, unit))
+            identity = f"{scope}.{name}"
+            location = SourceLocation(f"{base}.variables.{name}", block_id=block_id, variable_id=name)
+            self.inventory.symbols[identity] = SymbolDeclaration(
+                identity,
+                "state" if entry["initial_ast"] is not None else "internal",
+                IndexDomain("step", self.point_count),
+                unit,
+                location,
+            )
+            self.inventory.bound_facts[identity] = BoundFact(
+                identity, lower=lower, upper=upper, model_source=location
+            )
+            self.inventory.step_columns[(scope, name)] = tuple(
+                self._tech_name(scope, name, step) for step in range(self.point_count)
+            )
+        initial = {}
+        for name, entry in block["variables"].items():
+            if entry["initial_ast"] is not None:
+                self._source(
+                    f"{scope}.{name}.initial", "initial",
+                    location=SourceLocation(
+                        f"{base}.variables.{name}.initial", block_id=block_id, variable_id=name,
+                    ),
+                )
+                initial[name] = lower_expression(ast_from_dict(entry["initial_ast"]), symbols)
+                self.inventory.collect(
+                    SemanticRelation(
+                        f"{scope}.{name}.initial",
+                        "initial",
+                        IndexDomain("scalar"),
+                        StateInitial(scope, name, initial[name]),
+                        SourceLocation(
+                            f"{base}.variables.{name}.initial", block_id=block_id, variable_id=name
+                        ),
+                        tuple(
+                            self.inventory.property_bindings[(scope, ref)]
+                            for (ref, _), coeff in initial[name].terms
+                            if coeff
+                        ),
+                        (f"{scope}.{name}",),
+                    )
+                )
+        families = []
+        for relation in system_relations(block):
+            refs = _refs_of(relation.ast.lhs_root) | _refs_of(relation.ast.rhs_root)
+            family = RelationFamily(
+                f"{scope}.{relation.id}",
+                relation,
+                IndexDomain("step", self.point_count),
+                tuple(sorted(refs)),
+                None,
+                tuple(sorted(refs & (set(constants) | set(series) | {"step_duration"}))),
+                SourceLocation(
+                    f"{base}.relations.{relation.id}.expression", relation_id=relation.id, block_id=block_id
+                ),
+                scope,
+            )
+            families.append(family)
+            self.inventory.relations.append(family)
+        self._instance_relations[scope] = tuple(families)
+        for name, planning, sense in caps:
+            self.inventory.collect(
+                SemanticRelation(
+                    f"{scope}.{name}.plan_{sense}",
+                    "capacity",
+                    IndexDomain("step", self.point_count),
+                    CapacityLimit(scope, name, planning, sense),
+                    SourceLocation(
+                        f"{base}.variables.{name}.valid_range", block_id=block_id, variable_id=name,
+                    ),
+                    (f"{scope}.{name}", planning),
+                )
+            )
+        return {
+            "symbols": symbols,
+            "prop_const": constants,
+            "initial": initial,
+            "series": series,
+            "columns": columns,
+            "caps": caps,
+        }
 
     def _amount_source_links(
         self, source: Any,
@@ -1904,14 +2068,9 @@ class _ProjectBuilder:
         # production expansion reuses these compiled objects below.
         shared_technical: dict[tuple, TechnicalTemplate] = {}
         for inst, statics in bound_instances.items():
-            contribution = self.models[inst]
             known = dict(statics["prop_const"])
             known[TIMELINE_STEP_DURATION_VAR] = self.step_s
-            predefined = {
-                name: self._series_si(inst, name, contribution)
-                for name, flow in contribution.interfaces.items()
-                if flow.type == "predefined"
-            }
+            predefined = statics["series"]
             for family in self._instance_relations[inst]:
                 roles = {
                     name: ("known" if name in predefined
@@ -1957,12 +2116,8 @@ class _ProjectBuilder:
             raise RuntimeError("compile templates only after complete collection")
         compiled: dict[tuple, TechnicalTemplate] = {}
         for inst in sorted(bound_instances):
-            contribution = self.models[inst]
             symbols = bound_instances[inst]["symbols"]
-            predefined = {
-                name for name, flow in contribution.interfaces.items()
-                if flow.type == "predefined"
-            }
+            predefined = bound_instances[inst]["series"]
             for family in self._instance_relations[inst]:
                 self._checkpoint()
                 self._source(family.identity, "compile", kind="technical")
@@ -2032,7 +2187,6 @@ class _ProjectBuilder:
         families = self._instance_relations[inst]
         if not families:
             return
-        contribution = self.models[inst]
         initial = {
             op.payload.state: op.payload.value
             for op in self.analysis.relations("initial")
@@ -2040,11 +2194,7 @@ class _ProjectBuilder:
         }
         known = dict(statics["prop_const"])
         known[TIMELINE_STEP_DURATION_VAR] = self.step_s
-        series_by_name = {
-            name: self._series_si(inst, name, contribution)
-            for name, flow in contribution.interfaces.items()
-            if flow.type == "predefined"
-        }
+        series_by_name = statics["series"]
         # Each production step consumes its *own* proven interval. Do not
         # reuse point-0 inference for the rest of the operating horizon.
         # The bound property and step-column table are *already* declared.
@@ -2087,9 +2237,9 @@ class _ProjectBuilder:
                 for name, entry in statics["symbols"].items():
                     if entry[0] != "var":
                         continue
-                    column = self.bound_prop.get((inst, name))
+                    column = self.inventory.property_bindings.get((inst, name))
                     if column is None:
-                        column = self._step_columns[(inst, name)][step]
+                        column = self.inventory.step_columns[(inst, name)][step]
                     bounds[name] = self.analysis.variable_bounds(column)
                 for family in families:
                     template = self._technical_templates[family.identity]
@@ -2151,6 +2301,8 @@ class _ProjectBuilder:
                         f"规划接管 property {name!r} 不得带时间索引"
                     )
                 return self.bound_prop[(inst, name)]
+            if (inst, name) in self.inventory.step_columns:
+                return self.inventory.step_columns[(inst, name)][step + offset]
             return self._tech_name(inst, name, step + offset)
 
         for row in lowered.constraints:
@@ -2693,9 +2845,7 @@ class _ProjectBuilder:
             return
         buses = self._compute_buses()
         self._declare_global_symbols()
-        bound_instances: dict[str, dict[str, Any]] = {}
-        for inst in sorted(self.devices):
-            bound_instances[inst] = self._bind_instance_symbols(inst)
+        bound_instances = self._bind_technical_scopes()
         self._collect_semantic_relations(
             buses, bound_instances,
             include_planning=False,
@@ -3913,22 +4063,24 @@ class _ProjectBuilder:
     def step_series(self) -> tuple[Mapping[str, object], ...]:
         """可发布求解步序列声明（与建变量同一路径形成，不拆列名）。
 
-        对实例每个带业务单位的步变量集合（接口流与设备技术变量）各一条：
-        ``{series_id, instance_id, variable_id, unit, columns}``，
-        ``columns`` 按连续 ``step`` 顺序为显式求解列名；无步变量时为空元组。
-        ``series_id`` 为 ``{instance}.{variable}``，Bundle 内稳定唯一，
-        消费者不得拆解。只做初始化与变量声明展开，不执行装配建模。
+        设备条目保留 instance_id/variable_id；所选系统辅助量保留
+        block/variable。共同携带 series_id/unit/columns，columns 为
+        完整连续 step 顺序的真实求解列。两类共享不透明的唯一身份，
+        provider 分别写入 step_series 与 system_series。
+        只做初始化与变量声明展开，不执行装配建模。
         """
         # 单次包构造在 build() 后调用，此时步列已声明；不得再次
         # _declare_instance_statics，否则步列会被重复追加，破坏时序长度。
         # 兼容此公开辅助函数的独立调用（未执行 build 的新构造器）。
         if not self._step_columns:
             self._declare_global_symbols()
-            for inst in sorted(self.devices):
-                bound = self._bind_instance_symbols(inst)
-                self._expand_instance(inst, bound)
+            bound_instances = self._bind_technical_scopes()
+            for scope, bound in bound_instances.items():
+                self._expand_instance(scope, bound)
         out: list[Mapping[str, object]] = []
         for inst, local in sorted(self._step_columns):
+            if inst in self._system_scopes:
+                continue
             out.append({
                 "series_id": f"{inst}.{local}",
                 "instance_id": inst,
@@ -3936,6 +4088,14 @@ class _ProjectBuilder:
                 "unit": self._step_units[(inst, local)],
                 "columns": list(self._step_columns[(inst, local)]),
             })
+        for selection in sorted(
+            self.doc["outputs"].get("system_series", []),
+            key=lambda item: (item["block"], item["variable"]),
+        ):
+            block, local = selection["block"], selection["variable"]
+            scope = f"system:{block}"
+            out.append({"series_id": f"{scope}.{local}", "block": block, "variable": local,
+                        "unit": self._step_units[(scope, local)], "columns": list(self._step_columns[(scope, local)])})
         return tuple(out)
 
     def model_sources(self) -> Mapping[str, object]:
@@ -3943,8 +4103,13 @@ class _ProjectBuilder:
         outputs = [{"path": ["solution", "objective_value"],
                     "sources": ["relation:planning.objective"]}]
         for inst, local in sorted(self._step_columns):
+            if inst in self._system_scopes:
+                continue
             outputs.append({"path": ["series", f"{inst}.{local}"],
                             "sources": [f"symbol:{inst}.{local}"]})
+        for selection in self.doc["outputs"].get("system_series", []):
+            ident = f"system:{selection['block']}.{selection['variable']}"
+            outputs.append({"path": ["system_series", ident], "sources": [f"symbol:{ident}"]})
         component_sources = {}
         for operation in self.inventory.operations:
             if operation.kind in ("cost", "tariff", "demand"):
@@ -4199,10 +4364,7 @@ class _ProjectBuilder:
                 raise ComputationUnavailableError("项目模型生成已停止", reason=reason)
         buses = self._compute_buses()
         self._declare_global_symbols()
-        bound_instances: dict[str, dict[str, Any]] = {}
-        for inst in sorted(self.devices):
-            self._checkpoint()
-            bound_instances[inst] = self._bind_instance_symbols(inst)
+        bound_instances = self._bind_technical_scopes()
         # S2 barrier retained. The actual production path consumes compiled
         # structures instead of a per-step AST lowerer or mutable alias table.
         timer = time.perf_counter()

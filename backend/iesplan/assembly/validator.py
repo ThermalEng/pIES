@@ -235,6 +235,11 @@ def _run_validation(
     if _any_blocking(diags):
         return AssemblyValidationResult(diagnostics=diags, artifact=None)
 
+    from iesplan.assembly.system_equations import check_system_equations
+    system_blocks = check_system_equations(doc, registry, diags)
+    if _any_blocking(diags):
+        return AssemblyValidationResult(diagnostics=diags, artifact=None)
+
     # --- 阶段 3:图与系统(端口 / 边 / 母线 / 约束) -----------------------
     _check_connection_endpoints(doc, registry, diags)
     if _any_blocking(diags):
@@ -300,6 +305,7 @@ def _run_validation(
             "constraints": sorted(planning.get("constraints") or {}),
         },
         diagnostics=tuple(d for d in diags if not d.blocking),
+        system_equations=system_blocks,
     )
     artifact = ValidatedAssemblyArtifact(
         canonical_text=canonical_text, receipt=receipt

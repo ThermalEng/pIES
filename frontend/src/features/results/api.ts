@@ -109,12 +109,7 @@ export async function readHourly(projectId: number, taskId: number): Promise<Hou
   const ref = rawRefs[0]
   if (ref.series.length === 0) return { absent: true }
 
-  const series: HourlySeriesMeta[] = ref.series.map((s) => ({
-    series_id: s.series_id,
-    instance_id: s.instance_id,
-    variable_id: s.variable_id,
-    unit: s.unit,
-  }))
+  const series: HourlySeriesMeta[] = ref.series.map((s) => ({ ...s }))
   const rows = ref.rows
 
   const pages = await Promise.all(

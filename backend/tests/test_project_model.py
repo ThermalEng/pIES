@@ -232,6 +232,7 @@ def _artifact_doc(*, bilinear: bool = False) -> dict:
         "schema": "ies.assembly",
         "schema_version": "1.0.0",
         "assembly": {"id": "mini", "name": "最小真实装配"},
+        "outputs": {"series": [], "metrics": []},
         "project_baseline": {
             "resolution": "1h", "start_year": 2026, "scenario_mode": "single",
         },
@@ -600,6 +601,7 @@ def _island_doc() -> dict:
         "schema": "ies.assembly",
         "schema_version": "1.0.0",
         "assembly": {"id": "islands", "name": "双电岛共热网"},
+        "outputs": {"series": [], "metrics": []},
         "project_baseline": {
             "resolution": "1h", "start_year": 2026, "scenario_mode": "single",
         },

@@ -176,6 +176,29 @@ class RelationAst:
     rhs_refs: tuple[TimeIndexedRef, ...]
 
 
+def parse_equation_expression(expression: str, *, relation_id: str = "expression") -> object:
+    """Public technical expression parser; shared by device and system scopes."""
+    reference_atoms(expression, relation_id)
+    try:
+        return _parse_side(_tokenize(expression, relation_id), relation_id)
+    except _ExprError as exc:
+        raise EquationSyntaxError(exc.detail) from exc
+
+
+def parse_equation_relation(expression: str, *, relation_id: str) -> MathRelation:
+    """Parse an equality without imposing device output-definition semantics."""
+    left, right = split_relation(expression)
+    lhs, lo = reference_atoms(left, relation_id)
+    rhs, ro = reference_atoms(right, relation_id)
+    return MathRelation(relation_id, None, RelationAst(
+        relation_id, None,
+        parse_equation_expression(left, relation_id=relation_id),
+        parse_equation_expression(right, relation_id=relation_id),
+        tuple(TimeIndexedRef(n, o) for n, o in zip(lhs, lo, strict=True)),
+        tuple(TimeIndexedRef(n, o) for n, o in zip(rhs, ro, strict=True)),
+    ))
+
+
 class _ExprError(Exception):
     """表达式词法/语法错误(携带关系 ID 与中文说明)。"""
 

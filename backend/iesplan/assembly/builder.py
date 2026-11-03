@@ -338,7 +338,7 @@ def build_assembly_doc_from_content(
         }
 
     # 5) outputs(派生为空列表;后续 GUI 入口可补充)
-    outputs_out = {"series": [], "metrics": []}
+    outputs_out = content.get("outputs", {"series": [], "metrics": []})
 
     # 6) extensions(空映射)
     extensions_out: dict = {}
@@ -373,6 +373,8 @@ def build_assembly_doc_from_content(
         doc["demand_bindings"] = dict(demand_bindings)
     if planning is not None:
         doc["planning"] = dict(planning)
+    if "system_equations" in content:
+        doc["system_equations"] = content["system_equations"]
     doc.update(
         {
             "outputs": outputs_out,
