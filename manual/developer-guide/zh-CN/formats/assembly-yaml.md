@@ -194,7 +194,7 @@ extensions: {}
 
 - 两个实例和 interface 存在；
 - `out → in`、`out → out` 的母线汇合及与语义相容的 `bidirectional` 连接成立；
-- carrier 相同、单位量纲兼容、取值区间不冲突；
+- carrier 相同、单位量纲兼容，各端口自身有效域合法；公共母线不要求不同端口的区间两两相交，总量由守恒约束，见[网络边界](network-relations.md#完整网络边界)；
 - `predefined` 和 `blind` 从不出现在 connections；
 - 无禁止的自环、重复边和未满足的必需连接；
 - 损耗、延迟和转换由明确设备方程或系统约束表达；
