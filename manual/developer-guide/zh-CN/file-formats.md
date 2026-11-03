@@ -17,6 +17,8 @@
 | [项目 FinanceOverrides YAML](formats/finance-yaml.md) | `*.finance-overrides.yaml` / `finance_overrides.yaml` | 引用 `FinanceProfile {id}`，稀疏覆盖既有成本、定价和税务参数 | 财务合并器 |
 | [有效财务快照](formats/finance-yaml.md) | `*.effective-finance.yaml` / `effective_finance.yaml` | 合并器确定性产物：来源标识与完整成本、价格、规则及抵扣池 | 装配校验、计算生成与求解 |
 | [装配 YAML](formats/assembly-yaml.md) | `*.assembly.yaml` | 固定项目计算基线、设备实例、规范数据与来源绑定、连接、指向有效财务快照的精确引用、成本／能源／需量绑定及规划配置；跨实例逐步技术关系归规划约束 | 装配校验器 |
+| [网络边界与系统方程](formats/network-relations.md) | 装配内的system_equations及网络边界 | 声明辅助技术变量、真实模型引用和分配/状态关系；不是新文件类型 | 装配、公共技术贡献、生成器 |
+| [命名金额关系](formats/finance-relations.md) | 财务三件套内的命名项及关系 | 声明金额、经济发生、支付、资产与派生税；不是第二套财务文件 | 财务合并器、生成器、结果适配 |
 | [Solver Bundle](formats/solver-bundle.md) | 一个目录或不可变归档 | 固定求解器输入文件、受控命令、预期输出和结果适配器 | 求解运行时 |
 | [计算配置](formats/calculation-config.md) | 计算提交输入（JSON 兼容映射），目标 `1.0.0` | 固定 mode、预测算法与参数、generator、solver、精度、耦合预测收敛条件、时间限制、选项、种子和输出选择 | 生成器（生成前能力核对） |
 | [项目包](formats/project-package.md) | `*.zip`（`manifest.json` 在根） | 离线交换：当前工作状态、包内历史版本及其精确财务/规划/数据依赖 | 项目包导入器 |
@@ -138,9 +140,9 @@ YAML 采用 YAML 1.2 的安全子集：两个空格缩进，禁止 Tab、自定�
 
 1. 权威所有者是哪一种契约；
 2. 旧文件能否保持原语义；
-3. 需要升 PATCH、MINOR 还是 MAJOR；
+3. 是否改变产品/第三方版本或用户内容revision（2.0前自有契约固定1.0.0，不逐项升版）；
 4. 规范化是否变化；
-5. 是否需要离线迁移器及迁移回执；
+5. 哪些生产者、消费者、样例、编辑/包往返与冻结需要同步修改（不为旧格式建立迁移系统）；
 6. 手写示例、JSON Schema/CSV schema 与契约测试是否同步。
 
-文件格式属于公共设计。实现内部重构不得顺带改变它；确需不兼容修改时，必须先有 ADR、迁移规则和版本升级。
+文件格式属于公共设计。实现内部重构不得顺带改变它；字段及数学语义先在所属格式正文明确，再同步实现。改变宪法边界时须先走ADR与修宪，不能把普通字段变更变成多版本工程。

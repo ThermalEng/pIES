@@ -95,6 +95,14 @@ extensions: {}
 
 声明由当前 generator/result adapter 配套解释，不改变通用 Bundle manifest 或封闭 CalculationConfig。2.0 正式发布前统一固定 `1.0.0`，声明变化直接同步生成与恢复，不保留旧声明回退。统一结果形状见 [计算生成与求解](../modules/engines.md)。
 
+## 系统序列映射
+
+以下为[系统方程](network-relations.md)新增输出的目标契约。配套生成器在 parameters.json 增加 `system_series` 数组；无请求时为 `[]`，不把系统块伪装成设备实例。每条恰为 `{series_id, block, variable, unit, columns}`：series_id 为不透明唯一身份，block/variable 为冻结系统块及辅助变量ID，unit 为业务单位，columns 为完整运营step顺序的真实求解列引用。
+
+适配器由同次解发布 `ComputeResult.outputs.system_series`，以series_id为键，每项为 `{block, variable, unit, values}`；values为业务单位有限数值，顺序与完整运营时域一致。它与设备 outputs.series 分别拥有真实来源，不能复制一份设备序列再改名，也不在适配时重新求分配或来源比例。读取与导出复用既有步序列分页和单位规则，选择器明确区分device/system所有者；设备序列原DTO不改作“假实例”。
+
+仅在请求solution并取得可用主解时发布；实际选择项为装配outputs.system_series。源汇关闭行没有额外的伪求解输出，所需端口序列仍按原设备映射发布。两类序列和模型来源共同固定于同一证据，不读取当前草稿补名称或单位。
+
 ## 结构化命令
 
 `command` 是数据结构，不是 shell 字符串：
@@ -146,6 +154,32 @@ extensions: {}
 维护现金、进项税与所得税处理均来自同一逐笔金额表达式，年度维护与净额声明保持同源；资本化项由折旧关系扣税，不再当期重复扣除。维护年度合计仍为金额字符串；来源身份保留在折旧明细，不另建全量维护支付结果副本。通用 Bundle、ComputeResult、solver 与 executor 协议不变。
 
 同次解声明中的 `net_cashflows[].amount` 复用金额仿射节点，base_from、项目 ID 与期间是冻结字面量。适配器求值而不重建来源金额；application 原样封存项目明细与完整现金流。
+
+## 关系事实映射
+
+以下为[命名金额关系](finance-relations.md)及[评价比较](../contracts.md#评价范围与冻结基准)新增部分的目标输出，不表示当前适配器已实现。沿用同一 `financial_facts`、仿射求值节点与币种，不另建财务结果对象或税务后处理器：
+
+| 新字段 | 完整公开结构与含义 |
+| --- | --- |
+| `cost_items` | `[{instance_id, finance_type, component, item_id, axis, period, raw, gross, deductible_input, net_basis, unit}]`；每个实际命名项、实际期间一行，含零值；年率unit为币种/年，逐年付款额另按显式年度关系恢复 |
+| `amounts` | `[{id, axis, unit, values: [{period, value}]}]`；scalar的period为0，其余为真实评价年/月；保留命名配方输出，不自动作为现金 |
+| `cash_movements` | `[{id, axis, period, direction, price_basis, raw, gross, deductible_input, net_basis, output_tax, net_revenue, payments, end_unpaid}]`；period为发生期，payments为`[{at, ratio, amount}]`，at保留输入TimePoint形态；包含期外约定支付但不将其加入期内现金，end_unpaid为评价期末未付/未收金额。非适用方向的税额为0，对应净额仍按其明确算式恢复，不把它作为另一种收入/费用使用 |
+| `assets` | `[{id, basis, capitalized_at, available_from, book_values: [{year, value}]}]`；basis为实际非负净基础，book_values来自同次资产关系，不自动作为残值现金 |
+| `tax_cash.derived` | `[{rule, axis, period, assessed, payment_period, paid}]`；应计与实际约定支付分开，期外payment_period保留但不进入期内现金 |
+
+新资产的折旧仍只在原tax_cash.depreciation声明，base_from增加`{kind: asset, id}`，不复制第二份资产折旧数组。资产book_values为基础减截至该期实际计提的累计折旧，不因收取一笔net_cashflow就自动作资产处置。所得税原tax字段仍为当前同年度实缴税额；有新引用时同时按其明确measure提供应计/实缴身份，不让调用方按列名或税种推断。
+
+所有金额/比例为十进制字符串；period/year为整数；TimePoint中年/月字段为整数。cost_items按实例、component、item_id、period排序，其余按id/rule及period排序，payments保留输入顺序。未适用目录发布空数组；适用零值不省略。命名项已包含于原分量总额，不能再把cost_items逐项另扣现金。原annual_operation保持既有经营字段与合计；movement支付另从cash_movements进入annual_net_flows一次，不暗塞进maintenance或fixed_om再扣。派生税费实付由tax_cash.derived进入现金，资产基础/折旧不产生第二笔支付。
+
+财务事实增加 `comparison`：
+
+- absolute为`{mode: absolute}`。
+- reference为`{mode: reference, baseline_source, comparability, facts}`；facts是已冻结的基准别名到`{unit,axis,values}`的映射，不是对当前草稿的引用；原annual_net_flows仍为候选现金流。
+- difference在reference字段之外增加 `baseline_net_flows` 与 `evaluation_net_flows`。前者为冻结CF_b[0..E]，后者为主模型声明的CF_c-CF_b；原annual_net_flows始终保留CF_c，不被差额覆盖。baseline_source保留来源kind及可用的task/evidence/对象身份或declared来源标记；不复写完整基准模型。
+
+`financial_evaluation`原样封存这些关系事实及comparison；difference的指标rows/NPV/IRR/回收期使用evaluation_net_flows，其余使用annual_net_flows。优化目标也使用同一选定现金流；不在报告阶段才换评价口径。适配器只恢复，财务评价只执行一次既有指标计算，读取/页面/Excel不得再次扣基准、重算税或将余额当现金。
+
+模型来源映射同时覆盖命名成本、amount、movement发生与支付、asset基础/计提、derived_tax和baseline别名；保留原字段、作用期间及依赖。新增字段不改变Bundle manifest、Runtime、solver软件版本、ComputeResult顶层状态或solution输出词汇；仅有输入而没有这些同次恢复声明时不得发布支持能力。
 
 ## 构模来源映射
 

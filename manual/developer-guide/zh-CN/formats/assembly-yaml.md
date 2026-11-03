@@ -133,11 +133,13 @@ extensions: {}
 | `project_baseline` | 项目创建时固定的时间分辨率、场景模式与运行起始年（`1.0.0` 删除 `leap_year`，闰年一律逐年按公历推导） |
 | `devices` | 设备实例、精确设备内容、存量/新增身份、允许的 property 覆盖和预定义接口绑定 |
 | `connections` | 可连接的真实 `<device>.<interface>` 之间的有向连接 |
+| `system_equations` | 可选系统方程块映射；辅助变量、真实模型引用及跨期技术关系的完整目标字段见[网络与系统方程](network-relations.md)，不把辅助账户伪装成设备 |
 | `finance` | 对装配前由 `FinanceProfile` + `FinanceOverrides` 合并生成、完整校验的不可变 `EffectiveFinanceConfig` 的引用：`ref` 携带对象身份，`profile_id` 携带来源标识；规划与财务计算共同消费同一引用；装配内不内联另一份完整财务配置 |
 | `finance_binding` | 每个设备实例的**设备成本**财务判别联合：`type: costed`（含 `finance_type` 与 `driver → property/interface` 映射）或 `type: none`（该实例无设备成本贡献，可作纯计量点；能源计费不在此表达）。缺口、未知 `finance_type`、非法映射、按增量语义缺失的 driver 与单位量纲不兼容在装配校验中阻断 |
 | `tariff_bindings` | 能源价格计费绑定：`binding_id → {price, instance, interface, aggregation}`，`price` 引用有效快照 `energy_prices` 的 `price_id`（`carrier`/`direction` 由 Profile 条目显式声明）；独立于设备成本绑定，计费点实例可以是 `type: none`；逐点计价与会计方向规则见[财务 YAML 契约](finance-yaml.md) |
 | `demand_bindings` | 必填独立需量计量映射；无需量费时 `{}`，不依赖能源价格绑定，见「自然月需量计量绑定」 |
 | `planning` | 目标函数、规划变量、上下界、可选的 `construction_units` 及规划/系统约束；目标逐项引用设备成本或能源计费分量，不依赖隐式总成本 |
+| `outputs.system_series` | 可选系统辅助序列选择列表，元素为 `{block, variable}`；完整规则见[系统方程输出](network-relations.md#保存冻结与公开输出) |
 | `extensions` | 命名空间化扩展 |
 
 `planning.constraints` 为命名映射；每项必须显式声明约束 `type` 与 `expression`，`enabled` 省略时为 `true`。既有标量约束使用普通标识符 `Name`；`step_relation` 使用下节定义的局部端口引用与 `[t]` 索引。上方示例用 `annual_purchase_cost_limit` 限制运行窗口内的购能成本；一次性 `upfront_capex` 不会被系统隐式并入该约束或目标。把一次性投资转换为可与运行期成本比较的规划分量属于 `PlanningConfig` 的版本化规则，本财务 Profile 不隐式定义或默认选择（见[财务 YAML 契约](finance-yaml.md)「时间口径与分量」）。数值常量规则：**有维度的常量必须带单位字面量**（金额如 `900000 CNY`、时间跨度如 `1 year`），单位必须与 `EffectiveFinanceConfig.currency` 一致，量纲不一致阻断；**纯无量纲系数可写裸数字**（如 `0.5 * pv_1__period_variable_om` 中的 `0.5`），不需要也不允许编造单位。财务分量引用的合法标识符与单位字面量规则见下文「规划表达式中的财务分量标识符」。
@@ -184,7 +186,7 @@ extensions: {}
 
 每条母线逐步满足所有成员端口的净流量和为零：`out` 供给为正、`in` 消耗为负，`bidirectional` 使用模型声明的有符号净供给。相连的同一端口只计一次，多源多汇可在该母线混合。设备内部端口的转换、容量、效率与状态仍由其 YAML 方程定义，不作为理想连接合并。
 
-未被任何连接引用的端口不自动补入某条母线，保留既有模型及必需连接检查的边界；这不声明未连接端口流量为零，也不授予外部供给或来源外送权限。需要封闭边界或来源分配时须明确表达相应关系，不能从缺少连线推断。更完整的网络语义见[装配模块](../modules/assembly.md#端口级网络语义)。
+未被任何连接引用的可连接端口不自动补入其他母线；其关闭关系、外部源汇及来源分配遵守[网络边界与系统方程](network-relations.md)。这是目标边界语义，不表示未支持该能力的运行版本已交付；不通过缺边推断公共母线中的来源权限。更完整的语义边界见[装配模块](../modules/assembly.md#端口级网络语义)。
 
 当前自有契约仍统一为 `1.0.0`。程序、装配检查和内置生成器同步采用本节端口语义，不按旧版本或设备级连通行为回退；已有冻结输入和结果保持原对象，不回写历史。重新计算现有项目时，应核对真实端口连线，不能自动增加连接恢复曾被错误短接的设备两侧。
 
@@ -317,7 +319,7 @@ planning:
 
 | 项目 | 唯一写法与含义 |
 | --- | --- |
-| 路径 | `upfront_capex`、`annual_fixed_om`、`period_variable_om` 整项，或其实际存在的 `.fixed`、`.linear.<driver>` 子项；不含 finance_type 前缀 |
+| 路径 | `upfront_capex`、`annual_fixed_om`、`period_variable_om` 整项，或其实际存在的 `.fixed`、`.linear.<driver>` 子项；命名items目标路径见[命名金额关系](finance-relations.md#命名成本明细)，不含 finance_type 前缀 |
 | 无条件 | `{kind: always}`；省略映射或未覆盖的叶子均为此含义，不自动继承建设状态 |
 | 随建设发生 | `{kind: construction_unit, unit_ref: <unit_id>}`；引用本实例的建设单元，不跨实例猜测或借用状态 |
 

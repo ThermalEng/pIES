@@ -139,6 +139,50 @@
 
 服务端在任务提交时记录 `confirmed_by`/`confirmed_at`，将上述确认及运行年度边界随任务冻结。无确认、时间关系不成立、付款比例不成立或必要财务参数未确定，在公开提交边界阻断；项目预检不以缺少另一次 `baseline-confirm` 审计阻断进入评价确认。自由字典式审计记录不作为参数来源。冻结块仍为 `evaluation`，结构变化按快照版本规则升级，不保留旧字段语义或双轨读取。评价确认作为独立的不可变输入直接交给 Generator，不混入运行步序列、财务三件套或封闭计算配置。建设支出与运营净流的时点映射以[财务计算](modules/finance.md)为唯一语义正文。
 
+### 评价范围与冻结基准
+
+本节是新增评价输入的目标契约，尚不表示运行版本已接受这些字段。业务语义归[评价边界与基准](modules/finance.md#评价边界与基准)；金额引用归[命名金额关系](formats/finance-relations.md)。不新增 baseline-confirm 流程、基准任务自动求解、汇率服务或第二套评价引擎。
+
+`evaluation` 增加可选 `comparison`。省略与 `{mode: absolute}` 一致，沿用原项目绝对现金流，不自动采用基准或切换增量计税。comparison 是以下判别联合，只接受所选形态字段：
+
+| mode | 完整字段与含义 |
+| --- | --- |
+| `absolute` | 仅 `{mode: absolute}`；评价原完整项目现金流，无基准 |
+| `difference` | `{mode: difference, baseline, facts, comparability}`；先按双方各自明确税务规则形成税后现金流，再作候选减基准 |
+| `reference` | `{mode: reference, baseline, facts, comparability}`；只提供独立基准常量给声明的金额/约束关系，不自动减基准现金流，最终指标仍评价本次模型明确形成的现金流 |
+
+`baseline` 恰选：
+
+- `{kind: task_result, task_id, evidence_id}`：明确指定可访问的已封存可用结果。task_id/evidence_id 沿用已有公开ID类型；不得填当前任务、运行中任务、latest或可变项目草稿。提交用例解析该精确证据，记录其任务、attempt及结果对象引用；不额外计算一个“零容量基准”。
+- `{kind: declared, currency, evaluation_years, annual_net_flows, facts}`：用户明确提供并确认的数据。currency 与本项目相同，evaluation_years 与本次 E 相同。difference 模式下 annual_net_flows 必须为按t=0..E排列的E+1个有符号金额字符串；reference模式此字段必须为null，不能伪造全零基准现金流。facts 为下述已声明基准量表，不代表平台证明其物理可行。
+
+Task baseline的评价E和币种须与本次相同；difference模式还须已有完整财务现金流。不能只因状态completed就推断有可用评价，也不把缺失税额当成零。双方建设/运行安排或税务配置不必相同，但差异必须在本次确认中公开说明，不要求财务快照对象ID相等。
+
+`comparability` 必填 `{service_basis, differences}`：均为非空文字，明确比较的服务需求、经济承担范围和已知方案差异；完全相同可明确写“无额外差异”。它是本次评价确认的一部分，不是第二次人工批准。提交边界核对币种、评价轴、引用存在及权限；服务假设的工程真实性由用户声明，程序不以文字确认冒充供需可行性证明。
+
+`facts` 是本次对基准量的稳定局部别名映射，供财务 `kind: baseline` 引用。Task来源每项为以下已发布业务量选择器，不接受JSON数组下标、列名或任意对象路径：
+
+| kind | 选择字段与量 |
+| --- | --- |
+| `operation` | `{kind: operation, measure}`，measure 为 energy_net／fixed_om／variable_om／maintenance／demand_charge，取得逐评价年已封存经营事实 |
+| `cashflow` | `{kind: cashflow, measure: net}`，取得完整CF[0..E] |
+| `amount` | `{kind: amount, id}`，取得基准已发布命名金额，含其轴、单位及期间 |
+| `movement` | `{kind: movement, id, measure}`，measure 为gross／net_basis／net_revenue／paid，按发生或支付期间明确取值，净基础/净收入须与方向相容 |
+| `asset` | `{kind: asset, id, measure}`，measure 为basis／depreciation／book_value |
+| `tax` | `{kind: tax, source, measure}`，source/measure 复用[税额输出引用](formats/finance-relations.md#税额输出引用)，只选择该证据真实发布的事实 |
+
+Declared来源的baseline.facts每项为 `{unit, axis, values}`：axis为scalar／financial_year／tax_month；scalar的values恰一个值，financial_year恰E+1个（含时点0），tax_month恰12E个（从月1起）。金额/金额费率为十进制字符串，纯物理量为有限JSON number，沿用公共数值规范。不适用的年度时点明确填零，未知不能填零。comparison.facts 每项为 `{kind: declared_fact, id}`，引用该已声明量表。金额币种一致，其他单位遵守公共单位规则，禁止隐式换汇。
+
+公开提交一次解析选择器并冻结所用具名值、单位、轴、来源身份及比较确认；Generator仍只收到原独立evaluation输入，不增加数据库/对象读取入口或第七个输入。可信结果内部恢复不重新校验或复算基准，不复制整份基准模型、逐步解或财务配置。项目包导出保存这些冻结值和来源说明；导入为新项目计算时作为 declared 来源明确确认，不伪造目标系统中的原task/evidence身份。历史证据原样保留原来源，不回写。
+
+设候选按其冻结规则得到 `CF_c[t](x)`，基准独立给出 `CF_b[t]`：difference 模式的评价及 `system.after_tax_npv` 目标使用 `CF_c[t](x)-CF_b[t]`；reference/absolute使用`CF_c[t](x)`。NPV、IRR、回收期和导出使用同一条选定现金流。结果同时区分原候选、基准与差额，不能把全厂绝对支出称作设备增量损益，也不伪造主营收入使IRR有值。
+
+difference 固定为**分别计税后比较**。不提供一个把已计税差额重新套税率的开关：`Tax(c)-Tax(b)` 一般不等于 `Tax(c-b)`。例如两方案应税基础-10与-4、无结转且税率0.2时，前者为0，后者对差额6得1.2。本契约不把这两种算法当成可互换的精度设置。
+
+reference允许模型显式消费基准事实，影响税务的基准必须进入声明的金额及税务关系，与候选同次求解。它**不自动构成简化增量计税**，也不自动生成另一份现金账。若要新增专用增量税基/税盾兑现算法，必须先定义其核算主体、期初税务状态及现金范围契约，再扩展能力；不得在本次开发中自行解释为“默认税盾全兑现”。这一区分属于范围边界，不阻断分别计税的通用差额评价。
+
+comparison 非absolute时要求 `finance.frozen_baseline`；difference 另要求 `finance.cashflow_difference`，并要求同次financial_facts。缺能力在提交边界以TASK-REQ-007和触发字段明确拒收；未取得某个基准事实则报告其别名和来源选择器，不猜零值。没有基准需求的absolute任务不额外要求这些能力。
+
 ### 年度维护金额来源
 
 每笔维护保留 `year`、`currency` 和 `amount`；`amount` 表示非负十进制定点的确定金额加项，纯关联金额填写 `"0"`。可选 `terms` 为有序关联加项列表，省略或 `[]` 均表示只有确定金额；提交冻结时统一保存明确列表。该省略语义属于同一输入契约，不建立旧版读取分支。
