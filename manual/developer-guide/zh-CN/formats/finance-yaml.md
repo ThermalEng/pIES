@@ -26,7 +26,7 @@ assembly / computation / 项目包（精确引用 Effective YAML）
 
 ## 通用金额引用目标语义
 
-本节规定后续通用财务扩展的语义约束，不放宽下文 `1.0.0` 字段表。建设发生条件及来源范围按本页和装配格式的明确字段执行；命名费用、任意税额派生及基准方案仍是后续能力，不据这些语义示例增加字段。
+本节规定通用财务的语义约束；[命名金额、支付与资产关系](finance-relations.md)给出新增目标字段、引用、覆盖与能力边界，不从下面的语义示例自行发明字段。基础分量及已定义来源继续按本页执行；新增目标的实际交付状态只见更新日志，不以契约定稿宣称程序已支持。
 
 ### 金额项与驱动量
 
@@ -158,6 +158,8 @@ net_cashflows: {}              # 无额外净现金项目，不从折旧残值�
 | `tax_rules` | 是 | 计算规则映射，无规则时显式 `{}`；规则结构见下「税务计算输入」 |
 | `demand_charges` | 是 | 独立自然月需量费目录；无费项时 `{}`，费率、覆盖及税务引用见「自然月需量费」 |
 | `net_cashflows` | 是 | 显式净现金项目映射，无项目时 `{}`；发生时点、金额来源与收付方向见「显式净现金项目」 |
+| `finance_types.*.<component>.items` | 可选 | 命名成本明细；和原基础fixed/linear按加法组成同一分量，完整结构见[命名成本明细](finance-relations.md#命名成本明细) |
+| `amounts`、`cash_movements`、`assets` | 可选 | 金额定义、独立收付发生项及资本化关系；省略为空，唯一字段正文见[金额关系](finance-relations.md) |
 
 单位与范围校验：
 
@@ -240,6 +242,8 @@ Worker 从冻结规则和来源确定性物化完整运营期价格，输出与 
 
 同类进项规则按实际覆盖子项检查重复：整个分量与其任一子项重叠时拒绝，不仅比较路径字符串。所得税费用及初建净基础仍按完整成本金额减所声明子项的可抵进项合计构造，同次解恢复金额，不重扣现金。此路径只细化税务范围，不改变维护 terms 对建设总分量的引用，也不新增另一套成本数据。
 
+命名items属于上述整分量的真实叶子，其税基路径、movement税务范围及derived_tax规则见[金额关系](finance-relations.md)。命名资产的base_from为`{kind: asset, id}`；net_cashflows.amount可引用`{kind: amount_ref, id}`。这些新增目标复用本页的时间、残值和抵扣语义，不建立平行税务模型。
+
 年度固定运维与维护／换新按既定年末支出时点确认进项，评价年 `y` 对应税务月 `12y`；不均摊到各月。月度缴税及退款到账按所属评价年度归入年末现金流，税务月 `p` 对应评价年 `ceil(p/12)`；建设付款仍保留其显式财务时点，不因月结算而改写。
 
 维护引用 `(year, position)` 中，year 是评价年，position 是冻结清单同年内从1开始的顺序。现金金额唯一来自 `evaluation.maintenance_expenses`，表示实际含税付款，不随财务文件的 `price_basis` 改变；维护进项从该付款按明确税率拆分，再按抵扣资格归集。所得税可扣项的费用基础为实际费用扣除明确可抵进项，不可抵部分保留；不可扣不表示没有现金支出。建设折旧基础同理：含税额减可抵建设进项；不含税输入先按明确税率形成含税额，不可抵进项留在计税基础中。
@@ -319,6 +323,8 @@ tax_rules:
 `first_year` 始终为运营年序号，计提的评价年为 `K+first_year` 至 `K+first_year+life_years-1`，超出评价期的部分不进入期内税额，也不自动转成终期回款。初建最早从首个运营年计提；维护支付在评价年末发生，换新折旧首年须晚于该支付年，不自动替用户指定计提起点。
 
 同一来源可形成不同期间的结果行，但同一初建实例的计税基础只能由一个所得税折旧条目认领，不得用类别汇总与其子集、相交集合或跨同类规则重复计提。静态集合重叠在可取得实例范围的公开边界核对；不相交的同类实例可以分别计提。维护来源身份仍为 `(kind, year, position)`，与初建分开；同笔维护只能由一个折旧条目认领。Overrides 按下文规则完整替换列表。已作为折旧来源的维护项若同时声明 `deductible: true`，在公开输入边界报冲突；不暗中删除或改写当期费用扣除。
+
+上述直接来源是整笔基础认领；[命名资产](finance-relations.md#资本化与计提-assets)允许按明确非负已知份额分配基础，全部直接认领及资产分配合计仍不得超过原发生项份额1。不能用新asset_id绕过原基础的重复扣除检查。
 
 例如明确 K=2 时，运营第4年末的支付位于评价年6；从下一运营年计提，应引用 `{kind: maintenance_expense_net, year: 6, position: 1}` 并填写 `first_year: 5`。year 不是公历年份，也不是数组下标。
 
@@ -427,6 +433,7 @@ energy_prices:
 | `tax_rules` | 只覆盖 Profile 已有规则的参数：税率／可抵比例 Money 原子、亏损结转年限等。in_tax／out_tax／om_input_tax 的稀疏条目按 price／for 对应已有对象，只替换已有 rate／deductible_ratio。depreciation 按完整列表替换，限定 straight_line 与本页金额来源，绑定本项目的初建／维护来源、起点、年限与残值；来源按身份去重，未覆盖列表原样继承，不按 asset 拼接。维护进项列表、所得税逐项维护列表及 opening_losses 同样整表替换；建设确认 schedule 可整表替换，method 保持不变 |
 | `net_cashflows` | 只覆盖 Profile 已登记条目。fixed 的 value 按同币种 Money 原子替换；source_share 的 ratio 按 `unit: "1"` 原子替换；at 可完整替换为本页时点形态。不得新增／删除条目或改变 direction、amount.kind、base_from；无覆盖项原样继承 |
 | `credit_pools` | 只覆盖已有池的 opening_credit 原子或 refunds 完整列表；不可新增／删除池或改变 receivable_policy |
+| `items`、`amounts`、`cash_movements`、`assets`、`derived_tax`新增参数 | 按[金额关系覆盖纪律](finance-relations.md#合并冻结与能力边界)；不把稀疏参数覆盖扩成新增费用/规则的入口 |
 | 禁改字段 | 顶层 profile、currency、base_year、price_basis、cost_method、taxes，价格条目 carrier／direction，规则 id／kind／label_ref／计税方法／能源与费用范围／池归属不允许覆盖；不得新增／删除规则。按本页完整替换折旧列表及项目维护项绑定不属于新增税则 |
 | 其余字段 | 按本页规则校验 |
 

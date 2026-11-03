@@ -97,6 +97,8 @@ GeneratorProvider 合并技术贡献、规划配置与 `EffectiveFinanceConfig`
 
 ## 必须遵循的规范
 
+[系统方程](../formats/network-relations.md)复用本模块的公开AST、单位/索引规则、初值及数学贡献结构。装配负责把本块常数及真实实例引用绑定到作用域，生成器绑定同一设备/规划列；不能复制一套网络表达式解释器，也不能把系统辅助账户注册成虚构设备。设备与系统关系的代数环均为同时方程，不能与财务配方的同期间定义循环混同。
+
 - `modeling` 只消费 devices、assembly 和 core 的公开 contract；
 - 方程内容随设备 descriptor 一同管理，不存在独立命令目录；
 - 不访问数据库、网络、对象存储和当前时间；

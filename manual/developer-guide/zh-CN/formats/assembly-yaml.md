@@ -133,14 +133,16 @@ extensions: {}
 | `project_baseline` | 项目创建时固定的时间分辨率、场景模式与运行起始年（`1.0.0` 删除 `leap_year`，闰年一律逐年按公历推导） |
 | `devices` | 设备实例、精确设备内容、存量/新增身份、允许的 property 覆盖和预定义接口绑定 |
 | `connections` | 可连接的真实 `<device>.<interface>` 之间的有向连接 |
+| `system_equations` | 可选系统方程块映射；辅助变量、真实模型引用及跨期技术关系的完整目标字段见[网络与系统方程](network-relations.md)，不把辅助账户伪装成设备 |
 | `finance` | 对装配前由 `FinanceProfile` + `FinanceOverrides` 合并生成、完整校验的不可变 `EffectiveFinanceConfig` 的引用：`ref` 携带对象身份，`profile_id` 携带来源标识；规划与财务计算共同消费同一引用；装配内不内联另一份完整财务配置 |
 | `finance_binding` | 每个设备实例的**设备成本**财务判别联合：`type: costed`（含 `finance_type` 与 `driver → property/interface` 映射）或 `type: none`（该实例无设备成本贡献，可作纯计量点；能源计费不在此表达）。缺口、未知 `finance_type`、非法映射、按增量语义缺失的 driver 与单位量纲不兼容在装配校验中阻断 |
 | `tariff_bindings` | 能源价格计费绑定：`binding_id → {price, instance, interface, aggregation}`，`price` 引用有效快照 `energy_prices` 的 `price_id`（`carrier`/`direction` 由 Profile 条目显式声明）；独立于设备成本绑定，计费点实例可以是 `type: none`；逐点计价与会计方向规则见[财务 YAML 契约](finance-yaml.md) |
 | `demand_bindings` | 必填独立需量计量映射；无需量费时 `{}`，不依赖能源价格绑定，见「自然月需量计量绑定」 |
 | `planning` | 目标函数、规划变量、上下界、可选的 `construction_units` 及规划/系统约束；目标逐项引用设备成本或能源计费分量，不依赖隐式总成本 |
+| `outputs.system_series` | 可选系统辅助序列选择列表，元素为 `{block, variable}`；完整规则见[系统方程输出](network-relations.md#保存冻结与公开输出) |
 | `extensions` | 命名空间化扩展 |
 
-`planning.constraints` 为命名映射；每项必须显式声明约束 `type` 与 `expression`，`enabled` 省略时为 `true`。既有标量约束使用普通标识符 `Name`；`step_relation` 使用下节定义的局部端口引用与 `[t]` 索引。上方示例用 `annual_purchase_cost_limit` 限制运行窗口内的购能成本；一次性 `upfront_capex` 不会被系统隐式并入该约束或目标。把一次性投资转换为可与运行期成本比较的规划分量属于 `PlanningConfig` 的版本化规则，本财务 Profile 不隐式定义或默认选择（见[财务 YAML 契约](finance-yaml.md)「时间口径与分量」）。数值常量规则：**有维度的常量必须带单位字面量**（金额如 `900000 CNY`、时间跨度如 `1 year`），单位必须与 `EffectiveFinanceConfig.currency` 一致，量纲不一致阻断；**纯无量纲系数可写裸数字**（如 `0.5 * pv_1__period_variable_om` 中的 `0.5`），不需要也不允许编造单位。财务分量引用的合法标识符与单位字面量规则见下文「规划表达式中的财务分量标识符」。
+`planning.constraints` 为命名映射；每项必须显式声明约束 `type` 与 `expression`，`enabled` 省略时为 `true`。既有标量约束使用普通标识符 `Name`；`step_relation` 使用下节定义的局部端口引用与 `[t]` 索引；新增`amount_relation`只将明确期间的命名金额/基准量绑定为局部标量，见[金额引用约束](#金额引用约束)。上方示例用 `annual_purchase_cost_limit` 限制运行窗口内的购能成本；一次性 `upfront_capex` 不会被系统隐式并入该约束或目标。把一次性投资转换为可与运行期成本比较的规划分量属于 `PlanningConfig` 的版本化规则，本财务 Profile 不隐式定义或默认选择（见[财务 YAML 契约](finance-yaml.md)「时间口径与分量」）。数值常量规则：**有维度的常量必须带单位字面量**（金额如 `900000 CNY`、时间跨度如 `1 year`），单位必须与 `EffectiveFinanceConfig.currency` 一致，量纲不一致阻断；**纯无量纲系数可写裸数字**（如 `0.5 * pv_1__period_variable_om` 中的 `0.5`），不需要也不允许编造单位。财务分量引用的合法标识符与单位字面量规则见下文「规划表达式中的财务分量标识符」。
 
 ## 逐步技术约束
 
@@ -163,6 +165,39 @@ extensions: {}
 
 逐步技术关系自装配 `1.0.0` 引入；本页建设激活目标版本统一为 `ies.assembly@1.0.0` 与 `ies.assembly.canonical@1.0.0`。嵌入的规划结构随装配版本解释，不增加另一份规划格式字头。其余标量约束、目标与规划变量保持原有语义；输入、冻结、执行和编辑入口统一迁移，不提供静默忽略新关系的旧字头路径。
 
+## 金额引用约束
+
+本节为生效目标契约，不表示运行版本已支持。`planning.constraints.<constraint_id>`可声明以下最小标量关系，不新增另一套表达式或任意财务路径解析器：
+
+| 字段 | 完整形态与语义 |
+| --- | --- |
+| `type` | 固定为 `amount_relation` |
+| `references` | 必填非空映射，局部别名→`{kind: amount, id, period}`或`{kind: baseline, id, period}`；前者引用Effective.amounts，后者引用本次evaluation.comparison.facts的冻结别名 |
+| `expression` | 必填，沿用现有仿射`==`、`<=`、`>=`语法，只消费本条局部别名和已知常数；不引入点路径、函数、`[t]`或变量乘变量 |
+| `enabled` | 布尔值，省略为true；false保留声明，不施加关系 |
+
+period沿用[财务Reference期间](finance-relations.md#通用金额定义-amounts)，但本条是无时步索引的单个约束：仅可用scalar、固定financial_year/tax_month、固定year_months或range；禁止current和`year: current`。每个引用先按明确期间选择/汇总为一个标量，不隐式展开逐年约束，不把完整数组或年度费率误作累计现金。引用结果单位限本币金额或明确本币费率，比较须量纲兼容，常数沿既有单位字面量规则。财务以外的物理基准不从本入口进入技术约束。
+
+别名为lower_snake_case，只在本条约束内有效；不同约束可复用别名。本条别名不得与规划变量ID、保留财务分量标识符或`step_duration`重名，不新增全局`amount__...`等编码规则。amount/baseline相同id也不混淆，由kind及局部别名明确区分。
+
+例如Effective已有逐评价年本币金额`additional_spend`，本次comparison已将基准预算冻结为`budget_limit`；限制评价年2的新增支出为：
+
+```yaml
+planning:
+  constraints:
+    spend_cap:
+      type: amount_relation
+      references:
+        spend: {kind: amount, id: additional_spend, period: {kind: financial_year, year: 2}}
+        budget: {kind: baseline, id: budget_limit, period: {kind: financial_year, year: 2}}
+      expression: "spend <= budget"
+      enabled: true
+```
+
+这是已有合法装配/评价中的新增片段，不是独立上传文件；若该期spend为`2 CNY/kW × q`、冻结budget为`6 CNY`，关系就是同次模型的`2 CNY/kW × q <= 6 CNY`，不固定q或另做金额预求解。amount复用原求值关系及规划变量，baseline复用提交时冻结常量；本条不生成新的现金、税额或第二份金额定义。
+
+项目公开输入边界确认引用、单位和明确期间，错误指向约束ID及references别名；尚未随evaluation可知的基准/年限在提交边界绑定一次。保存、装配规范化、项目包及任务冻结保留同一声明；内部可信交接不重复校验。实际启用要求`finance.amount_constraints`，并按所用来源要求`finance.amount_references`或`finance.frozen_baseline`及其依赖，未接通以TASK-REQ-007定位触发字段。此入口不扩展目标函数语法、技术system_equations的references或任意技术时序基准；原`system.after_tax_npv`目标不变。
+
 ## 设备内容固定与实例
 
 每个设备实例用 `definition.id` 固定具体设备内容（按字头校验，不做内容摘要）。`schema_version` 版本化统一设备格式，不是某台设备的语义版本；装配不得出现 `device_version`、`model@version`、`latest` 或设备私有命令版本。
@@ -184,7 +219,7 @@ extensions: {}
 
 每条母线逐步满足所有成员端口的净流量和为零：`out` 供给为正、`in` 消耗为负，`bidirectional` 使用模型声明的有符号净供给。相连的同一端口只计一次，多源多汇可在该母线混合。设备内部端口的转换、容量、效率与状态仍由其 YAML 方程定义，不作为理想连接合并。
 
-未被任何连接引用的端口不自动补入某条母线，保留既有模型及必需连接检查的边界；这不声明未连接端口流量为零，也不授予外部供给或来源外送权限。需要封闭边界或来源分配时须明确表达相应关系，不能从缺少连线推断。更完整的网络语义见[装配模块](../modules/assembly.md#端口级网络语义)。
+未被任何连接引用的可连接端口不自动补入其他母线；其关闭关系、外部源汇及来源分配遵守[网络边界与系统方程](network-relations.md)。这是目标边界语义，不表示未支持该能力的运行版本已交付；不通过缺边推断公共母线中的来源权限。更完整的语义边界见[装配模块](../modules/assembly.md#端口级网络语义)。
 
 当前自有契约仍统一为 `1.0.0`。程序、装配检查和内置生成器同步采用本节端口语义，不按旧版本或设备级连通行为回退；已有冻结输入和结果保持原对象，不回写历史。重新计算现有项目时，应核对真实端口连线，不能自动增加连接恢复曾被错误短接的设备两侧。
 
@@ -192,7 +227,7 @@ extensions: {}
 
 - 两个实例和 interface 存在；
 - `out → in`、`out → out` 的母线汇合及与语义相容的 `bidirectional` 连接成立；
-- carrier 相同、单位量纲兼容、取值区间不冲突；
+- carrier 相同、单位量纲兼容，各端口自身有效域合法；公共母线不要求不同端口的区间两两相交，总量由守恒约束，见[网络边界](network-relations.md#完整网络边界)；
 - `predefined` 和 `blind` 从不出现在 connections；
 - 无禁止的自环、重复边和未满足的必需连接；
 - 损耗、延迟和转换由明确设备方程或系统约束表达；
@@ -250,6 +285,8 @@ finance:
 全周期财务目标由 `planning.objective` 显式选择：`{sense: maximize, expression: system.after_tax_npv}`。该保留标记只能作为完整目标使用，不作为普通表达式或约束中的操作数；它不开放属性访问语法。目标金额单位为有效财务配置的币种，含义为同一冻结评价确认和财务规则下的全周期税后 NPV，公式与现金时点以[财务计算](../modules/finance.md#规划目标与同源评价)为准。公开规划/装配入口识别该目标并核对方向；具体计算能力在生成器能力边界判断。其余合法目标仍显式保留，不被自动替换。
 
 财务标量表达式只接受普通标识符（`Name`）：财务分量不以点分路径或属性访问形式出现。财务分量在规划表达式中的合法标识符统一为：
+
+本表定义全局既有分量名；命名amount及baseline不增加全局编码，只在[amount_relation](#金额引用约束)的references中绑定局部Name，不能直接把金额ID或基准ID写进原目标表达式。
 
 ```text
 设备成本分量：<instance_id>__<分量>              # 分量 ∈ {upfront_capex, annual_fixed_om, period_variable_om}
@@ -317,7 +354,7 @@ planning:
 
 | 项目 | 唯一写法与含义 |
 | --- | --- |
-| 路径 | `upfront_capex`、`annual_fixed_om`、`period_variable_om` 整项，或其实际存在的 `.fixed`、`.linear.<driver>` 子项；不含 finance_type 前缀 |
+| 路径 | `upfront_capex`、`annual_fixed_om`、`period_variable_om` 整项，或其实际存在的 `.fixed`、`.linear.<driver>` 子项；命名items目标路径见[命名金额关系](finance-relations.md#命名成本明细)，不含 finance_type 前缀 |
 | 无条件 | `{kind: always}`；省略映射或未覆盖的叶子均为此含义，不自动继承建设状态 |
 | 随建设发生 | `{kind: construction_unit, unit_ref: <unit_id>}`；引用本实例的建设单元，不跨实例猜测或借用状态 |
 

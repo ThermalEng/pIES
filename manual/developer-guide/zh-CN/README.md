@@ -30,6 +30,8 @@
 | 设备方程如何形成声明式数学贡献 | [技术方程建模](modules/modeling.md) |
 | 手写装配、项目图校验或规范产物 | [装配 YAML](formats/assembly-yaml.md)与[装配与检查](modules/assembly.md) |
 | 手写或校验财务 YAML（FinanceProfile/Overrides/Effective） | [财务 YAML](formats/finance-yaml.md) |
+| 网络边界、分配与系统辅助状态 | [网络与系统方程](formats/network-relations.md) |
+| 命名金额、支付、资产、派生税与基准 | [金额关系](formats/finance-relations.md)与[评价范围](contracts.md#评价范围与冻结基准) |
 | 从规范装配生成求解器输入和命令 | [计算生成器](modules/generators.md) |
 | 安全执行求解器命令 | [求解运行时](modules/solver-runtime.md) |
 | 计算全链路或结果适配 | [计算生成与求解](modules/engines.md) |

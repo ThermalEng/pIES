@@ -132,6 +132,8 @@ SolverRuntime 根据 allowlist 解析结构化命令，在隔离目录执行，�
 
 以下为生效目标契约，不表示当前链已实现。ResultAdapter 按 [Bundle 步序列映射](../formats/solver-bundle.md#步序列结果映射) 与同次主解恢复 `ComputeResult.outputs.series`：以不透明 `series_id` 为键，每项为 `{instance_id, variable_id, unit, values}`；`values` 顺序对应完整运营时域的连续 `step=0..n-1`，使用业务单位。不得由消费者拆解列名或序列 ID，不补零、不循环输入、不重新求解；实际结果解释失败沿已有结果协议错误处理。
 
+系统辅助量由同一适配器按[系统序列映射](../formats/solver-bundle.md#系统序列映射)恢复为`outputs.system_series`，每项为`{block, variable, unit, values}`；与设备序列共享series_id唯一范围，不给系统块填虚构instance_id。application投影到公共目录及分页时，按[求解步序列读取](../contracts.md#求解步序列读取)增加明确device/system判别字段；适配器两张原映射的业务身份不变，不由前端根据ID猜所有者。
+
 步序列随已请求的 `solution` 发布，不增加 CalculationConfig 输出词汇；未请求 solution、无可用数学解时不发布 series。候选归属复用同一结果的已有 solution/bundle/receipt 身份，不为曲线另造候选。该新增输出不改变 ComputeResult 顶层状态及追溯字段；配套 provider 的必需映射变更按其协议版本处理。
 
 application 只将已恢复统一序列序列化为结果对象，经 storage 落盘，并在已有封存事务内提交对象元数据、引用、证据和任务终态；外部 Blob 不参与数据库原子提交。序列身份、单位和顺序保留到公开读取 DTO，禁止 application 再解释 Bundle 列或做内部长度/hash 复核。Worker 只调用用例，不解释求解输出。读取协议见 [公共契约](../contracts.md#求解步序列读取)。
