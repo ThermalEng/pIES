@@ -107,6 +107,10 @@ asset的basis只用scalar，depreciation/book_value只用financial_year，不把
 
 assessed按应计期引用，paid按实际支付期引用；派生规则有payment_lag时不能把原应计期的数额当作当期paid。对应期没有该项实际支付为已知零，不以未发布的规则/量补零。
 
+每个 source/measure 必须有同次构模声明及公开封存出口，逐项对应关系以[税额引用与封存字段](solver-bundle.md#税额引用与封存字段)为唯一正文；本次金额引用和基准税额选择器使用同一身份、轴及期间规则。规则级销项/进项不能从共享池实缴反推，池应收也不能在读取时用退款清单或当前配置重算。未发布对应事实的证据不可作为该量的基准来源。
+
+命名金额及冻结基准进入规划约束的最小入口见[金额引用约束](assembly-yaml.md#金额引用约束)：只将明确期间的值绑定为本条标量关系的局部名称，不把财务引用放进技术系统方程。
+
 ## 具名收付 `cash_movements`
 
 Profile 与 Effective 增加可选映射，省略为 `{}`。每个 movement_id 定义一个独立经济发生项，其金额定义与付款计划分开：
@@ -120,6 +124,8 @@ Profile 与 Effective 增加可选映射，省略为 `{}`。每个 movement_id �
 | `payments` | 必填有序 `[{offset, ratio}]`；offset 为从每笔recognition起算的整数期间，负值明确表示预付款，单位沿其轴；ratio 为非负十进制字符串，精确合计1 |
 
 TimePoint 恰为 `{kind: financial_year, year}` 或 `{kind: tax_month, month}`；financial_year 此处是现金时点，允许0。each 的期间从1开始。月末支付 p 汇入 CF[ceil(p/12)]；年时点 y 汇入 CF[y]，不改写建设付款的原有时点规则。金额 axis 必须为 scalar 或与 recognition 同轴，逐期定义按 current 绑定。payments 即使单笔立即支付也填写 `[{offset: 0, ratio: "1"}]`。
+
+实际发生身份为 `(movement_id, recognition轴, recognition期间)`，不只是 movement_id。at 产生一个身份，each 为闭区间每期各产生一个身份；同额、同一数值配方或同一付款月不会合并身份。结果 `cash_movements` 每行的 `(id, axis, period)` 保留该身份，付款、进项确认及资产引用均绑定它。财务 Reference 中的 movement.period 选择发生期，不选择实付期或开票期。
 
 recognition须在评价期内，付款计算所得年时点不得小于0、税务月不得小于1。约定付款超出评价期时作为明确期末应付／应收封存，不进入期内现金，也不自动变成终期回款；完整义务金额不因现金评价截断而消失。引用本币，不新增换汇系统。
 
@@ -184,11 +190,44 @@ tax_rules 增加 `kind: derived_tax`，完整字段为 `label_ref, axis, base_fr
 - rate 为已知非负有限 Money，单位 `"1"`；应计额＝base_from × rate。它不是“税种名→计算方法”的注册表。
 - payment_lag 为非负整数，单位沿 axis；支付期＝应计期＋滞后。期外应付不算期内现金，税费自身不再写第二笔 movement。
 - 所得税规则增加 `movement_revenue`、`movement_cost`、`derived_tax_cost` 三个可选 ID 列表；各自明确收入、可扣费用及可扣派生税费，省略为空。movement收入按net_revenue入发生年度税基，费用按net_basis在发生年度扣除，不随收付款计划移动；税务月p归评价年ceil(p/12)，年时点y>=1归年y，开工瞬间y=0属于第1税务年度而现金仍在CF[0]。派生税费按应计年度扣除，不把实缴日期暗作权责发生日期。
-- VAT规则增加可选 `movement_input_tax: [{movement, rate, deductible_ratio, confirmation}]`、`movement_output_tax: [{movement, rate, confirmation}]`。movement引用真实发生项，输入对应outflow、输出对应inflow。confirmation恰为`{method: recognition_period}`，或`{method: explicit_schedule, schedule: [{period, ratio}]}`。前者在recognition所属税务月确认（年y>=1映射12y）；后者的非负十进制比例精确合计1，period须在1..12E。年时点0不能使用recognition_period，必须明确schedule，不把0夹成月1，也不复用原初建付款确认规则猜开票期。
+- VAT规则增加可选 `movement_input_tax: [{movement, rate, deductible_ratio, confirmation}]`、`movement_output_tax: [{movement, rate, confirmation}]`。movement 指定定义ID，输入对应outflow、输出对应inflow；该条目覆盖此定义的全部实际发生项，确认方式见下节。
 
 同一来源只确认一次；分期付款不重复开票计税。没有相应规则则不猜税额、抵扣或扣除资格。资本化的movement不得同时列为全额movement_cost；零现金、免税、不可抵扣与不可费用扣除是不同事实。
 
 引用图按原金额、税额、净基础、资产及当期/跨期依赖构造。同期间循环（例如所得税引用一个又依赖该所得税的可扣费）属于输入引用错误，不按字段顺序求值；现有抵扣池与亏损递推继续由原税务关系表达，不开放任意金融状态脚本。
+
+### 收付发生项的VAT确认
+
+movement条目的confirmation为以下判别联合；仅用于本页新增收付，不改变原建设进项确认字段：
+
+条目的rate、deductible_ratio沿原VAT规则使用无量纲Money；rate非负，deductible_ratio为0..1，不混用裸数或字符串比例别名。下表schedule中的ratio则沿原确认清单使用十进制字符串。
+
+| method | 完整形态与语义 |
+| --- | --- |
+| `recognition_period` | 仅 `{method: recognition_period}`；逐发生项在其recognition对应税务月确认。月p映射p，年y>=1映射12y；年时点0不得使用 |
+| `explicit_schedule` | `{method: explicit_schedule, occurrences: [{at: TimePoint, schedule: [{period, ratio}]}]}`；at明确选择本movement的一个实际发生项，每项schedule只分配该次发生的税额，不分配整个movement的合计额 |
+
+explicit_schedule对at和each均采用同一形态。occurrences须恰好覆盖recognition产生的全部发生身份各一次，不接受缺项、额外at或重复at；按at期间排序。每份schedule非空，period为绝对税务月1..12E且不重复，按period排序；非负十进制ratio逐份精确合计1，不能将多次发生的ratio合计一次。确认可晚于发生或付款；不把发生年当作固定开票年。年时点0同样用明确的at及开票月，不夹成月1。
+
+例如E至少为3，service在评价年1、2各发生一笔不含税支出100，税率0.1、全额可抵，立即付款；两次进项分别在月13、25确认。新增VAT条目为：
+
+```yaml
+movement_input_tax:
+  - movement: service
+    rate: {value: "0.1", unit: "1"}
+    deductible_ratio: {value: "1", unit: "1"}
+    confirmation:
+      method: explicit_schedule
+      occurrences:
+        - at: {kind: financial_year, year: 1}
+          schedule: [{period: 13, ratio: "1"}]
+        - at: {kind: financial_year, year: 2}
+          schedule: [{period: 25, ratio: "1"}]
+```
+
+每次含税支付110、可抵额10、净基础100；本规则月13、25的deductible_input各10，其余月为零。发生项结果中的可抵总额仍分别为10，不因支付或确认分期复制；确认月进入规则级VAT事实，再汇入所属池，不把两次总额20重复用于每个开票月。
+
+重复认领按实际发生身份检查：同一方向的发生项只能由一个VAT条目拥有，不能在同规则列表、其他规则或另一池再确认；不是按金额相等判重。本契约不引入分票工作流，分期比例只在该发生项自己的schedule内表达。Overrides仍按所属rule、条目列表名和movement_id匹配，不能用数组下标或开票月另造条目身份；具体覆盖权限见下节。
 
 ## 合并、冻结与能力边界
 
@@ -200,7 +239,7 @@ tax_rules 增加 `kind: derived_tax`，完整字段为 `label_ref, axis, base_fr
 | assets | Profile 声明身份与来源；Overrides 可整体替换来源中的项目实例范围、capitalized_at 与 available_from；不能替换来源种类或把无关金额变为资本化来源 |
 | derived_tax | Overrides 只替换既有 rate 与 payment_lag；税基、来源、轴和规则身份不变 |
 
-movement的VAT条目按movement_id匹配，只可替换rate/deductible_ratio及既有explicit_schedule的完整schedule；confirmation.method、范围与池归属不变。所得税的movement_revenue/movement_cost/derived_tax_cost是Profile范围，Overrides不增删；本页资产basis_from的实例范围覆盖不改变这一点。
+movement的VAT条目在所属rule及movement_input_tax/movement_output_tax列表内按movement_id匹配，只可替换rate/deductible_ratio及既有explicit_schedule的完整occurrences数组；confirmation.method、movement定义ID与池归属不变，不逐开票行拼接。合并后的occurrences须对应合并后recognition产生的发生集合；若Overrides改变each范围，须一并给出匹配的完整occurrences，否则在项目采用/提交公开边界报告具体缺失或多余的发生期。不在冻结读取或Worker中重复匹配。所得税的movement_revenue/movement_cost/derived_tax_cost是Profile范围，Overrides不增删；本页资产basis_from的实例范围覆盖不改变这一点。
 
 省略覆盖保留原项；不接受 null 删除、逐元素列表拼接或“最新”来源。Effective 保存完整命名结构和经明确覆盖的参数。Profile 无法确认的项目实例/期间在项目采用或提交的真实输入边界绑定；内部冻结和恢复不再校验。修改方法、范围类型或新增费用身份时发布 Profile 新 revision，而非偷偷改变 Overrides 权限。
 

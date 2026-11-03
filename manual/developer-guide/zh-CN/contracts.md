@@ -114,11 +114,20 @@
 
 ### 求解步序列读取
 
-以下为生效目标契约，不表示当前链已实现。统一结果序列形状以 [计算生成与求解](modules/engines.md#统一求解步序列) 为唯一正文。结果视图的 `hourly_refs` 保留对象引用、`fields`（序列 ID）和 `rows`，并公开各序列的 `instance_id`、`variable_id` 与业务 `unit`；这些元数据与序列值来自同一封存结果，不从当前项目补齐。
+以下为生效目标契约，不表示当前链已实现。适配器内部统一结果形状见[计算生成与求解](modules/engines.md#统一求解步序列)及[Bundle映射](formats/solver-bundle.md#系统序列映射)；本节是公共目录、分页与导出身份的唯一正文。结果视图仍沿用`hourly_refs`引用组，每组`{rows, series}`中，rows是完整计算步数，series是序列元数据目录，不含完整值数组。每个目录条目为下列判别联合，不把系统块伪装成设备：
 
-既有 `/hourly` 路径及 `field` 参数继续用于选择不透明序列 ID；`start`、`end`、`next_start` 均为计算步位置，不是小时。响应保留 `field/unit/start/end/values/next_start/total_rows` 并公开所选序列的实例与变量身份。消费者按 `next_start` 读取到 null，不凭一次请求或行数上限声称取得完整时域。缺席与读取失败分别处理，不伪造序列或空数据成功。
+| kind | 完整目录条目 |
+| --- | --- |
+| `device` | `{kind: device, series_id, instance_id, variable_id, unit}`；保留设备原有实例/变量字段，身份来自outputs.series |
+| `system` | `{kind: system, series_id, block, variable, unit}`；block/variable为冻结system_equations的块/辅助变量ID，身份来自outputs.system_series；不携带instance_id/variable_id |
 
-结果对象可沿既有 `{data, meta.units}` 存储形状序列化，并保留序列身份元数据；字段键与公开序列 ID 一致。存储序列化不负责解释求解器变量，也不新增重复校验。前端按公开身份与单位通用选取、分组及展示，横轴使用计算步序号；不得按旧字段名推断设备语义或把所有序列默认标为 kW。
+kind是必填判别字段，只接受所属形态的字段。series_id在同一封存结果/候选的全部设备、系统序列和引用组中共享唯一命名空间，与Bundle及对象中字段键相同；不同任务不要求全局唯一。目录按series_id排序，消费者只用kind与显式身份分组，不解析series_id、显示名或solver列名。元数据、单位与值来自同一证据，不从当前项目补齐；名称相同的设备变量与系统变量也不互相覆盖。
+
+既有`GET /api/projects/{project_id}/tasks/{task_id}/result/hourly`及`field`参数用于从该任务已选定封存结果中选择series_id；请求不另填设备ID或kind来猜序列位置。`start`、`end`、`next_start`均沿既有计算步分页语义，不是小时。响应保留`field/unit/start/end/values/next_start/total_rows`，并携带所选条目的kind及该形态身份：device增加`kind: device, instance_id, variable_id`，system增加`kind: system, block, variable`；field就是目录中的series_id。单位、总行数和身份不随分页变化。消费者按next_start读取到null，不凭一次请求或行数上限声称取得完整时域。缺席、未知field与实际读取失败分别处理，不伪造序列或空数据成功。
+
+结果对象沿既有`{data, meta.units}`形状序列化，data和meta.units以series_id为键；`meta.series`为同样以series_id为键的上述目录条目（条目仍含series_id），保留判别身份。application只做同次适配器结果的投影，不解释求解器变量，也不新增内部长度/hash校验。公开读取不把存储对象引用或路径交给前端拼装。
+
+既有证据导出不新增设备/系统两套入口：步序列目录列固定为`series_id, kind, instance_id, variable_id, block, variable, unit, rows`，不适用的身份列在表格留空，按kind解释；值表以series_id为列键并显式保留step。Excel中的显示标签可另作展示，不能取代身份、覆盖同名曲线或截断完整时域。项目包保留同一meta.series、单位及序列值，导入后不从名称重建归属。前端按公开身份与单位通用选取、分组及展示，横轴使用计算步序号；不得按旧字段名推断设备语义或把所有序列默认标为kW。
 
 ## 快照与异步契约
 
@@ -149,7 +158,7 @@
 | --- | --- |
 | `absolute` | 仅 `{mode: absolute}`；评价原完整项目现金流，无基准 |
 | `difference` | `{mode: difference, baseline, facts, comparability}`；先按双方各自明确税务规则形成税后现金流，再作候选减基准 |
-| `reference` | `{mode: reference, baseline, facts, comparability}`；只提供独立基准常量给声明的金额/约束关系，不自动减基准现金流，最终指标仍评价本次模型明确形成的现金流 |
+| `reference` | `{mode: reference, baseline, facts, comparability}`；只提供独立基准常量给声明的金额关系或[金额引用约束](formats/assembly-yaml.md#金额引用约束)，不自动减基准现金流，最终指标仍评价本次模型明确形成的现金流 |
 
 `baseline` 恰选：
 
@@ -169,7 +178,7 @@ Task baseline的评价E和币种须与本次相同；difference模式还须已�
 | `amount` | `{kind: amount, id}`，取得基准已发布命名金额，含其轴、单位及期间 |
 | `movement` | `{kind: movement, id, measure}`，measure 为gross／net_basis／net_revenue／paid，按发生或支付期间明确取值，净基础/净收入须与方向相容 |
 | `asset` | `{kind: asset, id, measure}`，measure 为basis／depreciation／book_value |
-| `tax` | `{kind: tax, source, measure}`，source/measure 复用[税额输出引用](formats/finance-relations.md#税额输出引用)，只选择该证据真实发布的事实 |
+| `tax` | `{kind: tax, source, measure}`，source/measure 复用[税额输出引用](formats/finance-relations.md#税额输出引用)；每项按[封存对应表](formats/solver-bundle.md#税额引用与封存字段)选择真实字段及轴，不能从共享池实缴反推规则销项/进项或读取当前配置重算 |
 
 Declared来源的baseline.facts每项为 `{unit, axis, values}`：axis为scalar／financial_year／tax_month；scalar的values恰一个值，financial_year恰E+1个（含时点0），tax_month恰12E个（从月1起）。金额/金额费率为十进制字符串，纯物理量为有限JSON number，沿用公共数值规范。不适用的年度时点明确填零，未知不能填零。comparison.facts 每项为 `{kind: declared_fact, id}`，引用该已声明量表。金额币种一致，其他单位遵守公共单位规则，禁止隐式换汇。
 
@@ -177,9 +186,9 @@ Declared来源的baseline.facts每项为 `{unit, axis, values}`：axis为scalar�
 
 设候选按其冻结规则得到 `CF_c[t](x)`，基准独立给出 `CF_b[t]`：difference 模式的评价及 `system.after_tax_npv` 目标使用 `CF_c[t](x)-CF_b[t]`；reference/absolute使用`CF_c[t](x)`。NPV、IRR、回收期和导出使用同一条选定现金流。结果同时区分原候选、基准与差额，不能把全厂绝对支出称作设备增量损益，也不伪造主营收入使IRR有值。
 
-difference 固定为**分别计税后比较**。不提供一个把已计税差额重新套税率的开关：`Tax(c)-Tax(b)` 一般不等于 `Tax(c-b)`。例如两方案应税基础-10与-4、无结转且税率0.2时，前者为0，后者对差额6得1.2。本契约不把这两种算法当成可互换的精度设置。
+difference 固定为**分别计税后比较**。不提供一个把已计税差额重新套税率的开关：`Tax(c)-Tax(b)` 一般不等于 `Tax(c-b)`。例如候选应税基础`c=-4`、基准`b=-10`、无结转且税率0.2时，候选减基准为6，分别计税的差`Tax(-4)-Tax(-10)=0`，而对差额计税`Tax(6)=1.2`。反过来候选-10、基准-4则差额为-6，两种结果均为0，不能作为不等价反例。本契约不把这两种算法当成可互换的精度设置。
 
-reference允许模型显式消费基准事实，影响税务的基准必须进入声明的金额及税务关系，与候选同次求解。它**不自动构成简化增量计税**，也不自动生成另一份现金账。若要新增专用增量税基/税盾兑现算法，必须先定义其核算主体、期初税务状态及现金范围契约，再扩展能力；不得在本次开发中自行解释为“默认税盾全兑现”。这一区分属于范围边界，不阻断分别计税的通用差额评价。
+reference允许模型显式消费基准事实，影响税务的基准必须进入声明的金额及税务关系，与候选同次求解；影响财务约束的量通过amount_relation绑定明确期间，不能把基准别名直接写成全局规划名称或放进技术system_equations。它**不自动构成简化增量计税**，也不自动生成另一份现金账。若要新增专用增量税基/税盾兑现算法，必须先定义其核算主体、期初税务状态及现金范围契约，再扩展能力；不得在本次开发中自行解释为“默认税盾全兑现”。这一区分属于范围边界，不阻断分别计税的通用差额评价。
 
 comparison 非absolute时要求 `finance.frozen_baseline`；difference 另要求 `finance.cashflow_difference`，并要求同次financial_facts。缺能力在提交边界以TASK-REQ-007和触发字段明确拒收；未取得某个基准事实则报告其别名和来源选择器，不猜零值。没有基准需求的absolute任务不额外要求这些能力。
 

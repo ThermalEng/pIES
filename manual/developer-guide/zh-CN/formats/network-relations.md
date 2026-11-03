@@ -101,7 +101,7 @@ system_equations:
 
 辅助变量的公开输出选择为 `outputs.system_series: [{block, variable}]`，省略等价于 `[]`；每项必须引用本块真实变量，不接受求解列名。原 `outputs.series` 的设备序列形态不变。所选生成器必须同时支持辅助声明、引用、状态和结果恢复，不能只接受表达式而忽略变量或输出。
 
-Bundle／适配器的输出身份与结构以[系统序列映射](solver-bundle.md#系统序列映射)为准。来源映射保留 `system_equations.<block>`、relation ID、变量 ID、被引用实例及实际 step；关闭端口关系保留端口来源。生成器统一汇集这些原关系后再做界分析与降级，不新增求解前验证器；Runtime 不解释网络。
+Bundle／适配器的输出身份与结构以[系统序列映射](solver-bundle.md#系统序列映射)为准，公共目录、分页与导出沿[求解步序列读取](../contracts.md#求解步序列读取)的device/system判别联合，不能把block放进instance_id。来源映射保留 `system_equations.<block>`、relation ID、变量 ID、被引用实例及实际 step；关闭端口关系保留端口来源。生成器统一汇集这些原关系后再做界分析与降级，不新增求解前验证器；Runtime 不解释网络。
 
 ## 输入、转换和求解失败
 

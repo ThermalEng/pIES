@@ -85,7 +85,7 @@ extensions: {}
 
 | 字段 | 语义 |
 | --- | --- |
-| `series_id` | 此 Bundle 内稳定且唯一的不透明序列标识，不由消费者拆解 |
+| `series_id` | 此 Bundle 全部设备与系统序列共享的唯一不透明标识；同一封存结果/候选的所有引用组中唯一，不由消费者拆解；不同任务不作全局唯一承诺 |
 | `instance_id` | 公开装配实例 ID |
 | `variable_id` | 该实例设备数学贡献中已声明的变量身份，包含接口变量，不猜设备类型 |
 | `unit` | 业务单位，与生成器单位映射同源 |
@@ -99,7 +99,7 @@ extensions: {}
 
 以下为[系统方程](network-relations.md)新增输出的目标契约。配套生成器在 parameters.json 增加 `system_series` 数组；无请求时为 `[]`，不把系统块伪装成设备实例。每条恰为 `{series_id, block, variable, unit, columns}`：series_id 为不透明唯一身份，block/variable 为冻结系统块及辅助变量ID，unit 为业务单位，columns 为完整运营step顺序的真实求解列引用。
 
-适配器由同次解发布 `ComputeResult.outputs.system_series`，以series_id为键，每项为 `{block, variable, unit, values}`；values为业务单位有限数值，顺序与完整运营时域一致。它与设备 outputs.series 分别拥有真实来源，不能复制一份设备序列再改名，也不在适配时重新求分配或来源比例。读取与导出复用既有步序列分页和单位规则，选择器明确区分device/system所有者；设备序列原DTO不改作“假实例”。
+适配器由同次解发布 `ComputeResult.outputs.system_series`，以series_id为键，每项为 `{block, variable, unit, values}`；values为业务单位有限数值，顺序与完整运营时域一致。它与设备 outputs.series 分别拥有真实来源，不能复制一份设备序列再改名，也不在适配时重新求分配或来源比例。两张映射共享series_id命名空间；公共目录、分页和导出按[求解步序列读取](../contracts.md#求解步序列读取)的device/system判别联合发布，设备序列保留真实instance_id/variable_id，系统序列不填“假实例”。
 
 仅在请求solution并取得可用主解时发布；实际选择项为装配outputs.system_series。源汇关闭行没有额外的伪求解输出，所需端口序列仍按原设备映射发布。两类序列和模型来源共同固定于同一证据，不读取当前草稿补名称或单位。
 
@@ -132,9 +132,10 @@ extensions: {}
 | `net_cashflows` | `[{id, t, direction, amount}]`，显式净现金项目的同次解金额；amount 为非负金额字符串，direction 保留 inflow／outflow，t 为实际财务时点；无项目为 `[]`，按 `(t,id)` 排序 |
 | `annual_operation` | `[{financial_year, energy_net, variable_om, fixed_om, maintenance, demand_charge, net}]`，实际含税收付；`demand_charge` 为当年需量费正金额合计，无费用为 `"0"`；`net` 扣除所列费用各一次，尚未扣税款结算或折旧 |
 | `monthly_demand` | `[{billing_id, charge_id, calendar_year, calendar_month, financial_year, peak_power, peak_unit, rate, charge}]`；每个需量绑定、每个运营自然月一项。`peak_power` 为实际月峰十进制字符串，`peak_unit` 为 `kW`；`rate` 是冻结费率 Money，`charge` 是实际含税支付金额字符串；币种沿顶层。无绑定时显式 `[]`，零费率仍保留真实峰值与零账单 |
-| `tax_cash.vat` | `[{pool, month, paid, refund_claimed, refund_arrived, carry}]`，每池每评价月一行；`carry` 为扣除当月确认退款后的期末可结转留抵，实缴与到账退款才影响现金 |
+| `tax_cash.vat` | `[{pool, month, paid, refund_claimed, refund_arrived, carry, receivable}]`，每池每评价月一行；`carry` 为扣除当月确认退款后的期末可结转留抵，`receivable`为当月到账后尚未到账的期末已确认退款应收，实缴与到账退款才影响现金 |
+| `tax_cash.vat_rules` | `[{rule, pool, month, output_tax, deductible_input}]`，每VAT规则每评价月一行；规则实际没有的销项/进项方向明确为零，两个规则共享池仍分别保留确认税额，不把池实缴分摊给规则 |
 | `tax_cash.refunds` | `[{pool, period, arrival_period, amount}]`，明确确认和到账期间；保留评价期后到账的已确认款项，期后款不计入期内现金 |
-| `tax_cash.income` | `[{rule, year, taxable_base, loss_used, loss_generated, loss_expired, tax}]`，每所得税规则每评价年一行，基础为当年抵扣亏损前的应税基础 |
+| `tax_cash.income` | `[{rule, year, taxable_base, loss_used, loss_generated, loss_expired, assessed, tax}]`，每所得税规则每评价年一行，基础为当年抵扣亏损前的应税基础；`assessed`为该年应计所得税，原`tax`字段仍表示该年实缴，当前无支付滞后时两者来自同一金额表达式 |
 | `tax_cash.depreciation` | `[{rule, base_from, year, amount}]`，该年计税折旧；base_from 原样保留[财务金额来源](finance-yaml.md#金额来源与折旧期间)判别联合，区分初建与同年多笔换新，不压成 asset 类别；只解释税基，不作为额外现金支出 |
 | `tax_cash.loss_balances` | `[{rule, vintage_id, year, last_usable_year, amount}]`，按规则及不透明亏损批次标识记录年末余额，批次标识不得由消费者拆解 |
 | `annual_net_flows` | 按 `t=0..evaluation_years` 排列的完整税后现金流；包含明确建设付款、运行收支、VAT实缴／退款到账、所得税及显式净现金项目，余额及折旧不额外计入现金 |
@@ -167,7 +168,7 @@ extensions: {}
 | `assets` | `[{id, basis, capitalized_at, available_from, book_values: [{year, value}]}]`；basis为实际非负净基础，book_values来自同次资产关系，不自动作为残值现金 |
 | `tax_cash.derived` | `[{rule, axis, period, assessed, payment_period, paid}]`；应计与实际约定支付分开，期外payment_period保留但不进入期内现金 |
 
-新资产的折旧仍只在原tax_cash.depreciation声明，base_from增加`{kind: asset, id}`，不复制第二份资产折旧数组。资产book_values为基础减截至该期实际计提的累计折旧，不因收取一笔net_cashflow就自动作资产处置。所得税原tax字段仍为当前同年度实缴税额；有新引用时同时按其明确measure提供应计/实缴身份，不让调用方按列名或税种推断。
+新资产的折旧仍只在原tax_cash.depreciation声明，base_from增加`{kind: asset, id}`，不复制第二份资产折旧数组。资产book_values为基础减截至该期实际计提的累计折旧，不因收取一笔net_cashflow就自动作资产处置。所得税assessed/tax及规则级VAT、池应收的引用使用下节明确映射，不让调用方按列名或税种推断。
 
 所有金额/比例为十进制字符串；period/year为整数；TimePoint中年/月字段为整数。cost_items按实例、component、item_id、period排序，其余按id/rule及period排序，payments保留输入顺序。未适用目录发布空数组；适用零值不省略。命名项已包含于原分量总额，不能再把cost_items逐项另扣现金。原annual_operation保持既有经营字段与合计；movement支付另从cash_movements进入annual_net_flows一次，不暗塞进maintenance或fixed_om再扣。派生税费实付由tax_cash.derived进入现金，资产基础/折旧不产生第二笔支付。
 
@@ -179,7 +180,31 @@ extensions: {}
 
 `financial_evaluation`原样封存这些关系事实及comparison；difference的指标rows/NPV/IRR/回收期使用evaluation_net_flows，其余使用annual_net_flows。优化目标也使用同一选定现金流；不在报告阶段才换评价口径。适配器只恢复，财务评价只执行一次既有指标计算，读取/页面/Excel不得再次扣基准、重算税或将余额当现金。
 
-模型来源映射同时覆盖命名成本、amount、movement发生与支付、asset基础/计提、derived_tax和baseline别名；保留原字段、作用期间及依赖。新增字段不改变Bundle manifest、Runtime、solver软件版本、ComputeResult顶层状态或solution输出词汇；仅有输入而没有这些同次恢复声明时不得发布支持能力。
+模型来源映射同时覆盖命名成本、amount、movement发生与支付、asset基础/计提、derived_tax和baseline别名；amount_relation保留planning.constraints中的约束ID、references别名、明确期间及所绑定原金额/基准来源。保留原字段、作用期间及依赖。新增字段不改变Bundle manifest、Runtime、solver软件版本、ComputeResult顶层状态或solution输出词汇；仅有输入而没有这些同次恢复声明时不得发布支持能力。
+
+### 税额引用与封存字段
+
+本表是[税额输出引用](finance-relations.md#税额输出引用)及基准`kind: tax`选择器的唯一输出对应表。路径均相对同一封存`financial_facts`；声明阶段就用原税务关系登记下列字段的仿射节点，ResultAdapter按同次解恢复，financial_evaluation原样投影。表中数组条件是稳定业务身份匹配，不是用户可传的任意JSON路径。
+
+| source类别 | measure | 封存行与值字段 | 轴及取值期间 |
+| --- | --- | --- | --- |
+| VAT rule | `output_tax` | `tax_cash.vat_rules[rule=id, month=p].output_tax` | tax_month，确认月p |
+| VAT rule | `deductible_input` | `tax_cash.vat_rules[rule=id, month=p].deductible_input` | tax_month，确认月p |
+| pool | `paid` | `tax_cash.vat[pool=id, month=p].paid` | tax_month，实缴月p |
+| pool | `refund_confirmed` | `tax_cash.vat[pool=id, month=p].refund_claimed` | tax_month，确认月p |
+| pool | `refund_received` | `tax_cash.vat[pool=id, month=p].refund_arrived` | tax_month，到账月p |
+| pool | `credit_balance` | `tax_cash.vat[pool=id, month=p].carry` | tax_month，月p期末存量 |
+| pool | `receivable` | `tax_cash.vat[pool=id, month=p].receivable` | tax_month，月p期末存量 |
+| income rule | `taxable_base` | `tax_cash.income[rule=id, year=y].taxable_base` | financial_year，评价年y |
+| income rule | `loss_used` | `tax_cash.income[rule=id, year=y].loss_used` | financial_year，评价年y |
+| income rule | `assessed` | `tax_cash.income[rule=id, year=y].assessed` | financial_year，应计年y |
+| income rule | `paid` | `tax_cash.income[rule=id, year=y].tax` | financial_year，实缴年y；不另造paid别名字段 |
+| derived rule | `assessed` | `tax_cash.derived[rule=id, period=p].assessed` | 本规则axis，应计期p |
+| derived rule | `paid` | `tax_cash.derived[rule=id, payment_period=p].paid` | 本规则axis，支付期p；不是period=p的行 |
+
+各金额字段为本币十进制字符串；rule、pool为冻结的规则/池ID。VAT rule包括kind为vat与construction_input_vat的规则，后者output_tax为零；共享池的每条规则只报告自己的确认额。月行覆盖1..12E，所得税年行覆盖1..E；适用身份的零值行必须存在，数组按身份及实际期间排序。derived每个应计期一行，payment_period即使超出评价期也保留，但只在其实际支付期才可被paid选择器读到，不进入期内现金。其支付滞后为固定值，支付期无对应行时表示该规则本期无支付，取零；不能以缺少整个规则目录冒充零。所有存量均按其期末定义封存，不在消费时从其他结果重建。
+
+基准税额选择器按该表产生带unit/axis的期间值：月轴依次为月1..12E，年轴依次为年0..E，年0为明确不适用的结构性零；派生税的paid按payment_period放入同轴位置，期外款不放入期内数组。未知rule/池、对应字段未发布或期间事实缺失必须报告选择器及缺失事实，不从当前规则、共享池或候选解补算。新任务内的税额引用直接绑定同一原表达式，基准选择器只读取已封存值，两者语义相同但不互相启动求解。
 
 ## 构模来源映射
 
