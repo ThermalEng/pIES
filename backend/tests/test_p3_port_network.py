@@ -176,6 +176,36 @@ def test_grid_summary_does_not_turn_its_other_port_into_a_source_or_sink() -> No
     assert sale.sink_port_refs == ["grid.electricity_export"]
 
 
+@pytest.mark.parametrize("export_capacity", [0, 200])
+def test_self_consumption_does_not_require_an_export_port(export_capacity) -> None:
+    """The port graph alone cannot prove surplus, regardless of export capacity."""
+    registry = {document.device.id: document for document in list_devices()}
+    spec = AssemblySpec(
+        devices=[
+            AssemblyDevice("grid", "ies.device.grid_connection", properties={
+                "max_import_power_kw": {"value": 800, "unit": "kW"},
+                "max_export_power_kw": {"value": export_capacity, "unit": "kW"},
+            }),
+            AssemblyDevice("pv", "ies.device.pv", properties={
+                "rated_capacity_kwp": {"value": 50, "unit": "kWp"},
+            }),
+            AssemblyDevice("load", "ies.device.electric_load", properties={
+                "peak_power_kw": {"value": 50, "unit": "kW"},
+            }),
+        ],
+        edges=[
+            AssemblyEdge("purchase", "grid.electricity_import", "load.electricity_in"),
+            AssemblyEdge("self_use", "pv.electric_out", "load.electricity_in"),
+        ],
+    )
+    diags, summaries = run_phase_d(spec, CheckContext(registry=registry, period_steps=8760))
+    assert not [diag for diag in diags if diag.blocking], diags
+    assert len(summaries) == 1
+    assert summaries[0].port_refs == [
+        "grid.electricity_import", "load.electricity_in", "pv.electric_out",
+    ]
+
+
 def test_assembly_and_generation_share_actual_port_membership() -> None:
     from iesplan.computation.generators.project import _new_builder
 

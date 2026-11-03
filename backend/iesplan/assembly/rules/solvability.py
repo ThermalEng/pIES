@@ -9,7 +9,7 @@ fixed_supply_max, demand_max, has_storage}。
 - ASM-SOLV-002  约束不足/能量无归处:母线无汇(只有源,且无储能/无 export 通道;
                 grid 端口语义上可进口可反送,但 grid 禁反送时不算汇);
 - ASM-SOLV-003  必然不可行:无任何可调手段且 Σ固定供给上限 < Σ需求最大值;
-- ASM-SOLV-004  约束过度:互斥固定约束(无调节手段且供给>需求;grid 禁反送与可再生过剩并存);
+- ASM-SOLV-004  约束过度:互斥固定约束(无调节手段且供给>需求);
 - ASM-SOLV-006  孤立设备(无任何边,告警);
 - ASM-SOLV-007  自由度提示(可控变量数 vs 平衡方程数,info);
 - ASM-EDGE-008  双向-双向母线悬空风险(母线无任何确定方向端口,告警)。
@@ -258,10 +258,6 @@ def run_phase_d(spec: AssemblySpec, ctx) -> tuple[list[Diagnostic], list[BusSumm
             and _is_adjustable_source(ts.interfaces)
             for ts in type_specs.values()
         )
-        has_renewable = any(
-            ts is not None and any(i.carrier == "solar" for i in ts.interfaces.values())
-            for ts in type_specs.values()
-        )
 
         # Only actual member ports contribute directions. A grid's other
         # interface cannot become an implicit source/sink on this bus.
@@ -336,22 +332,6 @@ def run_phase_d(spec: AssemblySpec, ctx) -> tuple[list[Diagnostic], list[BusSumm
                         location=loc,
                     )
                 )
-        # ASM-SOLV-004(其二):grid 禁反送且存在无储能调节的非可控可再生源(过剩无处可去)
-        if has_grid and not can_export and not has_storage and has_renewable:
-            diags.append(
-                make_diag(
-                    ASM_SOLV_OVER_CONSTRAINED,
-                    severity="error",
-                    blocking=True,
-                    params={
-                        "carrier": carrier,
-                        "reason": "grid_export_disabled_with_renewable_surplus",
-                        "grid_export_disabled": True,
-                    },
-                    location=loc,
-                )
-            )
-
         # ASM-EDGE-008:母线无任何确定方向端口(双向-双向悬空风险)
         directional = [r for r in bus["port_refs"] if ports[r].direction in ("in", "out")]
         if not directional:
