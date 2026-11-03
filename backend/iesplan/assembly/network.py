@@ -1,7 +1,8 @@
 """Pure port partition shared by assembly diagnostics and model generation.
 
 Inputs describe existing, validated ideal connections. Device-internal
-relations do not participate in this graph; neither do unconnected ports.
+relations do not participate in this graph. Unconnected connectable ports
+are retained separately as closed boundaries, not implicit singleton supplies.
 """
 from __future__ import annotations
 
@@ -14,6 +15,26 @@ class PortBus:
     carrier: str
     port_refs: tuple[str, ...]
     connection_ids: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class PortNetwork:
+    buses: tuple[PortBus, ...]
+    closed_ports: tuple[str, ...]
+
+
+def build_port_network(
+    port_carriers: Mapping[str, str],
+    connections: Mapping[str, tuple[str, str]],
+) -> PortNetwork:
+    """Partition all connectable ports into ideal buses or closed boundaries.
+
+    Callers pass only in/out/bidirectional ports, never predefined or blind
+    interfaces. Closure is a zero-flow relation, not an input error.
+    """
+    buses = build_port_buses(port_carriers, connections)
+    connected = {ref for bus in buses for ref in bus.port_refs}
+    return PortNetwork(buses, tuple(sorted(set(port_carriers) - connected)))
 
 
 def build_port_buses(

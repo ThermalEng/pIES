@@ -49,7 +49,6 @@ from iesplan.assembly.diags import (
     ASM_INPUT_PROP_UNIT,
     ASM_INPUT_RANGE,
     ASM_INPUT_UNDECLARED,
-    ASM_INPUT_UNFED,
     ASM_OUTPUT_REF,
     ASM_REF_MODEL_UNREG,
     ASM_RES_INVALID,
@@ -806,7 +805,7 @@ def _phase3_graph_system(
     diags: list[Diagnostic],
 ) -> dict:
     """转换 doc → AssemblySpec + CheckContext,调用 run_phase_b +
-    输入完备检查 + run_phase_d。年步数由项目计算基线显式推导后传入。
+    端口引用检查 + run_phase_d。年步数由项目计算基线显式推导后传入。
     """
     from iesplan.assembly.context import CheckContext, steps_for_year
     from iesplan.assembly.rules import run_phase_b, run_phase_d
@@ -825,8 +824,8 @@ def _phase3_graph_system(
     diags.extend(b_diags)
     # 端口不可达(从 registry 推导 + 显式 data 列) — 未声明端口在本模块补报
     _check_undefined_ports(spec, ctx, diags)
-    # 输入完备(端口方向 in 的设备无来边)
-    _check_input_unfed(spec, ctx, diags)
+    # Unconnected connectable ports are closed by a zero-flow relation in
+    # generation. They are not invalid input, regardless of model/carrier.
     # 阶段 D:母线/可解性
     d_diags, _buses = run_phase_d(spec, ctx)
     diags.extend(d_diags)
@@ -882,42 +881,6 @@ def _check_undefined_ports(spec: AssemblySpec, ctx, diags: list[Diagnostic]) -> 
                         location={"object_type": "edge", "object_id": edge.id, "field": side},
                     )
                 )
-
-
-def _check_input_unfed(spec: AssemblySpec, ctx, diags: list[Diagnostic]) -> None:
-    from iesplan.assembly.context import (
-        EXOGENOUS_SUPPLY_CARRIERS,
-        GRID_SIDE_PORTS,
-        grid_side_used,
-        resolve_model,
-    )
-
-    ports = ensure_ports_ctx(spec, ctx)
-    in_edges: dict[str, list[str]] = {}
-    for edge in spec.edges:
-        in_edges.setdefault(edge.to_port, []).append(edge.id)
-    model_of = {d.id: d.definition_id for d in spec.devices}
-    grid_used_cache: dict[str, bool] = {}
-    for port_ref, port in ports.items():
-        if port.direction != "in" or port.carrier in EXOGENOUS_SUPPLY_CARRIERS:
-            continue
-        if port.name in GRID_SIDE_PORTS:
-            if port.device not in grid_used_cache:
-                type_spec = resolve_model(ctx, model_of.get(port.device, ""))
-                grid_used_cache[port.device] = grid_side_used(type_spec, port.device, spec.edges)
-            if grid_used_cache[port.device]:
-                continue
-        if not in_edges.get(port_ref):
-            dev_id, _, _ = port_ref.partition(".")
-            diags.append(
-                make_diag(
-                    ASM_INPUT_UNFED,
-                    severity="error",
-                    blocking=True,
-                    params={"device": dev_id, "port": port.name},
-                    location={"object_type": "device", "object_id": dev_id, "field": port.name},
-                )
-            )
 
 
 def ensure_ports_ctx(spec: AssemblySpec, ctx):

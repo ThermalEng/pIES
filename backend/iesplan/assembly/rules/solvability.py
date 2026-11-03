@@ -1,20 +1,18 @@
-"""阶段 D:整体可解性(母线级约束不足/过度)。
+"""阶段 D:实际端口母线汇总与非阻断结构提示。
 
 母线构造:理想连接按真实端口分区，设备内部输入输出不自动合并，
 得 BusSummary{carrier, ports, sources, sinks, controllable,
 fixed_supply_max, demand_max, has_storage}。
 
-规则(04 §3.4):
-- ASM-SOLV-001  约束不足:母线无源(只有汇);
-- ASM-SOLV-002  约束不足/能量无归处:母线无汇(只有源,且无储能/无 export 通道;
-                grid 端口语义上可进口可反送,但 grid 禁反送时不算汇);
-- ASM-SOLV-003  必然不可行:无任何可调手段且 Σ固定供给上限 < Σ需求最大值;
-- ASM-SOLV-004  约束过度:互斥固定约束(无调节手段且供给>需求);
+结构方向、设备能力或峰值估计不构成数学不可行证明。保留的能力
+估计只用于汇总展示，不作为校验或求解器变量的界。
+
+非阻断提示:
 - ASM-SOLV-006  孤立设备(无任何边,告警);
 - ASM-SOLV-007  自由度提示(可控变量数 vs 平衡方程数,info);
 - ASM-EDGE-008  双向-双向母线悬空风险(母线无任何确定方向端口,告警)。
 
-阶段 D 为结构性前置筛查,不替代求解器运行期检查(04 §8.1)。
+真实守恒、关闭边界、状态和逐步数据进入统一分析及求解。
 """
 
 from __future__ import annotations
@@ -30,14 +28,10 @@ from iesplan.assembly.context import (
 from iesplan.assembly.diags import (
     ASM_EDGE_LOOSE_BIDI,
     ASM_SOLV_DOF,
-    ASM_SOLV_INFEASIBLE,
-    ASM_SOLV_NO_SINK,
-    ASM_SOLV_NO_SOURCE,
     ASM_SOLV_ORPHAN,
-    ASM_SOLV_OVER_CONSTRAINED,
 )
 from iesplan.assembly.diags import make_asm_diag as make_diag
-from iesplan.assembly.network import build_port_buses
+from iesplan.assembly.network import build_port_network
 from iesplan.assembly.schema import prop_map
 from iesplan.core.diagnostics import Diagnostic
 
@@ -70,7 +64,7 @@ def build_buses(spec: AssemblySpec, ctx) -> list[dict]:
         and connectable[edge.from_port] == connectable[edge.to_port]
     }
     buses: list[dict] = []
-    for bus in build_port_buses(connectable, connections):
+    for bus in build_port_network(connectable, connections).buses:
         buses.append(
             {
                 "carrier": bus.carrier,
@@ -238,7 +232,7 @@ def _bus_controllable(spec: AssemblySpec, ctx, bus: dict) -> int:
 
 
 def run_phase_d(spec: AssemblySpec, ctx) -> tuple[list[Diagnostic], list[BusSummary]]:
-    """阶段 D:母线构造 + 整体可解性(约束不足/过度),返回 (诊断, 母线汇总)。"""
+    """返回端口母线汇总与非阻断提示，不按方向/峰值猜不可行。"""
     diags: list[Diagnostic] = []
     ports = ensure_ports(spec, ctx)
     n_steps = ctx.steps_per_year(spec)
@@ -247,91 +241,11 @@ def run_phase_d(spec: AssemblySpec, ctx) -> tuple[list[Diagnostic], list[BusSumm
     for bus in build_buses(spec, ctx):
         carrier = bus["carrier"]
         loc = {"object_type": "bus", "field": f"carrier:{carrier}"}
-        has_grid, can_import, can_export = _grid_caps(spec, bus, ctx)
+        has_grid, _can_import, _can_export = _grid_caps(spec, bus, ctx)
         devices = [d for d in spec.devices if d.id in bus["device_ids"]]
         type_specs = {d.id: resolve_model(ctx, d.definition_id) for d in devices}
         has_storage = any(_has_storage_state(ts) for ts in type_specs.values())
-        # 电网可调性由进出口容量(can_import/can_export)判定, 不计入此处
-        has_controllable = any(
-            ts is not None
-            and not {"electricity_import", "electricity_export"}.issubset(ts.interfaces)
-            and _is_adjustable_source(ts.interfaces)
-            for ts in type_specs.values()
-        )
-
-        # Only actual member ports contribute directions. A grid's other
-        # interface cannot become an implicit source/sink on this bus.
-        source_refs = list(bus["source_refs"])
-        sink_refs = list(bus["sink_refs"])
-
-        # ASM-SOLV-001:母线无源(只有汇)
-        if not source_refs:
-            diags.append(
-                make_diag(
-                    ASM_SOLV_NO_SOURCE,
-                    severity="error",
-                    blocking=True,
-                    params={
-                        "carrier": carrier,
-                        "bus_ports": bus["port_refs"],
-                        "sink_devices": sorted(bus["device_ids"]),
-                    },
-                    location=loc,
-                    ref_ids=["help.modeling.bus_balance", "ASM-SOLV-002"],
-                )
-            )
-        # ASM-SOLV-002:母线无汇(只有源,且无储能/无 export 通道)
-        if not sink_refs and not has_storage:
-            diags.append(
-                make_diag(
-                    ASM_SOLV_NO_SINK,
-                    severity="error",
-                    blocking=True,
-                    params={
-                        "carrier": carrier,
-                        "bus_ports": bus["port_refs"],
-                        "source_devices": sorted(bus["device_ids"]),
-                        "grid_export_disabled": has_grid and not can_export,
-                    },
-                    location=loc,
-                )
-            )
-
         fixed_supply, demand = _bus_caps(spec, ctx, bus)
-        adjustable = has_storage or has_controllable or can_import
-        # ASM-SOLV-003:必然不可行(无任何可调手段且 Σ固定供给 < Σ需求)
-        if not adjustable and fixed_supply is not None and demand is not None:
-            if fixed_supply < demand:
-                diags.append(
-                    make_diag(
-                        ASM_SOLV_INFEASIBLE,
-                        severity="error",
-                        blocking=True,
-                        params={
-                            "carrier": carrier,
-                            "fixed_supply_max": fixed_supply,
-                            "demand_max": demand,
-                        },
-                        location=loc,
-                        ref_ids=["help.modeling.bus_balance"],
-                    )
-                )
-            elif fixed_supply > demand:
-                # ASM-SOLV-004:约束过度(互斥固定约束:供给 > 需求且无调节手段)
-                diags.append(
-                    make_diag(
-                        ASM_SOLV_OVER_CONSTRAINED,
-                        severity="error",
-                        blocking=True,
-                        params={
-                            "carrier": carrier,
-                            "fixed_supply_max": fixed_supply,
-                            "demand_max": demand,
-                            "reason": "fixed_supply_exceeds_demand_no_adjustment",
-                        },
-                        location=loc,
-                    )
-                )
         # ASM-EDGE-008:母线无任何确定方向端口(双向-双向悬空风险)
         directional = [r for r in bus["port_refs"] if ports[r].direction in ("in", "out")]
         if not directional:

@@ -532,12 +532,9 @@ def _collection_builder(inputs):
     artifact, models, materialized, finance, _config, evaluation = inputs
     builder = _new_builder(artifact, models, materialized, finance, evaluation)
     buses = builder._compute_buses()
-    bus_flows = builder._bus_flow_index(buses)
     builder._declare_global_symbols()
     bound = {
-        inst: builder._bind_instance_symbols(
-            inst, bus_flows.get(inst, frozenset())
-        )
+        inst: builder._bind_instance_symbols(inst)
         for inst in sorted(builder.devices)
     }
     builder._collect_semantic_relations(buses, bound)

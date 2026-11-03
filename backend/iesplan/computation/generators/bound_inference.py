@@ -20,6 +20,7 @@ from iesplan.computation.generators.compiler_ir import (
     BoundFact,
     BusBalance,
     CapacityLimit,
+    ClosedPort,
     CompilerInventory,
     IndexDomain,
     KnownCoefficient,
@@ -318,7 +319,7 @@ class BoundInferenceEngine:
                         axis=op.domain.kind, index=t,
                     )
             elif isinstance(payload, BusBalance):
-                # Existing bus conservation (not the future port-level P3-N).
+                # Actual port-bus conservation from the shared network partition.
                 for t in range(count):
                     if self.checkpoint is not None:
                         self.checkpoint()
@@ -328,6 +329,15 @@ class BoundInferenceEngine:
                         terms[col] = terms.get(col, 0.0) + sign
                     self._add_affine(
                         terms, 0.0, "eq", op.source, op.identity,
+                        axis=op.domain.kind, index=t,
+                    )
+            elif isinstance(payload, ClosedPort):
+                for t in range(count):
+                    if self.checkpoint is not None:
+                        self.checkpoint()
+                    self._add_affine(
+                        {self._column(payload.instance, payload.interface, t): 1.0},
+                        0.0, "eq", op.source, op.identity,
                         axis=op.domain.kind, index=t,
                     )
             elif isinstance(payload, StateInitial):

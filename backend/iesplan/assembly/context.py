@@ -36,14 +36,6 @@ PEAK_PARAM_BY_LOAD: dict[str, str] = {
     "ies.device.cooling_load": "peak_cooling_kw",
 }
 
-#: 电网进出口端口名(与 rules.solvability 的电网识别集合一致)
-GRID_SIDE_PORTS = ("electricity_import", "electricity_export")
-
-#: 外生供给载体: 目录内无源设备, in 端口无来边不报输入不完备(与 solar
-#: 环境侧同理; 燃气由外部管网购入, 引擎按 gas_price 计价, 不依赖来边能量流)
-EXOGENOUS_SUPPLY_CARRIERS = frozenset({"solar", "gas"})
-
-
 # ---------------------------------------------------------------------------
 # 上下文与母线汇总类型
 # ---------------------------------------------------------------------------
@@ -130,22 +122,6 @@ def resolve_model(ctx: CheckContext, model: str) -> DeviceTypeSpec | None:
         registry = default_registry()
         ctx.registry = registry
     return registry.get(model)
-
-
-def grid_side_used(type_spec, device_id: str, edges) -> bool:
-    """电网设备任一进出口侧是否已连接(单侧运行判定)。
-
-    电网进出口为替代运行模式:单侧使用合法,未用侧由进出口互斥方程钳零;
-    INPUT-001 不得因此阻断。
-    """
-    if (
-        type_spec is None
-        or type_spec.device is None
-        or type_spec.device.id != "ies.device.grid_connection"
-    ):
-        return False
-    side_refs = {f"{device_id}.{name}" for name in GRID_SIDE_PORTS}
-    return any(e.from_port in side_refs or e.to_port in side_refs for e in edges)
 
 
 def default_registry() -> dict[str, DeviceTypeSpec]:
@@ -322,8 +298,6 @@ def to_watts(value: float | None, unit: str | None) -> float | None:
 __all__ = [
     "steps_for_year",
     "PEAK_PARAM_BY_LOAD",
-    "GRID_SIDE_PORTS",
-    "EXOGENOUS_SUPPLY_CARRIERS",
     "UNIT_CATEGORY_DIMS",
     "CheckContext",
     "BusSummary",
@@ -332,7 +306,6 @@ __all__ = [
     "AssemblyPort",
     "DeviceTypeSpec",
     "resolve_model",
-    "grid_side_used",
     "default_registry",
     "yaml_device_ports",
     "derive_device_ports",

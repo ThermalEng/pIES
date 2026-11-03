@@ -114,6 +114,12 @@ class BusBalance:
 
 
 @dataclass(frozen=True, slots=True)
+class ClosedPort:
+    instance: str
+    interface: str
+
+
+@dataclass(frozen=True, slots=True)
 class PlanningRule:
     name: str
     template: LinearConstraint
@@ -267,7 +273,7 @@ class ProjectObjective:
 
 
 SemanticPayload = (
-    CapacityLimit | StateInitial | BusBalance | PlanningRule | CostComponent
+    CapacityLimit | StateInitial | BusBalance | ClosedPort | PlanningRule | CostComponent
     | TariffCharge | DemandPeak | MaintenancePayment | VatRuleSource | VatPoolOperation
     | VatPeriodConnection | IncomeTaxOperation | IncomeYearConnection | IncomeLossClaim
     | DepreciationCharge | NetCashPayment

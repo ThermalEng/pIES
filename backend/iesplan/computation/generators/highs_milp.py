@@ -92,6 +92,7 @@ DESCRIPTOR = GeneratorDescriptor(
         "finance.ratio_residual",
         "finance.net_cashflows",
         "technical.step_constraints",
+        "network.closed_ports",
         "planning.construction_activation",
         "finance.cost_occurrence",
         "finance.scoped_amount_sources",
