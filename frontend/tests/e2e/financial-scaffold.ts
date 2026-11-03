@@ -392,7 +392,7 @@ export async function scaffoldProject(
       '    unit: m3/h',
       '    valid_range: {minimum: 0, maximum: 100}',
       'equations: {variables: {}, relations: []}',
-    ].join('\\n') + '\\n'
+    ].join('\n') + '\n'
     const saved = await requestJson(api, 'POST', `/api/projects/${pid}/models`, {
       source: 'direct_yaml', model_yaml: sourceYaml,
       expected_revision: before.draft.revision,
