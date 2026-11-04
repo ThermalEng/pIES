@@ -345,3 +345,122 @@ def test_future_reference_shape_is_explicit_not_a_string_alias():
         parse_amount_reference(
             {"kind": "baseline", "id": "baseline_npv", "period": {"kind": "scalar"}, "task_id": "current"}
         )
+
+
+def test_bound_override_rebinds_same_id_new_profile_without_restoring_old_parameters():
+    first = FinanceProfile.from_dict(_profile_data())
+    override = FinanceOverrides.from_dict(
+        _patch(
+            first,
+            finance_types={
+                "pv_system": {
+                    "annual_fixed_om": {
+                        "items": {
+                            "service": {"fixed": _money("12", "CNY/a")},
+                        }
+                    }
+                }
+            },
+            amounts={"year_fee": {"terms": {"one": {"coefficient": _money("2", "1")}}}},
+        ),
+        profile=first,
+    )
+    updated = first.to_dict()
+    updated["finance_types"]["pv_system"]["annual_fixed_om"]["items"]["materials"]["linear"]["capacity_kw"][
+        "unit_cost"
+    ]["value"] = "200"
+    updated["amounts"]["year_fee"]["constant"]["value"] = "5"
+    second = FinanceProfile.from_dict(updated)
+    assert second.profile_id == first.profile_id and second is not first
+    effective = merge_effective(second, override)
+    material = effective.finance_types["pv_system"].annual_fixed_om.items["materials"]
+    assert material.linear["capacity_kw"].unit_cost.value == Decimal("200")
+    assert effective.finance_types["pv_system"].annual_fixed_om.items["service"].fixed.value == Decimal("12")
+    assert effective.amounts["year_fee"].constant.value == Decimal("5")
+    assert effective.amounts["year_fee"].terms["one"].coefficient.value == Decimal("2")
+    # Serialising a sparse override never serialises its private owner object.
+    assert FinanceOverrides.from_dict(override.to_dict()).to_dict() == override.to_dict()
+
+
+def test_same_id_profile_rebinding_checks_changed_override_permission():
+    first = FinanceProfile.from_dict(_profile_data())
+    override = FinanceOverrides.from_dict(
+        _patch(
+            first,
+            finance_types={
+                "pv_system": {
+                    "annual_fixed_om": {
+                        "items": {
+                            "service": {"fixed": _money("12", "CNY/a")},
+                        }
+                    }
+                }
+            },
+        ),
+        profile=first,
+    )
+    updated = first.to_dict()
+    del updated["finance_types"]["pv_system"]["annual_fixed_om"]["items"]["service"]["fixed"]
+    second = FinanceProfile.from_dict(updated)
+    with pytest.raises(FinanceTripletError, match="禁止新增"):
+        merge_effective(second, override)
+
+
+def test_same_profile_owner_reuses_typed_override_without_reparsing(monkeypatch):
+    from iesplan.finance import Money
+
+    profile = FinanceProfile.from_dict(_profile_data())
+    override = FinanceOverrides.from_dict(
+        _patch(
+            profile,
+            finance_types={
+                "pv_system": {
+                    "annual_fixed_om": {
+                        "items": {
+                            "service": {"fixed": _money("12", "CNY/a")},
+                        }
+                    }
+                }
+            },
+            amounts={"year_fee": {"constant": _money("7")}},
+        ),
+        profile=profile,
+    )
+
+    def unexpected_parse(*args, **kwargs):
+        raise AssertionError("already bound immutable money must not be reparsed")
+
+    monkeypatch.setattr(Money, "from_dict", unexpected_parse)
+    effective = merge_effective(profile, override)
+    assert effective.amounts["year_fee"].constant.value == Decimal("7")
+    assert effective.finance_types["pv_system"].annual_fixed_om.items["service"].fixed.value == Decimal("12")
+
+
+def test_system_quantity_accepts_foreign_n3_identity_with_double_underscore():
+    source = {
+        "kind": "system_quantity",
+        "block": "dc__account",
+        "variable": "dc__available",
+        "aggregation": "integrate_positive",
+        "period": {"kind": "financial_year", "year": 1},
+    }
+    assert parse_amount_reference(source).to_dict() == source
+    payload = _profile_data()
+    payload["amounts"] = {"system_cost": _amount(source, coefficient=_money("1", "CNY/kWh"))}
+    profile = FinanceProfile.from_dict(payload)
+    assert profile.amounts["system_cost"].terms["one"].source.variable == "dc__available"
+    assert merge_effective(profile, None).amounts["system_cost"].terms["one"].source.block == "dc__account"
+
+
+@pytest.mark.parametrize("key,value", [("block", ""), ("variable", None), ("variable", 2)])
+def test_system_quantity_still_requires_explicit_string_identities(key, value):
+    source = {
+        "kind": "system_quantity",
+        "block": "account",
+        "variable": "available",
+        "aggregation": "integrate_positive",
+        "period": {"kind": "financial_year", "year": 1},
+        key: value,
+    }
+    with pytest.raises(FinanceTripletError, match="系统量标识"):
+        parse_amount_reference(source)

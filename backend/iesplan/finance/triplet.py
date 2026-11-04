@@ -2024,6 +2024,13 @@ def parse_amount_reference(mapping: object, *, field: str = "source") -> AmountR
             if not isinstance(raw, str) or not raw:
                 raise FinanceTripletError(f"{field}.path 必须为明确成本路径")
             values[key] = raw
+        elif kind == "system_quantity" and key in ("block", "variable"):
+            # Foreign identities belong to the system-equation contract, not
+            # finance's local-ID namespace. The project boundary binds them
+            # to the actual accepted block and variable (including legal __).
+            if not isinstance(raw, str) or not raw:
+                raise FinanceTripletError(f"{field}.{key} 必须为明确系统量标识")
+            values[key] = raw
         else:
             values[key] = _reference_id(raw, f"{field}.{key}")
     ref = AmountReference(**values)
@@ -2552,8 +2559,10 @@ class FinanceOverrides:
     credit_pools: Mapping[str, Mapping[str, object]] = field(default_factory=lambda: MappingProxyType({}))
     net_cashflows: Mapping[str, Mapping[str, object]] = field(default_factory=lambda: MappingProxyType({}))
     amounts: Mapping[str, Mapping[str, object]] = field(default_factory=lambda: MappingProxyType({}))
-    #: 解析时绑定的 Profile id（合并器据此判定覆盖权限是否已核对；不序列化）。
+    #: 解析时绑定的 Profile id（来源信息，不作为缓存复用身份；不序列化）。
     _bound_profile: str = ""
+    #: Cache ownership is the exact immutable input, not a reusable Profile ID.
+    _bound_profile_object: FinanceProfile | None = field(default=None, repr=False, compare=False)
     #: 输入边界已形成的不可变类型化补丁（规则 id → 已解析值；未绑定为空）。
     _parsed_tax_rules: Mapping[str, Mapping[str, object]] = field(
         default_factory=lambda: MappingProxyType({})
@@ -2768,6 +2777,7 @@ class FinanceOverrides:
             _parsed_amounts=parsed_amounts,
             _parsed_finance_types=parsed_finance_types,
             _bound_profile=profile.profile_id if profile is not None else "",
+            _bound_profile_object=profile,
             _parsed_tax_rules=_freeze(parsed_rules),
             _parsed_credit_pools=_freeze(parsed_pools),
             _parsed_net_cashflows=_freeze(parsed_cashflows),
@@ -3692,7 +3702,7 @@ def merge_effective(profile: FinanceProfile, overrides: FinanceOverrides | None)
                 f"与 Profile {profile.profile_id!r} 不一致"
             )
 
-    bound = overrides._bound_profile == profile.profile_id and bool(overrides._bound_profile)
+    bound = overrides._bound_profile_object is profile
     # 输入边界已产生不可变替换值；未覆盖类别直接共享，不序列化后重校验。
     merged_ft = dict(profile.finance_types)
     for ft_name, ft_override in sorted(overrides.finance_types.items()):
