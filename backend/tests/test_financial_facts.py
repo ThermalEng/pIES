@@ -49,6 +49,8 @@ from iesplan.computation.result_adapters.highs import (
 from iesplan.finance.tax import income_tax_payable, use_losses
 
 SOLVER_FILES = ("input/problem.mps", "input/parameters.json")
+# 与所得税链测试一致：近零货币金额用绝对误差比较，不舍入主解或封存事实。
+MONEY_ABS_TOL = 1e-8
 
 
 def _snapshot(*, years=3, construction=1, operation=2, rate=0.08):
@@ -110,7 +112,7 @@ def _assert_facts_close(left, right):
         except ValueError:
             assert left == right
         else:
-            assert left_num == pytest.approx(right_num, rel=1e-6)
+            assert left_num == pytest.approx(right_num, rel=1e-6, abs=MONEY_ABS_TOL)
         return
     assert left == right
 
@@ -150,8 +152,12 @@ def test_facts_mix_seal_matches_hand_and_objective(tmp_path) -> None:
     vat_rows = {(row["pool"], row["month"]): row for row in facts["tax_cash"]["vat"]}
     for month in range(1, 37):
         row = vat_rows[("main_pool", month)]
-        assert _amount(row["paid"]) == pytest.approx(float(paids[month - 1]), rel=1e-6)
-        assert _amount(row["carry"]) == pytest.approx(float(carries[month - 1]), rel=1e-6)
+        assert _amount(row["paid"]) == pytest.approx(
+            float(paids[month - 1]), rel=1e-6, abs=MONEY_ABS_TOL
+        )
+        assert _amount(row["carry"]) == pytest.approx(
+            float(carries[month - 1]), rel=1e-6, abs=MONEY_ABS_TOL
+        )
     base_y1, base_y2, base_y3 = _mix_bases()
     year2 = use_losses(taxable_base=base_y2, balances=(), year=2, carryforward_years=INC_CARRY_YEARS)
     year3 = use_losses(
@@ -291,11 +297,17 @@ def test_facts_two_pools_counted_once(tmp_path) -> None:
     for month in range(1, 37):
         main = by_pool["main_pool"][month - 1]
         assert main["month"] == month
-        assert _amount(main["paid"]) == pytest.approx(float(paids1[month - 1]), rel=1e-6)
-        assert _amount(main["carry"]) == pytest.approx(float(carries1[month - 1]), rel=1e-6)
+        assert _amount(main["paid"]) == pytest.approx(
+            float(paids1[month - 1]), rel=1e-6, abs=MONEY_ABS_TOL
+        )
+        assert _amount(main["carry"]) == pytest.approx(
+            float(carries1[month - 1]), rel=1e-6, abs=MONEY_ABS_TOL
+        )
         second = by_pool["pool2"][month - 1]
         assert _amount(second["paid"]) == pytest.approx(0.0, abs=1e-6)
-        assert _amount(second["carry"]) == pytest.approx(float(carry2[month - 1]), rel=1e-6)
+        assert _amount(second["carry"]) == pytest.approx(
+            float(carry2[month - 1]), rel=1e-6, abs=MONEY_ABS_TOL
+        )
     base_y1, base_y2, base_y3 = _mix_bases()
     income_rows = {(row["rule"], row["year"]): row for row in facts["tax_cash"]["income"]}
     assert _amount(income_rows[("income_demo", 3)]["taxable_base"]) == pytest.approx(float(base_y3), rel=1e-6)

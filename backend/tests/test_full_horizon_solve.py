@@ -568,6 +568,7 @@ def _store_doc() -> dict:
             "profile_id": "cn-north-demo",
         },
         "finance_binding": {"instances": {"store1": {"type": "none"}}},
+        "outputs": {"series": [], "metrics": []},
         "demand_bindings": {},
         "tariff_bindings": {
             "meter1": {
