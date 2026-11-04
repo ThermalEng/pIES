@@ -126,6 +126,8 @@ def _facts() -> dict:
         "payments_applied": [],
         "net_cashflows": [],
         "construction_units": [],
+        "cost_items": [],
+        "amounts": [],
         "annual_operation": [],
         "monthly_demand": [],
         "tax_cash": {

@@ -1037,7 +1037,7 @@ def _check_amount_evaluation_refs(
     from iesplan.assembly import consumed_amounts
 
     doc = json.loads(artifact.canonical_text)
-    years = evaluation.construction_years + evaluation.operation_years
+    years = evaluation.evaluation_years
     maintenance = {}
     for expense in evaluation.maintenance_expenses:
         maintenance[expense.year] = maintenance.get(expense.year, 0) + 1

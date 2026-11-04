@@ -2559,8 +2559,6 @@ class FinanceOverrides:
     credit_pools: Mapping[str, Mapping[str, object]] = field(default_factory=lambda: MappingProxyType({}))
     net_cashflows: Mapping[str, Mapping[str, object]] = field(default_factory=lambda: MappingProxyType({}))
     amounts: Mapping[str, Mapping[str, object]] = field(default_factory=lambda: MappingProxyType({}))
-    #: 解析时绑定的 Profile id（来源信息，不作为缓存复用身份；不序列化）。
-    _bound_profile: str = ""
     #: Cache ownership is the exact immutable input, not a reusable Profile ID.
     _bound_profile_object: FinanceProfile | None = field(default=None, repr=False, compare=False)
     #: 输入边界已形成的不可变类型化补丁（规则 id → 已解析值；未绑定为空）。
@@ -2776,7 +2774,6 @@ class FinanceOverrides:
             amounts=amount_patches,
             _parsed_amounts=parsed_amounts,
             _parsed_finance_types=parsed_finance_types,
-            _bound_profile=profile.profile_id if profile is not None else "",
             _bound_profile_object=profile,
             _parsed_tax_rules=_freeze(parsed_rules),
             _parsed_credit_pools=_freeze(parsed_pools),

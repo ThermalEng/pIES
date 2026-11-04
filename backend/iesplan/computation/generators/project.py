@@ -42,42 +42,43 @@ from datetime import datetime, timedelta
 from types import MappingProxyType
 from typing import Any
 
-from iesplan.assembly import ValidatedAssemblyArtifact, build_port_network
+from iesplan.assembly import ValidatedAssemblyArtifact, build_port_network, consumed_amounts
 from iesplan.computation.errors import ComputationUnavailableError
-from iesplan.computation.generators.sources import SourceTrace, SourceRows, SourceColumns
 from iesplan.computation.generators.compiler_ir import (
-    CompilerInventory,
-    CompilerAnalysis,
+    AmountConstraintRule,
+    AnnualCash,
     BoundFact,
-    SemanticRelation,
-    CapacityLimit,
-    StateInitial,
     BusBalance,
+    CapacityLimit,
     ClosedPort,
-    PlanningRule,
+    CompilerAnalysis,
+    CompilerInventory,
+    ConstructionPayment,
     CostAmountTerm,
     CostComponent,
-    TariffCharge,
     DemandPeak,
-    MaintenancePayment,
-    VatRuleSource,
-    VatPoolOperation,
+    DepreciationCharge,
     FinancialAmountTerm,
-    VatPeriodConnection,
+    IncomeLossClaim,
     IncomeTaxOperation,
     IncomeYearConnection,
-    IncomeLossClaim,
-    DepreciationCharge,
-    NetCashPayment,
-    ConstructionPayment,
-    AnnualCash,
-    ProjectObjective,
     IndexDomain,
     KnownCoefficient,
+    MaintenancePayment,
+    NamedCostItem,
+    NetCashPayment,
     OutputReference,
+    PlanningRule,
+    ProjectObjective,
     RelationFamily,
+    SemanticRelation,
     SourceLocation,
+    StateInitial,
     SymbolDeclaration,
+    TariffCharge,
+    VatPeriodConnection,
+    VatPoolOperation,
+    VatRuleSource,
 )
 from iesplan.computation.generators.linear import (
     LinearConstraint,
@@ -89,9 +90,13 @@ from iesplan.computation.generators.linear import (
     lower_planning_constraint,
     lower_planning_expression,
 )
+from iesplan.computation.generators.sources import SourceColumns, SourceRows, SourceTrace
 from iesplan.computation.generators.templates import (
-    TechnicalTemplate, StepConstraintTemplate, compile_technical,
-    bind_technical, compile_step_constraint,
+    StepConstraintTemplate,
+    TechnicalTemplate,
+    bind_technical,
+    compile_step_constraint,
+    compile_technical,
 )
 from iesplan.computation.protocols import CalculationConfig, StopProbe, read_stop_reason
 from iesplan.computation.sequences import (
@@ -108,6 +113,7 @@ from iesplan.core.contracts.baseline import TIMELINE_STEP_DURATION_VAR
 from iesplan.core.contracts.planning_expression import PlanningExpression
 from iesplan.core.units import dims_of, to_si, unit_meta
 from iesplan.finance import (
+    AmountPeriod,
     ConstructionVatRule,
     CostComponentShareTerm,
     EffectiveFinanceConfig,
@@ -117,6 +123,7 @@ from iesplan.finance import (
     ScaleUnitCostTerm,
     VatRule,
     annual_boundaries,
+    cost_target_leaves,
 )
 from iesplan.modeling import (
     BinaryNode,
@@ -130,6 +137,10 @@ from iesplan.modeling import (
 #: existing 仅计周期可变分量。
 _COMPONENTS_NEW = ("upfront_capex", "annual_fixed_om", "period_variable_om")
 _COMPONENTS_EXISTING = ("period_variable_om",)
+
+
+class _AmountNeedsConversion(Exception):
+    """A peak/conditional amount is not affine before the collection barrier."""
 
 #: 分量时间口径标签（与装配/财务契约的 upfront/annual/period 口径一致）。
 _COMPONENT_CALIBER = {
@@ -475,9 +486,15 @@ class _ProjectBuilder:
         self._fact_depr: list[dict[str, Any]] = []
         self._fact_balances: list[dict[str, Any]] = []
         self._fact_net_cashflows: list[dict[str, Any]] = []
+        self._fact_cost_items: list[dict[str, object]] = []
+        self._component_declarations: Mapping[str, Mapping[str, object]] | None = None
         self._net_sources: dict[tuple, _AffineAcc] = {}
         self._conditional_amounts: dict[tuple, _AffineAcc] = {}
         self._fixed_residuals: dict[tuple, _AffineAcc] = {}
+        self._named_amounts: dict[tuple[str, int], _AffineAcc] = {}
+        self._month_spans_cache: list[tuple[int, int, int]] | None = None
+        self._amount_year_spans: tuple[tuple[int, int], ...] | None = None
+        self._consumed_amounts = consumed_amounts(doc, finance)
         self.point_count = point_count
         self.step_s = step_s
         self.series: dict[tuple[str, str], list[float]] = {}
@@ -618,6 +635,22 @@ class _ProjectBuilder:
                 self.source_trace.sources[f"relation:{operation.identity}"]["domain"]["index"] = payload.month
             elif isinstance(payload, (MaintenancePayment, IncomeYearConnection, AnnualCash, ConstructionPayment)):
                 self.source_trace.sources[f"relation:{operation.identity}"]["domain"]["index"] = payload.year
+            elif isinstance(payload, AmountConstraintRule):
+                for alias, reference in payload.references.items():
+                    axis, periods = self._amount_periods(AmountPeriod(**reference["period"]), "scalar", 0)
+                    axis = {"financial_year": "year", "tax_month": "month"}.get(axis, axis)
+                    identity = f"reference:{operation.identity}.{alias}"
+                    self.source_trace.register(
+                        identity, "amount_reference", SourceLocation(
+                            f"{operation.source.field_path}.references.{alias}",
+                            relation_id=payload.name, binding_id=alias,
+                        ), IndexDomain(axis, len(periods)),
+                        inputs=(f"amount.{reference['id']}",),
+                        depends_on=(f"relation:amount.{reference['id']}",),
+                    )
+                    if len(periods) == 1:
+                        self.source_trace.sources[identity]["domain"]["index"] = periods[0]
+                    self.source_trace.sources[f"relation:{operation.identity}"]["depends_on"].append(identity)
 
     def _prop_value_unit(self, inst: str, prop: str) -> tuple[float, str]:
         """实例 property 值与单位（装配覆盖优先，否则设备默认值）。"""
@@ -1321,6 +1354,8 @@ class _ProjectBuilder:
             entry = constraints[name]
             if entry.get("enabled", True) is False:
                 continue
+            if entry.get("type") == "amount_relation":
+                continue  # Bind after all monetary source operations are collected.
             self._source(
                 f"planning.{'step' if entry.get('type') == 'step_relation' else 'scalar'}.{name}",
                 "planning", location=SourceLocation(f"planning.constraints.{name}", relation_id=name),
@@ -1384,7 +1419,15 @@ class _ProjectBuilder:
                 if value is None:
                     continue
                 terms: list[CostAmountTerm] = []
-                for driver, cost in sorted((value.linear or {}).items()):
+                linear_leaves = [(f"linear.{driver}", driver, cost)
+                                 for driver, cost in sorted((value.linear or {}).items())]
+                fixed_items = []
+                for item_id, item in sorted(value.items.items()):
+                    if item.fixed is not None:
+                        fixed_items.append((f"items.{item_id}.fixed", _money_to_internal(item.fixed)))
+                    linear_leaves.extend((f"items.{item_id}.linear.{driver}", driver, cost)
+                                         for driver, cost in sorted((item.linear or {}).items()))
+                for leaf, driver, cost in linear_leaves:
                     target = binding["drivers"][driver]
                     coefficient = (
                         _unit_cost_to_internal(
@@ -1395,11 +1438,11 @@ class _ProjectBuilder:
                             float(cost.unit_cost.value), cost.unit_cost.unit
                         )
                     )
-                    coefficient_id = f"cost.{inst}__{component}.linear.{driver}"
+                    coefficient_id = f"cost.{inst}__{component}.{leaf}"
                     self.inventory.coefficients[coefficient_id] = KnownCoefficient(
                         coefficient_id, "finance_unit_cost",
                         SourceLocation(
-                            f"finance.finance_types.{ft}.{component}.linear.{driver}",
+                            f"finance.finance_types.{ft}.{component}.{leaf}",
                             inst, binding_id=inst,
                         ),
                         coefficient,
@@ -1415,7 +1458,7 @@ class _ProjectBuilder:
                         target_kind = "interface"
                         aggregation = target["aggregation"]
                     terms.append(CostAmountTerm(
-                        driver, local, symbol, target_kind, aggregation, coefficient
+                        driver, local, symbol, target_kind, aggregation, coefficient, leaf
                     ))
                 ident = f"{inst}__{component}"
                 domain = (
@@ -1431,11 +1474,21 @@ class _ProjectBuilder:
                         _money_to_internal(value.fixed)
                         if value.fixed is not None else None,
                         tuple(terms),
+                        tuple(fixed_items),
                     ),
                     SourceLocation(f"finance.finance_types.{ft}.{component}",
                                    inst, binding_id=inst),
                     tuple(term.symbol for term in terms), (ident,),
                 ))
+                for item_id in value.items:
+                    add(SemanticRelation(
+                        f"cost_item.{inst}.{component}.{item_id}", "cost_item", domain,
+                        NamedCostItem(inst, ft, component, item_id),
+                        SourceLocation(f"finance.finance_types.{ft}.{component}.items.{item_id}",
+                                       inst, binding_id=inst),
+                        tuple(term.symbol for term in terms if term.leaf.startswith(f"items.{item_id}.")),
+                        (f"cost_item.{inst}.{component}.{item_id}",), depends_on=(f"cost.{ident}",),
+                    ))
 
         for binding_id in sorted(self.doc.get("tariff_bindings") or {}):
             binding = self.doc["tariff_bindings"][binding_id]
@@ -1851,7 +1904,7 @@ class _ProjectBuilder:
                         *((path, True) for path in rule.annual_om),
                         *((path, False) for path in rule.variable_om),
                     ):
-                        finance_type, _, component = for_path.partition(".")
+                        finance_type, component, *_ = for_path.split(".")
                         for source in source_operations:
                             if (
                                 source.kind != "cost"
@@ -1861,12 +1914,8 @@ class _ProjectBuilder:
                                 continue
                             spec = source.payload
                             prefix = f"{finance_type}.{component}"
-                            parts: list[str] = []
-                            if spec.fixed_amount is not None:
-                                parts.append("fixed")
-                            parts.extend(
-                                f"linear.{item.driver}" for item in spec.terms
-                            )
+                            selected = set(cost_target_leaves(for_path, self.finance.finance_types))
+                            parts = [part for part in spec.leaves if f"{prefix}.{part}" in selected]
                             for part in parts:
                                 path = f"{prefix}.{part}"
                                 credit, gross = om_credit.get(
@@ -2002,7 +2051,10 @@ class _ProjectBuilder:
         for cash_id, entry in sorted(self.finance.net_cashflows.items()):
             refs: tuple[str, ...] = ()
             dependencies: tuple[str, ...] = ()
-            if entry.amount.kind != "fixed":
+            if entry.amount.kind == "amount_ref":
+                refs = (f"amount.{entry.amount.id}",)
+                dependencies = (f"amount.{entry.amount.id}",)
+            elif entry.amount.kind != "fixed":
                 refs, dependencies = self._amount_source_links(entry.amount.base_from)
             add(SemanticRelation(
                 f"net_cash.{cash_id}", "net_cash", IndexDomain("year"),
@@ -2011,6 +2063,7 @@ class _ProjectBuilder:
                 refs, (f"net_cash.{cash_id}",),
                 depends_on=dependencies,
             ))
+        self._collect_named_amounts(planning_constraints)
         for position, payment in enumerate(self.evaluation.construction_payments):
             add(SemanticRelation(
                 f"construction_payment.{payment.t}.p{position}", "construction_payment",
@@ -2094,6 +2147,314 @@ class _ProjectBuilder:
             self.inventory, self.variables, checkpoint=self._checkpoint,
         )
         self._register_sources()
+        self._check_amount_measurements()
+
+    def _check_amount_measurements(self) -> None:
+        """Positive metering consumes bounds proved by the shared analysis.
+
+        A signed technical quantity must be decomposed in the technical model,
+        not clipped or absolutized by finance. Check only consumed periods;
+        declared domains and actual technical relations are equally valid proof.
+        """
+        for amount_id in self._consumed_amounts:
+            definition = self.finance.amounts[amount_id]
+            count = self.evaluation.evaluation_years * (12 if definition.axis == "tax_month" else 1)
+            current_periods = (0,) if definition.axis == "scalar" else range(1, count + 1)
+            for term_id, term in sorted(definition.terms.items()):
+                reference = term.source
+                if reference.kind != "system_quantity":
+                    continue
+                columns = self.inventory.step_columns[(f"system:{reference.block}", reference.variable)]
+                spans = set()
+                for current in current_periods:
+                    axis, periods = self._amount_periods(reference.period, definition.axis, current)
+                    spans.update(self._amount_span(axis, period) for period in periods)
+                previous_end = 0
+                for start, end in sorted(spans):
+                    for step in range(max(start, previous_end), end):
+                        self._checkpoint()
+                        lower, _ = self.analysis.variable_bounds(columns[step])
+                        if lower is None or lower < 0:
+                            field = f"finance.amounts.{amount_id}.terms.{term_id}.source"
+                            self._source(
+                                f"amount.{amount_id}.source.{term_id}", "positive_measurement", "step", step,
+                                location=SourceLocation(field, block_id=reference.block,
+                                                        variable_id=reference.variable),
+                            )
+                            raise LoweringUnsupportedError(
+                                f"系统计量 {reference.block}.{reference.variable} 在 step={step} "
+                                f"无法证明非负（下界={lower}）；请在技术模型中明确非负计量量",
+                            )
+                    previous_end = max(previous_end, end)
+
+    def _amount_instances(self, reference) -> tuple[str, ...]:
+        if reference.scope.kind == "instances":
+            return reference.scope.instances
+        category = reference.finance_type or reference.path.split(".")[0]
+        return tuple(inst for inst, binding in sorted(self.doc["finance_binding"]["instances"].items())
+                     if binding.get("finance_type") == category
+                     and self.devices[inst]["asset_origin"] == "new")
+
+    def _amount_links(self, reference) -> tuple[tuple[str, ...], tuple[str, ...]]:
+        """Source identities from the collected graph, independent of solver names."""
+        kind = reference.kind
+        if kind == "amount":
+            identity = f"amount.{reference.id}"
+            return (identity,), (identity,)
+        if kind == "construction_unit":
+            cfg = next(cfg for cfg in self._construction_configs.values()
+                       if cfg["unit_id"] == reference.unit_ref)
+            return (cfg["state"],), ()
+        if kind == "system_quantity":
+            return (f"system:{reference.block}.{reference.variable}",), ()
+        if kind == "driver":
+            inputs = []
+            for inst in self._amount_instances(reference):
+                target = self.doc["finance_binding"]["instances"][inst]["drivers"][reference.driver]
+                if "property" in target:
+                    inputs.append(self.inventory.property_bindings[(inst, target["property"])])
+                else:
+                    inputs.append(f"{inst}.{target['interface']}")
+            return tuple(inputs), ()
+        if kind == "cost":
+            component = reference.path.split(".")[1]
+            candidates = {f"cost.{inst}__{component}" for inst in self._amount_instances(reference)}
+        elif kind == "tariff":
+            candidates = {f"tariff.{binding}" for binding in reference.bindings}
+        elif kind == "demand":
+            candidates = {op.identity for op in self.inventory.relations_of("demand")
+                          if op.payload.billing_id in reference.bindings}
+        elif kind == "maintenance":
+            candidates = {f"maintenance.y{reference.year}.p{reference.position}"}
+        else:
+            raise LoweringUnsupportedError(f"金额来源 {kind!r} 尚未接通同次求解关系")
+        operations = tuple(op for op in self.inventory.operations if op.identity in candidates)
+        return (tuple(sorted({name for op in operations for name in op.output_symbols})),
+                tuple(op.identity for op in operations))
+
+    def _collect_named_amounts(self, constraint_names) -> None:
+        for amount_id in self._consumed_amounts:
+            definition = self.finance.amounts[amount_id]
+            inputs, dependencies = set(), set()
+            for term_id, term in definition.terms.items():
+                refs, parents = self._amount_links(term.source)
+                inputs.update(refs)
+                dependencies.update(parents)
+                coefficient = f"amount.{amount_id}.{term_id}"
+                self.inventory.coefficients[coefficient] = KnownCoefficient(
+                    coefficient, "amount_coefficient", SourceLocation(
+                        f"finance.amounts.{amount_id}.terms.{term_id}.coefficient"),
+                    _money_to_internal(term.coefficient),
+                )
+                inputs.add(coefficient)
+            axis = {"financial_year": "year", "tax_month": "month"}.get(definition.axis, definition.axis)
+            count = (1 if axis == "scalar" else
+                     self.evaluation.evaluation_years * (12 if axis == "month" else 1))
+            self.inventory.collect(SemanticRelation(
+                f"amount.{amount_id}", "named_amount", IndexDomain(axis, count), definition,
+                SourceLocation(f"finance.amounts.{amount_id}", binding_id=amount_id),
+                tuple(sorted(inputs)), (f"amount.{amount_id}",),
+                depends_on=tuple(sorted(dependencies)),
+            ))
+        for name in constraint_names:
+            entry = self.doc["planning"]["constraints"][name]
+            if entry.get("type") != "amount_relation" or not entry.get("enabled", True):
+                continue
+            dimensions = {alias: Counter(dict(dims_of(self.finance.amounts[ref["id"]].unit)))
+                          for alias, ref in entry["references"].items()}
+            compiled = compile_planning_expression(entry["expression"], dimensions, currency=None)
+            template = lower_planning_constraint(
+                name, compiled, {alias: ("var", None, None) for alias in dimensions},
+            )
+            try:
+                bound = self._bind_amount_constraint(template, entry["references"])
+            except _AmountNeedsConversion:
+                bound = None
+            self.inventory.collect(SemanticRelation(
+                f"planning.amount.{name}", "planning_amount", IndexDomain("scalar"),
+                AmountConstraintRule(name, template, entry["references"], bound),
+                SourceLocation(f"planning.constraints.{name}", relation_id=name),
+                tuple(f"amount.{ref['id']}" for ref in entry["references"].values()),
+                depends_on=tuple(f"amount.{ref['id']}" for ref in entry["references"].values()),
+            ))
+
+    @staticmethod
+    def _amount_periods(period, current_axis, current_period):
+        if period.kind == "scalar":
+            return "scalar", (0,)
+        if period.kind == "current":
+            return current_axis, (current_period,)
+        if period.kind == "financial_year":
+            return "financial_year", (period.year,)
+        if period.kind == "tax_month":
+            return "tax_month", (period.month,)
+        if period.kind == "year_months":
+            year = current_period if period.year == "current" else period.year
+            return "tax_month", range(12 * (year - 1) + 1, 12 * year + 1)
+        return period.axis, range(period.first, period.last + 1)
+
+    def _amount_span(self, axis: str, period: int) -> tuple[int, int]:
+        if axis == "scalar":
+            return 0, self.point_count
+        if axis == "financial_year":
+            year = period - self.evaluation.construction_period - 1
+            if year < 0:
+                return 0, 0
+            if self._amount_year_spans is None:
+                self._amount_year_spans = tuple(annual_boundaries(
+                    self.doc["project_baseline"]["resolution"],
+                    self.doc["project_baseline"]["start_year"], self.evaluation.operation_years,
+                ))
+            return self._amount_year_spans[year]
+        return next(((start, end) for month, start, end in self._vat_month_spans()
+                     if month == period), (0, 0))
+
+    def _amount_reference(self, reference, current_axis="scalar", current_period=0) -> _AffineAcc:
+        if reference.kind == "maintenance":
+            if (reference.year, reference.position) not in self._maintenance_items:
+                raise _AmountNeedsConversion
+            raw = self._maintenance_items[(reference.year, reference.position)]
+            net = self._maintenance_net(reference.year, reference.position)
+            return self._amount_basis(raw, raw, net, reference.basis)
+        axis, periods = self._amount_periods(reference.period, current_axis, current_period)
+        out = _AffineAcc()
+        for period in periods:
+            self._checkpoint()
+            out.add_scaled(self._amount_source(reference, axis, period), 1.0)
+        return out
+
+    @staticmethod
+    def _amount_basis(raw, gross, net, basis):
+        if basis == "raw":
+            return raw
+        if basis == "gross":
+            return gross
+        if basis in ("net_basis", "net_revenue"):
+            return net
+        credit = _AffineAcc()
+        credit.add_scaled(gross, 1.0)
+        credit.add_scaled(net, -1.0)
+        return credit
+
+    def _amount_source(self, reference, axis: str, period: int) -> _AffineAcc:
+        kind = reference.kind
+        if kind == "amount":
+            return self._named_amount(reference.id, period)
+        out = _AffineAcc()
+        if kind == "construction_unit":
+            cfg = next(cfg for cfg in self._construction_configs.values()
+                       if cfg["unit_id"] == reference.unit_ref)
+            out.add_term(cfg["state"], 1.0)
+            return out
+        start, end = self._amount_span(axis, period)
+        if kind == "driver":
+            for inst in self._amount_instances(reference):
+                target = self.doc["finance_binding"]["instances"][inst]["drivers"][reference.driver]
+                local = target.get("property", target.get("interface"))
+                property_target = "property" in target
+                symbol = (self.inventory.property_bindings[(inst, local)]
+                          if property_target else f"{inst}.{local}")
+                term = CostAmountTerm(reference.driver, local, symbol,
+                                      "property" if property_target else "interface",
+                                      target.get("aggregation", "scalar"), 1.0)
+                out.add_scaled(self._driver_affine(inst, term, start, end), 1.0)
+            return out
+        if kind == "system_quantity":
+            columns = self.inventory.step_columns[(f"system:{reference.block}", reference.variable)]
+            factor = self.step_s if reference.aggregation == "integrate_positive" else 1.0
+            for column in columns[start:end]:
+                out.add_term(column, factor)
+            return out
+        if kind == "cost":
+            _, component, *parts = reference.path.split(".")
+            part = ".".join(parts) or None
+            for inst in self._amount_instances(reference):
+                if (self.devices[inst]["asset_origin"] != "new" and component not in _COMPONENTS_EXISTING):
+                    continue
+                if axis != "scalar" and start == end:
+                    continue
+                raw = self._cost_affine(inst, component, start, end, part=part)
+                if component == "annual_fixed_om" and axis != "scalar":
+                    annual = _AffineAcc()
+                    annual.add_scaled(raw, _YEAR_SECONDS)
+                    raw = annual
+                gross, net = self._cost_paid_net(inst, component, start, end, part=part,
+                                                 annual_amount=axis != "scalar")
+                out.add_scaled(self._amount_basis(raw, gross, net, reference.basis), 1.0)
+            return out
+        if kind == "tariff":
+            grouped = {op.payload.pool_id: op.payload.rules for op in self.inventory.relations_of("vat")}
+            _, _, _, sale, purchase = self._income_vat_credits(grouped)
+            price = self.finance.energy_prices[reference.price]
+            sign = 1.0 if price.direction == "purchase" else -1.0
+            credit, markup = (purchase if price.direction == "purchase" else sale).get(
+                reference.price, (0.0, 1.0),
+            )
+            for binding in reference.bindings:
+                raw = _AffineAcc()
+                raw.add_scaled(self._tariff_affine(binding, start, end), sign)
+                gross, net = _AffineAcc(), _AffineAcc()
+                gross.add_scaled(raw, markup)
+                net.add_scaled(raw, markup - credit)
+                out.add_scaled(self._amount_basis(raw, gross, net, reference.basis), 1.0)
+            return out
+        if kind == "demand":
+            if start == end:
+                return out
+            if not self._demand_rows:
+                raise _AmountNeedsConversion
+            multiplier, credit = self._demand_tax_factors().get(reference.charge, (1.0, 0.0))
+            for row in self._demand_rows:
+                month = row["month"]
+                selected = (row["financial_year"] == period if axis == "financial_year" else month == period)
+                if row["billing_id"] not in reference.bindings or not selected:
+                    continue
+                raw = row["base_charge"]
+                gross, net = _AffineAcc(), _AffineAcc()
+                gross.add_scaled(raw, multiplier)
+                net.add_scaled(raw, multiplier - credit)
+                out.add_scaled(self._amount_basis(raw, gross, net, reference.basis), 1.0)
+            return out
+        raise LoweringUnsupportedError(f"金额来源 {kind!r} 尚未接通同次求解关系")
+
+    def _named_amount(self, amount_id: str, period: int) -> _AffineAcc:
+        key = (amount_id, period)
+        if key not in self._named_amounts:
+            definition = self.finance.amounts[amount_id]
+            out = _AffineAcc()
+            out.add_const(_money_to_internal(definition.constant))
+            for term in definition.terms.values():
+                out.add_scaled(self._amount_reference(term.source, definition.axis, period),
+                               _money_to_internal(term.coefficient))
+            self._named_amounts[key] = out
+        return self._named_amounts[key]
+
+    def _bind_amount_constraint(self, template, references) -> LinearConstraint:
+        out = _AffineAcc()
+        out.add_const(template.expression.constant)
+        for (alias, _), coefficient in template.expression.terms:
+            reference = references[alias]
+            _, periods = self._amount_periods(AmountPeriod(**reference["period"]), "scalar", 0)
+            for period in periods:
+                out.add_scaled(self._named_amount(reference["id"], period), coefficient)
+        return LinearConstraint(template.name, out.freeze(), template.sense, template.rhs)
+
+    def _retain_named_amounts(self) -> None:
+        for amount_id in self._consumed_amounts:
+            definition = self.finance.amounts[amount_id]
+            count = self.evaluation.evaluation_years * (12 if definition.axis == "tax_month" else 1)
+            periods = (0,) if definition.axis == "scalar" else range(1, count + 1)
+            for period in periods:
+                axis = {"financial_year": "year", "tax_month": "month"}.get(definition.axis, definition.axis)
+                self._source(f"amount.{amount_id}", "amount", axis, period)
+                self._named_amount(amount_id, period)
+
+    def _build_amount_constraints(self) -> None:
+        for operation in self.analysis.relations("planning_amount"):
+            self._source(operation.identity, "constraint")
+            spec = operation.payload
+            self.rows.append(spec.bound if spec.bound is not None else
+                             self._bind_amount_constraint(spec.template, spec.references))
 
     def _blocks(self):
         """Cover the complete domain, including final partial block and year edges."""
@@ -2386,9 +2747,12 @@ class _ProjectBuilder:
             inst, {}
         )
         conditions = binding.get("cost_occurrence") or {}
-        return conditions.get(component, conditions.get(
-            f"{component}.{leaf}", {"kind": "always"}
-        ))
+        pieces = [component, *leaf.split(".")]
+        for size in range(1, len(pieces) + 1):
+            path = ".".join(pieces[:size])
+            if path in conditions:
+                return conditions[path]
+        return {"kind": "always"}
 
     def _conditional_cost_affine(
         self, inst: str, component: str, leaf: str, amount: _AffineAcc,
@@ -2410,6 +2774,8 @@ class _ProjectBuilder:
         if amount.constant == 0.0 and set(amount.terms).issubset(cfg["scales"]):
             # The construction rows force every linked scale to zero when z=0.
             return amount
+        if self.analysis is None:
+            raise _AmountNeedsConversion
         cache_key = (inst, component, leaf, start, end)
         cached = self._conditional_amounts.get(cache_key)
         if cached is not None:
@@ -2452,16 +2818,20 @@ class _ProjectBuilder:
     ) -> _AffineAcc:
         """Evaluate each declared money leaf once, with its own occurrence."""
         out = _AffineAcc()
-        spec = self.analysis.operation(f"cost.{inst}__{component}").payload
-        if spec.fixed_amount is not None and part in (None, "fixed"):
+        spec = self.inventory.operation(f"cost.{inst}__{component}").payload
+        fixed_leaves = (*((("fixed", spec.fixed_amount),) if spec.fixed_amount is not None else ()),
+                        *spec.fixed_items)
+        for leaf, value in fixed_leaves:
+            if part is not None and leaf != part and not leaf.startswith(f"{part}."):
+                continue
             fixed = _AffineAcc()
-            fixed.add_const(spec.fixed_amount)
+            fixed.add_const(value)
             out.add_scaled(self._conditional_cost_affine(
-                inst, component, "fixed", fixed, start, end,
+                inst, component, leaf, fixed, start, end,
             ), 1.0)
         for term in spec.terms:
-            leaf = f"linear.{term.driver}"
-            if part is not None and part != leaf:
+            leaf = term.leaf
+            if part is not None and leaf != part and not leaf.startswith(f"{part}."):
                 continue
             amount = _AffineAcc()
             amount.add_scaled(
@@ -2526,7 +2896,7 @@ class _ProjectBuilder:
         取价，不重排价格序列）。
         """
         out = _AffineAcc()
-        relation = self.analysis.operation(f"tariff.{binding_id}")
+        relation = self.inventory.operation(f"tariff.{binding_id}")
         spec = relation.payload
         price = self.finance.energy_prices[spec.price_id]
         sign = 1.0 if price.direction == "purchase" else -1.0
@@ -2866,6 +3236,8 @@ class _ProjectBuilder:
         未声明的分量不存在，不声明、不补零；未知价格类型沿
         ``_tariff_affine`` 直接拒绝。
         """
+        if self._component_declarations is not None:
+            return self._component_declarations
         out: dict[str, Mapping[str, object]] = {}
         # Result declarations consume the very same collected amount relations
         # that fed cashflow, planning rows and tax basis construction.
@@ -2925,7 +3297,7 @@ class _ProjectBuilder:
         unmentioned leaf retains its original payment and has no input credit.
         """
         factors: dict[str, tuple[float, float]] = {}
-        for operation in self.analysis.relations("vat"):
+        for operation in self.inventory.relations_of("vat"):
             pool_rules = operation.payload.rules
             entries = [
                 (item.for_path, item.rate, item.deductible_ratio)
@@ -2936,11 +3308,13 @@ class _ProjectBuilder:
             ]
             for path, rate, ratio in entries:
                 gross = 1.0 + float(rate.value) if self.finance.price_basis == "tax_exclusive" else 1.0
-                factors[path] = (gross, self._vat_gross_factor(rate) * float(ratio.value))
+                for leaf in cost_target_leaves(path, self.finance.finance_types):
+                    factors[leaf] = (gross, self._vat_gross_factor(rate) * float(ratio.value))
         return factors
 
     def _cost_paid_net(
         self, inst: str, component: str, start: int = 0, end: int | None = None,
+        *, part: str | None = None, annual_amount: bool = True,
     ) -> tuple[_AffineAcc, _AffineAcc]:
         """One leaf-level source for actual gross payment and tax-net basis.
 
@@ -2948,21 +3322,20 @@ class _ProjectBuilder:
         variables.  VAT availability or refund timing never changes the net
         accounting basis.
         """
-        spec = self.analysis.operation(f"cost.{inst}__{component}").payload
+        spec = self.inventory.operation(f"cost.{inst}__{component}").payload
         prefix = f"{spec.finance_type}.{component}"
         factors = self._cost_tax_factors()
         gross, net = _AffineAcc(), _AffineAcc()
-        parts = (["fixed"] if spec.fixed_amount is not None else []) + [
-            f"linear.{term.driver}" for term in spec.terms
-        ]
-        for part in parts:
-            amount = self._cost_affine(inst, component, start, end, part=part)
-            if component == "annual_fixed_om":
+        parts = [leaf for leaf in spec.leaves
+                 if part is None or leaf == part or leaf.startswith(f"{part}.")]
+        for leaf in parts:
+            amount = self._cost_affine(inst, component, start, end, part=leaf)
+            if component == "annual_fixed_om" and annual_amount:
                 # Convert the declared annual rate into *one* full-year amount.
                 amount_year = _AffineAcc()
                 amount_year.add_scaled(amount, _YEAR_SECONDS)
                 amount = amount_year
-            multiplier, credit = factors.get(f"{prefix}.{part}", factors.get(prefix, (1.0, 0.0)))
+            multiplier, credit = factors.get(f"{prefix}.{leaf}", (1.0, 0.0))
             gross.add_scaled(amount, multiplier)
             net.add_scaled(amount, multiplier - credit)
         return gross, net
@@ -2989,7 +3362,7 @@ class _ProjectBuilder:
         影响抵扣资格，不缩小实际付款，加成恒用全额税率；维护按明确
         金额口径不加成；未声明税率不推断。
         """
-        operations = self.analysis.relations("vat")
+        operations = self.inventory.relations_of("vat")
         if not operations or self.finance.price_basis != "tax_exclusive":
             return {}, {}, {}
         prices: dict[str, float] = {}
@@ -3013,7 +3386,7 @@ class _ProjectBuilder:
         未声明进项的费项既不臆测税率也不臆测抵扣资格。
         """
         out: dict[str, tuple[float, float]] = {}
-        for operation in self.analysis.relations("vat"):
+        for operation in self.inventory.relations_of("vat"):
             for rule in operation.payload.rules["vat"]:
                 for entry in rule.demand_input_tax:
                     rate = float(entry.rate.value)
@@ -3174,6 +3547,8 @@ class _ProjectBuilder:
         ``12K+1``）。步数由已确认运营年限生成，映射恒落
         ``12K+1..12E``，此处不重复核对时域。
         """
+        if self._month_spans_cache is not None:
+            return self._month_spans_cache
         baseline = self.doc["project_baseline"]
         start_year = baseline["start_year"]
         step_hours = self.step_s / 3600.0
@@ -3189,10 +3564,11 @@ class _ProjectBuilder:
             )
             slot = spans.setdefault(month, [step, step])
             slot[1] = step
-        return [
+        self._month_spans_cache = [
             (month, bounds[0], bounds[1] + 1)
             for month, bounds in sorted(spans.items())
         ]
+        return self._month_spans_cache
 
     def _vat_grouped_rules(self) -> dict[str, dict[str, list]] | None:
         """已支持税则按池分组；无规则无池返回 None；未支持类型明确拒绝。
@@ -3485,11 +3861,12 @@ class _ProjectBuilder:
                     )
                 for entry in rule.om_input_tax:
                     rate = float(entry.rate.value)
-                    om[entry.for_path] = (
-                        self._vat_gross_factor(entry.rate)
-                        * float(entry.deductible_ratio.value),
-                        1.0 + rate if exclusive else 1.0,
-                    )
+                    for leaf in cost_target_leaves(entry.for_path, self.finance.finance_types):
+                        om[leaf] = (
+                            self._vat_gross_factor(entry.rate)
+                            * float(entry.deductible_ratio.value),
+                            1.0 + rate if exclusive else 1.0,
+                        )
                 for entry in rule.maintenance_input_tax:
                     key = (entry.year, entry.position)
                     maint[key] = maint.get(key, 0.0) + self._vat_gross_split_factor(
@@ -3510,7 +3887,7 @@ class _ProjectBuilder:
         """The uniquely identified payment less explicitly eligible input VAT."""
         key = (year, position)
         credit = 0.0
-        for operation in self.analysis.relations("vat"):
+        for operation in self.inventory.relations_of("vat"):
             for rule in operation.payload.rules["vat"]:
                 for item in rule.maintenance_input_tax:
                     if (item.year, item.position) == key:
@@ -3681,6 +4058,11 @@ class _ProjectBuilder:
             amount = _AffineAcc()
             if entry.amount.kind == "fixed":
                 amount.add_const(float(entry.amount.value.value))
+            elif entry.amount.kind == "amount_ref":
+                amount.add_scaled(self._named_amount(entry.amount.id, 0), 1.0)
+                self.rows.append(LinearConstraint(
+                    f"net_cash__{cash_id}__nonnegative", amount.freeze(), "ge", 0.0,
+                ))
             else:
                 amount.add_scaled(self._source_net(entry.amount.base_from, relation=relation),
                                   float(entry.amount.ratio.value))
@@ -4147,6 +4529,13 @@ class _ProjectBuilder:
         for index, item in enumerate(self._fact_net_cashflows):
             outputs.append({"path": ["financial_facts", "net_cashflows", index],
                             "sources": [f"relation:net_cash.{item['id']}"]})
+        for index, item in enumerate(self._fact_cost_items):
+            identity = f"cost_item.{item['instance_id']}.{item['component']}.{item['item_id']}"
+            outputs.append({"path": ["financial_facts", "cost_items", index],
+                            "sources": [f"relation:{identity}"]})
+        for index, amount_id in enumerate(sorted(self._consumed_amounts)):
+            outputs.append({"path": ["financial_facts", "amounts", index],
+                            "sources": [f"relation:amount.{amount_id}"]})
         for index, operation in enumerate(self.analysis.relations("construction_payment")):
             outputs.append({"path": ["financial_facts", "payments_applied", index],
                             "sources": [f"relation:{operation.identity}"]})
@@ -4182,6 +4571,11 @@ class _ProjectBuilder:
         negated = _AffineAcc()
         negated.add_scaled(acc, -1.0)
         return _ProjectBuilder._decl_affine(negated)
+
+    def _decl_business_amount(self, amount: _AffineAcc, unit: str) -> dict[str, object]:
+        business = _AffineAcc()
+        business.add_scaled(amount, 1.0 / _to_internal(1.0, unit))
+        return self._decl_affine(business)
 
     def financial_facts(self) -> Mapping[str, object]:
         """同次解结构化财务事实声明（格式页映射表为唯一正文）。
@@ -4347,7 +4741,54 @@ class _ProjectBuilder:
             ],
         }
         out["construction_units"] = construction_units
+        out["amounts"] = [
+            {"id": amount_id, "axis": definition.axis, "unit": definition.unit,
+             "values": [{"period": period, "value": self._decl_business_amount(value, definition.unit)}
+                        for (identity, period), value in sorted(self._named_amounts.items())
+                        if identity == amount_id]}
+            for amount_id, definition in sorted(self.finance.amounts.items())
+            if amount_id in self._consumed_amounts
+        ]
+        out["cost_items"] = self._fact_cost_items
         return MappingProxyType(out)
+
+
+    def _retain_cost_items(self) -> list[dict[str, object]]:
+        cost_items = []
+        for operation in self.analysis.relations("cost"):
+            spec = operation.payload
+            component = getattr(self.finance.finance_types[spec.finance_type], spec.component)
+            for item_id in component.items:
+                annual = spec.component == "annual_fixed_om"
+                unit = f"{self.finance.currency}/a" if annual else self.finance.currency
+                spans = ((0, 0, self.point_count),) if spec.component != "period_variable_om" else tuple(
+                    (self.evaluation.construction_period + index + 1, start, end)
+                    for index, (start, end) in enumerate(annual_boundaries(
+                        self.doc["project_baseline"]["resolution"],
+                        self.doc["project_baseline"]["start_year"],
+                        self.evaluation.operation_years,
+                    ))
+                )
+                for period, start, end in spans:
+                    self._source(f"cost_item.{spec.instance}.{spec.component}.{item_id}", "amount",
+                                 "year" if spec.component == "period_variable_om" else "scalar", period)
+                    part = f"items.{item_id}"
+                    raw = self._cost_affine(spec.instance, spec.component, start, end, part=part)
+                    gross, net = self._cost_paid_net(spec.instance, spec.component, start, end,
+                                                     part=part, annual_amount=False)
+                    credit = self._amount_basis(raw, gross, net, "deductible_input")
+                    cost_items.append({
+                        "instance_id": spec.instance, "finance_type": spec.finance_type,
+                        "component": spec.component, "item_id": item_id,
+                        "axis": "financial_year" if spec.component == "period_variable_om" else "scalar",
+                        "period": period, "unit": unit,
+                        **{key: self._decl_business_amount(value, unit) for key, value in (
+                            ("raw", raw), ("gross", gross), ("deductible_input", credit), ("net_basis", net),
+                        )},
+                    })
+        return sorted(cost_items, key=lambda row: (
+            row["instance_id"], row["component"], row["item_id"], row["period"],
+        ))
 
     def build(self) -> tuple[LinearModel, Mapping[str, str], str]:
         try:
@@ -4408,6 +4849,11 @@ class _ProjectBuilder:
                 self._build_planning_rows()
             elif phase == "maintenance":
                 self._retain_maintenance()
+            elif phase == "amount":
+                self._retain_named_amounts()
+                self._fact_cost_items = self._retain_cost_items()
+            elif phase == "planning_amount":
+                self._build_amount_constraints()
             elif phase == "vat":
                 self._vat_cash = self._build_vat()
             elif phase == "income":
@@ -4418,6 +4864,7 @@ class _ProjectBuilder:
                 self._source("planning.objective", "objective")
                 objective, objective_unit = self._build_objective()
         self._checkpoint()
+        self._component_declarations = self.finance_components()
         model = LinearModel(
             variables=tuple(self.variables.values()),
             constraints=tuple(self.rows),

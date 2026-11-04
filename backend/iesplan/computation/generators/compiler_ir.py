@@ -6,17 +6,21 @@ source references leave this inventory in the paired Bundle metadata.
 """
 from __future__ import annotations
 
+import math
 from collections import defaultdict
 from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass, field
-import math
 
 from iesplan.computation.generators.linear import (
-    LinearConstraint, LinearExpression, LinearVariable, LoweringUnsupportedError,
-    LoweredRelation, lower_mutex,
+    LinearConstraint,
+    LinearExpression,
+    LinearVariable,
+    LoweredRelation,
+    LoweringUnsupportedError,
+    lower_mutex,
 )
 from iesplan.core.contracts.planning_expression import PlanningExpression
-
+from iesplan.finance import AmountDefinition
 from iesplan.modeling import MathRelation
 
 
@@ -131,6 +135,14 @@ class PlanningRule:
 
 
 @dataclass(frozen=True, slots=True)
+class AmountConstraintRule:
+    name: str
+    template: LinearConstraint
+    references: Mapping[str, object]
+    bound: LinearConstraint | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class CostAmountTerm:
     """One compiled finance driver term before solver-column expansion."""
 
@@ -140,6 +152,11 @@ class CostAmountTerm:
     target_kind: str  # property or interface
     aggregation: str
     coefficient: float
+    path: str = ""
+
+    @property
+    def leaf(self) -> str:
+        return self.path or f"linear.{self.driver}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -149,6 +166,23 @@ class CostComponent:
     finance_type: str
     fixed_amount: float | None
     terms: tuple[CostAmountTerm, ...]
+    fixed_items: tuple[tuple[str, float], ...] = ()
+
+    @property
+    def leaves(self) -> tuple[str, ...]:
+        return (
+            *(("fixed",) if self.fixed_amount is not None else ()),
+            *(name for name, _ in self.fixed_items),
+            *(term.leaf for term in self.terms),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class NamedCostItem:
+    instance: str
+    finance_type: str
+    component: str
+    item_id: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -276,11 +310,12 @@ class ProjectObjective:
 
 
 SemanticPayload = (
-    CapacityLimit | StateInitial | BusBalance | ClosedPort | PlanningRule | CostComponent
+    CapacityLimit | StateInitial | BusBalance | ClosedPort | PlanningRule | AmountConstraintRule
+    | CostComponent | NamedCostItem
     | TariffCharge | DemandPeak | MaintenancePayment | VatRuleSource | VatPoolOperation
     | VatPeriodConnection | IncomeTaxOperation | IncomeYearConnection | IncomeLossClaim
     | DepreciationCharge | NetCashPayment
-    | ConstructionPayment | AnnualCash | ProjectObjective
+    | ConstructionPayment | AnnualCash | ProjectObjective | AmountDefinition
 )
 
 
@@ -391,17 +426,18 @@ class CompilerAnalysis:
         technical equations are intentionally excluded from this DAG.
         """
         kinds = (
-            "demand", "planning_scalar", "maintenance", "vat", "income",
+            "demand", "planning_scalar", "maintenance", "amount", "planning_amount", "vat", "income",
             "net_cash", "objective",
         )
         # Domain operations which produce the amount consumed by another
         # conversion phase but are not themselves row-generating phases.
         source_phase = {
             "annual_cash": "objective", "construction_payment": "objective",
+            "named_amount": "amount",
         }
         edges = {kind: set() for kind in kinds}
         for relation in self.inventory.operations:
-            kind = relation.kind
+            kind = source_phase.get(relation.kind, relation.kind)
             if kind not in edges:
                 continue
             for dependency in self.dependencies[relation.identity]:
@@ -414,6 +450,8 @@ class CompilerAnalysis:
         # consumes the tax states and net payments, planning cost expressions
         # may consume peak charge amounts.
         edges["planning_scalar"].add("demand")
+        edges["amount"].update(("demand", "maintenance"))
+        edges["planning_amount"].add("amount")
         edges["vat"].update(("demand", "maintenance"))
         edges["income"].update(("demand", "maintenance", "vat"))
         edges["net_cash"].update(("maintenance", "income"))
@@ -607,6 +645,7 @@ class CompilerInventory:
     relations: list[RelationFamily] = field(default_factory=list)
     outputs: list[OutputReference] = field(default_factory=list)
     operations: list[SemanticRelation] = field(default_factory=list)
+    _operations_by_id: dict[str, SemanticRelation] = field(default_factory=dict)
     bound_facts: dict[str, BoundFact] = field(default_factory=dict)
     sealed: bool = False
 
@@ -614,6 +653,13 @@ class CompilerInventory:
         if self.sealed:
             raise RuntimeError("no source relations after collection barrier")
         self.operations.append(operation)
+        self._operations_by_id[operation.identity] = operation
+
+    def operation(self, identity: str) -> SemanticRelation:
+        return self._operations_by_id[identity]
+
+    def relations_of(self, kind: str) -> tuple[SemanticRelation, ...]:
+        return tuple(operation for operation in self.operations if operation.kind == kind)
 
     def register_bound_fact(self, fact: BoundFact) -> None:
         if self.sealed:

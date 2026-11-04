@@ -146,7 +146,11 @@ test('F1 document -> form -> same-solve named facts -> exact Excel and frozen hi
   await page.locator('#task-discount-rate').fill('0.08')
   await page.locator('#task-construction-payments').fill('[{"t":0,"ratio":1}]')
   await page.locator('#task-maintenance-expenses').fill('[]')
+  const submission = page.waitForResponse(response => response.request().method() === 'POST'
+    && response.url().endsWith(`/api/projects/${pid}/tasks`))
   await page.getByRole('button', { name: /提交任务|Submit task/ }).last().click()
+  const submitted = await submission
+  expect(submitted.status(), await submitted.text()).toBe(201)
   await page.locator('.ies-table__row').first().click()
   await expect(async () => expect(await page.locator('.ies-task-detail .ies-badge__label').first().textContent()).toMatch(/已完成|Completed/))
     .toPass({ timeout: 420_000, intervals: [10_000] })
@@ -195,6 +199,7 @@ test('F1 document -> form -> same-solve named facts -> exact Excel and frozen hi
   expect(excelRows(file, '命名成本明细')).toEqual(expectedCosts)
   expect(excelRows(file, '命名金额')).toEqual(expectedAmounts)
   expect(path.extname(download.suggestedFilename())).toBe('.xlsx')
-  session.assertNoErrors()
+  // A fresh project has no saved planning revision until the first UI save.
+  session.assertNoErrors([{ method: 'GET', path: `/api/projects/${pid}/planning-config`, status: 404, times: 1 }])
   await context.close()
 })

@@ -369,8 +369,12 @@ def test_fixed_periods_checked_once_with_actual_evaluation(context):
     )
     effective = EffectiveFinanceConfig.from_dict(finance)
     artifact = SimpleNamespace(canonical_text=json.dumps(doc))
-    evaluation = SimpleNamespace(
-        construction_years=1, operation_years=2, maintenance_expenses=[SimpleNamespace(year=2)]
+    from iesplan.finance import EvaluationInput, MaintenanceExpense
+
+    evaluation = EvaluationInput(
+        evaluation_years=3, construction_period=1, operation_years=2, discount_rate=0.08,
+        construction_payments=(),
+        maintenance_expenses=(MaintenanceExpense(year=2, amount="1", currency="CNY"),),
     )
     with pytest.raises(InvalidRequestError) as error:
         _check_amount_evaluation_refs(evaluation, artifact, effective)

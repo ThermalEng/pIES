@@ -757,6 +757,8 @@ def build_financial_evaluation(
             for entry in facts["payments_applied"]
         ],
         "net_cashflows": thaw_json_value(facts["net_cashflows"]),
+        "cost_items": thaw_json_value(facts["cost_items"]),
+        "amounts": thaw_json_value(facts["amounts"]),
         "construction_units": thaw_json_value(facts["construction_units"]),
         "annual_operation": [
             {

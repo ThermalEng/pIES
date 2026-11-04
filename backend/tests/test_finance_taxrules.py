@@ -568,7 +568,7 @@ def test_unbound_overrides_legal_path_merges() -> None:
     profile = FinanceProfile.from_dict(_base_profile())
     payload = _base_overrides(profile)
     standalone = FinanceOverrides.from_dict(payload)
-    assert standalone._bound_profile == ""
+    assert standalone._bound_profile_object is None
     effective = merge_effective(profile, standalone)
     assert effective.tax_rules["operating_vat"].in_tax[0].rate.value == Decimal("0.15")  # type: ignore[union-attr]
 
