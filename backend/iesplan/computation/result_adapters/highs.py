@@ -268,6 +268,7 @@ def _parameters(bundle: SolverBundle) -> dict[str, Any]:
         "objective_unit": objective_unit,
         "requested": list(requested),
         "step_series": [dict(entry) for entry in series],
+        "system_series": [dict(entry) for entry in doc["system_series"]],
         "components": {ident: dict(decl) for ident, decl in components.items()},
         # 结构化财务事实原始声明（必需映射，缺键即旧包，自然失败；
         # 求值与形状由恢复侧按映射表消费，此处不重验条目结构）。
@@ -458,7 +459,8 @@ class HighsResultAdapter:
             # 随 solution 请求发布；声明列缺失/换算失败即协议失败，
             # 不补零、不回退。metrics-only 无 solution 即无 series。
             series_out: dict[str, object] = {}
-            for entry in params["step_series"]:
+            system_out: dict[str, object] = {}
+            for entry in (*params["step_series"], *params["system_series"]):
                 unit = entry["unit"]
                 values: list[float] = []
                 for name in entry["columns"]:
@@ -472,13 +474,17 @@ class HighsResultAdapter:
                     if not math.isfinite(value):
                         _fail(f"步序列 {entry['series_id']!r} 换算后非有限数值")
                     values.append(value)
-                series_out[entry["series_id"]] = {
-                    "instance_id": entry["instance_id"],
-                    "variable_id": entry["variable_id"],
+                system = "block" in entry
+                target = system_out if system else series_out
+                identity = ({"block": entry["block"], "variable": entry["variable"]} if system else
+                            {"instance_id": entry["instance_id"], "variable_id": entry["variable_id"]})
+                target[entry["series_id"]] = {
+                    **identity,
                     "unit": unit,
                     "values": values,
                 }
             out["series"] = series_out
+            out["system_series"] = system_out
             out["financial_facts"] = _recover_financial_facts(
                 params["financial_facts"], index_of, solution["primals"]
             )

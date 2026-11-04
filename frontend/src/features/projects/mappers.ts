@@ -70,6 +70,8 @@ export function draftFromView(draft: DraftViewDto): ProjectDraft {
     created_at: draft.created_at,
     dataset_bindings: bindings,
     task_working_inputs: working,
+    system_equations: draft.content.system_equations,
+    outputs: draft.content.outputs,
   }
 }
 

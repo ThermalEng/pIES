@@ -44,6 +44,7 @@ from iesplan.assembly.diags import ASM_ALL_CODES
 from iesplan.assembly.network import PortBus, PortNetwork, build_port_buses, build_port_network
 from iesplan.assembly.parser import ParseDocResult, parse_assembly_doc
 from iesplan.assembly.rules.step import check_step_relations
+from iesplan.assembly.system_equations import system_relations
 from iesplan.assembly.validator import (
     AssemblyValidationResult,
     validate_assembly_doc,
@@ -78,6 +79,7 @@ __all__ = [
     "validate_assembly_doc",
     "validate_project_export",
     "check_step_relations",
+    "system_relations",
     # 规范化与共享上下文/诊断码
     "canonicalize_assembly_doc",
     "canonical_algorithm_ref",

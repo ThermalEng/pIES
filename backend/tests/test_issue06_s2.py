@@ -139,6 +139,7 @@ def _builder(
             "variables": planning, "constraints": constraints,
         },
         "tariff_bindings": {}, "demand_bindings": {}, "connections": {},
+        "outputs": {"series": [], "metrics": []},
     }
     scalar = SimpleNamespace(kind="property", value=1.0, unit="kW")
     contribution = SimpleNamespace(

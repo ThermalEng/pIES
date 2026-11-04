@@ -33,12 +33,10 @@ export type {
 export type AssessmentType = 'full' | 'physical' | 'optimality' | 'financial' | 'reliability'
 
 /** 逐时序列公开元数据(与后端已封存 series 同一身份)。 */
-export interface HourlySeriesMeta {
-  series_id: string
-  instance_id: string
-  variable_id: string
-  unit: string
-}
+export type HourlySeriesMeta = { series_id: string; unit: string } & (
+  | { kind: 'device'; instance_id: string; variable_id: string }
+  | { kind: 'system'; block: string; variable: string }
+)
 
 /** 任务计算结果前端模型。 */
 export interface TaskResult {

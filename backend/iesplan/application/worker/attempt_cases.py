@@ -45,6 +45,7 @@ from iesplan.application.worker.compute_cases import (
     HOURLY_OBJECT_PATH,
     attach_evidence_objects,
     seal_output_objects,
+    result_step_series,
 )
 from iesplan.application.worker.evidence_cases import CheckAssessment, assess_check_evidence
 from iesplan.application.worker.lease_cases import (
@@ -289,7 +290,7 @@ def submit_attempt_result(
             # 只消费已恢复序列各必需键, 不解释求解列, 不做长度/hash 复核。
             if "hourly" in sealed_groups:
                 hourly_desc = sealed_groups["hourly"][HOURLY_OBJECT_PATH]
-                hourly_series = payload["compute_result"]["outputs"]["series"]
+                hourly_series = result_step_series(payload["compute_result"]["outputs"])
                 ordered_ids = sorted(hourly_series)
                 payload["hourly_refs"] = [{
                     "object_id": hourly_desc["object_id"],
@@ -297,10 +298,7 @@ def submit_attempt_result(
                     "rows": len(hourly_series[ordered_ids[0]]["values"]),
                     "series": [
                         {
-                            "series_id": series_id,
-                            "instance_id": hourly_series[series_id]["instance_id"],
-                            "variable_id": hourly_series[series_id]["variable_id"],
-                            "unit": hourly_series[series_id]["unit"],
+                            **{key: value for key, value in hourly_series[series_id].items() if key != "values"},
                         }
                         for series_id in ordered_ids
                     ],

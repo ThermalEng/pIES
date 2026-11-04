@@ -944,6 +944,17 @@ def _cmd_task_set_working_inputs(content: dict, payload: dict) -> dict:
     return {"stored": True}
 
 
+def _cmd_assembly_set_system_equations(content: dict, payload: dict) -> dict:
+    """Save the complete author document; assembly owns its semantic gate."""
+    if (set(payload) != {"system_equations", "outputs"}
+            or not isinstance(payload["system_equations"], dict)
+            or not isinstance(payload["outputs"], dict)):
+        raise InvalidRequestError("需要 system_equations 与 outputs 对象", code="PROJ-CMD-005")
+    content["system_equations"] = payload["system_equations"]
+    content["outputs"] = payload["outputs"]
+    return {"stored": True}
+
+
 # assembly.set_planning 已删除: 装配 planning 是冻结 PlanningConfig 修订的
 # 确定性投影(任务提交闸门按版本内容 planning_config.revision 经公开门面
 # 读取)，项目不再保存第二份 planning 草稿副本。
@@ -966,6 +977,7 @@ _COMMAND_HANDLERS.update(
         "assembly.set_finance_binding": _cmd_assembly_set_finance_binding,
         "assembly.set_tariff_bindings": _cmd_assembly_set_tariff_bindings,
         "assembly.set_demand_bindings": _cmd_assembly_set_demand_bindings,
+        "assembly.set_system_equations": _cmd_assembly_set_system_equations,
         "task.set_working_inputs": _cmd_task_set_working_inputs,
     }
 )

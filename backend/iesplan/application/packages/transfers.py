@@ -2308,6 +2308,26 @@ def export_excel(
             demand_sheet = wb.create_sheet("需量月账单")
             _write_sealed_monthly_demand(demand_sheet, section)
 
+    refs = evidence_content.get("hourly_refs") or []
+    if refs:
+        directory = wb.create_sheet("步序列目录")
+        values_sheet = wb.create_sheet("步序列值")
+        headings = ("series_id", "kind", "instance_id", "variable_id", "block", "variable", "unit", "rows")
+        directory.append(headings)
+        all_data = {}
+        for ref in refs:
+            frozen = json.loads(get_object(db, int(ref["object_id"])).decode("utf-8"))
+            for series_id in sorted(frozen["data"]):
+                values = frozen["data"][series_id]
+                meta = frozen["meta"]["series"][series_id]
+                directory.append(tuple(meta.get(key) if key != "rows" else len(values) for key in headings))
+                all_data[series_id] = values
+        ordered = sorted(all_data)
+        values_sheet.append(("step", *ordered))
+        if ordered:
+            for step in range(len(all_data[ordered[0]])):
+                values_sheet.append((step, *(all_data[key][step] for key in ordered)))
+
     buf = io.BytesIO()
     wb.save(buf)
     _audit_entry(

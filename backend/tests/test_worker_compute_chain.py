@@ -133,7 +133,7 @@ def _save_config_body(client: TestClient, pid: int, user, body: dict) -> int:
     return resp.json()["revision"]
 
 
-def _prepare_with_planning(client: TestClient, db: Session, user, planning_body: dict) -> int:
+def _prepare_with_planning(client: TestClient, db: Session, user, planning_body: dict, *, external_supply=False) -> int:
     """准备可提交计算任务的项目（规划变量目标可定制，电池容量保持固定）。
 
     步骤同 test_tasks_api._prepare_project：建项目 + 显式财务/装配声明 +
@@ -147,15 +147,28 @@ def _prepare_with_planning(client: TestClient, db: Session, user, planning_body:
     device_ref, revision = declare_compute_device(client, pid, _h(client, user))
     config_cases.save_planning_config(db, pid, planning_body, None, user.id)
     revision = _set_explicit_calc(client, pid, user, revision)
-    revision = _declare_assembly_sections(client, pid, user, revision, {device_ref: {"type": "none"}})
+    bindings = {device_ref: {"type": "none"}}
+    if external_supply:
+        response = client.put(f"/api/projects/{pid}/draft", headers=_h(client, user), json={
+            "expected_revision": revision, "commands": [
+                {"id": "source", "unit": "model", "type": "model.upsert_device", "payload": {
+                    "name": "grid", "device_type": "ies.device.grid_connection", "kind": "existing",
+                    "params": {"max_import_power_kw": 100, "max_export_power_kw": 0}}},
+                {"id": "supply", "unit": "model", "type": "model.upsert_connection", "payload": {
+                    "name": "supply", "from_device": "grid", "from_port": "electricity_import", "to_device": device_ref, "to_port": "electricity"}},
+            ]})
+        assert response.status_code == 200, response.text
+        revision = response.json()["revision"]
+        bindings["grid"] = {"type": "none"}
+    revision = _declare_assembly_sections(client, pid, user, revision, bindings)
     _bind_and_freeze(client, pid, user, None, revision=revision)
     return pid
 
 
-def _submit_calc_task(client: TestClient, db: Session, config_body: dict, planning_body: dict) -> int:
+def _submit_calc_task(client: TestClient, db: Session, config_body: dict, planning_body: dict, *, external_supply=False) -> int:
     """准备项目→保存配置→提交 optimization 任务，返回 task_id。"""
     user = make_user(db, "chain_owner")
-    pid = _prepare_with_planning(client, db, user, planning_body)
+    pid = _prepare_with_planning(client, db, user, planning_body, external_supply=external_supply)
     rev = _save_config_body(client, pid, user, config_body)
     status, body = _submit_task(
         client, pid, user, config={"config_revision": rev}, idempotency_key="chain-e2e-1"
@@ -583,7 +596,7 @@ class TestSingleUnitSeal:
         # 最小 SOC。这样至少一条状态/流量序列必变化，不依赖零目标任意选解。
         from assembly_fixture import FIXTURE_BATTERY_PARAMS
         monkeypatch.setitem(FIXTURE_BATTERY_PARAMS, "initial_soc", 0)
-        task_id = _submit_calc_task(client, db, dict(_CONFIG_BODY), dict(PLANNING_BODY))
+        task_id = _submit_calc_task(client, db, dict(_CONFIG_BODY), dict(PLANNING_BODY), external_supply=True)
         claim = _claim(db, task_id)
         assert _run(engine, claim, plane) == "completed"
 
@@ -591,7 +604,9 @@ class TestSingleUnitSeal:
         assert evidence is not None
         sealed = json.loads(get_object(db, evidence.object_id).decode("utf-8"))
         refs = sealed.get("hourly_refs")
-        assert isinstance(refs, list) and len(refs) == 1
+        assert isinstance(refs, list) and len(refs) == 1, (
+            sealed["compute_result"]["math_status"], list(sealed["compute_result"]["outputs"])
+        )
         ref = refs[0]
         params = json.loads(
             get_object(db, sealed["bundle_files"]["input/parameters.json"]["object_id"]).decode("utf-8")
@@ -616,7 +631,8 @@ class TestSingleUnitSeal:
         assert set(hourly["data"]) == set(ref["fields"])
         assert hourly["meta"]["units"] == {d["series_id"]: d["unit"] for d in decls}
         assert hourly["meta"]["series"] == {
-            d["series_id"]: {"instance_id": d["instance_id"], "variable_id": d["variable_id"]}
+            d["series_id"]: {"kind": "device", "series_id": d["series_id"], "unit": d["unit"],
+                             "instance_id": d["instance_id"], "variable_id": d["variable_id"]}
             for d in decls
         }
         assert all(len(v) == ref["rows"] for v in hourly["data"].values())

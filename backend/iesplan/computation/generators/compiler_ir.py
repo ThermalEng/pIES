@@ -32,6 +32,8 @@ class SourceLocation:
     binding_id: str | None = None
     data_object_ref: str | None = None
     data_object_refs: tuple[str, ...] | None = None
+    block_id: str | None = None
+    variable_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,6 +78,7 @@ class RelationFamily:
     output_symbol: str | None
     known_coefficients: tuple[str, ...]
     source: SourceLocation
+    scope_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

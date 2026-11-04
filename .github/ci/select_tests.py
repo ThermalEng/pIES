@@ -107,6 +107,7 @@ PAGE_SPECS = {
     "LoginPage.tsx": ("auth-navigation-model.spec.ts",),
     "ModelPage.tsx": ("auth-navigation-model.spec.ts", "model-load-state.spec.ts"),
     "PlanningPage.tsx": ("planning-issue05.spec.ts",),
+    "SystemEquationsEditor.tsx": ("system-equations.spec.ts",),
     "ProjectListPage.tsx": ("data-project-d3.spec.ts",),
     "ProjectPage.tsx": ("data-project-d3.spec.ts",),
     "ProjectsPage.tsx": ("data-project-d3.spec.ts",),
@@ -143,6 +144,9 @@ GENERATOR_PROJECT_CONSUMERS = (
     "test_p2_s2_derivation.py",
     "test_p2_s3_activation.py",
     "test_p2_s4_integration.py",
+    "test_p3_port_network.py",
+    "test_p3_network_boundaries.py",
+    "test_p3_system_equations.py",
     "test_pr38_review_probes.py",
     "test_linear_lowering.py",
     "test_issue04_d2.py",
@@ -510,7 +514,7 @@ def pick(changed: list[str], full: bool = False) -> dict[str, str]:
                 "backend/iesplan/computation/generators/bound_inference.py",
             ):
                 backend.update(GENERATOR_PROJECT_CONSUMERS)
-                browser.update(("tax-chain.spec.ts", "result-planning-solution.spec.ts"))
+                browser.update(("tax-chain.spec.ts", "result-planning-solution.spec.ts", "system-equations.spec.ts"))
         elif path in ("frontend/Dockerfile", "frontend/package.json", "frontend/package-lock.json"):
             browser.update((SMOKE_BROWSER, "page-loading.spec.ts", *BASIC_SPECS))
             frontend_all = True
@@ -833,7 +837,13 @@ def self_test() -> None:
         "backend/iesplan/computation/generators/mps.py"
     ])["backend_tests"].split()
     assert "tax-chain.spec.ts" in generator["browser_specs"]
-    assert len(generator["backend_tests"].split()) < 30  # scoped, never automatic full-suite
+    expected_generator = (set(GENERATOR_PROJECT_CONSUMERS)
+                          | expand("computation", inventory()[0]) | {SMOKE_BACKEND})
+    assert set(generator["backend_tests"].split()) == {"tests/" + name for name in expected_generator}
+    assert "system-equations.spec.ts" in generator["browser_specs"].split()
+    assert "system-equations.spec.ts" in pick([
+        "frontend/src/pages/SystemEquationsEditor.tsx"
+    ])["browser_specs"].split()
     ordinary = pick(["backend/iesplan/computation/generators/mps.py"])
     assert "tests/test_vat_monthly.py" not in ordinary["backend_tests"].split()
     assert len(pick(["frontend/src/pages/NewUnmappedPage.tsx"])["browser_specs"].split()) > 40

@@ -800,8 +800,7 @@ def read_hourly(
         return {
             "field": field,
             "unit": unit,
-            "instance_id": identity["instance_id"],
-            "variable_id": identity["variable_id"],
+            **{key: value for key, value in identity.items() if key not in ("series_id", "unit")},
             "start": start_i,
             "end": start_i,
             "values": [],
@@ -813,8 +812,7 @@ def read_hourly(
     return {
         "field": field,
         "unit": unit,
-        "instance_id": identity["instance_id"],
-        "variable_id": identity["variable_id"],
+        **{key: value for key, value in identity.items() if key not in ("series_id", "unit")},
         "start": start_i,
         "end": chunk_end,
         "values": values[start_i:chunk_end],

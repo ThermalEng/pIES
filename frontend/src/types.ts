@@ -199,6 +199,8 @@ export interface ProjectDraft {
    * 值为冻结业务值原样或用户编辑原文, 显示形态由对话框 mapping 负责。
    */
   task_working_inputs?: TaskWorkingInputs | null
+  system_equations?: Record<string, unknown>
+  outputs?: Record<string, unknown>
 }
 
 /**

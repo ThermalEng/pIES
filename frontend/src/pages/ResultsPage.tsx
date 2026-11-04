@@ -625,7 +625,7 @@ export default function ResultsPage() {
     for (const meta of hourly.series) {
       const values = hourly.flows[meta.series_id]
       if (!values?.length) continue
-      const label = `${meta.instance_id}.${meta.variable_id}`
+      const label = meta.kind === 'device' ? `${meta.instance_id}.${meta.variable_id}` : `${t('ies.result.system_series')} ${meta.block}.${meta.variable}`
       let group = groups.get(meta.unit)
       if (!group) {
         group = { unit: meta.unit, series: [] }

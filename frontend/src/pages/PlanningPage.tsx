@@ -14,6 +14,7 @@ import { getModel } from '../features/modeling'
 import { errorMessage } from '../i18n'
 import { pt } from '../i18n/pageMessages'
 import { ApiError } from '../types'
+import SystemEquationsEditor from './SystemEquationsEditor'
 
 type Sense = '' | 'minimize' | 'maximize'
 type VariableRow = {
@@ -301,6 +302,7 @@ export default function PlanningPage() {
         </Button>
       </div>
       <p>{pt('ies.planning.intro')}</p>
+      <SystemEquationsEditor key={projectId} projectId={projectId} />
       <div className="ies-flex" role="group" aria-label={pt('ies.planning.view_label')}>
         <Button variant={view === 'form' ? 'primary' : 'secondary'} disabled={saving || reloading}
           onClick={() => switchView('form')}>{pt('ies.planning.form_tab')}</Button>

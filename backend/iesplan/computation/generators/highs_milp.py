@@ -93,6 +93,8 @@ DESCRIPTOR = GeneratorDescriptor(
         "finance.net_cashflows",
         "technical.step_constraints",
         "network.closed_ports",
+        "modeling.system_equations",
+        "outputs.system_series",
         "planning.construction_activation",
         "finance.cost_occurrence",
         "finance.scoped_amount_sources",
@@ -324,7 +326,9 @@ class HighsMilpProvider:
                     "columns": list(entry["columns"]),
                 }
                 for entry in series
+                if "instance_id" in entry
             ],
+            "system_series": [dict(entry) for entry in series if "block" in entry],
             "unit_map": dict(sorted(unit_map.items())),
         }
         return (

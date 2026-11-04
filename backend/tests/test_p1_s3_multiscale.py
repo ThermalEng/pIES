@@ -39,6 +39,7 @@ def _full_two_year_builder(builder_type, *, block_size: int):
         for inst, initial, coeff in (("a", 0.2, 1.0), ("b", 0.7, 0.5))
     }
     doc = {
+        "outputs": {"series": [], "metrics": []},
         "project_baseline": {
             "start_year": 2026, "resolution": "1h", "scenario_mode": "single",
         },
