@@ -302,7 +302,7 @@ def test_active_amount_requires_source_execution_and_same_solution_recovery(cont
     )
 
 
-def test_unimplemented_tax_source_requires_real_delivery_not_generic_amount_marker(context):
+def test_tax_source_requires_actual_rule_or_pool_capabilities(context):
     from test_finance_s1_triplet_contract import _valid_profile_dict
 
     from iesplan.finance import FinanceProfile, merge_effective
@@ -328,9 +328,11 @@ def test_unimplemented_tax_source_requires_real_delivery_not_generic_amount_mark
     with pytest.raises(InvalidRequestError) as error:
         _check_amount_capabilities(artifact, effective, "test.generator", capabilities)
     assert error.value.code == "TASK-REQ-007"
-    assert error.value.params["reason"] == "unimplemented_amount_source"
-    assert error.value.params["source"]["kind"] == "tax"
+    assert error.value.params["missing_capabilities"] == ["finance.credit_pools"]
     assert error.value.params["fields"] == ["effective_finance.amounts.spend.terms.scale.source"]
+    _check_amount_capabilities(
+        artifact, effective, "test.generator", capabilities + ("finance.credit_pools",),
+    )
     doc["planning"]["constraints"]["spend_limit"]["enabled"] = False
     artifact.canonical_text = json.dumps(doc)
     _check_amount_capabilities(artifact, effective, "test.generator", ())

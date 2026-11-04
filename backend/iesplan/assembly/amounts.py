@@ -31,6 +31,10 @@ def consumed_amounts(doc: Mapping, finance) -> tuple[str, ...]:
     roots.update(
         cash.amount.id for cash in finance.net_cashflows.values() if cash.amount.kind == "amount_ref"
     )
+    roots.update(movement.amount.id for movement in finance.cash_movements.values())
+    roots.update(
+        asset.basis_from.id for asset in finance.assets.values() if asset.basis_from.kind == "amount"
+    )
     return amount_dependency_closure(finance.amounts, roots)
 
 
@@ -302,6 +306,25 @@ def check_amount_sources(doc: Mapping, finance, registry: Mapping, diags: list) 
                         actual=actual,
                     )
                     break
+
+    # Direct capitalized cost sources have project-owned scopes too; amount
+    # combinations above already reach the same checker through the closure.
+    for asset_id, asset in finance.assets.items():
+        reference = asset.basis_from
+        if reference.kind != "cost":
+            continue
+        source = reference.to_dict()
+        source["finance_type"] = source["path"].split(".", 1)[0]
+        selected, invalid = _selected_instances(doc, source)
+        invalid.update(instance for instance in selected if doc["devices"][instance]["asset_origin"] != "new")
+        if invalid:
+            _reject(
+                diags,
+                ASM_PLAN_UNDEF,
+                f"effective_finance.assets.{asset_id}.basis_from.scope",
+                "asset_scope_wrong_new_instance",
+                instances=sorted(invalid),
+            )
 
 
 __all__ = ["consumed_amounts", "check_amount_relations", "check_amount_sources"]

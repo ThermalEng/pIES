@@ -15,6 +15,7 @@
 公开门面(设备描述符),不依赖 services/engines/worker。
 """
 
+from iesplan.assembly.amounts import check_amount_relations, consumed_amounts
 from iesplan.assembly.builder import (
     BuildDocResult,
     annotate_device_refs,
@@ -23,7 +24,6 @@ from iesplan.assembly.builder import (
     device_instance_refs,
     parse_predefined_source_declaration,
 )
-from iesplan.assembly.amounts import check_amount_relations, consumed_amounts
 from iesplan.assembly.canonicalizer import (
     canonical_algorithm_ref,
     canonicalize_assembly_doc,
@@ -42,6 +42,13 @@ from iesplan.assembly.contracts import (
     ValidationReceipt,
 )
 from iesplan.assembly.diags import ASM_ALL_CODES
+from iesplan.assembly.financial_relations import (
+    FinancialDependencyEdge,
+    FinancialDependencyGraph,
+    FinancialDependencyNode,
+    FinancialNodeKey,
+    financial_dependency_graph,
+)
 from iesplan.assembly.network import PortBus, PortNetwork, build_port_buses, build_port_network
 from iesplan.assembly.parser import ParseDocResult, parse_assembly_doc
 from iesplan.assembly.rules.step import check_step_relations
@@ -82,6 +89,11 @@ __all__ = [
     "check_step_relations",
     "check_amount_relations",
     "consumed_amounts",
+    "FinancialNodeKey",
+    "FinancialDependencyEdge",
+    "FinancialDependencyNode",
+    "FinancialDependencyGraph",
+    "financial_dependency_graph",
     "system_relations",
     # 规范化与共享上下文/诊断码
     "canonicalize_assembly_doc",
