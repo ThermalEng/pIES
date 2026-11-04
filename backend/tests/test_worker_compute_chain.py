@@ -392,10 +392,12 @@ class TestComputeChainEndToEnd:
             "construction_period", "operation_years", "currency", "price_basis",
             "base_year", "profile_id", "discount_rate", "construction_total",
             "construction_total_unit", "annual_fixed_om", "payments_applied", "net_cashflows",
-            "construction_units",
+            "construction_units", "cost_items", "amounts",
             "annual_operation", "monthly_demand", "tax_cash", "annual_net_flows", "evaluation",
         }
-        assert fin["construction_units"] == []  # 无显式建设单元仍保留 4.0.0 结构
+        assert fin["construction_units"] == []  # 未声明建设单元仍保留公开结果字段
+        assert fin["cost_items"] == []
+        assert fin["amounts"] == []
         # K=0/E=1/N=1：单池 12 月 VAT 全零（无计费绑定，留抵恒零强制成立）。
         vat = fin["tax_cash"]["vat"]
         assert len(vat) == 12

@@ -494,7 +494,7 @@ class _ProjectBuilder:
         self._named_amounts: dict[tuple[str, int], _AffineAcc] = {}
         self._month_spans_cache: list[tuple[int, int, int]] | None = None
         self._amount_year_spans: tuple[tuple[int, int], ...] | None = None
-        self._consumed_amounts = consumed_amounts(doc, finance)
+        self._consumed_amounts: tuple[str, ...] = ()
         self.point_count = point_count
         self.step_s = step_s
         self.series: dict[tuple[str, str], list[float]] = {}
@@ -2233,6 +2233,9 @@ class _ProjectBuilder:
                 tuple(op.identity for op in operations))
 
     def _collect_named_amounts(self, constraint_names) -> None:
+        # Finance belongs to complete relation collection, not the physical
+        # symbol/template initialization path.
+        self._consumed_amounts = consumed_amounts(self.doc, self.finance)
         for amount_id in self._consumed_amounts:
             definition = self.finance.amounts[amount_id]
             inputs, dependencies = set(), set()
