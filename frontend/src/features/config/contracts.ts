@@ -43,12 +43,26 @@ export interface PlanningReferenceDto {
   interface: string
 }
 
+/** An amount constraint selects one explicit scalar value, never current/t. */
+export type PlanningAmountPeriodDto =
+  | { kind: 'scalar' }
+  | { kind: 'financial_year'; year: number }
+  | { kind: 'tax_month'; month: number }
+  | { kind: 'year_months'; year: number }
+  | { kind: 'range'; axis: 'financial_year' | 'tax_month'; first: number; last: number }
+
+export interface PlanningAmountReferenceDto {
+  kind: 'amount' | 'baseline'
+  id: string
+  period: PlanningAmountPeriodDto
+}
+
 export interface PlanningConstraintDto {
   type: string
   expression: string
   enabled: boolean
-  /** Only step_relation has local alias -> real instance/interface identities. */
-  references?: Record<string, PlanningReferenceDto>
+  /** Local aliases preserve either real ports or explicitly selected amounts. */
+  references?: Record<string, PlanningReferenceDto | PlanningAmountReferenceDto>
 }
 
 export interface PlanningConfigBody {

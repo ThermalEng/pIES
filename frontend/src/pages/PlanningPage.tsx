@@ -43,6 +43,7 @@ const CONSTRAINT_TYPES = [
   'annual_purchase_cost_limit',
   'ratio',
   'step_relation',
+  'amount_relation',
 ]
 
 export default function PlanningPage() {
@@ -179,7 +180,7 @@ export default function PlanningPage() {
         type: row.type,
         expression: row.expression.trim(),
         enabled: row.enabled,
-        ...(row.type === 'step_relation' && row.references ? { references: row.references } : {}),
+        ...(row.references ? { references: row.references } : {}),
       }
     }
     setFormError(null)
@@ -210,7 +211,7 @@ export default function PlanningPage() {
           type: row.type,
           expression: row.expression,
           enabled: row.enabled,
-          ...(row.type === 'step_relation' && row.references ? { references: row.references } : {}),
+          ...(row.references ? { references: row.references } : {}),
         }]),
       ))
     } else {
@@ -479,6 +480,9 @@ export default function PlanningPage() {
             </FormField>
             {row.type === 'step_relation' && (
               <p>{pt('ies.planning.step_references_hint')}</p>
+            )}
+            {row.type === 'amount_relation' && (
+              <p>{pt('ies.planning.amount_references_hint')}</p>
             )}
           </div>
         ))}

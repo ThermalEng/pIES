@@ -44,6 +44,19 @@ constraints:
         interface: heat_out
     expression: heat[t] <= 0 kW
     enabled: false
+  amount_cap:
+    type: amount_relation
+    references:
+      spend:
+        kind: amount
+        id: additional_spend
+        period: {kind: financial_year, year: 2}
+      rate:
+        kind: amount
+        id: annual_rate
+        period: {kind: scalar}
+    expression: spend <= 1 year * rate
+    enabled: true
 `
 const parsed = planningFromYaml(source)
 check('unquoted high-precision decimal retained exactly', parsed.variables.hp_cap.lower_bound === '50.000000000000000000000000000001')
@@ -51,6 +64,7 @@ check('quoted high-precision decimal retained exactly', parsed.variables.hp_cap.
 check('scalar and step coexist', parsed.constraints.scalar.type === 'ratio' && parsed.constraints.heat_gate.type === 'step_relation')
 check('real instance/port ref remains distinct from alias', parsed.constraints.heat_gate.references.heat.instance === 'hp1' && parsed.constraints.heat_gate.references.heat.interface === 'heat_out')
 check('disabled step stays present', parsed.constraints.disabled_gate.enabled === false)
+check('amount aliases retain their kind, ID and explicit periods', parsed.constraints.amount_cap.references.spend.id === 'additional_spend' && parsed.constraints.amount_cap.references.spend.period.year === 2 && parsed.constraints.amount_cap.references.rate.period.kind === 'scalar')
 
 // Omitted constraints and default enabled semantics
 const withoutConstraints = `objective:
