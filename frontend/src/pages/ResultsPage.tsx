@@ -29,7 +29,7 @@ import { getProject } from '../features/projects'
 import { downloadBlob } from '../shared/http'
 import { exportTaskReport, isNoAssessmentError } from '../application/exportTaskReport'
 import { exportPackage as createPackageExport, downloadExport } from '../features/exports'
-import { getResult, listAssessments, assess, select, readHourly, FinancialRelations } from '../features/results'
+import { getResult, listAssessments, assess, select, readHourly, FinancialRelations, FinancialTransactions } from '../features/results'
 import type { HourlySeriesMeta } from '../features/results'
 import { translate, translateError, useI18n } from '../i18n'
 import type { Locale } from '../i18n'
@@ -1757,6 +1757,7 @@ function FinancialEvaluationCard({ fin }: { fin: FinancialEvaluationBlock }) {
         )}
       </div>
       <FinancialRelations costItems={fin.cost_items} amounts={fin.amounts} />
+      <FinancialTransactions fin={fin} />
       <TaxCashSections fin={fin} />
       {fin.annual_net_flows.length > 0 ? (
         <div style={{ marginTop: 'var(--ies-space-3)' }}>
@@ -1858,7 +1859,8 @@ function TaxCashSections({ fin }: { fin: FinancialEvaluationBlock }) {
                   </td>
                   <td>
                     {t('ies.result.fin_tax_paid')}: {row.paid} / {t('ies.result.fin_tax_claimed')}: {row.refund_claimed} /{' '}
-                    {t('ies.result.fin_tax_arrived')}: {row.refund_arrived} / {t('ies.result.fin_tax_carry')}: {row.carry} {ccy}
+                    {t('ies.result.fin_tax_arrived')}: {row.refund_arrived} / {t('ies.result.fin_tax_carry')}: {row.carry} /{' '}
+                    {t('ies.result.fin_tax_receivable')}: {row.receivable} {ccy}
                   </td>
                 </tr>
               ))}
@@ -1904,7 +1906,8 @@ function TaxCashSections({ fin }: { fin: FinancialEvaluationBlock }) {
                   <td>
                     {t('ies.result.fin_tax_base')}: {row.taxable_base} / {t('ies.result.fin_tax_used')}: {row.loss_used} /{' '}
                     {t('ies.result.fin_tax_generated')}: {row.loss_generated} / {t('ies.result.fin_tax_expired')}:{' '}
-                    {row.loss_expired} / {t('ies.result.fin_tax_tax')}: {row.tax} {ccy}
+                    {row.loss_expired} / {t('ies.result.fin_tax_assessed')}: {row.assessed} /{' '}
+                    {t('ies.result.fin_tax_tax')}: {row.tax} {ccy}
                   </td>
                 </tr>
               ))}
@@ -1924,7 +1927,8 @@ function TaxCashSections({ fin }: { fin: FinancialEvaluationBlock }) {
                   <td>
                     {row.rule} / {row.base_from.kind === 'upfront_capex_net'
                       ? `${row.base_from.kind}: ${row.base_from.finance_type}`
-                      : `${row.base_from.kind}: y=${row.base_from.year}, #${row.base_from.position}`}
+                      : row.base_from.kind === 'asset' ? `asset: ${row.base_from.id}`
+                        : `${row.base_from.kind}: y=${row.base_from.year}, #${row.base_from.position}`}
                     {' '} / y={row.year}
                   </td>
                   <td>

@@ -124,10 +124,10 @@ interface SealedEvaluation {
   net_cashflows: Array<{ id: string; t: number; direction: 'inflow' | 'outflow'; amount: string }>
   annual_operation: Array<{ financial_year: number; energy_net: string; variable_om: string; fixed_om: string; maintenance: string; demand_charge: string; net: string }>
   tax_cash: {
-    vat: Array<{ pool: string; month: number; paid: string; refund_claimed: string; refund_arrived: string; carry: string }>
+    vat: Array<{ pool: string; month: number; paid: string; refund_claimed: string; refund_arrived: string; carry: string; receivable: string }>
     refunds: Array<{ pool: string; period: number; arrival_period: number; amount: string }>
-    income: Array<{ rule: string; year: number; taxable_base: string; loss_used: string; loss_generated: string; loss_expired: string; tax: string }>
-    depreciation: Array<{ rule: string; base_from: { kind: 'upfront_capex_net'; finance_type: string } | { kind: 'maintenance_expense_net'; year: number; position: number }; year: number; amount: string }>
+    income: Array<{ rule: string; year: number; taxable_base: string; loss_used: string; loss_generated: string; loss_expired: string; assessed: string; tax: string }>
+    depreciation: Array<{ rule: string; base_from: { kind: 'upfront_capex_net'; finance_type: string } | { kind: 'maintenance_expense_net'; year: number; position: number } | { kind: 'asset'; id: string }; year: number; amount: string }>
     loss_balances: Array<{ rule: string; vintage_id: string; year: number; last_usable_year: number; amount: string }>
   }
   annual_net_flows: string[]
@@ -426,6 +426,7 @@ function expectedExcelFinancialPairs(fin: SealedEvaluation): Array<[string, stri
     rows.push([`${head} 确认退款 / claimed`, `${item.refund_claimed} ${ccy}`])
     rows.push([`${head} 到账退款 / arrived`, `${item.refund_arrived} ${ccy}`])
     rows.push([`${head} 期末结转 / carry`, `${item.carry} ${ccy}`])
+    rows.push([`${head} 期末退款应收(非现金) / receivable`, `${item.receivable} ${ccy}`])
   }
   if (fin.tax_cash.vat.length === 0) rows.push(['增值税 / VAT', '无适用规则 / No applicable rules'])
   for (const item of fin.tax_cash.refunds) {
@@ -443,6 +444,7 @@ function expectedExcelFinancialPairs(fin: SealedEvaluation): Array<[string, stri
     rows.push([`${head} 抵亏 / used`, `${item.loss_used} ${ccy}`])
     rows.push([`${head} 新生亏损 / generated`, `${item.loss_generated} ${ccy}`])
     rows.push([`${head} 到期核销 / expired`, `${item.loss_expired} ${ccy}`])
+    rows.push([`${head} 应计税额 / assessed`, `${item.assessed} ${ccy}`])
     rows.push([`${head} 税额 / tax`, `${item.tax} ${ccy}`])
   }
   if (fin.tax_cash.income.length === 0) rows.push(['所得税 / Income tax', '无适用规则 / No applicable rules'])
@@ -450,7 +452,8 @@ function expectedExcelFinancialPairs(fin: SealedEvaluation): Array<[string, stri
     const source = item.base_from
     const identity = source.kind === 'upfront_capex_net'
       ? `${source.kind}:${source.finance_type}`
-      : `${source.kind}:y=${source.year},#${source.position}`
+      : source.kind === 'asset' ? `asset:${source.id}`
+        : `${source.kind}:y=${source.year},#${source.position}`
     rows.push([
       `计税折旧 ${item.rule} ${identity} y=${item.year} / Depreciation ${item.rule} ${identity} y=${item.year}`,
       `${item.amount} ${ccy}`,

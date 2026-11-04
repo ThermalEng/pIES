@@ -905,6 +905,15 @@ export interface FinancialTaxCashVatRow {
   refund_claimed: string
   refund_arrived: string
   carry: string
+  receivable: string
+}
+
+export interface FinancialTaxCashVatRuleRow {
+  rule: string
+  pool: string
+  month: number
+  output_tax: string
+  deductible_input: string
 }
 
 export interface FinancialTaxCashRefund {
@@ -921,12 +930,15 @@ export interface FinancialTaxCashIncomeRow {
   loss_used: string
   loss_generated: string
   loss_expired: string
+  assessed: string
   tax: string
 }
 
 export interface FinancialTaxCashDepreciation {
   rule: string
-  base_from: { kind: 'upfront_capex_net'; finance_type: string } | { kind: 'maintenance_expense_net'; year: number; position: number }
+  base_from: { kind: 'upfront_capex_net'; finance_type: string }
+    | { kind: 'maintenance_expense_net'; year: number; position: number }
+    | { kind: 'asset'; id: string }
   year: number
   amount: string
 }
@@ -948,10 +960,50 @@ export interface FinancialTaxCashLossBalance {
 
 export interface FinancialTaxCash {
   vat: FinancialTaxCashVatRow[]
+  vat_rules: FinancialTaxCashVatRuleRow[]
   refunds: FinancialTaxCashRefund[]
   income: FinancialTaxCashIncomeRow[]
   depreciation: FinancialTaxCashDepreciation[]
   loss_balances: FinancialTaxCashLossBalance[]
+  derived: FinancialDerivedTax[]
+}
+
+export type FinancialTimePoint =
+  | { kind: 'financial_year'; year: number }
+  | { kind: 'tax_month'; month: number }
+
+/** Occurrence identity is (id, axis, period), not just the movement definition ID. */
+export interface FinancialCashMovement {
+  id: string
+  axis: 'financial_year' | 'tax_month'
+  period: number
+  direction: 'inflow' | 'outflow'
+  price_basis: 'tax_inclusive' | 'tax_exclusive'
+  raw: string
+  gross: string
+  deductible_input: string
+  net_basis: string
+  output_tax: string
+  net_revenue: string
+  payments: Array<{ at: FinancialTimePoint; ratio: string; amount: string }>
+  end_unpaid: string
+}
+
+export interface FinancialAsset {
+  id: string
+  basis: string
+  capitalized_at: FinancialTimePoint
+  available_from: number
+  book_values: Array<{ year: number; value: string }>
+}
+
+export interface FinancialDerivedTax {
+  rule: string
+  axis: 'financial_year' | 'tax_month'
+  period: number
+  assessed: string
+  payment_period: number
+  paid: string
 }
 
 export interface FinancialConstructionUnit {
@@ -1001,6 +1053,8 @@ export interface FinancialEvaluationBlock {
   construction_units: FinancialConstructionUnit[]
   cost_items: FinancialCostItem[]
   amounts: FinancialNamedAmount[]
+  cash_movements: FinancialCashMovement[]
+  assets: FinancialAsset[]
   annual_operation: FinancialEvaluationYear[]
   monthly_demand: FinancialMonthlyDemand[]
   tax_cash: FinancialTaxCash
