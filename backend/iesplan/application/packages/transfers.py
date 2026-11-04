@@ -756,6 +756,15 @@ def _parse_triplet_group(
         else:
             for d in validate_planning_domain(planning):
                 reasons.append(f"{label}规划配置领域校验失败: {d.params.get('detail') or d.code}")
+            if effective is not None:
+                from iesplan.assembly import check_amount_relations
+
+                amount_diags = []
+                check_amount_relations(planning.to_dict(), effective, amount_diags)
+                reasons.extend(
+                    f"{label}金额关系 {d.location.get('field')}: {d.params.get('detail')}"
+                    for d in amount_diags
+                )
     if reasons:
         raise ImportValidationError(reasons)
     result: dict = {}

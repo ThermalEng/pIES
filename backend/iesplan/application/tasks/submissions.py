@@ -682,10 +682,14 @@ def _assemble_snapshot(
     # 落在本次评价输入内(能力拒绝之前，先给可定位的输入错误)。复用闸门
     # 实际消费的不可变快照与已解析评价输入，不读当前财务行、不二次解析。
     _check_tax_evaluation_refs(evaluation, effective)
+    _check_amount_evaluation_refs(evaluation, artifact, effective)
     # 提交边界税务能力闸门(C3): 凭本次已解析所选生成器描述符能力核对，
     # 缺项明确 007，不静默按税前执行。复用执行引用解析带回的能力元组与
     # 闸门实际消费的不可变快照，不二次取目录、不二次解析。
     _check_construction_capabilities(
+        artifact, effective, calc_config.get("generator"), generator_capabilities
+    )
+    _check_amount_capabilities(
         artifact, effective, calc_config.get("generator"), generator_capabilities
     )
     _check_tax_capabilities(
@@ -1024,6 +1028,137 @@ def _check_tax_evaluation_refs(
                             "field": f"effective_finance.net_cashflows.{cf_id}.amount",
                         },
                     )
+
+
+def _check_amount_evaluation_refs(
+    evaluation: _EvaluationInput, artifact: Any, effective: EffectiveFinanceConfig,
+) -> None:
+    """Bind explicit finance periods and maintenance identities once on submit."""
+    from iesplan.assembly import consumed_amounts
+
+    doc = json.loads(artifact.canonical_text)
+    years = evaluation.construction_years + evaluation.operation_years
+    maintenance = {}
+    for expense in evaluation.maintenance_expenses:
+        maintenance[expense.year] = maintenance.get(expense.year, 0) + 1
+
+    def fail(field, reason, **params):
+        raise InvalidRequestError(
+            reason, code="TASK-REQ-015", params=params,
+            location={"object_type": "task", "field": field},
+        )
+
+    def period_check(period, field):
+        kind = period["kind"]
+        last = None
+        axis = kind
+        if kind in ("financial_year", "year_months"):
+            last = period["year"]
+            axis = "financial_year"
+        elif kind == "tax_month":
+            last = period["month"]
+        elif kind == "range":
+            last, axis = period["last"], period["axis"]
+        if last is not None and last != "current":
+            limit = years * (12 if axis == "tax_month" else 1)
+            if last > limit:
+                fail(field, "金额引用期间超出本次评价范围", period=last, limit=limit, axis=axis)
+
+    for constraint_id, constraint in sorted(doc["planning"].get("constraints", {}).items()):
+        if constraint["type"] != "amount_relation" or not constraint.get("enabled", True):
+            continue
+        for alias, ref in sorted(constraint["references"].items()):
+            period_check(ref["period"], f"planning.constraints.{constraint_id}.references.{alias}.period")
+    for amount_id in consumed_amounts(doc, effective):
+        amount = effective.amounts[amount_id]
+        for term_id, term in sorted(amount.terms.items()):
+            source = term.source.to_dict()
+            field = f"effective_finance.amounts.{amount_id}.terms.{term_id}.source"
+            if "period" in source:
+                period_check(source["period"], f"{field}.period")
+            if source["kind"] == "maintenance" and maintenance.get(source["year"], 0) < source["position"]:
+                fail(field, "金额引用的维护项在本次评价清单中不存在",
+                     year=source["year"], position=source["position"])
+
+
+def _check_amount_capabilities(
+    artifact: Any, effective: EffectiveFinanceConfig,
+    generator_ref: object, capabilities: tuple[str, ...],
+) -> None:
+    """Require complete execution only for actually consumed named relations."""
+    from iesplan.assembly import consumed_amounts
+
+    doc = json.loads(artifact.canonical_text)
+    required: dict[str, list[str]] = {}
+
+    def require(marker, field):
+        required.setdefault(marker, []).append(field)
+
+    def unsupported(source, field):
+        raise InvalidRequestError(
+            "本切片尚未交付该来源的完整金额引用、冻结与同次封存出口",
+            code="TASK-REQ-007",
+            params={
+                "generator": generator_ref, "reason": "unimplemented_amount_source",
+                "source": source, "fields": [field],
+            },
+            location={"object_type": "task", "field": field},
+        )
+
+    for instance, binding in sorted(doc["finance_binding"]["instances"].items()):
+        if binding["type"] != "costed":
+            continue
+        ft = effective.finance_types[binding["finance_type"]]
+        components = (
+            ("upfront_capex", "annual_fixed_om", "period_variable_om")
+            if doc["devices"][instance]["asset_origin"] == "new" else ("period_variable_om",)
+        )
+        for component in components:
+            entry = getattr(ft, component)
+            if entry is not None and entry.items:
+                field = f"finance_binding.instances.{instance}"
+                require("finance.named_items", field)
+                if component == "annual_fixed_om" and any(
+                    item.fixed is not None for item in entry.items.values()
+                ):
+                    require("finance.affine_annual_om", field)
+    for constraint_id, constraint in sorted(doc["planning"].get("constraints", {}).items()):
+        if constraint["type"] == "amount_relation" and constraint.get("enabled", True):
+            field = f"planning.constraints.{constraint_id}"
+            require("finance.amount_constraints", field)
+            for alias, ref in sorted(constraint["references"].items()):
+                if ref["kind"] == "baseline":
+                    unsupported(ref, f"{field}.references.{alias}")
+    for amount_id in consumed_amounts(doc, effective):
+        amount = effective.amounts[amount_id]
+        field = f"effective_finance.amounts.{amount_id}"
+        require("finance.amount_references", field)
+        for term_id, term in sorted(amount.terms.items()):
+            source = term.source.to_dict()
+            source_field = f"{field}.terms.{term_id}.source"
+            if source["kind"] in ("tax", "baseline"):
+                unsupported(source, source_field)
+            marker = {
+                "system_quantity": "modeling.system_equations",
+                "construction_unit": "planning.construction_activation",
+                "movement": "finance.cash_movements",
+                "asset": "finance.assets",
+            }.get(source["kind"])
+            if marker:
+                require(marker, source_field)
+    if required:
+        required["finance.financial_facts"] = sorted({
+            field for fields in required.values() for field in fields
+        })
+    missing = sorted(set(required).difference(capabilities))
+    if missing:
+        fields = sorted({field for marker in missing for field in required[marker]})
+        raise InvalidRequestError(
+            "所选生成器缺命名金额关系或其来源及同次恢复能力，不允许静默忽略",
+            code="TASK-REQ-007",
+            params={"generator": generator_ref, "missing_capabilities": missing, "fields": fields},
+            location={"object_type": "task", "field": fields[0]},
+        )
 
 
 def _check_construction_capabilities(

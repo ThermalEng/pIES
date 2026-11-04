@@ -845,7 +845,7 @@ class _DocBuilder:
                         )
                     if entry.get("enabled") is not None:
                         self._bool(entry["enabled"], f"{field}.constraints.{const_name}.enabled")
-                    if kind == "step_relation":
+                    if kind in ("step_relation", "amount_relation"):
                         ref_field = f"{field}.constraints.{const_name}.references"
                         refs = self._require_map(entry.get("references"), ref_field)
                         if refs is not None:
@@ -856,13 +856,25 @@ class _DocBuilder:
                                     self._diag(ASM_SYN_FIELD, f"{ref_field}.{alias}", {"reason": "invalid_alias"})
                                 detail = self._require_map(target, f"{ref_field}.{alias}")
                                 if detail is not None:
-                                    for key in ("instance", "interface"):
+                                    ref_keys = (
+                                        ("instance", "interface") if kind == "step_relation" else ("kind", "id")
+                                    )
+                                    for key in ref_keys:
                                         self._str(detail, key, f"{ref_field}.{alias}.{key}", required=True)
+                                    if kind == "amount_relation":
+                                        self._require_map(detail.get("period"), f"{ref_field}.{alias}.period")
+                                    allowed_refs = (*ref_keys, "period") if kind == "amount_relation" else ref_keys
                                     for key in detail:
-                                        if key not in ("instance", "interface"):
-                                            self._diag(ASM_SYN_PARSE, f"{ref_field}.{alias}.{key}", {"reason": "unknown_key", "key": key})
+                                        if key not in allowed_refs:
+                                            self._diag(
+                                                ASM_SYN_PARSE, f"{ref_field}.{alias}.{key}",
+                                                {"reason": "unknown_key", "key": key},
+                                            )
                     for key in entry:
-                        allowed = ("type", "expression", "enabled", "references") if kind == "step_relation" else ("type", "expression", "enabled")
+                        allowed = (
+                            ("type", "expression", "enabled", "references")
+                            if kind in ("step_relation", "amount_relation") else ("type", "expression", "enabled")
+                        )
                         if key not in allowed:
                             self._diag(
                                 ASM_SYN_PARSE, f"{field}.constraints.{const_name}.{key}",

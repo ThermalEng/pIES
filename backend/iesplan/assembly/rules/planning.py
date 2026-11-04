@@ -87,9 +87,10 @@ def _produced_components(
         comp = getattr(ft_entry, component)
         if comp is None:
             continue
-        if comp.linear is None:
-            produced.add(component)
-        elif set(comp.linear) <= set(mapped):
+        needed = set(comp.linear or {})
+        for item in comp.items.values():
+            needed.update(item.linear or {})
+        if needed <= mapped:
             produced.add(component)
     return produced
 
@@ -431,7 +432,7 @@ def check_planning(
                 {"detail": str(exc)},
             )
             continue
-        if constraint.type == "step_relation":
+        if constraint.type in ("step_relation", "amount_relation"):
             continue  # 引用、[t] 和量纲由本模块下方公共逐步关系闸门处理。
         if not constraint.enabled:
             continue
@@ -449,6 +450,8 @@ def check_planning(
 
     from iesplan.assembly.rules.step import check_step_relations
     check_step_relations(planning, devices, registry, diags)
+    from iesplan.assembly.amounts import check_amount_relations
+    check_amount_relations(planning, snapshot, diags)
 
 
 __all__ = ["check_planning", "finance_identifiers"]

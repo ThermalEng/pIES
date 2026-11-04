@@ -809,6 +809,17 @@ def _save_planning_config(
             code="PROJ-PLAN-002",
             params={"detail": "项目尚未生成 EffectiveFinanceConfig"},
         )
+    if any(c.type == "amount_relation" for c in config.constraints.values()):
+        from iesplan.assembly import check_amount_relations
+
+        _, effective = _current_effective(db, project)
+        amount_diags = []
+        check_amount_relations(config.to_dict(), effective, amount_diags)
+        if amount_diags:
+            raise InvalidRequestError(
+                "金额关系引用或表达式非法", code="PROJ-PLAN-003",
+                params=_diag_params(amount_diags),
+            )
     if project.planning_revision != expected_revision:
         raise ConflictError(
             "规划配置已在其他会话中修改, 请基于最新 revision 重试",

@@ -41,7 +41,7 @@ _COMPONENTS_NEW: tuple[str, ...] = ("upfront_capex", "annual_fixed_om", "period_
 _COMPONENTS_EXISTING: tuple[str, ...] = ("period_variable_om",)
 
 
-def _add_dims(left: Mapping, right: Mapping) -> dict:
+def add_dimensions(left: Mapping, right: Mapping) -> dict:
     """量纲多重集加法(指数可正可负；零指数删除)。
 
     注意：collections.Counter 的 + 运算符丢弃零与负计数，不可用于量纲运算。
@@ -172,7 +172,7 @@ def resolve_finance_snapshot(
     return snapshot
 
 
-def _normalized_driver_dims(target_unit: str, aggregation: str | None) -> dict:
+def driver_dimensions(target_unit: str, aggregation: str | None) -> dict:
     """归一化 driver 量纲。
 
     scalar 取单位本身；integrate_positive 将功率序列累积为能量
@@ -183,7 +183,7 @@ def _normalized_driver_dims(target_unit: str, aggregation: str | None) -> dict:
     if aggregation == "integrate_positive":
         if dims == {_DIM_POWER: 1}:
             return {_DIM_ENERGY: 1}
-        dims = _add_dims(dims, {_DIM_TIME: 1})
+        dims = add_dimensions(dims, {_DIM_TIME: 1})
     return dims
 
 
@@ -191,7 +191,7 @@ def _expected_dims(component: str, currency: str) -> dict:
     """分量期望量纲: upfront/period → currency；annual → currency/年。"""
     expected = dict(dims_of(currency))
     if component == "annual_fixed_om":
-        expected = _add_dims(expected, {_DIM_TIME: -1})
+        expected = add_dimensions(expected, {_DIM_TIME: -1})
     return expected
 
 
@@ -203,10 +203,11 @@ def linear_drivers(ft_entry: FinanceTypeEntry) -> dict[str, list[tuple[str, str]
     out: dict[str, list[tuple[str, str]]] = {}
     for component in ("upfront_capex", "annual_fixed_om", "period_variable_om"):
         comp: CostComponent | None = getattr(ft_entry, component)
-        if comp is None or comp.linear is None:
+        if comp is None:
             continue
-        for driver, cost in comp.linear.items():
-            out.setdefault(driver, []).append((component, cost.unit_cost.unit))
+        for leaf in (comp, *comp.items.values()):
+            for driver, cost in (leaf.linear or {}).items():
+                out.setdefault(driver, []).append((component, cost.unit_cost.unit))
     return out
 
 
@@ -222,8 +223,9 @@ def required_driver_names(asset_origin: str, ft_entry: FinanceTypeEntry) -> set[
     needed: set[str] = set()
     for component in required_components(asset_origin):
         comp: CostComponent | None = getattr(ft_entry, component)
-        if comp is not None and comp.linear is not None:
-            needed.update(comp.linear)
+        if comp is not None:
+            for leaf in (comp, *comp.items.values()):
+                needed.update(leaf.linear or {})
     return needed
 
 
@@ -299,6 +301,15 @@ def _check_cost_occurrence(
         if comp.linear:
             leaves.update(f"{component}.linear.{driver}" for driver in comp.linear)
         available[component] = leaves
+        for item_id, item in comp.items.items():
+            prefix = f"{component}.items.{item_id}"
+            item_leaves = set()
+            if item.fixed is not None:
+                item_leaves.add(f"{prefix}.fixed")
+            if item.linear:
+                item_leaves.update(f"{prefix}.linear.{driver}" for driver in item.linear)
+            available[prefix] = item_leaves
+            leaves.update(item_leaves)
 
     construction_units = (doc.get("planning") or {}).get("construction_units") or {}
     used_leaves: set[str] = set()
@@ -467,7 +478,7 @@ def _check_driver_target(
         aggregation = target.get("aggregation")
         target_unit = ispec.unit
     try:
-        driver_dims = _normalized_driver_dims(target_unit, aggregation)
+        driver_dims = driver_dimensions(target_unit, aggregation)
     except Exception as exc:
         _fail(
             diags, field, "driver_unit_unrecognized",
@@ -481,7 +492,7 @@ def _check_driver_target(
         # 走唯一 cost_unit_unrecognized 路径, 不吞错继续、不加新校核。
         try:
             rate_dims = dims_of(cost_unit)
-            product = _add_dims(driver_dims, rate_dims)
+            product = add_dimensions(driver_dims, rate_dims)
         except Exception as exc:
             _cost_fail(
                 diags, field, "cost_unit_unrecognized",
@@ -531,6 +542,8 @@ def _check_driver_target(
 
 
 __all__ = [
+    "add_dimensions",
+    "driver_dimensions",
     "check_finance_binding",
     "linear_drivers",
     "required_components",

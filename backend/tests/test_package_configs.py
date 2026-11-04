@@ -391,6 +391,64 @@ def test_export_and_import_roundtrip_with_configs(client: TestClient, db: Sessio
     assert summary_configs["planning"]["present"] is True
 
 
+def test_named_amounts_and_local_constraint_survive_project_package(client: TestClient, db: Session) -> None:
+    """F1 named identities are preserved, not replaced by exported numeric values."""
+    from copy import deepcopy
+
+    owner = make_user(db, "amount_pkg_owner")
+    importer = make_user(db, "amount_pkg_reader")
+    pid = _create_project(client, owner)
+    payload = deepcopy(PROFILE_PAYLOAD)
+    payload["profile"]["id"] = "named-amount-package"
+    payload["finance_types"]["pv_system"]["annual_fixed_om"]["items"] = {
+        "service": {"fixed": {"value": "10", "unit": "CNY/a"}},
+    }
+    payload["amounts"] = {
+        "budget": {
+            "unit": "CNY", "axis": "financial_year",
+            "constant": {"value": "6", "unit": "CNY"}, "terms": {},
+        },
+    }
+    _register_profile(client, owner, payload)
+    _set_profile(client, owner, pid, "named-amount-package")
+    planning = _planning_payload()
+    planning["constraints"] = {
+        "budget_cap": {
+            "type": "amount_relation", "enabled": True,
+            "references": {"limit": {
+                "kind": "amount", "id": "budget", "period": {"kind": "financial_year", "year": 2},
+            }},
+            "expression": "limit <= 7 CNY",
+        },
+    }
+    _put_planning(client, owner, pid, planning, None)
+    raw = _export_zip(client, owner, pid)
+    imported, _ = _import_new_project(client, importer, raw)
+    response = client.get(f"/api/projects/{imported}/planning-config", headers=_h(client, importer))
+    assert response.status_code == 200
+    assert response.json()["planning_config"]["constraints"] == planning["constraints"]
+    response = client.get(f"/api/projects/{imported}/effective-finance", headers=_h(client, importer))
+    assert response.status_code == 200
+    restored = response.json()["effective_finance_config"]
+    assert restored["amounts"] == payload["amounts"]
+    assert restored["finance_types"]["pv_system"]["annual_fixed_om"]["items"] == (
+        payload["finance_types"]["pv_system"]["annual_fixed_om"]["items"]
+    )
+
+    # The package upload boundary shares the planning-save amount unit check.
+    from iesplan.core.yamlmini import load as yaml_load
+
+    with zipfile.ZipFile(io.BytesIO(raw)) as archive:
+        manifest = json.loads(archive.read("manifest.json"))
+        path = manifest["files"]["configs"]["planning_config"]
+        changed = yaml_load(archive.read(path).decode())
+    changed["constraints"]["budget_cap"]["expression"] = "limit <= 7 kWh"
+    invalid = _rezip_mutate(raw, {path: yaml_dump(changed).encode()})
+    with pytest.raises(package_domain.ImportValidationError) as error:
+        packages_uc.propose_import(db, importer, invalid)
+    assert any("budget_cap.expression" in reason for reason in error.value.reasons)
+
+
 def test_export_without_configs(client: TestClient, db: Session) -> None:
     """无配置项目: 包不含 YAML; 导入后无配置(不静默默认)。"""
     owner = make_user(db, "none_owner")
