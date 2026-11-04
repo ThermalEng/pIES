@@ -17,6 +17,7 @@ from fractions import Fraction
 from typing import Any
 
 from iesplan.computation.generators.compiler_ir import (
+    AmountConstraintRule,
     BoundFact,
     BusBalance,
     CapacityLimit,
@@ -40,7 +41,6 @@ from iesplan.computation.generators.linear import (
 )
 from iesplan.computation.generators.templates import bind_technical, compile_technical
 from iesplan.modeling import BinaryNode, RefNode, UnaryNode
-
 
 _TOLERANCE = 1e-12
 
@@ -364,8 +364,12 @@ class BoundInferenceEngine:
                         terms, val.constant, "eq", op.source, op.identity,
                         axis=op.domain.kind, index=0,
                     )
-            elif isinstance(payload, PlanningRule):
-                template = payload.template
+            elif isinstance(payload, (PlanningRule, AmountConstraintRule)):
+                if isinstance(payload, AmountConstraintRule) and payload.bound is None:
+                    # Conditional money/peak relations remain in the exact model;
+                    # only an already affine binding contributes proven bounds.
+                    continue
+                template = payload.bound if isinstance(payload, AmountConstraintRule) else payload.template
                 for t in range(count):
                     if self.checkpoint is not None:
                         self.checkpoint()
@@ -373,7 +377,7 @@ class BoundInferenceEngine:
                     for (sym, offset), coeff in template.expression.terms:
                         if coeff == 0:
                             continue
-                        if payload.step and sym in payload.references:
+                        if isinstance(payload, PlanningRule) and payload.step and sym in payload.references:
                             ref = payload.references[sym]
                             col = self._column(ref["instance"], ref["interface"], t + offset)
                         elif op.source.instance_id:

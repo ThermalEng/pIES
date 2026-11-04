@@ -57,7 +57,7 @@ _DIMLESS_UNIT = "1"
 
 CASHFLOW_DIRECTIONS: Final[tuple[str, ...]] = ("inflow", "outflow")
 CASHFLOW_AT_KINDS: Final[tuple[str, ...]] = ("evaluation_end", "financial_year")
-CASHFLOW_AMOUNT_KINDS: Final[tuple[str, ...]] = ("fixed", "source_share")
+CASHFLOW_AMOUNT_KINDS: Final[tuple[str, ...]] = ("fixed", "source_share", "amount_ref")
 BASE_FROM_KINDS: Final[tuple[str, ...]] = ("upfront_capex_net", "maintenance_expense_net")
 
 #: 诊断码(登记于 core.diagnostics NEW_DIAG_CODES)。
@@ -196,8 +196,8 @@ class LinearCost:
         return cls(unit_cost=Money.from_dict(mapping["unit_cost"], field="unit_cost"))
 
 @dataclass(frozen=True, slots=True)
-class CostComponent:
-    """一个时间口径成本分量: ``fixed`` 与/或 ``linear``(至少一个; 金额非负)。"""
+class CostItem:
+    """具有独立身份的成本明细；driver 是计量来源，不是费用身份。"""
 
     fixed: Money | None = None
     linear: Mapping[str, LinearCost] | None = None
@@ -217,7 +217,7 @@ class CostComponent:
         return out
 
     @classmethod
-    def from_dict(cls, mapping: object) -> CostComponent:
+    def from_dict(cls, mapping: object) -> CostItem:
         if not isinstance(mapping, Mapping):
             raise FinanceTripletError("成本分量必须是字典")
         unknown = set(mapping) - {"fixed", "linear"}
@@ -240,6 +240,55 @@ class CostComponent:
         if fixed is None and not linear:
             raise FinanceTripletError("成本分量必须含 fixed 或 linear 之一")
         return cls(fixed=fixed, linear=linear)
+
+
+@dataclass(frozen=True, slots=True)
+class CostComponent:
+    """原 fixed/linear 与命名 items 按加法组成同一时间口径分量。"""
+
+    fixed: Money | None = None
+    linear: Mapping[str, LinearCost] | None = None
+    items: Mapping[str, CostItem] = field(default_factory=lambda: MappingProxyType({}))
+
+    def __post_init__(self) -> None:
+        if self.fixed is None and not self.linear and not self.items:
+            raise FinanceTripletError("成本分量必须含 fixed、linear 或非空 items")
+        if self.linear is not None:
+            object.__setattr__(self, "linear", MappingProxyType(dict(sorted(self.linear.items()))))
+        object.__setattr__(self, "items", MappingProxyType(dict(sorted(self.items.items()))))
+
+    def to_dict(self) -> dict:
+        out: dict = {}
+        if self.fixed is not None:
+            out["fixed"] = self.fixed.to_dict()
+        if self.linear:
+            out["linear"] = {key: value.to_dict() for key, value in self.linear.items()}
+        if self.items:
+            out["items"] = {key: value.to_dict() for key, value in self.items.items()}
+        return out
+
+    @classmethod
+    def from_dict(cls, mapping: object) -> CostComponent:
+        if not isinstance(mapping, Mapping):
+            raise FinanceTripletError("成本分量必须是字典")
+        unknown = set(mapping) - {"fixed", "linear", "items"}
+        if unknown:
+            raise FinanceTripletError(f"成本分量未知字段: {sorted(unknown)}")
+        basic = {key: value for key, value in mapping.items() if key != "items"}
+        base = CostItem.from_dict(basic) if basic else None
+        raw_items = mapping.get("items", {})
+        if not isinstance(raw_items, Mapping):
+            raise FinanceTripletError("成本分量 items 必须为映射，禁止 null")
+        items: dict[str, CostItem] = {}
+        for item_id, item in raw_items.items():
+            item_id = _validate_local_id(item_id, "items.item_id")
+            try:
+                items[item_id] = CostItem.from_dict(item)
+            except FinanceTripletError as exc:
+                raise FinanceTripletError(f"items.{item_id}: {exc}") from exc
+        return cls(fixed=base.fixed if base else None,
+                   linear=base.linear if base else None, items=items)
+
 
 @dataclass(frozen=True, slots=True)
 class FinanceTypeEntry:
@@ -288,6 +337,10 @@ class FinanceTypeEntry:
                         f"annual_fixed_om; {comp} 只有 linear)"
                     )
             kwargs[comp] = CostComponent.from_dict(mapping[comp])
+            if comp == "period_variable_om" and any(
+                item.fixed is not None for item in kwargs[comp].items.values()
+            ):
+                raise FinanceTripletError(f"{comp}.items 不允许 fixed")
         return cls(**kwargs)
 
 # ---------------------------------------------------------------------------
@@ -1004,7 +1057,16 @@ class SourceShareCashflowAmount:
         }
 
 
-CashflowAmount = FixedCashflowAmount | SourceShareCashflowAmount
+@dataclass(frozen=True, slots=True)
+class AmountRefCashflowAmount:
+    id: str
+    kind: str = "amount_ref"
+
+    def to_dict(self) -> dict:
+        return {"kind": self.kind, "id": self.id}
+
+
+CashflowAmount = FixedCashflowAmount | SourceShareCashflowAmount | AmountRefCashflowAmount
 
 
 @dataclass(frozen=True, slots=True)
@@ -1061,6 +1123,9 @@ def _parse_cashflow_amount(mapping: object, currency: str, field: str) -> Cashfl
             raise FinanceTripletError(f"{field}.ratio 比例禁止负数: {ratio.value}")
         base_from = _parse_amount_base_from(mapping["base_from"], f"{field}.base_from")
         return SourceShareCashflowAmount(base_from=base_from, ratio=ratio)
+    elif kind == "amount_ref":
+        _require_keys(mapping, {"kind", "id"}, field)
+        return AmountRefCashflowAmount(id=_validate_local_id(mapping["id"], f"{field}.id"))
     else:
         raise FinanceTripletError(
             f"{field}.kind 非法: {kind!r} (须为 'fixed' 或 'source_share')"
@@ -1419,7 +1484,39 @@ def _expand_target_leaves(
     支持两级 (<ft>.<comp>)、三级 (<ft>.<comp>.fixed) 与四级 (<ft>.<comp>.linear.<driver>)。
     返回 (规范目标路径, 叶子项集合)。
     """
+    return path, set(cost_target_leaves(path, finance_types, allowed_components, field=field))
+
+
+def cost_target_leaves(
+    path: str,
+    finance_types: Mapping[str, FinanceTypeEntry],
+    allowed_components: tuple[str, ...] = FINANCE_COMPONENTS,
+    *,
+    field: str = "成本引用",
+) -> tuple[str, ...]:
+    """公开成本范围解析；返回覆盖的真实叶子，保持基础项与命名项身份。"""
+    if not isinstance(path, str):
+        raise FinanceTripletError(f"{field} 分量路径必须为字符串")
     parts = path.split(".")
+    if len(parts) >= 4 and parts[2] == "items":
+        ft_name, comp_name, _, item_id, *suffix = parts
+        if ft_name not in finance_types or comp_name not in allowed_components:
+            raise FinanceTripletError(f"{field} 财务类别或分量不存在: {path!r}")
+        comp = getattr(finance_types[ft_name], comp_name)
+        if comp is None or item_id not in comp.items:
+            raise FinanceTripletError(f"{field} 命名成本不存在: {path!r}")
+        item = comp.items[item_id]
+        prefix = ".".join(parts[:4])
+        leaves = set()
+        if item.fixed is not None:
+            leaves.add(f"{prefix}.fixed")
+        for driver in item.linear or {}:
+            leaves.add(f"{prefix}.linear.{driver}")
+        if suffix:
+            if path not in leaves:
+                raise FinanceTripletError(f"{field} 命名成本叶子不存在: {path!r}")
+            return (path,)
+        return tuple(sorted(leaves))
     if len(parts) == 2:
         ft_name, comp_name = parts
         if ft_name not in finance_types:
@@ -1435,9 +1532,13 @@ def _expand_target_leaves(
         if comp.linear:
             for driver in sorted(comp.linear):
                 leaves.add(f"{ft_name}.{comp_name}.linear.{driver}")
+        for item_id in comp.items:
+            leaves.update(cost_target_leaves(
+                f"{path}.items.{item_id}", finance_types, allowed_components, field=field
+            ))
         if not leaves:
             raise FinanceTripletError(f"{field} 引用的成本分量无任何子项: {path!r}")
-        return path, leaves
+        return tuple(sorted(leaves))
     elif len(parts) == 3 and parts[2] == "fixed":
         ft_name, comp_name, _ = parts
         if ft_name not in finance_types:
@@ -1447,7 +1548,7 @@ def _expand_target_leaves(
         comp = getattr(finance_types[ft_name], comp_name)
         if comp is None or comp.fixed is None:
             raise FinanceTripletError(f"{field} 引用的 fixed 子项不存在: {path!r}")
-        return path, {path}
+        return (path,)
     elif len(parts) == 4 and parts[2] == "linear":
         ft_name, comp_name, _, driver = parts
         if ft_name not in finance_types:
@@ -1457,7 +1558,7 @@ def _expand_target_leaves(
         comp = getattr(finance_types[ft_name], comp_name)
         if comp is None or comp.linear is None or driver not in comp.linear:
             raise FinanceTripletError(f"{field} 引用的 linear driver 子项不存在: {path!r}")
-        return path, {path}
+        return (path,)
     else:
         raise FinanceTripletError(f"{field} 分量路径非法: {path!r}")
 
@@ -1685,6 +1786,9 @@ def _check_cost_units(currency: str, finance_type: str, component: str, cost: Co
                     f"{finance_type}.{component}.linear.{driver} unit_cost 单位 {unit!r} "
                     f"必须以 {currency_prefix} 开头(币种前缀)"
                 )
+    for item_id, item in cost.items.items():
+        _check_cost_units(currency, f"{finance_type}.items.{item_id}", component,
+                          CostComponent(fixed=item.fixed, linear=item.linear))
 
 def _check_price_unit(currency: str, price_id: str, price: EnergyPrice) -> None:
     """能源价格单位量纲 = currency / (energy unit); 无法在 Profile 单文件
@@ -1718,6 +1822,459 @@ def _check_price_unit(currency: str, price_id: str, price: EnergyPrice) -> None:
                 )
 
 # ---------------------------------------------------------------------------
+# 命名仿射金额与明确期间引用（finance-relations.md）
+# ---------------------------------------------------------------------------
+
+AMOUNT_AXES: Final[tuple[str, ...]] = ("scalar", "financial_year", "tax_month")
+AMOUNT_BASES: Final[tuple[str, ...]] = (
+    "raw", "gross", "deductible_input", "net_basis", "net_revenue",
+)
+
+
+@dataclass(frozen=True, slots=True)
+class AmountPeriod:
+    kind: str
+    year: int | str | None = None
+    month: int | None = None
+    axis: str | None = None
+    first: int | None = None
+    last: int | None = None
+
+    def to_dict(self) -> dict:
+        return {key: value for key, value in (
+            ("kind", self.kind), ("year", self.year), ("month", self.month),
+            ("axis", self.axis), ("first", self.first), ("last", self.last),
+        ) if value is not None}
+
+
+def parse_amount_period(mapping: object, *, field: str = "period") -> AmountPeriod:
+    """公开输入解析器；项目 E 范围在取得评价上下文的公开边界绑定。"""
+    if not isinstance(mapping, Mapping):
+        raise FinanceTripletError(f"{field} 必须为显式期间映射")
+    kind = mapping.get("kind")
+    if kind in ("scalar", "current"):
+        _require_keys(mapping, {"kind"}, field)
+        return AmountPeriod(kind=kind)
+    if kind == "financial_year":
+        _require_keys(mapping, {"kind", "year"}, field)
+        return AmountPeriod(kind=kind, year=_nonneg_int(mapping["year"], f"{field}.year"))
+    if kind == "tax_month":
+        _require_keys(mapping, {"kind", "month"}, field)
+        return AmountPeriod(kind=kind, month=_pos_int(mapping["month"], f"{field}.month"))
+    if kind == "year_months":
+        _require_keys(mapping, {"kind", "year"}, field)
+        year = mapping["year"]
+        if year != "current":
+            year = _pos_int(year, f"{field}.year")
+        return AmountPeriod(kind=kind, year=year)
+    if kind == "range":
+        _require_keys(mapping, {"kind", "axis", "first", "last"}, field)
+        axis = mapping["axis"]
+        if axis not in ("financial_year", "tax_month"):
+            raise FinanceTripletError(f"{field}.axis 必须为 financial_year/tax_month")
+        first = _pos_int(mapping["first"], f"{field}.first")
+        last = _pos_int(mapping["last"], f"{field}.last")
+        if first > last:
+            raise FinanceTripletError(f"{field}.first 不得晚于 last")
+        return AmountPeriod(kind=kind, axis=axis, first=first, last=last)
+    raise FinanceTripletError(f"{field}.kind 非法: {kind!r}")
+
+
+@dataclass(frozen=True, slots=True)
+class ReferenceScope:
+    kind: str
+    instances: tuple[str, ...] = ()
+
+    def to_dict(self) -> dict:
+        if self.kind == "instances":
+            return {"kind": self.kind, "instances": list(self.instances)}
+        return {"kind": self.kind}
+
+
+def _reference_id(value: object, field: str) -> str:
+    if not isinstance(value, str) or not _PROFILE_ID_RE.fullmatch(value) or "__" in value:
+        raise FinanceTripletError(f"{field} 必须为明确稳定标识: {value!r}")
+    return value
+
+
+def _reference_ids(value: object, field: str) -> tuple[str, ...]:
+    if not isinstance(value, list) or not value:
+        raise FinanceTripletError(f"{field} 必须为非空标识列表")
+    out = tuple(_reference_id(item, field) for item in value)
+    if len(set(out)) != len(out):
+        raise FinanceTripletError(f"{field} 不允许重复标识")
+    return tuple(sorted(out))
+
+
+def _parse_reference_scope(mapping: object, field: str) -> ReferenceScope:
+    if not isinstance(mapping, Mapping):
+        raise FinanceTripletError(f"{field} 必须为明确实例范围")
+    kind = mapping.get("kind")
+    if kind == "all_new_instances":
+        _require_keys(mapping, {"kind"}, field)
+        return ReferenceScope(kind=kind)
+    if kind == "instances":
+        _require_keys(mapping, {"kind", "instances"}, field)
+        return ReferenceScope(kind=kind, instances=_reference_ids(mapping["instances"], field))
+    raise FinanceTripletError(f"{field}.kind 非法: {kind!r}")
+
+
+@dataclass(frozen=True, slots=True)
+class TaxReferenceSource:
+    kind: str
+    id: str
+
+    def to_dict(self) -> dict:
+        return {"kind": self.kind, "id": self.id}
+
+
+@dataclass(frozen=True, slots=True)
+class AmountReference:
+    """结构明确的引用联合；每个 kind 的合法字段由公开解析器限定。"""
+
+    kind: str
+    period: AmountPeriod | None = None
+    finance_type: str | None = None
+    driver: str | None = None
+    scope: ReferenceScope | None = None
+    path: str | None = None
+    basis: str | None = None
+    price: str | None = None
+    charge: str | None = None
+    bindings: tuple[str, ...] | None = None
+    year: int | None = None
+    position: int | None = None
+    id: str | None = None
+    block: str | None = None
+    variable: str | None = None
+    aggregation: str | None = None
+    unit_ref: str | None = None
+    measure: str | None = None
+    source: TaxReferenceSource | None = None
+
+    def to_dict(self) -> dict:
+        out: dict = {"kind": self.kind}
+        for key in (
+            "period", "finance_type", "driver", "scope", "path", "basis", "price", "charge",
+            "bindings", "year", "position", "id", "block", "variable", "aggregation",
+            "unit_ref", "measure", "source",
+        ):
+            value = getattr(self, key)
+            if value is not None:
+                out[key] = (value.to_dict() if hasattr(value, "to_dict")
+                            else list(value) if isinstance(value, tuple) else value)
+        return out
+
+
+_AMOUNT_REFERENCE_FIELDS: Final[Mapping[str, frozenset[str]]] = MappingProxyType({
+    "driver": frozenset({"finance_type", "driver", "scope", "period"}),
+    "system_quantity": frozenset({"block", "variable", "aggregation", "period"}),
+    "construction_unit": frozenset({"unit_ref", "period"}),
+    "cost": frozenset({"path", "scope", "basis", "period"}),
+    "tariff": frozenset({"price", "bindings", "basis", "period"}),
+    "demand": frozenset({"charge", "bindings", "basis", "period"}),
+    "maintenance": frozenset({"year", "position", "basis"}),
+    "amount": frozenset({"id", "period"}),
+    "movement": frozenset({"id", "basis", "period"}),
+    "asset": frozenset({"id", "measure", "period"}),
+    "tax": frozenset({"source", "measure", "period"}),
+    "baseline": frozenset({"id", "period"}),
+})
+
+
+def parse_amount_reference(mapping: object, *, field: str = "source") -> AmountReference:
+    """解析完整引用形状；文件内实体和轴关系在金额目录公开输入边界核对。"""
+    if not isinstance(mapping, Mapping):
+        raise FinanceTripletError(f"{field} 必须为来源引用映射")
+    kind = mapping.get("kind")
+    if not isinstance(kind, str) or kind not in _AMOUNT_REFERENCE_FIELDS:
+        raise FinanceTripletError(f"{field}.kind 非法: {kind!r}")
+    _require_keys(mapping, {"kind", *_AMOUNT_REFERENCE_FIELDS[kind]}, field)
+    values: dict = {"kind": kind}
+    for key in sorted(_AMOUNT_REFERENCE_FIELDS[kind]):
+        raw = mapping[key]
+        if key == "period":
+            values[key] = parse_amount_period(raw, field=f"{field}.period")
+        elif key == "scope":
+            values[key] = _parse_reference_scope(raw, f"{field}.scope")
+        elif key == "bindings":
+            values[key] = _reference_ids(raw, f"{field}.bindings")
+        elif key in ("year", "position"):
+            values[key] = _pos_int(raw, f"{field}.{key}")
+        elif key == "basis":
+            if raw not in AMOUNT_BASES:
+                raise FinanceTripletError(f"{field}.basis 非法: {raw!r}")
+            if kind in ("cost", "demand", "maintenance") and raw == "net_revenue":
+                raise FinanceTripletError(f"{field}.basis 支出来源不允许 net_revenue")
+            values[key] = raw
+        elif key == "aggregation":
+            if raw not in ("integrate_positive", "sum_positive"):
+                raise FinanceTripletError(f"{field}.aggregation 必须为明确非负聚合")
+            values[key] = raw
+        elif key == "source":
+            if not isinstance(raw, Mapping):
+                raise FinanceTripletError(f"{field}.source 必须为税额身份")
+            _require_keys(raw, {"kind", "id"}, f"{field}.source")
+            if raw["kind"] not in ("rule", "pool"):
+                raise FinanceTripletError(f"{field}.source.kind 必须为 rule/pool")
+            values[key] = TaxReferenceSource(
+                kind=raw["kind"], id=_validate_local_id(raw["id"], f"{field}.source.id")
+            )
+        elif key == "path":
+            if not isinstance(raw, str) or not raw:
+                raise FinanceTripletError(f"{field}.path 必须为明确成本路径")
+            values[key] = raw
+        elif kind == "system_quantity" and key in ("block", "variable"):
+            # Foreign identities belong to the system-equation contract, not
+            # finance's local-ID namespace. The project boundary binds them
+            # to the actual accepted block and variable (including legal __).
+            if not isinstance(raw, str) or not raw:
+                raise FinanceTripletError(f"{field}.{key} 必须为明确系统量标识")
+            values[key] = raw
+        else:
+            values[key] = _reference_id(raw, f"{field}.{key}")
+    ref = AmountReference(**values)
+    if ref.kind == "construction_unit" and ref.period.kind != "scalar":
+        raise FinanceTripletError(f"{field}.period 建设状态只接受 scalar")
+    if ref.kind == "asset":
+        if ref.measure not in ("basis", "depreciation", "book_value"):
+            raise FinanceTripletError(f"{field}.measure 非法资产量")
+        if ref.measure == "basis" and ref.period.kind != "scalar":
+            raise FinanceTripletError(f"{field}.period 资产基础只接受 scalar")
+    return ref
+
+
+@dataclass(frozen=True, slots=True)
+class AmountTerm:
+    coefficient: Money
+    source: AmountReference
+
+    def to_dict(self) -> dict:
+        return {"coefficient": self.coefficient.to_dict(), "source": self.source.to_dict()}
+
+
+@dataclass(frozen=True, slots=True)
+class AmountDefinition:
+    unit: str
+    axis: str
+    constant: Money
+    terms: Mapping[str, AmountTerm]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "terms", MappingProxyType(dict(sorted(self.terms.items()))))
+
+    def to_dict(self) -> dict:
+        return {"unit": self.unit, "axis": self.axis, "constant": self.constant.to_dict(),
+                "terms": {key: value.to_dict() for key, value in self.terms.items()}}
+
+    @classmethod
+    def from_dict(cls, mapping: object, *, currency: str, field: str) -> AmountDefinition:
+        if not isinstance(mapping, Mapping):
+            raise FinanceTripletError(f"{field} 必须为金额定义映射")
+        _require_keys(mapping, {"unit", "axis", "constant", "terms"}, field)
+        unit = _normalized_unit(mapping["unit"], f"{field}.unit")
+        if not (unit == currency or unit.startswith(f"{currency}/")):
+            raise FinanceTripletError(f"{field}.unit 必须使用文件币种 {currency}")
+        if _dims(unit).get("currency") != 1:
+            raise FinanceTripletError(f"{field}.unit 必须为金额或明确金额费率")
+        axis = mapping["axis"]
+        if axis not in AMOUNT_AXES:
+            raise FinanceTripletError(f"{field}.axis 非法: {axis!r}")
+        constant = Money.from_dict(mapping["constant"], allow_negative=True, field=f"{field}.constant")
+        _check_same_unit(constant.unit, unit, f"{field}.constant")
+        if not isinstance(mapping["terms"], Mapping):
+            raise FinanceTripletError(f"{field}.terms 必须为映射")
+        terms: dict[str, AmountTerm] = {}
+        for term_id, raw in mapping["terms"].items():
+            term_id = _validate_local_id(term_id, f"{field}.terms.term_id")
+            sub = f"{field}.terms.{term_id}"
+            if not isinstance(raw, Mapping):
+                raise FinanceTripletError(f"{sub} 必须为 coefficient/source 映射")
+            _require_keys(raw, {"coefficient", "source"}, sub)
+            source = parse_amount_reference(raw["source"], field=f"{sub}.source")
+            period = source.period
+            if period is not None:
+                if period.kind == "current" and axis == "scalar":
+                    raise FinanceTripletError(f"{sub}.source.period scalar 定义不允许 current")
+                if period.kind == "year_months" and period.year == "current" and axis != "financial_year":
+                    raise FinanceTripletError(f"{sub}.source.period.year current 只用于 financial_year 定义")
+                if (period.kind == "financial_year" and period.year == 0
+                        and source.kind not in ("movement", "baseline")):
+                    raise FinanceTripletError(f"{sub}.source.period.year 该来源不接受时点0")
+            terms[term_id] = AmountTerm(
+                coefficient=Money.from_dict(
+                    raw["coefficient"], allow_negative=True, field=f"{sub}.coefficient"
+                ),
+                source=source,
+            )
+        return cls(unit=unit, axis=axis, constant=constant, terms=terms)
+
+
+def amount_dependency_closure(
+    amounts: Mapping[str, AmountDefinition], roots: tuple[str, ...] | list[str] | set[str],
+) -> tuple[str, ...]:
+    """确定性的来源先行依赖次序；不因闲置目录自动扩大执行范围。"""
+    state: dict[str, int] = {}
+    ordered: list[str] = []
+    stack: list[str] = []
+
+    def visit(amount_id: str) -> None:
+        if amount_id not in amounts:
+            raise FinanceTripletError(f"amounts 引用不存在: {amount_id!r}")
+        if state.get(amount_id) == 2:
+            return
+        if state.get(amount_id) == 1:
+            start = stack.index(amount_id)
+            raise FinanceTripletError(f"amounts 循环引用: {' -> '.join((*stack[start:], amount_id))}")
+        state[amount_id] = 1
+        stack.append(amount_id)
+        for term in amounts[amount_id].terms.values():
+            if term.source.kind == "amount":
+                visit(term.source.id)
+        stack.pop()
+        state[amount_id] = 2
+        ordered.append(amount_id)
+
+    for amount_id in sorted(roots):
+        visit(amount_id)
+    return tuple(ordered)
+
+
+def _source_axis(period: AmountPeriod, owner_axis: str) -> str:
+    if period.kind == "current":
+        return owner_axis
+    if period.kind == "year_months":
+        return "tax_month"
+    if period.kind == "range":
+        return period.axis
+    return period.kind
+
+
+def _check_reference_axis(
+    ref: AmountReference, owner_axis: str, allowed: tuple[str, ...], field: str,
+) -> None:
+    if ref.period is not None and _source_axis(ref.period, owner_axis) not in allowed:
+        raise FinanceTripletError(f"{field}.period 与来源轴不匹配，允许 {allowed!r}")
+
+
+def _check_amount_refs(
+    amounts: Mapping[str, AmountDefinition], *, currency: str,
+    finance_types: Mapping[str, FinanceTypeEntry], energy_prices: Mapping[str, EnergyPrice],
+    demand_charges: Mapping[str, DemandCharge], credit_pools: Mapping[str, CreditPool],
+    tax_rules: Mapping[str, TaxRule], net_cashflows: Mapping[str, NetCashflowEntry],
+) -> None:
+    amount_dependency_closure(amounts, set(amounts))
+    for amount_id, amount in amounts.items():
+        for term_id, term in amount.terms.items():
+            ref = term.source
+            field = f"amounts.{amount_id}.terms.{term_id}.source"
+            source_dims: Mapping[str, int] | None = None
+            if ref.kind == "amount":
+                other = amounts[ref.id]
+                _check_reference_axis(ref, amount.axis, (other.axis,), field)
+                source_dims = _dims(other.unit)
+            elif ref.kind == "construction_unit":
+                source_dims = {}
+            elif ref.kind in ("movement", "asset"):
+                raise FinanceTripletError(f"{field}: {ref.kind} 来源尚未接通，文件内没有对应发生项/资产声明")
+            elif ref.kind == "cost":
+                cost_target_leaves(ref.path, finance_types, field=field)
+                comp = ref.path.split(".")[1]
+                allowed = (("scalar",) if comp == "upfront_capex" else
+                           ("scalar", "financial_year") if comp == "annual_fixed_om" else
+                           ("financial_year", "tax_month"))
+                _check_reference_axis(ref, amount.axis, allowed, field)
+                annual_rate = comp == "annual_fixed_om" and ref.period.kind == "scalar"
+                source_dims = {"currency": 1, **({"time": -1} if annual_rate else {})}
+            elif ref.kind == "driver":
+                entry = finance_types.get(ref.finance_type)
+                if entry is None:
+                    raise FinanceTripletError(f"{field}.finance_type 不存在: {ref.finance_type!r}")
+                candidates: list[Mapping[str, int]] = []
+                for comp_name in FINANCE_COMPONENTS:
+                    comp = getattr(entry, comp_name)
+                    if comp is None:
+                        continue
+                    for item in (comp, *comp.items.values()):
+                        if ref.driver in (item.linear or {}):
+                            dims = dict(_dims(item.linear[ref.driver].unit_cost.unit))
+                            dims["currency"] = dims.get("currency", 0) - 1
+                            if comp_name == "annual_fixed_om":
+                                dims["time"] = dims.get("time", 0) + 1
+                            candidates.append({key: -value for key, value in dims.items() if value})
+                if not candidates:
+                    raise FinanceTripletError(f"{field}.driver 不存在: {ref.driver!r}")
+                if any(dims != candidates[0] for dims in candidates[1:]):
+                    raise FinanceTripletError(f"{field}.driver 在成本单价中的量纲不一致")
+                source_dims = candidates[0]
+            elif ref.kind == "tariff":
+                price = energy_prices.get(ref.price)
+                if price is None:
+                    raise FinanceTripletError(f"{field}.price 不存在: {ref.price!r}")
+                if (price.direction == "sale" and ref.basis in ("deductible_input", "net_basis")
+                        or price.direction == "purchase" and ref.basis == "net_revenue"):
+                    raise FinanceTripletError(f"{field}.basis 与价格 direction 不匹配")
+                _check_reference_axis(ref, amount.axis, ("financial_year", "tax_month"), field)
+                source_dims = {"currency": 1}
+            elif ref.kind == "demand":
+                if ref.charge not in demand_charges:
+                    raise FinanceTripletError(f"{field}.charge 不存在: {ref.charge!r}")
+                _check_reference_axis(ref, amount.axis, ("financial_year", "tax_month"), field)
+                source_dims = {"currency": 1}
+            elif ref.kind == "maintenance":
+                source_dims = {"currency": 1}
+            elif ref.kind == "system_quantity":
+                _check_reference_axis(ref, amount.axis, ("financial_year", "tax_month"), field)
+            elif ref.kind == "tax":
+                source = ref.source
+                if source.kind == "pool":
+                    if source.id not in credit_pools:
+                        raise FinanceTripletError(f"{field}.source.id 抵扣池不存在: {source.id!r}")
+                    measures = ("paid", "refund_confirmed", "refund_received", "credit_balance", "receivable")
+                    axis = "tax_month"
+                else:
+                    rule = tax_rules.get(source.id)
+                    if rule is None:
+                        raise FinanceTripletError(f"{field}.source.id 税则不存在: {source.id!r}")
+                    measures = (("taxable_base", "loss_used", "assessed", "paid")
+                                if isinstance(rule, IncomeTaxRule) else ("output_tax", "deductible_input"))
+                    axis = "financial_year" if isinstance(rule, IncomeTaxRule) else "tax_month"
+                if ref.measure not in measures:
+                    raise FinanceTripletError(f"{field}.measure 不属于该税额来源: {ref.measure!r}")
+                _check_reference_axis(ref, amount.axis, (axis,), field)
+                source_dims = {"currency": 1}
+            if source_dims is not None:
+                dims = dict(_dims(term.coefficient.unit))
+                for key, value in source_dims.items():
+                    dims[key] = dims.get(key, 0) + value
+                dims = {key: value for key, value in dims.items() if value}
+                if dims != _dims(amount.unit):
+                    raise FinanceTripletError(f"{field}: coefficient × source 单位不等于 {amount.unit!r}")
+            for money in (term.coefficient,):
+                if any(code in money.unit for code in CURRENCIES if code != currency):
+                    raise FinanceTripletError(f"{field}: coefficient 不允许其他币种")
+    for cf_id, cf in net_cashflows.items():
+        if not isinstance(cf.amount, AmountRefCashflowAmount):
+            continue
+        amount = amounts.get(cf.amount.id)
+        if amount is None:
+            raise FinanceTripletError(f"net_cashflows.{cf_id}.amount.id 引用不存在: {cf.amount.id!r}")
+        if amount.axis != "scalar" or amount.unit != currency:
+            raise FinanceTripletError(f"net_cashflows.{cf_id}.amount 必须引用 scalar 本币金额")
+
+
+def _parse_amounts(mapping: object, currency: str) -> Mapping[str, AmountDefinition]:
+    if not isinstance(mapping, Mapping):
+        raise FinanceTripletError("amounts 必须为映射，禁止 null")
+    parsed = {
+        _validate_local_id(amount_id, "amounts.id"): AmountDefinition.from_dict(
+            raw, currency=currency, field=f"amounts.{amount_id}"
+        ) for amount_id, raw in mapping.items()
+    }
+    return MappingProxyType(dict(sorted(parsed.items())))
+
+
+# ---------------------------------------------------------------------------
 # FinanceProfile(地区财务基准, 人工 authoring)
 # ---------------------------------------------------------------------------
 
@@ -1739,6 +2296,7 @@ class FinanceProfile:
     tax_rules: Mapping[str, TaxRule] = field(default_factory=lambda: MappingProxyType({}))
     demand_charges: Mapping[str, DemandCharge] = field(default_factory=lambda: MappingProxyType({}))
     net_cashflows: Mapping[str, NetCashflowEntry] = field(default_factory=lambda: MappingProxyType({}))
+    amounts: Mapping[str, AmountDefinition] = field(default_factory=lambda: MappingProxyType({}))
 
     def __post_init__(self) -> None:
         if self.schema != SCHEMA_PROFILE:
@@ -1755,6 +2313,7 @@ class FinanceProfile:
         object.__setattr__(self, "credit_pools", MappingProxyType(dict(sorted(self.credit_pools.items()))))
         object.__setattr__(self, "tax_rules", MappingProxyType(dict(sorted(self.tax_rules.items()))))
         object.__setattr__(self, "net_cashflows", MappingProxyType(dict(sorted(self.net_cashflows.items()))))
+        object.__setattr__(self, "amounts", MappingProxyType(dict(sorted(self.amounts.items()))))
         # taxes.applies_to 引用存在性: 引用本文件 energy_prices 的 price_id,
         # 或 finance_types 的分量/子项路径, 或 demand_charges.<charge_id>。
         for tax_id, tax in self.taxes.items():
@@ -1812,6 +2371,7 @@ class FinanceProfile:
             "credit_pools": {k: v.to_dict() for k, v in sorted(self.credit_pools.items())},
             "tax_rules": {k: v.to_dict() for k, v in sorted(self.tax_rules.items())},
             "net_cashflows": {k: v.to_dict() for k, v in sorted(self.net_cashflows.items())},
+            "amounts": {k: v.to_dict() for k, v in self.amounts.items()},
         }
 
     @classmethod
@@ -1820,7 +2380,7 @@ class FinanceProfile:
             raise FinanceTripletError("FinanceProfile 必须是字典")
         known_profile = {
             "schema", "schema_version", "profile", "finance_types", "energy_prices",
-            "demand_charges", "taxes", "credit_pools", "tax_rules", "net_cashflows",
+            "demand_charges", "taxes", "credit_pools", "tax_rules", "net_cashflows", "amounts",
         }
         unknown = set(mapping) - known_profile
         if unknown:
@@ -1934,6 +2494,10 @@ class FinanceProfile:
             tax_rules[rule_id] = _parse_tax_rule(rule_id, rule_val)
         net_cashflows_raw = _require_section(mapping, "net_cashflows", "net_cashflows")
         net_cashflows = _parse_net_cashflows(net_cashflows_raw, currency)
+        amounts = _parse_amounts(mapping.get("amounts", {}), currency)
+        _check_amount_refs(amounts, currency=currency, finance_types=finance_types,
+                           energy_prices=energy_prices, demand_charges=demand_charges,
+                           credit_pools=credit_pools, tax_rules=tax_rules, net_cashflows=net_cashflows)
         _check_tax_refs(
             currency=currency,
             energy_prices=energy_prices,
@@ -1956,6 +2520,7 @@ class FinanceProfile:
             credit_pools=credit_pools,
             tax_rules=tax_rules,
             net_cashflows=net_cashflows,
+            amounts=amounts,
         )
 
     @classmethod
@@ -1971,7 +2536,7 @@ class FinanceProfile:
 # ---------------------------------------------------------------------------
 
 #: Overrides 允许的 finance_type 叶子键: <分量>.fixed 或 <分量>.linear.<driver>.unit_cost
-_OVERRIDE_LEAF_FIELDS: Final[frozenset[str]] = frozenset({"fixed", "linear"})
+_OVERRIDE_LEAF_FIELDS: Final[frozenset[str]] = frozenset({"fixed", "linear", "items"})
 
 @dataclass(frozen=True, slots=True)
 class FinanceOverrides:
@@ -1993,8 +2558,9 @@ class FinanceOverrides:
     tax_rules: Mapping[str, Mapping[str, object]] = field(default_factory=lambda: MappingProxyType({}))
     credit_pools: Mapping[str, Mapping[str, object]] = field(default_factory=lambda: MappingProxyType({}))
     net_cashflows: Mapping[str, Mapping[str, object]] = field(default_factory=lambda: MappingProxyType({}))
-    #: 解析时绑定的 Profile id（合并器据此判定覆盖权限是否已核对；不序列化）。
-    _bound_profile: str = ""
+    amounts: Mapping[str, Mapping[str, object]] = field(default_factory=lambda: MappingProxyType({}))
+    #: Cache ownership is the exact immutable input, not a reusable Profile ID.
+    _bound_profile_object: FinanceProfile | None = field(default=None, repr=False, compare=False)
     #: 输入边界已形成的不可变类型化补丁（规则 id → 已解析值；未绑定为空）。
     _parsed_tax_rules: Mapping[str, Mapping[str, object]] = field(
         default_factory=lambda: MappingProxyType({})
@@ -2007,6 +2573,10 @@ class FinanceOverrides:
     _parsed_net_cashflows: Mapping[str, Mapping[str, object]] = field(
         default_factory=lambda: MappingProxyType({})
     )
+    _parsed_amounts: Mapping[str, AmountDefinition] = field(default_factory=lambda: MappingProxyType({}))
+    _parsed_finance_types: Mapping[str, FinanceTypeEntry] = field(
+        default_factory=lambda: MappingProxyType({})
+    )
 
     def __post_init__(self) -> None:
         if self.schema != SCHEMA_OVERRIDES:
@@ -2014,12 +2584,17 @@ class FinanceOverrides:
         if self.schema_version != SCHEMA_VERSION:
             raise FinanceTripletError(f"schema_version 必须为 {SCHEMA_VERSION!r}")
         object.__setattr__(self, "profile_ref", MappingProxyType(dict(sorted(self.profile_ref.items()))))
-        object.__setattr__(self, "finance_types", MappingProxyType(dict(sorted(self.finance_types.items()))))
+        object.__setattr__(self, "finance_types", _freeze(self.finance_types))
         object.__setattr__(self, "energy_prices", MappingProxyType(dict(sorted(self.energy_prices.items()))))
         object.__setattr__(self, "demand_charges", MappingProxyType(dict(sorted(self.demand_charges.items()))))
         object.__setattr__(self, "tax_rules", MappingProxyType(dict(sorted(self.tax_rules.items()))))
         object.__setattr__(self, "credit_pools", MappingProxyType(dict(sorted(self.credit_pools.items()))))
         object.__setattr__(self, "net_cashflows", MappingProxyType(dict(sorted(self.net_cashflows.items()))))
+        object.__setattr__(self, "amounts", _freeze(self.amounts))
+        object.__setattr__(self, "_parsed_amounts",
+                           MappingProxyType(dict(sorted(self._parsed_amounts.items()))))
+        object.__setattr__(self, "_parsed_finance_types",
+                           MappingProxyType(dict(sorted(self._parsed_finance_types.items()))))
         object.__setattr__(
             self, "_parsed_tax_rules", MappingProxyType(dict(sorted(self._parsed_tax_rules.items())))
         )
@@ -2048,6 +2623,8 @@ class FinanceOverrides:
             d["credit_pools"] = _thaw(self.credit_pools)
         if self.net_cashflows:
             d["net_cashflows"] = _freeze_overrides(self.net_cashflows)
+        if self.amounts:
+            d["amounts"] = _thaw(self.amounts)
         return d
 
     @classmethod
@@ -2070,7 +2647,7 @@ class FinanceOverrides:
                 raise FinanceTripletError(f"FinanceOverrides 禁止出现字段: {forbidden!r}")
         known_overrides = {
             "schema", "schema_version", "profile_ref", "finance_types", "energy_prices",
-            "demand_charges", "tax_rules", "credit_pools", "net_cashflows",
+            "demand_charges", "tax_rules", "credit_pools", "net_cashflows", "amounts",
         }
         unknown = set(mapping) - known_overrides
         if unknown:
@@ -2101,13 +2678,17 @@ class FinanceOverrides:
         if not isinstance(ft_raw, Mapping):
             raise FinanceTripletError("finance_types 必须是字典")
         finance_types: dict[str, Mapping[str, object]] = {}
+        parsed_finance_types: dict[str, FinanceTypeEntry] = {}
         for ft_name, ft_val in ft_raw.items():
             ft_name = _validate_local_id(ft_name, "finance_type")
             if profile is not None and ft_name not in profile.finance_types:
                 raise FinanceTripletError(f"finance_type {ft_name!r} 在 Profile 中不存在, 禁止新增")
             if not isinstance(ft_val, Mapping) or not ft_val:
                 raise FinanceTripletError(f"finance_types.{ft_name} 必须为非空字典")
-            finance_types[ft_name] = _validate_ft_override(ft_name, ft_val, profile)
+            raw_patch, parsed_entry = _validate_ft_override(ft_name, ft_val, profile)
+            finance_types[ft_name] = raw_patch
+            if parsed_entry is not None:
+                parsed_finance_types[ft_name] = parsed_entry
 
         ep_raw = mapping.get("energy_prices") or {}
         if not isinstance(ep_raw, Mapping):
@@ -2171,6 +2752,15 @@ class FinanceOverrides:
             if parsed_values:
                 parsed_cashflows[cf_id] = parsed_values
 
+        amount_patches: dict[str, Mapping] = {}
+        parsed_amounts: dict[str, AmountDefinition] = {}
+        for amount_id, patch in _optional_section(mapping, "amounts", "amounts").items():
+            amount_id = _validate_local_id(amount_id, "amounts.id")
+            raw, parsed = _validate_amount_override(amount_id, patch, profile)
+            amount_patches[amount_id] = raw
+            if parsed is not None:
+                parsed_amounts[amount_id] = parsed
+
         return cls(
             schema=schema,
             schema_version=schema_version,
@@ -2181,7 +2771,10 @@ class FinanceOverrides:
             tax_rules=tax_rules,
             credit_pools=credit_pools,
             net_cashflows=net_cashflows,
-            _bound_profile=profile.profile_id if profile is not None else "",
+            amounts=amount_patches,
+            _parsed_amounts=parsed_amounts,
+            _parsed_finance_types=parsed_finance_types,
+            _bound_profile_object=profile,
             _parsed_tax_rules=_freeze(parsed_rules),
             _parsed_credit_pools=_freeze(parsed_pools),
             _parsed_net_cashflows=_freeze(parsed_cashflows),
@@ -2229,7 +2822,7 @@ def _validate_ft_override(
     ft_name: str,
     ft_val: Mapping[str, object],
     profile: FinanceProfile | None,
-) -> Mapping[str, object]:
+) -> tuple[Mapping[str, object], FinanceTypeEntry | None]:
     """校验单个 finance_type 覆盖: 只允许替换既有叶子(<分量>.fixed / linear.<driver>.unit_cost)。
 
     - 禁止出现未知分量、fixed/linear 之外的键;
@@ -2237,6 +2830,7 @@ def _validate_ft_override(
     - 金额完整原子、成本非负; 单位规范化后必须与 Profile 相同。
     """
     out: dict[str, object] = {}
+    merged_components: dict = {}
     # Profile 在场时预取 <分量> -> CostComponent(存在性 + 叶子类型化访问)
     prof_comps: Mapping[str, CostComponent] | None = None
     if profile is not None:
@@ -2247,6 +2841,7 @@ def _validate_ft_override(
             if cost is not None:
                 present[comp] = cost
         prof_comps = MappingProxyType(present)
+        merged_components = dict(present)
     for comp_name, comp_val in ft_val.items():
         comp_name = str(comp_name)
         if comp_name not in FINANCE_COMPONENTS:
@@ -2264,6 +2859,9 @@ def _validate_ft_override(
             raise FinanceTripletError(
                 f"finance_type {ft_name} 分量 {comp_name} 在 Profile 中不存在, 禁止新增"
             )
+        merged_fixed = prof_cost.fixed if prof_cost is not None else None
+        merged_linear = dict(prof_cost.linear or {}) if prof_cost is not None else {}
+        merged_items = dict(prof_cost.items) if prof_cost is not None else {}
         if "fixed" in comp_val:
             if comp_val["fixed"] is None:
                 raise FinanceTripletError(f"finance_types.{ft_name}.{comp_name}.fixed 禁止 null")
@@ -2276,6 +2874,7 @@ def _validate_ft_override(
                     )
                 _check_same_unit(money.unit, prof_fixed.unit, f"finance_types.{ft_name}.{comp_name}.fixed")
             comp_out["fixed"] = money.to_dict()
+            merged_fixed = money
         if "linear" in comp_val:
             raw_linear = comp_val["linear"]
             if not isinstance(raw_linear, Mapping) or not raw_linear:
@@ -2308,11 +2907,143 @@ def _validate_ft_override(
                         f"finance_types.{ft_name}.{comp_name}.linear.{driver}",
                     )
                 linear_out[driver] = {"unit_cost": money.to_dict()}
+                merged_linear[driver] = LinearCost(unit_cost=money)
             comp_out["linear"] = linear_out
+        if "items" in comp_val:
+            raw_items = comp_val["items"]
+            if not isinstance(raw_items, Mapping) or not raw_items:
+                raise FinanceTripletError(f"finance_types.{ft_name}.{comp_name}.items 必须为非空映射")
+            item_out: dict[str, object] = {}
+            for item_id, raw_item in raw_items.items():
+                item_id = _validate_local_id(item_id, "items.item_id")
+                base_item = prof_cost.items.get(item_id) if prof_cost is not None else None
+                sub = f"finance_types.{ft_name}.{comp_name}.items.{item_id}"
+                if prof_cost is not None and base_item is None:
+                    raise FinanceTripletError(f"{sub} 在 Profile 中不存在，禁止新增")
+                if not isinstance(raw_item, Mapping) or not raw_item:
+                    raise FinanceTripletError(f"{sub} 必须为非空参数覆盖")
+                if set(raw_item) - {"fixed", "linear"}:
+                    raise FinanceTripletError(f"{sub} 只允许 fixed/linear 原子参数覆盖")
+                parsed_item = CostItem.from_dict(raw_item)
+                if parsed_item.fixed is not None:
+                    if comp_name == "period_variable_om":
+                        raise FinanceTripletError(f"{sub}.fixed 不适用于 period_variable_om")
+                    if base_item is not None:
+                        if base_item.fixed is None:
+                            raise FinanceTripletError(f"{sub}.fixed 禁止新增")
+                        _check_same_unit(parsed_item.fixed.unit, base_item.fixed.unit, f"{sub}.fixed")
+                for driver, lin in (parsed_item.linear or {}).items():
+                    if base_item is not None:
+                        if driver not in (base_item.linear or {}):
+                            raise FinanceTripletError(f"{sub}.linear.{driver} 禁止新增 driver")
+                        _check_same_unit(lin.unit_cost.unit, base_item.linear[driver].unit_cost.unit,
+                                         f"{sub}.linear.{driver}")
+                item_out[item_id] = parsed_item.to_dict()
+                merged_items[item_id] = CostItem(
+                    fixed=parsed_item.fixed if parsed_item.fixed is not None else
+                    base_item.fixed if base_item is not None else None,
+                    linear={**(base_item.linear or {}), **(parsed_item.linear or {})}
+                    if base_item is not None else parsed_item.linear,
+                )
+            comp_out["items"] = item_out
         if not comp_out:
             raise FinanceTripletError(f"finance_types.{ft_name}.{comp_name} 必须覆盖至少一个叶子")
         out[comp_name] = comp_out
-    return out
+        if profile is not None:
+            merged_components[comp_name] = CostComponent(
+                fixed=merged_fixed, linear=merged_linear or None, items=merged_items
+            )
+    return out, FinanceTypeEntry(**merged_components) if profile is not None else None
+
+
+def _validate_amount_override(
+    amount_id: str, patch: object, profile: FinanceProfile | None,
+) -> tuple[Mapping, AmountDefinition | None]:
+    field = f"amounts.{amount_id}"
+    if not isinstance(patch, Mapping) or not patch:
+        raise FinanceTripletError(f"{field} 必须为非空参数覆盖")
+    if set(patch) - {"constant", "terms"}:
+        raise FinanceTripletError(f"{field} 只允许覆盖 constant/terms 参数，不能改身份、轴或单位")
+    base = profile.amounts.get(amount_id) if profile is not None else None
+    if profile is not None and base is None:
+        raise FinanceTripletError(f"{field} 在 Profile 中不存在，禁止新增")
+    constant = None
+    out: dict = {}
+    if "constant" in patch:
+        constant = Money.from_dict(patch["constant"], allow_negative=True, field=f"{field}.constant")
+        if base is not None:
+            _check_same_unit(constant.unit, base.constant.unit, f"{field}.constant")
+        out["constant"] = constant.to_dict()
+    terms: dict[str, AmountTerm] = dict(base.terms) if base is not None else {}
+    if "terms" in patch:
+        raw_terms = patch["terms"]
+        if not isinstance(raw_terms, Mapping) or not raw_terms:
+            raise FinanceTripletError(f"{field}.terms 必须为非空参数覆盖")
+        out_terms: dict = {}
+        for term_id, raw in raw_terms.items():
+            term_id = _validate_local_id(term_id, f"{field}.terms.id")
+            sub = f"{field}.terms.{term_id}"
+            if not isinstance(raw, Mapping) or not raw or set(raw) - {"coefficient", "source"}:
+                raise FinanceTripletError(f"{sub} 只允许 coefficient/source 参数覆盖")
+            term = base.terms.get(term_id) if base is not None else None
+            if base is not None and term is None:
+                raise FinanceTripletError(f"{sub} 禁止新增 term")
+            coefficient = term.coefficient if term is not None else None
+            source = term.source if term is not None else None
+            raw_out: dict = {}
+            if "coefficient" in raw:
+                coefficient = Money.from_dict(
+                    raw["coefficient"], allow_negative=True, field=f"{sub}.coefficient"
+                )
+                if term is not None:
+                    _check_same_unit(coefficient.unit, term.coefficient.unit, f"{sub}.coefficient")
+                raw_out["coefficient"] = coefficient.to_dict()
+            if "source" in raw:
+                source_patch = raw["source"]
+                if not isinstance(source_patch, Mapping) or not source_patch:
+                    raise FinanceTripletError(f"{sub}.source 必须为非空范围/期间覆盖")
+                if set(source_patch) - {"scope", "bindings", "period"}:
+                    raise FinanceTripletError(f"{sub}.source 禁止改变 kind/path/id 或来源身份")
+                raw_source: dict = {}
+                for key, value in source_patch.items():
+                    if term is not None and getattr(term.source, key) is None:
+                        raise FinanceTripletError(f"{sub}.source.{key} 原来源不存在该参数")
+                    if key == "scope":
+                        scope = _parse_reference_scope(value, f"{sub}.source.scope")
+                        if (scope.kind != "instances"
+                                or term is not None and scope.kind != term.source.scope.kind):
+                            raise FinanceTripletError(f"{sub}.source.scope 仅可覆盖既有明确实例范围")
+                        raw_source[key] = scope.to_dict()
+                    elif key == "bindings":
+                        raw_source[key] = list(_reference_ids(value, f"{sub}.source.bindings"))
+                    else:
+                        period = parse_amount_period(value, field=f"{sub}.source.period")
+                        if term is not None and period.kind != term.source.period.kind:
+                            raise FinanceTripletError(f"{sub}.source.period 不得改变期间方法")
+                        if period.kind not in ("financial_year", "tax_month", "year_months", "range"):
+                            raise FinanceTripletError(f"{sub}.source.period 只允许覆盖固定期间")
+                        if period.kind == "year_months" and period.year == "current":
+                            raise FinanceTripletError(f"{sub}.source.period 只允许覆盖固定期间")
+                        if (term is not None and term.source.period.kind == "year_months"
+                                and term.source.period.year == "current"):
+                            raise FinanceTripletError(f"{sub}.source.period 不得把 current 改为固定期间")
+                        if (term is not None and period.kind == "range"
+                                and period.axis != term.source.period.axis):
+                            raise FinanceTripletError(f"{sub}.source.period 不得改变来源轴")
+                        raw_source[key] = period.to_dict()
+                raw_out["source"] = raw_source
+                if term is not None:
+                    source = parse_amount_reference(
+                        {**term.source.to_dict(), **raw_source}, field=f"{sub}.source"
+                    )
+            out_terms[term_id] = raw_out
+            if term is not None:
+                terms[term_id] = AmountTerm(coefficient=coefficient, source=source)
+        out["terms"] = out_terms
+    result = (AmountDefinition(unit=base.unit, axis=base.axis,
+                               constant=constant or base.constant, terms=terms)
+              if base is not None else None)
+    return _freeze(out), result
 
 def _validate_price_override(
     price_id: str,
@@ -2729,6 +3460,8 @@ def _validate_net_cashflow_override(
                 parsed_values["amount"] = SourceShareCashflowAmount(
                     base_from=prof_cf.amount.base_from, ratio=ratio
                 )
+            else:
+                raise FinanceTripletError(f"{field}.amount amount_ref 的来源身份不允许覆盖")
         else:
             raw_patch["amount"] = dict(raw_amt)
     return raw_patch, parsed_values
@@ -2770,6 +3503,7 @@ class EffectiveFinanceConfig:
     tax_rules: Mapping[str, TaxRule] = field(default_factory=lambda: MappingProxyType({}))
     demand_charges: Mapping[str, DemandCharge] = field(default_factory=lambda: MappingProxyType({}))
     net_cashflows: Mapping[str, NetCashflowEntry] = field(default_factory=lambda: MappingProxyType({}))
+    amounts: Mapping[str, AmountDefinition] = field(default_factory=lambda: MappingProxyType({}))
 
     def __post_init__(self) -> None:
         if self.schema != SCHEMA_EFFECTIVE:
@@ -2793,6 +3527,7 @@ class EffectiveFinanceConfig:
         object.__setattr__(self, "credit_pools", MappingProxyType(dict(sorted(self.credit_pools.items()))))
         object.__setattr__(self, "tax_rules", MappingProxyType(dict(sorted(self.tax_rules.items()))))
         object.__setattr__(self, "net_cashflows", MappingProxyType(dict(sorted(self.net_cashflows.items()))))
+        object.__setattr__(self, "amounts", MappingProxyType(dict(sorted(self.amounts.items()))))
 
     def to_dict(self) -> dict:
         return {
@@ -2810,6 +3545,7 @@ class EffectiveFinanceConfig:
             "credit_pools": {k: v.to_dict() for k, v in sorted(self.credit_pools.items())},
             "tax_rules": {k: v.to_dict() for k, v in sorted(self.tax_rules.items())},
             "net_cashflows": {k: v.to_dict() for k, v in sorted(self.net_cashflows.items())},
+            "amounts": {k: v.to_dict() for k, v in self.amounts.items()},
         }
 
     @classmethod
@@ -2820,7 +3556,7 @@ class EffectiveFinanceConfig:
             "schema", "schema_version", "profile_id",
             "currency", "base_year", "price_basis", "cost_method",
             "finance_types", "energy_prices", "demand_charges", "taxes",
-            "credit_pools", "tax_rules", "net_cashflows",
+            "credit_pools", "tax_rules", "net_cashflows", "amounts",
         }
         if unknown:
             raise FinanceTripletError(f"EffectiveFinanceConfig 未知字段: {sorted(unknown)}")
@@ -2900,6 +3636,10 @@ class EffectiveFinanceConfig:
             tax_rules[rule_id] = _parse_tax_rule(rule_id, rule_val)
         net_cashflows_raw = _require_section(mapping, "net_cashflows", "net_cashflows")
         net_cashflows = _parse_net_cashflows(net_cashflows_raw, currency)
+        amounts = _parse_amounts(mapping.get("amounts", {}), currency)
+        _check_amount_refs(amounts, currency=currency, finance_types=finance_types,
+                           energy_prices=energy_prices, demand_charges=demand_charges,
+                           credit_pools=credit_pools, tax_rules=tax_rules, net_cashflows=net_cashflows)
         _check_tax_refs(
             currency=currency,
             energy_prices=energy_prices,
@@ -2926,6 +3666,7 @@ class EffectiveFinanceConfig:
             credit_pools=credit_pools,
             tax_rules=tax_rules,
             net_cashflows=net_cashflows,
+            amounts=amounts,
         )
 
     @classmethod
@@ -2958,32 +3699,14 @@ def merge_effective(profile: FinanceProfile, overrides: FinanceOverrides | None)
                 f"与 Profile {profile.profile_id!r} 不一致"
             )
 
-    # ---- 合并 finance_types: 逐项深拷贝 Profile 再应用覆盖叶子 ----
-    merged_ft: dict[str, FinanceTypeEntry] = {
-        name: FinanceTypeEntry.from_dict(entry.to_dict())
-        for name, entry in sorted(profile.finance_types.items())
-    }
+    bound = overrides._bound_profile_object is profile
+    # 输入边界已产生不可变替换值；未覆盖类别直接共享，不序列化后重校验。
+    merged_ft = dict(profile.finance_types)
     for ft_name, ft_override in sorted(overrides.finance_types.items()):
-        # ft_override: {comp: {fixed: {...} | linear: {driver: {unit_cost: {...}}}}}
-        ft_override_dict = _freeze_overrides(ft_override)
         if ft_name not in merged_ft:
-            # from_dict 无 profile 校验创建的文档走到这里时拦截, 不产生 Effective
             raise FinanceTripletError(f"finance_type {ft_name!r} 在 Profile 中不存在, 禁止新增")
-        base_entry = merged_ft[ft_name].to_dict()
-        for comp_name, comp_override in sorted(ft_override_dict.items()):
-            base_comp = dict(base_entry.get(comp_name, {}))
-            if "fixed" in comp_override:
-                base_comp["fixed"] = comp_override["fixed"]
-            if "linear" in comp_override:
-                linear_raw = comp_override["linear"]
-                if not isinstance(linear_raw, Mapping):
-                    raise FinanceTripletError(f"finance_types.{ft_name}.{comp_name}.linear 结构非法")
-                base_linear = dict(base_comp.get("linear", {}))
-                for driver, drv_val in sorted(linear_raw.items()):
-                    base_linear[driver] = drv_val
-                base_comp["linear"] = base_linear
-            base_entry[comp_name] = base_comp
-        merged_ft[ft_name] = FinanceTypeEntry.from_dict(base_entry)
+        merged_ft[ft_name] = (overrides._parsed_finance_types[ft_name] if bound else
+                              _validate_ft_override(ft_name, ft_override, profile)[1])
 
     # ---- 合并 energy_prices: 定价定义整项替换, carrier/direction 继承 Profile ----
     merged_ep: dict[str, EnergyPrice] = {}
@@ -3026,7 +3749,6 @@ def merge_effective(profile: FinanceProfile, overrides: FinanceOverrides | None)
     # 覆盖变更。与 Profile 绑定过的 Overrides 直接消费对象保留的已解析
     # 类型化补丁，不再复核、不重解析；无绑定 Overrides 在此做唯一一次覆盖
     # 权限核对与值解析。合并后做一次组合领域引用核对；不重解析未覆盖项。
-    bound = overrides._bound_profile == profile.profile_id and bool(overrides._bound_profile)
     for pool_id in sorted(overrides.credit_pools):
         if pool_id not in profile.credit_pools:
             raise FinanceTripletError(f"credit pool {pool_id!r} 在 Profile 中不存在, 禁止新增")
@@ -3074,6 +3796,16 @@ def merge_effective(profile: FinanceProfile, overrides: FinanceOverrides | None)
             amount=values.get("amount", prof_cf.amount),
         )
 
+    merged_amounts = dict(profile.amounts)
+    for amount_id, patch in overrides.amounts.items():
+        if bound:
+            merged_amounts[amount_id] = overrides._parsed_amounts[amount_id]
+        else:
+            merged_amounts[amount_id] = _validate_amount_override(amount_id, patch, profile)[1]
+    _check_amount_refs(merged_amounts, currency=profile.currency, finance_types=merged_ft,
+                       energy_prices=merged_ep, demand_charges=merged_demand,
+                       credit_pools=merged_pools, tax_rules=merged_rules, net_cashflows=merged_cf)
+
     _check_tax_refs(
         currency=profile.currency,
         energy_prices=profile.energy_prices,
@@ -3100,6 +3832,7 @@ def merge_effective(profile: FinanceProfile, overrides: FinanceOverrides | None)
         credit_pools=merged_pools,
         tax_rules=merged_rules,
         net_cashflows=merged_cf,
+        amounts=merged_amounts,
     )
 
 

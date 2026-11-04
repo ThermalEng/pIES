@@ -272,6 +272,9 @@ def _run_validation(
     if _any_blocking(diags):
         return AssemblyValidationResult(diagnostics=diags, artifact=None)
     check_planning(doc, snapshot, registry, diags)
+    if not _any_blocking(diags):
+        from iesplan.assembly.amounts import check_amount_sources
+        check_amount_sources(doc, snapshot, registry, diags)
 
     if _any_blocking(diags):
         return AssemblyValidationResult(diagnostics=diags, artifact=None)

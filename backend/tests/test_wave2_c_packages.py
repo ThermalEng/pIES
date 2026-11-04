@@ -337,6 +337,8 @@ def _sealed_k1n2() -> dict:
         "monthly_demand": [],
         "net_cashflows": [],
         "construction_units": [],
+        "cost_items": [],
+        "amounts": [],
         "annual_net_flows": ["-84000.0", "-56000.0", "8500", "6979.50"],
         # 无税展示夹具: 五个数组显式为空(合法"不适用"), 不用缺字段伪装。
         "tax_cash": {
@@ -396,6 +398,62 @@ def test_export_excel_renders_sealed_financial_evaluation(
     wb = load_workbook(io.BytesIO(new_bytes))
     assert wb["建设决策"].cell(row=3, column=1).value == "未声明建设单元 / No construction units declared"
     assert wb["需量月账单"].cell(row=3, column=1).value == "无计量绑定 / No demand meter bindings"
+    assert wb["命名成本明细"].cell(row=3, column=1).value == (
+        "无适用命名成本项 / No applicable named cost items"
+    )
+    assert wb["命名金额"].cell(row=3, column=1).value == "无适用命名金额 / No applicable named amounts"
+
+
+def test_export_excel_preserves_named_costs_and_amount_values(
+    client: TestClient, db: Session,
+) -> None:
+    """Named facts preserve separate identities and decimals without changing cash totals."""
+    owner = _user(db, "f1_xls_named")
+    pid = _project(client, owner, "F1 命名财务事实")
+    vid = _version(client, owner, pid)
+    fin = _sealed_k1n2()
+    fin["cost_items"] = [
+        {"instance_id": "first", "finance_type": "shared", "component": "annual_fixed_om",
+         "item_id": "service", "axis": "scalar", "period": 0,
+         "raw": "25.0000000000000000000001", "gross": "27.50", "deductible_input": "2.50",
+         "net_basis": "25.0000", "unit": "CNY/a"},
+        {"instance_id": "second", "finance_type": "shared", "component": "annual_fixed_om",
+         "item_id": "service", "axis": "financial_year", "period": 2,
+         "raw": "0", "gross": "0", "deductible_input": "0", "net_basis": "0", "unit": "CNY"},
+    ]
+    fin["amounts"] = [
+        {"id": "signed", "axis": "scalar", "unit": "CNY",
+         "values": [{"period": 0, "value": "-4.5000000000000000000001"}]},
+        {"id": "annual_rate", "axis": "financial_year", "unit": "CNY/a",
+         "values": [{"period": 2, "value": "31"}, {"period": 3, "value": "0"}]},
+        {"id": "monthly", "axis": "tax_month", "unit": "CNY",
+         "values": [{"period": 13, "value": "8.1250"}]},
+    ]
+    before = json.dumps(fin, sort_keys=True)
+    evidence_id, assessment_id = _seed_evidence(
+        db, pid, vid, owner.id,
+        content_text=json.dumps({"financial_evaluation": fin}).encode(),
+    )
+    user = identity_domain.get_user(db, owner.id)
+    wb = load_workbook(io.BytesIO(transfers_uc.export_excel(db, user, pid, evidence_id, assessment_id)))
+    assert list(wb["命名成本明细"].iter_rows(min_row=3, values_only=True)) == [
+        ("first", "shared", "annual_fixed_om", "service", "scalar", 0,
+         "25.0000000000000000000001", "27.50", "2.50", "25.0000", "CNY/a"),
+        ("second", "shared", "annual_fixed_om", "service", "financial_year", 2,
+         "0", "0", "0", "0", "CNY"),
+    ]
+    assert list(wb["命名金额"].iter_rows(min_row=3, values_only=True)) == [
+        ("signed", "scalar", 0, "'-4.5000000000000000000001", "CNY"),
+        ("annual_rate", "financial_year", 2, "31", "CNY/a"),
+        ("annual_rate", "financial_year", 3, "0", "CNY/a"),
+        ("monthly", "tax_month", 13, "8.1250", "CNY"),
+    ]
+    assert wb["命名成本明细"]["G3"].data_type == "s"
+    assert wb["命名金额"]["D3"].data_type == "s"
+    assert wb["命名金额"]["C3"].data_type == "n"
+    summary = {row[0].value: row[1].value for row in wb["财务摘要"].iter_rows(min_row=3)}
+    assert summary["税后现金流 CF[t=3] / After-tax CF[t=3]"] == "6979.50 CNY"
+    assert json.dumps(fin, sort_keys=True) == before
 
 
 def test_export_excel_preserves_construction_status_and_numeric_scales(

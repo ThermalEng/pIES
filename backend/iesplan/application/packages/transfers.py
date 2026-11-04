@@ -756,6 +756,15 @@ def _parse_triplet_group(
         else:
             for d in validate_planning_domain(planning):
                 reasons.append(f"{label}规划配置领域校验失败: {d.params.get('detail') or d.code}")
+            if effective is not None:
+                from iesplan.assembly import check_amount_relations
+
+                amount_diags = []
+                check_amount_relations(planning.to_dict(), effective, amount_diags)
+                reasons.extend(
+                    f"{label}金额关系 {d.location.get('field')}: {d.params.get('detail')}"
+                    for d in amount_diags
+                )
     if reasons:
         raise ImportValidationError(reasons)
     result: dict = {}
@@ -2074,6 +2083,46 @@ def _write_sealed_monthly_demand(ws, fin: dict[str, Any]) -> None:
             ws.cell(row=row_no, column=col, value=_excel_safe(value))
 
 
+def _write_sealed_cost_items(ws, fin: dict[str, Any]) -> None:
+    """Copy frozen named leaves, not another expense or recomputed tax basis."""
+    _set_sheet_title(ws, "命名成本明细（封存）", "Sealed Named Cost Items")
+    headers = (
+        "实例 / Instance ID", "财务类别 / Finance type", "分量 / Component",
+        "明细 / Item ID", "期间轴 / Axis", "期间 / Period", "原额 / Raw",
+        "含税额 / Gross", "可抵进项 / Deductible input", "净基础 / Net basis", "单位 / Unit",
+    )
+    for column, header in enumerate(headers, 1):
+        ws.cell(row=2, column=column, value=header)
+    if not fin["cost_items"]:
+        ws.cell(row=3, column=1, value="无适用命名成本项 / No applicable named cost items")
+    fields = (
+        "instance_id", "finance_type", "component", "item_id", "axis", "period",
+        "raw", "gross", "deductible_input", "net_basis", "unit",
+    )
+    for row_no, item in enumerate(fin["cost_items"], 3):
+        for column, field in enumerate(fields, 1):
+            ws.cell(row=row_no, column=column, value=_excel_safe(item[field]))
+
+
+def _write_sealed_amounts(ws, fin: dict[str, Any]) -> None:
+    """Copy each declared scalar/year/month value with its own unit, without totals."""
+    _set_sheet_title(ws, "命名金额（封存）", "Sealed Named Amounts")
+    headers = (
+        "金额 / Amount ID", "期间轴 / Axis", "期间 / Period", "金额 / Value", "单位 / Unit",
+    )
+    for column, header in enumerate(headers, 1):
+        ws.cell(row=2, column=column, value=header)
+    if not fin["amounts"]:
+        ws.cell(row=3, column=1, value="无适用命名金额 / No applicable named amounts")
+    row_no = 3
+    for item in fin["amounts"]:
+        for period in item["values"]:
+            values = (item["id"], item["axis"], period["period"], period["value"], item["unit"])
+            for column, value in enumerate(values, 1):
+                ws.cell(row=row_no, column=column, value=_excel_safe(value))
+            row_no += 1
+
+
 def export_excel(
     db: Session,
     user: UserRecord,
@@ -2307,6 +2356,10 @@ def export_excel(
             _write_sealed_construction_units(construction_sheet, section)
             demand_sheet = wb.create_sheet("需量月账单")
             _write_sealed_monthly_demand(demand_sheet, section)
+            item_sheet = wb.create_sheet("命名成本明细")
+            _write_sealed_cost_items(item_sheet, section)
+            amount_sheet = wb.create_sheet("命名金额")
+            _write_sealed_amounts(amount_sheet, section)
 
     refs = evidence_content.get("hourly_refs") or []
     if refs:

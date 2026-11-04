@@ -962,6 +962,28 @@ export interface FinancialConstructionUnit {
   scales: Array<{ planning_variable_id: string; value: number; unit: string }>
 }
 
+/** Same-solve named cost facts. Amount strings are never recomputed by consumers. */
+export interface FinancialCostItem {
+  instance_id: string
+  finance_type: string
+  component: string
+  item_id: string
+  axis: 'scalar' | 'financial_year' | 'tax_month'
+  period: number
+  raw: string
+  gross: string
+  deductible_input: string
+  net_basis: string
+  unit: string
+}
+
+export interface FinancialNamedAmount {
+  id: string
+  axis: 'scalar' | 'financial_year' | 'tax_month'
+  unit: string
+  values: Array<{ period: number; value: string }>
+}
+
 export interface FinancialEvaluationBlock {
   status: string
   evaluation_years: number
@@ -977,6 +999,8 @@ export interface FinancialEvaluationBlock {
   payments_applied: FinancialEvaluationPayment[]
   net_cashflows: FinancialNetCashflow[]
   construction_units: FinancialConstructionUnit[]
+  cost_items: FinancialCostItem[]
+  amounts: FinancialNamedAmount[]
   annual_operation: FinancialEvaluationYear[]
   monthly_demand: FinancialMonthlyDemand[]
   tax_cash: FinancialTaxCash

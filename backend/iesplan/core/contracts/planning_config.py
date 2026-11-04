@@ -38,6 +38,7 @@ CONSTRAINT_TYPES: Final[tuple[str, ...]] = (
     "annual_purchase_cost_limit",
     "ratio",
     "step_relation",
+    "amount_relation",
 )
 
 #: 表达式最大长度(受限声明式语法, 防病态输入)。
@@ -226,7 +227,7 @@ class Constraint:
     type: str
     expression: str
     enabled: bool = True
-    references: Mapping[str, Mapping[str, str]] | None = None
+    references: Mapping[str, Mapping[str, object]] | None = None
 
     def __post_init__(self) -> None:
         if self.type not in CONSTRAINT_TYPES:
@@ -246,7 +247,7 @@ class Constraint:
             if not isinstance(self.references, Mapping) or not self.references:
                 raise PlanningConfigError("step_relation.references 必须为非空映射")
             refs = {}
-            for alias, target in sorted(self.references.items()):
+            for alias, target in sorted(self.references.items(), key=lambda item: str(item[0])):
                 if not isinstance(alias, str) or re.fullmatch(r"[a-z][a-z0-9_]*", alias) is None:
                     raise PlanningConfigError(f"非法局部别名: {alias!r}")
                 if not isinstance(target, Mapping) or set(target) != {"instance", "interface"}:
@@ -255,13 +256,34 @@ class Constraint:
                     raise PlanningConfigError(f"引用 {alias!r} 必须明确实例与真实端口")
                 refs[alias] = MappingProxyType(dict(target))
             object.__setattr__(self, "references", MappingProxyType(refs))
+        elif self.type == "amount_relation":
+            if not isinstance(self.references, Mapping) or not self.references:
+                raise PlanningConfigError("amount_relation.references 必须为非空映射")
+            refs = {}
+            for alias, target in sorted(self.references.items(), key=lambda item: str(item[0])):
+                if not isinstance(alias, str) or re.fullmatch(r"[a-z][a-z0-9_]*", alias) is None:
+                    raise PlanningConfigError(f"非法局部别名: {alias!r}")
+                if not isinstance(target, Mapping) or set(target) != {"kind", "id", "period"}:
+                    raise PlanningConfigError(f"引用 {alias!r} 只允许 kind/id/period 三个字段")
+                if target["kind"] not in ("amount", "baseline"):
+                    raise PlanningConfigError(f"引用 {alias!r} kind 必须为 amount 或 baseline")
+                if not isinstance(target["id"], str) or not target["id"]:
+                    raise PlanningConfigError(f"引用 {alias!r} 必须明确 id")
+                period = _amount_constraint_period(
+                    target["period"], alias, baseline=target["kind"] == "baseline",
+                )
+                refs[alias] = MappingProxyType({**target, "period": MappingProxyType(period)})
+            object.__setattr__(self, "references", MappingProxyType(refs))
         elif self.references is not None:
-            raise PlanningConfigError("非 step_relation 约束不允许 references")
+            raise PlanningConfigError("只有 step_relation/amount_relation 约束允许 references")
 
     def to_dict(self) -> dict:
         value = {"type": self.type, "expression": self.expression, "enabled": self.enabled}
-        if self.type == "step_relation":
-            value["references"] = {alias: dict(ref) for alias, ref in self.references.items()}
+        if self.type in ("step_relation", "amount_relation"):
+            value["references"] = {
+                alias: {key: dict(item) if isinstance(item, Mapping) else item for key, item in ref.items()}
+                for alias, ref in self.references.items()
+            }
         return value
 
     @classmethod
@@ -285,6 +307,34 @@ class Constraint:
             enabled=enabled,
             references=mapping.get("references"),
         )
+
+
+def _amount_constraint_period(value: object, alias: str, *, baseline: bool) -> dict:
+    """The scalar constraint's fixed-period structural subset, not finance binding."""
+    if not isinstance(value, Mapping):
+        raise PlanningConfigError(f"引用 {alias!r} period 必须为映射")
+    kind = value.get("kind")
+    keys = {
+        "scalar": {"kind"},
+        "financial_year": {"kind", "year"},
+        "tax_month": {"kind", "month"},
+        "year_months": {"kind", "year"},
+        "range": {"kind", "axis", "first", "last"},
+    }
+    if not isinstance(kind, str) or kind not in keys or set(value) != keys[kind]:
+        raise PlanningConfigError(f"引用 {alias!r} period 必须明确固定期间，不允许 current 或未知字段")
+    for name in set(value) - {"kind", "axis"}:
+        number = value[name]
+        if isinstance(number, bool) or not isinstance(number, int) or number < 1:
+            if not (
+                baseline and kind == "financial_year" and name == "year"
+                and type(number) is int and number == 0
+            ):
+                raise PlanningConfigError(f"引用 {alias!r} period.{name} 必须为明确正整数")
+    if kind == "range":
+        if value["axis"] not in ("financial_year", "tax_month") or value["first"] > value["last"]:
+            raise PlanningConfigError(f"引用 {alias!r} range 轴或上下界非法")
+    return dict(value)
 
 @dataclass(frozen=True, slots=True)
 class ConstructionScale:

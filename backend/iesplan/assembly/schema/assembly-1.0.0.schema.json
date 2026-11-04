@@ -5,6 +5,31 @@
   "description": "装配 YAML 是系统模型与规划意图的完整、可审查文本:固定项目计算基线,实例化设备模型、绑定数据、连接真实端口、给出约束。装配不包含 calculation(计算配置在计算包生成时固定)。禁止 shell/command/executable/函数模块路径/环境变量/凭证。各节均必需,无内容写空 {} 或 []。",
   "type": "object",
   "$defs": {
+    "portReference": {
+      "type": "object", "required": ["instance", "interface"],
+      "properties": {
+        "instance": {"type": "string", "minLength": 1},
+        "interface": {"type": "string", "minLength": 1}
+      }, "additionalProperties": false
+    },
+    "amountReference": {
+      "type": "object", "required": ["kind", "id", "period"],
+      "properties": {
+        "kind": {"enum": ["amount", "baseline"]},
+        "id": {"type": "string", "minLength": 1},
+        "period": {"oneOf": [
+          {"type": "object", "required": ["kind"], "properties": {"kind": {"const": "scalar"}}, "additionalProperties": false},
+          {"type": "object", "required": ["kind", "year"], "properties": {"kind": {"const": "financial_year"}, "year": {"type": "integer", "minimum": 0}}, "additionalProperties": false},
+          {"type": "object", "required": ["kind", "month"], "properties": {"kind": {"const": "tax_month"}, "month": {"type": "integer", "minimum": 1}}, "additionalProperties": false},
+          {"type": "object", "required": ["kind", "year"], "properties": {"kind": {"const": "year_months"}, "year": {"type": "integer", "minimum": 1}}, "additionalProperties": false},
+          {"type": "object", "required": ["kind", "axis", "first", "last"], "properties": {"kind": {"const": "range"}, "axis": {"enum": ["financial_year", "tax_month"]}, "first": {"type": "integer", "minimum": 1}, "last": {"type": "integer", "minimum": 1}}, "additionalProperties": false}
+        ]}
+      }, "additionalProperties": false,
+      "allOf": [{
+        "if": {"properties": {"kind": {"const": "amount"}}, "required": ["kind"]},
+        "then": {"properties": {"period": {"properties": {"year": {"minimum": 1}}}}}
+      }]
+    },
     "system_limit": {
       "oneOf": [
         {"type": ["number", "null"]},
@@ -592,7 +617,8 @@
                   "co2_limit",
                   "annual_purchase_cost_limit",
                   "ratio",
-                  "step_relation"
+                  "step_relation",
+                  "amount_relation"
                 ],
                 "description": "约束种类(公共 Constraint 契约白名单)"
               },
@@ -608,22 +634,10 @@
                 "minProperties": 1,
                 "patternProperties": {
                   "^[a-z][a-z0-9_]*$": {
-                    "type": "object",
-                    "required": [
-                      "instance",
-                      "interface"
-                    ],
-                    "properties": {
-                      "instance": {
-                        "type": "string",
-                        "minLength": 1
-                      },
-                      "interface": {
-                        "type": "string",
-                        "minLength": 1
-                      }
-                    },
-                    "additionalProperties": false
+                    "oneOf": [
+                      {"$ref": "#/$defs/portReference"},
+                      {"$ref": "#/$defs/amountReference"}
+                    ]
                   }
                 },
                 "additionalProperties": false
@@ -635,7 +649,7 @@
                 "if": {
                   "properties": {
                     "type": {
-                      "const": "step_relation"
+                      "enum": ["step_relation", "amount_relation"]
                     }
                   },
                   "required": [
@@ -654,6 +668,14 @@
                     ]
                   }
                 }
+              },
+              {
+                "if": {"properties": {"type": {"const": "step_relation"}}, "required": ["type"]},
+                "then": {"properties": {"references": {"additionalProperties": {"$ref": "#/$defs/portReference"}}}}
+              },
+              {
+                "if": {"properties": {"type": {"const": "amount_relation"}}, "required": ["type"]},
+                "then": {"properties": {"references": {"additionalProperties": {"$ref": "#/$defs/amountReference"}}}}
               }
             ]
           }

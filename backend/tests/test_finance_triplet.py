@@ -538,7 +538,7 @@ def test_monthly_daily_profile_and_effective_roundtrip_deep_freeze() -> None:
         **_monthly_daily_source(),
     }
     profile = FinanceProfile.from_dict(payload)
-    assert profile.to_dict() == payload
+    assert profile.to_dict() == {**payload, "amounts": {}}
     price = profile.energy_prices["grid_import"]
     assert price.months["1"].ref == price.months["4"].ref
     with pytest.raises(TypeError):

@@ -686,6 +686,19 @@ def _recover_financial_facts(
         }
         for entry in decl["construction_units"]
     ]
+    out["cost_items"] = [
+        {**{key: entry[key] for key in (
+            "instance_id", "finance_type", "component", "item_id", "axis", "period", "unit",
+        )}, **{key: amount(entry[key], f"cost_items.{key}")
+               for key in ("raw", "gross", "deductible_input", "net_basis")}}
+        for entry in decl["cost_items"]
+    ]
+    out["amounts"] = [
+        {"id": entry["id"], "axis": entry["axis"], "unit": entry["unit"],
+         "values": [{"period": item["period"], "value": amount(item["value"], f"amounts.{entry['id']}")}
+                    for item in entry["values"]]}
+        for entry in decl["amounts"]
+    ]
     return out
 
 
