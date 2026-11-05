@@ -131,6 +131,7 @@ interface SealedEvaluation {
     loss_balances: Array<{ rule: string; vintage_id: string; year: number; last_usable_year: number; amount: string }>
   }
   annual_net_flows: string[]
+  comparison: { mode: 'absolute' }
   evaluation: {
     rows: Array<{ year: number; net: string; discounted: string; cumulative: string; cumulative_discounted: string }>
     npv: string
@@ -420,6 +421,7 @@ function expectedExcelFinancialPairs(fin: SealedEvaluation): Array<[string, stri
   for (let i = 0; i < fin.annual_net_flows.length; i += 1) {
     rows.push([`税后现金流 CF[t=${i}] / After-tax CF[t=${i}]`, `${fin.annual_net_flows[i]} ${ccy}`])
   }
+  rows.push(['评价口径 / Comparison mode', fin.comparison.mode])
   for (const item of fin.tax_cash.vat) {
     const head = `增值税 ${item.pool} m=${item.month} / VAT ${item.pool} m=${item.month}`
     rows.push([`${head} 实缴 / paid`, `${item.paid} ${ccy}`])

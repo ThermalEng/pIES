@@ -11,7 +11,7 @@ Requirements verified:
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, replace
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -419,7 +419,12 @@ def test_highs_solve_optional_construction_zero_and_active(tmp_path) -> None:
     from iesplan.application.worker.compute_cases import build_financial_evaluation
 
     sealed = build_financial_evaluation(
-        SimpleNamespace(evaluation=asdict(evaluation)), finance, adapted,
+        SimpleNamespace(evaluation={
+            "construction_period": evaluation.construction_period,
+            "operation_years": evaluation.operation_years,
+            "evaluation_years": evaluation.evaluation_years,
+            "discount_rate": evaluation.discount_rate,
+        }), finance, adapted,
     )
     assert sealed["construction_units"] == [{
         "unit_id": "gen_build", "instance_id": "gen1", "mode": "optional", "built": False,

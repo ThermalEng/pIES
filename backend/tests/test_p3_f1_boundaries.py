@@ -407,7 +407,7 @@ def test_net_cashflow_amount_reference_is_a_consumption_root(context):
     assert consumed_amounts(doc, effective) == ("spend",)
 
 
-def test_actual_baseline_reference_is_rejected_not_guessed(context):
+def test_baseline_reference_requires_frozen_baseline_capability(context):
     doc, finance, _ = context
     doc["planning"]["constraints"]["spend_limit"]["references"]["spend"]["kind"] = "baseline"
     artifact = SimpleNamespace(canonical_text=json.dumps(doc))
@@ -422,8 +422,7 @@ def test_actual_baseline_reference_is_rejected_not_guessed(context):
                 "finance.financial_facts",
             ),
         )
-    assert error.value.params["reason"] == "unimplemented_amount_source"
-    assert error.value.params["source"]["kind"] == "baseline"
+    assert error.value.params["missing_capabilities"] == ["finance.frozen_baseline"]
     assert error.value.params["fields"] == ["planning.constraints.spend_limit.references.spend"]
 
 
