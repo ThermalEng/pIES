@@ -158,7 +158,7 @@ extensions: {}
 
 ## 关系事实映射
 
-以下为[命名金额关系](finance-relations.md)及[评价比较](../contracts.md#评价范围与冻结基准)新增部分的输出约定。P3-F2 已实现并由当前适配器恢复 `cash_movements`、`assets`、规则级税额及派生税事实；下文的基准比较 `comparison` 仍是后续切片，未交付前不得仅凭契约段落宣称可用。所有字段沿用同一 `financial_facts`、仿射求值节点与币种，不另建财务结果对象或税务后处理器：
+以下为[命名金额关系](finance-relations.md)及[评价比较](../contracts.md#评价范围与冻结基准)的输出约定。适配器由同次主解恢复 `cash_movements`、`assets`、规则级税额、派生税及比较现金流。所有字段沿用同一 `financial_facts`、仿射求值节点与币种，不另建财务结果对象或税务后处理器：
 
 | 新字段 | 完整公开结构与含义 |
 | --- | --- |
@@ -172,7 +172,7 @@ extensions: {}
 
 所有金额/比例为十进制字符串；period/year为整数；TimePoint中年/月字段为整数。cost_items按实例、component、item_id、period排序，其余按id/rule及period排序，payments保留输入顺序。未适用目录发布空数组；适用零值不省略。命名项已包含于原分量总额，不能再把cost_items逐项另扣现金。原annual_operation保持既有经营字段与合计；movement支付另从cash_movements进入annual_net_flows一次，不暗塞进maintenance或fixed_om再扣。派生税费实付由tax_cash.derived进入现金，资产基础/折旧不产生第二笔支付。
 
-财务事实增加 `comparison`：
+财务事实包含 `comparison`；其 `baseline_source.selectors` 保留冻结输入中的原业务选择器，仅用于追溯：
 
 - absolute为`{mode: absolute}`。
 - reference为`{mode: reference, baseline_source, comparability, facts}`；facts是已冻结的基准别名到`{unit,axis,values}`的映射，不是对当前草稿的引用；原annual_net_flows仍为候选现金流。

@@ -30,7 +30,7 @@ import json
 import re
 import shutil
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid4
@@ -262,7 +262,7 @@ def _derive_random_seed(version_id: int) -> int:
 
 
 def _evaluation_identity(evaluation: object) -> object:
-    """评价确认复用身份: 年限/建设期/运营期/折现率/付款/维护/确认人。
+    """评价确认复用身份: 年限/建设期/运营期/折现率/付款/维护/比较/确认人。
 
     确认时间是服务端写入的来源 provenance(冻结存档, 不参与复用判定:
     每次提交写入新的确认时间, 纳入身份将使复用永不命中)。同一评价确认
@@ -279,6 +279,7 @@ def _evaluation_identity(evaluation: object) -> object:
         "discount_rate": evaluation.get("discount_rate"),
         "construction_payments": jsonable(evaluation.get("construction_payments")),
         "maintenance_expenses": jsonable(evaluation.get("maintenance_expenses")),
+        "comparison": jsonable(evaluation.get("comparison", {"mode": "absolute"})),
         "confirmed_by": evaluation.get("confirmed_by"),
     }
 
@@ -674,6 +675,13 @@ def _assemble_snapshot(
     )
     assert gate.artifact is not None
     artifact = gate.artifact
+    from iesplan.application.tasks.baselines import check_comparison_inputs, resolve_comparison
+
+    evaluation = resolve_comparison(db, actor, evaluation, effective.currency)
+    frozen_evaluation["comparison"] = evaluation.comparison.to_dict()
+    check_comparison_inputs(
+        evaluation, artifact, effective, calc_config.get("generator"), generator_capabilities,
+    )
     device_models = _freeze_device_models(artifact, gate.device_documents)
     # 提交边界运营期覆盖核对(装配不核对点数; 已确认运营年限后在此阻断):
     # 规范文本基线 + 冻结财务快照时变序列点数 == 运营期总点数。
@@ -1097,17 +1105,6 @@ def _check_amount_capabilities(
     def require(marker, field):
         required.setdefault(marker, []).append(field)
 
-    def unsupported(source, field):
-        raise InvalidRequestError(
-            "本切片尚未交付该来源的完整金额引用、冻结与同次封存出口",
-            code="TASK-REQ-007",
-            params={
-                "generator": generator_ref, "reason": "unimplemented_amount_source",
-                "source": source, "fields": [field],
-            },
-            location={"object_type": "task", "field": field},
-        )
-
     for movement_id in effective.cash_movements:
         require("finance.cash_movements", f"effective_finance.cash_movements.{movement_id}")
     for asset_id in effective.assets:
@@ -1139,7 +1136,7 @@ def _check_amount_capabilities(
             require("finance.amount_constraints", field)
             for alias, ref in sorted(constraint["references"].items()):
                 if ref["kind"] == "baseline":
-                    unsupported(ref, f"{field}.references.{alias}")
+                    require("finance.frozen_baseline", f"{field}.references.{alias}")
     for amount_id in consumed_amounts(doc, effective):
         amount = effective.amounts[amount_id]
         field = f"effective_finance.amounts.{amount_id}"
@@ -1148,7 +1145,7 @@ def _check_amount_capabilities(
             source = term.source.to_dict()
             source_field = f"{field}.terms.{term_id}.source"
             if source["kind"] == "baseline":
-                unsupported(source, source_field)
+                require("finance.frozen_baseline", source_field)
             if source["kind"] == "tax":
                 if source["source"]["kind"] == "pool":
                     require("finance.credit_pools", source_field)
@@ -2037,6 +2034,19 @@ def _submit_task(
         # TASK-REQ-015; 评价年限含建设期(E==K+N), 折现率 0..1 比例口径,
         # 付款比例十进制求和精确为 1, 维护清单发生年/金额/币种显式)。
         parsed_evaluation = _parse_evaluation_input(evaluation)
+        from iesplan.finance import ComparisonError, parse_comparison
+
+        try:
+            comparison = parse_comparison(
+                evaluation.get("comparison", {"mode": "absolute"}),
+                years=parsed_evaluation.evaluation_years,
+            )
+        except ComparisonError as exc:
+            raise InvalidRequestError(
+                str(exc), code="TASK-REQ-015", params={"detail": str(exc)},
+                location={"object_type": "task", "field": exc.field},
+            ) from exc
+        parsed_evaluation = replace(parsed_evaluation, comparison=comparison)
         # 2) 存储门禁(门禁失败不创建快照不创建任务)
         estimate = estimate_storage(db, project_id, task_type, config)
         if estimate.blocked:

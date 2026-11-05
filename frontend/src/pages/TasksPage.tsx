@@ -707,6 +707,7 @@ export default function TasksPage() {
       ['discountRate', 'discount_rate', 'task-discount-rate'],
       ['constructionPayments', 'construction_payments', 'task-construction-payments'],
       ['maintenanceExpenses', 'maintenance_expenses', 'task-maintenance-expenses'],
+      ['comparison', 'comparison', 'task-comparison'],
     ] as const
     const errors = evaluationFieldErrors(formRef.current)
     const target = fields.find(([key, server]) => errors[key] ||
@@ -1333,6 +1334,12 @@ export default function TasksPage() {
           <p id="task-maintenance-expenses-contract" className="ies-form-message" style={{ marginBottom: 'var(--ies-space-2)' }}>
             {t('ies.task.maintenance_expenses_hint')}
           </p>
+          <FormField label={t('ies.task.comparison')} htmlFor="task-comparison" error={evaluationError('comparison', 'comparison')}>
+            <textarea id="task-comparison" className="ies-input" rows={8}
+              value={form.comparison} aria-describedby="task-comparison-contract"
+              onChange={(e) => updateForm({ ...form, comparison: e.target.value })} />
+          </FormField>
+          <p id="task-comparison-contract" className="ies-form-message">{t('ies.task.comparison_hint')}</p>
         </fieldset>
 
         {form.type === 'uncertainty' ? (

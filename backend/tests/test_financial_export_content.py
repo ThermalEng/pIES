@@ -69,6 +69,7 @@ def _tax_seal() -> dict:
         "currency": "CNY",
         "evaluation_years": 1,
         "annual_net_flows": ["-1000.0", "2500.5"],
+        "comparison": {"mode": "absolute"},
         "net_cashflows": [{"id": "recovery", "t": 1, "direction": "inflow", "amount": "37.25"}],
         "tax_cash": {
             "vat": vat,
@@ -147,7 +148,7 @@ def test_tax_rows_consume_sealed_facts_without_recompute():
     assert len(within) == 1 and "期后应收" not in within[0]
     # 行数精确：显式净现金 1 + CF 2 + VAT 60 + 退款 2 + 所得税 6 + 折旧 1 + 余额 1。
     assert rows[0][0].startswith("显式净现金 recovery t=1 inflow")
-    assert len(rows) == 1 + 2 + 60 + 2 + 6 + 1 + 1
+    assert len(rows) == 1 + 2 + 1 + 60 + 2 + 6 + 1 + 1  # comparison mode is a sealed fact
 
 
 def test_current_tax_rows_keep_receivable_and_assessed_distinct():

@@ -17,6 +17,19 @@
 
 from __future__ import annotations
 
+from iesplan.finance.comparison import (
+    BaselineFact,
+    BaselineSelector,
+    Comparability,
+    ComparisonError,
+    ComparisonRequest,
+    DeclaredBaseline,
+    FrozenComparison,
+    TaskResultBaseline,
+    comparison_as_declared,
+    freeze_comparison,
+    parse_comparison,
+)
 from iesplan.finance.confirmation import (
     ConstructionPayment,
     CostComponentShareTerm,
@@ -178,6 +191,9 @@ from iesplan.finance.triplet import (
 from iesplan.finance.yaml_io import effective_from_yaml, effective_to_yaml
 
 __all__ = [
+    "BaselineFact", "BaselineSelector", "Comparability", "ComparisonError", "ComparisonRequest",
+    "DeclaredBaseline", "FrozenComparison", "TaskResultBaseline", "comparison_as_declared",
+    "freeze_comparison", "parse_comparison",
     # metrics
     "IRRStatus",
     "npv",

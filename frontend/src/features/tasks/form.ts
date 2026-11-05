@@ -13,6 +13,7 @@ import type {
   CalcConfig,
   EvaluationConstructionPayment,
   EvaluationMaintenanceExpense,
+  EvaluationComparison,
   TaskCreateInput,
   TaskType,
 } from '../../types'
@@ -45,6 +46,7 @@ export interface CreateForm {
   discountRate: string
   constructionPayments: string
   maintenanceExpenses: string
+  comparison: string
   uMode: UncertaintyMode
   nSamples: number
   seed: string
@@ -60,6 +62,7 @@ export const DEFAULT_FORM: CreateForm = {
   discountRate: '',
   constructionPayments: '',
   maintenanceExpenses: '',
+  comparison: '',
   uMode: 'fixed_reliability',
   nSamples: 200,
   seed: '',
@@ -85,6 +88,7 @@ export function workingOfForm(f: CreateForm): Record<string, unknown> {
     discount_rate: f.discountRate,
     construction_payments: f.constructionPayments,
     maintenance_expenses: f.maintenanceExpenses,
+    comparison: f.comparison,
   }
   if (f.type === 'uncertainty') {
     const inner: Record<string, unknown> = {
@@ -194,6 +198,9 @@ export function formFromWorking(working: Record<string, unknown>): CreateForm {
   next.discountRate = text(working.discount_rate)
   next.constructionPayments = paymentsText(working.construction_payments)
   next.maintenanceExpenses = text(working.maintenance_expenses)
+  const comparison = working.comparison
+  next.comparison = comparison !== null && typeof comparison === 'object' && !Array.isArray(comparison)
+    ? JSON.stringify(comparison, null, 2) : text(comparison)
   const tp = working.task_params
   if (typeof tp === 'object' && tp !== null) {
     applyWorkingTaskParams(next, next.type, tp as Record<string, unknown>)
@@ -278,6 +285,7 @@ export interface ParsedEvaluation {
   discount_rate: number
   construction_payments: EvaluationConstructionPayment[]
   maintenance_expenses: EvaluationMaintenanceExpense[]
+  comparison?: EvaluationComparison
 }
 
 /** 评价确认解析(提交边界必填; 空值/非法返回 null 由调用方提示, 后端仍为权威校验)。
@@ -287,7 +295,7 @@ export interface ParsedEvaluation {
  * 明确发送(关系成立由后端核对)。付款与维护为显式 JSON(无默认值;
  * 无维护支出填 []), 形态由后端边界核对。合法的数值写法(如 '+1'、
  * 首尾空格、'0.080')按 Number() 接受, 展示 E 与提交采用同一数值口径。 */
-export type EvaluationField = 'constructionPeriod' | 'operationYears' | 'discountRate' | 'constructionPayments' | 'maintenanceExpenses'
+export type EvaluationField = 'constructionPeriod' | 'operationYears' | 'discountRate' | 'constructionPayments' | 'maintenanceExpenses' | 'comparison'
 
 const validConstructionPeriod = (value: number) => Number.isInteger(value) && value >= 0
 const validOperationYears = (value: number) => Number.isInteger(value) && value >= 1
@@ -321,6 +329,14 @@ export function evaluationFieldErrors(f: CreateForm): Partial<Record<EvaluationF
       }
     }
   }
+  if (f.comparison?.trim()) {
+    try {
+      const value = JSON.parse(f.comparison)
+      if (value === null || typeof value !== 'object' || Array.isArray(value)) errors.comparison = 'ies.task.comparison_invalid'
+    } catch {
+      errors.comparison = 'ies.task.comparison_invalid'
+    }
+  }
   return errors
 }
 
@@ -335,6 +351,7 @@ export function parseEvaluation(f: CreateForm): ParsedEvaluation | null {
     discount_rate: Number(f.discountRate.trim()),
     construction_payments: JSON.parse(f.constructionPayments) as EvaluationConstructionPayment[],
     maintenance_expenses: JSON.parse(f.maintenanceExpenses) as EvaluationMaintenanceExpense[],
+    ...(f.comparison?.trim() ? { comparison: JSON.parse(f.comparison) as EvaluationComparison } : {}),
   }
 }
 
@@ -350,8 +367,8 @@ export function logicalSigOf(f: CreateForm, savedRevision: number | null): strin
   const parsed = parseEvaluation(f)
   const evalSig =
     parsed === null
-      ? `x${stableHash(`${f.constructionPeriod.trim()}|${f.operationYears.trim()}|${f.discountRate.trim()}|${f.constructionPayments.trim()}|${f.maintenanceExpenses.trim()}`)}`
-      : `${parsed.construction_period}_${parsed.operation_years}_${String(parsed.discount_rate)}_${stableHash(JSON.stringify(parsed.construction_payments))}_${stableHash(JSON.stringify(parsed.maintenance_expenses))}`
+      ? `x${stableHash(`${f.constructionPeriod.trim()}|${f.operationYears.trim()}|${f.discountRate.trim()}|${f.constructionPayments.trim()}|${f.maintenanceExpenses.trim()}|${f.comparison}`)}`
+      : `${parsed.construction_period}_${parsed.operation_years}_${String(parsed.discount_rate)}_${stableHash(JSON.stringify(parsed.construction_payments))}_${stableHash(JSON.stringify(parsed.maintenance_expenses))}_${stableHash(JSON.stringify(parsed.comparison ?? { mode: 'absolute' }))}`
   return `sub-${f.type}-r${savedRevision ?? 'none'}-${stableHash(serializeParams(params))}-e${evalSig}`
 }
 

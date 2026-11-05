@@ -84,6 +84,8 @@ DESCRIPTOR = GeneratorDescriptor(
         "finance.income_tax",
         "finance.credit_pools",
         "finance.financial_facts",
+        "finance.frozen_baseline",
+        "finance.cashflow_difference",
         "finance.cash_movements",
         "finance.assets",
         "finance.derived_tax",

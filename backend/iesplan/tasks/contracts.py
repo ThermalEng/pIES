@@ -239,7 +239,7 @@ def parse_evaluation_input(raw: Mapping[str, Any] | None) -> EvaluationInput:
             {"evaluation": raw},
             "evaluation",
         )
-    unknown = set(raw) - EVALUATION_INPUT_KEYS
+    unknown = set(raw) - EVALUATION_INPUT_KEYS - {"comparison"}
     if unknown:
         raise _evaluation_fail(
             f"evaluation 含未知字段: {sorted(unknown)}",

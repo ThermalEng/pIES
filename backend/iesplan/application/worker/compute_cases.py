@@ -727,8 +727,10 @@ def build_financial_evaluation(
     # 已为手册形状，此处只取键投影，不重组税务结构、不改写金额。
     tax_cash = thaw_json_value(facts["tax_cash"])
     flows = [value for value in facts["annual_net_flows"]]
+    comparison = thaw_json_value(facts["comparison"])
+    evaluation_flows = comparison["evaluation_net_flows"] if comparison["mode"] == "difference" else flows
     assessed = evaluate_project_investment(
-        [Decimal(value) for value in flows],
+        [Decimal(value) for value in evaluation_flows],
         rate,
         years,
         currency=currency,
@@ -779,6 +781,7 @@ def build_financial_evaluation(
         "tax_cash": tax_cash,
         # 完整税后现金流 CF[0..E](与目标同一模型表达式，未折现)。
         "annual_net_flows": list(flows),
+        "comparison": comparison,
         "evaluation": assessed.to_dict(),
     }
 
