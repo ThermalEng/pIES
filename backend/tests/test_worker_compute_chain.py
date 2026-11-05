@@ -392,24 +392,28 @@ class TestComputeChainEndToEnd:
             "construction_period", "operation_years", "currency", "price_basis",
             "base_year", "profile_id", "discount_rate", "construction_total",
             "construction_total_unit", "annual_fixed_om", "payments_applied", "net_cashflows",
-            "construction_units", "cost_items", "amounts",
+            "construction_units", "cost_items", "amounts", "cash_movements", "assets",
             "annual_operation", "monthly_demand", "tax_cash", "annual_net_flows", "evaluation",
         }
         assert fin["construction_units"] == []  # 未声明建设单元仍保留公开结果字段
         assert fin["cost_items"] == []
         assert fin["amounts"] == []
+        assert fin["cash_movements"] == []
+        assert fin["assets"] == []
+        assert fin["tax_cash"]["derived"] == []
         # K=0/E=1/N=1：单池 12 月 VAT 全零（无计费绑定，留抵恒零强制成立）。
         vat = fin["tax_cash"]["vat"]
         assert len(vat) == 12
         for row in vat:
             assert row["pool"] == "main_pool"
-            for key in ("paid", "refund_claimed", "refund_arrived", "carry"):
+            for key in ("paid", "refund_claimed", "refund_arrived", "carry", "receivable"):
                 assert float(row[key]) == pytest.approx(0.0, abs=1e-9)
         # 所得税单规则单年：无利润故税为零；负税基全部转为新生亏损。
         income = fin["tax_cash"]["income"]
         assert [(row["rule"], row["year"]) for row in income] == [("income", 1)]
         only = income[0]
         assert float(only["tax"]) == pytest.approx(0.0, abs=1e-9)
+        assert only["assessed"] == only["tax"]
         assert float(only["loss_used"]) == pytest.approx(0.0, abs=1e-9)
         assert float(only["loss_expired"]) == pytest.approx(0.0, abs=1e-9)
         assert float(only["taxable_base"]) <= 0.0

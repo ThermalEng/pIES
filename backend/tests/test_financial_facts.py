@@ -144,9 +144,13 @@ def test_facts_mix_seal_matches_hand_and_objective(tmp_path) -> None:
         "construction_units",
         "cost_items",
         "amounts",
+        "cash_movements",
+        "assets",
     }
     assert facts["construction_units"] == []
-    assert set(facts["tax_cash"]) == {"vat", "refunds", "income", "depreciation", "loss_balances"}
+    assert set(facts["tax_cash"]) == {
+        "vat", "vat_rules", "refunds", "income", "depreciation", "loss_balances", "derived",
+    }
     assert isinstance(facts["construction_total"], str)
     assert isinstance(facts["annual_fixed_om"], str)
     assert all(isinstance(value, str) for value in facts["annual_net_flows"])
@@ -340,10 +344,15 @@ def test_facts_post_period_refund_retained_not_cash(tmp_path) -> None:
         ("main_pool", 20, 22),
         ("main_pool", 25, 40),
     ]
+    vat_rows = {(row["pool"], row["month"]): row for row in facts["tax_cash"]["vat"]}
     assert _amount(facts["tax_cash"]["refunds"][0]["amount"]) == pytest.approx(1500.0, rel=1e-9)
     assert _amount(facts["tax_cash"]["refunds"][1]["amount"]) == pytest.approx(2000.0, rel=1e-9)
+    assert _amount(vat_rows[("main_pool", 20)]["receivable"]) == pytest.approx(1500.0, rel=1e-9)
+    assert _amount(vat_rows[("main_pool", 21)]["receivable"]) == pytest.approx(1500.0, rel=1e-9)
+    assert _amount(vat_rows[("main_pool", 22)]["receivable"]) == pytest.approx(0.0, abs=1e-9)
+    assert _amount(vat_rows[("main_pool", 25)]["receivable"]) == pytest.approx(2000.0, rel=1e-9)
+    assert _amount(vat_rows[("main_pool", 36)]["receivable"]) == pytest.approx(2000.0, rel=1e-9)
     # 发布 carry 为扣当月确认退款后的期末可结转余额（与下月 previous 同源）。
-    vat_rows = {(row["pool"], row["month"]): row for row in facts["tax_cash"]["vat"]}
     before_m20 = solved["vat__main_pool__carry__m20"]
     assert _amount(vat_rows[("main_pool", 20)]["carry"]) == pytest.approx(
         before_m20 - 1500.0, rel=1e-6
@@ -392,17 +401,21 @@ def test_facts_empty_rules_full_cashflow(tmp_path) -> None:
     adapted, sealed, facts = _seal(bundle, solution_raw, finance, _snapshot())
     assert facts["tax_cash"] == {
         "vat": [],
+        "vat_rules": [],
         "refunds": [],
         "income": [],
         "depreciation": [],
         "loss_balances": [],
+        "derived": [],
     }
     assert sealed["tax_cash"] == {
         "vat": [],
+        "vat_rules": [],
         "refunds": [],
         "income": [],
         "depreciation": [],
         "loss_balances": [],
+        "derived": [],
     }
     expected_cf = [
         Decimal("-10000"),

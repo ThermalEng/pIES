@@ -33,6 +33,11 @@ def _sealed() -> dict:
             {"t": 1, "ratio": "0.4", "amount": "56000.0"},
         ],
         "net_cashflows": [],
+        "construction_units": [],
+        "cost_items": [],
+        "amounts": [],
+        "cash_movements": [],
+        "assets": [],
         "annual_operation": [
             {
                 "financial_year": 2, "energy_net": "10000", "variable_om": "100",
@@ -48,10 +53,12 @@ def _sealed() -> dict:
         # 无税展示夹具: 五个数组显式为空(合法"不适用"), 不用缺字段伪装。
         "tax_cash": {
             "vat": [],
+            "vat_rules": [],
             "refunds": [],
             "income": [],
             "depreciation": [],
             "loss_balances": [],
+            "derived": [],
         },
         "evaluation": {
             "currency": "CNY", "evaluation_years": 3,

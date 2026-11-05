@@ -339,14 +339,18 @@ def _sealed_k1n2() -> dict:
         "construction_units": [],
         "cost_items": [],
         "amounts": [],
+        "cash_movements": [],
+        "assets": [],
         "annual_net_flows": ["-84000.0", "-56000.0", "8500", "6979.50"],
-        # 无税展示夹具: 五个数组显式为空(合法"不适用"), 不用缺字段伪装。
+        # 无税展示夹具: 公开税务目录显式为空(合法"不适用"), 不用缺字段伪装。
         "tax_cash": {
             "vat": [],
+            "vat_rules": [],
             "refunds": [],
             "income": [],
             "depreciation": [],
             "loss_balances": [],
+            "derived": [],
         },
         "evaluation": {
             "currency": "CNY", "evaluation_years": 3,
@@ -402,6 +406,8 @@ def test_export_excel_renders_sealed_financial_evaluation(
         "无适用命名成本项 / No applicable named cost items"
     )
     assert wb["命名金额"].cell(row=3, column=1).value == "无适用命名金额 / No applicable named amounts"
+    for name in ("收付发生项", "收付支付计划", "资产基础", "资产账面值", "规则级增值税", "派生税费"):
+        assert wb[name].cell(row=3, column=1).value == "无适用项 / No applicable items"
 
 
 def test_export_excel_preserves_named_costs_and_amount_values(
@@ -454,6 +460,91 @@ def test_export_excel_preserves_named_costs_and_amount_values(
     summary = {row[0].value: row[1].value for row in wb["财务摘要"].iter_rows(min_row=3)}
     assert summary["税后现金流 CF[t=3] / After-tax CF[t=3]"] == "6979.50 CNY"
     assert json.dumps(fin, sort_keys=True) == before
+
+
+def test_export_excel_preserves_occurrence_payments_assets_and_tax_outlets(
+    client: TestClient, db: Session,
+) -> None:
+    """Occurrence, future obligation and non-cash asset/tax stocks remain separate."""
+    owner = _user(db, "f2_xls_relations")
+    pid = _project(client, owner, "F2 封存关系")
+    vid = _version(client, owner, pid)
+    fin = _sealed_k1n2()
+    fin["cash_movements"] = [
+        {"id": "purchase", "axis": "financial_year", "period": 0,
+         "direction": "outflow", "price_basis": "tax_exclusive", "raw": "100.000000000000000000001",
+         "gross": "110", "deductible_input": "10", "net_basis": "100", "output_tax": "0",
+         "net_revenue": "110", "end_unpaid": "66",
+         "payments": [
+             {"at": {"kind": "financial_year", "year": 0}, "ratio": "0.4", "amount": "44"},
+             {"at": {"kind": "financial_year", "year": 4}, "ratio": "0.6", "amount": "66"},
+         ]},
+        {"id": "service", "axis": "tax_month", "period": 13,
+         "direction": "outflow", "price_basis": "tax_inclusive", "raw": "0", "gross": "0",
+         "deductible_input": "0", "net_basis": "0", "output_tax": "0", "net_revenue": "0",
+         "end_unpaid": "0",
+         "payments": [{"at": {"kind": "tax_month", "month": 14}, "ratio": "1", "amount": "0"}]},
+    ]
+    fin["assets"] = [{
+        "id": "asset_a", "basis": "100", "capitalized_at": {"kind": "financial_year", "year": 1},
+        "available_from": 1,
+        "book_values": [{"year": 2, "value": "80.0000"}, {"year": 3, "value": "60.0000"}],
+    }]
+    fin["tax_cash"] = {
+        "vat": [{"pool": "shared", "month": 36, "paid": "10", "refund_claimed": "3",
+                 "refund_arrived": "0", "carry": "0", "receivable": "3.000000000000000001"}],
+        "vat_rules": [
+            {"rule": "purchase_vat", "pool": "shared", "month": 13,
+             "output_tax": "0", "deductible_input": "10.0000"},
+            {"rule": "sale_vat", "pool": "shared", "month": 13,
+             "output_tax": "20.0000", "deductible_input": "0"},
+        ],
+        "refunds": [],
+        "income": [{"rule": "cit", "year": 3, "taxable_base": "20", "loss_used": "0",
+                    "loss_generated": "0", "loss_expired": "0", "assessed": "5.0000", "tax": "5"}],
+        "depreciation": [{"rule": "cit", "base_from": {"kind": "asset", "id": "asset_a"},
+                          "year": 3, "amount": "20.0000"}],
+        "loss_balances": [],
+        "derived": [{"rule": "surcharge", "axis": "tax_month", "period": 36,
+                     "assessed": "0.400000000000000001", "payment_period": 38,
+                     "paid": "0.400000000000000001"}],
+    }
+    original = json.dumps(fin, sort_keys=True)
+    eid, aid = _seed_evidence(db, pid, vid, owner.id,
+                              content_text=json.dumps({"financial_evaluation": fin}).encode())
+    user = identity_domain.get_user(db, owner.id)
+    wb = load_workbook(io.BytesIO(transfers_uc.export_excel(db, user, pid, eid, aid)))
+    assert list(wb["收付发生项"].iter_rows(min_row=3, values_only=True)) == [
+        ("purchase", "financial_year", 0, "outflow", "tax_exclusive", "100.000000000000000000001",
+         "110", "10", "100", "0", "110", "66", "CNY"),
+        ("service", "tax_month", 13, "outflow", "tax_inclusive", "0", "0", "0", "0", "0", "0", "0", "CNY"),
+    ]
+    assert list(wb["收付支付计划"].iter_rows(min_row=3, values_only=True)) == [
+        ("purchase", "financial_year", 0, 1, "financial_year", 0, "0.4", "44", "CNY"),
+        ("purchase", "financial_year", 0, 2, "financial_year", 4, "0.6", "66", "CNY"),
+        ("service", "tax_month", 13, 1, "tax_month", 14, "1", "0", "CNY"),
+    ]
+    assert list(wb["资产基础"].iter_rows(min_row=3, values_only=True)) == [
+        ("asset_a", "100", "financial_year", 1, 1, "CNY"),
+    ]
+    assert list(wb["资产账面值"].iter_rows(min_row=3, values_only=True)) == [
+        ("asset_a", 2, "80.0000", "CNY"), ("asset_a", 3, "60.0000", "CNY"),
+    ]
+    assert list(wb["规则级增值税"].iter_rows(min_row=3, values_only=True)) == [
+        ("purchase_vat", "shared", 13, "0", "10.0000", "CNY"),
+        ("sale_vat", "shared", 13, "20.0000", "0", "CNY"),
+    ]
+    assert list(wb["派生税费"].iter_rows(min_row=3, values_only=True)) == [
+        ("surcharge", "tax_month", 36, "0.400000000000000001", 38, "0.400000000000000001", "CNY"),
+    ]
+    summary = {row[0].value: row[1].value for row in wb["财务摘要"].iter_rows(min_row=3)}
+    assert summary["增值税 shared m=36 / VAT shared m=36 期末退款应收(非现金) / receivable"] == (
+        "3.000000000000000001 CNY"
+    )
+    assert summary["所得税 cit y=3 / Income cit y=3 应计税额 / assessed"] == "5.0000 CNY"
+    assert summary["计税折旧 cit asset:asset_a y=3 / Depreciation cit asset:asset_a y=3"] == "20.0000 CNY"
+    assert summary["税后现金流 CF[t=3] / After-tax CF[t=3]"] == "6979.50 CNY"
+    assert json.dumps(fin, sort_keys=True) == original
 
 
 def test_export_excel_preserves_construction_status_and_numeric_scales(

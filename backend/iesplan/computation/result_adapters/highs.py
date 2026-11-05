@@ -586,8 +586,19 @@ def _recover_financial_facts(
                     "refund_claimed": amount(entry["refund_claimed"], "tax_cash.vat"),
                     "refund_arrived": amount(entry["refund_arrived"], "tax_cash.vat"),
                     "carry": amount(entry["carry"], "tax_cash.vat"),
+                    "receivable": amount(entry["receivable"], "tax_cash.vat.receivable"),
                 }
                 for entry in decl["tax_cash"]["vat"]
+            ],
+            "vat_rules": [
+                {
+                    "rule": entry["rule"], "pool": entry["pool"], "month": entry["month"],
+                    "output_tax": amount(entry["output_tax"], "tax_cash.vat_rules.output_tax"),
+                    "deductible_input": amount(
+                        entry["deductible_input"], "tax_cash.vat_rules.deductible_input",
+                    ),
+                }
+                for entry in decl["tax_cash"]["vat_rules"]
             ],
             "refunds": [
                 {
@@ -606,6 +617,7 @@ def _recover_financial_facts(
                     "loss_used": amount(entry["loss_used"], "tax_cash.income"),
                     "loss_generated": amount(entry["loss_generated"], "tax_cash.income"),
                     "loss_expired": amount(entry["loss_expired"], "tax_cash.income"),
+                    "assessed": amount(entry["assessed"], "tax_cash.income.assessed"),
                     "tax": amount(entry["tax"], "tax_cash.income"),
                 }
                 for entry in decl["tax_cash"]["income"]
@@ -628,6 +640,15 @@ def _recover_financial_facts(
                     "amount": amount(entry["amount"], "tax_cash.loss_balances"),
                 }
                 for entry in decl["tax_cash"]["loss_balances"]
+            ],
+            "derived": [
+                {
+                    "rule": entry["rule"], "axis": entry["axis"], "period": entry["period"],
+                    "assessed": amount(entry["assessed"], "tax_cash.derived.assessed"),
+                    "payment_period": entry["payment_period"],
+                    "paid": amount(entry["paid"], "tax_cash.derived.paid"),
+                }
+                for entry in decl["tax_cash"]["derived"]
             ],
         },
         "monthly_demand": [
@@ -698,6 +719,31 @@ def _recover_financial_facts(
          "values": [{"period": item["period"], "value": amount(item["value"], f"amounts.{entry['id']}")}
                     for item in entry["values"]]}
         for entry in decl["amounts"]
+    ]
+    out["cash_movements"] = [
+        {
+            **{key: entry[key] for key in ("id", "axis", "period", "direction", "price_basis")},
+            **{key: amount(entry[key], f"cash_movements.{entry['id']}.{key}") for key in (
+                "raw", "gross", "deductible_input", "net_basis", "output_tax", "net_revenue", "end_unpaid",
+            )},
+            "payments": [
+                {"at": dict(payment["at"]), "ratio": payment["ratio"],
+                 "amount": amount(payment["amount"], f"cash_movements.{entry['id']}.payments.amount")}
+                for payment in entry["payments"]
+            ],
+        }
+        for entry in decl["cash_movements"]
+    ]
+    out["assets"] = [
+        {
+            "id": entry["id"], "basis": amount(entry["basis"], f"assets.{entry['id']}.basis"),
+            "capitalized_at": dict(entry["capitalized_at"]), "available_from": entry["available_from"],
+            "book_values": [
+                {"year": value["year"], "value": amount(value["value"], f"assets.{entry['id']}.book_values")}
+                for value in entry["book_values"]
+            ],
+        }
+        for entry in decl["assets"]
     ]
     return out
 

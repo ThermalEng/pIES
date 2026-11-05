@@ -42,7 +42,9 @@ from datetime import datetime, timedelta
 from types import MappingProxyType
 from typing import Any
 
-from iesplan.assembly import ValidatedAssemblyArtifact, build_port_network, consumed_amounts
+from iesplan.assembly import (
+    ValidatedAssemblyArtifact, build_port_network, consumed_amounts, financial_dependency_graph,
+)
 from iesplan.computation.errors import ComputationUnavailableError
 from iesplan.computation.generators.compiler_ir import (
     AmountConstraintRule,
@@ -117,13 +119,16 @@ from iesplan.finance import (
     ConstructionVatRule,
     CostComponentShareTerm,
     EffectiveFinanceConfig,
+    DerivedTaxRule,
     EvaluationInput,
     IncomeTaxRule,
     MaintenanceExpenseNetBaseFrom,
     ScaleUnitCostTerm,
     VatRule,
     annual_boundaries,
+    cash_movement_occurrences,
     cost_target_leaves,
+    expand_amount_period,
 )
 from iesplan.modeling import (
     BinaryNode,
@@ -495,6 +500,19 @@ class _ProjectBuilder:
         self._month_spans_cache: list[tuple[int, int, int]] | None = None
         self._amount_year_spans: tuple[tuple[int, int], ...] | None = None
         self._consumed_amounts: tuple[str, ...] = ()
+        self._financial_graph = None
+        self._financial_values: dict[tuple, _AffineAcc] = {}
+        self._vat_iterators = {}
+        self._vat_built = {}
+        self._income_iterators = {}
+        self._income_built = {}
+        self._income_bases = {}
+        self._depreciation_values = {}
+        self._movement_values = {}
+        self._fact_movements = []
+        self._fact_assets = []
+        self._fact_derived = []
+        self._fact_vat_rules = []
         self.point_count = point_count
         self.step_s = step_s
         self.series: dict[tuple[str, str], list[float]] = {}
@@ -1287,6 +1305,9 @@ class _ProjectBuilder:
         the same finance type; maintenance sources bind the frozen
         (year, position) item exactly.
         """
+        if source.kind == "asset":
+            identity = self._financial_identity(("asset", source.id, "scalar", 0, "basis"))
+            return (identity,), (identity,)
         if source.kind == "upfront_capex_net":
             operations = tuple(
                 op for op in self.inventory.operations
@@ -1596,6 +1617,7 @@ class _ProjectBuilder:
             ))
 
         grouped = self._vat_grouped_rules()
+        rule_names = {id(rule): identity for identity, rule in self.finance.tax_rules.items()}
         for pool_id, rules in sorted((grouped or {}).items()):
             frozen_rules = MappingProxyType({
                 "vat": tuple(rules["vat"]),
@@ -1627,10 +1649,10 @@ class _ProjectBuilder:
             def add_period_term(
                 month: int, role: str, source_relation: str, coefficient: float,
                 *, start: int | None = None, end: int | None = None,
-                scope: str | None = None,
+                scope: str | None = None, owner: str,
             ) -> None:
                 period_terms[month].append(FinancialAmountTerm(
-                    role, source_relation, coefficient, start, end, scope
+                    role, source_relation, coefficient, start, end, scope, owner
                 ))
 
             for rule in frozen_rules["vat"]:
@@ -1645,7 +1667,7 @@ class _ProjectBuilder:
                         ):
                             add_period_term(
                                 source.payload.month, "vat_in",
-                                source.identity, factor,
+                                source.identity, factor, owner=rule_names[id(rule)],
                             )
                 for entry in rule.in_tax:
                     factor = self._vat_gross_factor(entry.rate) * float(
@@ -1659,7 +1681,7 @@ class _ProjectBuilder:
                             for month, start, end in spans:
                                 add_period_term(
                                     month, "vat_in", source.identity, factor,
-                                    start=start, end=end,
+                                    start=start, end=end, owner=rule_names[id(rule)],
                                 )
                 for entry in rule.out_tax:
                     factor = self._vat_gross_factor(entry.rate)
@@ -1671,7 +1693,7 @@ class _ProjectBuilder:
                             for month, start, end in spans:
                                 add_period_term(
                                     month, "vat_out", source.identity, -factor,
-                                    start=start, end=end,
+                                    start=start, end=end, owner=rule_names[id(rule)],
                                 )
                 for entry in rule.om_input_tax:
                     finance_type, _, scope_tail = entry.for_path.partition(".")
@@ -1696,13 +1718,13 @@ class _ProjectBuilder:
                                 if month in period_terms:
                                     add_period_term(
                                         month, "vat_in", source.identity, factor,
-                                        scope=entry.for_path,
+                                        scope=entry.for_path, owner=rule_names[id(rule)],
                                     )
                         else:
                             for month, start, end in spans:
                                 add_period_term(
                                     month, "vat_in", source.identity, factor,
-                                    start=start, end=end, scope=entry.for_path,
+                                    start=start, end=end, scope=entry.for_path, owner=rule_names[id(rule)],
                                 )
                 for entry in rule.maintenance_input_tax:
                     factor = self._vat_gross_split_factor(entry.rate) * float(
@@ -1712,7 +1734,7 @@ class _ProjectBuilder:
                     add_period_term(
                         month, "vat_in",
                         f"maintenance.y{entry.year}.p{entry.position}",
-                        factor,
+                        factor, owner=rule_names[id(rule)],
                     )
 
             for rule in frozen_rules["construction"]:
@@ -1742,7 +1764,7 @@ class _ProjectBuilder:
                     for source in sources:
                         add_period_term(
                             month, "vat_in", source.identity, factor * ratio,
-                            scope=rule.for_path,
+                            scope=rule.for_path, owner=rule_names[id(rule)],
                         )
 
             claims: dict[int, float] = {}
@@ -2158,8 +2180,8 @@ class _ProjectBuilder:
         """
         for amount_id in self._consumed_amounts:
             definition = self.finance.amounts[amount_id]
-            count = self.evaluation.evaluation_years * (12 if definition.axis == "tax_month" else 1)
-            current_periods = (0,) if definition.axis == "scalar" else range(1, count + 1)
+            current_periods = tuple(node.key[3] for node in self._financial_graph.nodes
+                                    if node.key[0] == "amount" and node.key[1] == amount_id)
             for term_id, term in sorted(definition.terms.items()):
                 reference = term.source
                 if reference.kind != "system_quantity":
@@ -2207,6 +2229,14 @@ class _ProjectBuilder:
             return (cfg["state"],), ()
         if kind == "system_quantity":
             return (f"system:{reference.block}.{reference.variable}",), ()
+        if kind in ("movement", "asset", "tax"):
+            owner = ("pool" if reference.source.kind == "pool" else "tax_rule") if kind == "tax" else kind
+            identity = reference.source.id if kind == "tax" else reference.id
+            dependencies = tuple(
+                self._financial_identity(node.key) for node in self._financial_graph.nodes
+                if node.key[0] == owner and node.key[1] == identity
+            )
+            return dependencies, dependencies
         if kind == "driver":
             inputs = []
             for inst in self._amount_instances(reference):
@@ -2236,6 +2266,17 @@ class _ProjectBuilder:
         # Finance belongs to complete relation collection, not the physical
         # symbol/template initialization path.
         self._consumed_amounts = consumed_amounts(self.doc, self.finance)
+        self._financial_graph = financial_dependency_graph(self.doc, self.finance, self.evaluation)
+        for node in self._financial_graph.nodes:
+            kind, identity, axis, period, measure = node.key
+            internal_axis = {"financial_year": "year", "tax_month": "month"}.get(axis, axis)
+            self.inventory.collect(SemanticRelation(
+                self._financial_identity(node.key), "financial_value", IndexDomain(internal_axis), node,
+                SourceLocation(node.field_path.replace("effective_finance.", "finance."), binding_id=identity),
+                tuple(self._financial_identity(key) for key in node.dependencies),
+                (self._financial_identity(node.key),),
+                depends_on=tuple(self._financial_identity(key) for key in node.dependencies),
+            ))
         for amount_id in self._consumed_amounts:
             definition = self.finance.amounts[amount_id]
             inputs, dependencies = set(), set()
@@ -2283,18 +2324,7 @@ class _ProjectBuilder:
 
     @staticmethod
     def _amount_periods(period, current_axis, current_period):
-        if period.kind == "scalar":
-            return "scalar", (0,)
-        if period.kind == "current":
-            return current_axis, (current_period,)
-        if period.kind == "financial_year":
-            return "financial_year", (period.year,)
-        if period.kind == "tax_month":
-            return "tax_month", (period.month,)
-        if period.kind == "year_months":
-            year = current_period if period.year == "current" else period.year
-            return "tax_month", range(12 * (year - 1) + 1, 12 * year + 1)
-        return period.axis, range(period.first, period.last + 1)
+        return expand_amount_period(period, current_axis, current_period)
 
     def _amount_span(self, axis: str, period: int) -> tuple[int, int]:
         if axis == "scalar":
@@ -2343,6 +2373,14 @@ class _ProjectBuilder:
         kind = reference.kind
         if kind == "amount":
             return self._named_amount(reference.id, period)
+        if kind in ("movement", "asset", "tax"):
+            if self.analysis is None:
+                raise _AmountNeedsConversion
+            if kind == "movement":
+                return self._movement_values[(reference.id, axis, period)][reference.basis]
+            owner = ("pool" if reference.source.kind == "pool" else "tax_rule") if kind == "tax" else "asset"
+            identity = reference.source.id if kind == "tax" else reference.id
+            return self._financial_values[(owner, identity, axis, period, reference.measure)]
         out = _AffineAcc()
         if kind == "construction_unit":
             cfg = next(cfg for cfg in self._construction_configs.values()
@@ -2427,8 +2465,9 @@ class _ProjectBuilder:
             out = _AffineAcc()
             out.add_const(_money_to_internal(definition.constant))
             for term in definition.terms.values():
-                out.add_scaled(self._amount_reference(term.source, definition.axis, period),
-                               _money_to_internal(term.coefficient))
+                if term.coefficient.value:
+                    out.add_scaled(self._amount_reference(term.source, definition.axis, period),
+                                   _money_to_internal(term.coefficient))
             self._named_amounts[key] = out
         return self._named_amounts[key]
 
@@ -2443,14 +2482,214 @@ class _ProjectBuilder:
         return LinearConstraint(template.name, out.freeze(), template.sense, template.rhs)
 
     def _retain_named_amounts(self) -> None:
-        for amount_id in self._consumed_amounts:
-            definition = self.finance.amounts[amount_id]
-            count = self.evaluation.evaluation_years * (12 if definition.axis == "tax_month" else 1)
-            periods = (0,) if definition.axis == "scalar" else range(1, count + 1)
+        self._run_financial_graph()
+
+    @staticmethod
+    def _financial_identity(key) -> str:
+        return "financial:" + json.dumps(key, separators=(",", ":"), ensure_ascii=False)
+
+    def _run_financial_graph(self) -> None:
+        """Lower the shared, already-bound period graph, without revalidation.
+
+        VAT/claim kernels pause after each actual period. A future reference
+        never forces another period's bases to be evaluated prematurely.
+        """
+        for key in self._financial_graph.order:
+            self._checkpoint()
+            if key in self._financial_values:
+                continue
+            kind, identity, axis, period, measure = key
+            trace_axis = {"financial_year": "year", "tax_month": "month"}.get(axis, axis)
+            self._source(self._financial_identity(key), measure, trace_axis, period)
+            if kind == "amount":
+                value = self._named_amount(identity, period)
+            elif kind == "movement":
+                value = self._retain_movement(identity, axis, period)
+            elif kind == "asset":
+                value = self._asset_value(identity, period, measure)
+            elif kind == "pool":
+                value = self._pool_value(identity, period, measure)
+            else:
+                value = self._tax_rule_value(identity, axis, period, measure)
+            self._financial_values[key] = value
+        self._fact_assets = [
+            {"id": identity, "basis": self._financial_values[("asset", identity, "scalar", 0, "basis")],
+             "capitalized_at": asset.capitalized_at.to_dict(), "available_from": asset.available_from,
+             "book_values": [{"year": year,
+                              "value": self._financial_values[("asset", identity, "financial_year", year,
+                                                                "book_value")]}
+                             for year in range(1, self.evaluation.evaluation_years + 1)]}
+            for identity, asset in sorted(self.finance.assets.items())
+        ]
+        self._fact_movements.sort(key=lambda row: (row["id"], row["axis"], row["period"]))
+        self._fact_derived.sort(key=lambda row: (row["rule"], row["period"]))
+        self._fact_vat.sort(key=lambda row: (row["pool"], row["month"]))
+        self._fact_vat_rules = [
+            {"rule": identity, "pool": rule.credit_pool, "month": month,
+             **{measure: self._financial_values[("tax_rule", identity, "tax_month", month, measure)]
+                for measure in ("output_tax", "deductible_input")}}
+            for identity, rule in sorted(self.finance.tax_rules.items())
+            if isinstance(rule, (VatRule, ConstructionVatRule))
+            for month in range(1, 12 * self.evaluation.evaluation_years + 1)
+        ]
+        self._fact_income.sort(key=lambda row: (row["rule"], row["year"]))
+        self._fact_depr.sort(key=lambda row: (row["rule"], row["year"],
+                                             json.dumps(row["base_from"], sort_keys=True)))
+        self._fact_balances.sort(key=lambda row: (row["rule"], row["vintage_id"], row["year"]))
+
+    @staticmethod
+    def _time_point(axis, period):
+        return {"kind": axis, "year" if axis == "financial_year" else "month": period}
+
+    def _retain_movement(self, identity, axis, period) -> _AffineAcc:
+        movement = self.finance.cash_movements[identity]
+        raw = self._amount_reference(movement.amount, axis, period).snapshot()
+        multiplier, input_factor, output_factor = 1.0, 0.0, 0.0
+        for rule in self.finance.tax_rules.values():
+            if not isinstance(rule, VatRule):
+                continue
+            entries = rule.movement_input_tax if movement.direction == "outflow" else rule.movement_output_tax
+            for entry in entries:
+                if entry.movement != identity:
+                    continue
+                rate = float(entry.rate.value)
+                exclusive = movement.price_basis == "tax_exclusive"
+                multiplier = 1.0 + rate if exclusive else 1.0
+                tax = rate if exclusive else rate / (1.0 + rate)
+                if movement.direction == "outflow":
+                    input_factor = tax * float(entry.deductible_ratio.value)
+                else:
+                    output_factor = tax
+        values = {"raw": raw}
+        for name, factor in (("gross", multiplier), ("deductible_input", input_factor),
+                             ("output_tax", output_factor), ("net_basis", multiplier - input_factor),
+                             ("net_revenue", multiplier - output_factor)):
+            value = _AffineAcc()
+            value.add_scaled(raw, factor)
+            values[name] = value
+        limit = self.evaluation.evaluation_years * (12 if axis == "tax_month" else 1)
+        payments, unpaid = [], _AffineAcc()
+        for index, payment in enumerate(movement.payments):
+            paid_period = period + payment.offset
+            amount = _AffineAcc()
+            amount.add_scaled(values["gross"], float(payment.ratio))
+            payments.append({"at": self._time_point(axis, paid_period), "ratio": str(payment.ratio),
+                             "amount": amount})
+            if paid_period <= limit:
+                year = paid_period if axis == "financial_year" else (paid_period + 11) // 12
+                self._year_cash(year).add_scaled(amount, 1.0 if movement.direction == "inflow" else -1.0)
+            else:
+                unpaid.add_scaled(amount, 1.0)
+        self._movement_values[(identity, axis, period)] = values
+        self._fact_movements.append({"id": identity, "axis": axis, "period": period,
+                                     "direction": movement.direction, "price_basis": movement.price_basis,
+                                     **values, "payments": payments, "end_unpaid": unpaid})
+        return raw
+
+    def _asset_value(self, identity, year, measure) -> _AffineAcc:
+        if measure == "basis":
+            value = self._amount_reference(self.finance.assets[identity].basis_from).snapshot()
+            self.rows.append(LinearConstraint(f"asset__{identity}__basis_nonnegative", value.freeze(), "ge", 0.0))
+            return value
+        value = _AffineAcc()
+        if measure == "book_value":
+            value.add_scaled(self._financial_values[("asset", identity, "scalar", 0, "basis")], 1.0)
+        for relation in self.analysis.relations("depreciation"):
+            entry = relation.payload.entry
+            if entry.base_from.kind != "asset" or entry.base_from.id != identity:
+                continue
+            first = self.evaluation.construction_period + entry.first_year
+            periods = range(first, min(year, first + entry.life_years - 1) + 1) if measure == "book_value" else (year,)
             for period in periods:
-                axis = {"financial_year": "year", "tax_month": "month"}.get(definition.axis, definition.axis)
-                self._source(f"amount.{amount_id}", "amount", axis, period)
-                self._named_amount(amount_id, period)
+                if first <= period < first + entry.life_years:
+                    annual = self._income_depreciation_affine(relation, period, {}, f"资产 {identity!r}")
+                    value.add_scaled(annual, -1.0 if measure == "book_value" else 1.0)
+        return value
+
+    def _vat_rule_quantity(self, rule_id, month, measure) -> _AffineAcc:
+        rule = self.finance.tax_rules[rule_id]
+        relation = self.analysis.operation(f"vat.{rule.credit_pool}.m{month}")
+        value = _AffineAcc()
+        role = "vat_out" if measure == "output_tax" else "vat_in"
+        for term in relation.payload.amount_terms:
+            if term.owner == rule_id and term.role == role:
+                value.add_scaled(self._financial_amount_term_affine(term), term.coefficient)
+        if isinstance(rule, VatRule):
+            entries = rule.movement_output_tax if measure == "output_tax" else rule.movement_input_tax
+            field = "output_tax" if measure == "output_tax" else "deductible_input"
+            for entry in entries:
+                for at in cash_movement_occurrences(self.finance.cash_movements[entry.movement]):
+                    if entry.confirmation.method == "recognition_period":
+                        schedule = ((at.period if at.axis == "tax_month" else 12 * at.period, 1.0),)
+                    else:
+                        occurrence = next(item for item in entry.confirmation.occurrences if item.at == at)
+                        schedule = tuple((item.period, float(item.ratio)) for item in occurrence.schedule)
+                    for confirmed, ratio in schedule:
+                        if confirmed == month and ratio:
+                            value.add_scaled(self._movement_values[(entry.movement, at.axis, at.period)][field], ratio)
+        return value
+
+    def _pool_value(self, pool_id, month, measure) -> _AffineAcc:
+        pool = self.finance.credit_pools[pool_id]
+        value = _AffineAcc()
+        if measure in ("paid", "credit_balance"):
+            self._ensure_vat_period(pool_id, month)
+            return self._financial_values[("pool", pool_id, "tax_month", month, measure)]
+        for refund in pool.refunds:
+            if measure == "refund_confirmed" and refund.period == month:
+                value.add_const(_money_to_internal(refund.amount))
+            elif measure == "refund_received" and refund.arrival_period == month:
+                value.add_const(_money_to_internal(refund.amount))
+            elif measure == "receivable" and refund.period <= month < refund.arrival_period:
+                value.add_const(_money_to_internal(refund.amount))
+        return value
+
+    def _tax_rule_value(self, identity, axis, period, measure) -> _AffineAcc:
+        rule = self.finance.tax_rules[identity]
+        if isinstance(rule, (VatRule, ConstructionVatRule)):
+            return self._vat_rule_quantity(identity, period, measure)
+        if isinstance(rule, IncomeTaxRule):
+            if measure == "taxable_base":
+                return self._income_base_for(identity, period)
+            self._ensure_income_year(identity, period)
+            return self._financial_values[("tax_rule", identity, axis, period, measure)]
+        if measure == "paid":
+            source_period = period - rule.payment_lag
+            if source_period < 1:
+                return _AffineAcc()
+            return self._financial_values[("tax_rule", identity, axis, source_period, "assessed")]
+        assessed = _AffineAcc()
+        if rule.rate.value:
+            assessed.add_scaled(self._amount_reference(rule.base_from, axis, period), float(rule.rate.value))
+        payment_period = period + rule.payment_lag
+        limit = self.evaluation.evaluation_years * (12 if axis == "tax_month" else 1)
+        if payment_period <= limit:
+            year = payment_period if axis == "financial_year" else (payment_period + 11) // 12
+            self._year_cash(year).add_scaled(assessed, -1.0)
+        self._fact_derived.append({"rule": identity, "axis": axis, "period": period, "assessed": assessed,
+                                   "payment_period": payment_period, "paid": assessed.snapshot()})
+        return assessed
+
+    def _ensure_vat_period(self, pool_id, month) -> None:
+        if pool_id not in self._vat_iterators:
+            self._vat_iterators[pool_id] = self._vat_periods(self.analysis.operation(f"vat.{pool_id}"))
+            self._vat_built[pool_id] = 0
+        while self._vat_built[pool_id] < month:
+            self._vat_built[pool_id] = next(self._vat_iterators[pool_id])
+
+    def _income_base_for(self, rule_id, year) -> _AffineAcc:
+        key = (rule_id, year)
+        if key not in self._income_bases:
+            relation = self.analysis.operation(f"income.{rule_id}.y{year}")
+            self._income_bases[key] = self._income_annual_base(relation, {}, f"所得税规则 {rule_id!r} 第{year}年")
+        return self._income_bases[key]
+
+    def _ensure_income_year(self, rule_id, year) -> None:
+        if rule_id not in self._income_iterators:
+            self._income_iterators[rule_id] = self._income_periods(self.analysis.operation(f"income.{rule_id}"))
+            self._income_built[rule_id] = 0
+        while self._income_built[rule_id] < year:
+            self._income_built[rule_id] = next(self._income_iterators[rule_id])
 
     def _build_amount_constraints(self) -> None:
         for operation in self.analysis.relations("planning_amount"):
@@ -3462,13 +3701,8 @@ class _ProjectBuilder:
         def discount(year: int) -> float:
             return (1.0 + evaluation.discount_rate) ** year
 
-        for t, ratio, acc in self._fact_payments:
-            npv.add_scaled(acc, -1.0 / discount(t))
-        for year_no in sorted(self._fact_annual):
-            npv.add_scaled(self._fact_annual[year_no]["net"], 1.0 / discount(year_no))
-        for row in self._fact_net_cashflows:
-            sign = 1.0 if row["direction"] == "inflow" else -1.0
-            npv.add_scaled(row["amount"], sign / discount(row["t"]))
+        for year, amount in sorted(self._fact_cash.items()):
+            npv.add_scaled(amount, 1.0 / discount(year))
         return npv
 
     def _retain_operating_facts(self) -> None:
@@ -3597,7 +3831,7 @@ class _ProjectBuilder:
                 grouped.setdefault(
                     rule.credit_pool, {"vat": [], "construction": []}
                 )["construction"].append(rule)
-            elif isinstance(rule, IncomeTaxRule):
+            elif isinstance(rule, (IncomeTaxRule, DerivedTaxRule)):
                 continue
             else:
                 raise LoweringUnsupportedError(
@@ -3653,34 +3887,34 @@ class _ProjectBuilder:
             f"unsupported financial amount source {source.identity!r}"
         )
 
-    def _vat_pool_month_bases(
-        self, periods: tuple[SemanticRelation, ...],
-    ) -> tuple[list[_AffineAcc], list[_AffineAcc]]:
-        """Build VAT bases only from period-bound terms collected before lowering."""
-        months = 12 * self.evaluation.evaluation_years
-        out: list[_AffineAcc] = [_AffineAcc() for _ in range(months)]
-        inp: list[_AffineAcc] = [_AffineAcc() for _ in range(months)]
-        for relation in periods:
-            period = relation.payload
-            for term in period.amount_terms:
-                amount = self._financial_amount_term_affine(term)
-                target = out if term.role == "vat_out" else inp
-                target[period.month - 1].add_scaled(amount, term.coefficient)
+    def _vat_period_bases(self, period) -> tuple[_AffineAcc, _AffineAcc]:
+        out, inp = _AffineAcc(), _AffineAcc()
+        for identity, rule in self.finance.tax_rules.items():
+            if isinstance(rule, (VatRule, ConstructionVatRule)) and rule.credit_pool == period.pool_id:
+                out.add_scaled(self._financial_values[("tax_rule", identity, "tax_month", period.month,
+                                                       "output_tax")], 1.0)
+                inp.add_scaled(self._financial_values[("tax_rule", identity, "tax_month", period.month,
+                                                       "deductible_input")], 1.0)
         return out, inp
 
     def _build_vat(self) -> _AffineAcc | None:
+        for operation in self.analysis.relations("vat"):
+            self._ensure_vat_period(operation.payload.pool_id, 12 * self.evaluation.evaluation_years)
+        return self._vat_cash
+
+    def _vat_periods(self, operation):
         """各池连续月度 paid/carry 精确链；返回 NPV 现金仿射（或 None）。
 
         月范围、期初留抵、退款领取/到账以及上月余额连接均来自 collection
         barrier 前的 vat_period 声明；本阶段只把这些语义关系精确降级
         为现有 paid/carry/mutex 行，不再重新解释 credit_pools 的时序。
         """
-        operations = self.analysis.relations("vat")
-        if not operations:
-            return None
+        operations = (operation,)
         evaluation = self.evaluation
         taken = set(self.variables)
-        cash = _AffineAcc()
+        if self._vat_cash is None:
+            self._vat_cash = _AffineAcc()
+        cash = self._vat_cash
         rate = evaluation.discount_rate
 
         def discount(year: int) -> float:
@@ -3698,7 +3932,6 @@ class _ProjectBuilder:
                 ),
                 key=lambda relation: relation.payload.month,
             ))
-            out_list, in_list = self._vat_pool_month_bases(periods)
             for refund in pool.refunds:
                 self._fact_refunds.append(
                     {
@@ -3714,22 +3947,24 @@ class _ProjectBuilder:
             for period_relation in periods:
                 period = period_relation.payload
                 month = period.month
+                self._checkpoint()
                 self._source(period_relation.identity, "vat", "month", month)
                 location = f"VAT 池 {pool_id!r} 第 {month} 月"
+                output, eligible_input = self._vat_period_bases(period)
                 out_max = self.analysis.affine_side(
-                    out_list[month - 1], side="max", label=location,
+                    output, side="max", label=location,
                     relation=period_relation, period=month,
                 )
                 out_min = self.analysis.affine_side(
-                    out_list[month - 1], side="min", label=location,
+                    output, side="min", label=location,
                     relation=period_relation, period=month,
                 )
                 in_max = self.analysis.affine_side(
-                    in_list[month - 1], side="max", label=location,
+                    eligible_input, side="max", label=location,
                     relation=period_relation, period=month,
                 )
                 in_min = self.analysis.affine_side(
-                    in_list[month - 1], side="min", label=location,
+                    eligible_input, side="min", label=location,
                     relation=period_relation, period=month,
                 )
                 cumulative_hi += max(in_max - out_min, 0.0)
@@ -3741,7 +3976,7 @@ class _ProjectBuilder:
                 paid_name = f"vat__{pool_id}__paid__m{month}"
                 carry_name = f"vat__{pool_id}__carry__m{month}"
                 for name in (paid_name, carry_name):
-                    if name in taken:
+                    if name in self.variables:
                         raise LoweringUnsupportedError(
                             f"VAT 内部列名与已有变量冲突 {name!r}"
                         )
@@ -3763,8 +3998,8 @@ class _ProjectBuilder:
                 equation = _AffineAcc()
                 equation.add_term(paid_name, 1.0)
                 equation.add_term(carry_name, -1.0)
-                equation.add_scaled(out_list[month - 1], -1.0)
-                equation.add_scaled(in_list[month - 1], 1.0)
+                equation.add_scaled(output, -1.0)
+                equation.add_scaled(eligible_input, 1.0)
                 equation.add_scaled(previous, 1.0)
                 self.rows.append(
                     LinearConstraint(
@@ -3801,12 +4036,17 @@ class _ProjectBuilder:
                         "carry": carry_name,
                         "claim": claim,
                         "arrival": period.refund_arrival,
+                        "receivable": self._pool_value(pool_id, month, "receivable"),
                     }
                 )
                 previous = _AffineAcc()
                 previous.add_term(carry_name, 1.0)
                 previous.add_const(-claim)
-        return cash
+                paid = _AffineAcc()
+                paid.add_term(paid_name, 1.0)
+                self._financial_values[("pool", pool_id, "tax_month", month, "paid")] = paid
+                self._financial_values[("pool", pool_id, "tax_month", month, "credit_balance")] = previous.snapshot()
+                yield month
 
     # -- 所得税年度关系（3.3.0；无所得税规则时整段跳过）--
 
@@ -3912,6 +4152,9 @@ class _ProjectBuilder:
         """
         key = source.identity
         if key not in self._net_sources:
+            if source.kind == "asset":
+                self._net_sources[key] = self._financial_values[("asset", source.id, "scalar", 0, "basis")].snapshot()
+                return self._net_sources[key]
             amount = _AffineAcc()
             dependency_ids = (
                 relation.depends_on if relation is not None
@@ -3951,6 +4194,10 @@ class _ProjectBuilder:
         location: str,
     ) -> _AffineAcc:
         """Lower one already collected depreciation amount relation."""
+        cache_key = (relation.identity, year)
+        if cache_key in self._depreciation_values:
+            return self._depreciation_values[cache_key]
+        self._source(relation.identity, "depreciation", "year", year)
         entry = relation.payload.entry
         source = entry.base_from
         depreciable = self._source_net(source, relation=relation)
@@ -4017,6 +4264,7 @@ class _ProjectBuilder:
                 "amount": annual,
             }
         )
+        self._depreciation_values[cache_key] = annual
         return annual
 
     def _income_annual_base(
@@ -4042,6 +4290,19 @@ class _ProjectBuilder:
             else:
                 amount = self._financial_amount_term_affine(term)
             base.add_scaled(amount, term.coefficient)
+        rule = self.finance.tax_rules[year_relation.payload.rule_id]
+        for names, field, sign in ((rule.movement_revenue, "net_revenue", 1.0),
+                                   (rule.movement_cost, "net_basis", -1.0)):
+            for identity in names:
+                for at in cash_movement_occurrences(self.finance.cash_movements[identity]):
+                    occurrence_year = max(1, at.period) if at.axis == "financial_year" else (at.period + 11) // 12
+                    if occurrence_year == year:
+                        base.add_scaled(self._movement_values[(identity, at.axis, at.period)][field], sign)
+        for identity in rule.derived_tax_cost:
+            axis = self.finance.tax_rules[identity].axis
+            periods = (year,) if axis == "financial_year" else range(12 * (year - 1) + 1, 12 * year + 1)
+            for period in periods:
+                base.add_scaled(self._financial_values[("tax_rule", identity, axis, period, "assessed")], -1.0)
         return base
 
     def _retain_net_cashflows(self) -> None:
@@ -4078,6 +4339,11 @@ class _ProjectBuilder:
         self._fact_net_cashflows.sort(key=lambda row: (row["t"], row["id"]))
 
     def _build_income(self) -> _AffineAcc | None:
+        for operation in self.analysis.relations("income"):
+            self._ensure_income_year(operation.payload.rule_id, self.evaluation.evaluation_years)
+        return self._income_cash
+
+    def _income_periods(self, operation):
         """各所得税规则年度计税/亏损/税额精确链；返回 NPV 现金仿射（或 None）。
 
         ``profit - gen = base`` 等式 + 非负 + 互斥确定唯一正负分段；
@@ -4087,23 +4353,23 @@ class _ProjectBuilder:
         约束与目标选择无关，现金只入 NPV；折旧/亏损抵扣不是现金流，
         不重复扣除。
         """
-        operations = self.analysis.relations("income")
-        if not operations:
-            return None
+        operations = (operation,)
         evaluation = self.evaluation
         var_bounds = {
             variable.name: (variable.lower, variable.upper)
             for variable in self.variables.values()
         }
         taken = set(var_bounds)
-        cash = _AffineAcc()
+        if self._income_cash is None:
+            self._income_cash = _AffineAcc()
+        cash = self._income_cash
         tax_rate_default = evaluation.discount_rate
 
         def discount(year: int) -> float:
             return (1.0 + tax_rate_default) ** year
 
         def declare(name: str, upper: float, binary: bool = False) -> None:
-            if name in taken:
+            if name in self.variables:
                 raise LoweringUnsupportedError(
                     f"所得税内部列名与已有变量冲突 {name!r}"
                 )
@@ -4170,9 +4436,9 @@ class _ProjectBuilder:
                                 vintage["rem"].snapshot(),
                             )
                         )
-                base = self._income_annual_base(
-                    year_relation, var_bounds, location,
-                )
+                self._checkpoint()
+                base = self._income_base_for(rule_id, year)
+                self._source(year_relation.identity, "income", "year", year)
                 base_kept = base.snapshot()
                 base_hi = self.analysis.affine_side(
                     base, side="max", label=location, relation=year_relation, period=year,
@@ -4305,7 +4571,13 @@ class _ProjectBuilder:
                                 "rem": vintage["rem"].snapshot(),
                             }
                         )
-        return cash
+                assessed = _AffineAcc()
+                assessed.add_term(profit_name, tax_rate)
+                assessed.add_scaled(used_total, -tax_rate)
+                for measure, value in (("taxable_base", base_kept), ("loss_used", used_total),
+                                       ("assessed", assessed), ("paid", assessed.snapshot())):
+                    self._financial_values[("tax_rule", rule_id, "financial_year", year, measure)] = value
+                yield year
 
     def _build_objective(self) -> tuple[_AffineAcc, str]:
         planning = self.doc["planning"]
@@ -4317,10 +4589,6 @@ class _ProjectBuilder:
             # 流出、到账退税流入）只入本目标；税额状态约束与目标选择
             # 无关，已在建模段落实。
             npv = self._npv_objective()
-            if self._vat_cash is not None:
-                npv.add_scaled(self._vat_cash, 1.0)
-            if self._income_cash is not None:
-                npv.add_scaled(self._income_cash, 1.0)
             return npv, self.finance.currency
         # 普通目标不消费经营现金，但同次解财务事实仍须声明（与目标无关）。
         self._retain_operating_facts()
@@ -4485,6 +4753,9 @@ class _ProjectBuilder:
 
     def model_sources(self) -> Mapping[str, object]:
         """Expose references from the same build, never parse solver names."""
+        def financial_sources(*keys) -> list[str]:
+            return [f"relation:{self._financial_identity(key)}" for key in keys]
+
         outputs = [{"path": ["solution", "objective_value"],
                     "sources": ["relation:planning.objective"]}]
         for inst, local in sorted(self._step_columns):
@@ -4532,6 +4803,39 @@ class _ProjectBuilder:
         for index, item in enumerate(self._fact_net_cashflows):
             outputs.append({"path": ["financial_facts", "net_cashflows", index],
                             "sources": [f"relation:net_cash.{item['id']}"]})
+        for index, item in enumerate(self._fact_movements):
+            sources = financial_sources(
+                ("movement", item["id"], item["axis"], item["period"], "raw"),
+            )
+            outputs.append({"path": ["financial_facts", "cash_movements", index],
+                            "sources": sources})
+        for index, item in enumerate(self._fact_assets):
+            basis_key = ("asset", item["id"], "scalar", 0, "basis")
+            sources = financial_sources(basis_key)
+            for value in item["book_values"]:
+                book_key = ("asset", item["id"], "financial_year", value["year"], "book_value")
+                sources.extend(financial_sources(book_key))
+            for operation in self.analysis.relations("depreciation"):
+                entry = operation.payload.entry
+                if (entry.base_from.kind == "asset" and entry.base_from.id == item["id"]
+                        and self.evaluation.construction_period + entry.first_year
+                        <= self.evaluation.evaluation_years):
+                    sources.append(f"relation:{operation.identity}")
+            outputs.append({"path": ["financial_facts", "assets", index],
+                            "sources": list(dict.fromkeys(sources))})
+        for index, item in enumerate(self._fact_vat_rules):
+            sources = financial_sources(
+                ("tax_rule", item["rule"], "tax_month", item["month"], "output_tax"),
+                ("tax_rule", item["rule"], "tax_month", item["month"], "deductible_input"),
+            )
+            outputs.append({"path": ["financial_facts", "tax_cash", "vat_rules", index],
+                            "sources": sources})
+        for index, item in enumerate(self._fact_derived):
+            sources = financial_sources(
+                ("tax_rule", item["rule"], item["axis"], item["period"], "assessed"),
+            )
+            outputs.append({"path": ["financial_facts", "tax_cash", "derived", index],
+                            "sources": sources})
         for index, item in enumerate(self._fact_cost_items):
             identity = f"cost_item.{item['instance_id']}.{item['component']}.{item['item_id']}"
             outputs.append({"path": ["financial_facts", "cost_items", index],
@@ -4620,6 +4924,7 @@ class _ProjectBuilder:
                         "constant": -row["claim"],
                         "terms": {row["carry"]: 1.0},
                     },
+                    "receivable": self._decl_affine(row["receivable"]),
                 }
             )
         income: list[dict[str, object]] = []
@@ -4645,6 +4950,7 @@ class _ProjectBuilder:
                     "loss_used": self._decl_affine(used),
                     "loss_generated": self._decl_affine(gen),
                     "loss_expired": self._decl_affine(expired),
+                    "assessed": self._decl_affine(tax),
                     "tax": self._decl_affine(tax),
                 }
             )
@@ -4707,6 +5013,16 @@ class _ProjectBuilder:
             "annual_operation": annual_operation,
             "tax_cash": {
                 "vat": vat,
+                "vat_rules": [
+                    {
+                        "rule": row["rule"],
+                        "pool": row["pool"],
+                        "month": row["month"],
+                        "output_tax": self._decl_affine(row["output_tax"]),
+                        "deductible_input": self._decl_affine(row["deductible_input"]),
+                    }
+                    for row in self._fact_vat_rules
+                ],
                 "refunds": [
                     {
                         "pool": row["pool"],
@@ -4736,7 +5052,56 @@ class _ProjectBuilder:
                     }
                     for row in self._fact_balances
                 ],
+                "derived": [
+                    {
+                        "rule": row["rule"],
+                        "axis": row["axis"],
+                        "period": row["period"],
+                        "assessed": self._decl_affine(row["assessed"]),
+                        "payment_period": row["payment_period"],
+                        "paid": self._decl_affine(row["paid"]),
+                    }
+                    for row in self._fact_derived
+                ],
             },
+            "cash_movements": [
+                {
+                    "id": row["id"],
+                    "axis": row["axis"],
+                    "period": row["period"],
+                    "direction": row["direction"],
+                    "price_basis": row["price_basis"],
+                    **{
+                        field: self._decl_affine(row[field])
+                        for field in (
+                            "raw", "gross", "deductible_input", "net_basis", "output_tax",
+                            "net_revenue", "end_unpaid",
+                        )
+                    },
+                    "payments": [
+                        {
+                            "at": payment["at"],
+                            "ratio": payment["ratio"],
+                            "amount": self._decl_affine(payment["amount"]),
+                        }
+                        for payment in row["payments"]
+                    ],
+                }
+                for row in self._fact_movements
+            ],
+            "assets": [
+                {
+                    "id": row["id"],
+                    "basis": self._decl_affine(row["basis"]),
+                    "capitalized_at": row["capitalized_at"],
+                    "available_from": row["available_from"],
+                    "book_values": [
+                        {"year": value["year"], "value": self._decl_affine(value["value"])}
+                        for value in row["book_values"]
+                    ],
+                }
+                for row in self._fact_assets
+            ],
             # 完整税后现金流按 t=0..E 顺序排列（时点为下标位置，不另存年键）。
             "annual_net_flows": [
                 self._decl_affine(self._fact_cash.get(t) or _AffineAcc())

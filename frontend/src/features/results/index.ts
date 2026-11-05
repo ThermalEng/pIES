@@ -1,3 +1,4 @@
 export { getResult, listAssessments, assess, select, readHourly } from './api'
 export type { HourlyRead, HourlySeriesMeta, TaskResult } from './model'
 export { FinancialRelations } from './FinancialRelations'
+export { FinancialTransactions } from './FinancialTransactions'

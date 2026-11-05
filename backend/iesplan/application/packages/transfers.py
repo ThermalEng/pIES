@@ -1903,6 +1903,7 @@ def _sealed_tax_rows(fin: dict[str, Any], ccy: str) -> list[tuple[str, Any]]:
             rows.append((f"{head} 确认退款 / claimed", f"{row['refund_claimed']} {ccy}"))
             rows.append((f"{head} 到账退款 / arrived", f"{row['refund_arrived']} {ccy}"))
             rows.append((f"{head} 期末结转 / carry", f"{row['carry']} {ccy}"))
+            rows.append((f"{head} 期末退款应收(非现金) / receivable", f"{row['receivable']} {ccy}"))
     else:
         rows.append(("增值税 / VAT", "无适用规则 / No applicable rules"))
     refunds = tax["refunds"]
@@ -1926,6 +1927,7 @@ def _sealed_tax_rows(fin: dict[str, Any], ccy: str) -> list[tuple[str, Any]]:
             rows.append((f"{head} 抵亏 / used", f"{row['loss_used']} {ccy}"))
             rows.append((f"{head} 新生亏损 / generated", f"{row['loss_generated']} {ccy}"))
             rows.append((f"{head} 到期核销 / expired", f"{row['loss_expired']} {ccy}"))
+            rows.append((f"{head} 应计税额 / assessed", f"{row['assessed']} {ccy}"))
             rows.append((f"{head} 税额 / tax", f"{row['tax']} {ccy}"))
     else:
         rows.append(("所得税 / Income tax", "无适用规则 / No applicable rules"))
@@ -1933,9 +1935,12 @@ def _sealed_tax_rows(fin: dict[str, Any], ccy: str) -> list[tuple[str, Any]]:
     if depreciation:
         for row in depreciation:
             source = row["base_from"]
-            identity = (f"{source['kind']}:{source['finance_type']}"
-                        if source["kind"] == "upfront_capex_net"
-                        else f"{source['kind']}:y={source['year']},#{source['position']}")
+            if source["kind"] == "upfront_capex_net":
+                identity = f"{source['kind']}:{source['finance_type']}"
+            elif source["kind"] == "asset":
+                identity = f"asset:{source['id']}"
+            else:
+                identity = f"{source['kind']}:y={source['year']},#{source['position']}"
             rows.append(
                 (
                     f"计税折旧 {row['rule']} {identity} y={row['year']} / "
@@ -2121,6 +2126,85 @@ def _write_sealed_amounts(ws, fin: dict[str, Any]) -> None:
             for column, value in enumerate(values, 1):
                 ws.cell(row=row_no, column=column, value=_excel_safe(value))
             row_no += 1
+
+
+def _write_frozen_relation_table(ws, headers: tuple[str, ...], rows: list[tuple[Any, ...]]) -> None:
+    """Display each frozen row verbatim; no amount parsing, totals or tax inference."""
+    for column, header in enumerate(headers, 1):
+        ws.cell(row=2, column=column, value=header)
+    if not rows:
+        ws.cell(row=3, column=1, value="无适用项 / No applicable items")
+    for row_no, values in enumerate(rows, 3):
+        for column, value in enumerate(values, 1):
+            ws.cell(row=row_no, column=column, value=_excel_safe(value))
+
+
+def _write_sealed_transactions(wb, fin: dict[str, Any]) -> None:
+    """Separate occurrence, payment, asset, book value and tax facts, including post-horizon records."""
+    ccy = fin["currency"]
+    movements = fin["cash_movements"]
+    fields = (
+        "id", "axis", "period", "direction", "price_basis", "raw", "gross",
+        "deductible_input", "net_basis", "output_tax", "net_revenue", "end_unpaid",
+    )
+    ws = wb.create_sheet("收付发生项")
+    _set_sheet_title(ws, "收付发生项（封存）", "Sealed Cash Movement Occurrences")
+    _write_frozen_relation_table(ws, (
+        "发生项 / ID", "轴 / Axis", "发生期间 / Period", "方向 / Direction", "原额口径 / Price basis",
+        "原额 / Raw", "含税额 / Gross", "可抵进项 / Deductible input", "净基础 / Net basis",
+        "销项税额 / Output tax", "净收入 / Net revenue", "期末未收付 / End unpaid", "币种 / Currency",
+    ), [tuple(item[field] for field in fields) + (ccy,) for item in movements])
+
+    payment_rows = []
+    for item in movements:
+        for position, payment in enumerate(item["payments"], 1):
+            at = payment["at"]
+            period = at["year"] if at["kind"] == "financial_year" else at["month"]
+            payment_rows.append((
+                item["id"], item["axis"], item["period"], position, at["kind"], period,
+                payment["ratio"], payment["amount"], ccy,
+            ))
+    ws = wb.create_sheet("收付支付计划")
+    _set_sheet_title(ws, "收付支付计划（含期外）", "Sealed Payments Including Post-horizon")
+    _write_frozen_relation_table(ws, (
+        "发生项 / ID", "发生轴 / Occurrence axis", "发生期间 / Occurrence period", "顺序 / Position",
+        "支付轴 / Payment axis", "支付期间 / Payment period", "比例 / Ratio", "金额 / Amount",
+        "币种 / Currency",
+    ), payment_rows)
+
+    asset_rows = []
+    book_rows = []
+    for asset in fin["assets"]:
+        at = asset["capitalized_at"]
+        period = at["year"] if at["kind"] == "financial_year" else at["month"]
+        asset_rows.append((asset["id"], asset["basis"], at["kind"], period, asset["available_from"], ccy))
+        book_rows.extend((asset["id"], value["year"], value["value"], ccy) for value in asset["book_values"])
+    ws = wb.create_sheet("资产基础")
+    _set_sheet_title(ws, "资产基础（封存，非新增付款）", "Sealed Asset Bases, Not Additional Payments")
+    _write_frozen_relation_table(ws, (
+        "资产 / ID", "净基础 / Basis", "资本化轴 / Capitalization axis", "资本化期间 / Capitalization period",
+        "可开始计提运营年 / First available operating year", "币种 / Currency",
+    ), asset_rows)
+    ws = wb.create_sheet("资产账面值")
+    _set_sheet_title(ws, "资产账面值（非回收现金）", "Sealed Book Values, Not Cash Recoveries")
+    _write_frozen_relation_table(ws, (
+        "资产 / ID", "评价年 / Financial year", "账面值 / Book value", "币种 / Currency",
+    ), book_rows)
+
+    ws = wb.create_sheet("规则级增值税")
+    _set_sheet_title(ws, "规则级增值税确认（非池实缴）", "Rule VAT Recognition, Not Pool Payments")
+    _write_frozen_relation_table(ws, (
+        "规则 / Rule", "池 / Pool", "确认月 / Month", "销项税额 / Output tax",
+        "可抵进项 / Deductible input", "币种 / Currency",
+    ), [(row["rule"], row["pool"], row["month"], row["output_tax"], row["deductible_input"], ccy)
+        for row in fin["tax_cash"]["vat_rules"]])
+    ws = wb.create_sheet("派生税费")
+    _set_sheet_title(ws, "派生税费（应计与支付）", "Sealed Derived Tax Accruals and Payments")
+    _write_frozen_relation_table(ws, (
+        "规则 / Rule", "轴 / Axis", "应计期间 / Accrual period", "应计税额 / Assessed",
+        "支付期间 / Payment period", "支付税额 / Paid", "币种 / Currency",
+    ), [(row["rule"], row["axis"], row["period"], row["assessed"], row["payment_period"], row["paid"], ccy)
+        for row in fin["tax_cash"]["derived"]])
 
 
 def export_excel(
@@ -2360,6 +2444,7 @@ def export_excel(
             _write_sealed_cost_items(item_sheet, section)
             amount_sheet = wb.create_sheet("命名金额")
             _write_sealed_amounts(amount_sheet, section)
+            _write_sealed_transactions(wb, section)
 
     refs = evidence_content.get("hourly_refs") or []
     if refs:

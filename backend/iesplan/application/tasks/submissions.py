@@ -683,6 +683,8 @@ def _assemble_snapshot(
     # 实际消费的不可变快照与已解析评价输入，不读当前财务行、不二次解析。
     _check_tax_evaluation_refs(evaluation, effective)
     _check_amount_evaluation_refs(evaluation, artifact, effective)
+    from iesplan.application.tasks.finance_relations import check_financial_relation_inputs
+    check_financial_relation_inputs(evaluation, artifact, effective)
     # 提交边界税务能力闸门(C3): 凭本次已解析所选生成器描述符能力核对，
     # 缺项明确 007，不静默按税前执行。复用执行引用解析带回的能力元组与
     # 闸门实际消费的不可变快照，不二次取目录、不二次解析。
@@ -1087,6 +1089,7 @@ def _check_amount_capabilities(
 ) -> None:
     """Require complete execution only for actually consumed named relations."""
     from iesplan.assembly import consumed_amounts
+    from iesplan.finance import ConstructionVatRule, DerivedTaxRule, IncomeTaxRule, VatRule
 
     doc = json.loads(artifact.canonical_text)
     required: dict[str, list[str]] = {}
@@ -1104,6 +1107,14 @@ def _check_amount_capabilities(
             },
             location={"object_type": "task", "field": field},
         )
+
+    for movement_id in effective.cash_movements:
+        require("finance.cash_movements", f"effective_finance.cash_movements.{movement_id}")
+    for asset_id in effective.assets:
+        require("finance.assets", f"effective_finance.assets.{asset_id}")
+    for rule_id, rule in effective.tax_rules.items():
+        if isinstance(rule, DerivedTaxRule):
+            require("finance.derived_tax", f"effective_finance.tax_rules.{rule_id}")
 
     for instance, binding in sorted(doc["finance_binding"]["instances"].items()):
         if binding["type"] != "costed":
@@ -1136,8 +1147,17 @@ def _check_amount_capabilities(
         for term_id, term in sorted(amount.terms.items()):
             source = term.source.to_dict()
             source_field = f"{field}.terms.{term_id}.source"
-            if source["kind"] in ("tax", "baseline"):
+            if source["kind"] == "baseline":
                 unsupported(source, source_field)
+            if source["kind"] == "tax":
+                if source["source"]["kind"] == "pool":
+                    require("finance.credit_pools", source_field)
+                else:
+                    tax_rule = effective.tax_rules[source["source"]["id"]]
+                    require({
+                        VatRule: "finance.vat", ConstructionVatRule: "finance.construction_input_vat",
+                        IncomeTaxRule: "finance.income_tax", DerivedTaxRule: "finance.derived_tax",
+                    }[type(tax_rule)], source_field)
             marker = {
                 "system_quantity": "modeling.system_equations",
                 "construction_unit": "planning.construction_activation",
