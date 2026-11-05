@@ -151,6 +151,7 @@ GENERATOR_PROJECT_CONSUMERS = (
     "test_p3_f1_contract.py",
     "test_p3_f1_boundaries.py",
     "test_p3_f1_execution.py",
+    "test_p3_f3_nf_integration.py",
     "test_pr38_review_probes.py",
     "test_linear_lowering.py",
     "test_issue04_d2.py",
