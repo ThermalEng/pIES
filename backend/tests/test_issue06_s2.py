@@ -115,8 +115,8 @@ def _builder(
             "upper_bound": "10", "unit": "kW",
         }
         constraints = {
-            "min_total": {"expression": "cap_a + cap_b >= 10 kW"},
-            "max_total": {"expression": "cap_a + cap_b <= 10 kW"},
+            "min_total": {"type": "capacity_limit", "expression": "cap_a + cap_b >= 10 kW"},
+            "max_total": {"type": "capacity_limit", "expression": "cap_a + cap_b <= 10 kW"},
         }
     doc = {
         "project_baseline": {"resolution": "1h", "start_year": 2025},
@@ -350,7 +350,7 @@ def test_finite_bound_only_required_when_tax_expression_needs_it() -> None:
     items = [_expense("0", _scale("a", "2")), _expense("0")]
     # 无税链时不对纯 NPV 仿射虚构最小建设量或上界。
     _builder(items, upper=None).build()
-    with pytest.raises(LoweringUnsupportedError, match="VAT 池.*缺有限界.*cap_a"):
+    with pytest.raises(LoweringUnsupportedError, match="缺有限界.*cap_a"):
         _builder(items, upper=None, taxes=True).build()
 
 

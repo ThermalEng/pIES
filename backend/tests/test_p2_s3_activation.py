@@ -169,12 +169,17 @@ def test_fixed_residual_zero_basis_does_not_request_a_lower_bound() -> None:
         residual=SimpleNamespace(value=100.0, unit="CNY"),
         life_years=10,
     )
-    relation = SimpleNamespace(payload=SimpleNamespace(entry=entry, rule_id="depreciation"))
+    relation = SimpleNamespace(
+        identity="depreciation.depreciation.0",
+        payload=SimpleNamespace(entry=entry, rule_id="depreciation"),
+    )
     builder = object.__new__(_ProjectBuilder)
     builder._source_net = lambda _source, relation=None: _AffineAcc()
     builder.analysis = AnalysisSpy()
     builder._fixed_residuals = {}
     builder._fact_depr = []
+    builder._depreciation_values = {}
+    builder._source = lambda *args, **kwargs: None
     builder.rows = []
 
     amount = builder._income_depreciation_affine(relation, 1, {}, "evaluation")
@@ -206,6 +211,8 @@ def test_fixed_residual_formed_basis_uses_only_its_proven_lower_side() -> None:
     builder._source_net = lambda _source, relation=None: basis
     builder._fixed_residuals = {}
     builder._fact_depr = []
+    builder._depreciation_values = {}
+    builder._source = lambda *args, **kwargs: None
     builder.rows = []
 
     annual = builder._income_depreciation_affine(relation, 1, {}, "income")
