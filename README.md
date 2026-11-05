@@ -11,7 +11,7 @@
   <img src="https://img.shields.io/badge/Backend-Python%203.12-3776AB?logo=python&logoColor=white" alt="Python 3.12">
   <img src="https://img.shields.io/badge/Frontend-React%20%7C%20TypeScript-61DAFB?logo=react&logoColor=black" alt="React & TS">
   <img src="https://img.shields.io/badge/Solver-HiGHS-green.svg" alt="Solver: HiGHS">
-  <img src="https://img.shields.io/badge/Milestone-0.14.0%20(Current)-orange.svg" alt="Milestone 0.14.0">
+  <a href="manual/changelog/README.md#当前版本状态"><img src="https://img.shields.io/badge/Milestone-0.14.5%20(Complete)-green.svg" alt="开发里程碑 0.14.5 已完成"></a>
 </p>
 
 ---
@@ -107,12 +107,9 @@ README 是项目的快速导览入口，详细技术规范与使用指南以 `ma
 
 ---
 
-## 🗺️ 未来路线图（Roadmap 展望）
+## 🗺️ 开发进度与路线图
 
-- **`0.15.0`**：外部 Provider 扩展机制验收（以黑盒视角接入外部设备 YAML 与时序数据）；
-- **`1.0.0`**：首个正式工业稳定版；
-- **`1.1.0`**：模型库与算法插件共享园地（支持氢能、冷/热储能扩展与外部算法容器化运行）；
-- **`1.2.0`**：规划—运行闭环与多场景不确定性分析（典型日容量规划 + 全年时序校核）。
+`0.14.5` 开发里程碑已完成；下一目标 `0.15.0` 统一开展 Provider 扩展与工程全流程验收。当前状态见[更新日志](manual/changelog/README.md)，后续顺序和退出标准以 [Roadmap](manual/changelog/roadmap.md) 为准。
 
 ---
 
