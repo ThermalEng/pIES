@@ -683,6 +683,7 @@ _WORKING_EVALUATION_KEYS: tuple[str, ...] = (
     "discount_rate",
     "construction_payments",
     "maintenance_expenses",
+    "comparison",
 )
 
 
@@ -761,6 +762,11 @@ def load_task_into_draft(
         for key in _WORKING_EVALUATION_KEYS:
             if key in evaluation:
                 working[key] = evaluation[key]
+        if "comparison" in evaluation:
+            from iesplan.finance import comparison_as_declared
+
+            working["comparison"] = comparison_as_declared(
+                evaluation["comparison"], years=evaluation["evaluation_years"], currency=project.currency)
         params = body.get("task_params") if isinstance(body, Mapping) else None
         params = jsonable(params) if isinstance(params, Mapping) else None
         if isinstance(params, dict) and len(params) > 0:

@@ -29,7 +29,7 @@ import { getProject } from '../features/projects'
 import { downloadBlob } from '../shared/http'
 import { exportTaskReport, isNoAssessmentError } from '../application/exportTaskReport'
 import { exportPackage as createPackageExport, downloadExport } from '../features/exports'
-import { getResult, listAssessments, assess, select, readHourly, FinancialRelations, FinancialTransactions } from '../features/results'
+import { getResult, listAssessments, assess, select, readHourly, FinancialRelations, FinancialTransactions, FinancialComparison } from '../features/results'
 import type { HourlySeriesMeta } from '../features/results'
 import { translate, translateError, useI18n } from '../i18n'
 import type { Locale } from '../i18n'
@@ -1758,6 +1758,7 @@ function FinancialEvaluationCard({ fin }: { fin: FinancialEvaluationBlock }) {
       </div>
       <FinancialRelations costItems={fin.cost_items} amounts={fin.amounts} />
       <FinancialTransactions fin={fin} />
+      <FinancialComparison fin={fin} />
       <TaxCashSections fin={fin} />
       {fin.annual_net_flows.length > 0 ? (
         <div style={{ marginTop: 'var(--ies-space-3)' }}>

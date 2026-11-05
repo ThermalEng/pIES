@@ -745,6 +745,12 @@ def _recover_financial_facts(
         }
         for entry in decl["assets"]
     ]
+    comparison = dict(decl["comparison"])
+    if comparison["mode"] == "difference":
+        comparison["evaluation_net_flows"] = [
+            amount(node, "comparison.evaluation_net_flows") for node in comparison["evaluation_net_flows"]
+        ]
+    out["comparison"] = comparison
     return out
 
 

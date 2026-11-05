@@ -394,6 +394,7 @@ class TestComputeChainEndToEnd:
             "construction_total_unit", "annual_fixed_om", "payments_applied", "net_cashflows",
             "construction_units", "cost_items", "amounts", "cash_movements", "assets",
             "annual_operation", "monthly_demand", "tax_cash", "annual_net_flows", "evaluation",
+            "comparison",
         }
         assert fin["construction_units"] == []  # 未声明建设单元仍保留公开结果字段
         assert fin["cost_items"] == []

@@ -50,6 +50,7 @@ def _sealed() -> dict:
         ],
         "monthly_demand": [],
         "annual_net_flows": ["-84000.0", "-56000.0", "8500", "6979.50"],
+        "comparison": {"mode": "absolute"},
         # 无税展示夹具: 五个数组显式为空(合法"不适用"), 不用缺字段伪装。
         "tax_cash": {
             "vat": [],

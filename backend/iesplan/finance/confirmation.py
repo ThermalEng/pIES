@@ -14,6 +14,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
+from iesplan.finance.comparison import ComparisonRequest, FrozenComparison
+
 
 @dataclass(frozen=True, slots=True)
 class ConstructionPayment:
@@ -112,6 +114,7 @@ class EvaluationInput:
     discount_rate: float
     construction_payments: tuple[ConstructionPayment, ...] = ()
     maintenance_expenses: tuple[MaintenanceExpense, ...] = ()
+    comparison: ComparisonRequest | FrozenComparison = FrozenComparison()
 
     @classmethod
     def from_frozen(cls, frozen: Mapping[str, Any]) -> EvaluationInput:
@@ -137,4 +140,5 @@ class EvaluationInput:
                 )
                 for entry in frozen["maintenance_expenses"]
             ),
+            comparison=FrozenComparison.from_frozen(frozen.get("comparison", {"mode": "absolute"})),
         )

@@ -342,6 +342,7 @@ def _sealed_k1n2() -> dict:
         "cash_movements": [],
         "assets": [],
         "annual_net_flows": ["-84000.0", "-56000.0", "8500", "6979.50"],
+        "comparison": {"mode": "absolute"},
         # 无税展示夹具: 公开税务目录显式为空(合法"不适用"), 不用缺字段伪装。
         "tax_cash": {
             "vat": [],

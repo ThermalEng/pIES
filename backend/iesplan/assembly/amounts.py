@@ -84,11 +84,11 @@ def _degree(ir):
     raise ValueError("amount_relation_requires_affine_expression")
 
 
-def check_amount_relations(planning: Mapping, finance, diags: list) -> None:
+def check_amount_relations(planning: Mapping, finance, diags: list, *, baseline_facts=None) -> None:
     """Resolve local amount aliases once on planning save or assembly input.
 
     Evaluation-owned baseline units cannot be inferred at planning-save time;
-    their active use remains capability-gated until frozen-baseline delivery.
+    submission binds those units after resolving its frozen baseline.
     """
     reserved = set(planning.get("variables") or {}) | {"step_duration"}
     for constraint_id, entry in sorted((planning.get("constraints") or {}).items()):
@@ -111,9 +111,12 @@ def check_amount_relations(planning: Mapping, finance, diags: list) -> None:
                 broken = True
                 continue
             if target["kind"] == "baseline":
-                pending_baseline = True
-                continue
-            amount = finance.amounts.get(target["id"])
+                if baseline_facts is None:
+                    pending_baseline = True
+                    continue
+                amount = baseline_facts.get(target["id"])
+            else:
+                amount = finance.amounts.get(target["id"])
             if amount is None:
                 _reject(diags, ASM_PLAN_UNDEF, ref_field + ".id", "amount_unknown_id", id=target["id"])
                 broken = True

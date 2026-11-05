@@ -116,6 +116,7 @@ from iesplan.core.contracts.planning_expression import PlanningExpression
 from iesplan.core.units import dims_of, to_si, unit_meta
 from iesplan.finance import (
     AmountPeriod,
+    AmountReference,
     ConstructionVatRule,
     CostComponentShareTerm,
     EffectiveFinanceConfig,
@@ -663,8 +664,8 @@ class _ProjectBuilder:
                             f"{operation.source.field_path}.references.{alias}",
                             relation_id=payload.name, binding_id=alias,
                         ), IndexDomain(axis, len(periods)),
-                        inputs=(f"amount.{reference['id']}",),
-                        depends_on=(f"relation:amount.{reference['id']}",),
+                        inputs=(f"{reference['kind']}.{reference['id']}",),
+                        depends_on=(f"relation:{reference['kind']}.{reference['id']}",),
                     )
                     if len(periods) == 1:
                         self.source_trace.sources[identity]["domain"]["index"] = periods[0]
@@ -2136,7 +2137,8 @@ class _ProjectBuilder:
                 objective_inputs,
                 ("objective",),
                 depends_on=tuple(op.identity for op in self.inventory.operations
-                                 if op.kind in ("annual_cash", "vat", "income", "net_cash")),
+                                 if op.kind in ("annual_cash", "vat", "income", "net_cash")
+                                 or op.kind == "comparison" and self.evaluation.comparison.mode == "difference"),
             ))
 
         # Bind the SAME P1 technical templates before running P2 analysis;
@@ -2223,6 +2225,9 @@ class _ProjectBuilder:
         if kind == "amount":
             identity = f"amount.{reference.id}"
             return (identity,), (identity,)
+        if kind == "baseline":
+            identity = f"baseline.{reference.id}"
+            return (identity,), (identity,)
         if kind == "construction_unit":
             cfg = next(cfg for cfg in self._construction_configs.values()
                        if cfg["unit_id"] == reference.unit_ref)
@@ -2265,17 +2270,38 @@ class _ProjectBuilder:
     def _collect_named_amounts(self, constraint_names) -> None:
         # Finance belongs to complete relation collection, not the physical
         # symbol/template initialization path.
+        comparison = self.evaluation.comparison
+        for alias, fact in sorted(comparison.facts.items()):
+            axis = {"financial_year": "year", "tax_month": "month"}.get(fact.axis, fact.axis)
+            self.inventory.collect(SemanticRelation(
+                f"baseline.{alias}", "baseline", IndexDomain(axis, len(fact.values)), fact,
+                SourceLocation(f"evaluation.comparison.facts.{alias}", binding_id=alias,
+                               data_object_ref=str(comparison.baseline_source["object_id"])
+                               if "object_id" in comparison.baseline_source else None),
+                (), (f"baseline.{alias}",),
+            ))
+        if comparison.mode != "absolute":
+            self.inventory.collect(SemanticRelation(
+                "evaluation.comparison", "comparison", IndexDomain("year", self.evaluation.evaluation_years + 1),
+                comparison, SourceLocation("evaluation.comparison"),
+                depends_on=tuple(f"baseline.{alias}" for alias in sorted(comparison.facts)),
+            ))
         self._consumed_amounts = consumed_amounts(self.doc, self.finance)
         self._financial_graph = financial_dependency_graph(self.doc, self.finance, self.evaluation)
         for node in self._financial_graph.nodes:
             kind, identity, axis, period, measure = node.key
             internal_axis = {"financial_year": "year", "tax_month": "month"}.get(axis, axis)
+            baseline_dependencies = (
+                tuple(f"baseline.{term.source.id}" for term in self.finance.amounts[identity].terms.values()
+                      if term.source.kind == "baseline") if kind == "amount" else ()
+            )
+            dependencies = tuple(self._financial_identity(key) for key in node.dependencies)
             self.inventory.collect(SemanticRelation(
                 self._financial_identity(node.key), "financial_value", IndexDomain(internal_axis), node,
                 SourceLocation(node.field_path.replace("effective_finance.", "finance."), binding_id=identity),
-                tuple(self._financial_identity(key) for key in node.dependencies),
+                dependencies + baseline_dependencies,
                 (self._financial_identity(node.key),),
-                depends_on=tuple(self._financial_identity(key) for key in node.dependencies),
+                depends_on=dependencies + baseline_dependencies,
             ))
         for amount_id in self._consumed_amounts:
             definition = self.finance.amounts[amount_id]
@@ -2304,8 +2330,10 @@ class _ProjectBuilder:
             entry = self.doc["planning"]["constraints"][name]
             if entry.get("type") != "amount_relation" or not entry.get("enabled", True):
                 continue
-            dimensions = {alias: Counter(dict(dims_of(self.finance.amounts[ref["id"]].unit)))
-                          for alias, ref in entry["references"].items()}
+            dimensions = {}
+            for alias, ref in entry["references"].items():
+                catalogue = comparison.facts if ref["kind"] == "baseline" else self.finance.amounts
+                dimensions[alias] = Counter(dict(dims_of(catalogue[ref["id"]].unit)))
             compiled = compile_planning_expression(entry["expression"], dimensions, currency=None)
             template = lower_planning_constraint(
                 name, compiled, {alias: ("var", None, None) for alias in dimensions},
@@ -2318,8 +2346,8 @@ class _ProjectBuilder:
                 f"planning.amount.{name}", "planning_amount", IndexDomain("scalar"),
                 AmountConstraintRule(name, template, entry["references"], bound),
                 SourceLocation(f"planning.constraints.{name}", relation_id=name),
-                tuple(f"amount.{ref['id']}" for ref in entry["references"].values()),
-                depends_on=tuple(f"amount.{ref['id']}" for ref in entry["references"].values()),
+                tuple(f"{ref['kind']}.{ref['id']}" for ref in entry["references"].values()),
+                depends_on=tuple(f"{ref['kind']}.{ref['id']}" for ref in entry["references"].values()),
             ))
 
     @staticmethod
@@ -2373,6 +2401,12 @@ class _ProjectBuilder:
         kind = reference.kind
         if kind == "amount":
             return self._named_amount(reference.id, period)
+        if kind == "baseline":
+            fact = self.evaluation.comparison.facts[reference.id]
+            index = period - 1 if axis == "tax_month" else period
+            value = _AffineAcc()
+            value.add_const(_to_internal(float(fact.values[index]), fact.unit))
+            return value
         if kind in ("movement", "asset", "tax"):
             if self.analysis is None:
                 raise _AmountNeedsConversion
@@ -2476,9 +2510,10 @@ class _ProjectBuilder:
         out.add_const(template.expression.constant)
         for (alias, _), coefficient in template.expression.terms:
             reference = references[alias]
-            _, periods = self._amount_periods(AmountPeriod(**reference["period"]), "scalar", 0)
+            axis, periods = self._amount_periods(AmountPeriod(**reference["period"]), "scalar", 0)
             for period in periods:
-                out.add_scaled(self._named_amount(reference["id"], period), coefficient)
+                source = AmountReference(kind=reference["kind"], id=reference["id"])
+                out.add_scaled(self._amount_source(source, axis, period), coefficient)
         return LinearConstraint(template.name, out.freeze(), template.sense, template.rhs)
 
     def _retain_named_amounts(self) -> None:
@@ -3701,9 +3736,18 @@ class _ProjectBuilder:
         def discount(year: int) -> float:
             return (1.0 + evaluation.discount_rate) ** year
 
-        for year, amount in sorted(self._fact_cash.items()):
-            npv.add_scaled(amount, 1.0 / discount(year))
+        for year in range(evaluation.evaluation_years + 1):
+            npv.add_scaled(self._evaluation_cash(year), 1.0 / discount(year))
         return npv
+
+    def _evaluation_cash(self, year: int) -> _AffineAcc:
+        """The one selected cash expression used by objective and declaration."""
+        cash = _AffineAcc()
+        if year in self._fact_cash:
+            cash.add_scaled(self._fact_cash[year], 1.0)
+        if self.evaluation.comparison.mode == "difference":
+            cash.add_const(-float(self.evaluation.comparison.baseline_net_flows[year]))
+        return cash
 
     def _retain_operating_facts(self) -> None:
         """实际 gross 经营/建设现金表达式（目标与声明同源，见方法文档）。
@@ -4855,6 +4899,9 @@ class _ProjectBuilder:
                 and (field not in ("construction_total", "annual_fixed_om")
                      or op.payload.component == ("upfront_capex" if field == "construction_total" else field))
             ]})
+        if self.evaluation.comparison.mode != "absolute":
+            outputs.append({"path": ["financial_facts", "comparison"],
+                            "sources": ["relation:evaluation.comparison"]})
         return MappingProxyType(self.source_trace.export(outputs))
 
     @staticmethod
@@ -5118,6 +5165,12 @@ class _ProjectBuilder:
             if amount_id in self._consumed_amounts
         ]
         out["cost_items"] = self._fact_cost_items
+        comparison = self.evaluation.comparison
+        out["comparison"] = comparison.to_dict() if comparison.mode != "absolute" else {"mode": "absolute"}
+        if comparison.mode == "difference":
+            out["comparison"]["evaluation_net_flows"] = [
+                self._decl_affine(self._evaluation_cash(year)) for year in range(years + 1)
+            ]
         return MappingProxyType(out)
 
 

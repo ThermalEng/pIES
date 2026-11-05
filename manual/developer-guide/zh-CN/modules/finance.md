@@ -191,6 +191,7 @@ Worker 对同次已求解结果计算一次评价，随结果载荷同一证据�
 - `annual_operation`：`[{financial_year, energy_net, variable_om, fixed_om, maintenance, demand_charge, net}]` 数组；金额十进制字符串，`maintenance` 为该年逐项维护合计，`demand_charge` 为当年需量费合计，`net` 已扣除各项费用一次；
 - `monthly_demand`：原样保留同次解的需量月明细；字段、金额与单位以[同次解财务事实](../formats/solver-bundle.md#同次解财务事实映射)为准。无绑定为空数组，零费率绑定仍保留真实峰值与零费用；
 - `tax_cash`、`annual_net_flows`：原样保留同次解财务事实中的结构与金额；数组单位由 `currency` 指定，年度现金流长度为 `evaluation_years+1`。空税则表示不适用，税务结算后的现金流仍完整存在；
+- `comparison`：沿[同次结果声明](../formats/solver-bundle.md#关系事实映射)保留冻结基准来源、原选择器、比较确认及事实；difference 的指标只使用同次声明的 `evaluation_net_flows`，原候选 `annual_net_flows` 不被覆盖。读取或导出不再扣一次基准；
 - `evaluation`：逐年明细与指标：`rows[{year, net, discounted, cumulative, cumulative_discounted}]`（金额字符串）；`npv`（字符串）+ `npv_unit`；`irr`（数或 null）+ `irr_status`（本页 IRR 状态枚举）；`static/dynamic_payback`（年数或 null）+ `_unit`（有值为 `"year"`）+ `_status`（`recovered`／`not_recovered`）。
 
 ### 评价确认与快照冻结

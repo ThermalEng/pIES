@@ -143,6 +143,7 @@ def _facts() -> dict:
             "derived": [],
         },
         "annual_net_flows": [dict(zero)],
+        "comparison": {"mode": "absolute"},
     }
 
 

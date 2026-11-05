@@ -30,6 +30,22 @@ function check(name, cond, detail = '') {
 
 const tk = require('/tmp/b1-tasks.cjs')
 
+{
+  const comparison = { mode: 'reference', baseline: { kind: 'declared', currency: 'CNY', evaluation_years: 1,
+    annual_net_flows: null, facts: { cap: { axis: 'scalar', unit: 'CNY', values: ['1.00000000000000001'] } } },
+    facts: { limit: { kind: 'declared_fact', id: 'cap' } }, comparability: { service_basis: 'same', differences: 'none' } }
+  const form = { ...tk.DEFAULT_FORM, constructionPeriod: '0', operationYears: '1', discountRate: '0.08',
+    constructionPayments: '[{"t":0,"ratio":1}]', maintenanceExpenses: '[]', comparison: JSON.stringify(comparison) }
+  check('F3 comparison document submitted unchanged', JSON.stringify(tk.parseEvaluation(form)?.comparison) === JSON.stringify(comparison))
+  check('F3 comparison working roundtrip', tk.formFromWorking(tk.workingOfForm(form)).comparison === form.comparison)
+  check('F3 frozen object restores to document without loss', JSON.stringify(JSON.parse(tk.formFromWorking({
+    ...tk.workingOfForm(form), comparison,
+  }).comparison)) === JSON.stringify(comparison))
+  check('F3 comparison affects logical submission identity', tk.logicalSigOf(form, 1) !== tk.logicalSigOf({ ...form, comparison: '' }, 1))
+  check('F3 malformed document stays in editable working input', tk.workingOfForm({ ...form, comparison: '{bad' }).comparison === '{bad')
+  check('F3 malformed document has field error', tk.evaluationFieldErrors({ ...form, comparison: '{bad' }).comparison === 'ies.task.comparison_invalid')
+}
+
 // ---------------------------------------------------------------------------
 // 后端形态桩(与 application/tasks/views.py 同形)
 // ---------------------------------------------------------------------------

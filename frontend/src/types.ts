@@ -220,6 +220,7 @@ export interface TaskWorkingInputs {
   discount_rate?: unknown
   construction_payments?: unknown
   maintenance_expenses?: unknown
+  comparison?: unknown
   task_params?: unknown
 }
 
@@ -649,6 +650,7 @@ export interface TaskCreateInput {
     discount_rate: number
     construction_payments: EvaluationConstructionPayment[]
     maintenance_expenses: EvaluationMaintenanceExpense[]
+    comparison?: EvaluationComparison
   }
   priority?: number
   deadline?: ISO8601
@@ -1036,6 +1038,44 @@ export interface FinancialNamedAmount {
   values: Array<{ period: number; value: string }>
 }
 
+export interface BaselineFact {
+  unit: string
+  axis: 'scalar' | 'financial_year' | 'tax_month'
+  values: Array<string | number>
+}
+
+export interface ComparisonConfirmation {
+  service_basis: string
+  differences: string
+}
+
+export type BaselineSelector =
+  | { kind: 'operation'; measure: 'energy_net' | 'fixed_om' | 'variable_om' | 'maintenance' | 'demand_charge' }
+  | { kind: 'cashflow'; measure: 'net' }
+  | { kind: 'amount'; id: string }
+  | { kind: 'movement'; id: string; measure: 'gross' | 'net_basis' | 'net_revenue' | 'paid' }
+  | { kind: 'asset'; id: string; measure: 'basis' | 'depreciation' | 'book_value' }
+  | { kind: 'tax'; source: { kind: 'rule' | 'pool'; id: string }; measure:
+    'output_tax' | 'deductible_input' | 'paid' | 'refund_confirmed' | 'refund_received' |
+    'credit_balance' | 'receivable' | 'taxable_base' | 'loss_used' | 'assessed' }
+
+export type EvaluationComparison =
+  | { mode: 'absolute' }
+  | { mode: 'reference' | 'difference'; comparability: ComparisonConfirmation } & (
+    | { baseline: { kind: 'task_result'; task_id: number; evidence_id: number }; facts: Record<string, BaselineSelector> }
+    | { baseline: { kind: 'declared'; currency: string; evaluation_years: number; annual_net_flows: string[] | null; facts: Record<string, BaselineFact> }; facts: Record<string, { kind: 'declared_fact'; id: string }> }
+  )
+
+export type FinancialComparison =
+  | { mode: 'absolute' }
+  | { mode: 'reference' | 'difference'; baseline_source: ({ kind: 'declared' } | {
+    kind: 'task_result'; task_id: number; evidence_id: number; attempt_id: number | null; object_id: number
+  }) & { selectors: Record<string, BaselineSelector | { kind: 'declared_fact'; id: string }> };
+    comparability: ComparisonConfirmation; facts: Record<string, BaselineFact> } & (
+    | { mode: 'reference' }
+    | { mode: 'difference'; baseline_net_flows: string[]; evaluation_net_flows: string[] }
+  )
+
 export interface FinancialEvaluationBlock {
   status: string
   evaluation_years: number
@@ -1059,6 +1099,7 @@ export interface FinancialEvaluationBlock {
   monthly_demand: FinancialMonthlyDemand[]
   tax_cash: FinancialTaxCash
   annual_net_flows: string[]
+  comparison: FinancialComparison
   evaluation: {
     rows: FinancialEvaluationRow[]
     npv: string

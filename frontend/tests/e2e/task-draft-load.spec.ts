@@ -381,6 +381,7 @@ test.describe('任务选择载入草稿：切换恢复全部分类、编辑保�
         { t: 1, ratio: '0.4' },
       ],
       maintenance_expenses: [],
+      comparison: { mode: 'absolute' },
     })
     expect(creates.length).toBe(2)
     const revLoaded = Number(afterT1.draft.revision)
@@ -474,6 +475,7 @@ test.describe('任务选择载入草稿：切换恢复全部分类、编辑保�
         { t: 1, ratio: '0.4' },
       ],
       maintenance_expenses: [],
+      comparison: { mode: 'absolute' },
     })
     expect(await taskIds(req, pid, token)).toEqual([t1, t2, t3])
     expect(creates.length).toBe(3)
@@ -585,6 +587,7 @@ test.describe('任务选择载入草稿：切换恢复全部分类、编辑保�
             { t: 1, ratio: '0.4' },
           ],
           maintenance_expenses: [],
+          comparison: { mode: 'absolute' },
         })
       const viewA1 = await guiDraft(page, pid)
       expect(hpCop(viewA1.content)).toBe(3.5)

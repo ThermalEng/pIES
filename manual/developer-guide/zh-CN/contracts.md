@@ -150,7 +150,7 @@ kind是必填判别字段，只接受所属形态的字段。series_id在同一�
 
 ### 评价范围与冻结基准
 
-本节是新增评价输入的目标契约，尚不表示运行版本已接受这些字段。业务语义归[评价边界与基准](modules/finance.md#评价边界与基准)；金额引用归[命名金额关系](formats/finance-relations.md)。不新增 baseline-confirm 流程、基准任务自动求解、汇率服务或第二套评价引擎。
+本节定义评价比较输入。业务语义归[评价边界与基准](modules/finance.md#评价边界与基准)；金额引用归[命名金额关系](formats/finance-relations.md)。不新增 baseline-confirm 流程、基准任务自动求解、汇率服务或第二套评价引擎。
 
 `evaluation` 增加可选 `comparison`。省略与 `{mode: absolute}` 一致，沿用原项目绝对现金流，不自动采用基准或切换增量计税。comparison 是以下判别联合，只接受所选形态字段：
 
@@ -183,6 +183,8 @@ Task baseline的评价E和币种须与本次相同；difference模式还须已�
 Declared来源的baseline.facts每项为 `{unit, axis, values}`：axis为scalar／financial_year／tax_month；scalar的values恰一个值，financial_year恰E+1个（含时点0），tax_month恰12E个（从月1起）。金额/金额费率为十进制字符串，纯物理量为有限JSON number，沿用公共数值规范。不适用的年度时点明确填零，未知不能填零。comparison.facts 每项为 `{kind: declared_fact, id}`，引用该已声明量表。金额币种一致，其他单位遵守公共单位规则，禁止隐式换汇。
 
 公开提交一次解析选择器并冻结所用具名值、单位、轴、来源身份及比较确认；Generator仍只收到原独立evaluation输入，不增加数据库/对象读取入口或第七个输入。可信结果内部恢复不重新校验或复算基准，不复制整份基准模型、逐步解或财务配置。项目包导出保存这些冻结值和来源说明；导入为新项目计算时作为 declared 来源明确确认，不伪造目标系统中的原task/evidence身份。历史证据原样保留原来源，不回写。
+
+冻结块的 `comparison` 使用同次结果的 `mode/baseline_source/comparability/facts` 形状；difference 另存 `baseline_net_flows`。`baseline_source.selectors` 保留“本地别名→本次明确选择器”，与来源任务、attempt、证据及对象身份一起用于追溯，不在 Worker 中重新执行选择器。再次将历史任务载入草稿时，比较输入转为 declared，保留相同值与比较确认，由新任务提交重新确认，不伪造可用的旧服务器引用。
 
 设候选按其冻结规则得到 `CF_c[t](x)`，基准独立给出 `CF_b[t]`：difference 模式的评价及 `system.after_tax_npv` 目标使用 `CF_c[t](x)-CF_b[t]`；reference/absolute使用`CF_c[t](x)`。NPV、IRR、回收期和导出使用同一条选定现金流。结果同时区分原候选、基准与差额，不能把全厂绝对支出称作设备增量损益，也不伪造主营收入使IRR有值。
 

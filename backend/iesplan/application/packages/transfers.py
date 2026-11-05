@@ -1895,6 +1895,25 @@ def _sealed_tax_rows(fin: dict[str, Any], ccy: str) -> list[tuple[str, Any]]:
         rows.append(("显式净现金 / Explicit net cashflows", "无项目 / None"))
     for index, amount in enumerate(fin["annual_net_flows"]):
         rows.append((f"税后现金流 CF[t={index}] / After-tax CF[t={index}]", f"{amount} {ccy}"))
+    comparison = fin["comparison"]
+    rows.append(("评价口径 / Comparison mode", comparison["mode"]))
+    if comparison["mode"] != "absolute":
+        rows.append((
+            "冻结基准来源 / Frozen baseline source",
+            json.dumps(comparison["baseline_source"], ensure_ascii=False),
+        ))
+        for key, value in comparison["comparability"].items():
+            rows.append((f"比较确认 / {key}", value))
+        for alias, fact in comparison["facts"].items():
+            for index, value in enumerate(fact["values"]):
+                period = index + 1 if fact["axis"] == "tax_month" else index
+                label = f"冻结基准 / Baseline {alias} {fact['axis']}={period}"
+                rows.append((label, f"{value} {fact['unit']}"))
+        if comparison["mode"] == "difference":
+            for index, (baseline, delta) in enumerate(zip(comparison["baseline_net_flows"],
+                                                       comparison["evaluation_net_flows"], strict=True)):
+                rows.append((f"基准税后现金流 / Baseline CF[t={index}]", f"{baseline} {ccy}"))
+                rows.append((f"评价差额 / Difference CF[t={index}]", f"{delta} {ccy}"))
     vat = tax["vat"]
     if vat:
         for row in vat:

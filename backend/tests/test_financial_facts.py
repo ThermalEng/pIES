@@ -146,6 +146,7 @@ def test_facts_mix_seal_matches_hand_and_objective(tmp_path) -> None:
         "amounts",
         "cash_movements",
         "assets",
+        "comparison",
     }
     assert facts["construction_units"] == []
     assert set(facts["tax_cash"]) == {
