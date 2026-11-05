@@ -2405,7 +2405,7 @@ class _ProjectBuilder:
             fact = self.evaluation.comparison.facts[reference.id]
             index = period - 1 if axis == "tax_month" else period
             value = _AffineAcc()
-            value.add_const(to_si(float(fact.values[index]), fact.unit))
+            value.add_const(_to_internal(float(fact.values[index]), fact.unit))
             return value
         if kind in ("movement", "asset", "tax"):
             if self.analysis is None:

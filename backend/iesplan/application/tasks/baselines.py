@@ -8,7 +8,7 @@ from dataclasses import replace
 from iesplan import results as results_domain
 from iesplan import tasks as tasks_domain
 from iesplan.application.projects import ensure_access
-from iesplan.assembly import check_amount_relations, consumed_amounts
+from iesplan.assembly import check_amount_relations, consumed_amounts, financial_dependency_graph
 from iesplan.core.errors import NotFoundError
 from iesplan.core.units import dims_of
 from iesplan.finance import (
@@ -120,16 +120,25 @@ def check_comparison_inputs(evaluation, artifact, finance, generator, capabiliti
     if diagnostics:
         diagnostic = diagnostics[0]
         reject(diagnostic.location["field"], diagnostic.params["detail"])
+    # Check the periods the dependency graph actually consumes (year-0
+    # occurrences and ``year_months: current`` reach before period 1).
+    for node in financial_dependency_graph(doc, finance, evaluation).nodes:
+        kind, identity, axis, period, _ = node.key
+        if kind != "amount":
+            continue
+        for term_id, term in finance.amounts[identity].terms.items():
+            if term.source.kind == "baseline":
+                field = f"effective_finance.amounts.{identity}.terms.{term_id}.source"
+                reference(term.source.to_dict(), axis, period, field)
     for identity in consumed_amounts(doc, finance):
         definition = finance.amounts[identity]
         for term_id, term in definition.terms.items():
             if term.source.kind != "baseline":
                 continue
             field = f"effective_finance.amounts.{identity}.terms.{term_id}.source"
-            # current periods have the same finite domain as their amount axis;
-            # all explicit selections are already fixed by the same expansion.
-            period = 1 if definition.axis != "scalar" else 0
-            fact = reference(term.source.to_dict(), definition.axis, period, field)
+            if term.source.id not in facts:
+                reject(field + ".id", f"未冻结基准事实别名: {term.source.id}")
+            fact = facts[term.source.id]
             dimensions = dims_of(fact.unit).copy()
             dimensions.update(dims_of(term.coefficient.unit))
             dimensions = {key: value for key, value in dimensions.items() if value}
