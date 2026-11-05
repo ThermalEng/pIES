@@ -73,8 +73,9 @@ DESCRIPTOR = GeneratorDescriptor(
     assembly_schema_version=ASSEMBLY_SCHEMA_VERSION,
     modes=("planning",),
     precisions=("medium",),
-    # 税务提交能力标记（手册“税务提交能力”节为正文）：三种税则种类、
-    # 抵扣池存在、同次解财务事实输出；提交闸门凭此核对，不按名称猜测。
+    # 财务提交能力标记（手册“税务提交能力”节为正文）：税则、抵扣池、
+    # 收付发生项、资产、派生税及同次解财务事实均已贯通；提交闸门凭此核对，
+    # 不按 provider 名称猜测能力。
     capabilities=(
         "affine",
         "mutex_bigm",
@@ -83,6 +84,9 @@ DESCRIPTOR = GeneratorDescriptor(
         "finance.income_tax",
         "finance.credit_pools",
         "finance.financial_facts",
+        "finance.cash_movements",
+        "finance.assets",
+        "finance.derived_tax",
         "finance.monthly_demand",
         "finance.affine_maintenance",
         "finance.monthly_daily_prices",

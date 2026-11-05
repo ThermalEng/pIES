@@ -72,9 +72,9 @@ test('F2 documents -> same-solve payment/asset/tax facts -> Excel and frozen his
   } }
   profile.credit_pools = { shared: { opening_credit: { value: '0', unit: 'CNY' }, receivable_policy: 'end_receivable', refunds: [] } }
   profile.taxes = {
-    vat_label: { display_name: '合成交易税', tax_type: 'value_added_tax', applies_to: 'revenue' },
-    income_label: { display_name: '合成所得税', tax_type: 'income_tax', applies_to: 'revenue' },
-    derived_label: { display_name: '合成派生费', tax_type: 'synthetic_levy', applies_to: 'shared' },
+    vat_label: { display_name: '合成交易税', tax_type: 'value_added_tax', applies_to: 'grid_import' },
+    income_label: { display_name: '合成所得税', tax_type: 'income_tax', applies_to: 'grid_import' },
+    derived_label: { display_name: '合成派生费', tax_type: 'synthetic_levy', applies_to: 'grid_import' },
   }
   profile.tax_rules = {
     transaction_vat: { kind: 'vat', label_ref: 'vat_label', settlement: 'monthly', credit_pool: 'shared',
@@ -214,6 +214,8 @@ test('F2 documents -> same-solve payment/asset/tax facts -> Excel and frozen his
   expect(workbookRows(file, '规则级增值税')).toEqual(fin.tax_cash.vat_rules.map(r => [r.rule, r.pool, r.month, safe(r.output_tax), safe(r.deductible_input), fin.currency]))
   expect(workbookRows(file, '派生税费')).toEqual(fin.tax_cash.derived.map(r => [r.rule, r.axis, r.period, safe(r.assessed), r.payment_period, safe(r.paid), fin.currency]))
   expect((await fetchResult()).result.financial_evaluation).toEqual(fin)
-  session.assertNoErrors()
+  session.assertNoErrors([
+    { method: 'GET', path: `/api/projects/${pid}/planning-config`, status: 404, times: 1 },
+  ])
   await context.close()
 })

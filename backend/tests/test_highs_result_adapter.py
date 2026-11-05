@@ -13,6 +13,7 @@ V1 夹具为 Docker 内真实求解垫片（``ies-highs-solver``，highspy 1.7.2
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -128,14 +129,18 @@ def _facts() -> dict:
         "construction_units": [],
         "cost_items": [],
         "amounts": [],
+        "cash_movements": [],
+        "assets": [],
         "annual_operation": [],
         "monthly_demand": [],
         "tax_cash": {
             "vat": [],
+            "vat_rules": [],
             "refunds": [],
             "income": [],
             "depreciation": [],
             "loss_balances": [],
+            "derived": [],
         },
         "annual_net_flows": [dict(zero)],
     }
@@ -702,3 +707,94 @@ def test_monthly_demand_facts_recovered_from_same_primal() -> None:
     assert facts["annual_operation"][0]["maintenance"] == "1512.0"
     assert facts["annual_operation"][0]["net"] == "-1602.0"
     assert facts["annual_net_flows"][-1] == "-1602.0"
+
+
+def test_f2_relation_facts_restore_same_primal_and_seal_verbatim() -> None:
+    """Restore declared amounts only; period-0, future payments and identities survive sealing."""
+    from iesplan.application.worker.compute_cases import build_financial_evaluation
+
+    def affine(constant=0.0, coefficient=0.0):
+        return {"constant": constant, "terms": {"x": coefficient} if coefficient else {}}
+
+    doc = json.loads(_parameters())
+    declaration = doc["financial_facts"]
+    declaration["cash_movements"] = [{
+        "id": "purchase", "axis": "financial_year", "period": 0,
+        "direction": "outflow", "price_basis": "tax_exclusive",
+        "raw": affine(10, 0.03), "gross": affine(20, 0.03),
+        "deductible_input": affine(1, 0.003), "net_basis": affine(10, 0.03),
+        "output_tax": affine(), "net_revenue": affine(20, 0.03), "end_unpaid": affine(12, 0.018),
+        "payments": [
+            {"at": {"kind": "financial_year", "year": 0}, "ratio": "0.4000", "amount": affine(8, 0.012)},
+            {"at": {"kind": "financial_year", "year": 4}, "ratio": "0.6000", "amount": affine(12, 0.018)},
+        ],
+    }]
+    declaration["assets"] = [{
+        "id": "asset_a", "basis": affine(10, 0.03),
+        "capitalized_at": {"kind": "tax_month", "month": 12}, "available_from": 1,
+        "book_values": [{"year": 2, "value": affine(20, 0.02)}, {"year": 3, "value": affine(30, 0.01)}],
+    }]
+    declaration["tax_cash"]["vat"] = [{
+        "pool": "shared", "month": 36, "paid": affine(1, 0.003),
+        "refund_claimed": affine(3), "refund_arrived": affine(), "carry": affine(),
+        "receivable": affine(1, 0.001),
+    }]
+    declaration["tax_cash"]["vat_rules"] = [{
+        "rule": "purchase_vat", "pool": "shared", "month": 13,
+        "output_tax": affine(), "deductible_input": affine(1, 0.003),
+    }, {
+        "rule": "sale_vat", "pool": "shared", "month": 13,
+        "output_tax": affine(5, 0.005), "deductible_input": affine(),
+    }]
+    declaration["tax_cash"]["income"] = [{
+        "rule": "income", "year": 3, "taxable_base": affine(5, 0.005),
+        "loss_used": affine(), "loss_generated": affine(), "loss_expired": affine(),
+        "assessed": affine(2, 0.001), "tax": affine(5),
+    }]
+    declaration["tax_cash"]["depreciation"] = [{
+        "rule": "income", "base_from": {"kind": "asset", "id": "asset_a"},
+        "year": 3, "amount": affine(5, 0.005),
+    }]
+    declaration["tax_cash"]["derived"] = [{
+        "rule": "levy", "axis": "tax_month", "period": 36, "payment_period": 38,
+        "assessed": affine(0.1, 0.0001), "paid": affine(0.1, 0.0001),
+    }]
+    declaration["annual_net_flows"] = [affine() for _ in range(4)]
+    original = json.dumps(declaration, sort_keys=True)
+    result = _adapt({PROBLEM_PATH: TINY_MPS.encode(), PARAMETERS_PATH: json.dumps(doc).encode()},
+                    _receipt(), SHIM_OPTIMAL.encode())
+    facts = result.to_dict()["outputs"]["financial_facts"]
+    movement = facts["cash_movements"][0]
+    assert movement == {
+        "id": "purchase", "axis": "financial_year", "period": 0,
+        "direction": "outflow", "price_basis": "tax_exclusive", "raw": "100.0", "gross": "110.0",
+        "deductible_input": "10.0", "net_basis": "100.0", "output_tax": "0.0",
+        "net_revenue": "110.0", "end_unpaid": "66.0", "payments": [
+            {"at": {"kind": "financial_year", "year": 0}, "ratio": "0.4000", "amount": "44.0"},
+            {"at": {"kind": "financial_year", "year": 4}, "ratio": "0.6000", "amount": "66.0"},
+        ],
+    }
+    assert facts["assets"] == [{
+        "id": "asset_a", "basis": "100.0", "capitalized_at": {"kind": "tax_month", "month": 12},
+        "available_from": 1, "book_values": [{"year": 2, "value": "80.0"}, {"year": 3, "value": "60.0"}],
+    }]
+    assert facts["tax_cash"]["vat"][0]["receivable"] == "4.0"
+    assert facts["tax_cash"]["vat_rules"][0]["deductible_input"] == "10.0"
+    assert facts["tax_cash"]["vat_rules"][1]["output_tax"] == "20.0"
+    assert facts["tax_cash"]["income"][0]["assessed"] == "5.0"
+    assert facts["tax_cash"]["derived"] == [{
+        "rule": "levy", "axis": "tax_month", "period": 36,
+        "assessed": "0.4", "payment_period": 38, "paid": "0.4",
+    }]
+    assert facts["tax_cash"]["depreciation"][0]["base_from"] == {"kind": "asset", "id": "asset_a"}
+    snapshot = SimpleNamespace(evaluation={
+        "construction_period": 1, "operation_years": 2, "evaluation_years": 3, "discount_rate": 0.08,
+    })
+    finance = SimpleNamespace(
+        currency="CNY", price_basis="tax_inclusive", base_year=2025, profile_id="synthetic",
+    )
+    sealed = build_financial_evaluation(snapshot, finance, result)
+    for key in ("cash_movements", "assets", "tax_cash", "annual_net_flows"):
+        assert sealed[key] == facts[key]
+    assert sealed["annual_net_flows"] == ["0.0"] * 4
+    assert json.dumps(declaration, sort_keys=True) == original

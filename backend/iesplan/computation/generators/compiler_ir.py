@@ -11,6 +11,7 @@ from collections import defaultdict
 from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass, field
 
+from iesplan.assembly import FinancialDependencyNode
 from iesplan.computation.generators.linear import (
     LinearConstraint,
     LinearExpression,
@@ -235,6 +236,7 @@ class FinancialAmountTerm:
     start: int | None = None
     end: int | None = None
     scope: str | None = None
+    owner: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -315,7 +317,7 @@ SemanticPayload = (
     | TariffCharge | DemandPeak | MaintenancePayment | VatRuleSource | VatPoolOperation
     | VatPeriodConnection | IncomeTaxOperation | IncomeYearConnection | IncomeLossClaim
     | DepreciationCharge | NetCashPayment
-    | ConstructionPayment | AnnualCash | ProjectObjective | AmountDefinition
+    | ConstructionPayment | AnnualCash | ProjectObjective | AmountDefinition | FinancialDependencyNode
 )
 
 

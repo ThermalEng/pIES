@@ -61,6 +61,7 @@ def _tax_seal() -> dict:
             "refund_claimed": "5.0" if month == 3 else "0.0",
             "refund_arrived": "5.0" if month == 5 else "0.0",
             "carry": "100.25",
+            "receivable": "7.5" if month >= 11 else "0.0",
         }
         for month in range(1, 13)
     ]
@@ -71,6 +72,7 @@ def _tax_seal() -> dict:
         "net_cashflows": [{"id": "recovery", "t": 1, "direction": "inflow", "amount": "37.25"}],
         "tax_cash": {
             "vat": vat,
+            "vat_rules": [],
             "refunds": [
                 {"pool": "main_pool", "period": 3, "arrival_period": 5, "amount": "5.0"},
                 {"pool": "main_pool", "period": 11, "arrival_period": 14, "amount": "7.5"},
@@ -83,6 +85,7 @@ def _tax_seal() -> dict:
                     "loss_used": "500.0",
                     "loss_generated": "0.0",
                     "loss_expired": "0.0",
+                    "assessed": "375.0",
                     "tax": "375.0",
                 }
             ],
@@ -96,6 +99,7 @@ def _tax_seal() -> dict:
                     "amount": "1200.0",
                 }
             ],
+            "derived": [],
         },
         "evaluation": {
             "rows": [
@@ -141,20 +145,25 @@ def test_tax_rows_consume_sealed_facts_without_recompute():
     assert len(post) == 1 and "(期后应收，非期内现金)" in post[0]
     within = [label for label, _ in rows if "确认m=3→到账m=5" in label]
     assert len(within) == 1 and "期后应收" not in within[0]
-    # 行数精确：显式净现金 1 + CF 2 + VAT 48 + 退款 2 + 所得税 5 + 折旧 1 + 余额 1。
+    # 行数精确：显式净现金 1 + CF 2 + VAT 60 + 退款 2 + 所得税 6 + 折旧 1 + 余额 1。
     assert rows[0][0].startswith("显式净现金 recovery t=1 inflow")
-    assert len(rows) == 1 + 2 + 48 + 2 + 5 + 1 + 1
+    assert len(rows) == 1 + 2 + 60 + 2 + 6 + 1 + 1
 
 
-def test_tax_expected_mirror_matches_production():
-    """测试镜像与生产渲染逐行一致（供未来检入下载精确对照）。"""
-    from xlsx_content_check import _expected_tax_pairs
-
-    from iesplan.application.packages.transfers import _excel_safe, _sealed_tax_rows
+def test_current_tax_rows_keep_receivable_and_assessed_distinct():
+    """Current outlets are explicit; the checked-in historical workbook is not rewritten."""
+    from iesplan.application.packages.transfers import _sealed_tax_rows
 
     fin = _tax_seal()
-    assert _expected_tax_pairs(fin, "CNY") == [
-        (label, _excel_safe(value)) for label, value in _sealed_tax_rows(fin, "CNY")
+    rows = _sealed_tax_rows(fin, "CNY")
+    receivable = [(label, value) for label, value in rows if label.endswith(" / receivable")]
+    assert receivable == [
+        (f"增值税 main_pool m={month} / VAT main_pool m={month} 期末退款应收(非现金) / receivable",
+         f"{'7.5' if month >= 11 else '0.0'} CNY")
+        for month in range(1, 13)
+    ]
+    assert [(label, value) for label, value in rows if label.endswith(" / assessed")] == [
+        ("所得税 income y=1 / Income income y=1 应计税额 / assessed", "375.0 CNY"),
     ]
 
 
