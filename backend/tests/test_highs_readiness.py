@@ -394,6 +394,35 @@ def test_native_time_limit_incumbent_is_written_without_claiming_optimality():
     assert facts["best_bound"] == facts["relative_gap"] == "none"
 
 
+def test_native_optimal_mip_preserves_actual_bound_and_nonzero_gap():
+    """kOptimal表示满足容差，不得把原生非零间隙伪写为0。"""
+    import highspy
+    import numpy as np
+
+    handle = highspy.Highs()
+    handle.setOptionValue("output_flag", False)
+    handle.setOptionValue("presolve", "off")
+    handle.setOptionValue("mip_rel_gap", 0.5)
+    handle.setOptionValue("time_limit", 3.)
+    n = 100
+    indices = np.arange(n, dtype=np.int32)
+    handle.addVars(n, np.zeros(n), np.ones(n))
+    handle.changeColsIntegrality(n, indices, np.ones(n, dtype=np.uint8))
+    handle.changeColsCost(n, indices, -np.arange(1, n + 1, dtype=float))
+    rng = np.random.default_rng(42)
+    for _ in range(50):
+        handle.addRow(0., 100., n, indices, rng.integers(1, 10, size=n).astype(float))
+    assert handle.run() == highspy.HighsStatus.kOk
+    assert handle.getModelStatus() == highspy.HighsModelStatus.kOptimal
+    info = handle.getInfo()
+    assert 0 < info.mip_gap <= .5
+    assert info.mip_dual_bound != handle.getObjectiveValue()
+    shim = runpy.run_path(HIGHS_ADAPTER_PATH)
+    facts = _parse_solution(shim["_solution_text"](handle, handle.getModelStatus()))
+    assert float(facts["best_bound"]) == info.mip_dual_bound
+    assert float(facts["relative_gap"]) == info.mip_gap
+
+
 def test_real_shim_time_limit_without_incumbent_is_normal_exit(tmp_path):
     import highspy
     import numpy as np
@@ -497,6 +526,8 @@ def test_real_highs_zero_export_with_unbounded_opposite(tmp_path) -> None:
     assert int(facts["num_columns"]) == 3
     assert facts["primals"] == pytest.approx([0.0, 3.0, 3.0])
     assert float(facts["objective_value"]) == pytest.approx(3.0)
+    assert float(facts["best_bound"]) == pytest.approx(3.0)
+    assert float(facts["relative_gap"]) == 0.
 
 
 @pytest.mark.parametrize(

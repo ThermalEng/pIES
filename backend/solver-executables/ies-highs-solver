@@ -106,11 +106,13 @@ def _solution_text(handle, model_status) -> str:
     )
     objective = float(handle.getObjectiveValue()) if feasible else None
     best_bound = gap = None
-    if model_status == highspy.HighsModelStatus.kOptimal and feasible:
-        best_bound, gap = objective, 0.0
-    elif info.mip_node_count >= 0:
+    if info.mip_node_count >= 0:
         best_bound = info.mip_dual_bound if math.isfinite(info.mip_dual_bound) else None
         gap = info.mip_gap if math.isfinite(info.mip_gap) else None
+    elif model_status == highspy.HighsModelStatus.kOptimal and feasible:
+        # Optimal LP has no MIP statistics; an optimal MIP may still have a
+        # nonzero gap within its configured optimality tolerance.
+        best_bound, gap = objective, 0.0
     primals = solution.col_value if feasible else []
 
     def number(value):
