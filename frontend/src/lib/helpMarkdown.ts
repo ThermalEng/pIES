@@ -60,6 +60,16 @@ export function interpolate(template: string, params?: Record<string, unknown>):
   )
 }
 
+/** 表格起点须同时包含表头和分隔行；正文中的管道符不单独构成表格。 */
+function isTableStart(lines: string[], index: number): boolean {
+  return (
+    /\|/.test(lines[index]) &&
+    index + 1 < lines.length &&
+    /^\s*\|?[\s:|-]+\|?\s*$/.test(lines[index + 1]) &&
+    lines[index + 1].includes('-')
+  )
+}
+
 /** Markdown 文本 → 块序列。 */
 export function splitBlocks(content: string): Block[] {
   const lines = content.split('\n')
@@ -132,12 +142,7 @@ export function splitBlocks(content: string): Block[] {
       continue
     }
     // 表格(表头行 + 分隔行 + 数据行)
-    if (
-      /\|/.test(line) &&
-      i + 1 < lines.length &&
-      /^\s*\|?[\s:|-]+\|?\s*$/.test(lines[i + 1]) &&
-      lines[i + 1].includes('-')
-    ) {
+    if (isTableStart(lines, i)) {
       const buf: string[] = []
       let j = i
       while (j < lines.length && /\|/.test(lines[j])) {
@@ -154,7 +159,11 @@ export function splitBlocks(content: string): Block[] {
     while (j < lines.length) {
       const l = lines[j]
       if (!l.trim()) break
-      if (/^(#{1,6})\s|^```|^>|^\s*([-*]|\d+[.)])\s+|\|/.test(l)) break
+      // 首行已由上方各块分支判定，段落必须消费它才能继续前进。
+      if (j > i && (
+        /^#{1,6}\s+|^```|^>|^\s*([-*]|\d+[.)])\s+|^---+$|^\*\*\*+$/.test(l) ||
+        isTableStart(lines, j)
+      )) break
       buf.push(l)
       j++
     }

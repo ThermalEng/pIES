@@ -133,6 +133,35 @@ test.describe('场景 8: 帮助中心', () => {
 // ---------------------------------------------------------------------------
 
 test.describe('场景 9: 帮助深链接', () => {
+  test('浏览全部发布章节，管道符正文不阻塞导航和刷新', async ({ page }) => {
+    const session = await createSession(page, 'admin', process.env.E2E_ADMIN_PASSWORD ?? 'Iesplan-Admin-2026!')
+    await page.goto('/help')
+    await expect(page.locator('.ies-help__title')).toBeVisible()
+    // 使用真实发布目录，不注入或替换 Markdown；无需创建账号或项目。
+    const links = await page.locator('#help-nav .ies-help__nav-link').evaluateAll(
+      (nodes) => nodes.map((node) => node.getAttribute('href')!),
+    )
+    expect(links.length).toBeGreaterThan(0)
+    for (const href of links) {
+      const link = page.locator('#help-nav').locator(`a[href="${href}"]`)
+      const title = await link.innerText()
+      await link.click()
+      await expect(page).toHaveURL(new URL(href, page.url()).href)
+      await expect(page.locator('.ies-help__title')).toHaveText(title)
+      await expect(page.locator('.ies-help__markdown')).not.toBeEmpty()
+    }
+    // 实测触发卡死的装配格式章节，核对正文而非仅判断路由变化。
+    await page.locator('#help-nav a[href$="/assembly-yaml"]').click()
+    await expect(page.locator('.ies-help__markdown')).toContainText('purchase|sale')
+    const chapterUrl = page.url()
+    await page.reload()
+    await expect(page).toHaveURL(chapterUrl)
+    await expect(page.locator('.ies-help__markdown')).toContainText('purchase|sale')
+    await expect(page.locator('table.ies-help__table').first()).toBeVisible()
+    await expect(page.locator('pre.ies-help__code').first()).toBeVisible()
+    session.assertNoErrors()
+  })
+
   test('直接打开章节 URL 并刷新仍停留在同一章节', async ({ browser }) => {
     const username = uniqueName('es-deeplink')
     const password = strongPassword('Init')

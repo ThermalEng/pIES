@@ -58,6 +58,20 @@ check('代码块解析', types[6] === 'code' && blocks[6].raw.includes('echo hel
 // ---- 表格分隔行过滤(渲染侧从 raw 提取数据行) ----
 check('表格 raw 含分隔行', blocks[5].raw.includes('|-----|'))
 
+// ---- 普通管道符不截断段落；真正的表格/水平线仍可紧接正文 ----
+const pipeText = '正文包含 `purchase|sale` 与 mode: mandatory|optional。\n第二行继续使用 x|y。'
+const pipeBlocks = md.splitBlocks(pipeText)
+check('正文管道符保留为单段且完整消费', pipeBlocks.length === 1 &&
+  pipeBlocks[0].type === 'p' && pipeBlocks[0].raw === pipeText)
+const notTable = '普通段落\n说明 | 不是表头\n这里不是分隔行'
+check('缺少表格分隔行时保持段落', md.splitBlocks(notTable)[0].raw === notTable)
+const adjacentTable = md.splitBlocks('表格说明\n| 名称 | 值 |\n| --- | --- |\n| a | b |')
+check('紧接段落的真实表格仍被识别', adjacentTable.length === 2 &&
+  adjacentTable[0].raw === '表格说明' && adjacentTable[1].type === 'table' &&
+  adjacentTable[1].raw.includes('| a | b |'))
+const adjacentRule = md.splitBlocks('段落\n---\n下一段\n***')
+check('紧接段落的水平线仍被识别', adjacentRule.map((b) => b.type).join(',') === 'p,hr,p,hr')
+
 // ---- safeHref: 过滤 javascript: 等不安全 URL ----
 check('https 放行', md.safeHref('https://example.com') === 'https://example.com')
 check('相对路径放行', md.safeHref('/help/zh-CN/getting-started') === '/help/zh-CN/getting-started')
@@ -97,6 +111,11 @@ try {
     const ids = Object.keys(manifest.pages).filter((k) => k.startsWith('zh-CN/'))
     return ids.length >= 36 && ids.every((k) => manifest.pages[k].content.length > 0)
   })())
+  const pages = Object.values(manifest.pages)
+  check('全部已发布帮助正文均可解析且不生成空段落', pages.every((page) => {
+    const parsed = md.splitBlocks(page.content)
+    return parsed.length > 0 && parsed.every((block) => block.type !== 'p' || block.raw.trim())
+  }), `${pages.length} 篇`)
   check('manifest 深链接 id 集合 = 目录展平', (() => {
     const flat = []
     const walk = (nodes) => {
