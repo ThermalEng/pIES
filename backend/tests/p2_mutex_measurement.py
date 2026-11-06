@@ -62,7 +62,8 @@ def _read_solution(content: bytes, variable_names: tuple[str, ...]) -> dict:
             if int(k.strip()) != len(values):
                 raise ValueError("non-contiguous HiGHS primal")
             values.append(float(v.strip()))
-    if len(values) != len(variable_names) or int(facts["num_columns"]) != len(values):
+    expected = len(variable_names) if facts["has_feasible_solution"] == "true" else 0
+    if len(values) != expected or int(facts["num_columns"]) != len(values):
         raise ValueError("HiGHS solution columns do not match model")
     status = facts["model_status"]
     objective = float(facts["objective_value"]) if status == _OPTIMAL else None
