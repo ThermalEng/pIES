@@ -1006,9 +1006,10 @@ EXECUTION_STATUSES = (
     "protocol_failed",
 )
 
-#: 数学状态封闭集合(求解器数学结局: 有解/不可行/无界/数值失败/未求解)。
+#: 数学状态封闭集合(已证最优/可行未证最优/不可行/无界/数值失败/未求解)。
 MATH_STATUSES = (
     "solved",
+    "feasible",
     "infeasible",
     "unbounded",
     "numeric_failure",

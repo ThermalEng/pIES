@@ -695,7 +695,7 @@ def build_financial_evaluation(
 ) -> dict[str, object] | None:
     """同次解财务事实 → 封存评价(ies.financial-evaluation@1.0.0)。
 
-    只处理已求解且含 solution 输出的结果; 其余状态返回 None(调用方
+    只处理有可行解（已证最优或受限）且含 solution 输出的结果; 其余状态返回 None(调用方
     不写财务块, 不把不可行/缺证据结果伪装为有现金流的方案, 缺块语义
     沿既有 ``financial_absence``)。本函数只投影适配器恢复的同次解财务
     事实并调用 finance 既有评价纯函数, 不重建税基/VAT/亏损算法, 不读
@@ -706,7 +706,7 @@ def build_financial_evaluation(
 
     from iesplan.finance import evaluate_project_investment
 
-    if result.math_status != "solved":
+    if result.math_status not in ("solved", "feasible"):
         return None
     # outputs 为 Mapping 由 ComputeResult 构造时保证; 此处只分支用户结果物
     # 发布选项(metrics-only 无 solution 即不评价, 不伪装)。
@@ -789,7 +789,8 @@ def build_financial_evaluation(
 def business_outcome_for(result: ComputeResult) -> str | None:
     """统一结果 → 任务业务结局显式映射（非 completed 执行返回 None）。
 
-    completed + solved → normal_completion；completed + 不可行/无界 →
+    completed + solved → normal_completion；completed + feasible →
+    restricted_results（可用解、未证最优）；completed + 不可行/无界 →
     no_recommendation（正常完成、无可推荐方案）；completed + 数值失败/
     未求解 → insufficient_evidence（正常完成、无可用证据）。未知状态
     返回 None（调用方按执行失败可见处理，不猜测）。
@@ -799,6 +800,8 @@ def business_outcome_for(result: ComputeResult) -> str | None:
     math_status = result.math_status
     if math_status == "solved":
         outcome = "normal_completion"
+    elif math_status == "feasible":
+        outcome = "restricted_results"
     elif math_status in ("infeasible", "unbounded"):
         outcome = "no_recommendation"
     elif math_status in ("numeric_failure", "not_solved"):

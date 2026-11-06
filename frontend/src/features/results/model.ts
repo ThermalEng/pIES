@@ -16,6 +16,7 @@ import type {
   ResultAssessment,
   ResultSelection,
   SnapshotRefs,
+  SolverSummary,
 } from '../../types'
 
 export type {
@@ -44,6 +45,7 @@ export interface TaskResult {
   evidence_status: 'available' | 'no_evidence'
   evidence_package_id: number | null
   metrics: Record<string, MetricValue> | null
+  solverSummary: SolverSummary | null
   /** 已封存财务评价(同一证据内容原样投影, 无块为 null)。 */
   financial: FinancialEvaluationBlock | null
   /** 缺块原因(有块为 null; 后端按可观察事实判定)。 */

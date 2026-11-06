@@ -1138,6 +1138,17 @@ export interface PlanningSolutionParam {
   unit: string
 }
 
+/** 同次求解封存状态；未知数值为 null，不从任务完成推断最优性。 */
+export interface SolverSummary {
+  termination_reason: 'optimal' | 'time_limit' | 'infeasible' | 'unbounded' | 'not_solved'
+  math_status: 'solved' | 'feasible' | 'infeasible' | 'unbounded' | 'not_solved'
+  has_feasible_solution: boolean
+  objective_value: number | null
+  objective_unit: string
+  best_bound: number | null
+  relative_gap: number | null
+}
+
 /** 规划解读取(单解身份见后端结果契约 SINGLE_SOLUTION_ID; 无解为 null)。 */
 export interface PlanningSolution {
   solution_id: number

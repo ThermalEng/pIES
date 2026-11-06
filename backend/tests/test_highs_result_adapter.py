@@ -5,9 +5,8 @@ V1 夹具为 Docker 内真实求解垫片（``ies-highs-solver``，highspy 1.7.2
 - ``SHIM_OPTIMAL``：具名 MPS（min x+2y s.t. x+y>=3000）最优解；
 - ``SHIM_INFEASIBLE``：``x == 2`` 且 ``x <= 1``；
 - ``SHIM_UNBOUNDED``：``min -x, x >= 0``；
-- ``V1_TIME_LIMIT``：垫片真实超时恒 exit 2 且不写文件（走回执失败
-  路径），此夹具仅按同一 V1 文法构造 kTimeLimit 令牌分支，验证已知
-  词汇出现时明确报错而非发布部分解。
+- ``V1_TIME_LIMIT``为无可行解时限夹具；已有可行解的时限夹具验证映射、
+  偏移、界和Gap，不冒充真实运行。原生HiGHS两种时限实测见readiness测试。
 """
 
 from __future__ import annotations
@@ -38,7 +37,10 @@ SOLUTION_PATH = "output/solution.sol"
 #: 真实垫片最优解（最优 x=3000, y=0，目标 3000）。
 SHIM_OPTIMAL = """HIGHS_SOLUTION_V1
 model_status: HighsModelStatus.kOptimal
+has_feasible_solution: true
 objective_value: 3000.0
+best_bound: 3000.0
+relative_gap: 0.0
 num_columns: 2
 primal:
 0: 3000.0
@@ -48,28 +50,34 @@ primal:
 #: 真实垫片不可行解。
 SHIM_INFEASIBLE = """HIGHS_SOLUTION_V1
 model_status: HighsModelStatus.kInfeasible
-objective_value: 0.0
-num_columns: 1
+has_feasible_solution: false
+objective_value: none
+best_bound: none
+relative_gap: none
+num_columns: 0
 primal:
-0: 0.0
 """
 
 #: 真实垫片无界解（注意目标为 -0.0）。
 SHIM_UNBOUNDED = """HIGHS_SOLUTION_V1
 model_status: HighsModelStatus.kUnbounded
-objective_value: -0.0
-num_columns: 1
+has_feasible_solution: false
+objective_value: none
+best_bound: none
+relative_gap: none
+num_columns: 0
 primal:
-0: 0.0
 """
 
 #: V1 文法内的 kTimeLimit 令牌（垫片真实超时不写文件，此分支守词汇）。
 V1_TIME_LIMIT = """HIGHS_SOLUTION_V1
 model_status: HighsModelStatus.kTimeLimit
-objective_value: 0.0
-num_columns: 1
+has_feasible_solution: false
+objective_value: none
+best_bound: none
+relative_gap: none
+num_columns: 0
 primal:
-0: 0.0
 """
 
 #: 具名 tiny MPS（列序 x, y；每变量单行）。
@@ -265,7 +273,10 @@ def test_optimal_money_objective_keeps_currency() -> None:
     assert result.math_status == "solved"
     assert result.bundle_id == "bundle-7"
     assert result.receipt_id == "receipt-7"
-    assert set(result.outputs) == {"solution", "metrics", "series", "system_series", "financial_facts", "model_sources"}
+    assert set(result.outputs) == {
+        "solution", "metrics", "series", "system_series", "financial_facts",
+        "model_sources", "solver_summary",
+    }
     assert dict(result.outputs["series"]) == {}
     solution = result.outputs["solution"]
     assert solution["objective_value"] == 3001.5
@@ -284,6 +295,7 @@ def test_optimal_money_objective_keeps_currency() -> None:
 def test_objective_physical_unit_converts() -> None:
     """等效契约：物理目标按 objective_unit 反向换算（内部 J→kWh）。"""
     solution = SHIM_OPTIMAL.replace("objective_value: 3000.0", "objective_value: 7200000.0")
+    solution = solution.replace("best_bound: 3000.0", "best_bound: 7200000.0")
     solution = solution.replace("0: 3000.0", "0: 3600000.0", 1)
     files = {
         PROBLEM_PATH: TINY_MPS.encode("utf-8"),
@@ -298,6 +310,7 @@ def test_objective_physical_unit_converts() -> None:
     out = result.outputs["solution"]
     assert out["objective_value"] == 2.0
     assert out["objective_unit"] == "kWh"
+    assert result.outputs["solver_summary"]["best_bound"] == 2.0
     assert [dict(item) for item in out["variables"]] == [
         {"name": "x", "value": 1.0, "unit": "kWh"},
         {"name": "y", "value": 0.0, "unit": "kWh"},
@@ -324,14 +337,18 @@ def test_requested_subset_only() -> None:
         PARAMETERS_PATH: _parameters(outputs=["solution"]),
     }
     result = _adapt(files, _receipt(), SHIM_OPTIMAL.encode("utf-8"))
-    assert set(result.outputs) == {"solution", "series", "system_series", "financial_facts", "model_sources"}
+    assert set(result.outputs) == {
+        "solution", "series", "system_series", "financial_facts", "model_sources", "solver_summary",
+    }
     assert dict(result.outputs["series"]) == {}
     files = {
         PROBLEM_PATH: TINY_MPS.encode("utf-8"),
         PARAMETERS_PATH: _parameters(outputs=["solution", "nope"]),
     }
     result = _adapt(files, _receipt(), SHIM_OPTIMAL.encode("utf-8"))
-    assert set(result.outputs) == {"solution", "series", "system_series", "financial_facts", "model_sources"}
+    assert set(result.outputs) == {
+        "solution", "series", "system_series", "financial_facts", "model_sources", "solver_summary",
+    }
     assert dict(result.outputs["series"]) == {}
 
 
@@ -344,7 +361,8 @@ def test_infeasible_and_unbounded_have_no_business_outputs() -> None:
         result = _adapt(None, _receipt(), text.encode("utf-8"))
         assert result.execution_status == "completed"
         assert result.math_status == math
-        assert dict(result.outputs) == {}
+        assert set(result.outputs) == {"solver_summary"}
+        assert result.outputs["solver_summary"]["math_status"] == math
         assert result.receipt_id == "receipt-7"
 
 
@@ -396,12 +414,61 @@ def test_all_receipt_statuses_map() -> None:
         assert result.receipt_id == "receipt-7"
 
 
-def test_time_limit_file_is_explicit_error() -> None:
-    """文件自报时间限制：明确报错，不接受部分解当成功。"""
-    with pytest.raises(ComputationUnavailableError) as exc_info:
-        _adapt(None, _receipt(), V1_TIME_LIMIT.encode("utf-8"))
-    assert exc_info.value.reason == "result-protocol-failure"
-    assert "时间限制" in str(exc_info.value)
+def test_time_limit_without_incumbent_preserves_stop_reason() -> None:
+    result = _adapt(None, _receipt(), V1_TIME_LIMIT.encode())
+    assert result.math_status == "not_solved"
+    summary = result.outputs["solver_summary"]
+    assert summary["termination_reason"] == "time_limit"
+    assert summary["has_feasible_solution"] is False
+    assert summary["objective_value"] is None
+    assert summary["best_bound"] is None
+    assert set(result.outputs) == {"solver_summary"}
+
+
+def test_time_limit_incumbent_is_not_optimal_and_keeps_offset_bound_and_gap() -> None:
+    raw = (
+        SHIM_OPTIMAL.replace("kOptimal", "kTimeLimit")
+        .replace("best_bound: 3000.0", "best_bound: 2400.0")
+        .replace("relative_gap: 0.0", "relative_gap: 0.2")
+    )
+    result = _adapt(None, _receipt(), raw.encode())
+    assert result.execution_status == "completed"
+    assert result.math_status == "feasible"
+    assert result.outputs["solution"]["objective_value"] == 3001.5
+    summary = result.outputs["solver_summary"]
+    assert summary["termination_reason"] == "time_limit"
+    assert summary["best_bound"] == 2401.5
+    assert summary["relative_gap"] == 0.2
+    assert summary["has_feasible_solution"] is True
+
+    from iesplan.application import worker as worker_app
+    assert worker_app.business_outcome_for(result) == "restricted_results"
+    snapshot = SimpleNamespace(evaluation={
+        "construction_period": 0, "operation_years": 1,
+        "evaluation_years": 1, "discount_rate": .08,
+    })
+    finance = SimpleNamespace(currency="CNY", price_basis="tax_inclusive", base_year=2026, profile_id="test")
+    params = json.loads(_parameters())
+    params["financial_facts"]["annual_net_flows"].append({"constant": 0.0, "terms": {}})
+    evaluation_result = _adapt({
+        PROBLEM_PATH: TINY_MPS.encode(), PARAMETERS_PATH: json.dumps(params).encode(),
+    }, _receipt(), raw.encode())
+    evaluated = worker_app.build_financial_evaluation(snapshot, finance, evaluation_result)
+    assert evaluated is not None
+    assert evaluated["status"] == "evaluated"
+    assert evaluated["construction_total"] == (
+        evaluation_result.outputs["financial_facts"]["construction_total"]
+    )
+
+    no_primal = _adapt(None, _receipt(), V1_TIME_LIMIT.encode())
+    assert worker_app.business_outcome_for(no_primal) == "insufficient_evidence"
+    assert worker_app.build_financial_evaluation(snapshot, finance, no_primal) is None
+
+
+def test_optimal_without_valid_primal_is_not_published() -> None:
+    raw = SHIM_OPTIMAL.replace("has_feasible_solution: true", "has_feasible_solution: false")
+    with pytest.raises(ComputationUnavailableError, match="有效主解"):
+        _adapt(None, _receipt(), raw.encode())
 
 
 def test_mps_repeated_name_lines_map() -> None:
@@ -574,7 +641,10 @@ def test_series_recovers_by_declared_columns() -> None:
     }
     result = _adapt(files, _receipt(), SHIM_OPTIMAL.encode("utf-8"))
     assert result.math_status == "solved"
-    assert set(result.outputs) == {"solution", "metrics", "series", "system_series", "financial_facts", "model_sources"}
+    assert set(result.outputs) == {
+        "solution", "metrics", "series", "system_series", "financial_facts",
+        "model_sources", "solver_summary",
+    }
     series = {key: dict(item) for key, item in result.outputs["series"].items()}
     assert series == {
         "inst.flow": {
@@ -603,7 +673,7 @@ def test_series_absent_without_solution_request() -> None:
     }
     result = _adapt(files, _receipt(), SHIM_OPTIMAL.encode("utf-8"))
     assert result.math_status == "solved"
-    assert set(result.outputs) == {"metrics"}
+    assert set(result.outputs) == {"metrics", "solver_summary"}
     assert "series" not in result.outputs
     assert "solution" not in result.outputs
 

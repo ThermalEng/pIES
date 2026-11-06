@@ -238,7 +238,7 @@ def _runtime(policy=None) -> SolverRuntime:
         policy = DeploymentPolicy(
             executables=(HIGHS_EXECUTABLE_REF,),
             environment_vars=(),
-            max_timeout_seconds=600,
+            max_timeout_seconds=660,
             max_memory_mib=4096,
             max_cpu_cores=4,
             allow_network=False,
@@ -414,7 +414,8 @@ def test_chain_infeasible_model_reports_math_status() -> None:
     result = _adapt(bundle, receipt, collected)
     assert result.execution_status == "completed"
     assert result.math_status == "infeasible"
-    assert dict(result.outputs) == {}
+    assert set(result.outputs) == {"solver_summary"}
+    assert result.outputs["solver_summary"]["termination_reason"] == "infeasible"
     assert result.bundle_id == receipt.bundle_id
     assert result.receipt_id == receipt.receipt_id
 
@@ -589,7 +590,7 @@ def test_chain_policy_rejected_never_executes() -> None:
     denied = DeploymentPolicy(
         executables=("ies.executor.unused@1.0.0",),
         environment_vars=(),
-        max_timeout_seconds=600,
+        max_timeout_seconds=660,
         max_memory_mib=4096,
         max_cpu_cores=4,
         allow_network=False,

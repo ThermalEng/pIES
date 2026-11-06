@@ -227,7 +227,9 @@ comparison 非absolute时要求 `finance.frozen_baseline`；difference 另要求
 
 Worker 只有在命令可解析、租约有效且写入资格仍成立时才能提交进度和结果。失败保留结构化诊断；取消、超时和重试遵守公开状态转换。
 
-任务结果读取（`GET /projects/{id}/tasks/{task_id}/result` 的 `result` 视图）复用同一证据内容，不另建财务结果存储、不重新运行评价：有证据时原样投影 `financial_evaluation`（形态见[财务计算](modules/finance.md)“封存评价块”，无块时为 null）；同时给出缺块原因 `financial_absence`（有块时恒为 null）：`outcome_not_normal` 表示任务业务结局非正常完成（未求解或无可行方案）；`solution_not_requested` 表示快照 `outputs` 未请求 `solution`（解数据未发布）；`missing_unknown` 表示请求了 `solution` 但该证据未封存财务评价（如历史证据）。展示与导出不得把缺块猜为未请求、前两种原因伪装为评价通过。
+任务结果读取（`GET /projects/{id}/tasks/{task_id}/result` 的 `result` 视图）复用同一证据内容，不另建财务结果存储、不重新运行评价：有证据时原样投影 `financial_evaluation`（形态见[财务计算](modules/finance.md)“封存评价块”，无块时为 null）；同时给出缺块原因 `financial_absence`（有块时恒为 null）：`outcome_not_normal` 表示业务结局不是正常完成或有可行解的受限结果；`solution_not_requested` 表示快照 `outputs` 未请求 `solution`（解数据未发布）；`missing_unknown` 表示请求了 `solution` 但该证据未封存财务评价（如历史证据）。正常完成和受限结果按同一快照输出规则区分后两种缺席；不得把缺块猜为未请求或伪装为评价通过。
+
+任务结果视图另投影`solver_summary`：同次封存的终止原因、数学状态、是否有可行解、业务单位目标值／最优界及求解器原相对Gap，字段语义见[求解终止与最优性摘要](modules/engines.md#求解终止与最优性摘要)。非计算证据或没有该provider摘要时为null，不根据任务completed猜最优。超时且有可行解可提供同次财务评价，业务结局为受限结果；没有可行解不发布方案或虚构财务数值。结果页、重新评估和Excel读取同一封存事实，不用当前配置重算Gap。
 
 ## 兼容与演进
 

@@ -186,7 +186,8 @@ def test_campus_generate_full_bundle() -> None:
         "0",
     ]
     assert command["working_directory"] == "."
-    assert command["timeout_seconds"] == 600
+    # 求解600秒不变；独立壁钟允许启动/读取/结果写出，不与原生时限竞速。
+    assert command["timeout_seconds"] == 660
     assert command["network"] is False
     assert list(command["success_exit_codes"]) == [0]
     assert manifest.outputs == (

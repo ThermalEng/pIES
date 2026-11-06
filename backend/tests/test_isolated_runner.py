@@ -30,6 +30,7 @@ import os
 import threading
 import time
 import uuid
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 
@@ -187,7 +188,7 @@ def _runtime(exchange_dir: str) -> SolverRuntime:
     policy = DeploymentPolicy(
         executables=(HIGHS_EXECUTABLE_REF,),
         environment_vars=(),
-        max_timeout_seconds=600,
+        max_timeout_seconds=660,
         max_memory_mib=4096,
         max_cpu_cores=4,
         allow_network=False,
@@ -634,13 +635,16 @@ def test_runner_serves_two_attempts_serially() -> None:
 
 @needs_docker
 def test_runner_timeout_no_orphans() -> None:
-    """正式短超时 Bundle：timed_out 收尾、无孤儿。"""
+    """明确压短监督壁钟（非原生求解时限）：timed_out 收尾、无孤儿。"""
     exchange = _require_harness()
     runner = _Runner(exchange, f"pies-09f-timeout-{uuid.uuid4().hex[:8]}")
     try:
         runner.start(memory="512m").wait_ready()
         baseline_pids = runner.pids_current()
         bundle = _campus_bundle(time_limit_seconds=2)
+        bundle = replace(bundle, manifest=replace(
+            bundle.manifest, command={**bundle.manifest.command, "timeout_seconds": 2},
+        ))
         assert bundle.manifest.command["timeout_seconds"] == 2
         receipt, outputs = _run_worker(exchange, bundle)
         assert receipt.status == "timed_out"

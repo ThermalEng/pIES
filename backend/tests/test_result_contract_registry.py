@@ -84,6 +84,7 @@ def test_status_layers_are_closed_and_orthogonal() -> None:
     }
     assert set(MATH_STATUSES) == {
         "solved",
+        "feasible",
         "infeasible",
         "unbounded",
         "numeric_failure",

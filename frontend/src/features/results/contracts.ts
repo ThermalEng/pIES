@@ -17,6 +17,7 @@ import type {
   MetricValue,
   PlanningSolution,
   SnapshotRefs,
+  SolverSummary,
 } from '../../types'
 
 export type {
@@ -125,6 +126,7 @@ export interface TaskResultViewDto {
   } | null
   assessment: ResultAssessmentDto | null
   metrics_summary: Record<string, MetricValue> | null
+  solver_summary: SolverSummary | null
   financial_evaluation: FinancialEvaluationBlock | null
   financial_absence: FinancialAbsence
   candidates: EvidenceCandidateDto[] | null

@@ -445,6 +445,7 @@ def _submit_evidence(
 def _prepare_task_with_evidence(
     client: TestClient, db: Session, user, *,
     hourly_rows: int = 100, complete: bool = True,
+    content_overrides: dict[str, Any] | None = None, outcome: str = "normal_completion",
 ) -> tuple[int, int, Any, EvidencePackage, list[int]]:
     """完整准备: 项目 → 任务 → 领取 → 逐时对象 → 证据提交 → (可选)任务完成。
 
@@ -458,16 +459,60 @@ def _prepare_task_with_evidence(
     claim = _claim(db, task_id)
     obj_a = _store_hourly(db, hourly_rows)
     obj_b = _store_hourly(db, hourly_rows, fields=["p_grid_buy"])
-    payload = _build_payload(task["calc_snapshot_id"], [obj_a, obj_b], user.id)
+    payload = _build_payload(
+        task["calc_snapshot_id"], [obj_a, obj_b], user.id, content_overrides=content_overrides,
+    )
     pkg = _submit_evidence(db, task_id, claim, payload)
     if complete:
-        _complete_task(db, task_id, outcome=tasks_domain.map_business_outcome("OPTIMAL"))
+        _complete_task(db, task_id, outcome=outcome)
         db.commit()
     return pid, task_id, claim, pkg, [obj_a, obj_b]
 
 
 # ---------------------------------------------------------------------------
 # 证据提交与 fencing
+
+
+@pytest.mark.parametrize("has_solution", [True, False])
+def test_sealed_solver_summary_view_assessment_and_excel(client, db, has_solution):
+    """投影用已封存小夹具；真实HiGHS状态另由readiness测试验证。"""
+    from io import BytesIO
+
+    from openpyxl import load_workbook
+
+    from iesplan.application.packages.transfers import export_excel
+
+    user = make_user(db, "solver_view_owner")
+    summary = {
+        "termination_reason": "time_limit",
+        "math_status": "feasible" if has_solution else "not_solved",
+        "has_feasible_solution": has_solution,
+        "objective_value": 10.0 if has_solution else None,
+        "objective_unit": "CNY",
+        "best_bound": 8.0,
+        "relative_gap": 0.2 if has_solution else None,
+    }
+    pid, tid, _, package, _ = _prepare_task_with_evidence(
+        client, db, user,
+        content_overrides={"compute_result": {"outputs": {"solver_summary": summary}}},
+        outcome="restricted_results" if has_solution else "insufficient_evidence",
+    )
+    response = client.get(f"/api/projects/{pid}/tasks/{tid}/result", headers=_h(client, user))
+    assert response.status_code == 200, response.text
+    assert response.json()["result"]["solver_summary"] == summary
+    assessment = results_uc.assess_evidence(db, package.id)
+    from iesplan.results import fine_states
+    assert assessment.dimension_optimality == "unknown"
+    assert str(fine_states(assessment)["optimality"]) == ("restricted" if has_solution else "insufficient")
+    doc = export_excel(db, user, pid, package.id, assessment.id)
+    book = load_workbook(BytesIO(doc), data_only=True)
+    pairs = dict(book["求解状态"].iter_rows(min_row=3, max_col=2, values_only=True))
+    assert pairs["终止原因 / Termination"] == "time_limit"
+    assert pairs["已证明最优 / Optimality proven"] is False
+    assert pairs["有可行解 / Feasible solution"] is has_solution
+    assert pairs["最优界 / Best bound"] == 8
+    assert pairs["求解器相对间隙 / Solver relative gap"] == (0.2 if has_solution else "—")
+
 # ---------------------------------------------------------------------------
 
 

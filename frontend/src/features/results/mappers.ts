@@ -28,6 +28,7 @@ export function mapResultViewDtoToModel(dto: TaskResultViewDto): TaskResult {
     evidence_status: dto.evidence_status,
     evidence_package_id: dto.evidence === null ? null : dto.evidence.id,
     metrics: dto.metrics_summary,
+    solverSummary: dto.solver_summary,
     financial: dto.financial_evaluation,
     financialAbsence: dto.financial_absence,
     candidates: dto.candidates === null ? [] : dto.candidates.map((c) => ({ index: c.index })),

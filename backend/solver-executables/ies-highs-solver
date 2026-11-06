@@ -11,8 +11,11 @@
 solution 文件格式 ``HIGHS_SOLUTION_V1``（ResultAdapter 按此解析）： ::
 
     HIGHS_SOLUTION_V1
-    model_status: kOptimal
+    model_status: HighsModelStatus.kOptimal
+    has_feasible_solution: true
     objective_value: 2.5
+    best_bound: 2.5
+    relative_gap: 0.0
     num_columns: 2
     primal:
     0: 1.5
@@ -25,6 +28,7 @@ solution 文件格式 ``HIGHS_SOLUTION_V1``（ResultAdapter 按此解析）： :
 
 from __future__ import annotations
 
+import math
 import os
 import sys
 
@@ -85,25 +89,44 @@ def _solve_model(mps_path: str, time_limit: float, seed: int):
         raise RuntimeError(f"MPS 读取失败: {mps_path!r}")
     handle.setOptionValue("time_limit", time_limit)
     handle.setOptionValue("random_seed", seed)
-    if handle.run() != highspy.HighsStatus.kOk:
-        raise RuntimeError("HiGHS 求解未完成")
+    if handle.run() == highspy.HighsStatus.kError:
+        raise RuntimeError("HiGHS 求解执行错误")
     return handle, handle.getModelStatus()
 
 
 def _solution_text(handle, model_status) -> str:
+    import highspy
+
     solution = handle.getSolution()
-    try:
-        objective = repr(float(handle.getObjectiveValue()))
-    except Exception:
-        objective = "unknown"
+    info = handle.getInfo()
+    feasible = (
+        model_status in (highspy.HighsModelStatus.kOptimal, highspy.HighsModelStatus.kTimeLimit)
+        and solution.value_valid
+        and info.primal_solution_status == highspy.SolutionStatus.kSolutionStatusFeasible
+    )
+    objective = float(handle.getObjectiveValue()) if feasible else None
+    best_bound = gap = None
+    if model_status == highspy.HighsModelStatus.kOptimal and feasible:
+        best_bound, gap = objective, 0.0
+    elif info.mip_node_count >= 0:
+        best_bound = info.mip_dual_bound if math.isfinite(info.mip_dual_bound) else None
+        gap = info.mip_gap if math.isfinite(info.mip_gap) else None
+    primals = solution.col_value if feasible else []
+
+    def number(value):
+        return "none" if value is None else repr(float(value))
+
     lines = [
         "HIGHS_SOLUTION_V1",
         f"model_status: {model_status}",
-        f"objective_value: {objective}",
-        f"num_columns: {len(solution.col_value)}",
+        f"has_feasible_solution: {str(bool(feasible)).lower()}",
+        f"objective_value: {number(objective)}",
+        f"best_bound: {number(best_bound)}",
+        f"relative_gap: {number(gap)}",
+        f"num_columns: {len(primals)}",
         "primal:",
     ]
-    lines.extend(f"{index}: {value!r}" for index, value in enumerate(solution.col_value))
+    lines.extend(f"{index}: {value!r}" for index, value in enumerate(primals))
     return "\n".join(lines) + "\n"
 
 

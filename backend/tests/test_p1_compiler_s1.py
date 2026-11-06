@@ -238,7 +238,10 @@ def test_public_generate_adapter_reuses_one_bundle_mapping(measured_generate):
     solution = "\n".join([
         "HIGHS_SOLUTION_V1",
         "model_status: HighsModelStatus.kOptimal",
+        "has_feasible_solution: true",
         "objective_value: 0.0",
+        "best_bound: 0.0",
+        "relative_gap: 0.0",
         f"num_columns: {len(names)}",
         "primal:",
         *(f"{i}: {value}" for i, value in enumerate(values)),

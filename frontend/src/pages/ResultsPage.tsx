@@ -70,6 +70,7 @@ import type {
   PlanningSolution,
   ResultAssessment,
   SnapshotRefs,
+  SolverSummary,
   TaskOutcome,
 } from '../types'
 import { useEffectiveTaskContext, useWorkbench } from './workbench'
@@ -221,6 +222,7 @@ export default function ResultsPage() {
 
   // 选中证据包的结果数据
   const [metrics, setMetrics] = useState<Record<string, MetricValue> | null>(null)
+  const [solverSummary, setSolverSummary] = useState<SolverSummary | null>(null)
   /** 已封存财务评价(同一证据内容原样投影, 页面只展示不重算)。 */
   const [finEval, setFinEval] = useState<FinancialEvaluationBlock | null>(null)
   /** 缺块原因(有块为 null; 后端按可观察事实判定, 前端不猜测)。 */
@@ -353,6 +355,7 @@ export default function ResultsPage() {
       clearResultErrorFor(null)
       setCandList([])
       setPlanSolution(null)
+      setSolverSummary(null)
       setSnapRefs(null)
       setSnapSources(null)
       return
@@ -373,6 +376,7 @@ export default function ResultsPage() {
     clearResultErrorFor(pickedTaskId === 0 ? null : pickedTaskId)
     setCandList([])
     setPlanSolution(null)
+    setSolverSummary(null)
     setSnapRefs(null)
     setSnapSources(null)
     setSelectedCandidateId(null)
@@ -410,6 +414,7 @@ export default function ResultsPage() {
         // 真实候选/规划解/快照引用(后端权威, 不反解指标键)
         setCandList(res.candidates)
         setPlanSolution(res.planningSolution)
+        setSolverSummary(res.solverSummary)
         setSnapRefs(res.snapshotRefs)
         // 结果读成功不吞掉正选中任务自身的草稿载入失败(草稿仍未载入)。
         clearResultErrorFor(taskId)
@@ -444,6 +449,7 @@ export default function ResultsPage() {
           setFinAbsence(null)
           setCandList([])
           setPlanSolution(null)
+          setSolverSummary(null)
           setSnapRefs(null)
           setSelectedCandidateId(null)
           setApplyOpen(false)
@@ -960,6 +966,25 @@ export default function ResultsPage() {
       </div>
 
       {/* 四维结论卡片 */}
+      {solverSummary ? (
+        <div className="ies-section">
+          <Card title={t('ies.result.solver_summary')}>
+            <Alert variant={solverSummary.math_status === 'solved' ? 'success' : 'warning'}>
+              {t(`ies.result.math_${solverSummary.math_status}`)}
+            </Alert>
+            <dl className="ies-kv">
+              <dt>{t('ies.result.solver_termination')}</dt>
+              <dd>{t(`ies.result.termination_${solverSummary.termination_reason}`)}</dd>
+              <dt>{t('ies.result.solver_objective')}</dt>
+              <dd>{solverSummary.objective_value === null ? '—' : formatNumber(solverSummary.objective_value)} {solverSummary.objective_unit}</dd>
+              <dt>{t('ies.result.solver_bound')}</dt>
+              <dd>{solverSummary.best_bound === null ? '—' : formatNumber(solverSummary.best_bound)} {solverSummary.objective_unit}</dd>
+              <dt>{t('ies.result.solver_gap')}</dt>
+              <dd>{solverSummary.relative_gap === null ? '—' : formatPercent(solverSummary.relative_gap)}</dd>
+            </dl>
+          </Card>
+        </div>
+      ) : null}
       <div className="ies-section">
         <div className="ies-dims">
           {DIMENSIONS.map((d) => {

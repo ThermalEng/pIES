@@ -834,7 +834,7 @@ def _financial_absence(
     """
     if financial is not None:
         return None
-    if business_outcome != "normal_completion":
+    if business_outcome not in ("normal_completion", "restricted_results"):
         return "outcome_not_normal"
     snapshot = tasks_domain.get_snapshot(db, snapshot_id) if snapshot_id else None
     config = snapshot.calc_config_snapshot if snapshot is not None else None
@@ -864,6 +864,7 @@ def result_view(db: Session, user: UserRecord, project_id: int, task_id: int) ->
     content: dict[str, Any] = {}
     if package is not None:
         content = evidence_content(db, package)
+    compute = results_domain.evidence_inner(content).get("compute_result")
     return {
         "task": {
             "id": task.id,
@@ -887,6 +888,7 @@ def result_view(db: Session, user: UserRecord, project_id: int, task_id: int) ->
         ),
         "assessment": assessment_to_dict(db, assessment) if assessment is not None else None,
         "metrics_summary": content.get("metrics") if content else None,
+        "solver_summary": compute["outputs"].get("solver_summary") if compute is not None else None,
         # 已封存财务评价(同一证据内容原样投影, 不重算、不读最新配置)。
         "financial_evaluation": content.get("financial_evaluation") if content else None,
         # 缺块原因(可观察事实, 不猜测): outcome_not_normal=未求解/无可行方案;

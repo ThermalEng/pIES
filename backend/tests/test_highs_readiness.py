@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import runpy
 import subprocess
 from pathlib import Path
 
@@ -166,7 +167,7 @@ def _runtime(provider=None) -> SolverRuntime:
     policy = DeploymentPolicy(
         executables=(HIGHS_EXECUTABLE_REF,),
         environment_vars=(),
-        max_timeout_seconds=600,
+        max_timeout_seconds=660,
         max_memory_mib=4096,
         max_cpu_cores=4,
         allow_network=False,
@@ -359,6 +360,66 @@ def _tiny_model(*, lower, upper, obj_coeff: float, rows: tuple = ()):
     )
     text, _ = write_mps(model)
     return text
+
+
+def test_native_time_limit_incumbent_is_written_without_claiming_optimality():
+    """真实HiGHS已有全零可行解后触及时限；非伪造状态或工程长算。"""
+    import highspy
+    import numpy as np
+
+    handle = highspy.Highs()
+    handle.setOptionValue("output_flag", False)
+    handle.setOptionValue("presolve", "off")
+    n = 100
+    indices = np.arange(n, dtype=np.int32)
+    handle.addVars(n, np.zeros(n), np.ones(n))
+    handle.changeColsIntegrality(n, indices, np.ones(n, dtype=np.uint8))
+    handle.changeColsCost(n, indices, -np.arange(1, n + 1, dtype=float))
+    rng = np.random.default_rng(42)
+    for _ in range(50):
+        handle.addRow(0., 100., n, indices, rng.integers(1, 10, size=n).astype(float))
+    initial = highspy.HighsSolution()
+    initial.col_value = [0.] * n
+    initial.value_valid = True
+    handle.setSolution(initial)
+    handle.setOptionValue("time_limit", 1e-9)
+    assert handle.run() == highspy.HighsStatus.kWarning
+    status = handle.getModelStatus()
+    assert status == highspy.HighsModelStatus.kTimeLimit
+    shim = runpy.run_path(HIGHS_ADAPTER_PATH)
+    facts = _parse_solution(shim["_solution_text"](handle, status))
+    assert facts["has_feasible_solution"] == "true"
+    assert float(facts["objective_value"]) == 0.
+    assert len(facts["primals"]) == n
+    assert facts["best_bound"] == facts["relative_gap"] == "none"
+
+
+def test_real_shim_time_limit_without_incumbent_is_normal_exit(tmp_path):
+    import highspy
+    import numpy as np
+
+    handle = highspy.Highs()
+    handle.setOptionValue("output_flag", False)
+    n = 100
+    indices = np.arange(n, dtype=np.int32)
+    handle.addVars(n, np.zeros(n), np.ones(n))
+    handle.changeColsIntegrality(n, indices, np.ones(n, dtype=np.uint8))
+    handle.changeColsCost(n, indices, -np.arange(1, n + 1, dtype=float))
+    rng = np.random.default_rng(42)
+    for _ in range(50):
+        handle.addRow(0., 100., n, indices, rng.integers(1, 10, size=n).astype(float))
+    handle.writeModel(str(tmp_path / "problem.mps"))
+    completed = subprocess.run(
+        [HIGHS_ADAPTER_PATH, "problem.mps", "--solution_file", "solution.sol",
+         "--time_limit", "0.000000001", "--random_seed", "0"],
+        cwd=tmp_path, capture_output=True, timeout=30,
+    )
+    assert completed.returncode == 0, completed.stderr
+    facts = _parse_solution((tmp_path / "solution.sol").read_text())
+    assert facts["model_status"] == "HighsModelStatus.kTimeLimit"
+    assert facts["has_feasible_solution"] == "false"
+    assert facts["objective_value"] == "none"
+    assert facts["primals"] == []
 
 
 def _ge_row(rhs: float):
