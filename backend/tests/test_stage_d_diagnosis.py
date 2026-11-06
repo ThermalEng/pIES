@@ -30,13 +30,28 @@ def sources(*binaries):
                         "targets": list(binaries)}]}
 
 
-def solve(model, tmp_path, mode="exact", source=None):
+def solve(model, tmp_path, mode="exact", source=None, **kwargs):
     mps, _ = write_mps(model)
     # Native HiGHS uses a process-wide scheduler. Fresh children match the
     # explicit benchmark and do not inherit other pytest tests' thread counts.
     with ProcessPoolExecutor(max_workers=1, mp_context=multiprocessing.get_context("spawn")) as pool:
         return pool.submit(solve_diagnostic, model, mps.encode(), source or sources(), mode=mode,
-                           seconds=5, log_path=tmp_path / f"{mode}.log").result(timeout=30)
+                           seconds=5, log_path=tmp_path / f"{mode}.log", **kwargs).result(timeout=30)
+
+
+def test_lp_method_cannot_silently_turn_an_exact_experiment_into_a_relaxation(tmp_path):
+    with pytest.raises(ValueError, match="explicit relaxation"):
+        solve_diagnostic(Model(), b"", sources(), mode="exact", lp_solver="ipm",
+                         seconds=1, log_path=tmp_path / "unused.log")
+
+
+def test_ipm_control_is_labeled_relaxation_and_not_an_original_incumbent(tmp_path):
+    model = Model((Var("a", 0, 2),), (Row("demand", expression(a=1), "ge", 1),), expression(a=1))
+    out = solve(model, tmp_path, "relaxation", lp_solver="ipm")
+    assert out["options"]["solver"] == "ipm"
+    assert out["model_status"] == "HighsModelStatus.kOptimal"
+    assert out["objective_internal_without_offset"] == pytest.approx(1)
+    assert not out["is_original_milp_incumbent"]
 
 
 def test_source_and_algebra_not_column_names_identify_mutex():

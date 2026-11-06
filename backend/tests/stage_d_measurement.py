@@ -120,9 +120,10 @@ def native_solve(mps: bytes, seconds: int) -> dict:
 
 
 def measure(years: int, *, solve_seconds: int = 0, profile_path: str | None = None,
-            purchase_budget_factor: int = 1) -> dict:
+            purchase_budget_factor: int = 1, inputs_factory=public_inputs,
+            fixture="public campus; repeated input only, independent state trajectory") -> dict:
     start = time.perf_counter()
-    inputs = public_inputs(years, purchase_budget_factor)
+    inputs = inputs_factory(years, purchase_budget_factor)
     input_seconds = time.perf_counter() - start
     times = {}
     captured = {}
@@ -174,7 +175,7 @@ def measure(years: int, *, solve_seconds: int = 0, profile_path: str | None = No
         profile.dump_stats(profile_path)
     builder = captured["builder"]
     result = {
-        "fixture": "public campus; repeated input only, independent state trajectory",
+        "fixture": fixture,
         "operation_years": years, "steps": builder.point_count,
         "whole_period_purchase_budget_factor": purchase_budget_factor,
         "instrumentation": "cProfile" if profile else "boundary timers only; no allocation tracer",

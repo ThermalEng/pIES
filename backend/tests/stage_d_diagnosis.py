@@ -11,7 +11,7 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from unittest.mock import patch
 
-from stage_d_measurement import measure
+from stage_d_measurement import measure, public_inputs
 
 from iesplan.computation.generators import highs_milp
 from iesplan.computation.generators.linear import LinearModel
@@ -90,18 +90,21 @@ def check_original(model: LinearModel, values: dict[str, float], pairs: list[dic
 
 
 def solve_diagnostic(model: LinearModel, mps: bytes, sources: dict, *, mode: str,
-                     seconds: int, log_path: Path, presolve: str = "on") -> dict:
+                     seconds: int, log_path: Path, presolve: str = "on",
+                     financial_declarations: dict | None = None, lp_solver: str = "choose") -> dict:
     """Same MPS and parameters, only explicit diagnostic factors vary.
 
     Relaxation is NEVER an incumbent of the original MILP. Preserve the native
     log instead of inventing phase timings from wall-clock differences.
     """
+    if mode != "relaxation" and lp_solver != "choose":
+        raise ValueError("LP method controls are only allowed for an explicit relaxation")
     import highspy
 
     handle = highspy.Highs()
     options = {"output_flag": True, "log_to_console": False, "log_file": str(log_path),
                "threads": 2, "random_seed": 0, "time_limit": seconds,
-               "presolve": presolve, "solve_relaxation": mode == "relaxation"}
+               "presolve": presolve, "solve_relaxation": mode == "relaxation", "solver": lp_solver}
     for key, value in options.items():
         if handle.setOptionValue(key, value) != highspy.HighsStatus.kOk:
             raise RuntimeError(f"unsupported diagnostic option: {key}")
@@ -122,6 +125,7 @@ def solve_diagnostic(model: LinearModel, mps: bytes, sources: dict, *, mode: str
                 and info.primal_solution_status == highspy.SolutionStatus.kSolutionStatusFeasible)
     pairs = technical_mutex_pairs(model, sources)
     checks = None
+    financial_facts = None
     if feasible:
         # HiGHS MPS column order is authoritative, not the DTO's order.
         lp = handle.getLp()
@@ -131,6 +135,15 @@ def solve_diagnostic(model: LinearModel, mps: bytes, sources: dict, *, mode: str
             feasibility_tolerance=handle.getOptionValue("primal_feasibility_tolerance")[1],
             integer_tolerance=handle.getOptionValue("mip_feasibility_tolerance")[1],
         )
+        if financial_declarations is not None:
+            # Reuse the real adapter's affine recovery on this SAME primal;
+            # never recalculate taxes or silently solve a second model.
+            from iesplan.computation.result_adapters.highs import _recover_financial_facts
+
+            financial_facts = _recover_financial_facts(
+                financial_declarations,
+                {name: i for i, name in enumerate(lp.col_names_)}, solution.col_value,
+            )
     mip = mode == "exact" and info.mip_node_count >= 0
     return {
         "mode": mode, "presolve": presolve, "solver_version": handle.version(),
@@ -143,20 +156,26 @@ def solve_diagnostic(model: LinearModel, mps: bytes, sources: dict, *, mode: str
         "mip_relative_gap": info.mip_gap if mip and math.isfinite(info.mip_gap) else None,
         "mip_nodes": info.mip_node_count if mip else None,
         "simplex_iterations": info.simplex_iteration_count,
+        "ipm_iterations": info.ipm_iteration_count, "crossover_iterations": info.crossover_iteration_count,
         "read_seconds": read_seconds, "run_seconds": run_seconds,
         "original_matrix_checks": checks,
+        "financial_facts_of_experiment": financial_facts,
         "lp_limit": "standalone LP is not the MILP root with cuts/heuristics; compare the native logs",
     }
 
 
 def diagnose(years: int, factor: int, mode: str, seconds: int, log_path: Path,
-             presolve: str = "on") -> dict:
+             presolve: str = "on", *, inputs_factory=public_inputs,
+             fixture="public campus; repeated input only, independent state trajectory",
+             lp_solver: str = "choose") -> dict:
     captured = {}
     build, write = highs_milp.build_project_model_package, highs_milp.write_mps
 
     def capture_build(*args, **kwargs):
         package = build(*args, **kwargs)
         captured["model"], captured["sources"] = package[0], package[-1]
+        captured["financial_declarations"] = package[3]
+        captured["tax_rules"] = len(args[3].tax_rules)
         return package
 
     def capture_mps(*args, **kwargs):
@@ -166,15 +185,16 @@ def diagnose(years: int, factor: int, mode: str, seconds: int, log_path: Path,
 
     with (patch.object(highs_milp, "build_project_model_package", capture_build),
           patch.object(highs_milp, "write_mps", capture_mps)):
-        generation = measure(years, purchase_budget_factor=factor)
+        generation = measure(years, purchase_budget_factor=factor,
+                             inputs_factory=inputs_factory, fixture=fixture)
     native = solve_diagnostic(captured["model"], captured["mps"], captured["sources"],
-                              mode=mode, seconds=seconds, log_path=log_path, presolve=presolve)
+                              mode=mode, seconds=seconds, log_path=log_path, presolve=presolve,
+                              financial_declarations=captured["financial_declarations"], lp_solver=lp_solver)
     return {
         "generation": generation, "native": native,
         "fresh_process_peak_rss_kib": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss,
         "coverage": {
-            "public_fixture": True, "tax_rules_in_this_fixture": 0,
-            "tax_performance_conclusion": "not covered; requires a separate taxed fixture",
+            "public_fixture": True, "tax_rules_in_this_fixture": captured["tax_rules"],
             "state": "original initial condition and adjacent steps; no resets or terminal additions",
             "input_comparison": "factor changes a whole-period budget, NOT an equivalent optimization",
         },
@@ -187,11 +207,13 @@ if __name__ == "__main__":
     parser.add_argument("--purchase-budget-factor", type=int, choices=(1, 2), default=1)
     parser.add_argument("--mode", choices=("exact", "relaxation"), required=True)
     parser.add_argument("--presolve", choices=("on", "off"), default="on")
+    parser.add_argument("--lp-solver", choices=("choose", "simplex", "ipm"), default="choose",
+                        help="Diagnostic relaxation ONLY; never changes the production MIP solver")
     parser.add_argument("--solve-seconds", type=int, choices=range(1, 31), default=30)
     parser.add_argument("--report", type=Path, required=True)
     args = parser.parse_args()
     result = diagnose(args.years, args.purchase_budget_factor, args.mode, args.solve_seconds,
-                      args.report.with_suffix(".solver.log"), args.presolve)
+                      args.report.with_suffix(".solver.log"), args.presolve, lp_solver=args.lp_solver)
     content = json.dumps(result, ensure_ascii=False, sort_keys=True, allow_nan=False)
     args.report.write_text(content + "\n", encoding="utf-8")
     print(content, flush=True)
