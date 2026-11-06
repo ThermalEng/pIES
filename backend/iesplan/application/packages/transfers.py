@@ -2277,6 +2277,8 @@ def export_excel(
     if version is not None:
         version_content = _load_content_object(db, version.content_object_id)
     evidence_content = _parse_evidence_content(get_object(db, evidence.object_id))
+    compute = results_domain.evidence_inner(evidence_content).get("compute_result")
+    solver_summary = compute["outputs"].get("solver_summary") if compute is not None else None
 
     # 数据版本(计算快照绑定的数据集版本 + 溯源/许可证)
     dataset_rows: list[dict[str, Any]] = []
@@ -2299,6 +2301,19 @@ def export_excel(
     wb = Workbook()
     ws = wb.active
     ws.title = "报告总览"
+    if solver_summary is not None:
+        solver_sheet = wb.create_sheet("求解状态")
+        _set_sheet_title(solver_sheet, "求解状态（封存）", "Sealed Solver Status")
+        _write_kv(solver_sheet, [
+            ("终止原因 / Termination", solver_summary["termination_reason"]),
+            ("数学状态 / Mathematical status", solver_summary["math_status"]),
+            ("有可行解 / Feasible solution", solver_summary["has_feasible_solution"]),
+            ("目标值 / Objective", solver_summary["objective_value"]),
+            ("目标单位 / Objective unit", solver_summary["objective_unit"]),
+            ("最优界 / Best bound", solver_summary["best_bound"]),
+            ("求解器相对间隙 / Solver relative gap", solver_summary["relative_gap"]),
+            ("已证明最优 / Optimality proven", solver_summary["math_status"] == "solved"),
+        ])
     # 固定标题: 中英双语(默认简体中文在前)
     title = ws.cell(row=1, column=1, value="pIES 项目结果报告 / pIES Project Result Report")
     title.font = Font(bold=True, size=14)

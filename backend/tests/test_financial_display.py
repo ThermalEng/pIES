@@ -105,12 +105,14 @@ def test_financial_absence_reasons(monkeypatch):
 
     monkeypatch.setattr("iesplan.tasks.get_snapshot", lambda db, sid: _Snap())
     assert _financial_absence("normal_completion", None, 1, None) == "solution_not_requested"
+    assert _financial_absence("restricted_results", None, 1, None) == "solution_not_requested"
 
     class _Snap2:
         calc_config_snapshot = {"outputs": ["solution", "metrics"]}
 
     monkeypatch.setattr("iesplan.tasks.get_snapshot", lambda db, sid: _Snap2())
     assert _financial_absence("normal_completion", None, 1, None) == "missing_unknown"
+    assert _financial_absence("restricted_results", None, 1, None) == "missing_unknown"
 
 
 def test_financial_absence_frozen_tuple_outputs(monkeypatch):

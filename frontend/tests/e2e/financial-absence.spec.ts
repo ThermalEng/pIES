@@ -138,7 +138,7 @@ test.describe('缺席验收: 未评价不伪装通过', () => {
 
     // 页面: 真实任务结局“无推荐方案”徽章 + 非正常缺席说明; 无封存卡。
     await expect(page.getByText('无推荐方案').first()).toBeVisible({ timeout: 30_000 })
-    await expect(page.getByText(/未产生财务评价/).first()).toBeVisible({ timeout: 30_000 })
+    await expect(page.getByText(/本证据未封存财务评价/).first()).toBeVisible({ timeout: 30_000 })
     await expect(page.getByText(/评价现金流\(封存\)|Sealed evaluation/i)).toHaveCount(0)
     await expect(page.getByText(/CF\[t=/)).toHaveCount(0)
 

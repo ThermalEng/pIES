@@ -145,6 +145,12 @@ test.describe('S3-A: 规划解参数预览与历史来源', () => {
     // 结果页规划解预览: 双实例值与绑定同源。
     await page.getByRole('link', { name: /查看结果|View results/i }).click({ timeout: 30_000 })
     await expect(page).toHaveURL(/\/results/)
+    const solverCard = page.locator('.ies-card').filter({
+      has: page.getByRole('heading', { name: '求解状态（封存）', exact: true }),
+    })
+    await expect(solverCard).toBeVisible()
+    await expect(solverCard).toContainText('已找到可行解，并已证明最优。')
+    await expect(solverCard).toContainText('0.0%')
     await expect(page.getByText('规划解参数预览')).toBeVisible({ timeout: 30_000 })
     const hp1Row = page.locator('.ies-table__body .ies-table__row', { hasText: 'hp1_cap' })
     const hp2Row = page.locator('.ies-table__body .ies-table__row', { hasText: 'hp2_cap' })
@@ -179,6 +185,10 @@ test.describe('S3-A: 规划解参数预览与历史来源', () => {
     const taskId: number = listed.items[listed.items.length - 1].id
     const result = await requestJson(apiCtx.request, 'GET', `/api/projects/${pid}/tasks/${taskId}/result`, undefined, token2)
     const ps = result.result.planning_solution
+    expect(result.result.solver_summary).toMatchObject({
+      termination_reason: 'optimal', math_status: 'solved',
+      has_feasible_solution: true, relative_gap: 0,
+    })
     expect(ps.solution_id).toBe(0)
     expect(ps.single_solution).toBe(true)
     const params = ps.params as PlanParam[]
@@ -213,6 +223,7 @@ test.describe('S3-A: 规划解参数预览与历史来源', () => {
 
     const result2 = await requestJson(apiCtx.request, 'GET', `/api/projects/${pid}/tasks/${taskId}/result`, undefined, token2)
     expect(result2.result.planning_solution.refs.calc_snapshot_id).toBe(ps.refs.calc_snapshot_id)
+    expect(result2.result.solver_summary).toEqual(result.result.solver_summary)
     expect(result2.result.financial_evaluation.construction_units).toEqual(result.result.financial_evaluation.construction_units)
 
     // token2 已顶替浏览器会话(单登录): 重新 GUI 登录后重进历史结果。

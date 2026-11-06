@@ -192,4 +192,5 @@ def test_true_highs_keeps_conflicting_rows_and_reports_infeasible(campus):
     result = _solve(inputs, "step-conflict")
     assert result.math_status == "infeasible"
     assert result.execution_status == "completed"
-    assert dict(result.outputs) == {}
+    assert set(result.outputs) == {"solver_summary"}
+    assert result.outputs["solver_summary"]["termination_reason"] == "infeasible"

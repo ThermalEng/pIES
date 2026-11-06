@@ -20,11 +20,10 @@
   （财务币种，含 USD，直接采用不折算），物理量经
   ``core.units.from_si`` 反向换算；单位由生成器编译目标时确定并写入
   parameters，适配器不猜；
-- ``kInfeasible``/``kUnbounded`` 明确映射，不发布业务输出；
-  ``kUnboundedOrInfeasible`` 记 ``not_solved``，不发布；
-- 文件自报 ``kTimeLimit`` 时明确报错（部分解不当成功解释）；垫片超时
-  恒以非零退出且不写文件，走回执 ``process_failed`` 路径；
-  其余非最优数学状态一律明确报错，不猜数值失败；
+- ``kInfeasible``/``kUnbounded``明确映射，不发布方案；
+  ``kUnboundedOrInfeasible``为``not_solved``，保留终止摘要；
+- 正常``kTimeLimit``按是否有完整可行解映射``feasible``／``not_solved``，
+  不把未证最优的解记为``solved``；已证明最优才为``solved``；
 - 未知状态、格式损坏、缺失输出、发布值非有限一律结果协议失败；
 - 非成功回执按 0.10-A 映射表返回执行状态，数学状态一律
   ``not_solved``，不发布业务输出。
@@ -147,7 +146,10 @@ def _parse_solution(raw: bytes) -> dict[str, Any]:
             primals.append(float(value.strip()))
         except ValueError:
             _fail(f"primal 数值非法: {line!r}")
-    for key in ("model_status", "objective_value", "num_columns"):
+    for key in (
+        "model_status", "has_feasible_solution", "objective_value",
+        "best_bound", "relative_gap", "num_columns",
+    ):
         if key not in facts:
             _fail(f"solution 缺必需段: {key}")
     if facts["model_status"] not in _KNOWN_STATUSES:
@@ -158,13 +160,26 @@ def _parse_solution(raw: bytes) -> dict[str, Any]:
         _fail(f"num_columns 非法: {facts['num_columns']!r}")
     if num_columns != len(primals):
         _fail(f"primal 个数 {len(primals)} 与 num_columns {num_columns} 不一致")
-    try:
-        objective = float(facts["objective_value"])
-    except ValueError:
-        _fail(f"objective_value 非法: {facts['objective_value']!r}")
+    if facts["has_feasible_solution"] not in ("true", "false"):
+        _fail("has_feasible_solution 须为true或false")
+
+    def number(key: str) -> float | None:
+        if facts[key] == "none":
+            return None
+        try:
+            value = float(facts[key])
+        except ValueError:
+            _fail(f"{key} 非法: {facts[key]!r}")
+        if not math.isfinite(value):
+            _fail(f"{key} 非有限")
+        return value
+
     return {
         "model_status": facts["model_status"],
-        "objective": objective,
+        "has_feasible_solution": facts["has_feasible_solution"] == "true",
+        "objective": number("objective_value"),
+        "best_bound": number("best_bound"),
+        "relative_gap": number("relative_gap"),
         "primals": primals,
     }
 
@@ -322,10 +337,8 @@ class HighsResultAdapter:
     def _execution_status(receipt: ExecutionReceipt) -> str:
         """回执七种状态到技术状态的真实映射（0.10-A 契约规则）。
 
-        垫片超时恒以非零退出且不写 solution 文件，走普通
-        ``process_failed``（``failed``）；监督超时（``timed_out``）由
-        执行器在进程被杀时直接记录，根本不读 solution 文件；文件自报
-        时间限制另见 ``_adapt_succeeded`` 的明确报错。
+        求解器正常达到时限与监督强制超时分开。前者由状态文件解释，
+        后者保持执行器记录的timed_out，不读取残留文件。
         """
         status = receipt.status
         if status == "succeeded":
@@ -358,25 +371,53 @@ class HighsResultAdapter:
             _fail(f"声明输出缺失: {_SOLUTION_PATH}")
         solution = _parse_solution(solution_raw)
         status = solution["model_status"]
-        if status == _STATUS_TIME_LIMIT:
-            _fail("求解器自报达到时间限制：部分解不当成功解释")
-        if status != _STATUS_SOLVED:
-            if status in (_STATUS_INFEASIBLE, _STATUS_UNBOUNDED):
-                math_status = "infeasible" if status == _STATUS_INFEASIBLE else "unbounded"
-            elif status == _STATUS_UNBOUNDED_OR_INFEASIBLE:
-                math_status = "not_solved"
-            else:
-                _fail(f"数学状态不可发布: {status!r}")
+        if status == _STATUS_SOLVED:
+            math_status, reason = "solved", "optimal"
+        elif status == _STATUS_TIME_LIMIT:
+            math_status = "feasible" if solution["has_feasible_solution"] else "not_solved"
+            reason = "time_limit"
+        elif status in (_STATUS_INFEASIBLE, _STATUS_UNBOUNDED):
+            math_status = "infeasible" if status == _STATUS_INFEASIBLE else "unbounded"
+            reason = math_status
+        elif status == _STATUS_UNBOUNDED_OR_INFEASIBLE:
+            math_status, reason = "not_solved", "not_solved"
+        else:
+            _fail(f"数学状态不可发布: {status!r}")
+
+        def objective_value(value: float | None) -> float | None:
+            if value is None:
+                return None
+            total = value + params["offset"]
+            unit = params["objective_unit"]
+            try:
+                if dims_of(unit) != Counter({"currency": 1}):
+                    total = from_si(total, unit)
+            except UnitError as exc:
+                _fail(f"目标反向换算失败 →{unit!r}: {exc}")
+            if not math.isfinite(total):
+                _fail("目标发布值非有限")
+            return total
+
+        summary = {
+            "termination_reason": reason,
+            "math_status": math_status,
+            "has_feasible_solution": solution["has_feasible_solution"],
+            "objective_value": objective_value(solution["objective"]),
+            "objective_unit": params["objective_unit"],
+            "best_bound": objective_value(solution["best_bound"]),
+            "relative_gap": solution["relative_gap"],
+        }
+        if math_status not in ("solved", "feasible"):
             return ComputeResult(
                 bundle_id=receipt.bundle_id,
                 receipt_id=receipt.receipt_id,
                 execution_status="completed",
                 math_status=math_status,
-                outputs={},
+                outputs={"solver_summary": summary},
             )
         objective = solution["objective"]
-        if not math.isfinite(objective):
-            _fail("有解但 objective_value 非有限")
+        if not solution["has_feasible_solution"] or objective is None:
+            _fail("数学状态有解但缺有效主解或目标值")
         problem_raw = bundle.files.get(_PROBLEM_PATH)
         if not isinstance(problem_raw, bytes):
             _fail(f"Bundle 缺输入文件: {_PROBLEM_PATH}")
@@ -399,21 +440,8 @@ class HighsResultAdapter:
             if not math.isfinite(value):
                 _fail(f"换算后非有限数值: {name!r}")
             variables.append({"name": name, "value": value, "unit": unit})
-        total = objective + params["offset"]
         objective_unit = params["objective_unit"]
-        try:
-            currency = dims_of(objective_unit) == Counter({"currency": 1})
-        except UnitError as exc:
-            _fail(f"目标单位无法解析 {objective_unit!r}: {exc}")
-        if currency:
-            business_total = total
-        else:
-            try:
-                business_total = from_si(total, objective_unit)
-            except UnitError as exc:
-                _fail(f"目标反向换算失败 →{objective_unit!r}: {exc}")
-        if not math.isfinite(business_total):
-            _fail("目标发布值非有限")
+        business_total = summary["objective_value"]
         components_out: dict[str, object] = {}
         for ident, decl in params["components"].items():
             total = float(decl["constant"])
@@ -426,10 +454,6 @@ class HighsResultAdapter:
             if not math.isfinite(total):
                 _fail(f"分量 {ident!r} 内部值非有限")
             unit = decl["unit"]
-            try:
-                currency = dims_of(unit) == Counter({"currency": 1})
-            except UnitError as exc:
-                _fail(f"分量 {ident!r} 单位无法解析 {unit!r}: {exc}")
             try:
                 if dims_of(unit).get("currency") == 1:
                     # 与生成器同一系数：USD/a、USD/kW/a 只还原时间/
@@ -446,7 +470,7 @@ class HighsResultAdapter:
                 "unit": unit,
                 "caliber": decl["caliber"],
             }
-        out: dict[str, object] = {}
+        out: dict[str, object] = {"solver_summary": summary}
         if "solution" in params["requested"]:
             out["solution"] = {
                 "objective_value": business_total,
@@ -500,7 +524,7 @@ class HighsResultAdapter:
             bundle_id=receipt.bundle_id,
             receipt_id=receipt.receipt_id,
             execution_status="completed",
-            math_status="solved",
+            math_status=math_status,
             outputs=out,
         )
 

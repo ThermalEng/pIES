@@ -117,10 +117,19 @@ SolverRuntime 根据 allowlist 解析结构化命令，在隔离目录执行，�
 
 ### 结果适配器契约与注册
 
-- `ComputeResult` 分两层表达状态：`execution_status` 只解读回执执行事实（`completed`/`rejected`/`failed`/`timed_out`/`cancelled`/`fenced`/`resource_exhausted`/`protocol_failed`，七种回执状态各有准确归属：策略拒绝归 `rejected` 而非协议失败，租约隔离归 `fenced` 而非取消，`process_failed` 按终止原因拆为 OOM 的 `resource_exhausted` 与其余的 `failed`），`math_status`（`solved`/`infeasible`/`unbounded`/`numeric_failure`/`not_solved`）只解读求解器数学结局；`outputs` 为统一业务输出容器。本层不设业务结局字段，不依赖任务域；首个具体求解器语义见下（`ies.result-adapter.highs@1.0.0`）。
+- `ComputeResult` 分两层表达状态：`execution_status` 只解读回执执行事实（`completed`/`rejected`/`failed`/`timed_out`/`cancelled`/`fenced`/`resource_exhausted`/`protocol_failed`，七种回执状态各有准确归属：策略拒绝归 `rejected` 而非协议失败，租约隔离归 `fenced` 而非取消，`process_failed` 按终止原因拆为 OOM 的 `resource_exhausted` 与其余的 `failed`），`math_status`（`solved`/`feasible`/`infeasible`/`unbounded`/`numeric_failure`/`not_solved`）只解读求解器数学结局。`solved`为已证明最优；`feasible`为已有完整可行解、未证明最优，不能混用。`outputs` 为统一业务输出容器。本层不设业务结局字段，不依赖任务域；首个具体求解器语义见下（`ies.result-adapter.highs@1.0.0`）。
 - 追溯经 `receipt_id` 唯一定位一张回执（同一 bundle + attempt 可有多张回执），`bundle_id` 指向 Bundle，不复制回执内容。
 - 扩展适配器只需实现 `ResultAdapter` 公开身份（`descriptor`/`ref`/`available`）与唯一业务调用 `adapt(Bundle, receipt, outputs)`，经 `build_result_adapter_registry` 原子发布，按 manifest/回执固定的精确引用解析。
-- 首个内置 `ies.result-adapter.highs@1.0.0`（配 `ies.generator.highs_milp@1.0.0`）解释求解 executable 写出的 `HIGHS_SOLUTION_V1` 文本（状态、目标值、列数与按索引的主解）。`kOptimal` 有完整主解时记 `solved`：变量按 MPS 列序对 `unit_map` 键反向换算到业务单位；目标值先加回 `objective_offset`（只加一次），再按 `objective_unit` 恢复业务单位——金额量纲守币种原值（财务币种，含 USD），物理量反向换算，单位由生成器确定，适配器不猜。声明分量按 `components` 用同一次主解求值发布到 `solution.components`（每分量 `{value, unit, caliber}`，年值按币种/年换算；声明缺失或引用未知 LP 变量即协议失败，不补零）。步序列按 `step_series` 声明用同一次主解恢复业务单位序列到 `outputs.series`（随 `solution` 请求发布，`metrics-only` 缺席）。只发布 parameters 已请求的 `solution`/`metrics`。`kInfeasible`/`kUnbounded` 映射同名数学状态且无业务输出；`kUnboundedOrInfeasible` 记 `not_solved` 且无输出。文件自报时间限制时明确报错（部分解不当成功解释）；垫片超时以非零退出且不写文件，走回执失败路径，监督超时走回执 `timed_out`，此时不读 solution 文件。其余非最优状态、未知状态、格式损坏、缺失输出、发布值非有限一律结果协议失败。结果填 `receipt_id` 与 `bundle_id` 追溯，不读取当前项目或最新 provider。
+- 内置 `ies.result-adapter.highs@1.0.0`消费配套executable的`HIGHS_SOLUTION_V1`当前文本：`model_status`、`has_feasible_solution`、`objective_value`、`best_bound`、`relative_gap`、`num_columns`及按索引的`primal`。布尔写true／false；不可用数值写none，不写NaN／Inf或伪造0。可行解须由HiGHS的primal可行状态及有效主解共同确认，不靠存在一串列值判断。无可行解不写主解列或目标值；已证明最优的界等于目标且Gap为0，其余只保留实际可用界和Gap。
+- `kOptimal`映射`solved`；正常`kTimeLimit`有可行解映射`feasible`、无可行解映射`not_solved`，不误报不可行。两者均以完整求解状态文件正常结束；真正`kError`、不可读输入或写出失败仍非零退出。监督超时、取消、OOM和进程错误保持原回执，不接受残留文件伪装正常完成。`kInfeasible`／`kUnbounded`仍映射同名状态，`kUnboundedOrInfeasible`仍为`not_solved`，不发布方案。其余未知或不可发布状态、损坏文件及非有限发布值仍为结果协议失败。
+- 求解时限原样传入HiGHS；Bundle进程壁钟为该时限加60秒启动／读写预算，部署策略仍核对完整壁钟。两层时限不能相同以致正常写出被抢先终止；超过壁钟预算仍由原执行器强制收拢，不修改取消、租约隔离或资源失败规则。
+- `solved`与`feasible`使用同一完整主解恢复变量、分量、序列和财务事实，不重求解或补零。变量依MPS列序和`unit_map`恢复，目标与最优界均只加一次`objective_offset`、按`objective_unit`换算；币种保持原值，物理单位反向换算。分量保留`{value, unit, caliber}`；序列和财务事实随solution请求发布，metrics按请求发布。结果始终携带bundle／receipt身份，不读当前项目。
+
+### 求解终止与最优性摘要
+
+`outputs.solver_summary`为本适配器正常解释状态文件后的同次事实，字段为`termination_reason`、`math_status`、`has_feasible_solution`、`objective_value`、`objective_unit`、`best_bound`、`relative_gap`。原因分别为optimal／time_limit／infeasible／unbounded／not_solved；数值无值时为null。objective与best_bound使用相同业务单位和偏移；relative_gap保留求解器原相对间隙，不按显示值再算，尤其不能因加入目标常数后分母变化而伪称同一间隙。未知界不补0，LP未提供的中途界不借用MIP默认值。
+
+公开结果页及导出只投影已封存摘要，摘要缺席表示该provider未提供或该执行没有正常状态文件，不从任务“完成”猜最优。`completed+feasible`映射已有`restricted_results`，可保留同次财务评价与时序，但明确未证明最优；`completed+not_solved`仍为`insufficient_evidence`，保留终止原因，不生成虚构现金流。其余任务业务结局不变。
 
 ### 同次解财务输出
 

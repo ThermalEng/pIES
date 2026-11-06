@@ -224,6 +224,17 @@ def check_optimality(content: dict[str, Any]) -> tuple[OptimalityValidity, dict]
     记录原始求解状态、目标值、界、相对 Gap 与停止原因; Gap 只在求解器
     给出数学上有效的 Gap 时参与判定。
     """
+    compute = content.get("compute_result")
+    summary = compute["outputs"].get("solver_summary") if compute is not None else None
+    if summary is not None:
+        fine = {
+            "solved": OptimalityValidity.passed,
+            "feasible": OptimalityValidity.restricted,
+            "infeasible": OptimalityValidity.failed,
+            "unbounded": OptimalityValidity.failed,
+            "not_solved": OptimalityValidity.insufficient,
+        }[summary["math_status"]]
+        return fine, dict(summary)
     solve = content.get("solve") or {}
     stop = content.get("stop_condition") or {}
     solver_status = str(solve.get("solver_status") or stop.get("status") or "")
