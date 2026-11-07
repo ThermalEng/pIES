@@ -28,6 +28,7 @@ from iesplan.computation.result_adapters.highs import (
     ADAPTER_REF,
     HIGHS_ADAPTER,
     HighsResultAdapter,
+    _mps_column_names,
 )
 
 PROBLEM_PATH = "input/problem.mps"
@@ -538,6 +539,18 @@ def test_corrupt_inputs_fail() -> None:
     with pytest.raises(ComputationUnavailableError) as exc_info:
         _adapt(files, _receipt(), SHIM_OPTIMAL.encode("utf-8"))
     assert exc_info.value.reason == "result-protocol-failure"
+
+
+def test_column_order_reads_incrementally() -> None:
+    class NoWholeText(bytes):
+        def decode(self, *args, **kwargs):
+            raise AssertionError("不得完整解码 MPS")
+
+        def splitlines(self, *args, **kwargs):
+            raise AssertionError("不得物化完整 MPS 行列表")
+
+    assert _mps_column_names(NoWholeText(WRAPPED_MPS.encode())) == ["x", "y"]
+    assert _mps_column_names(WRAPPED_MPS.replace("\n", "\r\n").encode()) == ["x", "y"]
 
 
 def test_declared_components_evaluated_from_same_solution(monkeypatch: pytest.MonkeyPatch) -> None:
