@@ -424,7 +424,7 @@ class HighsResultAdapter:
         names = _mps_column_names(problem_raw)
         if len(names) != len(solution["primals"]):
             _fail("MPS 变量数与 solution primal 个数不一致")
-        # 列名→下标一次构造，变量与序列两条取值路径共享，避免逐步线性搜索。
+        # 列名→下标一次构造，变量、分量、序列及财务事实共享，避免逐项线性搜索。
         index_of = {name: i for i, name in enumerate(names)}
         variables: list[dict[str, object]] = []
         for name, unit in params["unit_map"].items():
@@ -446,9 +446,8 @@ class HighsResultAdapter:
         for ident, decl in params["components"].items():
             total = float(decl["constant"])
             for name, coeff in decl["terms"].items():
-                try:
-                    index = names.index(name)
-                except ValueError:
+                index = index_of.get(name)
+                if index is None:
                     _fail(f"分量 {ident!r} 的 LP 变量不在 MPS 列中: {name!r}")
                 total += float(coeff) * solution["primals"][index]
             if not math.isfinite(total):
