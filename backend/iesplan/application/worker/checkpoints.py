@@ -53,6 +53,8 @@ def _publish(
     db: Session, claim: Claim, number: int, stage: str, data: dict,
     groups: Mapping[str, Mapping[str, Mapping[str, object]]],
 ) -> int:
+    # 大文件写盘不占用租约行锁；发布引用前才与续租/回收串行确认写入资格。
+    _lock(db, claim)
     task = tasks.get_task(db, claim.task_id)
     document = {
         "schema": "ies.worker-checkpoint", "schema_version": "1.0.0",
@@ -83,7 +85,6 @@ def save_bundle_checkpoint(
     db: Session, claim: Claim, number: int, bundle: SolverBundle, attempt: AttemptContext,
 ) -> tuple[int, dict]:
     try:
-        _lock(db, claim)
         media = {entry["path"]: entry["media_type"] for entry in bundle.manifest.inputs}
         files = seal_output_objects(
             db, {path: (raw, media[path]) for path, raw in bundle.files.items()}, actor_id=None,
@@ -139,7 +140,6 @@ def execute_saved_bundle(
             return
         with session_factory() as db:
             try:
-                _lock(db, claim)
                 media = {entry["path"]: entry["media_type"] for entry in receipt.outputs}
                 files = seal_output_objects(
                     db, {path: (raw, media[path]) for path, raw in outputs.items()}, actor_id=None,
@@ -179,7 +179,6 @@ def save_prediction_checkpoint(
     db: Session, claim: Claim, number: int, series: tuple, predicted: tuple,
 ) -> dict:
     try:
-        _lock(db, claim)
         artifacts = seal_output_objects(db, {
             f"{item.device}/{item.interface}": (item.artifact, item.artifact_media_type)
             for item in predicted

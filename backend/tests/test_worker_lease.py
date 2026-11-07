@@ -174,6 +174,47 @@ class TestAcquire:
         # 第一个 Worker 的租约仍有效
         assert worker_app.verify_lease(db, first.attempt_id, first.lease_token) is not None
 
+    @pytest.mark.parametrize("expire_during_write", [False, True])
+    def test_checkpoint_fences_after_file_write_before_publication(
+        self, db, env, monkeypatch, expire_during_write,
+    ):
+        from test_solver_runtime import _attempt, _bundle
+
+        from iesplan.application.worker import checkpoints
+        from iesplan.storage import find_refs_by_owner
+        from iesplan.storage.persistence import StoredObject
+
+        claim = _claim(db, env)
+        original_seal = checkpoints.seal_output_objects
+        original_verify = checkpoints.verify_lease
+        order = []
+        before = db.query(StoredObject).count()
+
+        def seal(*args, **kwargs):
+            order.append("write_files")
+            if expire_during_write:
+                _lease_row(db, claim).expires_at = datetime.now(UTC) - timedelta(seconds=1)
+                db.commit()
+            return original_seal(*args, **kwargs)
+
+        def verify(*args):
+            order.append("fence_publication")
+            return original_verify(*args)
+
+        monkeypatch.setattr(checkpoints, "seal_output_objects", seal)
+        monkeypatch.setattr(checkpoints, "verify_lease", verify)
+        if expire_during_write:
+            with pytest.raises(worker_app.LeaseRejectedError):
+                worker_app.save_bundle_checkpoint(db, claim, 1, _bundle(), _attempt())
+            assert db.query(StoredObject).count() == before
+            assert not find_refs_by_owner(db, "task_checkpoint", claim.attempt_id, "task_attempts")
+        else:
+            identity, _files = worker_app.save_bundle_checkpoint(db, claim, 1, _bundle(), _attempt())
+            assert find_refs_by_owner(
+                db, "task_checkpoint", claim.attempt_id, "task_attempts",
+            )[0]["object_id"] == identity
+        assert order == ["write_files", "fence_publication"]
+
     def test_claim_when_slots_full(self, db: Session, env: dict[str, Any], tmp_path: Path):
         """槽满: 第三个任务保持 queued(03 §5.2 排队等待)。"""
         env2 = setup_environment(db, tmp_path, task_type="calc", config={"tag": "two"})
