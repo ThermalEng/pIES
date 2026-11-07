@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Iterator
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -25,9 +26,9 @@ from worker_testkit import setup_environment  # noqa: E402
 from iesplan.application import worker as worker_app  # noqa: E402
 from iesplan.core.diagnostics import TASK_TIMEOUT  # noqa: E402
 from iesplan.db import Base  # noqa: E402
-from iesplan.tasks.persistence import ComputeSlot, Task, TaskAttempt, TaskDiagnostic, TaskLease  # noqa: E402
 from iesplan.results.persistence import EvidencePackage, ResultAssessment, ResultIndex  # noqa: E402
 from iesplan.tasks import queue  # noqa: E402
+from iesplan.tasks.persistence import ComputeSlot, Task, TaskAttempt, TaskDiagnostic, TaskLease  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # 测试环境
@@ -332,6 +333,22 @@ class TestRenew:
         db.commit()
         assert worker_app.renew_attempt_lease(db, claim.attempt_id, claim.lease_token) is False
 
+    def test_elapsed_active_lease_cannot_revive_or_write(self, db: Session, env):
+        claim = _claim(db, env)
+        lease = _lease_row(db, claim)
+        lease.expires_at = datetime.now(UTC) - timedelta(seconds=1)
+        db.commit()
+        assert lease.status == "active"  # 回收尚未执行，时间本身已使旧资格失效。
+        assert worker_app.renew_attempt_lease(db, claim.attempt_id, claim.lease_token) is False
+        assert worker_app.verify_lease(db, claim.attempt_id, claim.lease_token) is None
+        assert worker_app.report_attempt_progress(
+            db, claim.attempt_id, claim.lease_token, claim.task_id, 90, "adapt"
+        ) is False
+        with pytest.raises(worker_app.LeaseRejectedError):
+            worker_app.submit_attempt_result(
+                db, claim, payload=_payload(), outcome="normal_completion"
+            )
+
     def test_verify_lease_invalid(self, db: Session, env: dict[str, Any]):
         claim = _claim(db, env)
         from uuid import uuid4
@@ -353,6 +370,94 @@ class TestRenew:
 # ---------------------------------------------------------------------------
 # 提交(证据包 + 四维评估 + 结果索引)与迟到拒绝
 # ---------------------------------------------------------------------------
+
+
+class TestExpiredRecovery:
+    def _expire(self, db, claim):
+        _lease_row(db, claim).expires_at = datetime.now(UTC) - timedelta(seconds=1)
+        db.commit()
+
+    def test_recovery_keeps_snapshot_history_and_new_fencing(self, db, env):
+        claim = _claim(db, env)
+        snapshot = env["snapshot"].id
+        worker_app.report_attempt_progress(db, claim.attempt_id, claim.lease_token,
+                                           claim.task_id, 85, "execute")
+        self._expire(db, claim)
+        assert worker_app.recover_expired_attempts(db, "io") == 0
+        assert worker_app.recover_expired_attempts(db, "compute") == 1
+        assert worker_app.recover_expired_attempts(db, "compute") == 0
+        db.expire_all()
+        assert _lease_row(db, claim).status == "expired"
+        attempt = db.get(TaskAttempt, claim.attempt_id)
+        assert (attempt.status, attempt.stop_reason) == ("stopped", "lease_expired")
+        assert attempt.finished_at is not None
+        assert _slots_used(db) == 0
+        assert db.get(Task, claim.task_id).calc_snapshot_id == snapshot
+        assert db.get(Task, claim.task_id).status == "queued"
+        from iesplan import tasks as tasks_domain
+        assert tasks_domain.get_progress(db, claim.attempt_id).progress_percent == 85
+        assert queue.dequeue("compute") == claim.task_id
+        assert queue.dequeue("compute") is None
+        new_claim = _claim_task(db, claim.task_id, "cw-restarted")
+        assert new_claim.attempt_no == claim.attempt_no + 1
+        assert new_claim.lease_token != claim.lease_token
+        assert worker_app.verify_lease(db, claim.attempt_id, claim.lease_token) is None
+        assert worker_app.verify_lease(db, new_claim.attempt_id, new_claim.lease_token)
+
+    @pytest.mark.parametrize("cancel,exhausted,status", [
+        (True, False, "cancelled"), (False, True, "failed"),
+    ])
+    def test_cancel_and_attempt_limit_do_not_requeue(self, db, env, cancel, exhausted, status):
+        claim = _claim(db, env)
+        task = db.get(Task, claim.task_id)
+        if cancel:
+            task.status = "cancelling"
+            queue.set_cancel(task.id, "test cancellation")
+        if exhausted:
+            task.max_attempts = task.attempt_count
+        self._expire(db, claim)
+        assert worker_app.recover_expired_attempts(db, "compute") == 1
+        db.expire_all()
+        assert db.get(Task, claim.task_id).status == status
+        assert _slots_used(db) == 0
+        assert queue.dequeue("compute") is None
+
+    def test_live_lease_is_untouched(self, db, env):
+        claim = _claim(db, env)
+        assert worker_app.recover_expired_attempts(db, "compute") == 0
+        assert db.get(Task, claim.task_id).status == "running"
+        assert _slots_used(db) == 1
+        assert worker_app.verify_lease(db, claim.attempt_id, claim.lease_token)
+
+    def test_restart_tick_recovers_before_slot_gate(self, db, env, monkeypatch):
+        from iesplan.worker.main import Worker
+
+        claim = _claim(db, env)
+        self._expire(db, claim)
+        worker = Worker(compute=object(), session_factory=lambda: Session(db.get_bind()))
+        claimed = []
+        monkeypatch.setattr(worker, "_claim_and_run", claimed.append)
+        worker._tick()
+        assert claimed == [claim.task_id]
+        db.expire_all()
+        assert db.get(Task, claim.task_id).status == "queued"
+        assert _slots_used(db) == 0
+
+    def test_recovery_rollback_does_not_publish_queue(self, db, env, monkeypatch):
+        claim = _claim(db, env)
+        self._expire(db, claim)
+
+        def reject(*args, **kwargs):
+            raise RuntimeError("diagnostic write failed")
+
+        monkeypatch.setattr("iesplan.tasks.persistence.append_diagnostic", reject)
+        with pytest.raises(RuntimeError, match="diagnostic write failed"):
+            worker_app.recover_expired_attempts(db, "compute")
+        db.expire_all()
+        assert db.get(Task, claim.task_id).status == "running"
+        assert _lease_row(db, claim).status == "active"
+        assert _slots_used(db) == 1
+        assert queue.dequeue("compute") is None
 
 
 class TestSubmit:

@@ -38,9 +38,9 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Mapped, Session, mapped_column
 
 from iesplan.db import (
+    JSONB,
     Base,
     BigIntArray,
-    JSONB,
     bigint_pk,
     drop_trigger_function_sql,
     immutable_revoke_sql,
@@ -49,6 +49,7 @@ from iesplan.db import (
 )
 from iesplan.tasks.contracts import (
     IDEMPOTENCY_KEY_RE,
+    POOL_BY_TYPE,
     CalcSnapshotRecord,
     ComputeSlotRecord,
     SampleRecordRecord,
@@ -62,6 +63,7 @@ from iesplan.tasks.contracts import (
     TaskRecord,
     UncertaintySnapshotRecord,
 )
+
 
 def _iso(value: datetime | None) -> str | None:
     """ORM 时间 → 记录字符串（原样 isoformat，不增减时区后缀）。"""
@@ -988,11 +990,71 @@ def fence_renew_lease(
                 TaskLease.attempt_id == attempt_id,
                 TaskLease.lease_token == token,
                 TaskLease.status == "active",
+                TaskLease.expires_at > now,
             )
             .values(renewed_at=now, expires_at=now + timedelta(seconds=ttl_seconds))
+            .execution_options(synchronize_session="fetch")
         ).rowcount
         or 0
     )
+
+
+def get_valid_lease(
+    db: Session, attempt_id: int, lease_token: UUID | str
+) -> TaskLeaseRecord | None:
+    """取得并锁定尚未到期的写入资格，与续租/回收在同一租约行上串行。"""
+    row = db.execute(
+        select(TaskLease).where(
+            TaskLease.attempt_id == attempt_id,
+            TaskLease.lease_token == UUID(str(lease_token)),
+            TaskLease.status == "active",
+            TaskLease.expires_at > _now(),
+        ).with_for_update()
+    ).scalar_one_or_none()
+    return _row_to_lease(row) if row is not None else None
+
+
+def recover_expired_attempts(db: Session, pool: str) -> list[TaskRecord]:
+    """同池到期尝试原子收拢；调用方提交后重建队列提示，不提交事务。"""
+    now = _now()
+    types = [kind for kind, owner in POOL_BY_TYPE.items() if owner == pool]
+    leases = db.execute(
+        select(TaskLease)
+        .join(TaskAttempt, TaskAttempt.id == TaskLease.attempt_id)
+        .join(Task, Task.id == TaskAttempt.task_id)
+        .where(
+            TaskLease.status == "active", TaskLease.expires_at <= now,
+            TaskAttempt.status == "running", Task.type.in_(types),
+            Task.status.in_(("running", "cancelling")),
+        )
+        .order_by(TaskLease.id)
+        .with_for_update(skip_locked=True, of=TaskLease)
+    ).scalars().all()
+    recovered = []
+    for lease in leases:
+        attempt = db.get(TaskAttempt, lease.attempt_id)
+        # 租约锁后再取得最新任务状态，避免覆盖并发到达的取消请求。
+        task = db.execute(
+            select(Task).where(Task.id == attempt.task_id).with_for_update()
+            .execution_options(populate_existing=True)
+        ).scalar_one()
+        lease.status = "expired"
+        finish_attempt(db, attempt.id, "stopped", stop_reason="lease_expired")
+        release_slot(db, attempt.id)
+        if task.status == "cancelling":
+            status = "cancelled"
+        else:
+            status = "queued" if task.attempt_count < task.max_attempts else "failed"
+        record = set_task_status(db, task.id, status, business_outcome=None)
+        append_diagnostic(
+            db, task_id=task.id, attempt_id=attempt.id, level="warning",
+            code="TASK-LEASE-001", message=f"执行租约过期，旧尝试已停止；任务状态：{status}",
+            context={"recovery": "restart_from_snapshot" if status == "queued" else status,
+                     "status": status},
+        )
+        recovered.append(record)
+    db.flush()
+    return recovered
 
 
 def fence_release_lease(

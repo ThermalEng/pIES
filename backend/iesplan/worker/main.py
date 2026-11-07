@@ -77,6 +77,7 @@ class Worker:
         self._current_task_id: int | None = None
         self._last_heartbeat = 0.0
         self._last_renew = 0.0
+        self._last_recovery = 0.0
 
     # -- 生命周期 ---------------------------------------------------------
 
@@ -112,6 +113,13 @@ class Worker:
         if now - self._last_heartbeat >= self.heartbeat_interval:
             self._heartbeat()
             self._last_heartbeat = now
+        # 必须先回收到期尝试，再检查槽；失联尝试可能占满整个资源池。
+        if now - self._last_recovery >= self.renew_interval:
+            with self.session_factory() as db:
+                recovered = worker_app.recover_expired_attempts(db, self.pool)
+            self._last_recovery = now
+            if recovered:
+                logger.info("过期尝试回收: pool=%s count=%s", self.pool, recovered)
         if self._task_thread is not None:
             if self._task_thread.is_alive():
                 if now - self._last_renew >= self.renew_interval:

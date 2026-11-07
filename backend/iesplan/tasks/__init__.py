@@ -38,6 +38,7 @@ _PERSISTENCE_EXPORTS: frozenset[str] = frozenset({
     "get_lease_by_token",
     "get_progress",
     "get_running_attempt",
+    "get_valid_lease",
     "get_sample_task",
     "get_snapshot",
     "get_task",
@@ -54,6 +55,7 @@ _PERSISTENCE_EXPORTS: frozenset[str] = frozenset({
     "list_tasks",
     "pool_has_free_slot",
     "record_sample",
+    "recover_expired_attempts",
     "release_lease",
     "release_slot",
     "renew_lease",
@@ -79,8 +81,8 @@ def install_triggers() -> tuple[str, ...]:
     return _persistence.install_triggers()
 
 
-from iesplan.tasks import queue as _queue
-from iesplan.tasks.contracts import (
+from iesplan.tasks import queue as _queue  # noqa: E402 - 保留上方惰性persistence导出顺序
+from iesplan.tasks.contracts import (  # noqa: E402
     BUSINESS_OUTCOMES,
     COMPUTE_TYPES,
     EVALUATION_INPUT_KEYS,
@@ -114,7 +116,6 @@ from iesplan.tasks.contracts import (
     map_business_outcome,
     parse_evaluation_input,
 )
-
 
 QUEUE_COMPUTE = _queue.QUEUE_COMPUTE
 QUEUE_IO = _queue.QUEUE_IO
@@ -202,6 +203,7 @@ __all__ = [
     "get_progress",
     "get_queue_progress",
     "get_running_attempt",
+    "get_valid_lease",
     "get_sample_task",
     "get_snapshot",
     "get_task",
@@ -220,6 +222,7 @@ __all__ = [
     "queue_position",
     "queue_status",
     "record_sample",
+    "recover_expired_attempts",
     "release_lease",
     "release_slot",
     "remove",

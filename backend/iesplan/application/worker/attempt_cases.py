@@ -40,12 +40,13 @@ from uuid import UUID
 
 from sqlalchemy.orm import Session
 
+from iesplan import tasks as tasks_domain
 from iesplan.application.tasks import Claim
 from iesplan.application.worker.compute_cases import (
     HOURLY_OBJECT_PATH,
     attach_evidence_objects,
-    seal_output_objects,
     result_step_series,
+    seal_output_objects,
 )
 from iesplan.application.worker.evidence_cases import CheckAssessment, assess_check_evidence
 from iesplan.application.worker.lease_cases import (
@@ -82,6 +83,7 @@ __all__ = [
     "cancel_attempt",
     "fail_attempt",
     "renew_attempt_lease",
+    "recover_expired_attempts",
     "report_attempt_progress",
     "submit_attempt_result",
     "timeout_attempt",
@@ -123,6 +125,24 @@ def acquire_attempt(db: Session, task_id: int, worker_id: str) -> Claim | None:
 # ---------------------------------------------------------------------------
 # 续租(独立事务, 与执行路径隔离)
 # ---------------------------------------------------------------------------
+
+
+def recover_expired_attempts(db: Session, pool: str) -> int:
+    """收拢到期尝试并提交，随后重建需要重试任务的队列提示。"""
+    try:
+        recovered = tasks_domain.recover_expired_attempts(db, pool)
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    for task in recovered:
+        tasks_domain.clear_cancel(task.id)
+        if task.status == "queued":
+            tasks_domain.enqueue(
+                task.id, pool, task_type=task.type, snapshot_id=task.calc_snapshot_id,
+                priority=task.priority,
+            )
+    return len(recovered)
 
 
 def renew_attempt_lease(
@@ -298,7 +318,8 @@ def submit_attempt_result(
                     "rows": len(hourly_series[ordered_ids[0]]["values"]),
                     "series": [
                         {
-                            **{key: value for key, value in hourly_series[series_id].items() if key != "values"},
+                            **{key: value for key, value in hourly_series[series_id].items()
+                               if key != "values"},
                         }
                         for series_id in ordered_ids
                     ],
