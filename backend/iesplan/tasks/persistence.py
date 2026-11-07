@@ -321,6 +321,18 @@ def get_task(db: Session, task_id: int) -> TaskRecord | None:
     return _row_to_task(row) if row is not None else None
 
 
+def get_task_for_update(db: Session, task_id: int) -> TaskRecord | None:
+    row = db.execute(select(Task).where(Task.id == task_id).with_for_update()
+                     .execution_options(populate_existing=True)).scalar_one_or_none()
+    return _row_to_task(row) if row is not None else None
+
+
+def find_queued_task(db: Session, pool: str) -> int | None:
+    types = [kind for kind, owner in POOL_BY_TYPE.items() if owner == pool]
+    return db.execute(select(Task.id).where(Task.status == "queued", Task.type.in_(types))
+                      .order_by(Task.priority.desc(), Task.created_at, Task.id).limit(1)).scalar()
+
+
 def get_task_by_idempotency(db: Session, project_id: int, idempotency_key: str) -> TaskRecord | None:
     """按（项目，幂等键）取任务；不存在返回 None。"""
     row = db.execute(

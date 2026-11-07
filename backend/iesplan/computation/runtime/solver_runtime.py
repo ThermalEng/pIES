@@ -20,8 +20,8 @@ import shutil
 import stat
 import tempfile
 import uuid
-from collections.abc import Mapping
-from datetime import datetime, timezone
+from collections.abc import Callable, Mapping
+from datetime import UTC, datetime
 
 from iesplan.computation.errors import ComputationUnavailableError
 from iesplan.computation.protocols import (
@@ -48,7 +48,7 @@ def _normalize_timestamp(value: str) -> str:
     """把带时区时间戳归一化为 ISO 8601 UTC ``Z`` 字尾。"""
     return (
         datetime.fromisoformat(value)
-        .astimezone(timezone.utc)
+        .astimezone(UTC)
         .isoformat()
         .replace("+00:00", "Z")
     )
@@ -90,6 +90,7 @@ class SolverRuntime:
         attempt: AttemptContext,
         *,
         stop: StopProbe | None = None,
+        handoff: Callable[[ExecutionReceipt, Mapping[str, bytes]], None] | None = None,
     ) -> tuple[ExecutionReceipt, dict[str, bytes]]:
         """执行完整 Bundle，返回 ``(唯一回执, 已核对声明输出字节)``。
 
@@ -158,6 +159,7 @@ class SolverRuntime:
                 bundle, attempt, provider.ref, str(executable_ref), gate_error
             ), {}
         root = tempfile.mkdtemp(prefix="ies-runtime-")
+        delivered = True
         try:
             self._prepare_workdir(root, bundle, command)
             try:
@@ -178,11 +180,17 @@ class SolverRuntime:
                     "executor 须返回 ProcessOutcome，"
                     f"得到 {type(outcome).__name__}"
                 )
-            return self._finish(
+            receipt, outputs = self._finish(
                 bundle, attempt, provider, command, outcome, root
             )
+            if handoff is not None:
+                delivered = False
+                handoff(receipt, outputs)
+                delivered = True
+            return receipt, outputs
         finally:
-            shutil.rmtree(root)
+            if delivered:
+                shutil.rmtree(root)
 
     def _check_policy(self, command: Mapping[str, object]) -> str | None:
         """部署策略门禁；通过返回 None，否则返回明确拒绝原因。"""

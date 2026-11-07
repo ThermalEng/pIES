@@ -42,6 +42,8 @@ _PERSISTENCE_EXPORTS: frozenset[str] = frozenset({
     "get_sample_task",
     "get_snapshot",
     "get_task",
+    "get_task_for_update",
+    "find_queued_task",
     "get_task_by_idempotency",
     "latest_diagnostic",
     "latest_finished_at_for_tasks",

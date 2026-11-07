@@ -30,6 +30,7 @@ import logging
 import time
 import traceback
 from collections.abc import Callable, Mapping
+from dataclasses import replace
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -44,7 +45,11 @@ from iesplan.core.diagnostics import (
 from iesplan.core.errors import AppError
 from iesplan.worker import executors
 from iesplan.worker.executors import (
-    EngineRunError, LeaseFenced, RunContext, TaskCancelled, TaskTimedOut,
+    EngineRunError,
+    LeaseFenced,
+    RunContext,
+    TaskCancelled,
+    TaskTimedOut,
 )
 
 logger = logging.getLogger(__name__)
@@ -118,42 +123,78 @@ def _predict_round(
     ctx: RunContext, plane: Any, snapshot: Any,
     previous: Mapping[str, object] | None,
 ) -> tuple[tuple, tuple]:
-    """预测阶段短读会话(读快照与固定资源, 无数据库写入)。"""
+    """复用已保存预测，否则计算实际预测并另经短事务保存产物。"""
     with ctx.session_factory() as db:
-        return worker_app.predict_target_round(
+        saved = worker_app.load_prediction_checkpoint(db, ctx.claim, 1)
+    if saved is not None:
+        ctx.prediction_artifacts[1] = saved[2]
+        return saved[:2]
+    with ctx.session_factory() as db:
+        series, predicted = worker_app.predict_target_round(
             db, plane, ctx.task.project_id, snapshot, previous=previous,
         )
+    with ctx.session_factory() as db:
+        ctx.prediction_artifacts[1] = worker_app.save_prediction_checkpoint(
+            db, ctx.claim, 1, series, predicted)
+    return series, predicted
 
 
 def _predict_selected_round(
     ctx: RunContext, plane: Any, snapshot: Any,
-    entries: tuple, previous: Mapping[str, object] | None,
+    entries: tuple, previous: Mapping[str, object] | None, number: int,
 ) -> tuple[tuple, tuple]:
-    """耦合轮次预测短读会话(只重算给定条目, 独立产物由调用方复用)。"""
+    """耦合轮次复用已保存产物，否则计算指定条目并提交本轮检查点。"""
     with ctx.session_factory() as db:
-        return worker_app.predict_selected_round(
+        saved = worker_app.load_prediction_checkpoint(db, ctx.claim, number)
+    if saved is not None:
+        ctx.prediction_artifacts[number] = saved[2]
+        return saved[:2]
+    with ctx.session_factory() as db:
+        series, predicted = worker_app.predict_selected_round(
             db, plane, ctx.task.project_id, snapshot, entries, previous=previous,
         )
+    with ctx.session_factory() as db:
+        ctx.prediction_artifacts[number] = worker_app.save_prediction_checkpoint(
+            db, ctx.claim, number, series, predicted)
+    return series, predicted
 
 
 def _solve_round(
     ctx: RunContext, plane: Any, snapshot: Any, artifact: Any, models: Any,
     materialized: Any, finance: Any, config: Any, evaluation: Any, attempt: Any,
-) -> tuple[Any, Any, Any, Any]:
+    number: int = 1,
+) -> tuple:
     """单轮求解: 生成 → 执行(含回执分流) → 适配 → 业务结局。
 
     每轮回执独立判定: cancelled → TaskCancelled, timed_out → TaskTimedOut,
     fenced → LeaseFenced（不写终态）, 其他非成功/不可映射 → EngineRunError。生成后与回执判定后
     分别写进度（判定前不写 execute 进度）。评价确认逐轮透传同一冻结值，
-    不读最新草稿。返回 (bundle, receipt, collected, result, outcome)。
+    不读最新草稿。返回 (bundle, receipt, collected, result, outcome, sealed_files)。
     """
-    bundle = worker_app.generate_bundle(
-        plane, snapshot, artifact, models, materialized, finance, config, evaluation,
-        stop=_stop_probe(ctx))
+    ctx.checkpoint("restore_round")
+    with ctx.session_factory() as db:
+        saved = worker_app.restore_round(db, ctx.claim, number)
+    if saved is None:
+        bundle = worker_app.generate_bundle(
+            plane, snapshot, artifact, models, materialized, finance, config, evaluation,
+            stop=_stop_probe(ctx))
+        with ctx.session_factory() as db:
+            generated_id, bundle_refs = worker_app.save_bundle_checkpoint(
+                db, ctx.claim, number, bundle, attempt)
+    else:
+        bundle = saved.bundle
+        generated_id = saved.generated_id
+        bundle_refs = saved.files["bundle_files"]
+        attempt = replace(attempt, bundle_id=saved.bundle_id)
     ctx.progress(40.0, "generate", None)
-    receipt, collected = worker_app.execute_bundle(
-        plane=plane, bundle=bundle, attempt=attempt, stop=_stop_probe(ctx),
-    )
+    if saved is not None and saved.receipt is not None:
+        receipt, collected = saved.receipt, saved.outputs
+        solution_refs = saved.files["solution"]
+    else:
+        receipt, collected, solution_refs = worker_app.execute_saved_bundle(
+            plane=plane, bundle=bundle, attempt=attempt, claim=ctx.claim, number=number,
+            generated_id=generated_id, session_factory=ctx.session_factory, stop=_stop_probe(ctx),
+        )
     _raise_for_receipt_status(receipt)
     ctx.progress(85.0, "execute", {"receipt_status": receipt.status})
     result = worker_app.adapt_result(plane, bundle, receipt, collected)
@@ -163,7 +204,9 @@ def _solve_round(
             f"统一结果无法映射业务结局(execution={result.execution_status}, "
             f"math={result.math_status}, receipt={receipt.receipt_id})"
         )
-    return bundle, receipt, collected, result, outcome
+    return bundle, receipt, collected, result, outcome, {
+        "bundle_files": bundle_refs, "solution": solution_refs,
+    }
 
 
 def _predicted_series_csv(item: Any) -> bytes:
@@ -195,18 +238,16 @@ def _execute_compute(ctx: RunContext) -> tuple[dict, dict]:
     至少为 2，不存在跳过耦合迭代求解的上限）。prediction 载荷中
     prediction_rounds 与 solve_rounds 恒等（每耦合迭代都真实求解），
     phase2_solve_rounds = solve_rounds - 1（阶段一计 1 轮）。
-    多轮证据（solve_rounds > 1 时）：阶段一与非最终中间轮的 Bundle
-    文件、回执、声明原始输出、训练产物与预测序列字节进入
-    output_files["round_history"]（按 round-<n>/ 前缀区分）；最终轮
-    不重复封存，其 rounds 条目直接引用顶层最终组
-   （bundle_files/solution/prediction_files）的同一对象描述子。
+    每轮预测、生成与执行先发布检查点。中间轮仅保留文件描述子，
+    不常驻各轮Bundle字节；最终round_history按round-<n>/组合已有
+    对象引用，最终轮引用顶层组，不重复写入生成包、原始解或训练产物。
     载荷 "rounds" 按轮次列出回执/manifest/文件引用（附各节所在
     密封组）并标明最终权威轮；最终轮各组即权威结果；仍由最终
-    提交单元一次性封存提交，无中间轮终态。
+    提交单元原子发布业务结果，无中间轮业务终态。
     返回 (payload, output_files)：payload
-    只含 JSON 兼容字段；output_files 为待封存原始字节，由提交单元随
-    提交在同一数据库事务内建对象元数据/引用并注入描述子（Blob 字节落
-    盘不参与原子提交），本函数不写数据库。
+    只含JSON兼容字段；output_files只携带尚需封存的序列字节。
+    ctx.sealed_output_files携带已持久化阶段文件的描述子，提交单元
+    复用对象并挂接证据引用，原子发布最终索引和终态。本层不写ORM。
     """
     task = ctx.task
     snapshot = ctx.snapshot
@@ -254,12 +295,13 @@ def _execute_compute(ctx: RunContext) -> tuple[dict, dict]:
     completed = worker_app.complete_materialized(materialized, predicted_series)
     attempt = worker_app.build_attempt_context(task, ctx.claim, snapshot)
     rounds_log: list[dict] = []
-    bundle, receipt, collected, result, outcome = _solve_round(
+    bundle, receipt, collected, result, outcome, sealed = _solve_round(
         ctx, plane, snapshot, artifact, models, completed, finance, config, evaluation, attempt)
     rounds_log.append({
         "round": 1, "phase": "phase1",
-        "bundle": bundle, "receipt": receipt, "collected": collected,
+        "manifest": bundle.manifest.to_dict(), "receipt": receipt, "files": sealed,
         "predicted": predicted,
+        "prediction_artifacts": ctx.prediction_artifacts.get(1, {}),
     })
     prediction_rounds = 1 if predicted else 0
     solve_rounds = 1
@@ -276,13 +318,14 @@ def _execute_compute(ctx: RunContext) -> tuple[dict, dict]:
         previous_outputs = result.outputs
         while prediction_rounds < max_iterations:
             new_series, new_predicted = _predict_selected_round(
-                ctx, plane, snapshot, coupled_entries, previous_outputs)
+                ctx, plane, snapshot, coupled_entries, previous_outputs, prediction_rounds + 1)
             prediction_rounds += 1
             completed = worker_app.complete_materialized(
                 materialized, independent_series + new_series)
-            bundle, receipt, collected, result, outcome = _solve_round(
+            del bundle, collected  # 前轮仅保留对象引用，不与新轮大矩阵同时常驻。
+            bundle, receipt, collected, result, outcome, sealed = _solve_round(
                 ctx, plane, snapshot, artifact, models, completed,
-                finance, config, evaluation, attempt)
+                finance, config, evaluation, attempt, prediction_rounds)
             solve_rounds += 1
             current_coupled = {(item.device, item.interface): item for item in new_predicted}
             aggregate, records = worker_app.convergence_for_round(
@@ -292,8 +335,11 @@ def _execute_compute(ctx: RunContext) -> tuple[dict, dict]:
             final_convergences = records
             rounds_log.append({
                 "round": prediction_rounds, "phase": "phase2",
-                "bundle": bundle, "receipt": receipt, "collected": collected,
+                "manifest": bundle.manifest.to_dict(), "receipt": receipt, "files": sealed,
                 "predicted": independent_predicted + new_predicted,
+                "prediction_artifacts": {
+                    **ctx.prediction_artifacts[1], **ctx.prediction_artifacts[prediction_rounds],
+                },
                 "convergence": {"aggregate": aggregate, "per_target": [dict(r) for r in records]},
             })
             ctx.progress(90.0, "phase2", {"round": solve_rounds})
@@ -304,21 +350,8 @@ def _execute_compute(ctx: RunContext) -> tuple[dict, dict]:
                 converged = True
                 break
         predicted = independent_predicted + coupled_predicted
-    bundle_media = {
-        entry["path"]: entry["media_type"]
-        for entry in (*bundle.manifest.inputs, *bundle.manifest.outputs)
-    }
-    solution_media = {
-        entry["path"]: entry["media_type"] for entry in receipt.outputs
-    }
-    output_files = {
-        "bundle_files": {
-            path: (data, bundle_media[path]) for path, data in bundle.files.items()
-        },
-        "solution": {
-            path: (collected[path], solution_media[path]) for path in collected
-        },
-    }
+    ctx.sealed_output_files.update(sealed)
+    output_files = {}
     payload = {
         "outcome": outcome,
         "compute_result": result.to_dict(),
@@ -330,7 +363,8 @@ def _execute_compute(ctx: RunContext) -> tuple[dict, dict]:
         receipts = []
         for item in predicted:
             artifact_path = f"prediction/{item.device}/{item.interface}/training_artifact.json"
-            prediction_files[artifact_path] = (item.artifact, item.artifact_media_type)
+            ctx.sealed_output_files.setdefault("prediction_files", {})[artifact_path] = (
+                rounds_log[-1]["prediction_artifacts"][f"{item.device}/{item.interface}"])
             series_path = f"prediction/{item.device}/{item.interface}/series.csv"
             prediction_files[series_path] = (_predicted_series_csv(item), "text/csv")
             entry = dict(item.receipt)
@@ -351,28 +385,21 @@ def _execute_compute(ctx: RunContext) -> tuple[dict, dict]:
         }
     if len(rounds_log) > 1:
         history: dict[str, tuple[bytes, str]] = {}
+        history_refs: dict = {}
         rounds: list[dict] = []
         for record in rounds_log[:-1]:
             prefix = f"round-{record['round']}"
-            round_bundle = record["bundle"]
+            round_manifest = record["manifest"]
             round_receipt = record["receipt"]
-            round_collected = record["collected"]
-            round_bundle_media = {
-                entry["path"]: entry["media_type"]
-                for entry in (*round_bundle.manifest.inputs, *round_bundle.manifest.outputs)
-            }
-            round_solution_media = {
-                entry["path"]: entry["media_type"] for entry in round_receipt.outputs
-            }
             bundle_paths = []
-            for path, data in round_bundle.files.items():
+            for path, descriptor in record["files"]["bundle_files"].items():
                 key = f"{prefix}/bundle/{path}"
-                history[key] = (data, round_bundle_media[path])
+                history_refs[key] = descriptor
                 bundle_paths.append(key)
             solution_paths = []
-            for path in round_collected:
+            for path, descriptor in record["files"]["solution"].items():
                 key = f"{prefix}/solution/{path}"
-                history[key] = (round_collected[path], round_solution_media[path])
+                history_refs[key] = descriptor
                 solution_paths.append(key)
             prediction_paths = []
             for item in record["predicted"]:
@@ -380,7 +407,8 @@ def _execute_compute(ctx: RunContext) -> tuple[dict, dict]:
                     f"{prefix}/prediction/{item.device}/{item.interface}"
                     "/training_artifact.json"
                 )
-                history[artifact_key] = (item.artifact, item.artifact_media_type)
+                history_refs[artifact_key] = record["prediction_artifacts"][
+                    f"{item.device}/{item.interface}"]
                 series_key = (
                     f"{prefix}/prediction/{item.device}/{item.interface}/series.csv"
                 )
@@ -391,7 +419,7 @@ def _execute_compute(ctx: RunContext) -> tuple[dict, dict]:
                 "phase": record["phase"],
                 "authoritative": False,
                 "receipt": round_receipt.to_dict(),
-                "bundle_manifest": round_bundle.manifest.to_dict(),
+                "bundle_manifest": round_manifest,
                 "sealed_in": {
                     "bundle": "round_history",
                     "solution": "round_history",
@@ -422,18 +450,21 @@ def _execute_compute(ctx: RunContext) -> tuple[dict, dict]:
             "files": {
                 "bundle": sorted(f"bundle/{path}" for path in bundle.files),
                 "solution": sorted(f"solution/{path}" for path in collected),
-                "prediction": sorted(prediction_files),
+                "prediction": sorted(set(prediction_files)
+                                     | set(ctx.sealed_output_files.get("prediction_files", {}))),
             },
         }
         if "convergence" in final_record:
             final_entry["convergence"] = final_record["convergence"]
         rounds.append(final_entry)
         output_files["round_history"] = history
+        ctx.sealed_output_files["round_history"] = history_refs
         payload["rounds"] = rounds
         payload["authoritative_round"] = solve_rounds
     # 统一求解步序列对象(0.14-R5/R6): 只对最终轮结果已恢复的统一序列
     # 序列化, 随 output_files 进同一证据封存/提交单元；无序列(缺 solution
     # 输出/metrics-only/无可发布步变量)即无文件, 不伪造。
+    del bundle, collected, materialized, completed, models, artifact
     hourly_files = worker_app.build_hourly_files(result.outputs)
     if hourly_files:
         output_files["hourly"] = hourly_files
@@ -454,9 +485,9 @@ def dispatch(
     未实现的 I/O 执行器抛 tasks 域执行不可用错误(上抛, 不落成功);
     未知任务类型抛 InvalidTaskTypeError。计算类任务走真实链
     (``_execute_compute``): 任务/快照记录缺失即确定性失败, 不解释任何
-    输入字段；输出文件原始字节随 payload 之外返回，由提交单元随提交
-    在同一数据库事务内建元数据/引用（Blob 字节落盘不参与原子提交，
-    本函数不写数据库）。
+    输入字段；计算阶段资产已通过公开网关持久化，新输出字节在payload
+    之外返回，由最终提交单元与已有对象引用一起原子发布业务结果。
+    Blob字节落盘不参与数据库原子提交，本层不直接写数据库。
     """
     task_type = ctx.task.type
     if task_type in COMPUTE_TASK_TYPES:
@@ -504,9 +535,9 @@ def run_task(
     ORM; 任务/快照读完即关闭读取会话, 求解/分析/导出在无数据库事务状态
     下运行, 领取/进度/续租/评估写入/提交/失败/取消各自的新短会话短事务
     由 application.worker 用例拥有并提交(领取已在执行前提交, 故执行期
-    回滚不会丢失租约; 失败收拢不再误判为 lease_rejected)。计算输出字节
-    由提交单元随提交在同一数据库事务内建元数据/引用(封存/证据/引用/
-    完成一次提交; Blob 字节落盘不参与原子提交), 本函数只传参。
+    回滚不会丢失租约; 失败收拢不再误判为 lease_rejected)。计算阶段产物
+    经公开网关分段保存；最终提交复用已有对象并封存新输出，证据/评价/
+    索引/终态同事务发布，失败不撤销先前检查点。本函数只编排和传参。
     """
     factory = session_factory
     # 输入加载: 短读会话, 读完即关(task/snapshot 为脱离会话的值对象)
@@ -548,7 +579,8 @@ def run_task(
         with factory() as db:
             worker_app.submit_attempt_result(
                 db, claim, payload=payload, outcome=outcome,
-                actor_id=task.requested_by, output_files=output_files)
+                actor_id=task.requested_by, output_files=output_files,
+                sealed_output_files=ctx.sealed_output_files)
         return "completed"
     except LeaseFenced:
         logger.warning("租约隔离，丢弃本次执行结果: task=%s", task.id)

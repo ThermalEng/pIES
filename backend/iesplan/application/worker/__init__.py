@@ -46,6 +46,13 @@ from iesplan.application.worker.attempt_cases import (
     submit_attempt_result,
     timeout_attempt,
 )
+from iesplan.application.worker.checkpoints import (
+    execute_saved_bundle,
+    load_prediction_checkpoint,
+    restore_round,
+    save_bundle_checkpoint,
+    save_prediction_checkpoint,
+)
 from iesplan.application.worker.compute_cases import (
     HOURLY_OBJECT_PATH,
     ComputeExecutionPlane,
@@ -99,6 +106,7 @@ from iesplan.tasks import (
 )
 
 __all__ = [
+    "find_queued_task",
     "BUSINESS_OUTCOMES",
     "CalcSnapshotRecord",
     "Claim",
@@ -125,6 +133,11 @@ __all__ = [
     "count_completed_samples",
     "dequeue_task",
     "execute_bundle",
+    "execute_saved_bundle",
+    "load_prediction_checkpoint",
+    "restore_round",
+    "save_bundle_checkpoint",
+    "save_prediction_checkpoint",
     "fail_attempt",
     "generate_bundle",
     "get_dataset_data_object",
@@ -151,6 +164,11 @@ __all__ = [
     "timeout_attempt",
     "verify_lease",
 ]
+
+
+def find_queued_task(db, pool: str) -> int | None:
+    """队列提示丢失时，从任务权威状态发现可领取工作。"""
+    return tasks_domain.find_queued_task(db, pool)
 
 
 def cancel_requested(task_id: int) -> bool:

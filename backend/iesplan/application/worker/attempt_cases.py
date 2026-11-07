@@ -243,19 +243,19 @@ def submit_attempt_result(
     outcome: str,
     actor_id: int | None = None,
     output_files: Mapping[str, Mapping[str, tuple[bytes, str]]] | None = None,
+    sealed_output_files: Mapping[str, Mapping[str, Mapping[str, object]]] | None = None,
 ) -> SubmitReceipt:
     """仅租约持有者可提交(03 §11.4): token 不符/租约过期 → 整笔回滚并抛 LeaseRejectedError。
 
-    输出字节随本单元封存(调用方传原始字节, 不经过第二种 payload 格式):
-    fencing 确认后、证据包创建前封存 Bundle 与声明输出并注入描述子,
+    未持久化输出字节随本单元封存，已提交阶段资产复用对象描述子：
+    fencing 确认后、证据包创建前合并已有阶段文件与新输出描述子,
     证据包创建后挂接输出引用, 与提交同事务一次提交/回滚 —— 任一步失败
-    则任务/结果/证据/对象元数据/引用全无提交, 不留已完成缺引用与孤立
-    元数据(外部 Blob 字节跨资源不能同原子提交, 沿现有存储回收语义清理)。
+    则本次任务终态/结果/证据/新对象元数据/新引用全部回滚，先前已提交
+    的阶段资产保留(外部 Blob 字节沿现有存储回收语义清理)。
 
     单事务顺序:
         1) fencing 校验(租约 active + token 匹配);
-        2) 输出封存(Bundle/声明输出/预测训练产物原始字节 → 对象,
-           描述子注入 payload, 预测回执训练产物引用回填);
+        2) 复用阶段对象并封存新输出，描述子注入 payload，回填预测产物引用;
         3) 结果序列化 → 对象存储;
         4) 证据包(evidence_packages, 不可变) + 对象引用(含输出引用挂接);
         5) 四维评估(result_assessments, assessor='system');
@@ -282,12 +282,12 @@ def submit_attempt_result(
         index_id: int | None = None
         snapshot = get_snapshot_record(db, task.calc_snapshot_id) if task.calc_snapshot_id else None
         if snapshot is not None:
-            sealed_groups: dict[str, Mapping[str, Mapping[str, object]]] = {}
+            sealed_groups = {key: dict(value) for key, value in (sealed_output_files or {}).items()}
             if output_files is not None:
                 for key, raw in output_files.items():
                     sealed = seal_output_objects(db, raw, actor_id=who)
-                    payload[key] = sealed
-                    sealed_groups[key] = sealed
+                    sealed_groups.setdefault(key, {}).update(sealed)
+            payload.update(sealed_groups)
             # 预测回执引用回填(B5-2): 训练产物与最终轮输出序列的密封描述子
             # 注入各回执, 随证据载荷同事务提交(外部 Blob 字节落盘不参与原子提交)。
             prediction_files = sealed_groups.get("prediction_files")

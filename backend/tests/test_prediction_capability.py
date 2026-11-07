@@ -39,6 +39,7 @@ from test_tasks_api import (  # noqa: E402
     _set_explicit_calc,
     _submit_task,
 )
+from worker_testkit import claim_for_direct_run  # noqa: E402
 
 from iesplan.api import projects as projects_api  # noqa: E402
 from iesplan.api import tasks as tasks_api  # noqa: E402
@@ -967,7 +968,7 @@ def _save_calc_case(db: Session, user, pid: int, body: dict, registry) -> int:
 
 
 def _claim(db: Session, task_id: int):
-    claim = worker_app.acquire_attempt(db, task_id, "predict-e2e")
+    claim = claim_for_direct_run(db, task_id, "predict-e2e")
     assert claim is not None
     db.commit()
     return claim
@@ -977,12 +978,7 @@ def _run(engine: Engine, claim, plane) -> str:
     def factory() -> Session:
         return sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)()
 
-    try:
-        return runner.run_task(factory, claim, worker_id="predict-e2e", compute=plane)
-    except worker_app.TaskCancelled:
-        return "cancelled"
-    except worker_app.LeaseFencedError:
-        return "fenced"
+    return runner.run_task(factory, claim, worker_id="predict-e2e", compute=plane)
 
 
 def _evidence_payload(db: Session, task_id: int) -> dict:
@@ -1128,8 +1124,9 @@ class TestPredictEndToEnd:
         assert status == 400, resp
         assert resp["error"]["code"] == "TASK-REQ-012"
 
+    @pytest.mark.parametrize("interrupt", [False, True])
     def test_coupled_predictor_solves_each_round(
-        self, client: TestClient, db: Session, engine: Engine, plane
+        self, client: TestClient, db: Session, engine: Engine, plane, monkeypatch, interrupt,
     ) -> None:
         """耦合验收：随 previous 变化的 predictor 每一阶段二迭代都真实求解。
 
@@ -1196,7 +1193,39 @@ class TestPredictEndToEnd:
             predictor_registry=registry,
         )
         claim = _claim(db, task.id)
+        executions = []
+        native_execute = worker_app.execute_saved_bundle
+
+        def execute(**kwargs):
+            executions.append(kwargs["number"])
+            return native_execute(**kwargs)
+
+        monkeypatch.setattr(worker_app, "execute_saved_bundle", execute)
+        if interrupt:
+            from datetime import UTC, datetime, timedelta
+
+            from iesplan.tasks.persistence import TaskLease
+
+            adaptations = []
+            native_adapt = worker_app.adapt_result
+
+            def adapt(*args):
+                adaptations.append(args[2].receipt_id)
+                if len(adaptations) == 2:
+                    raise SystemExit("simulated exit during coupled round 2")
+                return native_adapt(*args)
+
+            monkeypatch.setattr(worker_app, "adapt_result", adapt)
+            with pytest.raises(SystemExit, match="coupled round 2"):
+                _run(engine, claim, chase_plane)
+            lease = db.execute(select(TaskLease).where(
+                TaskLease.attempt_id == claim.attempt_id)).scalar_one()
+            lease.expires_at = datetime.now(UTC) - timedelta(seconds=1)
+            db.commit()
+            assert worker_app.recover_expired_attempts(db, "compute") == 1
+            claim = _claim(db, task.id)
         assert _run(engine, claim, chase_plane) == "completed"
+        assert executions == [1, 2, 3]
 
         task_row = db.execute(select(Task).where(Task.id == task.id)).scalar_one()
         assert task_row.status == "completed"
@@ -1439,7 +1468,14 @@ class TestPredictEndToEnd:
 
         monkeypatch.setattr(compute_cases, "add_ref", _fail_output_refs)
         fail_task, _flags = _submit("predict-e2e-rollback")
-        before = len(db.execute(select(StoredObject)).scalars().all())
+        before = []
+        submit_result = worker_app.submit_attempt_result
+
+        def final_submit(session, *args, **kwargs):
+            before.append(len(session.execute(select(StoredObject)).scalars().all()))
+            return submit_result(session, *args, **kwargs)
+
+        monkeypatch.setattr(worker_app, "submit_attempt_result", final_submit)
         claim = _claim(db, fail_task.id)
         assert _run(engine, claim, _chase_plane()) == "failed"
 
@@ -1447,7 +1483,7 @@ class TestPredictEndToEnd:
         assert task.status == "failed"
         assert task.business_outcome is None
         assert results_store.latest_evidence_for_task(db, fail_task.id) is None
-        assert len(db.execute(select(StoredObject)).scalars().all()) == before
+        assert len(db.execute(select(StoredObject)).scalars().all()) == before[0]
 
     def test_unknown_algorithm_rejected_at_save(
         self, client: TestClient, db: Session

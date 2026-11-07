@@ -135,7 +135,10 @@ class Worker:
             return
         task_id = worker_app.dequeue_task(self.pool)
         if task_id is None:
-            return
+            with self.session_factory() as db:
+                task_id = worker_app.find_queued_task(db, self.pool)
+            if task_id is None:
+                return
         self._claim_and_run(task_id)
 
     # -- 子流程 ------------------------------------------------------------

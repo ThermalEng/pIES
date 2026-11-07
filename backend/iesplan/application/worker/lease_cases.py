@@ -132,8 +132,8 @@ def acquire_task(db: Session, task_id: int, worker_id: str) -> Claim | None:
     """
     capacities = {"compute": settings.compute_slots, "io": settings.io_slots}
     tasks_domain.ensure_slots(db, capacities)
-    task = _get_task(db, task_id)
-    if task.status != "queued":
+    task = tasks_domain.get_task_for_update(db, task_id)
+    if task is None or task.status != "queued":
         return None
     pool = POOL_BY_TYPE.get(task.type, "compute")
     slot = tasks_domain.acquire_slot(db, pool, capacities[pool])

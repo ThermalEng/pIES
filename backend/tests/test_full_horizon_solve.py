@@ -49,12 +49,12 @@ from test_tasks_api import (  # noqa: E402
     _set_explicit_calc,
     _submit_task,
 )
+from worker_testkit import claim_for_direct_run  # noqa: E402
 
 from iesplan.api import projects as projects_api  # noqa: E402
 from iesplan.api import tasks as tasks_api  # noqa: E402
 from iesplan.api.config import config_router  # noqa: E402
 from iesplan.api.deps import get_request_db  # noqa: E402
-from iesplan.application import worker as worker_app  # noqa: E402
 from iesplan.assembly.contracts import (  # noqa: E402
     ValidatedAssemblyArtifact,
     ValidationReceipt,
@@ -494,7 +494,7 @@ class TestFullHorizonTrueSolve:
         )
         assert status == 201, body
         task_id = int(body["task"]["id"])
-        claim = worker_app.acquire_attempt(db, task_id, "full-e2e")
+        claim = claim_for_direct_run(db, task_id, "full-e2e")
         assert claim is not None
         db.commit()
 
@@ -901,7 +901,7 @@ class TestPredictPhase2FullHorizon:
             runtime=plane.runtime,
             predictor_registry=pred_registry,
         )
-        claim = worker_app.acquire_attempt(db, task.id, "predict-n2-e2e")
+        claim = claim_for_direct_run(db, task.id, "predict-n2-e2e")
         assert claim is not None
         db.commit()
 
@@ -1058,7 +1058,7 @@ class TestShortPredictionRejected:
             runtime=plane.runtime,
             predictor_registry=pred_registry,
         )
-        claim = worker_app.acquire_attempt(db, task.id, "predict-n2-short")
+        claim = claim_for_direct_run(db, task.id, "predict-n2-short")
         assert claim is not None
         db.commit()
 
@@ -1287,7 +1287,7 @@ class TestTimeVaryingPriceTrueSolve:
             (r.ref_type, r.ref_entity_id) for r in list_refs(db, price_oid)
         ]
         assert refs.count(("snapshot_ref", str(snapshot_id))) == 1
-        claim = worker_app.acquire_attempt(db, task_id, "tou-e2e")
+        claim = claim_for_direct_run(db, task_id, "tou-e2e")
         assert claim is not None
         db.commit()
 
@@ -1638,7 +1638,7 @@ class TestFirstYearBuildTrueSolve:
         )
         assert status == 201, body
         task_id = int(body["task"]["id"])
-        claim = worker_app.acquire_attempt(db, task_id, "build-e2e")
+        claim = claim_for_direct_run(db, task_id, "build-e2e")
         assert claim is not None
         db.commit()
 
@@ -1712,7 +1712,7 @@ class TestMandatoryFixedBuildTrueSolve:
         )
         assert status == 201, body
         task_id = int(body["task"]["id"])
-        claim = worker_app.acquire_attempt(db, task_id, "build-fixed-e2e")
+        claim = claim_for_direct_run(db, task_id, "build-fixed-e2e")
         assert claim is not None
         db.commit()
 
@@ -1934,7 +1934,7 @@ class TestFirstYearHeatPumpTrueSolve:
         )
         assert status == 201, body
         task_id = int(body["task"]["id"])
-        claim = worker_app.acquire_attempt(db, task_id, "hp-build-e2e")
+        claim = claim_for_direct_run(db, task_id, "hp-build-e2e")
         assert claim is not None
         db.commit()
 

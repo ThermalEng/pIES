@@ -469,6 +469,29 @@ class TestExpiredRecovery:
         assert db.get(Task, claim.task_id).status == "queued"
         assert _slots_used(db) == 0
 
+    def test_queue_publication_interruption_is_discovered_from_database(self, db, env, monkeypatch):
+        from iesplan import tasks as tasks_domain
+        from iesplan.worker.main import Worker
+
+        claim = _claim(db, env)
+        self._expire(db, claim)
+
+        def unavailable(*args, **kwargs):
+            raise RuntimeError("interrupted after database commit")
+
+        with monkeypatch.context() as patch:
+            patch.setattr(tasks_domain, "enqueue", unavailable)
+            with pytest.raises(RuntimeError, match="after database commit"):
+                worker_app.recover_expired_attempts(db, "compute")
+        db.expire_all()
+        assert db.get(Task, claim.task_id).status == "queued"
+        assert queue.dequeue("compute") is None
+        worker = Worker(compute=object(), session_factory=lambda: Session(db.get_bind()))
+        discovered = []
+        monkeypatch.setattr(worker, "_claim_and_run", discovered.append)
+        worker._tick()
+        assert discovered == [claim.task_id]
+
     def test_recovery_rollback_does_not_publish_queue(self, db, env, monkeypatch):
         claim = _claim(db, env)
         self._expire(db, claim)
