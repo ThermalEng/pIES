@@ -135,6 +135,79 @@ async function openResults(page: Page): Promise<void> {
 test.describe('项目已保存模型消费链', () => {
   // 全期 17520 h 真实求解超过默认 90s 用例超时, 本文件单独放宽。
   test.setTimeout(900_000)
+  test('同名项目模型以真实ID区分且重开不丢标识', async ({ browser }) => {
+    const username = uniqueName('es-model-id')
+    const password = strongPassword('Init')
+    const projectName = uniqueName('同名模型选择')
+    const apiCtx = await browser.newContext({ baseURL: APP })
+    await createEngineer(apiCtx.request, username, password)
+    const token = await loginToken(apiCtx.request, username, password)
+    await requestJson(apiCtx.request, 'POST', '/api/projects', {
+      name: projectName, baseline_resolution: '1h', baseline_start_year: 2026,
+      baseline_scenario_mode: 'single',
+    }, token)
+    await apiCtx.close()
+    const context = await browser.newContext()
+    const page = await context.newPage()
+    await createSession(page, username, password)
+    await page.getByText(projectName).click()
+    const modelingLink = () => page.getByRole('navigation', { name: /工作台|Workspace/i })
+      .getByText(/系统建模|System Modeling/i)
+    await modelingLink().click()
+    for (const demand of [10, 11]) {
+      await page.getByRole('button', { name: /新建模型|New model/i }).click()
+      await page.getByRole('tab', { name: /直接编辑 YAML|Edit YAML directly/i }).click()
+      await page.getByLabel(/设备模型 YAML|Device model YAML/i)
+        .fill(SINK_YAML.replace('value: 10', `value: ${demand}`))
+      await page.getByRole('button', { name: /提交为候选|Submit as candidate/i }).click()
+      await expect(page.getByRole('status', { name: /正式已保存|Saved/i })).toBeVisible()
+      await modelingLink().click()
+    }
+    const checkIds = async () => {
+      const items = page.locator('.mp-palette-item').filter({ hasText: SINK_LABEL })
+      await expect(items).toHaveCount(2)
+      for (const suffix of [1, 2]) {
+        const id = `${SINK_TYPE}_${suffix}`
+        const item = items.filter({ has: page.getByText(id, { exact: true }) })
+        await expect(item.locator('.mp-palette-item__id')).toHaveText(id)
+        await expect(item).toBeVisible()
+        await expect(item).toHaveAttribute('aria-label', new RegExp(escapeRegExp(id)))
+        await expect(item).toHaveAttribute('draggable', 'true')
+      }
+    }
+    await checkIds()
+    await page.reload()
+    await checkIds()
+    const selectedId = `${SINK_TYPE}_2`
+    const selected = page.locator('.mp-palette-item')
+      .filter({ has: page.getByText(selectedId, { exact: true }) })
+    await selected.scrollIntoViewIfNeeded()
+    await page.screenshot({ path: test.info().outputPath('same-name-options.png'), fullPage: true })
+    const itemBox = await selected.boundingBox()
+    const canvasBox = await page.locator('.mp-canvas-wrap').boundingBox()
+    expect(itemBox && canvasBox).toBeTruthy()
+    const saved = page.waitForResponse((res) => res.request().method() === 'PUT'
+      && /\/api\/projects\/\d+\/draft$/.test(new URL(res.url()).pathname)
+      && res.status() === 200)
+    await page.mouse.move(itemBox!.x + itemBox!.width / 2, itemBox!.y + itemBox!.height / 2)
+    await page.mouse.down()
+    await page.mouse.move(canvasBox!.x + canvasBox!.width / 2,
+      canvasBox!.y + canvasBox!.height / 2, { steps: 8 })
+    await page.mouse.up()
+    await saved
+    const checkSelection = async () => {
+      await page.locator('.react-flow__node', { hasText: SINK_LABEL }).click()
+      await expect(page.locator('.mp-sidebar__section').first()).toHaveText(selectedId)
+      await expect(page.getByLabel('rated_demand_kw (kW)', { exact: true })).toHaveValue('11')
+    }
+    await checkSelection()
+    await page.reload()
+    await checkIds()
+    await checkSelection()
+    await page.screenshot({ path: test.info().outputPath('same-name-models.png'), fullPage: true })
+    await context.close()
+  })
+
   test('保存模型→选择器/拖放/参数/连线→装配→真实求解→结果', async ({ browser }) => {
     const username = uniqueName('es-projmodel')
     const password = strongPassword('Init')

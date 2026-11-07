@@ -1107,10 +1107,11 @@ function Palette({
                 event.dataTransfer.setData('application/ies-device-type', spec.type_id)
                 event.dataTransfer.effectAllowed = 'copy'
               }}
-              aria-label={lt('canvas.drop_new', { type: name })}
-              title={lt('canvas.drop_new', { type: name })}
+              aria-label={`${lt('canvas.drop_new', { type: name })} [${spec.type_id}]`}
+              title={`${lt('canvas.drop_new', { type: name })} [${spec.type_id}]`}
             >
               <span className="mp-palette-item__name">{name}</span>
+              <code className="mp-palette-item__id">{spec.type_id}</code>
               <span className="mp-palette-item__meta">{carriers}</span>
             </div>
           )
