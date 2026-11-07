@@ -168,6 +168,12 @@
   color: var(--ies-color-text-muted);
 }
 
+.mp-palette-item__id {
+  font-size: var(--ies-fs-xs);
+  color: var(--ies-color-text-muted);
+  overflow-wrap: anywhere;
+}
+
 /* 画布容器 */
 .mp-canvas-wrap {
   flex: 1;

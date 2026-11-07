@@ -40,12 +40,13 @@ from uuid import UUID
 
 from sqlalchemy.orm import Session
 
+from iesplan import tasks as tasks_domain
 from iesplan.application.tasks import Claim
 from iesplan.application.worker.compute_cases import (
     HOURLY_OBJECT_PATH,
     attach_evidence_objects,
-    seal_output_objects,
     result_step_series,
+    seal_output_objects,
 )
 from iesplan.application.worker.evidence_cases import CheckAssessment, assess_check_evidence
 from iesplan.application.worker.lease_cases import (
@@ -82,6 +83,7 @@ __all__ = [
     "cancel_attempt",
     "fail_attempt",
     "renew_attempt_lease",
+    "recover_expired_attempts",
     "report_attempt_progress",
     "submit_attempt_result",
     "timeout_attempt",
@@ -123,6 +125,24 @@ def acquire_attempt(db: Session, task_id: int, worker_id: str) -> Claim | None:
 # ---------------------------------------------------------------------------
 # 续租(独立事务, 与执行路径隔离)
 # ---------------------------------------------------------------------------
+
+
+def recover_expired_attempts(db: Session, pool: str) -> int:
+    """收拢到期尝试并提交，随后重建需要重试任务的队列提示。"""
+    try:
+        recovered = tasks_domain.recover_expired_attempts(db, pool)
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    for task in recovered:
+        tasks_domain.clear_cancel(task.id)
+        if task.status == "queued":
+            tasks_domain.enqueue(
+                task.id, pool, task_type=task.type, snapshot_id=task.calc_snapshot_id,
+                priority=task.priority,
+            )
+    return len(recovered)
 
 
 def renew_attempt_lease(
@@ -223,19 +243,19 @@ def submit_attempt_result(
     outcome: str,
     actor_id: int | None = None,
     output_files: Mapping[str, Mapping[str, tuple[bytes, str]]] | None = None,
+    sealed_output_files: Mapping[str, Mapping[str, Mapping[str, object]]] | None = None,
 ) -> SubmitReceipt:
     """仅租约持有者可提交(03 §11.4): token 不符/租约过期 → 整笔回滚并抛 LeaseRejectedError。
 
-    输出字节随本单元封存(调用方传原始字节, 不经过第二种 payload 格式):
-    fencing 确认后、证据包创建前封存 Bundle 与声明输出并注入描述子,
+    未持久化输出字节随本单元封存，已提交阶段资产复用对象描述子：
+    fencing 确认后、证据包创建前合并已有阶段文件与新输出描述子,
     证据包创建后挂接输出引用, 与提交同事务一次提交/回滚 —— 任一步失败
-    则任务/结果/证据/对象元数据/引用全无提交, 不留已完成缺引用与孤立
-    元数据(外部 Blob 字节跨资源不能同原子提交, 沿现有存储回收语义清理)。
+    则本次任务终态/结果/证据/新对象元数据/新引用全部回滚，先前已提交
+    的阶段资产保留(外部 Blob 字节沿现有存储回收语义清理)。
 
     单事务顺序:
         1) fencing 校验(租约 active + token 匹配);
-        2) 输出封存(Bundle/声明输出/预测训练产物原始字节 → 对象,
-           描述子注入 payload, 预测回执训练产物引用回填);
+        2) 复用阶段对象并封存新输出，描述子注入 payload，回填预测产物引用;
         3) 结果序列化 → 对象存储;
         4) 证据包(evidence_packages, 不可变) + 对象引用(含输出引用挂接);
         5) 四维评估(result_assessments, assessor='system');
@@ -262,12 +282,12 @@ def submit_attempt_result(
         index_id: int | None = None
         snapshot = get_snapshot_record(db, task.calc_snapshot_id) if task.calc_snapshot_id else None
         if snapshot is not None:
-            sealed_groups: dict[str, Mapping[str, Mapping[str, object]]] = {}
+            sealed_groups = {key: dict(value) for key, value in (sealed_output_files or {}).items()}
             if output_files is not None:
                 for key, raw in output_files.items():
                     sealed = seal_output_objects(db, raw, actor_id=who)
-                    payload[key] = sealed
-                    sealed_groups[key] = sealed
+                    sealed_groups.setdefault(key, {}).update(sealed)
+            payload.update(sealed_groups)
             # 预测回执引用回填(B5-2): 训练产物与最终轮输出序列的密封描述子
             # 注入各回执, 随证据载荷同事务提交(外部 Blob 字节落盘不参与原子提交)。
             prediction_files = sealed_groups.get("prediction_files")
@@ -298,7 +318,8 @@ def submit_attempt_result(
                     "rows": len(hourly_series[ordered_ids[0]]["values"]),
                     "series": [
                         {
-                            **{key: value for key, value in hourly_series[series_id].items() if key != "values"},
+                            **{key: value for key, value in hourly_series[series_id].items()
+                               if key != "values"},
                         }
                         for series_id in ordered_ids
                     ],

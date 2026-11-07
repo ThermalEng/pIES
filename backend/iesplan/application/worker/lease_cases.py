@@ -132,8 +132,8 @@ def acquire_task(db: Session, task_id: int, worker_id: str) -> Claim | None:
     """
     capacities = {"compute": settings.compute_slots, "io": settings.io_slots}
     tasks_domain.ensure_slots(db, capacities)
-    task = _get_task(db, task_id)
-    if task.status != "queued":
+    task = tasks_domain.get_task_for_update(db, task_id)
+    if task is None or task.status != "queued":
         return None
     pool = POOL_BY_TYPE.get(task.type, "compute")
     slot = tasks_domain.acquire_slot(db, pool, capacities[pool])
@@ -296,11 +296,8 @@ def slot_available(db: Session, pool: str) -> bool:
 
 
 def verify_lease(db: Session, attempt_id: int, token: UUID | str) -> TaskLeaseRecord | None:
-    """校验租约有效性: 该尝试 + token 匹配 + status='active'; 失效返回 None。"""
-    record = tasks_domain.get_active_lease_for_attempt(db, attempt_id)
-    if record is None or record.lease_token != str(token):
-        return None
-    return record
+    """取得该token尚未到期的写入资格；与过期回收互斥，失效返回None。"""
+    return tasks_domain.get_valid_lease(db, attempt_id, token)
 
 
 def renew_lease_once(

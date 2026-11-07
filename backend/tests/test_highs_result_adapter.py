@@ -28,6 +28,7 @@ from iesplan.computation.result_adapters.highs import (
     ADAPTER_REF,
     HIGHS_ADAPTER,
     HighsResultAdapter,
+    _mps_column_names,
 )
 
 PROBLEM_PATH = "input/problem.mps"
@@ -540,7 +541,19 @@ def test_corrupt_inputs_fail() -> None:
     assert exc_info.value.reason == "result-protocol-failure"
 
 
-def test_declared_components_evaluated_from_same_solution() -> None:
+def test_column_order_reads_incrementally() -> None:
+    class NoWholeText(bytes):
+        def decode(self, *args, **kwargs):
+            raise AssertionError("不得完整解码 MPS")
+
+        def splitlines(self, *args, **kwargs):
+            raise AssertionError("不得物化完整 MPS 行列表")
+
+    assert _mps_column_names(NoWholeText(WRAPPED_MPS.encode())) == ["x", "y"]
+    assert _mps_column_names(WRAPPED_MPS.replace("\n", "\r\n").encode()) == ["x", "y"]
+
+
+def test_declared_components_evaluated_from_same_solution(monkeypatch: pytest.MonkeyPatch) -> None:
     """声明分量用同一次真实解求值发布：金额守币种、年值与物理量换算。
 
     手算（tiny 最优解 x=3000, y=0；年内部以秒计，a = 31536000 s）：
@@ -548,12 +561,20 @@ def test_declared_components_evaluated_from_same_solution() -> None:
     om_year = from_si(0.5×3000, CNY/a) = 1500×31536000 = 47304000000 CNY/a；
     energy = 3600000 J = 1.0 kWh。
     """
+    class NoLinearSearchColumns(list):
+        def index(self, *args, **kwargs):
+            raise AssertionError("分量恢复不得对列名逐项线性搜索")
+
+    monkeypatch.setattr(
+        "iesplan.computation.result_adapters.highs._mps_column_names",
+        lambda _: NoLinearSearchColumns(["x", "y"]),
+    )
     components = {
         "capex": {
             "unit": "CNY",
             "caliber": "upfront",
             "constant": 100.0,
-            "terms": {"x": 2.0},
+            "terms": {"x": 2.0, "y": 5.0},
         },
         "om_year": {
             "unit": "CNY/a",

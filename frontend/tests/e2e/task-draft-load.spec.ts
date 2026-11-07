@@ -131,15 +131,16 @@ async function putDraft(apiCtx: APIRequestContext, pid: number, token: string, c
 }
 
 /**
- * 将页面停到空白页后再做 API 登录（单会话语义顶掉 GUI 会话）。
- * about:blank 卸载应用代码并中止在途轮询：导航取消已发出的 fetch，
- * 中止的请求只记 ERR_ABORTED（监控已过滤），不产生 401 回显；空白页
- * 自身零请求，随后的 API 接管无页面请求可被失效。停 /login 不可靠：
- * 会话有效时会跳转项目列表，列表轮询必在接管后刷出 401 噪声。
- * 本块后若还有 GUI 动作，必须经 guiLoginTasks（其先回 /login 再碰
- * localStorage，about:blank 下直接碰存储会抛 opaque-origin 异常）。
+ * 经真实退出入口结束GUI会话后停放，再进行API准备。
+ * 退出同时清理浏览器会话标记，避免下次回源时用已撤销的标记触发auth/me。
  */
 async function parkForApi(page: Page): Promise<void> {
+  // 离开工作台并等已有读取落定，再撤销会话；不让在途版本读取撞上登出。
+  await page.getByRole('link', { name: /帮助中心|Help Center/i }).click()
+  await expect(page).toHaveURL(/\/help(?:\/.*)?$/)
+  await page.waitForLoadState('networkidle')
+  await page.getByRole('button', { name: /退出登录|Sign out/i }).click()
+  await expect(page).toHaveURL(/\/login$/)
   await page.goto('about:blank')
   await expect(page).not.toHaveURL(/\/projects\/\d+/, { timeout: 30_000 })
 }
@@ -150,29 +151,10 @@ async function guiLoginTasks(
   projectName: string,
   username: string,
   password: string,
-  monitor: SessionContext,
+  _monitor: SessionContext,
 ): Promise<void> {
-  // 先清失效会话标记：前一 API 登录已顶掉 GUI 会话；残留 cookie/localStorage
-  // 会话标记会使路由守卫在 / 与 /login 间循环并刷出 401 噪声。
-  // 任务选择键（iesplan.tasks.selected.*）保留，不受影响。
-  // 停放页可能是 about:blank（其源上直接碰 localStorage 会抛异常），
-  // 先回应用源再清理存储。回源期间残留标记会使路由守卫短暂进列表并轮询，
-  // 而 cookie 已清、会话已接管，轮询必 401；回源期的轮询在路由回调内
-  // 按实际请求逐条登记再中止（method + 路径精确登记，一条只核销一条；
-  // 登记期内的其他 URL/方法失败仍判失败）。监听挂在首个会话对象上
-  // （同页监听不移除，累计全程；只在最终断言消费；新会话对象的监听
-  // 仅追加，不影响登记）。
-  await page.context().clearCookies()
-  await page.route('**/api/**', (route) => {
-    monitor.registerExpectedAbort(route.request().method(), route.request().url())
-    route.abort()
-  })
-  try {
-    await page.goto('/login')
-    await page.evaluate(() => window.localStorage.removeItem('iesplan.session'))
-  } finally {
-    await page.unroute('**/api/**')
-  }
+  // parkForApi已正常退出；无需注入localStorage或中止真实请求。
+  if (page.url() !== 'about:blank') await parkForApi(page)
   await createSession(page, username, password)
   await page.getByText(projectName).click({ timeout: 30_000 })
   // 重登录可能恢复上次停留的子页（/tasks 后缀），仅断言项目作用域。

@@ -51,6 +51,21 @@ MINI_CSV = (
 )
 
 
+def claim_for_direct_run(db: Session, task_id: int, worker_id: str):
+    """直接调用 runner 的测试没有 daemon 续租，显式给多轮真求解留测试租期。
+
+    不改变生产 60 秒租期；租约到期与 fencing 测试仍用实际默认值。
+    """
+    from iesplan.application import worker
+
+    claim = worker.acquire_attempt(db, task_id, worker_id)
+    if claim is not None:
+        assert worker.renew_attempt_lease(
+            db, claim.attempt_id, claim.lease_token, ttl_seconds=900,
+        )
+    return claim
+
+
 def mini_content(
     dataset_version_id: int, config: dict | None = None, devices: list[dict[str, Any]] | None = None,
 ) -> dict:

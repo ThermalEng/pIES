@@ -76,6 +76,8 @@ class RunContext:
     snapshot: worker_app.CalcSnapshotRecord | None = None  # 计算类任务快照记录; 网关读出
     io_params: dict[str, Any] = field(default_factory=dict)  # io 任务参数(队列消息扩展)
     compute: worker_app.ComputeExecutionPlane | None = None  # 计算执行面(组合根装配; 无则计算任务不可执行)
+    sealed_output_files: dict = field(default_factory=dict)
+    prediction_artifacts: dict = field(default_factory=dict)
 
     def progress(self, percent: float, stage: str, detail: dict | None = None) -> None:
         """阶段化进度报告（PG 持久进度 + Redis 秒级进度，见 contracts §快照与异步契约）。"""

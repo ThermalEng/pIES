@@ -40,6 +40,7 @@ import math
 from collections import Counter
 from collections.abc import Mapping
 from decimal import Decimal
+from io import BytesIO, TextIOWrapper
 from typing import Any, NoReturn
 
 from iesplan.computation.errors import ComputationUnavailableError
@@ -191,36 +192,37 @@ def _mps_column_names(raw: bytes) -> list[str]:
     只出现在变量之间；同名连续行属同一列，列名切换即新列，至 RHS
     段结束。列名复现（非连续重复）即文件损坏，明确失败。
     """
-    try:
-        text = raw.decode("utf-8")
-    except UnicodeDecodeError as exc:
-        _fail(f"problem.mps 非 UTF-8 文本: {exc}")
-    lines = text.splitlines()
-    try:
-        start = lines.index("COLUMNS") + 1
-    except ValueError:
-        _fail("problem.mps 缺 COLUMNS 段")
     names: list[str] = []
     seen: set[str] = set()
     previous: str | None = None
-    for line in lines[start:]:
-        parts = line.split()
-        if not parts:
-            _fail("problem.mps 含空行")
-        head = parts[0]
-        if head == "RHS":
-            break
-        if head in _MARKER_FIELDS:
-            previous = None
-            continue
-        if len(parts) < 3 or len(parts) % 2 == 0:
-            _fail(f"problem.mps 列行非法: {line!r}")
-        if head != previous:
-            if head in seen:
-                _fail(f"problem.mps 列名复现: {head!r}")
-            names.append(head)
-            seen.add(head)
-            previous = head
+    try:
+        # 只逐行读取到列段结束，不复制整份 MPS 为大字符串和行列表。
+        with TextIOWrapper(BytesIO(raw), encoding="utf-8") as lines:
+            for line in lines:
+                if line.rstrip("\n") == "COLUMNS":
+                    break
+            else:
+                _fail("problem.mps 缺 COLUMNS 段")
+            for line in lines:
+                parts = line.split()
+                if not parts:
+                    _fail("problem.mps 含空行")
+                head = parts[0]
+                if head == "RHS":
+                    break
+                if head in _MARKER_FIELDS:
+                    previous = None
+                    continue
+                if len(parts) < 3 or len(parts) % 2 == 0:
+                    _fail(f"problem.mps 列行非法: {line!r}")
+                if head != previous:
+                    if head in seen:
+                        _fail(f"problem.mps 列名复现: {head!r}")
+                    names.append(head)
+                    seen.add(head)
+                    previous = head
+    except UnicodeDecodeError as exc:
+        _fail(f"problem.mps 非 UTF-8 文本: {exc}")
     return names
 
 
@@ -424,7 +426,7 @@ class HighsResultAdapter:
         names = _mps_column_names(problem_raw)
         if len(names) != len(solution["primals"]):
             _fail("MPS 变量数与 solution primal 个数不一致")
-        # 列名→下标一次构造，变量与序列两条取值路径共享，避免逐步线性搜索。
+        # 列名→下标一次构造，变量、分量、序列及财务事实共享，避免逐项线性搜索。
         index_of = {name: i for i, name in enumerate(names)}
         variables: list[dict[str, object]] = []
         for name, unit in params["unit_map"].items():
@@ -446,9 +448,8 @@ class HighsResultAdapter:
         for ident, decl in params["components"].items():
             total = float(decl["constant"])
             for name, coeff in decl["terms"].items():
-                try:
-                    index = names.index(name)
-                except ValueError:
+                index = index_of.get(name)
+                if index is None:
                     _fail(f"分量 {ident!r} 的 LP 变量不在 MPS 列中: {name!r}")
                 total += float(coeff) * solution["primals"][index]
             if not math.isfinite(total):

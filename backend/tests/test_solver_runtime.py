@@ -16,7 +16,7 @@ import dataclasses
 import json
 import os
 import stat
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
@@ -42,7 +42,7 @@ SOLUTION_BYTES = b'{"status": "optimal"}'
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def _outcome(
@@ -202,6 +202,32 @@ def _success_handler(probe: dict, write_optional: bool = True):
 def _runtime(provider: _FakeExecutor, policy=None) -> SolverRuntime:
     assert isinstance(provider, ExecutorProvider)
     return SolverRuntime(build_executor_registry([provider]), policy or _policy())
+
+
+@pytest.mark.parametrize("fail", [False, True])
+def test_output_handoff_precedes_cleanup(fail):
+    import shutil
+
+    probe = {}
+    provider = _FakeExecutor(handler=_success_handler(probe))
+    accepted = []
+
+    def handoff(receipt, outputs):
+        assert os.path.exists(os.path.join(probe["workdir"], "output/solution.json"))
+        assert outputs["output/solution.json"] == SOLUTION_BYTES
+        accepted.append(receipt.status)
+        if fail:
+            raise OSError("stage storage unavailable")
+
+    if fail:
+        with pytest.raises(OSError, match="stage storage unavailable"):
+            _runtime(provider).run(_bundle(), _attempt(), handoff=handoff)
+        assert os.path.exists(probe["workdir"])
+        shutil.rmtree(probe["workdir"])  # 本测试创建且已确认归属的临时目录。
+    else:
+        _runtime(provider).run(_bundle(), _attempt(), handoff=handoff)
+        assert not os.path.exists(probe["workdir"])
+    assert accepted == ["succeeded"]
 
 
 def test_success_collects_declared_outputs_and_receipt() -> None:

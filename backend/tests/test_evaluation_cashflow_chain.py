@@ -37,6 +37,7 @@ from test_tasks_api import (  # noqa: E402
     _set_explicit_calc,
     _submit_task,
 )
+from worker_testkit import claim_for_direct_run  # noqa: E402
 
 from iesplan.api import projects as projects_api  # noqa: E402
 from iesplan.api import tasks as tasks_api  # noqa: E402
@@ -402,7 +403,7 @@ def _solve(client, db, engine, plane, pid, user, evaluation, key, expected_revis
     task_id = int(body["task"]["id"])
     if after_submit is not None:
         after_submit()
-    claim = worker_app.acquire_attempt(db, task_id, "t2-e2e")
+    claim = claim_for_direct_run(db, task_id, "t2-e2e")
     assert claim is not None
     db.commit()
 
@@ -877,8 +878,8 @@ def test_monthly_daily_real_task_uses_calendar_tariff_in_cashflow(
 ) -> None:
     """Actual solver cashflow independently reconciled to hourly month prices."""
     from datetime import datetime, timedelta
-    from iesplan.storage import put_object
-    from iesplan.storage import list_refs
+
+    from iesplan.storage import list_refs, put_object
 
     def day_object(prices: list[str]) -> str:
         raw = (

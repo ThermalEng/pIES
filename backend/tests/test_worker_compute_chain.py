@@ -45,6 +45,7 @@ from iesplan.api.config import config_router  # noqa: E402
 from iesplan.api.deps import get_request_db  # noqa: E402
 from iesplan.application import worker as worker_app  # noqa: E402
 from iesplan.bootstrap import assemble_compute_worker  # noqa: E402
+from iesplan.core.diagnostics import TASK_TIMEOUT  # noqa: E402
 from iesplan.db import Base  # noqa: E402
 from iesplan.main import create_app  # noqa: E402
 from iesplan.results import persistence as results_store  # noqa: E402
@@ -52,10 +53,14 @@ from iesplan.storage import get_object, list_refs  # noqa: E402
 from iesplan.storage.persistence import StoredObject  # noqa: E402
 from iesplan.tasks import queue  # noqa: E402
 from iesplan.tasks.persistence import (  # noqa: E402
-    CalcSnapshot, Task, TaskAttempt, TaskDiagnostic, TaskLease, TaskProgress,
+    CalcSnapshot,
+    Task,
+    TaskAttempt,
+    TaskDiagnostic,
+    TaskLease,
+    TaskProgress,
 )
 from iesplan.worker import runner  # noqa: E402
-from iesplan.core.diagnostics import TASK_TIMEOUT  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # 测试环境
@@ -133,7 +138,9 @@ def _save_config_body(client: TestClient, pid: int, user, body: dict) -> int:
     return resp.json()["revision"]
 
 
-def _prepare_with_planning(client: TestClient, db: Session, user, planning_body: dict, *, external_supply=False) -> int:
+def _prepare_with_planning(
+    client: TestClient, db: Session, user, planning_body: dict, *, external_supply=False,
+) -> int:
     """准备可提交计算任务的项目（规划变量目标可定制，电池容量保持固定）。
 
     步骤同 test_tasks_api._prepare_project：建项目 + 显式财务/装配声明 +
@@ -155,7 +162,8 @@ def _prepare_with_planning(client: TestClient, db: Session, user, planning_body:
                     "name": "grid", "device_type": "ies.device.grid_connection", "kind": "existing",
                     "params": {"max_import_power_kw": 100, "max_export_power_kw": 0}}},
                 {"id": "supply", "unit": "model", "type": "model.upsert_connection", "payload": {
-                    "name": "supply", "from_device": "grid", "from_port": "electricity_import", "to_device": device_ref, "to_port": "electricity"}},
+                    "name": "supply", "from_device": "grid", "from_port": "electricity_import",
+                    "to_device": device_ref, "to_port": "electricity"}},
             ]})
         assert response.status_code == 200, response.text
         revision = response.json()["revision"]
@@ -165,7 +173,9 @@ def _prepare_with_planning(client: TestClient, db: Session, user, planning_body:
     return pid
 
 
-def _submit_calc_task(client: TestClient, db: Session, config_body: dict, planning_body: dict, *, external_supply=False) -> int:
+def _submit_calc_task(
+    client: TestClient, db: Session, config_body: dict, planning_body: dict, *, external_supply=False,
+) -> int:
     """准备项目→保存配置→提交 optimization 任务，返回 task_id。"""
     user = make_user(db, "chain_owner")
     pid = _prepare_with_planning(client, db, user, planning_body, external_supply=external_supply)
@@ -268,11 +278,10 @@ class _StubRuntime:
     def __init__(self, status: str) -> None:
         self._status = status
 
-    def run(self, bundle, attempt, *, stop=None):
+    def run(self, bundle, attempt, *, stop=None, handoff=None):
         from iesplan.computation import ExecutionReceipt  # noqa: E402
 
-        return (
-            ExecutionReceipt(
+        receipt = ExecutionReceipt(
                 receipt_id=f"stub-{self._status}",
                 bundle_id=attempt.bundle_id,
                 attempt_id=attempt.attempt_id,
@@ -285,9 +294,10 @@ class _StubRuntime:
                 result_adapter_ref="ies.result-adapter.highs@1.0.0",
                 status=self._status,
                 termination_reason=self._status,
-            ),
-            {},
-        )
+            )
+        if handoff is not None:
+            handoff(receipt, {})
+        return receipt, {}
 
 
 def _plane_with_stub_runtime(plane, status: str):
@@ -307,6 +317,78 @@ def _plane_with_stub_runtime(plane, status: str):
 
 
 class TestComputeChainEndToEnd:
+    @pytest.mark.parametrize("stage", ["generated", "executed", "adapted"])
+    def test_restart_uses_committed_stage_without_resolving(
+        self, client, db, engine, plane, monkeypatch, stage,
+    ):
+        from datetime import UTC, datetime, timedelta
+
+        from iesplan.storage import find_refs_by_owner
+
+        task_id = _submit_calc_task(client, db, dict(_CONFIG_BODY), dict(PLANNING_BODY))
+        claim = _claim(db, task_id)
+        original_generate = worker_app.generate_bundle
+        original_execute = worker_app.execute_saved_bundle
+        original_adapt = worker_app.adapt_result
+        calls = {"generate": 0, "execute": 0}
+        expected = []
+        crashed = False
+
+        def generate(*args, **kwargs):
+            calls["generate"] += 1
+            return original_generate(*args, **kwargs)
+
+        def execute(**kwargs):
+            nonlocal crashed
+            if stage == "generated" and not crashed:
+                crashed = True
+                raise SystemExit("simulated worker exit before solver")
+            calls["execute"] += 1
+            return original_execute(**kwargs)
+
+        def adapt(*args):
+            nonlocal crashed
+            if stage == "executed" and not crashed:
+                crashed = True
+                raise SystemExit("simulated worker exit before adaptation")
+            result = original_adapt(*args)
+            expected.append(result.to_dict())
+            if stage == "adapted" and not crashed:
+                crashed = True
+                raise SystemExit("simulated worker exit after adaptation")
+            return result
+
+        monkeypatch.setattr(worker_app, "generate_bundle", generate)
+        monkeypatch.setattr(worker_app, "execute_saved_bundle", execute)
+        monkeypatch.setattr(worker_app, "adapt_result", adapt)
+        with pytest.raises(SystemExit, match="simulated worker exit"):
+            _run(engine, claim, plane)
+        assert results_store.latest_evidence_for_task(db, task_id) is None
+        refs = find_refs_by_owner(db, "task_checkpoint", claim.attempt_id, "task_attempts")
+        assert {ref["purpose"] for ref in refs} >= {"round-1:generated"}
+        generated_ref = next(ref for ref in refs if ref["purpose"] == "round-1:generated")
+        original_files = json.loads(get_object(db, generated_ref["object_id"]))["data"]["files"]
+        lease = db.execute(select(TaskLease).where(
+            TaskLease.attempt_id == claim.attempt_id)).scalar_one()
+        lease.expires_at = datetime.now(UTC) - timedelta(seconds=1)
+        db.commit()
+        assert worker_app.recover_expired_attempts(db, "compute") == 1
+        replacement = _claim(db, task_id)
+        assert replacement.lease_token != claim.lease_token
+        assert _run(engine, replacement, plane) == "completed"
+        assert calls == {"generate": 1, "execute": 1}
+        db.expire_all()
+        evidence = results_store.latest_evidence_for_task(db, task_id)
+        sealed = json.loads(get_object(db, evidence.object_id))
+        assert evidence.attempt_id == replacement.attempt_id
+        assert sealed["bundle_files"] == original_files
+        source_attempt = replacement.attempt_id if stage == "generated" else claim.attempt_id
+        assert sealed["receipt"]["attempt_id"] == str(source_attempt)
+        assert sealed["compute_result"] == expected[-1]
+        if stage == "adapted":
+            assert expected[0] == expected[1]
+        assert db.query(results_store.EvidencePackage).filter_by(task_id=task_id).count() == 1
+
     def test_real_higs_task_completes_with_sealed_evidence(
         self, client: TestClient, db: Session, engine: Engine, plane
     ) -> None:
@@ -580,14 +662,21 @@ class TestSingleUnitSeal:
         monkeypatch.setattr(compute_cases, "add_ref", _fail_output_refs)
         task_id = _submit_calc_task(client, db, dict(_CONFIG_BODY), dict(PLANNING_BODY))
         claim = _claim(db, task_id)
-        before = _stored_object_count(db)
+        before = []
+        submit = worker_app.submit_attempt_result
+
+        def final_submit(db, *args, **kwargs):
+            before.append(_stored_object_count(db))
+            return submit(db, *args, **kwargs)
+
+        monkeypatch.setattr(worker_app, "submit_attempt_result", final_submit)
         assert _run(engine, claim, plane) == "failed"
 
         task = db.execute(select(Task).where(Task.id == task_id)).scalar_one()
         assert task.status == "failed"
         assert task.business_outcome is None
         assert results_store.latest_evidence_for_task(db, task_id) is None
-        assert _stored_object_count(db) == before
+        assert _stored_object_count(db) == before[0]  # 已提交检查点保留，最终提交无半成品。
 
     def test_hourly_sealed_from_declared_series(
         self, client: TestClient, db: Session, engine: Engine, plane, monkeypatch
@@ -684,13 +773,20 @@ class TestSingleUnitSeal:
         monkeypatch.setattr(attempt_cases, "create_assessment_record", _boom)
         task_id = _submit_calc_task(client, db, dict(_CONFIG_BODY), dict(PLANNING_BODY))
         claim = _claim(db, task_id)
-        before = _stored_object_count(db)
+        before = []
+        submit = worker_app.submit_attempt_result
+
+        def final_submit(db, *args, **kwargs):
+            before.append(_stored_object_count(db))
+            return submit(db, *args, **kwargs)
+
+        monkeypatch.setattr(worker_app, "submit_attempt_result", final_submit)
         assert _run(engine, claim, plane) == "failed"
 
         task = db.execute(select(Task).where(Task.id == task_id)).scalar_one()
         assert task.status == "failed"
         assert results_store.latest_evidence_for_task(db, task_id) is None
-        assert _stored_object_count(db) == before
+        assert _stored_object_count(db) == before[0]
 
     def test_submit_fence_rejects_before_seal(
         self, client: TestClient, db: Session
@@ -745,7 +841,10 @@ class _ControlledGenerator:
 
     def generate(self, artifact, models, materialized, finance, config, evaluation, *, stop=None):
         from iesplan.computation import (
-            ComputationUnavailableError, SolverBundle, SolverBundleManifest, read_stop_reason,
+            ComputationUnavailableError,
+            SolverBundle,
+            SolverBundleManifest,
+            read_stop_reason,
         )
 
         if self.mode == "generate":
@@ -776,8 +875,13 @@ class _ControlledGenerator:
 def _controlled_plane(plane, mode: str, started: threading.Event, timeout: float):
     """执行层仍使用真实 LocalProcessProvider / SolverRuntime，且精确绑定。"""
     from iesplan.computation import (
-        DeploymentPolicy, ExecutorDescriptor, GeneratorRegistry, LocalExecutable,
-        LocalProcessProvider, SolverRuntime, build_executor_registry,
+        DeploymentPolicy,
+        ExecutorDescriptor,
+        GeneratorRegistry,
+        LocalExecutable,
+        LocalProcessProvider,
+        SolverRuntime,
+        build_executor_registry,
     )
 
     helper = str(Path(__file__).with_name("local_exec_probe.py"))
@@ -858,8 +962,8 @@ class TestStopLifecycle:
         self, client: TestClient, db: Session, engine: Engine, plane, phase: str,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        from iesplan.identity.persistence import User
         from iesplan.computation.runtime import local_process
+        from iesplan.identity.persistence import User
 
         spawned: list[int] = []
         real_popen = local_process.subprocess.Popen
@@ -962,6 +1066,7 @@ def test_step_relation_real_task_freezes_ports_and_survives_later_draft(
 ) -> None:
     """Public submission -> true HiGHS -> adapter/Worker seal, without live-draft reads."""
     from copy import deepcopy
+
     from iesplan.application import configuration as configuration_cases
 
     user = make_user(db, "step_task_owner")
@@ -988,7 +1093,8 @@ def test_step_relation_real_task_freezes_ports_and_survives_later_draft(
     assert task is not None
     snapshot = worker_app.get_snapshot_record(db, task.calc_snapshot_id)
     frozen_before = snapshot.canonical_assembly_text
-    assert json.loads(frozen_before)["planning"]["constraints"]["pin_battery_port"] == original["constraints"]["pin_battery_port"]
+    assert (json.loads(frozen_before)["planning"]["constraints"]["pin_battery_port"]
+            == original["constraints"]["pin_battery_port"])
 
     claim = _claim(db, task_id)
     assert _run(engine, claim, plane) == "completed"
