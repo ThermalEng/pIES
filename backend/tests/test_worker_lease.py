@@ -429,6 +429,32 @@ class TestExpiredRecovery:
         assert _slots_used(db) == 1
         assert worker_app.verify_lease(db, claim.attempt_id, claim.lease_token)
 
+    @pytest.mark.parametrize("sample_status,outcome", [
+        ("completed", "partial_batch"), ("failed", None),
+    ])
+    def test_cancel_preserves_completed_samples(self, db, env, sample_status, outcome):
+        from iesplan import tasks as tasks_domain
+
+        task = db.get(Task, env["task"].id)
+        task.type = "uncertainty"
+        snapshot = tasks_domain.create_uncertainty_snapshot(
+            db, calc_snapshot_id=env["snapshot"].id, method="scenario", n_samples=1,
+            random_seed=0, distributions={}, created_by=task.requested_by,
+        )
+        sample = tasks_domain.create_sample_row(
+            db, uncertainty_snapshot_id=snapshot.id, parent_task_id=task.id,
+            sample_index=0, status=sample_status,
+        )
+        db.commit()
+        claim = _claim(db, env)
+        task.status = "cancelling"
+        self._expire(db, claim)
+        assert worker_app.recover_expired_attempts(db, "compute") == 1
+        db.expire_all()
+        assert (task.status, task.business_outcome) == ("cancelled", outcome)
+        assert tasks_domain.get_sample_task(db, sample.id).status == sample_status
+        assert queue.dequeue("compute") is None
+
     def test_restart_tick_recovers_before_slot_gate(self, db, env, monkeypatch):
         from iesplan.worker.main import Worker
 

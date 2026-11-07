@@ -1041,11 +1041,14 @@ def recover_expired_attempts(db: Session, pool: str) -> list[TaskRecord]:
         lease.status = "expired"
         finish_attempt(db, attempt.id, "stopped", stop_reason="lease_expired")
         release_slot(db, attempt.id)
+        outcome = None
         if task.status == "cancelling":
             status = "cancelled"
+            if task.type == "uncertainty" and count_completed_samples(db, task.id) > 0:
+                outcome = "partial_batch"
         else:
             status = "queued" if task.attempt_count < task.max_attempts else "failed"
-        record = set_task_status(db, task.id, status, business_outcome=None)
+        record = set_task_status(db, task.id, status, business_outcome=outcome)
         append_diagnostic(
             db, task_id=task.id, attempt_id=attempt.id, level="warning",
             code="TASK-LEASE-001", message=f"执行租约过期，旧尝试已停止；任务状态：{status}",
