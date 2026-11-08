@@ -100,7 +100,10 @@ def _rows(battery, *, capacity=None, power=None, soc=0.5, minimum=0.1,
         builder._collect_semantic_relations([], {"cell": bound})
     else:
         builder.inventory.seal()
-        builder.analysis = CompilerAnalysis(builder.inventory, builder.variables)
+        builder.analysis = CompilerAnalysis(
+            builder.inventory, builder.variables,
+            bounds=builder.symbol_slots, rows=builder.rows.data,
+        )
     builder._compile_templates({"cell": bound})
     builder._expand_instance("cell", bound)
     builder._build_relations("cell", bound)

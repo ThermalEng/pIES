@@ -1,6 +1,7 @@
 """Per-build source references. No model reconstruction or global registry."""
 from __future__ import annotations
 
+from array import array
 from dataclasses import asdict
 
 
@@ -9,6 +10,7 @@ class SourceTrace:
         self.sources = {}
         self.groups = {}
         self.active = None
+        self.targets = {}
 
     def register(self, identity, kind, location, domain, inputs=(), depends_on=(), outputs=()):
         self.sources[identity] = {
@@ -30,7 +32,7 @@ class SourceTrace:
         key = (source, f"{kind}:{role}", axis)
         group = self.groups.get(key)
         if group is None:
-            group = self.groups[key] = {"targets": [], "indices": []}
+            group = self.groups[key] = {"targets": array("I"), "indices": array("q")}
         group["targets"].append(target)
         group["indices"].append(index)
 
@@ -59,34 +61,10 @@ class SourceTrace:
             "sources": dict(sorted(self.sources.items())),
             "groups": [
                 {"source": source, "role": role, "axis": axis,
-                 "targets": list(group["targets"]),
+                 "targets": [self.targets[role.partition(":")[0]][slot]
+                             for slot in group["targets"]],
                  "indices": self._indices(group["indices"])}
                 for (source, role, axis), group in sorted(self.groups.items())
             ],
             "outputs": outputs,
         }
-
-
-class SourceRows(list):
-    def __init__(self, trace):
-        super().__init__()
-        self.trace = trace
-
-    def append(self, row):
-        self.trace.record(row.name, "row")
-        super().append(row)
-
-    def extend(self, rows):
-        for row in rows:
-            self.append(row)
-
-
-class SourceColumns(dict):
-    def __init__(self, trace):
-        super().__init__()
-        self.trace = trace
-
-    def __setitem__(self, name, variable):
-        if name not in self:
-            self.trace.record(name, "column")
-        super().__setitem__(name, variable)

@@ -14,17 +14,11 @@ from dataclasses import dataclass
 from iesplan.computation.generators.compiler_ir import SourceLocation
 
 
-class BoundTable(MutableMapping):
-    """One symbol index and compact mutable endpoints; None stays unknown."""
-
+class SymbolIndex:
+    """Shared identities only; final matrices do not retain analysis state."""
     def __init__(self) -> None:
         self.slots: dict[str, int] = {}
         self.names: list[str] = []
-        self.lower = array("d")
-        self.upper = array("d")
-        self.lower_sources = array("I")
-        self.upper_sources = array("I")
-        self.has_sources = bytearray()
         self.sources: list[SourceLocation | None] = [None]
         self._source_slots: dict[SourceLocation | None, int] = {None: 0}
 
@@ -42,20 +36,68 @@ class BoundTable(MutableMapping):
             slot = len(self.names)
             self.slots[name] = slot
             self.names.append(name)
-            # NaN is solely an internal missing-endpoint marker, never an
-            # inferred bound, serialized value or operand in propagation.
+        return slot
+
+    def __len__(self):
+        return len(self.names)
+
+
+class BoundTable(MutableMapping):
+    """Compact mutable endpoints over shared identities; None stays unknown."""
+
+    def __init__(self) -> None:
+        self.symbols = SymbolIndex()
+        self.lower = array("d")
+        self.upper = array("d")
+        self.lower_sources = array("I")
+        self.upper_sources = array("I")
+        self.has_sources = bytearray()
+
+    @property
+    def slots(self):
+        return self.symbols.slots
+
+    @property
+    def names(self):
+        return self.symbols.names
+
+    @property
+    def sources(self):
+        return self.symbols.sources
+
+    def source_slot(self, source):
+        return self.symbols.source_slot(source)
+
+    def ensure(self, name: str) -> int:
+        slot = self.symbols.ensure(name)
+        self._extend(slot)
+        return slot
+
+    def _extend(self, slot: int) -> None:
+        missing = slot + 1 - len(self.lower)
+        if missing == 1:
             self.lower.append(math.nan)
             self.upper.append(math.nan)
             self.lower_sources.append(0)
             self.upper_sources.append(0)
             self.has_sources.append(0)
-        return slot
+        elif missing > 1:
+            # NaN is solely an internal missing-endpoint marker, never an
+            # inferred bound, serialized value or operand in propagation.
+            self.lower.extend(array("d", [math.nan]) * missing)
+            self.upper.extend(array("d", [math.nan]) * missing)
+            self.lower_sources.extend(array("I", [0]) * missing)
+            self.upper_sources.extend(array("I", [0]) * missing)
+            self.has_sources.extend(bytearray(missing))
 
     def endpoints(self, slot: int) -> tuple[float | None, float | None]:
+        if slot >= len(self.lower):
+            return (None, None)
         lo, hi = self.lower[slot], self.upper[slot]
         return (None if math.isnan(lo) else lo, None if math.isnan(hi) else hi)
 
     def set_endpoints(self, slot: int, lo: float | None, hi: float | None) -> None:
+        self._extend(slot)
         self.lower[slot] = math.nan if lo is None else lo
         self.upper[slot] = math.nan if hi is None else hi
 
@@ -92,7 +134,7 @@ class BoundSources(MutableMapping):
 
     def __getitem__(self, name: str) -> tuple[SourceLocation | None, SourceLocation | None]:
         slot = self.bounds.slots[name]
-        if not self.bounds.has_sources[slot]:
+        if slot >= len(self.bounds.has_sources) or not self.bounds.has_sources[slot]:
             raise KeyError(name)
         return (self.bounds.sources[self.bounds.lower_sources[slot]],
                 self.bounds.sources[self.bounds.upper_sources[slot]])
@@ -107,7 +149,9 @@ class BoundSources(MutableMapping):
         raise TypeError("analysis symbol slots are append-only")
 
     def __iter__(self) -> Iterator[str]:
-        return (name for name in self.bounds if self.bounds.has_sources[self.bounds.slots[name]])
+        return (name for name in self.bounds
+                if self.bounds.slots[name] < len(self.bounds.has_sources)
+                and self.bounds.has_sources[self.bounds.slots[name]])
 
     def __len__(self) -> int:
         return self.bounds.has_sources.count(1)
@@ -131,8 +175,8 @@ class AffineRows:
 
     SENSES = ("eq", "le", "ge")
 
-    def __init__(self, bounds: BoundTable) -> None:
-        self.bounds = bounds
+    def __init__(self, symbols: SymbolIndex) -> None:
+        self.symbols = symbols
         self.offsets = array("Q", [0])
         self.columns = array("I")
         self.coefficients = array("d")
@@ -156,11 +200,11 @@ class AffineRows:
             origin = len(self.origins)
             self._origin_slots[key] = origin
             self.origins.append(RelationOrigin(
-                source, self.bounds.source_slot(source), relation_id, axis,
+                source, self.symbols.source_slot(source), relation_id, axis,
             ))
         row = len(self)
         for name, coefficient in terms:
-            self.columns.append(self.bounds.ensure(name))
+            self.columns.append(self.symbols.ensure(name))
             self.coefficients.append(coefficient)
         self.offsets.append(len(self.columns))
         self.constants.append(constant)
@@ -184,11 +228,11 @@ class AffineRows:
 
     def named_terms(self, row: int) -> Iterator[tuple[str, float]]:
         for slot, coefficient in self.terms(row):
-            yield self.bounds.names[slot], coefficient
+            yield self.symbols.names[slot], coefficient
 
     def raw_terms(self, row: int) -> Iterator[tuple[tuple[str, int], float]]:
         for at in range(self.offsets[row], self.offsets[row + 1]):
-            yield (self.bounds.names[self.columns[at]], 0), self.coefficients[at]
+            yield (self.symbols.names[self.columns[at]], 0), self.coefficients[at]
 
     def origin(self, row: int) -> RelationOrigin:
         return self.origins[self.origin_slots[row]]
@@ -201,13 +245,13 @@ class SparseRowIndex:
         self, rows: AffineRows, row_ids: array,
         checkpoint: Callable[[], None] | None,
     ) -> None:
-        self.offsets = array("Q", [0]) * (len(rows.bounds) + 1)
+        self.offsets = array("Q", [0]) * (len(rows.symbols) + 1)
         for row in row_ids:
             if checkpoint is not None:
                 checkpoint()
             for slot, _ in rows.terms(row):
                 self.offsets[slot + 1] += 1
-        for slot in range(len(rows.bounds)):
+        for slot in range(len(rows.symbols)):
             if checkpoint is not None and slot % 4096 == 0:
                 checkpoint()
             self.offsets[slot + 1] += self.offsets[slot]
@@ -221,6 +265,10 @@ class SparseRowIndex:
                 cursor[slot] += 1
 
     def rows_for(self, slot: int) -> Iterator[int]:
+        # Exact lowering may append auxiliary symbols after this analysis
+        # index was built. They have no source-analysis dependents.
+        if slot + 1 >= len(self.offsets):
+            return
         for at in range(self.offsets[slot], self.offsets[slot + 1]):
             yield self.entries[at]
 

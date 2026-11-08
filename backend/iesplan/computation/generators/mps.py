@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from iesplan.computation.errors import ComputationUnavailableError
 from iesplan.computation.generators.linear import LinearModel
+from iesplan.computation.generators.matrix import ColumnEntries, SparseModel
 from iesplan.computation.protocols import StopProbe, read_stop_reason
 
 #: 目标行名 / RHS 集名 / BOUNDS 集名 / 模型名（固定，保确定性）。
@@ -31,10 +32,11 @@ def _num(value: float) -> str:
     return repr(float(value))
 
 
-def write_mps(model: LinearModel, *, stop: StopProbe | None = None) -> tuple[str, float]:
+def write_mps(model: LinearModel | SparseModel, *, stop: StopProbe | None = None) -> tuple[str, float]:
     """序列化项目级线性模型为 free-format MPS 文本与目标偏移量。"""
-    if not isinstance(model, LinearModel):
-        raise TypeError("model 须为 LinearModel")
+    if isinstance(model, LinearModel):
+        model = SparseModel.from_public(model)
+
     def checkpoint() -> None:
         reason = read_stop_reason(stop)
         if reason is not None:
@@ -43,33 +45,21 @@ def write_mps(model: LinearModel, *, stop: StopProbe | None = None) -> tuple[str
     checkpoint()
     lines: list[str] = [f"NAME          {_MODEL_NAME}", "ROWS"]
     lines.append(f" N  {_OBJECTIVE_ROW}")
-    for index, row in enumerate(model.constraints):
+    rows = model.rows
+    for index, declaration in enumerate(model.row_order):
         if index % 128 == 0:
             checkpoint()
-        lines.append(f" {_SENSE_ROWS[row.sense]}  {row.name}")
+        sense = rows.data.SENSES[rows.data.senses[rows.row_ids[declaration]]]
+        lines.append(f" {_SENSE_ROWS[sense]}  {rows.names[declaration]}")
     lines.append("COLUMNS")
-    columns: dict[str, list[tuple[str, float]]] = {
-        var.name: [] for var in model.variables
-    }
-    for key, coeff in model.objective.terms:
-        if coeff != 0:
-            columns[key[0]].append((_OBJECTIVE_ROW, coeff))
-    for index, row in enumerate(model.constraints):
-        if index % 128 == 0:
-            checkpoint()
-        for key, value in row.expression.terms:
-            if value != 0:
-                columns[key[0]].append((row.name, value))
+    columns = ColumnEntries(model, checkpoint)
     in_integer = False
-    for var_index, var in enumerate(model.variables):
+    for var_index, declaration in enumerate(model.column_order):
         if var_index % 128 == 0:
             checkpoint()
-        if not columns[var.name]:
-            # 无系数变量仍需占列：COLUMNS 缺列会导致解列数与
-            # unit_map 交接不一致。显式零元数学等价，目标行恒存在。
-            columns[var.name].append((_OBJECTIVE_ROW, 0.0))
-        general_integer = var.kind == "binary" and not (
-            var.lower == 0.0 and var.upper == 1.0
+        name, lower, upper, kind = model.columns.values_at(declaration)
+        general_integer = kind == "binary" and not (
+            lower == 0.0 and upper == 1.0
         )
         if general_integer and not in_integer:
             lines.append("    INTORG    'MARKER'                 'INTORG'")
@@ -77,52 +67,58 @@ def write_mps(model: LinearModel, *, stop: StopProbe | None = None) -> tuple[str
         elif not general_integer and in_integer:
             lines.append("    INTEND    'MARKER'                 'INTEND'")
             in_integer = False
-        entries = columns[var.name]
-        for index in range(0, len(entries), 2):
-            chunk = entries[index:index + 2]
-            line = f"    {var.name}"
-            for row_name, value in chunk:
+        start, end = columns.offsets[var_index], columns.offsets[var_index + 1]
+        if start == end:
+            # A coefficient-free variable still owns its explicit solver slot.
+            lines.append(f"    {name}  {_OBJECTIVE_ROW}  {_num(0.0)}")
+        for index in range(start, end, 2):
+            line = f"    {name}"
+            for at in range(index, min(index + 2, end)):
+                row = columns.rows[at]
+                row_name = _OBJECTIVE_ROW if row == -1 else rows.names[row]
+                value = columns.values[at]
                 line += f"  {row_name}  {_num(value)}"
             lines.append(line)
     if in_integer:
         lines.append("    INTEND    'MARKER'                 'INTEND'")
     lines.append("RHS")
-    for index, row in enumerate(model.constraints):
+    for index, declaration in enumerate(model.row_order):
         if index % 128 == 0:
             checkpoint()
-        rhs = row.rhs - row.expression.constant
+        rhs = rows.rhs[declaration] - rows.constants[declaration]
         if rhs != 0:
-            lines.append(f"    {_RHS_NAME}  {row.name}  {_num(rhs)}")
+            lines.append(f"    {_RHS_NAME}  {rows.names[declaration]}  {_num(rhs)}")
     lines.append("BOUNDS")
-    for index, var in enumerate(model.variables):
+    for index, declaration in enumerate(model.column_order):
         if index % 128 == 0:
             checkpoint()
-        if var.kind == "binary" and var.lower == 0.0 and var.upper == 1.0:
-            lines.append(f" BV       {_BOUND_NAME}  {var.name}")
+        name, lower, upper, kind = model.columns.values_at(declaration)
+        if kind == "binary" and lower == 0.0 and upper == 1.0:
+            lines.append(f" BV       {_BOUND_NAME}  {name}")
             continue
-        if var.lower is None and var.upper is None:
-            lines.append(f" FR       {_BOUND_NAME}  {var.name}")
+        if lower is None and upper is None:
+            lines.append(f" FR       {_BOUND_NAME}  {name}")
             continue
         if (
-            var.lower is not None
-            and var.upper is not None
-            and var.lower == var.upper
+            lower is not None
+            and upper is not None
+            and lower == upper
         ):
-            lines.append(f" FX       {_BOUND_NAME}  {var.name}  {_num(var.lower)}")
+            lines.append(f" FX       {_BOUND_NAME}  {name}  {_num(lower)}")
             continue
-        if var.lower is None:
+        if lower is None:
             # 无下界即 -inf：有限上界须用 MI+UP 表达。FR+UP 会被 HiGHS
             # 判“BOUNDS 重复定义”丢弃 UP 行导致上界丢失（已实证）。
-            lines.append(f" MI       {_BOUND_NAME}  {var.name}")
-            if var.upper != 0:
+            lines.append(f" MI       {_BOUND_NAME}  {name}")
+            if upper != 0:
                 lines.append(
-                    f" UP       {_BOUND_NAME}  {var.name}  {_num(var.upper)}"  # type: ignore[arg-type]
+                    f" UP       {_BOUND_NAME}  {name}  {_num(upper)}"
                 )
             continue
-        lines.append(f" LO       {_BOUND_NAME}  {var.name}  {_num(var.lower)}")
-        if var.upper is not None:
+        lines.append(f" LO       {_BOUND_NAME}  {name}  {_num(lower)}")
+        if upper is not None:
             lines.append(
-                f" UP       {_BOUND_NAME}  {var.name}  {_num(var.upper)}"
+                f" UP       {_BOUND_NAME}  {name}  {_num(upper)}"
             )
     lines.append("OBJSENSE")
     lines.append(" MAX" if model.sense == "maximize" else " MIN")

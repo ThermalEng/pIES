@@ -244,7 +244,10 @@ def test_two_instances_share_structure_not_values_and_cross_calendar_year():
     builder._declare_global_symbols()
     bound = {inst: builder._bind_instance_symbols(inst) for inst in sorted(devices)}
     builder.inventory.seal()
-    builder.analysis = CompilerAnalysis(builder.inventory, builder.variables)
+    builder.analysis = CompilerAnalysis(
+        builder.inventory, builder.variables,
+        bounds=builder.symbol_slots, rows=builder.rows.data,
+    )
     builder._compile_templates(bound)
     for inst in sorted(devices):
         builder._expand_instance(inst, bound[inst])

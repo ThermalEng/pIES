@@ -1,7 +1,7 @@
 """项目级线性模型构造(0.8f-B)。
 
 把直接输入装配成首个 HiGHS MILP 链可消费的、求解器中立且
-MPS-ready 的 ``LinearModel``，并附带结果反向换算所需的最小单位映射。
+MPS-ready 的紧凑稀疏矩阵，并附带结果反向换算所需的最小单位映射。
 内部构造函数同样直接列出各项，不设包装层。
 
 事实来源（只读公开契约，不重复校验）：
@@ -43,7 +43,10 @@ from types import MappingProxyType
 from typing import Any
 
 from iesplan.assembly import (
-    ValidatedAssemblyArtifact, build_port_network, consumed_amounts, financial_dependency_graph,
+    ValidatedAssemblyArtifact,
+    build_port_network,
+    consumed_amounts,
+    financial_dependency_graph,
 )
 from iesplan.computation.errors import ComputationUnavailableError
 from iesplan.computation.generators.compiler_ir import (
@@ -85,14 +88,15 @@ from iesplan.computation.generators.compiler_ir import (
 from iesplan.computation.generators.linear import (
     LinearConstraint,
     LinearExpression,
-    LinearModel,
     LinearVariable,
     LoweringUnsupportedError,
     lower_expression,
     lower_planning_constraint,
     lower_planning_expression,
 )
-from iesplan.computation.generators.sources import SourceColumns, SourceRows, SourceTrace
+from iesplan.computation.generators.matrix import MatrixColumns, MatrixRows, SparseModel
+from iesplan.computation.generators.relation_storage import AffineRows, BoundTable
+from iesplan.computation.generators.sources import SourceTrace
 from iesplan.computation.generators.templates import (
     StepConstraintTemplate,
     TechnicalTemplate,
@@ -119,11 +123,10 @@ from iesplan.finance import (
     AmountReference,
     ConstructionVatRule,
     CostComponentShareTerm,
-    EffectiveFinanceConfig,
     DerivedTaxRule,
+    EffectiveFinanceConfig,
     EvaluationInput,
     IncomeTaxRule,
-    MaintenanceExpenseNetBaseFrom,
     ScaleUnitCostTerm,
     VatRule,
     annual_boundaries,
@@ -293,13 +296,13 @@ def build_project_model(
     finance: EffectiveFinanceConfig,
     config: CalculationConfig,
     evaluation: EvaluationInput,
-) -> tuple[LinearModel, Mapping[str, str], str]:
+) -> tuple[SparseModel, Mapping[str, str], str]:
     """由直接输入构造项目级线性模型、单位映射与目标业务单位。
 
     第三项为已完成物化的集合；求解域步数由装配运行起始年/分辨率与评价
     确认的已确认运营年限推导，``series`` 为空时仍为完整运营时域（物化
     集合不再承载财务年限权威，此处不复核两者一致）。
-    返回 ``(LinearModel, unit_map, objective_unit)``：``unit_map`` 为
+    返回 ``(SparseModel, unit_map, objective_unit)``：``unit_map`` 为
     LP 名 → 业务单位，供后续 ResultAdapter 反向换算（内部 binary 不进入
     结果，不收录）；``objective_unit`` 为目标业务单位（金额取财务币种，
     无量纲取 ``"1"``，单一物理量纲取 SI 基准单位；复合量纲无可报告业务
@@ -319,7 +322,7 @@ def build_project_model_with_facts(
     finance: EffectiveFinanceConfig,
     config: CalculationConfig,
     evaluation: EvaluationInput,
-) -> tuple[LinearModel, Mapping[str, str], str, Mapping[str, object]]:
+) -> tuple[SparseModel, Mapping[str, str], str, Mapping[str, object]]:
     """由直接输入构造模型、单位映射、目标单位与同次解财务事实声明。
 
     与 ``build_project_model`` 同一构造器一次建模：模型三元组与该函数
@@ -342,7 +345,7 @@ def build_project_model_package(
     *,
     stop: StopProbe | None = None,
 ) -> tuple[
-    LinearModel, Mapping[str, str], str, Mapping[str, object],
+    SparseModel, Mapping[str, str], str, Mapping[str, object],
     Mapping[str, Mapping[str, object]], tuple[Mapping[str, object], ...],
     Mapping[str, object],
 ]:
@@ -531,8 +534,10 @@ class _ProjectBuilder:
             ]
         self._series_si_cache: dict[tuple[str, str], list[float]] = {}
         self.source_trace = SourceTrace()
-        self.variables: dict[str, LinearVariable] = SourceColumns(self.source_trace)
-        self.rows: list[LinearConstraint] = SourceRows(self.source_trace)
+        self.symbol_slots = BoundTable()
+        self.variables = MatrixColumns(self.symbol_slots, self.source_trace)
+        self.rows = MatrixRows(AffineRows(self.symbol_slots.symbols), self.source_trace)
+        self.source_trace.targets = {"row": self.rows.names, "column": self.symbol_slots.names}
         self.unit_map: dict[str, str] = {}
         # Per-generate declarations: no published input or Bundle schema change.
         self.inventory = CompilerInventory()
@@ -594,12 +599,10 @@ class _ProjectBuilder:
         """声明 LP 变量（同名复现即取首次；调用方保证同一事实）。"""
         self._checkpoint()
         if name not in self.variables:
-            self.variables[name] = LinearVariable(
-                name=name, lower=lower, upper=upper, kind=kind,
-            )
+            name = self.variables.declare(name, lower, upper, kind)
             if unit is not None:
                 self.unit_map[name] = unit
-        return name
+        return self.symbol_slots.names[self.symbol_slots.slots[name]]
 
     def _tech_name(self, inst: str, local: str, step: int) -> str:
         return f"{inst}__{local}__t{step}"
@@ -2169,6 +2172,7 @@ class _ProjectBuilder:
         self.inventory.seal()
         self.analysis = CompilerAnalysis(
             self.inventory, self.variables, checkpoint=self._checkpoint,
+            bounds=self.symbol_slots, rows=self.rows.data,
         )
         self._register_sources()
         self._check_amount_measurements()
@@ -2783,38 +2787,35 @@ class _ProjectBuilder:
             )
             self.template_stats["step_compiles"] += 1
 
-    def _expand_instance(self, inst: str, statics: Mapping[str, Any]) -> None:
-        """Allocate step columns and variable capacity rows AFTER global binding."""
+    def _declare_step_columns(self, inst: str, statics: Mapping[str, Any]) -> None:
+        """Allocate actual columns for both generation and standalone declarations."""
         for local, lower, upper, unit in statics["columns"]:
             columns = self._step_columns.setdefault((inst, local), [])
             for block in self._blocks():
                 for step in block:
                     self._source(f"{inst}.{local}", "declared", "step", step, kind="symbol")
                     cname = self._tech_name(inst, local, step)
-                    self._declare(cname, lower, upper, "continuous", unit)
+                    cname = self._declare(cname, lower, upper, "continuous", unit)
                     columns.append(cname)
             self._step_units[(inst, local)] = unit
+
+    def _expand_instance(self, inst: str, statics: Mapping[str, Any]) -> None:
+        """Allocate columns and reuse analyzed capacity rows after global binding."""
+        self._declare_step_columns(inst, statics)
         for relation in self.inventory.operations:
             if relation.kind != "capacity" or relation.payload.instance != inst:
                 continue
-            local, pname, sense = (
-                relation.payload.local, relation.payload.planning_symbol,
-                relation.payload.sense,
+            local, sense = (
+                relation.payload.local, relation.payload.sense,
             )
             for step in range(self.point_count):
                 self._source(relation.identity, "capacity", "step", step)
-                vname = self._tech_name(inst, local, step)
                 suffix = "plan_max" if sense == "le" else "plan_min"
-                self.rows.append(LinearConstraint(
-                    name=f"{inst}__{local}__{suffix}__t{step}",
-                    expression=LinearExpression(
-                        terms=tuple(sorted((
-                            ((vname, 0), 1.0), ((pname, 0), -1.0),
-                        ))),
-                        constant=0.0,
-                    ),
-                    sense=sense, rhs=0.0,
-                ))
+                self.rows.append_semantic(
+                    f"{inst}__{local}__{suffix}__t{step}",
+                    self.analysis.semantic_row_slot(relation.identity, step),
+                    sense=sense,
+                )
 
     # ------------------------------------------------------------------
     # 技术关系
@@ -2882,11 +2883,14 @@ class _ProjectBuilder:
                 for family in families:
                     template = self._technical_templates[family.identity]
                     self._source(family.identity, "equation", "step", step, kind="technical")
-                    reused = self.analysis.technical_rows(family.identity, step)
+                    reused = self.analysis.technical_row_slot(family.identity, step)
                     if reused is not None:
-                        self.rows.extend(reused)
+                        if reused >= 0:
+                            self.rows.append_existing(
+                                f"{inst}__{family.relation.id}__t{step}", reused,
+                            )
                         self.template_stats["technical_reuses"] += 1
-                        self.template_stats["affine_direct_rows"] += len(reused)
+                        self.template_stats["affine_direct_rows"] += int(reused >= 0)
                         continue
                     lowered = bind_technical(
                         template, instance=inst, step=step, known=known,
@@ -2988,30 +2992,22 @@ class _ProjectBuilder:
         """Expand sealed conservation and closure, not raw connections."""
         for operation in self.analysis.relations("closed_port"):
             spec = operation.payload
-            for step, column in enumerate(self._step_columns[(spec.instance, spec.interface)]):
+            for step in range(self.point_count):
                 self._checkpoint()
                 self._source(operation.identity, "closed_port", "step", step)
-                self.rows.append(LinearConstraint(
-                    name=f"closed__{spec.instance}__{spec.interface}__t{step}",
-                    expression=LinearExpression(terms=(((column, 0), 1.0),), constant=0.0),
-                    sense="eq", rhs=0.0,
-                ))
+                self.rows.append_semantic(
+                    f"closed__{spec.instance}__{spec.interface}__t{step}",
+                    self.analysis.semantic_row_slot(operation.identity, step),
+                )
         for operation in self.analysis.relations("bus"):
             spec = operation.payload
             for step in range(self.point_count):
                 self._checkpoint()
                 self._source(operation.identity, "balance", "step", step)
-                terms = tuple(
-                    ((f"{inst}__{iface}__t{step}", 0), sign)
-                    for inst, iface, sign in spec.ports
+                self.rows.append_semantic(
+                    f"bus__{spec.carrier}__{spec.bus_index}__t{step}",
+                    self.analysis.semantic_row_slot(operation.identity, step),
                 )
-                self.rows.append(LinearConstraint(
-                    name=f"bus__{spec.carrier}__{spec.bus_index}__t{step}",
-                    expression=LinearExpression(
-                        terms=tuple(sorted(terms)), constant=0.0,
-                    ),
-                    sense="eq", rhs=0.0,
-                ))
 
     # ------------------------------------------------------------------
     # 财务分量仿射式
@@ -3955,7 +3951,6 @@ class _ProjectBuilder:
         """
         operations = (operation,)
         evaluation = self.evaluation
-        taken = set(self.variables)
         if self._vat_cash is None:
             self._vat_cash = _AffineAcc()
         cash = self._vat_cash
@@ -4024,7 +4019,6 @@ class _ProjectBuilder:
                         raise LoweringUnsupportedError(
                             f"VAT 内部列名与已有变量冲突 {name!r}"
                         )
-                    taken.add(name)
                 self.variables[paid_name] = LinearVariable(
                     paid_name, lower=0.0, upper=paid_hi,
                 )
@@ -4399,11 +4393,6 @@ class _ProjectBuilder:
         """
         operations = (operation,)
         evaluation = self.evaluation
-        var_bounds = {
-            variable.name: (variable.lower, variable.upper)
-            for variable in self.variables.values()
-        }
-        taken = set(var_bounds)
         if self._income_cash is None:
             self._income_cash = _AffineAcc()
         cash = self._income_cash
@@ -4417,7 +4406,6 @@ class _ProjectBuilder:
                 raise LoweringUnsupportedError(
                     f"所得税内部列名与已有变量冲突 {name!r}"
                 )
-            taken.add(name)
             self.variables[name] = LinearVariable(
                 name,
                 lower=0.0,
@@ -4670,28 +4658,11 @@ class _ProjectBuilder:
                 for step in block:
                     self._checkpoint()
                     self._source(operation.identity, "step_constraint", "step", step)
-                    terms: dict[tuple[str, int], float] = {}
-                    for inst, iface, coeff in template.ports:
-                        column = self._step_columns[(inst, iface)][step]
-                        key = (column, 0)
-                        total = terms.get(key, 0.0) + coeff
-                        if total == 0.0:
-                            terms.pop(key, None)
-                        else:
-                            terms[key] = total
-                    for symbol, coeff in template.planning:
-                        key = (symbol, 0)
-                        total = terms.get(key, 0.0) + coeff
-                        if total == 0.0:
-                            terms.pop(key, None)
-                        else:
-                            terms[key] = total
-                    self.rows.append(LinearConstraint(
-                        name=f"step__{template.relation_id}__t{step}",
-                        expression=LinearExpression(
-                            terms=tuple(terms.items()), constant=template.constant,
-                        ), sense=template.sense, rhs=template.rhs,
-                    ))
+                    self.rows.append_semantic(
+                        f"step__{template.relation_id}__t{step}",
+                        self.analysis.semantic_row_slot(operation.identity, step),
+                        constant=template.constant, sense=template.sense, rhs=template.rhs,
+                    )
                     self.template_stats["step_binds"] += 1
 
     def _build_planning_rows(self) -> None:
@@ -4768,12 +4739,12 @@ class _ProjectBuilder:
         """
         # 单次包构造在 build() 后调用，此时步列已声明；不得再次
         # _declare_instance_statics，否则步列会被重复追加，破坏时序长度。
-        # 兼容此公开辅助函数的独立调用（未执行 build 的新构造器）。
+        # 独立声明入口只分配列，不触发分析或容量约束转换。
         if not self._step_columns:
             self._declare_global_symbols()
             bound_instances = self._bind_technical_scopes()
             for scope, bound in bound_instances.items():
-                self._expand_instance(scope, bound)
+                self._declare_step_columns(scope, bound)
         out: list[Mapping[str, object]] = []
         for inst, local in sorted(self._step_columns):
             if inst in self._system_scopes:
@@ -5211,7 +5182,7 @@ class _ProjectBuilder:
             row["instance_id"], row["component"], row["item_id"], row["period"],
         ))
 
-    def build(self) -> tuple[LinearModel, Mapping[str, str], str]:
+    def build(self) -> tuple[SparseModel, Mapping[str, str], str]:
         try:
             return self._build()
         except LoweringUnsupportedError as exc:
@@ -5219,7 +5190,7 @@ class _ProjectBuilder:
                 exc.model_source = self.source_trace.location()
             raise
 
-    def _build(self) -> tuple[LinearModel, Mapping[str, str], str]:
+    def _build(self) -> tuple[SparseModel, Mapping[str, str], str]:
         if self.stop is not None:
             reason = read_stop_reason(self.stop)
             if reason is not None:
@@ -5286,11 +5257,9 @@ class _ProjectBuilder:
                 objective, objective_unit = self._build_objective()
         self._checkpoint()
         self._component_declarations = self.finance_components()
-        model = LinearModel(
-            variables=tuple(self.variables.values()),
-            constraints=tuple(self.rows),
-            objective=objective.freeze(),
-            sense=self.doc["planning"]["objective"]["sense"],
+        model = SparseModel.freeze(
+            self.variables, self.rows, objective.freeze(),
+            self.doc["planning"]["objective"]["sense"], self._checkpoint,
         )
         return (
             model,
