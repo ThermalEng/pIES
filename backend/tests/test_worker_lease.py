@@ -21,6 +21,7 @@ from sqlalchemy import create_engine, select  # noqa: E402
 from sqlalchemy.engine import Engine  # noqa: E402
 from sqlalchemy.orm import Session, sessionmaker  # noqa: E402
 from sqlalchemy.pool import StaticPool  # noqa: E402
+from test_slot_pg_concurrency import _assert_isolated  # noqa: E402
 from worker_testkit import setup_environment  # noqa: E402
 
 from iesplan.application import worker as worker_app  # noqa: E402
@@ -320,8 +321,6 @@ class TestAcquire:
         覆盖 test_slot_pg_concurrency._assert_isolated 的判定逻辑本身。
         """
         from sqlalchemy import text
-        from test_slot_pg_concurrency import _assert_isolated
-
         empty = create_engine("sqlite+pysqlite://")
         _assert_isolated(empty)
         with empty.begin() as conn:
