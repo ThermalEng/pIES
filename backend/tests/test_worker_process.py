@@ -140,16 +140,13 @@ def test_task_entrypoint_assembles_its_own_runtime(worker_type, monkeypatch):
     from iesplan import bootstrap
 
     context = Mock()
-    compute_assembly = Mock(return_value=context)
-    io_assembly = Mock(return_value=context)
-    monkeypatch.setattr(bootstrap, "assemble_compute_worker", compute_assembly)
-    monkeypatch.setattr(bootstrap, "assemble_io_worker", io_assembly)
+    assembly = Mock(return_value=context)
+    monkeypatch.setattr(bootstrap, "assemble_task_runtime", assembly)
     run_task = Mock()
     monkeypatch.setattr(worker_main.runner, "run_task", run_task)
     claim, stop = object(), object()
     worker_main.run_claimed_task(worker_type, "worker", claim, stop)
-    (compute_assembly if worker_type == "compute" else io_assembly).assert_called_once_with()
-    (io_assembly if worker_type == "compute" else compute_assembly).assert_not_called()
+    assembly.assert_called_once_with(worker_type)
     run_task.assert_called_once_with(
         context.session_factory, claim, worker_id="worker", stop_event=stop,
         compute=context.compute_execution_plane.return_value if worker_type == "compute" else None,
@@ -189,10 +186,12 @@ def test_spawned_attempt_completes_real_solve_and_seals_results(tmp_path, monkey
         with TestClient(app, raise_server_exceptions=False) as client:
             task_id = _submit_calc_task(client, db, dict(_CONFIG_BODY), dict(PLANNING_BODY))
         snapshot_id = db.get(Task, task_id).calc_snapshot_id
-    process = subprocess.Popen(
-        [sys.executable, "-m", "iesplan.worker.main", "--worker-type", "compute"],
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-    )
+    log_path = tmp_path / "worker.log"
+    with log_path.open("w") as log:
+        process = subprocess.Popen(
+            [sys.executable, "-m", "iesplan.worker.main", "--worker-type", "compute"],
+            stdout=log, stderr=subprocess.STDOUT, text=True,
+        )
     try:
         deadline = time.monotonic() + 60
         while process.poll() is None and time.monotonic() < deadline:
@@ -202,7 +201,9 @@ def test_spawned_attempt_completes_real_solve_and_seals_results(tmp_path, monkey
             time.sleep(0.05)
         with factory() as db:
             task = db.get(Task, task_id)
-            assert (task.status, task.business_outcome) == ("completed", "normal_completion")
+            assert (task.status, task.business_outcome) == (
+                "completed", "normal_completion",
+            ), log_path.read_text()
             assert (task.calc_snapshot_id, task.attempt_count) == (snapshot_id, 1)
             attempt = db.scalar(select(TaskAttempt).where(TaskAttempt.task_id == task_id))
             assert attempt.status == "succeeded"
@@ -216,9 +217,9 @@ def test_spawned_attempt_completes_real_solve_and_seals_results(tmp_path, monkey
     finally:
         process.terminate()
         try:
-            output, _ = process.communicate(timeout=40)
+            process.wait(timeout=40)
         except subprocess.TimeoutExpired:
             process.kill()
-            output, _ = process.communicate()
+            process.wait()
         engine.dispose()
-    assert process.returncode == 0, output
+    assert process.returncode == 0, log_path.read_text()

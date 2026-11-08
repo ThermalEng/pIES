@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+from unittest.mock import Mock
+
+import pytest
+
 from iesplan.bootstrap import (
     ApplicationContext,
     assemble_api,
     assemble_compute_worker,
     assemble_io_worker,
+    assemble_task_runtime,
     collect_immutable_tables,
     collect_trigger_statements,
 )
@@ -109,6 +114,25 @@ def test_public_facades_register_domain_metadata() -> None:
     assert "projects" in names
     assert "tasks" in names
     assert "objects" in names
+
+
+@pytest.mark.parametrize("worker_type", ["compute", "io"])
+def test_task_runtime_does_not_redeploy_database_or_seed_identity(worker_type, monkeypatch) -> None:
+    from iesplan import db
+    from iesplan.application import identity
+
+    initialize = Mock()
+    seed = Mock()
+    monkeypatch.setattr(db, "init_db", initialize)
+    monkeypatch.setattr(identity, "seed_builtin_admin", seed)
+
+    ctx = assemble_task_runtime(worker_type)
+
+    initialize.assert_not_called()
+    seed.assert_not_called()
+    assert ctx.session_factory is db.SessionLocal
+    assert ctx.storage is not None
+    assert (ctx.compute_execution_plane() is not None) == (worker_type == "compute")
 
 
 def test_collect_trigger_statements_covers_immutable_tables() -> None:
