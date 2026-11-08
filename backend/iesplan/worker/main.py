@@ -9,15 +9,16 @@ main() 职责:
   取消当前任务并停止一切写回, 03 §4.4 自毁契约);
 - 信号处理: SIGTERM/SIGINT 优雅退出(置停止事件 → 取消当前任务 → 等待退出)。
 
-并发模型: 单任务线程 + 主循环轮询(心跳/续租/取消); 槽并发由 compute_slots
+并发模型: 单任务子进程 + 主循环轮询(心跳/续租/取消); 槽并发由 compute_slots
 约束(每池 capacity 行, 03 §5.2), 本进程同一时刻至多执行一个任务(多 Worker
-进程由部署编排)。
+进程由部署编排)。计算与控制不共享解释器，构模的 GIL / GC 停顿不阻塞续租。
 """
 
 from __future__ import annotations
 
 import argparse
 import logging
+import multiprocessing
 import os
 import signal
 import socket
@@ -72,8 +73,9 @@ class Worker:
         self.heartbeat_interval = heartbeat_interval
         self.renew_interval = renew_interval
         self._stop = threading.Event()
-        self._task_thread: threading.Thread | None = None
-        self._cancel_event: threading.Event | None = None
+        self._process_context = multiprocessing.get_context("spawn")
+        self._task_process: Any = None
+        self._cancel_event: Any = None
         self._current_task_id: int | None = None
         self._last_heartbeat = 0.0
         self._last_renew = 0.0
@@ -93,13 +95,19 @@ class Worker:
                 logger.exception("Worker tick 异常")
             time.sleep(self.poll_interval)
         # 优雅退出: 取消当前任务并等待其收拢(03 §6.1 子进程 SIGTERM → SIGKILL)
-        if self._task_thread is not None and self._task_thread.is_alive():
+        if self._task_process is not None and self._task_process.is_alive():
             logger.info("优雅退出: 等待当前任务收拢(task=%s)", self._current_task_id)
             if self._cancel_event is not None:
                 self._cancel_event.set()  # 执行器检查点 + 隔离子进程取消
-            self._task_thread.join(timeout=SHUTDOWN_GRACE)
-            if self._task_thread.is_alive():
-                logger.warning("当前任务未在 %s s 内收拢, 强制退出", SHUTDOWN_GRACE)
+            self._task_process.join(timeout=SHUTDOWN_GRACE)
+            if self._task_process.is_alive():
+                logger.warning("当前任务未在 %s s 内收拢, 终止任务进程", SHUTDOWN_GRACE)
+                self._task_process.terminate()
+                self._task_process.join(timeout=5.0)
+                if self._task_process.is_alive():
+                    self._task_process.kill()
+                    self._task_process.join()
+        self._reap_task_process()
         self._clear_heartbeat()
         logger.info("Worker 退出: %s", self.worker_id)
 
@@ -120,15 +128,13 @@ class Worker:
             self._last_recovery = now
             if recovered:
                 logger.info("过期尝试回收: pool=%s count=%s", self.pool, recovered)
-        if self._task_thread is not None:
-            if self._task_thread.is_alive():
+        if self._task_process is not None:
+            if self._task_process.is_alive():
                 if now - self._last_renew >= self.renew_interval:
                     self._renew_or_cancel()
                     self._last_renew = now
                 return  # 有任务在执行, 本 tick 不领取
-            self._task_thread = None
-            self._cancel_event = None
-            self._current_task_id = None
+            self._reap_task_process()
             return
         # 槽门禁(03 §5.2 第 1 步): 无空槽则等待
         if not self._slot_gate():
@@ -185,7 +191,7 @@ class Worker:
         return available
 
     def _claim_and_run(self, task_id: int) -> None:
-        """领取(槽 + 尝试 + 租约 + token)并在独立线程中执行。
+        """领取(槽 + 尝试 + 租约 + token)并在独立解释器中执行。
 
         领取事务由 application.worker 用例提交, 返回后租约/尝试状态即刻
         可见; 本层不调用 commit/rollback。
@@ -199,28 +205,34 @@ class Worker:
         self._attempt_no = claim.attempt_no
         self._lease_token = claim.lease_token
         self._current_task_id = task_id
-        self._cancel_event = threading.Event()
-        self._task_thread = threading.Thread(
-            target=self._execute_task, args=(claim,), name=f"task-{task_id}", daemon=True,
+        self._cancel_event = self._process_context.Event()
+        self._task_process = self._process_context.Process(
+            target=run_claimed_task,
+            args=(self.worker_type, self.worker_id, claim, self._cancel_event),
+            name=f"task-{task_id}",
         )
-        self._task_thread.start()
+        try:
+            self._task_process.start()
+        except Exception:
+            self._task_process.close()
+            self._task_process = None
+            self._cancel_event = None
+            self._current_task_id = None
+            raise  # 未执行的领取由现有到期回收路径收拢。
         logger.info("任务领取: task=%s attempt=%s worker=%s", task_id, claim.attempt_id, self.worker_id)
 
-    def _execute_task(self, claim: worker_app.Claim) -> None:
-        """任务执行线程: runner.run_task 完成提交/失败/取消收拢(自带事务边界)。
-
-        Worker 只持有 session factory, 不持有跨阶段的长寿命 Session: 输入
-        加载读完即关, 求解/分析/导出在无数据库事务状态下运行, 领取/进度/
-        续租/评估写入/提交/失败/取消各自新短会话短事务(由 application.worker
-        用例提交, 本层不调用 commit/rollback)。
-        """
-        try:
-            runner.run_task(
-                self.session_factory, claim, worker_id=self.worker_id,
-                stop_event=self._cancel_event, compute=self.compute,
-            )
-        except Exception:  # noqa: BLE001 - 线程边界兜底, 防止静默死亡
-            logger.exception("任务线程异常: task=%s", claim.task_id)
+    def _reap_task_process(self) -> None:
+        if self._task_process is None:
+            return
+        self._task_process.join()
+        if self._task_process.exitcode:
+            # 不伪造业务终态。未封存的尝试沿原有租约回收路径恢复。
+            logger.error("任务进程退出: task=%s exit_code=%s",
+                         self._current_task_id, self._task_process.exitcode)
+        self._task_process.close()
+        self._task_process = None
+        self._cancel_event = None
+        self._current_task_id = None
 
     # -- 工具 ----------------------------------------------------------------
 
@@ -244,6 +256,25 @@ class Worker:
 # ---------------------------------------------------------------------------
 # 入口
 # ---------------------------------------------------------------------------
+
+
+def run_claimed_task(
+    worker_type: str, worker_id: str, claim: worker_app.Claim, stop_event: Any,
+) -> None:
+    """任务进程入口：在组合根重新装配，不继承连接、provider 对象或大文件。
+
+    进程间只传递领取身份及停止事件；输入、阶段检查点和终态仍通过原有
+    application 公开门面与短事务交接。该进程不领取新任务或续租。
+    """
+    from iesplan.bootstrap import assemble_task_runtime
+
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+    ctx = assemble_task_runtime(worker_type)
+    compute = ctx.compute_execution_plane() if worker_type == "compute" else None
+    runner.run_task(
+        ctx.session_factory, claim, worker_id=worker_id,
+        stop_event=stop_event, compute=compute,
+    )
 
 
 def main(argv: list[str] | None = None) -> int:

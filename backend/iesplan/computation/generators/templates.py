@@ -10,15 +10,17 @@ expression language, serialized Bundle schema or persisted cache.
 from __future__ import annotations
 
 import math
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from typing import Callable, Mapping
 
 from iesplan.computation.generators.linear import (
-    LinearConstraint, LinearExpression, LoweredRelation, LoweringUnsupportedError,
+    LinearConstraint,
+    LinearExpression,
+    LoweredRelation,
+    LoweringUnsupportedError,
     lower_mutex,
 )
 from iesplan.modeling import BinaryNode, MathRelation, NumberNode, RefNode, UnaryNode
-
 
 # A compact postfix instruction: ("number", float), ("known", identifier),
 # ("var", (identifier, time_offset)), ("unary", op), ("binary", op).
@@ -462,6 +464,7 @@ def bind_technical(
     bound: Mapping[str, tuple[float | None, float | None]],
     affine_column: Callable[[Key], Key] | None = None,
     affine_row_name: str | None = None,
+    affine_sink: Callable[[tuple[tuple[Key, float], ...], float], None] | None = None,
 ) -> LoweredRelation:
     """Bind with the shared compiler; optionally emit a final-column affine row.
 
@@ -469,6 +472,8 @@ def bind_technical(
     this avoids allocating local LinearExpression/LinearConstraint objects
     that would immediately be discarded during LP qualification.  Public
     single-relation callers omit it and retain the existing local-key IR.
+    Analysis can consume the same sorted coefficients through affine_sink,
+    retaining compact numeric rows instead of per-step nested DTOs.
 
     A conditional mutex still returns the exact *local* lower_mutex IR, with
     auxiliary variables, to be qualified by the existing project emitter.
@@ -508,6 +513,12 @@ def bind_technical(
             terms = tuple(ordered)
         else:
             terms = tuple((affine_column(key), coeff) for key, coeff in ordered)
+        if affine_sink is not None:
+            # Analysis owns compact numeric rows. Use this same arithmetic
+            # and stable projected-key order without allocating DTOs for
+            # every time slot. The final consumer can recover the exact row.
+            affine_sink(tuple(sorted(terms, key=lambda item: item[0])), diff.constant)
+            return LoweredRelation()
         return LoweredRelation(constraints=(
             LinearConstraint(
                 affine_row_name or template.relation_id,

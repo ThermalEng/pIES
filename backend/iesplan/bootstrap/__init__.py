@@ -13,6 +13,8 @@
   任一缺失即拒绝启动，不领取无法执行的计算任务；
 - ``assemble_io_worker``: I/O 所需子集(database + storage, 不含 devices
   注册表与生成器目录）。
+- ``assemble_task_runtime``: 任务子进程装配运行依赖，不重复数据库初始化
+  或身份播种。
 
 失败语义: 任一必需依赖装配失败即抛异常(启动失败), 不发布半初始化
 状态, 不设 fallback。provider 选择与装配只归本组合根；API/Worker
@@ -30,7 +32,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 from iesplan import audit as audit_domain
 from iesplan import configuration as configuration_domain
@@ -42,6 +44,7 @@ from iesplan import project as project_domain
 from iesplan import results as results_domain
 from iesplan import storage as storage_domain  # noqa: F401 - 加载本域 ORM 声明
 from iesplan import tasks as tasks_domain
+from iesplan.identity import IMMUTABLE_TABLES as IDENTITY_IMMUTABLE_TABLES
 
 logger = logging.getLogger(__name__)
 
@@ -314,7 +317,7 @@ def collect_immutable_tables() -> tuple[str, ...]:
     第二份表名清单; 无 IMMUTABLE_TABLES 的域按能力缺席。
     """
     tables: list[str] = []
-    tables.extend(getattr(identity_domain, "IMMUTABLE_TABLES", ()))
+    tables.extend(IDENTITY_IMMUTABLE_TABLES)
     tables.extend(getattr(project_domain, "IMMUTABLE_TABLES", ()))
     tables.extend(getattr(dataset_domain, "IMMUTABLE_TABLES", ()))
     tables.extend(getattr(tasks_domain, "IMMUTABLE_TABLES", ()))
@@ -325,15 +328,24 @@ def collect_immutable_tables() -> tuple[str, ...]:
     return tuple(tables)
 
 
+def _initialize_database() -> None:
+    """服务入口初始化数据库；任务子进程只使用已初始化的数据库。"""
+    from iesplan import db as db_module
+    from iesplan.application.identity import seed_builtin_admin
+
+    db_module.init_db(trigger_statements=collect_trigger_statements())
+    with db_module.SessionLocal() as session:
+        seed_builtin_admin(session)
+
+
 def _assemble(
     *,
     with_storage: bool,
     with_registry: bool,
     with_generators: bool,
     with_execution_plane: bool,
-    seed_admin: bool,
 ) -> ApplicationContext:
-    """通用装配：加载领域门面后建表、部署触发器并装配能力子集。
+    """装配进程内连接、目录和执行能力，不执行数据库部署或身份播种。
 
     异常直接抛给调用方(启动失败, 不发布半初始化状态)。
     """
@@ -342,27 +354,19 @@ def _assemble(
     # 0. 队列/限速后端选型(组合根唯一环境解释点): 一次解析部署环境,
     #    扇出给各接收模块; 业务模块只接收传入配置, 不再自行解释环境选型。
     _configure_queue_mode(_resolve_queue_mode())
-    # 1. 领域公开门面已在模块加载时注册各自 ORM；此处建表并部署触发器。
-    db_module.init_db(trigger_statements=collect_trigger_statements())
-    # 2. 内置身份种子(幂等)
-    if seed_admin:
-        from iesplan.application.identity import seed_builtin_admin
-
-        with db_module.SessionLocal() as session:
-            seed_builtin_admin(session)
-    # 3. 存储适配能力(公开句柄)
+    # 1. 存储适配能力(公开句柄)
     storage: Any | None = None
     if with_storage:
         from iesplan.storage.service import get_blob_store
 
         storage = get_blob_store()
-    # 4. devices 2.0 注册表(任一设备校验失败即整体拒绝, 原子发布)
+    # 2. devices 2.0 注册表(任一设备校验失败即整体拒绝, 原子发布)
     device_registry: Any | None = None
     if with_registry:
         from iesplan.devices import init_registry
 
         device_registry = init_registry()
-    # 5. 生成器目录(原子发布; 显式注册内置真实 provider, 不做任何
+    # 3. 生成器目录(原子发布; 显式注册内置真实 provider, 不做任何
     #    动态发现或扫描; 任一候选不符即整体失败, 不发布半表)
     generator_registry: Any | None = None
     predictor_registry: Any | None = None
@@ -378,7 +382,7 @@ def _assemble(
 
         generator_registry = build_registry((HIGHS_MILP_PROVIDER,))
         predictor_registry = build_predictor_registry((NAIVE_PREDICTOR,))
-    # 6. 计算执行面(只归计算 Worker: 执行器/适配器目录 + 通用运行时 +
+    # 4. 计算执行面(只归计算 Worker: 执行器/适配器目录 + 通用运行时 +
     #    统一 Settings 派生的部署策略; 任一缺失即拒绝启动)
     executor_registry: Any | None = None
     result_adapter_registry: Any | None = None
@@ -427,12 +431,12 @@ def assemble_api() -> ApplicationContext:
 
     API 不装配执行面（执行器目录/运行时/执行策略只归计算 Worker）。
     """
+    _initialize_database()
     return _assemble(
         with_storage=True,
         with_registry=True,
         with_generators=True,
         with_execution_plane=False,
-        seed_admin=True,
     )
 
 
@@ -444,23 +448,27 @@ def assemble_compute_worker() -> ApplicationContext:
     任一必需依赖缺失（缺二进制/版本自检失败/策略非法）即抛异常拒绝启动，
     不领取无法执行的计算任务。
     """
-    return _assemble(
-        with_storage=True,
-        with_registry=True,
-        with_generators=True,
-        with_execution_plane=True,
-        seed_admin=True,
-    )
+    _initialize_database()
+    return assemble_task_runtime("compute")
 
 
 def assemble_io_worker() -> ApplicationContext:
     """装配 I/O Worker：database 与 storage，不含 devices 注册表、生成器目录与执行面。"""
+    _initialize_database()
+    return assemble_task_runtime("io")
+
+
+def assemble_task_runtime(worker_type: Literal["compute", "io"]) -> ApplicationContext:
+    """任务子进程重建自身依赖，复用服务入口已初始化的数据库。
+
+    不建表、部署触发器或播种身份；连接和 provider 均由该进程独立创建。
+    """
+    compute = worker_type == "compute"
     return _assemble(
         with_storage=True,
-        with_registry=False,
-        with_generators=False,
-        with_execution_plane=False,
-        seed_admin=True,
+        with_registry=compute,
+        with_generators=compute,
+        with_execution_plane=compute,
     )
 
 
@@ -469,6 +477,7 @@ __all__ = [
     "assemble_api",
     "assemble_compute_worker",
     "assemble_io_worker",
+    "assemble_task_runtime",
     "collect_immutable_tables",
     "collect_trigger_statements",
 ]

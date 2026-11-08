@@ -10,27 +10,22 @@ Infers conservative effective bounds from the complete relation inventory:
 from __future__ import annotations
 
 import math
-from collections import defaultdict, deque
+from array import array
+from collections import deque
 from collections.abc import Callable, Mapping
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from fractions import Fraction
 from typing import Any
 
 from iesplan.computation.generators.compiler_ir import (
     AmountConstraintRule,
-    BoundFact,
     BusBalance,
     CapacityLimit,
     ClosedPort,
     CompilerInventory,
-    IndexDomain,
-    KnownCoefficient,
     PlanningRule,
-    RelationFamily,
-    SemanticRelation,
     SourceLocation,
     StateInitial,
-    SymbolDeclaration,
 )
 from iesplan.computation.generators.linear import (
     BoundConflictError,
@@ -39,26 +34,15 @@ from iesplan.computation.generators.linear import (
     LinearVariable,
     LoweringUnsupportedError,
 )
+from iesplan.computation.generators.relation_storage import (
+    AffineRows,
+    BoundSources,
+    BoundTable,
+    SparseRowIndex,
+    TechnicalRowCache,
+)
 from iesplan.computation.generators.templates import bind_technical, compile_technical
 from iesplan.modeling import BinaryNode, RefNode, UnaryNode
-
-_TOLERANCE = 1e-12
-
-
-@dataclass(frozen=True, slots=True)
-class AffineRelation:
-    """An exact affine relation: sum(terms[symbol] * symbol) + constant (sense) 0."""
-
-    terms: tuple[tuple[str, float], ...]  # sorted (symbol, coeff) pairs
-    constant: float = 0.0
-    sense: str = "eq"  # "eq", "le", "ge"
-    source: SourceLocation | None = None
-    relation_id: str | None = None
-    axis: str = "scalar"
-    index: int = 0
-
-    def term_dict(self) -> dict[str, float]:
-        return dict(self.terms)
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,15 +92,17 @@ class BoundInferenceEngine:
         self.inventory = inventory
         self.variables = variables
         self.checkpoint = checkpoint
-        # References to the final affine rows already bound for analysis.
-        # Production reuses these objects; no second mathematical model or
-        # additional copy of their coefficients is constructed.
-        self.technical_rows: dict[str, list[tuple[LinearConstraint, ...] | None]] = {}
-        self.bounds: dict[str, tuple[float | None, float | None]] = {}
-        self.provenance: dict[str, tuple[SourceLocation | None, SourceLocation | None]] = {}
-        self.relations: list[AffineRelation] = []
-        self.equalities: dict[str, tuple[dict[str, Fraction], Fraction]] = {}  # exact affine substitutions
-        self.inequalities: list[AffineRelation] = []
+        self.technical_rows: dict[str, TechnicalRowCache] = {}
+        self.bounds = BoundTable()
+        self.provenance = BoundSources(self.bounds)
+        self.rows = AffineRows(self.bounds)
+        # Analysis row ordinals remain in the original source/step order.
+        # A true alias-cancelled row can still be reused by the final emitter
+        # without becoming a spurious analysis operation.
+        self.relations = array("I")
+        self.equality_rows = array("q")
+        self._equality_count = 0
+        self.inequalities = array("I")
         self.conflicts: list[dict[str, Any]] = []
         self.budget_exhausted = False
         self.incomplete_symbols: frozenset[str] = frozenset()
@@ -136,19 +122,17 @@ class BoundInferenceEngine:
         self._indexes_ready = False
         # Sparse reverse index: do not rescan every per-step inequality for
         # each annual VAT / income expression bound request.
-        self._inequalities_by_symbol: dict[str, list[int]] = defaultdict(list)
+        self._inequalities_by_symbol: SparseRowIndex | None = None
 
         self._init_bounds()
         self._collect_relations()
         # A contradictory source relation belongs to the exact model. Analysis
         # keeps all rows for the solver and only reports the conflict if a
         # downstream exact lowering would otherwise misreport a missing bound.
-        declared_bounds = dict(self.bounds)
-        declared_provenance = dict(self.provenance)
+        declared_bounds = self.bounds.snapshot()
         self._propagate(budget=max(budget, 4 * len(self.relations)))
         if self.conflicts:
-            self.bounds = declared_bounds
-            self.provenance = declared_provenance
+            self.bounds.restore(declared_bounds)
 
     def _init_bounds(self) -> None:
         # Load from inventory.bound_facts
@@ -162,7 +146,9 @@ class BoundInferenceEngine:
             fact = self.inventory.bound_facts.get(f"{inst}.{local}")
             if fact is None:
                 continue
-            for column in columns:
+            for step, column in enumerate(columns):
+                if self.checkpoint is not None and step % 4096 == 0:
+                    self.checkpoint()
                 self.bounds[column] = (fact.lower, fact.upper)
                 self.provenance[column] = (fact.lower_source, fact.upper_source)
 
@@ -196,80 +182,96 @@ class BoundInferenceEngine:
         index: int = 0,
     ) -> None:
         filtered = tuple(sorted((k, v) for k, v in terms.items() if v != 0.0))
-        if not filtered and constant != 0.0:
-            # 0 (sense) -constant
-            if sense == "eq" or (sense == "le" and constant > 0) or (sense == "ge" and constant < 0):
-                rel = AffineRelation((), constant, sense, source, relation_id, axis, index)
-                self.relations.append(rel)
-                self._record_conflict("<constant>", rel)
-            return
-        if not filtered:
-            return
+        false = constant != 0.0 and (
+            sense == "eq" or (sense == "le" and constant > 0)
+            or (sense == "ge" and constant < 0)
+        )
+        if filtered or false:
+            row = self.rows.append(filtered, constant, sense, source, relation_id, axis, index)
+            self.relations.append(row)
+            if not filtered:
+                self._record_conflict("<constant>", row)
+            self._indexes_ready = False
 
-        for sym, _ in filtered:
-            if sym not in self.bounds:
-                # Indexed identities are not interchangeable with their base.
-                self.bounds[sym] = (None, None)
-
-        rel = AffineRelation(filtered, constant, sense, source, relation_id, axis, index)
-        self.relations.append(rel)
-        if self._indexes_ready:
-            self._index_relation(rel)
+    def technical_constraints(self, identity: str, step: int) -> tuple[LinearConstraint, ...] | None:
+        """Materialize only the final consumer's current row, not all slots."""
+        cache = self.technical_rows.get(identity)
+        if cache is None or cache.rows[step] == -1:
+            return None
+        row = cache.rows[step]
+        if row == -2:
+            return ()
+        return (LinearConstraint(
+            f"{cache.instance}__{cache.relation_id}__t{step}",
+            LinearExpression(tuple(self.rows.raw_terms(row)), self.rows.constants[row]),
+            sense="eq", rhs=0.0,
+        ),)
 
     def _index_relations(self) -> None:
         """Build deterministic equality and inequality indexes after collection."""
-        source_keys: dict[int, str] = {}
-
-        def key(rel: AffineRelation) -> tuple:
+        # Sort shared families, not millions of expanded Python key tuples.
+        # Equal sort keys share a bucket so stable insertion/step order also
+        # survives different axes with the same source identity.
+        groups: dict[tuple[str, str], array] = {}
+        origin_buckets: list[array | None] = []
+        source_keys = ["" if origin.source is None else repr(asdict(origin.source))
+                       for origin in self.rows.origins]
+        for origin, source in zip(self.rows.origins, source_keys, strict=False):
+            origin_buckets.append(
+                None if origin.relation_id is None
+                else groups.setdefault((origin.relation_id, source), array("I"))
+            )
+        anonymous: list[int] = []
+        for row in self.relations:
             if self.checkpoint is not None:
                 self.checkpoint()
-            source = ""
-            if rel.source is not None:
-                source = source_keys.get(id(rel.source))
-                if source is None:
-                    source = repr(asdict(rel.source))
-                    source_keys[id(rel.source)] = source
-            if rel.relation_id is not None:
-                # A relation family is already expanded in its declared domain
-                # order. Keep that order within the family: sorting solver
-                # column names lexically puts t10 before t2 and can turn a
-                # single forward pass into thousands of worklist retries.
-                return (0, rel.relation_id, source)
-            return (1, rel.terms, rel.sense, rel.constant, source)
-
-        self.equalities.clear()
-        self.inequalities.clear()
-        self._inequalities_by_symbol.clear()
-        for rel in sorted(self.relations, key=key):
-            if self.checkpoint is not None:
-                self.checkpoint()
-            self._index_relation(rel)
+            bucket = origin_buckets[self.rows.origin_slots[row]]
+            if bucket is None:
+                anonymous.append(row)
+            else:
+                bucket.append(row)
+        anonymous.sort(key=lambda row: (
+            tuple(self.rows.named_terms(row)),
+            self.rows.SENSES[self.rows.senses[row]], self.rows.constants[row],
+            source_keys[self.rows.origin_slots[row]],
+        ))
+        self.equality_rows = array("q", [-1]) * len(self.bounds)
+        self._equality_count = 0
+        self.inequalities = array("I")
+        for key in sorted(groups):
+            for row in groups[key]:
+                if self.checkpoint is not None:
+                    self.checkpoint()
+                self._index_relation(row)
+        for row in anonymous:
+            self._index_relation(row)
+        self._inequalities_by_symbol = SparseRowIndex(
+            self.rows, self.inequalities, self.checkpoint,
+        )
         self._indexes_ready = True
 
-    def _index_relation(self, rel: AffineRelation) -> None:
-        if not rel.terms:
+    def _substitution(self, row: int, lead: int) -> tuple[dict[str, Fraction], Fraction]:
+        divisor = Fraction.from_float(next(a for slot, a in self.rows.terms(row) if slot == lead))
+        return ({self.bounds.names[slot]: -Fraction.from_float(a) / divisor
+                 for slot, a in self.rows.terms(row) if slot != lead},
+                -Fraction.from_float(self.rows.constants[row]) / divisor)
+
+    def _index_relation(self, row: int) -> None:
+        terms = tuple(self.rows.terms(row))
+        if not terms:
             return
-        if rel.sense == "eq":
-            lead_var = next(
-                (name for name, coeff in rel.terms if coeff in (1.0, -1.0)),
-                rel.terms[0][0],
-            )
-            lead_coeff = next(coeff for name, coeff in rel.terms if name == lead_var)
-            divisor = Fraction.from_float(lead_coeff)
-            sub_terms = {
-                name: -Fraction.from_float(coeff) / divisor
-                for name, coeff in rel.terms if name != lead_var
-            }
-            sub_const = -Fraction.from_float(rel.constant) / divisor
-            current = self.equalities.get(lead_var)
-            candidate = (sub_terms, sub_const)
-            if current is None or repr(candidate) < repr(current):
-                self.equalities[lead_var] = candidate
+        if self.rows.senses[row] == 0:
+            lead = next((slot for slot, a in terms if a in (1.0, -1.0)), terms[0][0])
+            current = self.equality_rows[lead]
+            # Preserve the original exact lexical tie-break. Fractions are
+            # transient on collision/query, never retained for every row.
+            if current < 0:
+                self.equality_rows[lead] = row
+                self._equality_count += 1
+            elif repr(self._substitution(row, lead)) < repr(self._substitution(current, lead)):
+                self.equality_rows[lead] = row
         else:
-            index = len(self.inequalities)
-            self.inequalities.append(rel)
-            for sym, _ in rel.terms:
-                self._inequalities_by_symbol[sym].append(index)
+            self.inequalities.append(row)
 
     @staticmethod
     def _source_dict(source: SourceLocation | None) -> dict[str, Any] | None:
@@ -277,15 +279,16 @@ class BoundInferenceEngine:
                 if source is not None else None)
 
     def _record_conflict(
-        self, symbol: str, relation: AffineRelation,
+        self, symbol: str, row: int,
         prior_sources: tuple[SourceLocation | None, SourceLocation | None] = (None, None),
     ) -> None:
+        origin = self.rows.origin(row)
         self.conflicts.append({
             "symbol": symbol,
-            "relation_id": relation.relation_id,
-            "source": relation.source,
-            "axis": relation.axis,
-            "index": relation.index,
+            "relation_id": origin.relation_id,
+            "source": origin.source,
+            "axis": origin.axis,
+            "index": self.rows.indices[row],
             "prior_sources": prior_sources,
         })
 
@@ -438,31 +441,47 @@ class BoundInferenceEngine:
                 count = family.domain.count if family.domain.kind == "step" else 1
             known = dict(constants)
             reusable = template.fast_lhs is not None and template.fast_rhs is not None
-            cached_rows = [] if reusable else None
-            if cached_rows is not None:
-                self.technical_rows[family.identity] = cached_rows
+            cached = TechnicalRowCache(inst, family.relation.id) if reusable else None
+            if cached is not None:
+                self.technical_rows[family.identity] = cached
+            bound_row = -2
+
             for step in range(count):
                 if self.checkpoint is not None:
                     self.checkpoint()
                 for name, values in series.items():
                     known[name] = values[step]
-                def resolve(key: tuple[str, int]) -> tuple[str, int]:
+                bound_row = -2
+
+                def capture(terms: tuple, constant: float, family=family, step=step) -> None:
+                    nonlocal bound_row
+                    bound_row = self.rows.append(
+                        ((name, coeff) for (name, _), coeff in terms), constant, "eq",
+                        family.source, family.identity, family.domain.kind, step,
+                    )
+                    if any(self.rows.terms(bound_row)):
+                        self.relations.append(bound_row)
+                    elif constant != 0.0:
+                        self.relations.append(bound_row)
+                        self._record_conflict("<constant>", bound_row)
+
+                def resolve(key: tuple[str, int], inst=inst, step=step) -> tuple[str, int]:
                     name, offset = key
                     return (self._column(inst, name, step + offset), 0)
                 try:
                     lowered = bind_technical(
                         template, instance=inst, step=step, known=known,
                         initial=initial, bound=box, affine_column=resolve,
-                        affine_row_name=f"{inst}__{family.relation.id}__t{step}",
+                        affine_sink=capture,
                     )
                 except LoweringUnsupportedError:
                     # Non-affine mutex is lowered exactly by the production
                     # consumer, not used to invent an affine analysis relation.
-                    if cached_rows is not None:
-                        cached_rows.append(None)
+                    if cached is not None:
+                        cached.rows.append(-1)
                     continue
-                if cached_rows is not None:
-                    cached_rows.append(lowered.constraints)
+                if cached is not None:
+                    cached.rows.append(bound_row)
                 if lowered.variables:
                     continue
                 for row in lowered.constraints:
@@ -508,23 +527,21 @@ class BoundInferenceEngine:
                 rounded = math.nextafter(rounded, -math.inf)
             return rounded if math.isfinite(rounded) else None
 
-        uses: dict[str, list[int]] = defaultdict(list)
-        for idx, rel in enumerate(self.relations):
-            if self.checkpoint is not None:
-                self.checkpoint()
-            for symbol, _ in rel.terms:
-                uses[symbol].append(idx)
-
+        uses = SparseRowIndex(self.rows, self.relations, self.checkpoint)
         initial_count = len(self.relations)
-        initial = set(range(initial_count))
-        queue = deque(range(initial_count))
-        pending = set(queue)
+        # Visit the initial range lazily. Only already-visited dependents need
+        # a numeric FIFO entry and pending bit; no millions of boxed integers
+        # in three overlapping queue/set objects.
+        next_initial = 0
+        queue = array("I")
+        head = 0
+        pending = bytearray(initial_count)
         steps = 0
         bound_updates = 0
         requeues = 0
         self_requeues = 0
         dependent_requeues = 0
-        max_queue_size = len(queue)
+        max_queue_size = initial_count
         step_limit = initial_count + budget
 
         def finish() -> None:
@@ -542,28 +559,36 @@ class BoundInferenceEngine:
                 incomplete_symbols=tuple(sorted(self.incomplete_symbols)),
             )
 
-        while queue and steps < initial_count + budget:
+        while (next_initial < initial_count or head < len(queue)) and steps < step_limit:
             if self.checkpoint is not None:
                 self.checkpoint()
             steps += 1
-            rel_idx = queue.popleft()
-            pending.discard(rel_idx)
-            initial.discard(rel_idx)
-            rel = self.relations[rel_idx]
-            coefficients = [(sym, exact(a)) for sym, a in rel.terms]
-            rhs = -exact(rel.constant)
+            if next_initial < initial_count:
+                rel_idx = next_initial
+                next_initial += 1
+            else:
+                rel_idx = queue[head]
+                head += 1
+                pending[rel_idx] = 0
+                if head >= 65536 and head * 2 >= len(queue):
+                    del queue[:head]
+                    head = 0
+            row = self.relations[rel_idx]
+            sense = self.rows.senses[row]
+            coefficients = [(slot, exact(a)) for slot, a in self.rows.terms(row)]
+            rhs = -exact(self.rows.constants[row])
             # Sum the interval of -a*x once. Removing the target contribution
             # gives exactly the previous nested-loop calculation. Update the
             # totals after each tightening to retain within-row propagation.
             # A count of unknown endpoints handles single-sided/free variables
             # without ever subtracting infinities.
-            endpoints: dict[str, tuple[Fraction | None, Fraction | None]] = {}
+            endpoints: dict[int, tuple[Fraction | None, Fraction | None]] = {}
             lower_sum = upper_sum = rhs
             lower_missing = upper_missing = 0
             for symbol, coefficient in coefficients:
                 if self.checkpoint is not None:
                     self.checkpoint()
-                lo, hi = self.bounds.get(symbol, (None, None))
+                lo, hi = self.bounds.endpoints(symbol)
                 low, high = (lo, hi) if coefficient < 0 else (hi, lo)
                 low_term = None if low is None else -coefficient * exact(low)
                 high_term = None if high is None else -coefficient * exact(high)
@@ -589,7 +614,7 @@ class BoundInferenceEngine:
 
                 new_lo: float | None = None
                 new_hi: float | None = None
-                if rel.sense == "eq":
+                if sense == 0:
                     if a_k > 0:
                         new_lo = (outward(lower_rest / a_k, False)
                                   if lower_rest is not None else None)
@@ -600,18 +625,18 @@ class BoundInferenceEngine:
                                   if upper_rest is not None else None)
                         new_hi = (outward(lower_rest / a_k, True)
                                   if lower_rest is not None else None)
-                elif rel.sense == "le":
+                elif sense == 1:
                     if a_k > 0 and upper_rest is not None:
                         new_hi = outward(upper_rest / a_k, True)
                     elif a_k < 0 and upper_rest is not None:
                         new_lo = outward(upper_rest / a_k, False)
-                elif rel.sense == "ge":
+                elif sense == 2:
                     if a_k > 0 and lower_rest is not None:
                         new_lo = outward(lower_rest / a_k, False)
                     elif a_k < 0 and lower_rest is not None:
                         new_hi = outward(lower_rest / a_k, True)
 
-                cur_lo, cur_hi = self.bounds.get(target, (None, None))
+                cur_lo, cur_hi = self.bounds.endpoints(target)
                 next_lo = (new_lo if cur_lo is None else max(cur_lo, new_lo)
                            ) if new_lo is not None else cur_lo
                 next_hi = (new_hi if cur_hi is None else min(cur_hi, new_hi)
@@ -622,11 +647,12 @@ class BoundInferenceEngine:
                     # A source-level inconsistent system must keep all exact
                     # production rows and let the solver report infeasibility.
                     self._record_conflict(
-                        target, rel, self.provenance.get(target, (None, None)),
+                        self.bounds.names[target], row,
+                        self.provenance.get(self.bounds.names[target], (None, None)),
                     )
                     finish()
                     return
-                self.bounds[target] = (next_lo, next_hi)
+                self.bounds.set_endpoints(target, next_lo, next_hi)
                 low, high = (next_lo, next_hi) if a_k < 0 else (next_hi, next_lo)
                 low_term = None if low is None else -a_k * exact(low)
                 high_term = None if high is None else -a_k * exact(high)
@@ -636,12 +662,13 @@ class BoundInferenceEngine:
                 upper_sum += (high_term or 0) - (old_high_term or 0)
                 endpoints[target] = (low_term, high_term)
                 bound_updates += 1
-                prior_lo, prior_hi = self.provenance.get(target, (None, None))
-                self.provenance[target] = (
-                    rel.source if next_lo != cur_lo else prior_lo,
-                    rel.source if next_hi != cur_hi else prior_hi,
-                )
-                for dependent in uses[target]:
+                source_slot = self.rows.origin(row).source_slot
+                self.bounds.has_sources[target] = 1
+                if next_lo != cur_lo:
+                    self.bounds.lower_sources[target] = source_slot
+                if next_hi != cur_hi:
+                    self.bounds.upper_sources[target] = source_slot
+                for dependent in uses.rows_for(target):
                     # Tightening a bound from one affine row cannot improve
                     # that same row again: its opposite-side interval already
                     # used the other variables' endpoints. Only a DIFFERENT
@@ -649,18 +676,21 @@ class BoundInferenceEngine:
                     # redundant second visit for every state-transition row.
                     if dependent == rel_idx:
                         continue
-                    if dependent not in initial and dependent not in pending:
+                    if dependent < next_initial and not pending[dependent]:
                         queue.append(dependent)
-                        pending.add(dependent)
+                        pending[dependent] = 1
                         requeues += 1
                         dependent_requeues += 1
-                max_queue_size = max(max_queue_size, len(queue))
-        if queue:
+                max_queue_size = max(
+                    max_queue_size, initial_count - next_initial + len(queue) - head,
+                )
+        if next_initial < initial_count or head < len(queue):
             self.budget_exhausted = True
             self.incomplete_symbols = frozenset(
-                symbol
-                for rel_idx in pending
-                for symbol, _ in self.relations[rel_idx].terms
+                self.bounds.names[slot]
+                for rel_idx in range(initial_count)
+                if rel_idx >= next_initial or pending[rel_idx]
+                for slot, _ in self.rows.terms(self.relations[rel_idx])
             )
         finish()
 
@@ -692,6 +722,13 @@ class BoundInferenceEngine:
 
         No tolerance-based cancellation or float coefficient loss is permitted.
         """
+        if not self._indexes_ready:
+            self._index_relations()
+
+        def has_equality(name: str) -> bool:
+            slot = self.bounds.slots.get(name)
+            return slot is not None and self.equality_rows[slot] >= 0
+
         current = {
             k: Fraction.from_float(float(v))
             for k, v in terms.items() if v != 0
@@ -702,22 +739,23 @@ class BoundInferenceEngine:
         # next substitutable variable. Each equality lead is visited at most
         # once, as in the previous implementation.
         seen: set[str] = set()
-        queue = deque(k for k in current if k in self.equalities)
-        limit = min(len(self.equalities), 1000)
+        queue = deque(k for k in current if has_equality(k))
+        limit = min(self._equality_count, 1000)
         while queue and len(seen) < limit:
             lead = queue.popleft()
             if lead in seen or lead not in current:
                 continue
             seen.add(lead)
             multiplier = current.pop(lead)
-            replacement, base = self.equalities[lead]
+            slot = self.bounds.slots[lead]
+            replacement, base = self._substitution(self.equality_rows[slot], slot)
             offset += multiplier * base
             for k, coeff in replacement.items():
                 existed = k in current
                 value = current.get(k, Fraction(0)) + multiplier * coeff
                 if value:
                     current[k] = value
-                    if not existed and k in self.equalities and k not in seen:
+                    if not existed and has_equality(k) and k not in seen:
                         queue.append(k)
                 else:
                     current.pop(k, None)
@@ -792,22 +830,25 @@ class BoundInferenceEngine:
         relevant = sorted({
             index
             for sym in coeffs
-            for index in self._inequalities_by_symbol.get(sym, ())
+            if sym in self.bounds.slots
+            for index in self._inequalities_by_symbol.rows_for(self.bounds.slots[sym])
         })
         for index in relevant:
-            rel = self.inequalities[index]
-            # rel.terms is already sorted; the first shared key is exactly the
+            row = self.inequalities[index]
+            row_terms = tuple(self.rows.named_terms(row))
+            sense = self.rows.SENSES[self.rows.senses[row]]
+            # Terms are already sorted; the first shared key is exactly the
             # same pivot chosen by the previous dense algorithm.
-            pivot = next((sym for sym, _ in rel.terms if sym in coeffs), None)
+            pivot = next((sym for sym, _ in row_terms if sym in coeffs), None)
             if pivot is None:
                 continue
-            pivot_coeff = next(a for sym, a in rel.terms if sym == pivot)
+            pivot_coeff = next(a for sym, a in row_terms if sym == pivot)
             factor = coeffs[pivot] / Fraction.from_float(pivot_coeff)
             allowed = (
-                (factor > 0 and rel.sense == "le" and side == "max")
-                or (factor > 0 and rel.sense == "ge" and side == "min")
-                or (factor < 0 and rel.sense == "le" and side == "min")
-                or (factor < 0 and rel.sense == "ge" and side == "max")
+                (factor > 0 and sense == "le" and side == "max")
+                or (factor > 0 and sense == "ge" and side == "min")
+                or (factor < 0 and sense == "le" and side == "min")
+                or (factor < 0 and sense == "ge" and side == "max")
             )
             if not allowed:
                 continue
@@ -815,9 +856,9 @@ class BoundInferenceEngine:
             # The new expression is base - factor*row. Every symbol outside
             # the sparse row has an unchanged contribution. Update only row
             # symbols, and keep the exact count of unbounded endpoints.
-            total = base_sum - factor * Fraction.from_float(rel.constant)
+            total = base_sum - factor * Fraction.from_float(self.rows.constants[row])
             unbounded = missing
-            for sym, a in rel.terms:
+            for sym, a in row_terms:
                 previous = per_symbol.get(sym, Fraction(0))
                 if previous is None:
                     unbounded -= 1
