@@ -406,8 +406,7 @@ class CompilerAnalysis:
 
     def technical_rows(self, identity: str, step: int) -> tuple[LinearConstraint, ...] | None:
         """Reuse bound-independent affine rows from this same analysis pass."""
-        rows = self.inference.technical_rows.get(identity)
-        return None if rows is None else rows[step]
+        return self.inference.technical_constraints(identity, step)
 
     def relations(self, kind: str) -> tuple[SemanticRelation, ...]:
         return self._groups.get(kind, ())
@@ -484,7 +483,9 @@ class CompilerAnalysis:
         if fact is not None:
             lo = fact.lower if inf_lo is None else (inf_lo if fact.lower is None else max(fact.lower, inf_lo))
             hi = fact.upper if inf_hi is None else (inf_hi if fact.upper is None else min(fact.upper, inf_hi))
-            lo_src, hi_src = self.inference.provenance.get(resolved_name, (fact.lower_source, fact.upper_source))
+            lo_src, hi_src = self.inference.provenance.get(
+                resolved_name, (fact.lower_source, fact.upper_source),
+            )
             return BoundFact(
                 symbol=name,
                 lower=lo,
@@ -532,12 +533,21 @@ class CompilerAnalysis:
             inst, _, local = name.partition(".")
             columns = self.inventory.step_columns.get((inst, local))
             if columns:
-                step_bounds = [self.inference.bounds.get(col, (None, None)) for col in columns]
-                if all(lo is not None for lo, _ in step_bounds):
-                    envelope_lo = min(lo for lo, _ in step_bounds)
+                envelope_lo, envelope_hi = math.inf, -math.inf
+                all_lo = all_hi = True
+                for col in columns:
+                    lo, hi = self.inference.bounds.get(col, (None, None))
+                    if lo is None:
+                        all_lo = False
+                    else:
+                        envelope_lo = min(envelope_lo, lo)
+                    if hi is None:
+                        all_hi = False
+                    else:
+                        envelope_hi = max(envelope_hi, hi)
+                if all_lo:
                     inf_lo = envelope_lo if inf_lo is None else max(inf_lo, envelope_lo)
-                if all(hi is not None for _, hi in step_bounds):
-                    envelope_hi = max(hi for _, hi in step_bounds)
+                if all_hi:
                     inf_hi = envelope_hi if inf_hi is None else min(inf_hi, envelope_hi)
 
         if variable is None and inf_lo is None and inf_hi is None:
@@ -557,7 +567,7 @@ class CompilerAnalysis:
             self.bound_requests.extend(
                 BoundRequest(relation.identity, relation.source, period, side,
                              (name,), value)
-                for side, value in zip(("min", "max"), result)
+                for side, value in zip(("min", "max"), result, strict=False)
             )
         return result
 
