@@ -24,6 +24,7 @@ from iesplan.computation.generators.linear import (
     lower_planning_expression,
     lower_relation,
 )
+from iesplan.computation.generators.matrix import SparseModel
 from iesplan.computation.generators.mps import write_mps
 from iesplan.computation.generators.project import (
     build_project_model,
@@ -45,6 +46,7 @@ __all__ = [
     "LinearExpression",
     "LinearModel",
     "LinearVariable",
+    "SparseModel",
     "build_project_model",
     "build_project_model_with_facts",
     "build_registry",

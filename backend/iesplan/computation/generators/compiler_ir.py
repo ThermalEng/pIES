@@ -370,7 +370,7 @@ class CompilerAnalysis:
     """
 
     def __init__(self, inventory: CompilerInventory, variables: Mapping[str, LinearVariable],
-                 *, checkpoint: Callable[[], None] | None = None):
+                 *, checkpoint: Callable[[], None] | None = None, bounds=None, rows=None):
         if not inventory.sealed:
             raise RuntimeError("relation collection must be complete before analysis")
         self.inventory = inventory
@@ -402,7 +402,18 @@ class CompilerAnalysis:
         self.uses = {name: frozenset(ids) for name, ids in uses.items()}
         self.bound_requests: list[BoundRequest] = []
         from iesplan.computation.generators.bound_inference import BoundInferenceEngine
-        self.inference = BoundInferenceEngine(inventory, variables, checkpoint=checkpoint)
+        self.inference = BoundInferenceEngine(
+            inventory, variables, checkpoint=checkpoint, bounds=bounds, rows=rows,
+        )
+
+    def technical_row_slot(self, identity: str, step: int) -> int | None:
+        cache = self.inference.technical_rows.get(identity)
+        if cache is None or cache.rows[step] == -1:
+            return None
+        return cache.rows[step]
+
+    def semantic_row_slot(self, identity: str, step: int) -> int:
+        return self.inference.semantic_rows[identity][step]
 
     def technical_rows(self, identity: str, step: int) -> tuple[LinearConstraint, ...] | None:
         """Reuse bound-independent affine rows from this same analysis pass."""

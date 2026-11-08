@@ -88,14 +88,17 @@ class BoundInferenceEngine:
         *,
         budget: int = 5000,
         checkpoint: Callable[[], None] | None = None,
+        bounds: BoundTable | None = None,
+        rows: AffineRows | None = None,
     ) -> None:
         self.inventory = inventory
         self.variables = variables
         self.checkpoint = checkpoint
         self.technical_rows: dict[str, TechnicalRowCache] = {}
-        self.bounds = BoundTable()
+        self.bounds = BoundTable() if bounds is None else bounds
         self.provenance = BoundSources(self.bounds)
-        self.rows = AffineRows(self.bounds)
+        self.rows = AffineRows(self.bounds.symbols) if rows is None else rows
+        self.semantic_rows: dict[str, array] = {}
         # Analysis row ordinals remain in the original source/step order.
         # A true alias-cancelled row can still be reused by the final emitter
         # without becoming a spurious analysis operation.
@@ -192,9 +195,16 @@ class BoundInferenceEngine:
             if not filtered:
                 self._record_conflict("<constant>", row)
             self._indexes_ready = False
+        else:
+            row = -2
+        if relation_id is not None:
+            slots = self.semantic_rows.get(relation_id)
+            if slots is None:
+                slots = self.semantic_rows[relation_id] = array("q")
+            slots.append(row)
 
     def technical_constraints(self, identity: str, step: int) -> tuple[LinearConstraint, ...] | None:
-        """Materialize only the final consumer's current row, not all slots."""
+        """Inspect one public row without retaining a per-step DTO graph."""
         cache = self.technical_rows.get(identity)
         if cache is None or cache.rows[step] == -1:
             return None
@@ -727,7 +737,8 @@ class BoundInferenceEngine:
 
         def has_equality(name: str) -> bool:
             slot = self.bounds.slots.get(name)
-            return slot is not None and self.equality_rows[slot] >= 0
+            return (slot is not None and slot < len(self.equality_rows)
+                    and self.equality_rows[slot] >= 0)
 
         current = {
             k: Fraction.from_float(float(v))
