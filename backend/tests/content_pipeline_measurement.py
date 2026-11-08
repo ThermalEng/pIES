@@ -1,7 +1,9 @@
 """Docker-only public generate→checkpoint→restore→runtime-preparation measurement.
 
 No solver is started. Run each size/repetition in a fresh, equally limited container.
-The explicit baseline switch measures the former implementation, not a production mode.
+Only the implementation in the mounted checkout is measured; there is no baseline mode.
+For old/new comparisons, run each actual implementation separately and record its
+Git commit, any working-tree changes, command, inputs and container limits with the output.
 """
 from __future__ import annotations
 
@@ -58,12 +60,11 @@ class PreparationExecutor:
 
 
 def main():
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(description=__doc__)
     source = parser.add_mutually_exclusive_group(required=True)
     source.add_argument("--years", type=int)
     source.add_argument("--snapshot-id", type=int)
     parser.add_argument("--project-id", type=int, default=1)
-    parser.add_argument("--baseline-bytes", action="store_true")
     args = parser.parse_args()
     timings = {}
     stages = {}
@@ -159,7 +160,7 @@ def main():
     print(json.dumps({
         "scope": "frozen input" if args.snapshot_id is not None else "public campus",
         "stages": "generate→persist→release→restore→runtime input copy; no solve",
-        "implementation": "baseline_bytes" if args.baseline_bytes else "content_records",
+        "implementation": "content_records",
         "years": args.years, "timings_seconds": timings, "total_seconds": total,
         "stage_resources": stages,
         "persisted_input_bytes": file_bytes,
