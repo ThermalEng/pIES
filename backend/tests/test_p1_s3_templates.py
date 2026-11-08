@@ -15,6 +15,7 @@ import pytest
 from bundle_testkit import materialized_file
 from s2_reference_lowerer import lower_relation_s2
 from test_battery_planning import _rows
+from test_battery_planning import battery as battery
 from test_linear_lowering import (
     BILINEAR_YAML,
     HEATER_YAML,
@@ -22,6 +23,7 @@ from test_linear_lowering import (
     SOC_YAML,
     _relation,
 )
+from test_p1_compiler_s1 import measured_generate as measured_generate
 from test_project_model import _contribution
 
 from iesplan.computation.generators.compiler_ir import CompilerAnalysis
