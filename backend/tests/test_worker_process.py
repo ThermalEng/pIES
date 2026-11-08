@@ -120,6 +120,23 @@ def test_abrupt_task_exit_is_reaped_without_fabricating_terminal_state(worker, m
     fail.assert_not_called()  # Existing expiry recovery owns interrupted attempts.
 
 
+def test_supervised_exit_reports_evidence_with_the_original_claim(worker, monkeypatch):
+    claim = SimpleNamespace(task_id=11, attempt_id=12, attempt_no=1, lease_token="token")
+    before, after = object(), object()
+    worker._claim, worker._resource_start = claim, before
+    worker._current_task_id = claim.task_id
+    worker._cancel_event = worker._process_context.Event()
+    worker._task_process = worker._process_context.Process(target=_exit_abruptly)
+    worker._task_process.start()
+    worker._task_process.join(timeout=10)
+    report = Mock()
+    monkeypatch.setattr(worker_app, "observe_local_resources", lambda: after)
+    monkeypatch.setattr(worker_app, "report_task_process_exit", report)
+    worker._reap_task_process()
+    report.assert_called_once_with(None, claim, exit_code=7, before=before, after=after)
+    assert worker._claim is None and worker._resource_start is None
+
+
 def test_worker_shutdown_terminates_and_reaps_unresponsive_task(worker, monkeypatch):
     context = worker._process_context
     started, finished, stop = context.Event(), context.Event(), context.Event()

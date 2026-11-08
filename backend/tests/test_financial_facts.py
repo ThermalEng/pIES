@@ -13,6 +13,7 @@ from decimal import Decimal
 from types import SimpleNamespace
 
 import pytest
+from bundle_testkit import materialized_file
 from test_highs_result_adapter import (
     SOLUTION_PATH,
     _receipt,
@@ -77,7 +78,7 @@ def _finance_stub():
 def _seal(bundle, solution_raw, finance, snapshot):
     """生产 Adapter（4.0.0）恢复 + 封存评价，返回（结果，封存）。"""
     adapted = HIGHS_ADAPTER.adapt(
-        _wrap_bundle({path: bundle.files[path] for path in SOLVER_FILES}),
+        _wrap_bundle({path: materialized_file(bundle, path) for path in SOLVER_FILES}),
         _receipt(result_adapter_ref=ADAPTER_REF),
         {SOLUTION_PATH: solution_raw},
     )
@@ -217,7 +218,7 @@ def test_source_out_sale_uses_only_its_meter_and_preserves_tax_seal(tmp_path) ->
         bundle = HIGHS_MILP_PROVIDER.generate(
             artifact, models, materialized, finance, config, evaluation
         )
-        metadata = json.loads(bundle.files["input/parameters.json"])
+        metadata = json.loads(materialized_file(bundle, "input/parameters.json"))
         terms = metadata["components"]["export_meter__period_energy_sale"]["terms"]
         port = "grid1__supply" if at_source else "heater1__electricity_in"
         assert len(terms) == 17520

@@ -12,8 +12,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol, TypeAlias
 
+from iesplan.core.content import Content, SizedContent
 from iesplan.core.errors import AppError, ConflictError
-
 
 ObjectId: TypeAlias = int | str
 
@@ -83,16 +83,16 @@ class RefInfo:
 class ObjectStore(Protocol):
     """对象存储公开门面(最小公开协议, 10.3)。
 
-    - put: 写入字节 → 新对象句柄(每次写入新建对象, 按对象 id 寻址, 无内容去重);
-    - get: 按 ID 读取字节(缺失抛 ObjectCorruptError; 不做内容复核);
+    - put: 消费只读分块内容 → 新对象句柄(每次新建对象, 按 id 寻址, 无内容去重);
+    - get: 按 ID 返回会话独立内容引用(实际读取失败抛 ObjectCorruptError; 不做内容复核);
     - stat: 元数据视图(不含内容);
     - attach/detach: 建立/解除 owner 引用(引用清单为唯一权威, STO-02);
     - list_owners: 列出对象全部引用(调试/审计)。
     """
 
-    def put(self, content: bytes, media_type: str) -> ObjectHandle: ...
+    def put(self, content: Content, media_type: str) -> ObjectHandle: ...
 
-    def get(self, object_id: ObjectId) -> bytes: ...
+    def get(self, object_id: ObjectId) -> SizedContent: ...
 
     def stat(self, object_id: ObjectId) -> ObjectHandle: ...
 
@@ -107,15 +107,18 @@ class BlobStore(Protocol):
     """字节存储适配器(10.7: 文件系统 / S3 等 provider 接口)。
 
     实现只负责字节的可靠存取, 不理解业务引用与生命周期, 不做内容摘要与复核。
-    - put_blob: 完整字节原子提交到调用方给定的对象 id 路径, 返回 storage_path;
-    - get_blob: 按 storage_path 读取字节(缺失抛 BlobMissingError);
+    - put_blob: 分块原子提交到调用方给定的对象 id 路径, 返回内部位置和实际大小;
+    - get_content: 返回可重复分块读取的内容(实际读取失败抛 BlobMissingError);
+    - blob_size: 仅查询文件大小, 用于登记磁盘孤儿, 不读取内容;
     - delete_blob: 删除字节(不存在幂等);
     - reconcile: 扫描磁盘孤儿(有文件无记录)与缺失(有记录无文件), 幂等。
     """
 
-    def put_blob(self, content: bytes, oid: str) -> str: ...
+    def put_blob(self, content: Content, oid: str) -> tuple[str, int]: ...
 
-    def get_blob(self, storage_path: str) -> bytes: ...
+    def get_content(self, storage_path: str) -> Content: ...
+
+    def blob_size(self, storage_path: str) -> int: ...
 
     def delete_blob(self, storage_path: str) -> None: ...
 

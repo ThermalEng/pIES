@@ -29,6 +29,7 @@ from pathlib import Path
 import pytest  # type: ignore[import-untyped]
 from assembly_fixture import declare_compute_device  # noqa: E402
 from auth_helpers import make_user  # noqa: E402
+from bundle_testkit import materialized_file
 from fastapi.testclient import TestClient  # noqa: E402
 from sqlalchemy import create_engine  # noqa: E402
 from sqlalchemy.engine import Engine  # noqa: E402
@@ -1008,7 +1009,7 @@ class TestGeneratorEmptySeriesHorizon:
         bundle = HIGHS_MILP_PROVIDER.generate(
             artifact, models, materialized, finance, config, _frozen_evaluation()
         )
-        mps = bytes(bundle.files["input/problem.mps"])
+        mps = bytes(materialized_file(bundle, "input/problem.mps"))
         assert f"store1__soc__t{FULL_STEPS - 1}".encode() in mps
 
 

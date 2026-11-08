@@ -11,6 +11,7 @@ from decimal import Decimal
 from types import SimpleNamespace
 
 import pytest
+from bundle_testkit import materialized_file
 from test_finance_s2_execution import _money
 from test_p3_f2_execution import _relations
 from test_p3_network_boundaries import _solve
@@ -307,7 +308,7 @@ def test_network_and_finance_share_physical_cash_tax_asset_and_frozen_baseline(t
     expected_npv = Decimal("-55") + Decimal("11.2396") / Decimal("1.1") + Decimal("11.362") / Decimal("1.21")
     assert float(fin["evaluation"]["npv"]) == pytest.approx(float(expected_npv))
     assert float(candidate.outputs["solution"]["objective_value"]) == pytest.approx(float(expected_npv))
-    sources = json.loads(bundle.files["input/parameters.json"])["model_sources"]["sources"]
+    sources = json.loads(materialized_file(bundle, "input/parameters.json"))["model_sources"]["sources"]
     buses = {tuple(source["inputs"]) for source in sources.values() if source["kind"] == "bus"}
     assert buses == {("route.power_in", "source.power_out"), ("load.electricity_in", "route.power_out")}
     assert (

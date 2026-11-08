@@ -29,6 +29,7 @@ from __future__ import annotations
 import logging
 import secrets
 import shutil
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -37,6 +38,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from iesplan.config import settings
+from iesplan.core.content import Content, MemoryContent, SizedContent, read_content
 from iesplan.core.errors import AppError, NotFoundError
 from iesplan.storage.adapters.filesystem import FileSystemBlobStore
 from iesplan.storage.contracts import (
@@ -44,8 +46,8 @@ from iesplan.storage.contracts import (
     ObjectCorruptError,
     ObjectHandle,
     ObjectNotPendingDeletionError,
-    RefInfo,
     ReferenceNotFoundError,
+    RefInfo,
     RetentionPolicy,
 )
 from iesplan.storage.persistence import (
@@ -219,17 +221,30 @@ def put_object(
     返回:
         ObjectHandle(新建对象)。
     """
+    return put_content(
+        db, MemoryContent(content), content_type, source_category,
+        ref_type, ref_id, ref_entity_type, purpose, actor_id=actor_id, actor_type=actor_type,
+    )
+
+
+def put_content(
+    db: Session, content: Content, content_type: str, source_category: str,
+    ref_type: str | None = None, ref_id: int | None = None,
+    ref_entity_type: str | None = None, purpose: str | None = None,
+    *, actor_id: int | None = None, actor_type: str = "system",
+) -> ObjectHandle:
+    """Consume chunks atomically; size is the actual write count, never a second read."""
     # 1. 对象 id(随机 64 位 hex, 满足 ck_objects_oid; 文件名即 oid)
     oid = secrets.token_hex(32)
 
     # 2. BlobStore 原子落盘(临时区 → fsync → rename)
     store = get_blob_store()
-    storage_path = store.put_blob(content, oid)
+    storage_path, size = store.put_blob(content, oid)
 
     # 3. 元数据行(本函数只 flush, 提交/回滚由调用方负责)
     obj = StoredObject(
         oid=oid,
-        size_bytes=len(content),
+        size_bytes=size,
         storage_path=storage_path,
         media_type=content_type,
         status="stored",
@@ -255,8 +270,23 @@ def put_object(
 # ---------------------------------------------------------------------------
 
 
-def get_object(db: Session, object_id: int | str) -> bytes:
-    """按对象 id 读取对象字节; 记录/文件缺失抛 ObjectCorruptError。
+@dataclass(frozen=True, slots=True)
+class _ObjectContent:
+    source: Content
+    object_id: int
+    size_bytes: int
+
+    def iter_chunks(self):
+        try:
+            yield from self.source.iter_chunks()
+        except BlobMissingError as exc:
+            raise ObjectCorruptError(
+                "", params={"object_id": self.object_id, "reason": "missing"},
+            ) from exc
+
+
+def get_object_content(db: Session, object_id: int | str) -> SizedContent:
+    """返回独立于会话的可重复读取内容；实际读取失败抛 ObjectCorruptError。
 
     不做内容复核(大小/摘要比对已删除, 二进制分发完整性不由业务程序负责)。
     """
@@ -266,15 +296,12 @@ def get_object(db: Session, object_id: int | str) -> bytes:
             "",
             params={"object_id": obj.id, "oid": obj.oid, "reason": "missing_path"},
         )
-    try:
-        return get_blob_store().get_blob(obj.storage_path)
-    except BlobMissingError as exc:
-        # §16: 错误响应不得含主机绝对路径; 适配器异常 params 携带的路径只进日志
-        logger.warning("对象文件缺失(仅日志): object_id=%s path=%s", obj.id, exc.params)
-        raise ObjectCorruptError(
-            "",
-            params={"object_id": obj.id, "oid": obj.oid, "reason": "missing"},
-        ) from exc
+    return _ObjectContent(get_blob_store().get_content(obj.storage_path), obj.id, obj.size_bytes)
+
+
+def get_object(db: Session, object_id: int | str) -> bytes:
+    """Explicit small-object convenience, using the same content source."""
+    return read_content(get_object_content(db, object_id))
 
 
 def object_info(db: Session, object_id: int | str) -> dict:
@@ -1003,7 +1030,7 @@ def reconcile(db: Session, *, dry_run: bool = True) -> dict:
     if not dry_run:
         for path in orphans:
             try:
-                content = store.get_blob(path)
+                size = store.blob_size(path)
             except BlobMissingError:
                 continue
             # 文件名即对象 id(不计算内容摘要); 冲突时跳过(已有记录认领)
@@ -1015,7 +1042,7 @@ def reconcile(db: Session, *, dry_run: bool = True) -> dict:
                 continue
             obj = StoredObject(
                 oid=oid,
-                size_bytes=len(content),
+                size_bytes=size,
                 storage_path=path,
                 media_type="application/octet-stream",
                 status="stored",
@@ -1029,10 +1056,10 @@ def reconcile(db: Session, *, dry_run: bool = True) -> dict:
         # dry-run 只报告文件名(即认领后的对象 id)与大小, 不泄内部路径(§11)
         for path in orphans:
             try:
-                content = store.get_blob(path)
+                size = store.blob_size(path)
                 orphan_reported.append({
                     "oid": Path(path).name,
-                    "size_bytes": len(content),
+                    "size_bytes": size,
                 })
             except BlobMissingError:
                 continue
@@ -1045,9 +1072,7 @@ def reconcile(db: Session, *, dry_run: bool = True) -> dict:
         if not obj.storage_path:
             corrupt_reported.append({"object_id": obj.id, "oid": obj.oid, "reason": "missing_path"})
             continue
-        try:
-            store.get_blob(obj.storage_path)
-        except BlobMissingError:
+        if not store.exists(obj.storage_path):
             corrupt_reported.append({"object_id": obj.id, "oid": obj.oid, "reason": "missing_file"})
             continue
 

@@ -6,6 +6,7 @@ import subprocess
 from copy import deepcopy
 
 import pytest
+from bundle_testkit import content_bytes, materialized_file
 from test_highs_result_adapter import _receipt
 from test_p3_port_network import SOURCE
 from test_project_model import HEATER_YAML, LOAD_YAML, _evaluation_n, _finance_payload, _island_doc
@@ -92,7 +93,7 @@ def _case(texts, connections, predefined=None):
 
 
 def _solve(bundle, tmp_path):
-    (tmp_path / "problem.mps").write_bytes(bundle.files["input/problem.mps"])
+    (tmp_path / "problem.mps").write_bytes(materialized_file(bundle, "input/problem.mps"))
     process = subprocess.run(
         ["/usr/local/bin/ies-highs-solver", "problem.mps", "--solution_file", "values.sol",
          "--time_limit", "30", "--random_seed", "0"],
@@ -139,7 +140,7 @@ def test_unreferenced_ports_close_but_predefined_blind_and_state_do_not(tmp_path
         assert all(value == 0 for value in curves[f"unit.{name}"]["values"])
     assert curves["unit.count"]["values"][0] == 3
     assert curves["unit.count"]["values"][-1] == 8762
-    params = json.loads(bundle.files["input/parameters.json"])
+    params = json.loads(materialized_file(bundle, "input/parameters.json"))
     sources = params["model_sources"]["sources"]
     for op in operations:
         source = sources[f"relation:{op.identity}"]
@@ -165,7 +166,7 @@ def test_missing_external_supply_is_not_free_energy(tmp_path, carrier, external_
     if external_source:
         assert result.outputs["series"]["heater.electricity_in"]["values"][0] == pytest.approx(4 / 0.9)
     else:
-        sources = json.loads(bundle.files["input/parameters.json"])["model_sources"]["sources"]
+        sources = json.loads(materialized_file(bundle, "input/parameters.json"))["model_sources"]["sources"]
         assert sources["relation:network.closed.heater.electricity_in"]["location"]["binding_id"] == (
             "heater.electricity_in"
         )
@@ -207,7 +208,8 @@ def test_different_port_domains_balance_totals_not_pairwise_values(tmp_path):
     checked = validate_assembly_doc(reversed_doc, device_documents=documents,
                                     finance_snapshots={"obj-finance": inputs[3]})
     assert checked.ok, checked.diagnostics
-    assert HIGHS_MILP_PROVIDER.generate(checked.artifact, *inputs[1:]).files == bundle.files
+    again = HIGHS_MILP_PROVIDER.generate(checked.artifact, *inputs[1:])
+    assert content_bytes(again.files) == content_bytes(bundle.files)
 
 
 @pytest.mark.parametrize("direction", ["out", "in"])

@@ -34,6 +34,7 @@ from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from iesplan.assembly.contracts import ValidatedAssemblyArtifact
 from iesplan.computation.sequences import MaterializedSet
+from iesplan.core.content import Content, FrozenMap, FrozenSequence, MemoryContent
 from iesplan.finance import EffectiveFinanceConfig, EvaluationInput
 from iesplan.modeling import DeviceMathContribution
 
@@ -61,6 +62,8 @@ EXECUTION_RECEIPT_VERSION = "1.0.0"
 
 def freeze_json_value(value: object) -> object:
     """递归冻结 JSON 值(dict → MappingProxy, list/tuple → tuple)。"""
+    if isinstance(value, (FrozenMap, FrozenSequence)):
+        return value
     if isinstance(value, Mapping):
         if not all(isinstance(key, str) for key in value):
             raise TypeError("边界映射键须为字符串")
@@ -76,7 +79,7 @@ def thaw_json_value(value: object) -> object:
     """递归解冻为普通 dict/list(与 ``freeze_json_value`` 互逆)。"""
     if isinstance(value, Mapping):
         return {str(key): thaw_json_value(item) for key, item in value.items()}
-    if isinstance(value, tuple):
+    if isinstance(value, (tuple, FrozenSequence)):
         return [thaw_json_value(item) for item in value]
     return value
 
@@ -138,7 +141,7 @@ class GeneratorProvider(Protocol):
         config: CalculationConfig,
         evaluation: EvaluationInput,
     ) -> SolverBundle:
-        """由直接输入生成完整求解包(聚合：manifest + 输入文件字节)。
+        """由直接输入生成完整求解包(聚合：manifest + 可重复分块读取的输入内容)。
 
         第三项为已完成物化的集合（``pending_predict`` 为空，由上游在预测
         产物合并后构成；此处信任类型化交接，不复核）。冻结评价确认为独立
@@ -632,13 +635,14 @@ class SolverBundle:
     """一次求解的完整不可变交接聚合(生产者 GeneratorProvider)。
 
     唯一完整形态：``manifest`` + 按 Bundle 规范相对路径索引的只读
-    ``files`` 字节映射。``manifest.inputs`` 声明的路径与 ``files`` 的键
+    ``files`` 内容映射。每个 ``Content.iter_chunks()`` 可从头重复读取，
+    分块边界没有语义，不暴露路径或文件句柄。``manifest.inputs`` 与键
     必须恰好对应(同集合)；``outputs`` 只是运行时可写声明，不在生成包中
-    预建内容。跨越边界后整体不可变(映射只读，字节不可变)。
+    预建内容。跨越边界后整体不可变。小文档字节在构造时转为 MemoryContent。
     """
 
     manifest: SolverBundleManifest
-    files: Mapping[str, bytes] = field(default_factory=dict)
+    files: Mapping[str, Content] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not isinstance(self.manifest, SolverBundleManifest):
@@ -648,12 +652,12 @@ class SolverBundle:
             )
         if not isinstance(self.files, Mapping):
             raise TypeError(
-                f"files 须为路径到字节的 Mapping，得到 {type(self.files).__name__}"
+                f"files 须为路径到内容的 Mapping，得到 {type(self.files).__name__}"
             )
         for path, content in self.files.items():
             _check_relative_path(path, "files")
-            if not isinstance(content, bytes):
-                raise TypeError(f"files[{path!r}] 须为 bytes，得到 {type(content).__name__}")
+            if not isinstance(content, (Content, bytes)):
+                raise TypeError(f"files[{path!r}] 须为 Content，得到 {type(content).__name__}")
         declared = {entry["path"] for entry in self.manifest.inputs}
         if set(self.files) != declared:
             raise ValueError(
@@ -661,7 +665,10 @@ class SolverBundle:
                 f"清单 {sorted(declared)!r} x 文件 {sorted(self.files)!r}"
             )
         object.__setattr__(
-            self, "files", MappingProxyType(dict(sorted(self.files.items())))
+            self, "files", MappingProxyType({
+                path: MemoryContent(value) if isinstance(value, bytes) else value
+                for path, value in sorted(self.files.items())
+            })
         )
 
 
@@ -1072,6 +1079,15 @@ class ComputeResult:
             "math_status": self.math_status,
             "outputs": thaw_json_value(self.outputs),
         }
+
+    def to_mapping(self) -> Mapping[str, object]:
+        """Read-only serialization view sharing the already frozen result."""
+        return MappingProxyType({
+            "schema": self.schema, "schema_version": self.schema_version,
+            "bundle_id": self.bundle_id, "receipt_id": self.receipt_id,
+            "execution_status": self.execution_status, "math_status": self.math_status,
+            "outputs": self.outputs,
+        })
 
 
 __all__ = [

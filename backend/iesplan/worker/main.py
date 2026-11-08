@@ -77,6 +77,8 @@ class Worker:
         self._task_process: Any = None
         self._cancel_event: Any = None
         self._current_task_id: int | None = None
+        self._claim: worker_app.Claim | None = None
+        self._resource_start: Any = None
         self._last_heartbeat = 0.0
         self._last_renew = 0.0
         self._last_recovery = 0.0
@@ -205,6 +207,8 @@ class Worker:
         self._attempt_no = claim.attempt_no
         self._lease_token = claim.lease_token
         self._current_task_id = task_id
+        self._claim = claim
+        self._resource_start = worker_app.observe_local_resources()
         self._cancel_event = self._process_context.Event()
         self._task_process = self._process_context.Process(
             target=run_claimed_task,
@@ -218,6 +222,8 @@ class Worker:
             self._task_process = None
             self._cancel_event = None
             self._current_task_id = None
+            self._claim = None
+            self._resource_start = None
             raise  # 未执行的领取由现有到期回收路径收拢。
         logger.info("任务领取: task=%s attempt=%s worker=%s", task_id, claim.attempt_id, self.worker_id)
 
@@ -226,13 +232,21 @@ class Worker:
             return
         self._task_process.join()
         if self._task_process.exitcode:
-            # 不伪造业务终态。未封存的尝试沿原有租约回收路径恢复。
             logger.error("任务进程退出: task=%s exit_code=%s",
                          self._current_task_id, self._task_process.exitcode)
+            if self._claim is not None and not self._cancel_event.is_set():
+                with self.session_factory() as db:
+                    worker_app.report_task_process_exit(
+                        db, self._claim, exit_code=self._task_process.exitcode,
+                        before=self._resource_start,
+                        after=worker_app.observe_local_resources(),
+                    )
         self._task_process.close()
         self._task_process = None
         self._cancel_event = None
         self._current_task_id = None
+        self._claim = None
+        self._resource_start = None
 
     # -- 工具 ----------------------------------------------------------------
 

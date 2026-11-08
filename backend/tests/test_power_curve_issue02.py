@@ -10,6 +10,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from bundle_testkit import materialized_file
 
 from iesplan.assembly import validate_assembly_text
 from iesplan.computation import (
@@ -250,8 +251,8 @@ def test_fixed_capacity_hand_calculation_and_public_generation(capacity_kw: floa
         assert units[f"curve1__electric_out__t{step}"] == "kW"
     provider = build_registry((HIGHS_MILP_PROVIDER,)).resolve(config)
     bundle = provider.generate(artifact, models, materialized, finance, config, evaluation)
-    assert b"curve1__electric_out__t1" in bundle.files["input/problem.mps"]
-    metadata = json.loads(bundle.files["input/parameters.json"].decode("utf-8"))
+    assert b"curve1__electric_out__t1" in materialized_file(bundle, "input/problem.mps")
+    metadata = json.loads(materialized_file(bundle, "input/parameters.json").decode("utf-8"))
     assert metadata["unit_map"]["curve1__electric_out__t1"] == "kW"
 
 
@@ -271,7 +272,7 @@ def test_real_highs_solution_takes_over_capacity(tmp_path: Path) -> None:
     """仅 Docker CI 执行；真实求解值必须来自变量，而非 YAML 默认 13 kW。"""
     inputs = _inputs(13, optimize=True)
     bundle = build_registry((HIGHS_MILP_PROVIDER,)).resolve(inputs[4]).generate(*inputs)
-    mps = bundle.files["input/problem.mps"].decode("utf-8")
+    mps = materialized_file(bundle, "input/problem.mps").decode("utf-8")
     (tmp_path / "input").mkdir()
     (tmp_path / "output").mkdir()
     (tmp_path / "input/problem.mps").write_text(mps, encoding="utf-8")

@@ -22,7 +22,8 @@ from iesplan.computation import (
     SolverBundleManifest,
     thaw_json_value,
 )
-from iesplan.storage import add_ref, find_refs_by_owner, get_object, put_object
+from iesplan.core.content import Content
+from iesplan.storage import add_ref, find_refs_by_owner, get_object, get_object_content, put_object
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,7 +32,7 @@ class SavedRound:
     bundle_id: str
     bundle: SolverBundle
     receipt: ExecutionReceipt | None
-    outputs: Mapping[str, bytes]
+    outputs: Mapping[str, Content]
     files: Mapping[str, Mapping[str, Mapping[str, object]]]
 
 
@@ -111,7 +112,7 @@ def restore_round(db: Session, claim: Claim, number: int) -> SavedRound | None:
             generated_id = execution_data["generated_id"]
             generated = _read(db, generated_id)
             solution_refs = execution_data["files"]
-            outputs = {path: get_object(db, ref["object_id"])
+            outputs = {path: get_object_content(db, ref["object_id"])
                        for path, ref in solution_refs.items()}
     if receipt is None:
         entry = _find(db, claim, number, "generated")
@@ -122,7 +123,7 @@ def restore_round(db: Session, claim: Claim, number: int) -> SavedRound | None:
     bundle_refs = data["files"]
     bundle = SolverBundle(
         SolverBundleManifest(**data["manifest"]),
-        {path: get_object(db, ref["object_id"]) for path, ref in bundle_refs.items()},
+        {path: get_object_content(db, ref["object_id"]) for path, ref in bundle_refs.items()},
     )
     return SavedRound(generated_id, data["bundle_id"], bundle, receipt, outputs,
                       {"bundle_files": bundle_refs, "solution": solution_refs})
@@ -131,13 +132,13 @@ def restore_round(db: Session, claim: Claim, number: int) -> SavedRound | None:
 def execute_saved_bundle(
     *, plane: Any, bundle: SolverBundle, attempt: AttemptContext, claim: Claim,
     number: int, generated_id: int, session_factory: Callable[[], Session], stop=None,
-) -> tuple[ExecutionReceipt, dict[str, bytes], dict]:
+) -> tuple[ExecutionReceipt, Mapping[str, Content], dict]:
     files = {}
 
-    def handoff(receipt: ExecutionReceipt, outputs: Mapping[str, bytes]) -> None:
+    def handoff(receipt: ExecutionReceipt, outputs: Mapping[str, Content]) -> Mapping[str, Content]:
         nonlocal files
         if receipt.status == "fenced":
-            return
+            return {}
         with session_factory() as db:
             try:
                 media = {entry["path"]: entry["media_type"] for entry in receipt.outputs}
@@ -147,6 +148,8 @@ def execute_saved_bundle(
                 _publish(db, claim, number, "execution", {
                     "generated_id": generated_id, "receipt": receipt.to_dict(), "files": files,
                 }, {"solution": files})
+                return {path: get_object_content(db, ref["object_id"])
+                        for path, ref in files.items()}
             except Exception:
                 db.rollback()
                 raise

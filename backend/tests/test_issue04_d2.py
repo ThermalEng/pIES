@@ -9,11 +9,28 @@ import json
 from types import SimpleNamespace
 
 import pytest
+from bundle_testkit import materialized_file
+from test_highs_result_adapter import SOLUTION_PATH, _bundle, _receipt
+from test_vat_monthly import (
+    GRID_YAML,
+    HEATER_UNBOUNDED_YAML,
+    HEATER_YAML,
+    LOAD_UNBOUNDED_YAML,
+    LOAD_YAML,
+    TANK_YAML,
+    _contribution,
+    _device_docs,
+    _doc,
+    _finance_payload,
+    _solve_internal,
+)
 
-from iesplan.assembly import validate_assembly_doc
 from iesplan.application.worker.compute_cases import build_financial_evaluation
+from iesplan.assembly import validate_assembly_doc
 from iesplan.computation import (
-    CalculationConfig, HIGHS_MILP_PROVIDER, materialize_non_predictive_series,
+    HIGHS_MILP_PROVIDER,
+    CalculationConfig,
+    materialize_non_predictive_series,
 )
 from iesplan.computation.generators.highs_milp import GENERATOR_REF
 from iesplan.computation.generators.linear import LoweringUnsupportedError
@@ -22,13 +39,10 @@ from iesplan.core.yamlmini import load as yaml_load
 from iesplan.devices import init_registry
 from iesplan.devices.parser2 import parse_device_model_v2
 from iesplan.finance import (
-    ConstructionPayment, EvaluationInput, FinanceProfile, merge_effective,
-)
-from test_highs_result_adapter import SOLUTION_PATH, _bundle, _receipt
-from test_vat_monthly import (
-    GRID_YAML, HEATER_YAML, HEATER_UNBOUNDED_YAML,
-    LOAD_YAML, LOAD_UNBOUNDED_YAML, TANK_YAML,
-    _contribution, _device_docs, _doc, _finance_payload, _solve_internal,
+    ConstructionPayment,
+    EvaluationInput,
+    FinanceProfile,
+    merge_effective,
 )
 
 METER_RATE = {"rate": {"value": "12", "unit": "CNY/kW"}}
@@ -215,8 +229,8 @@ def _solved(inputs, tmp_path):
     _, _, raw = _solve_internal(bundle, tmp_path)
     adapted = HIGHS_ADAPTER.adapt(
         _bundle({
-            "input/problem.mps": bundle.files["input/problem.mps"],
-            "input/parameters.json": bundle.files["input/parameters.json"],
+            "input/problem.mps": materialized_file(bundle, "input/problem.mps"),
+            "input/parameters.json": materialized_file(bundle, "input/parameters.json"),
         }),
         _receipt(result_adapter_ref=ADAPTER_REF), {SOLUTION_PATH: raw},
     )
@@ -256,7 +270,7 @@ def test_zero_rate_non_economic_still_real_peak(tmp_path, resolution):
 def test_two_rates_same_meter_no_energy_tariff(tmp_path):
     """Two user-declared charges on the same physical meter are independent."""
     facts, sealed, bundle = _solved(_inputs(second_rate="4"), tmp_path)
-    sources = json.loads(bundle.files["input/parameters.json"])["model_sources"]["sources"]
+    sources = json.loads(materialized_file(bundle, "input/parameters.json"))["model_sources"]["sources"]
     assert sources["relation:demand.second.m13"]["depends_on"] == ["relation:demand.first.m13"]
     rows = facts["monthly_demand"]
     assert len(rows) == 24

@@ -40,9 +40,11 @@ from iesplan.application.worker.attempt_cases import (
     acquire_attempt,
     cancel_attempt,
     fail_attempt,
+    fail_resource_attempt,
     recover_expired_attempts,
     renew_attempt_lease,
     report_attempt_progress,
+    report_task_process_exit,
     submit_attempt_result,
     timeout_attempt,
 )
@@ -99,13 +101,16 @@ from iesplan.application.worker.runner_cases import (
     load_version_content,
     parse_dataset_csv,
 )
-from iesplan.computation import ComputationUnavailableError
+from iesplan.computation import ComputationUnavailableError, observe_local_resources
 from iesplan.tasks import (
     BUSINESS_OUTCOMES,
     ExecutionUnavailableError,
 )
 
 __all__ = [
+    "observe_local_resources",
+    "fail_resource_attempt",
+    "report_task_process_exit",
     "find_queued_task",
     "BUSINESS_OUTCOMES",
     "CalcSnapshotRecord",

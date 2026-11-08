@@ -2,7 +2,32 @@
 from __future__ import annotations
 
 from array import array
+from collections.abc import Sequence
 from dataclasses import asdict
+
+
+class _TargetNames(Sequence):
+    """Read-only projection over numeric source slots; no second target-name list."""
+
+    def __init__(self, names, slots):
+        self.names = names
+        self.slots = slots
+
+    def __len__(self):
+        return len(self.slots)
+
+    def __getitem__(self, index):
+        if isinstance(index, slice):
+            return [self.names[slot] for slot in self.slots[index]]
+        return self.names[self.slots[index]]
+
+    def __eq__(self, other):
+        return len(self) == len(other) and all(a == b for a, b in zip(self, other, strict=True))
+
+    def solver_positions(self, model, kind):
+        if kind == "column":
+            return (model.column_positions[model.columns.declaration(slot)] for slot in self.slots)
+        return (model.row_positions[slot] for slot in self.slots)
 
 
 class SourceTrace:
@@ -53,7 +78,7 @@ class SourceTrace:
         stride = values[1] - values[0] if len(values) > 1 else 0
         if all(value == values[0] + i * stride for i, value in enumerate(values)):
             return {"start": values[0], "stride": stride, "count": len(values)}
-        return list(values)
+        return values
 
     def export(self, outputs):
         return {
@@ -61,8 +86,7 @@ class SourceTrace:
             "sources": dict(sorted(self.sources.items())),
             "groups": [
                 {"source": source, "role": role, "axis": axis,
-                 "targets": [self.targets[role.partition(":")[0]][slot]
-                             for slot in group["targets"]],
+                 "targets": _TargetNames(self.targets[role.partition(":")[0]], group["targets"]),
                  "indices": self._indices(group["indices"])}
                 for (source, role, axis), group in sorted(self.groups.items())
             ],

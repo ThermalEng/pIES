@@ -15,15 +15,16 @@ from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
+from bundle_testkit import materialized_file
+from test_project_model import (
+    _evaluation_n,
+    _finance_payload,
+    _gen_inputs,
+)
 
 from iesplan.assembly.contracts import ValidatedAssemblyArtifact, ValidationReceipt
-from iesplan.computation import build_registry, write_mps
 from iesplan.computation.generators.linear import (
-    LinearConstraint,
-    LinearExpression,
-    LinearModel,
     LinearVariable,
-    LoweringUnsupportedError,
 )
 from iesplan.computation.generators.project import (
     _AffineAcc,
@@ -31,22 +32,11 @@ from iesplan.computation.generators.project import (
     build_project_model,
     finance_component_declarations,
 )
-from iesplan.computation.result_adapters.highs import HIGHS_ADAPTER
+from iesplan.computation.sequences import materialize_non_predictive_series
 from iesplan.finance import (
     ConstructionPayment,
-    EffectiveFinanceConfig,
-    EvaluationInput,
     FinanceProfile,
     merge_effective,
-)
-from iesplan.computation.sequences import materialize_non_predictive_series
-
-from test_project_model import (
-    _gen_inputs,
-    _gen_fixed_inputs,
-    _island_doc,
-    _finance_payload,
-    _evaluation_n,
 )
 
 
@@ -328,9 +318,9 @@ def test_zero_construction_produces_zero_costs_and_facts() -> None:
 def test_highs_solve_optional_construction_zero_and_active(tmp_path) -> None:
     """真实 HiGHS 求解并经 ResultAdapter 恢复封存选建状态、规模与金额。"""
     import subprocess
+
     from iesplan.computation.generators.highs_milp import HIGHS_MILP_PROVIDER
     from iesplan.computation.result_adapters.highs import HIGHS_ADAPTER
-    from iesplan.computation.protocols import ExecutionReceipt
     SOLUTION_PATH = "output/solution.sol"
 
     # Case A: 无负荷收入，明确支付全额建设费 => 税后最优为零建设。
@@ -380,7 +370,7 @@ def test_highs_solve_optional_construction_zero_and_active(tmp_path) -> None:
         evaluation, construction_payments=(ConstructionPayment(t=0, ratio=1.0),),
     )
     bundle = HIGHS_MILP_PROVIDER.generate(artifact, models, materialized, finance, config, evaluation)
-    mps_bytes = bundle.files["input/problem.mps"]
+    mps_bytes = materialized_file(bundle, "input/problem.mps")
     (tmp_path / "case_a").mkdir(exist_ok=True)
     (tmp_path / "case_a" / "problem.mps").write_bytes(mps_bytes)
     (tmp_path / "case_a" / "solution").mkdir(exist_ok=True)
@@ -438,7 +428,7 @@ def test_highs_solve_optional_construction_zero_and_active(tmp_path) -> None:
     bundle_b = HIGHS_MILP_PROVIDER.generate(
         artifact_b, models_b, materialized_b, finance_b, config_b, evaluation_b,
     )
-    mps_b = bundle_b.files["input/problem.mps"]
+    mps_b = materialized_file(bundle_b, "input/problem.mps")
     (tmp_path / "case_b").mkdir(exist_ok=True)
     (tmp_path / "case_b" / "problem.mps").write_bytes(mps_b)
     (tmp_path / "case_b" / "solution").mkdir(exist_ok=True)
@@ -469,7 +459,7 @@ def test_highs_solve_optional_construction_zero_and_active(tmp_path) -> None:
     bundle_c = HIGHS_MILP_PROVIDER.generate(*inputs_c)
     directory = tmp_path / "case_c"
     directory.mkdir()
-    (directory / "problem.mps").write_bytes(bundle_c.files["input/problem.mps"])
+    (directory / "problem.mps").write_bytes(materialized_file(bundle_c, "input/problem.mps"))
     solved_c = subprocess.run(
         ["/usr/local/bin/ies-highs-solver", "problem.mps", "--solution_file", "values.sol",
          "--time_limit", "30", "--random_seed", "0"],

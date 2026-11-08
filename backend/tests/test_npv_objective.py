@@ -12,6 +12,7 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
+from bundle_testkit import materialized_file
 
 from iesplan.assembly import parse_assembly_doc, validate_assembly_doc
 from iesplan.computation import (
@@ -621,8 +622,8 @@ def test_static_npv_real_solve_matches_hand(tmp_path) -> None:
     artifact, models, materialized, finance, config, evaluation = _inputs()
     bundle = HIGHS_MILP_PROVIDER.generate(artifact, models, materialized, finance, config, evaluation)
     assert bundle.manifest.bundle["generator"] == GENERATOR_REF
-    metadata = json.loads(bundle.files["input/parameters.json"].decode("utf-8"))
-    solved = _solve_mps(bundle.files["input/problem.mps"].decode("utf-8"), tmp_path)
+    metadata = json.loads(materialized_file(bundle, "input/parameters.json").decode("utf-8"))
+    solved = _solve_mps(materialized_file(bundle, "input/problem.mps").decode("utf-8"), tmp_path)
     assert solved + metadata["objective_offset"] == pytest.approx(_hand_npv(), rel=1e-6)
 
 
@@ -859,7 +860,7 @@ def _mps_column_order(mps_text: str) -> list[str]:
 
 def _solve_bundle(bundle, tmp_path) -> tuple[float, float]:
     """真实求解 Bundle：返回（目标值 + 偏移，gen_cap 求解值 SI）。"""
-    mps_text = bundle.files["input/problem.mps"].decode("utf-8")
+    mps_text = materialized_file(bundle, "input/problem.mps").decode("utf-8")
     (tmp_path / "input").mkdir(parents=True, exist_ok=True)
     (tmp_path / "output").mkdir(parents=True, exist_ok=True)
     (tmp_path / "input" / "problem.mps").write_text(mps_text, encoding="utf-8")
@@ -884,7 +885,7 @@ def _solve_bundle(bundle, tmp_path) -> tuple[float, float]:
     content = (tmp_path / "output" / "solution.sol").read_text(encoding="utf-8")
     facts, primals = _solution_primals(content)
     assert facts.get("model_status") == "HighsModelStatus.kOptimal"
-    metadata = json.loads(bundle.files["input/parameters.json"].decode("utf-8"))
+    metadata = json.loads(materialized_file(bundle, "input/parameters.json").decode("utf-8"))
     order = _mps_column_order(mps_text)
     assert len(primals) == len(order)
     cap = primals[order.index("gen_cap")]

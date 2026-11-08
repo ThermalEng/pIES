@@ -9,10 +9,14 @@ Requirements verified:
 """
 from __future__ import annotations
 
-import json
 import pytest
+from bundle_testkit import materialized_file
+from p2_mutex_measurement import evaluate_mutex_strategies
+from test_project_model import (
+    _gen_inputs,
+    _island_inputs,
+)
 
-from iesplan.assembly.contracts import ValidatedAssemblyArtifact, ValidationReceipt
 from iesplan.computation.generators.compiler_ir import (
     BoundFact,
     CompilerAnalysis,
@@ -24,19 +28,7 @@ from iesplan.computation.generators.compiler_ir import (
 )
 from iesplan.computation.generators.highs_milp import HIGHS_MILP_PROVIDER
 from iesplan.computation.generators.linear import LoweringUnsupportedError
-from p2_mutex_measurement import evaluate_mutex_strategies
-from iesplan.computation.generators.project import build_project_model, _new_builder
-from iesplan.computation.protocols import CalculationConfig, StopProbe
-from iesplan.computation.sequences import materialize_non_predictive_series
-from iesplan.finance import FinanceProfile, merge_effective
-
-from test_project_model import (
-    _gen_inputs,
-    _island_inputs,
-    _island_doc,
-    _finance_payload,
-    _evaluation_n,
-)
+from iesplan.computation.generators.project import _new_builder
 
 
 def test_unified_bound_consumption_by_all_converters() -> None:
@@ -99,8 +91,8 @@ def test_generation_determinism() -> None:
     b1 = HIGHS_MILP_PROVIDER.generate(artifact, models, materialized, finance, config, evaluation)
     b2 = HIGHS_MILP_PROVIDER.generate(artifact, models, materialized, finance, config, evaluation)
 
-    assert b1.files["input/problem.mps"] == b2.files["input/problem.mps"]
-    assert b1.files["input/parameters.json"] == b2.files["input/parameters.json"]
+    assert materialized_file(b1, "input/problem.mps") == materialized_file(b2, "input/problem.mps")
+    assert materialized_file(b1, "input/parameters.json") == materialized_file(b2, "input/parameters.json")
 
 
 def test_cooperative_cancellation_probe() -> None:

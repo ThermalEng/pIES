@@ -1,8 +1,7 @@
 """首个真实 ResultAdapterProvider：``ies.result-adapter.highs@1.0.0``。
 
-与 ``ies.generator.highs_milp@1.0.0`` 配套，在 2.0.0 主解/序列/度量
-恢复基础上增加同次解结构化财务事实映射（映射协议改变故升版；仿射
-求值复用同一路径），解释其声明输出
+与 ``ies.generator.highs_milp@1.0.0`` 配套，按有序参数记录恢复主解、
+序列、度量与同次解结构化财务事实，解释其声明输出
 ``output/solution.sol``。该文件由求解 executable
 ``ies.solver.highs@1.7.2``（``ies-highs-solver`` 垫片，0.9-E 已提交
 契约）写出的 ``HIGHS_SOLUTION_V1`` 文本：状态行、目标值、列数与按
@@ -13,8 +12,8 @@
 - 成功回执只看 solution 文件的 ``model_status`` 令牌：垫片在有解、
   不可行、无界时均以退出码 0 写出文件，不可用退出码判断数学状态；
 - ``kOptimal`` 须有完整主解才发布：目标与映射变量值须有限，变量按
-  MPS 列序对 ``unit_map`` 键映射（内部二进制列不在 ``unit_map`` 中，
-  自然忽略；缺键、列数不一致一律失败）；
+  同次生成的实际求解列位置恢复声明单位的变量；不为找列重读MPS，
+  内部辅助列按公开输出声明自然忽略；
 - 目标值先加回 ``objective_offset``（MPS 无法承载的目标常数项，只加
   一次），再按 ``objective_unit`` 恢复业务单位：金额量纲守币种原值
   （财务币种，含 USD，直接采用不折算），物理量经
@@ -39,9 +38,8 @@ import json
 import math
 from array import array
 from collections import Counter
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Iterator, Mapping
 from decimal import Decimal
-from io import BytesIO, TextIOWrapper
 from typing import Any, NoReturn
 
 from iesplan.computation.errors import ComputationUnavailableError
@@ -51,6 +49,8 @@ from iesplan.computation.protocols import (
     SolverBundle,
 )
 from iesplan.computation.result_adapter import ResultAdapterDescriptor
+from iesplan.computation.result_adapters.declarations import recover_declarations
+from iesplan.core.content import Content, MemoryContent, freeze_owned_json, read_content, text_lines
 from iesplan.core.units import UnitError, dims_of, from_si, unit_meta
 
 ADAPTER_ID = "ies.result-adapter.highs"
@@ -66,7 +66,6 @@ DESCRIPTOR = ResultAdapterDescriptor(
 #: V1 主解按索引排列，变量映射需 MPS 列序。
 _SOLUTION_PATH = "output/solution.sol"
 _PARAMETERS_PATH = "input/parameters.json"
-_PROBLEM_PATH = "input/problem.mps"
 
 #: 本 provider 发布时只认识的请求输出（未知请求由生成器在 build 侧
 #: 拒绝；此处只按已请求键发布，不重复校验）。
@@ -104,19 +103,15 @@ _KNOWN_STATUSES = frozenset(
     )
 )
 
-#: MPS COLUMNS 段内的标记行首字段。
-_MARKER_FIELDS = ("INTORG", "INTEND")
-
 
 def _fail(message: str) -> NoReturn:
     raise ComputationUnavailableError(f"HiGHS 结果解释失败: {message}", reason="result-protocol-failure")
 
 
-def _parse_solution(raw: bytes) -> dict[str, Any]:
+def _parse_solution(raw: Content | bytes) -> dict[str, Any]:
     """逐行解析垫片 V1 文本，不复制整份解文本与行列表。"""
     try:
-        with TextIOWrapper(BytesIO(raw), encoding="utf-8") as source:
-            return _read_solution(line.rstrip("\r\n") for line in source)
+        return _read_solution(text_lines(MemoryContent(raw) if isinstance(raw, bytes) else raw))
     except UnicodeDecodeError as exc:
         _fail(f"solution 非 UTF-8 文本: {exc}")
 
@@ -190,112 +185,15 @@ def _read_solution(lines: Iterator[str]) -> dict[str, Any]:
     }
 
 
-def _mps_column_names(raw: bytes) -> list[str]:
-    """按 MPS COLUMNS 段恢复 LP 变量顺序（V1 主解按索引排列所需）。
-
-    配对生成器 writer：每变量块连续，块内每行重复列名，整数标记行
-    只出现在变量之间；同名连续行属同一列，列名切换即新列，至 RHS
-    段结束。列名复现（非连续重复）即文件损坏，明确失败。
-    """
-    names: list[str] = []
-    seen: set[str] = set()
-    previous: str | None = None
-    try:
-        # 只逐行读取到列段结束，不复制整份 MPS 为大字符串和行列表。
-        with TextIOWrapper(BytesIO(raw), encoding="utf-8") as lines:
-            for line in lines:
-                if line.rstrip("\n") == "COLUMNS":
-                    break
-            else:
-                _fail("problem.mps 缺 COLUMNS 段")
-            for line in lines:
-                parts = line.split()
-                if not parts:
-                    _fail("problem.mps 含空行")
-                head = parts[0]
-                if head == "RHS":
-                    break
-                if head in _MARKER_FIELDS:
-                    previous = None
-                    continue
-                if len(parts) < 3 or len(parts) % 2 == 0:
-                    _fail(f"problem.mps 列行非法: {line!r}")
-                if head != previous:
-                    if head in seen:
-                        _fail(f"problem.mps 列名复现: {head!r}")
-                    names.append(head)
-                    seen.add(head)
-                    previous = head
-    except UnicodeDecodeError as exc:
-        _fail(f"problem.mps 非 UTF-8 文本: {exc}")
-    return names
-
-
 def _parameters(bundle: SolverBundle) -> dict[str, Any]:
-    """读 Bundle 内 generator 规范 parameters（可信生成器产物）。
-
-    只取计算必需事实：unit_map、objective_offset、objective_unit、
-    components（财务分量求值声明）、step_series（可发布步序列声明）、
-    outputs；缺键或形态错误即协议失败，不做 schema 复核。
-    无声明的老 Bundle 不静默降级、不回退旧解析，直接失败。
-    """
-    raw = bundle.files.get(_PARAMETERS_PATH)
-    if not isinstance(raw, bytes):
-        _fail(f"Bundle 缺输入文件: {_PARAMETERS_PATH}")
-    try:
-        doc = json.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, ValueError) as exc:
-        _fail(f"parameters 非法 JSON: {exc}")
-    if not isinstance(doc, dict):
-        _fail("parameters 须为 JSON 对象")
-    unit_map = doc.get("unit_map")
-    if not isinstance(unit_map, dict):
-        _fail("parameters.unit_map 缺失或非法")
-    offset = doc.get("objective_offset")
-    if not isinstance(offset, (int, float)) or isinstance(offset, bool):
-        _fail("parameters.objective_offset 缺失或非法")
-    objective_unit = doc.get("objective_unit")
-    if not isinstance(objective_unit, str):
-        _fail("parameters.objective_unit 缺失或非法")
-    requested = doc.get("outputs")
-    if not isinstance(requested, list):
-        _fail("parameters.outputs 缺失或非法")
-    # 可发布步序列声明与配套生成器同源（缺键即旧包，自然失败，不另造校验器）。
-    series = doc["step_series"]
-    components = doc.get("components")
-    if not isinstance(components, dict):
-        _fail("parameters.components 缺失或非法")
-    for ident, decl in components.items():
-        if not isinstance(ident, str) or not isinstance(decl, dict):
-            _fail(f"parameters.components 条目非法: {ident!r}")
-        if not isinstance(decl.get("unit"), str) or not isinstance(
-            decl.get("caliber"), str
-        ):
-            _fail(f"分量 {ident!r} 缺 unit/caliber")
-        if not isinstance(decl.get("constant"), (int, float)) or isinstance(
-            decl.get("constant"), bool
-        ):
-            _fail(f"分量 {ident!r} 的 constant 非法")
-        terms = decl.get("terms")
-        if not isinstance(terms, dict) or not all(
-            isinstance(name, str)
-            and isinstance(coeff, (int, float))
-            and not isinstance(coeff, bool)
-            for name, coeff in terms.items()
-        ):
-            _fail(f"分量 {ident!r} 的 terms 非法")
+    """Read the small header only; declaration records are consumed once with the solution."""
+    doc = json.loads(read_content(bundle.files[_PARAMETERS_PATH]))
     return {
-        "unit_map": dict(unit_map),
-        "offset": float(offset),
-        "objective_unit": objective_unit,
-        "requested": list(requested),
-        "step_series": [dict(entry) for entry in series],
-        "system_series": [dict(entry) for entry in doc["system_series"]],
-        "components": {ident: dict(decl) for ident, decl in components.items()},
-        # 结构化财务事实原始声明（必需映射，缺键即旧包，自然失败；
-        # 求值与形状由恢复侧按映射表消费，此处不重验条目结构）。
-        "financial_facts": doc["financial_facts"],
-        "model_sources": doc["model_sources"],
+        "offset": float(doc["objective_offset"]),
+        "objective_unit": doc["objective_unit"],
+        "requested": doc["outputs"],
+        "records": bundle.files[doc["records"]],
+        "column_count": doc["column_count"],
     }
 
 
@@ -374,7 +272,9 @@ class HighsResultAdapter:
     ) -> ComputeResult:
         params = _parameters(bundle)
         solution_raw = outputs.get(_SOLUTION_PATH)
-        if not isinstance(solution_raw, bytes):
+        if isinstance(solution_raw, bytes):
+            solution_raw = MemoryContent(solution_raw)
+        if not isinstance(solution_raw, Content):
             _fail(f"声明输出缺失: {_SOLUTION_PATH}")
         solution = _parse_solution(solution_raw)
         status = solution["model_status"]
@@ -425,38 +325,18 @@ class HighsResultAdapter:
         objective = solution["objective"]
         if not solution["has_feasible_solution"] or objective is None:
             _fail("数学状态有解但缺有效主解或目标值")
-        problem_raw = bundle.files.get(_PROBLEM_PATH)
-        if not isinstance(problem_raw, bytes):
-            _fail(f"Bundle 缺输入文件: {_PROBLEM_PATH}")
-        names = _mps_column_names(problem_raw)
-        if len(names) != len(solution["primals"]):
-            _fail("MPS 变量数与 solution primal 个数不一致")
-        # 列名→下标一次构造，变量、分量、序列及财务事实共享，避免逐项线性搜索。
-        index_of = {name: i for i, name in enumerate(names)}
-        variables: list[dict[str, object]] = []
-        for name, unit in params["unit_map"].items():
-            if not isinstance(name, str) or not isinstance(unit, str):
-                _fail("parameters.unit_map 键值须为字符串")
-            index = index_of.get(name)
-            if index is None:
-                _fail(f"unit_map 变量不在 MPS 列中: {name!r}")
-            try:
-                value = from_si(solution["primals"][index], unit)
-            except UnitError as exc:
-                _fail(f"反向换算失败 {name!r}→{unit!r}: {exc}")
-            if not math.isfinite(value):
-                _fail(f"换算后非有限数值: {name!r}")
-            variables.append({"name": name, "value": value, "unit": unit})
+        if len(solution["primals"]) != params["column_count"]:
+            _fail("声明列数与 solution primal 个数不一致")
+        params.update(recover_declarations(
+            params.pop("records"), solution["primals"], _fail,
+            include_solution="solution" in params["requested"],
+        ))
+        variables = params["variables"]
         objective_unit = params["objective_unit"]
         business_total = summary["objective_value"]
         components_out: dict[str, object] = {}
         for ident, decl in params["components"].items():
             total = float(decl["constant"])
-            for name, coeff in decl["terms"].items():
-                index = index_of.get(name)
-                if index is None:
-                    _fail(f"分量 {ident!r} 的 LP 变量不在 MPS 列中: {name!r}")
-                total += float(coeff) * solution["primals"][index]
             if not math.isfinite(total):
                 _fail(f"分量 {ident!r} 内部值非有限")
             unit = decl["unit"]
@@ -488,36 +368,9 @@ class HighsResultAdapter:
             # 恢复业务单位序列发布（与 variables 同一 primal 路径）。
             # 随 solution 请求发布；声明列缺失/换算失败即协议失败，
             # 不补零、不回退。metrics-only 无 solution 即无 series。
-            series_out: dict[str, object] = {}
-            system_out: dict[str, object] = {}
-            for entry in (*params["step_series"], *params["system_series"]):
-                unit = entry["unit"]
-                values: list[float] = []
-                for name in entry["columns"]:
-                    index = index_of.get(name)
-                    if index is None:
-                        _fail(f"步序列 {entry['series_id']!r} 的列不在 MPS 列中: {name!r}")
-                    try:
-                        value = from_si(solution["primals"][index], unit)
-                    except UnitError as exc:
-                        _fail(f"步序列 {entry['series_id']!r} 反向换算失败 →{unit!r}: {exc}")
-                    if not math.isfinite(value):
-                        _fail(f"步序列 {entry['series_id']!r} 换算后非有限数值")
-                    values.append(value)
-                system = "block" in entry
-                target = system_out if system else series_out
-                identity = ({"block": entry["block"], "variable": entry["variable"]} if system else
-                            {"instance_id": entry["instance_id"], "variable_id": entry["variable_id"]})
-                target[entry["series_id"]] = {
-                    **identity,
-                    "unit": unit,
-                    "values": values,
-                }
-            out["series"] = series_out
-            out["system_series"] = system_out
-            out["financial_facts"] = _recover_financial_facts(
-                params["financial_facts"], index_of, solution["primals"]
-            )
+            out["series"] = params["series"]
+            out["system_series"] = params["system_series"]
+            out["financial_facts"] = _recover_financial_facts(params["financial_facts"])
             out["model_sources"] = params["model_sources"]
         if "metrics" in params["requested"]:
             out["metrics"] = {
@@ -531,27 +384,12 @@ class HighsResultAdapter:
             receipt_id=receipt.receipt_id,
             execution_status="completed",
             math_status=math_status,
-            outputs=out,
+            outputs=freeze_owned_json(out),
         )
 
 
-def _facts_value(
-    node: Mapping[str, Any],
-    index_of: Mapping[str, int],
-    primals: Sequence[float],
-    label: str,
-) -> str:
-    """仿射声明节点 → 同次主解求值金额（十进制字符串，不作展示舍入）。
-
-    求值方式与分量路径同一逻辑；内部可信声明直接取值，缺件自然可见
-    失败。实际无法解释的列引用与不可发布结果仍明确协议失败。
-    """
-    total = float(node["constant"])
-    for name, coeff in node["terms"].items():
-        index = index_of.get(name)
-        if index is None:
-            _fail(f"财务事实 {label} 的求解列不在 MPS 列中: {name!r}")
-        total += float(coeff) * primals[index]
+def _facts_value(total: float, label: str) -> str:
+    """有序记录已按同次主解求值；这里只发布十进制金额，不再次遍历表达式。"""
     if not math.isfinite(total):
         _fail(f"财务事实 {label} 求值非有限")
     # 十进制字符串：沿财务既有口径经字符串转 Decimal（不引入二进制
@@ -561,8 +399,6 @@ def _facts_value(
 
 def _recover_financial_facts(
     decl: Mapping[str, Any],
-    index_of: Mapping[str, int],
-    primals: Sequence[float],
 ) -> dict[str, object]:
     """结构化财务事实声明 → 同次主解业务事实（格式页映射表为唯一正文）。
 
@@ -573,8 +409,8 @@ def _recover_financial_facts(
     """
     currency = decl["currency"]
 
-    def amount(node: Mapping[str, Any], label: str) -> str:
-        return _facts_value(node, index_of, primals, label)
+    def amount(value: float, label: str) -> str:
+        return _facts_value(value, label)
 
     out: dict[str, object] = {
         "currency": currency,
@@ -700,14 +536,14 @@ def _recover_financial_facts(
             for node in decl["annual_net_flows"]
         ],
     }
-    def construction_built(node: Mapping[str, Any], label: str) -> bool:
+    def construction_built(node: float, label: str) -> bool:
         value = float(amount(node, label))
         rounded = round(value)
         if not math.isfinite(value) or rounded not in (0, 1) or abs(value - rounded) > 1e-6:
             _fail(f"建设状态 {label!r} 不属于整数 0/1: {value!r}")
         return bool(rounded)
 
-    def scale_value(node: Mapping[str, Any], unit: str, label: str) -> float:
+    def scale_value(node: float, unit: str, label: str) -> float:
         raw = float(amount(node, label))
         try:
             business = from_si(raw, unit)

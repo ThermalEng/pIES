@@ -11,12 +11,13 @@ from decimal import Decimal
 from types import SimpleNamespace
 
 import pytest
+from bundle_testkit import mps_columns as _mps_column_names
 
 from iesplan.computation import HIGHS_ADAPTER_PATH
 from iesplan.computation.generators.linear import LoweringUnsupportedError
 from iesplan.computation.generators.mps import write_mps
 from iesplan.computation.generators.project import _ProjectBuilder
-from iesplan.computation.result_adapters.highs import _mps_column_names, _parse_solution
+from iesplan.computation.result_adapters.highs import _parse_solution
 from iesplan.finance import FinanceProfile, merge_effective
 from iesplan.tasks.contracts import parse_evaluation_input
 

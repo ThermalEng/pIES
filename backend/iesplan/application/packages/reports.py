@@ -20,9 +20,10 @@ from sqlalchemy.orm import Session
 
 from iesplan import package as package_domain
 from iesplan.application.packages.transfers import export_excel as _export_excel
+from iesplan.core.content import Content
 from iesplan.identity.contracts import UserRecord
 from iesplan.package import DownloadTokenError
-from iesplan.storage import add_ref, get_object, list_refs, put_object
+from iesplan.storage import add_ref, get_object_content, list_refs, put_object
 
 EXCEL_MEDIA_TYPE = package_domain.EXCEL_MEDIA_TYPE
 PACKAGE_MEDIA_TYPE = package_domain.PACKAGE_MEDIA_TYPE
@@ -99,11 +100,11 @@ def load_export_download(
     project_id: int,
     token: str,
     expected_kind: str,
-) -> tuple[bytes, str, str]:
-    """校验下载授权并读取对象字节, 返回 (内容, 媒体类型, 文件名)。"""
+) -> tuple[Content, str, str]:
+    """校验下载授权，返回不持有数据库会话的 (内容, 媒体类型, 文件名)。"""
     info = package_domain.verify_download_token(token, expected_kind=expected_kind)
     authorize_download(db, info, project_id, user.id)
-    content = get_object(db, info["object_id"])
+    content = get_object_content(db, info["object_id"])
     if expected_kind == "excel":
         return content, EXCEL_MEDIA_TYPE, f"report-{project_id}.xlsx"
     return content, PACKAGE_MEDIA_TYPE, f"project-package-{project_id}.zip"

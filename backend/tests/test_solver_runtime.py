@@ -32,6 +32,7 @@ from iesplan.computation import (
     SolverRuntime,
     build_executor_registry,
 )
+from iesplan.core.content import MemoryContent, read_content
 
 EXECUTOR = "t.executor@1.0.0"
 EXE = "t.exe@1.0.0"
@@ -214,10 +215,11 @@ def test_output_handoff_precedes_cleanup(fail):
 
     def handoff(receipt, outputs):
         assert os.path.exists(os.path.join(probe["workdir"], "output/solution.json"))
-        assert outputs["output/solution.json"] == SOLUTION_BYTES
+        assert read_content(outputs["output/solution.json"]) == SOLUTION_BYTES
         accepted.append(receipt.status)
         if fail:
             raise OSError("stage storage unavailable")
+        return {path: MemoryContent(read_content(content)) for path, content in outputs.items()}
 
     if fail:
         with pytest.raises(OSError, match="stage storage unavailable"):
@@ -238,7 +240,7 @@ def test_success_collects_declared_outputs_and_receipt() -> None:
     assert probe["input_ok"] is True
     assert probe["input_mode"] == 0o444
     assert probe["input_dir_owner_writable"] is True
-    assert outputs == {
+    assert {path: read_content(content) for path, content in outputs.items()} == {
         "output/solution.json": SOLUTION_BYTES,
         "output/optional.json": b"{}",
     }
@@ -305,7 +307,9 @@ def test_non_dot_working_directory_uses_bundle_root() -> None:
     assert receipt.status == "succeeded"
     assert probe["input_ok"] is True
     assert probe["run_owner_writable"] is True
-    assert outputs == {"output/solution.json": SOLUTION_BYTES}
+    assert {path: read_content(content) for path, content in outputs.items()} == {
+        "output/solution.json": SOLUTION_BYTES,
+    }
 
 
 def test_process_outcome_exclusive_exit_and_tz_aware_times() -> None:
@@ -351,7 +355,9 @@ def test_optional_output_may_be_absent() -> None:
     )
     receipt, outputs = runtime.run(_bundle(), _attempt())
     assert receipt.status == "succeeded"
-    assert outputs == {"output/solution.json": SOLUTION_BYTES}
+    assert {path: read_content(content) for path, content in outputs.items()} == {
+        "output/solution.json": SOLUTION_BYTES,
+    }
     assert [e["path"] for e in receipt.outputs] == ["output/solution.json"]
 
 
@@ -377,7 +383,10 @@ def test_two_inputs_in_same_dir_are_written_read_and_cleaned() -> None:
     assert receipt.status == "succeeded"
     assert probe["input/a.mps"] == INPUT_BYTES
     assert probe["input/b.mps"] == INPUT_BYTES
-    assert outputs == {"output/solution.json": SOLUTION_BYTES}
+    assert {path: read_content(content) for path, content in outputs.items()} == {
+        "output/solution.json": SOLUTION_BYTES,
+    }
+    outputs.close()
     assert not os.path.exists(probe["workdir"])
 
 
@@ -470,7 +479,9 @@ def test_nonzero_exit_is_process_failed_with_existing_outputs() -> None:
     assert receipt.status == "process_failed"
     assert receipt.exit_code == 3
     assert "3" in receipt.error
-    assert outputs == {"output/solution.json": SOLUTION_BYTES}
+    assert {path: read_content(content) for path, content in outputs.items()} == {
+        "output/solution.json": SOLUTION_BYTES,
+    }
     assert receipt.stderr == "boom"
 
 
@@ -524,7 +535,9 @@ def test_undeclared_output_and_symlink_are_protocol_failed() -> None:
     )
     assert receipt.status == "output_protocol_failed"
     assert "sneaky.bin" in receipt.error
-    assert outputs == {"output/solution.json": SOLUTION_BYTES}
+    assert {path: read_content(content) for path, content in outputs.items()} == {
+        "output/solution.json": SOLUTION_BYTES,
+    }
 
     def handle_link(command, workdir):
         os.symlink("solution.json", os.path.join(workdir, "evil-link"))

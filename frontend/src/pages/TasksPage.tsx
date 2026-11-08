@@ -39,6 +39,7 @@ import {
   saveWorkingInputs,
   serializeParams,
   workingOfForm,
+  WorkerResourcesView,
 } from '../features/tasks'
 import { getCalcConfig } from '../features/config'
 import { runValidation } from '../features/validation'
@@ -1031,6 +1032,8 @@ export default function TasksPage() {
                   </>
                 ) : null}
               </dl>
+
+              <WorkerResourcesView resources={detail.progress?.detail.worker_resources} />
 
               {/* 冻结输入: 所选任务快照的只读投影(非当前草稿); 失败可见, 不回退草稿 */}
               <h3 style={{ fontSize: 'var(--ies-fs-sm)', fontWeight: 700, margin: 'var(--ies-space-4) 0 var(--ies-space-2)' }}>

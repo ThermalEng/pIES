@@ -48,6 +48,7 @@ from iesplan.computation.runtime.local_process import (
     TERMINATE_GRACE_SECONDS,
     validate_highs_arguments,
 )
+from iesplan.core.content import read_content
 
 HELPER = os.path.join(os.path.dirname(__file__), "local_exec_probe.py")
 HELPER_REF = "t.helper.exec@1.0.0"
@@ -780,7 +781,7 @@ def test_output_bytes_exact_and_over() -> None:
                                    "max_output_bytes": 100}
     )
     assert receipt.status == "succeeded"
-    assert len(outputs["output/a.json"]) == 100
+    assert len(read_content(outputs["output/a.json"])) == 100
     bundle_specs = [("output/a.json", 100), ("output/b.json", 101)]
     outputs_decl = [
         {"path": path, "media_type": "application/json", "required": False}
@@ -914,7 +915,7 @@ def test_inputs_and_dirs_not_counted() -> None:
     )
     assert receipt.status == "succeeded"
     assert list(outputs) == ["output/a.json"]
-    assert outputs["output/a.json"] == b"f" * 10
+    assert read_content(outputs["output/a.json"]) == b"f" * 10
 
 
 @pytest.mark.parametrize("reason", ["cancelled", "fenced"])

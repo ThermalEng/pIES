@@ -21,19 +21,18 @@ HiGHS CLI 真实执行验证不在本文件（见 Docker 集成探针记录）�
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
 from pathlib import Path
 from types import MappingProxyType
 
 import pytest
+from bundle_testkit import content_bytes, materialized_file
 
-from iesplan.assembly import ValidatedAssemblyArtifact, ValidationReceipt
-from iesplan.assembly import validate_assembly_text
+from iesplan.assembly import ValidatedAssemblyArtifact, ValidationReceipt, validate_assembly_text
 from iesplan.computation import (
+    HIGHS_MILP_PROVIDER,
     CalculationConfig,
     ComputationUnavailableError,
     GeneratorProvider,
-    HIGHS_MILP_PROVIDER,
     MaterializedPriceSeries,
     MaterializedSet,
     SolverBundle,
@@ -167,12 +166,14 @@ def test_campus_generate_full_bundle() -> None:
     assert [e["path"] for e in manifest.inputs] == [
         "input/problem.mps",
         "input/parameters.json",
+        "input/parameters.jsonl",
     ]
     assert [e["media_type"] for e in manifest.inputs] == [
         "application/mps",
         "application/json",
+        "application/x-ndjson",
     ]
-    assert set(bundle.files) == {"input/problem.mps", "input/parameters.json"}
+    assert set(bundle.files) == {"input/problem.mps", "input/parameters.json", "input/parameters.jsonl"}
     command = manifest.command
     assert command["executor"] == EXECUTOR_REF
     assert command["executable"] == SOLVER_REF
@@ -199,7 +200,7 @@ def test_campus_generate_full_bundle() -> None:
     )
     assert manifest.result_adapter == ADAPTER_REF
     assert manifest.extensions == {}
-    metadata = json.loads(bundle.files["input/parameters.json"].decode("utf-8"))
+    metadata = json.loads(materialized_file(bundle, "input/parameters.json").decode("utf-8"))
     assert metadata["generator"] == GENERATOR_REF
     assert metadata["solver"] == SOLVER_REF
     assert metadata["result_adapter"] == ADAPTER_REF
@@ -217,7 +218,7 @@ def test_campus_generate_full_bundle() -> None:
         artifact, models, materialized, finance, config, evaluation
     )
     mps_text, offset = write_mps(model)
-    assert bundle.files["input/problem.mps"] == mps_text.encode("utf-8")
+    assert materialized_file(bundle, "input/problem.mps") == mps_text.encode("utf-8")
     assert metadata["unit_map"] == dict(sorted(unit_map.items()))
     assert metadata["objective_offset"] == pytest.approx(offset)
     assert metadata["objective_unit"] == objective_unit == "CNY"
@@ -229,8 +230,8 @@ def test_generate_is_byte_deterministic_and_writes_nothing(
     """同一输入逐字节相同；生成过程不写工作目录。"""
     first, _ = _resolved_generate(seed=7)
     second, _ = _resolved_generate(seed=7)
-    assert export_bundle_files(first) == export_bundle_files(second)
-    meta = json.loads(first.files["input/parameters.json"].decode("utf-8"))
+    assert content_bytes(export_bundle_files(first)) == content_bytes(export_bundle_files(second))
+    meta = json.loads(materialized_file(first, "input/parameters.json").decode("utf-8"))
     assert meta["seed"] == 7
     assert first.manifest.command["arguments"][-1] == "7"
     monkeypatch.chdir(tmp_path)
@@ -418,6 +419,7 @@ def test_bundle_aggregate_requires_exact_manifest_files_match() -> None:
         "bundle.yaml",
         "input/problem.mps",
         "input/parameters.json",
+        "input/parameters.jsonl",
     }
     assert exported["bundle.yaml"].endswith(b"\n")
     assert "output/" not in exported
@@ -456,7 +458,7 @@ def test_step_series_declared_from_variable_path() -> None:
             assert column in model_names, column
             assert unit_map[column] == d["unit"], column
     assert len(lengths) == 1
-    metadata = json.loads(bundle.files["input/parameters.json"].decode("utf-8"))
+    metadata = json.loads(materialized_file(bundle, "input/parameters.json").decode("utf-8"))
     assert metadata["step_series"] == [dict(d) for d in decls]
     assert metadata["generator"] == GENERATOR_REF == "ies.generator.highs_milp@1.0.0"
     assert metadata["result_adapter"] == ADAPTER_REF == "ies.result-adapter.highs@1.0.0"

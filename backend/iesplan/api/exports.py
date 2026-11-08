@@ -15,17 +15,31 @@ application/packages create_download_token/verify_download_token)。
 
 from __future__ import annotations
 
+from itertools import chain
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query, Response
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
+from starlette.responses import StreamingResponse
 
 from iesplan.api.auth import CurrentUser
 from iesplan.api.deps import get_request_db
 from iesplan.application import packages as packages_app
+from iesplan.core.content import Content
 
 router = APIRouter(prefix="/api/projects/{project_id}/exports", tags=["exports"])
+
+
+def _download_response(content: Content, media_type: str, file_name: str) -> StreamingResponse:
+    # Start the actual read before HTTP headers, so storage errors retain their status.
+    chunks = content.iter_chunks()
+    first = next(chunks, b"")
+    return StreamingResponse(
+        content=chain((first,), chunks),
+        media_type=media_type,
+        headers={"Content-Disposition": f'attachment; filename="{file_name}"'},
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -71,11 +85,7 @@ def download_excel_endpoint(
     content, media_type, file_name = packages_app.load_export_download(
         db, user, project_id, token, "excel"
     )
-    return Response(
-        content=content,
-        media_type=media_type,
-        headers={"Content-Disposition": f'attachment; filename="{file_name}"'},
-    )
+    return _download_response(content, media_type, file_name)
 
 
 @router.post("/package", summary="导出完整项目包(仅所有者)")
@@ -100,8 +110,4 @@ def download_package_endpoint(
     content, media_type, file_name = packages_app.load_export_download(
         db, user, project_id, token, "package"
     )
-    return Response(
-        content=content,
-        media_type=media_type,
-        headers={"Content-Disposition": f'attachment; filename="{file_name}"'},
-    )
+    return _download_response(content, media_type, file_name)

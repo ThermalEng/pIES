@@ -5,6 +5,7 @@ import json
 import subprocess
 
 import pytest
+from bundle_testkit import materialized_file
 from test_highs_result_adapter import _receipt
 from test_project_model import LOAD_YAML, _evaluation_n, _finance_payload, _island_doc
 
@@ -240,7 +241,7 @@ def test_route_capacity_and_losses_survive_public_generation_and_real_solve(
 ) -> None:
     inputs, _documents = _inputs(demand, parallel)
     bundle = HIGHS_MILP_PROVIDER.generate(*inputs)
-    (tmp_path / "problem.mps").write_bytes(bundle.files["input/problem.mps"])
+    (tmp_path / "problem.mps").write_bytes(materialized_file(bundle, "input/problem.mps"))
     result = subprocess.run(
         ["/usr/local/bin/ies-highs-solver", "problem.mps", "--solution_file", "values.sol",
          "--time_limit", "30", "--random_seed", "0"],
@@ -261,7 +262,7 @@ def test_route_capacity_and_losses_survive_public_generation_and_real_solve(
         assert values["load__electricity_in__t0"] == pytest.approx(demand)
         if parallel is not None:
             assert values["load_two__electricity_in__t0"] == pytest.approx(parallel)
-    parameters = json.loads(bundle.files["input/parameters.json"])
+    parameters = json.loads(materialized_file(bundle, "input/parameters.json"))
     buses = [source for source in parameters["model_sources"]["sources"].values() if source["kind"] == "bus"]
     downstream = (("load.electricity_in", "route.power_out") if parallel is None else
                   ("load.electricity_in", "load_two.electricity_in", "route.power_out"))

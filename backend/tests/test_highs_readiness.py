@@ -17,6 +17,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from bundle_testkit import materialized_file
 
 from iesplan.assembly import validate_assembly_text
 from iesplan.computation import (
@@ -52,6 +53,7 @@ from iesplan.computation.generators.linear import (
 )
 from iesplan.computation.generators.mps import write_mps
 from iesplan.computation.runtime import validate_highs_arguments
+from iesplan.core.content import read_content
 from iesplan.devices import init_registry, list_devices
 from iesplan.finance import effective_from_yaml
 from iesplan.modeling import build_math_contribution
@@ -324,7 +326,7 @@ def test_end_to_end_campus_bundle() -> None:
     bundle = _campus_bundle()
     manifest = bundle.manifest
     assert manifest.command["executable"] == HIGHS_EXECUTABLE_REF
-    mps_bytes = bundle.files[PROBLEM_PATH]
+    mps_bytes = materialized_file(bundle, PROBLEM_PATH)
     assert mps_bytes.startswith(b"NAME") and len(mps_bytes) > 100
     receipt, outputs = _runtime().run(bundle, _attempt())
     if receipt.status != "succeeded":
@@ -340,7 +342,7 @@ def test_end_to_end_campus_bundle() -> None:
     assert receipt.signal_number is None
     assert receipt.termination_reason == "exited"
     assert set(outputs) == {SOLUTION_PATH}
-    content = outputs[SOLUTION_PATH].decode("utf-8")
+    content = read_content(outputs[SOLUTION_PATH]).decode("utf-8")
     facts = _parse_solution(content)
     assert facts["model_status"] == "HighsModelStatus.kOptimal"
     objective = float(facts["objective_value"])
@@ -348,7 +350,7 @@ def test_end_to_end_campus_bundle() -> None:
     assert int(facts["num_columns"]) > 0
     assert len(facts["primals"]) == int(facts["num_columns"])
     assert receipt.outputs[0]["path"] == SOLUTION_PATH
-    assert receipt.outputs[0]["size_bytes"] == len(outputs[SOLUTION_PATH])
+    assert receipt.outputs[0]["size_bytes"] == len(read_content(outputs[SOLUTION_PATH]))
 
 
 def _tiny_model(*, lower, upper, obj_coeff: float, rows: tuple = ()):

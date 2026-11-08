@@ -454,6 +454,7 @@ class _ProjectBuilder:
     ) -> None:
         self.stop = stop
         self._stop_ticks = 0
+        self._frozen_amounts: dict[int, tuple[_AffineAcc, dict[str, object]]] = {}
         self.doc = doc
         self.devices = devices
         self.models = models
@@ -3522,8 +3523,7 @@ class _ProjectBuilder:
             out[ident] = {
                 "unit": self._component_unit(component),
                 "caliber": _COMPONENT_CALIBER[component],
-                "constant": affine.constant,
-                "terms": dict(sorted(affine.terms.items())),
+                **self._decl_affine(affine),
             }
         for relation in self.analysis.relations("tariff"):
             spec = relation.payload
@@ -3533,15 +3533,13 @@ class _ProjectBuilder:
             out[ident] = {
                 "unit": self._component_unit(component),
                 "caliber": _COMPONENT_CALIBER[component],
-                "constant": affine.constant,
-                "terms": dict(sorted(affine.terms.items())),
+                **self._decl_affine(affine),
             }
         for billing_id, amount in sorted(self._demand_totals.items()):
             out[f"{billing_id}__period_demand_charge"] = {
                 "unit": self.finance.currency,
                 "caliber": "period",
-                "constant": amount.constant,
-                "terms": dict(sorted(amount.terms.items())),
+                **self._decl_affine(amount),
             }
         return MappingProxyType(out)
 
@@ -4754,7 +4752,7 @@ class _ProjectBuilder:
                 "instance_id": inst,
                 "variable_id": local,
                 "unit": self._step_units[(inst, local)],
-                "columns": list(self._step_columns[(inst, local)]),
+                "columns": self._step_columns[(inst, local)],
             })
         for selection in sorted(
             self.doc["outputs"].get("system_series", []),
@@ -4762,8 +4760,10 @@ class _ProjectBuilder:
         ):
             block, local = selection["block"], selection["variable"]
             scope = f"system:{block}"
-            out.append({"series_id": f"{scope}.{local}", "block": block, "variable": local,
-                        "unit": self._step_units[(scope, local)], "columns": list(self._step_columns[(scope, local)])})
+            out.append({
+                "series_id": f"{scope}.{local}", "block": block, "variable": local,
+                "unit": self._step_units[(scope, local)], "columns": self._step_columns[(scope, local)],
+            })
         return tuple(out)
 
     def model_sources(self) -> Mapping[str, object]:
@@ -4875,10 +4875,14 @@ class _ProjectBuilder:
                             "sources": ["relation:evaluation.comparison"]})
         return MappingProxyType(self.source_trace.export(outputs))
 
-    @staticmethod
-    def _decl_affine(acc: _AffineAcc) -> dict[str, object]:
+    def _decl_affine(self, acc: _AffineAcc) -> dict[str, object]:
         """仿射留存 → 声明节点（求解列引用，消费者不得拆解）。"""
-        return {"constant": acc.constant, "terms": dict(sorted(acc.terms.items()))}
+        identity = id(acc)
+        if identity not in self._frozen_amounts:
+            self._frozen_amounts[identity] = (
+                acc, {"constant": acc.constant, "terms": dict(sorted(acc.terms.items()))},
+            )
+        return self._frozen_amounts[identity][1]
 
     @staticmethod
     def _decl_var(name: str) -> dict[str, object]:
@@ -4890,14 +4894,15 @@ class _ProjectBuilder:
         """已知常量声明节点（与求值路径统一，适配器同口径恢复）。"""
         return {"constant": value, "terms": {}}
 
-    @staticmethod
-    def _decl_negated(acc: _AffineAcc) -> dict[str, object]:
+    def _decl_negated(self, acc: _AffineAcc) -> dict[str, object]:
         """同源仿射的相反数声明（费用类沿既有封存口径记正数）。"""
         negated = _AffineAcc()
         negated.add_scaled(acc, -1.0)
-        return _ProjectBuilder._decl_affine(negated)
+        return self._decl_affine(negated)
 
     def _decl_business_amount(self, amount: _AffineAcc, unit: str) -> dict[str, object]:
+        if _to_internal(1.0, unit) == 1.0:
+            return self._decl_affine(amount)
         business = _AffineAcc()
         business.add_scaled(amount, 1.0 / _to_internal(1.0, unit))
         return self._decl_affine(business)

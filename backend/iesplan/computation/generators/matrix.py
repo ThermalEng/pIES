@@ -211,6 +211,12 @@ class SparseModel:
     def column_position(self, name):
         return self.column_positions[self.columns.declaration(self.columns.symbols.slots[name])]
 
+    def column_names(self):
+        return (self.columns.values_at(declaration)[0] for declaration in self.column_order)
+
+    def row_names(self):
+        return (self.rows.names[declaration] for declaration in self.row_order)
+
     def to_dict(self):
         return {"variables": [v.to_dict() for v in self.variables],
                 "constraints": [r.to_dict() for r in self.constraints],

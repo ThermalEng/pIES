@@ -26,7 +26,11 @@ from iesplan import results as results_domain
 from iesplan import tasks as tasks_domain
 from iesplan.application.configuration import (
     get_effective_finance_config as _get_effective_finance_config,
+)
+from iesplan.application.configuration import (
     get_finance_overrides as _get_finance_overrides,
+)
+from iesplan.application.configuration import (
     get_planning_config as _get_planning_config,
 )
 from iesplan.application.configuration import (
@@ -34,13 +38,21 @@ from iesplan.application.configuration import (
 )
 from iesplan.application.models import (
     MODEL_MEDIA_TYPE as _MODEL_MEDIA_TYPE,
+)
+from iesplan.application.models import (
     save_project_model_in_transaction as _save_project_model_in_transaction,
 )
+from iesplan.application.packages.archive import ArchiveBuilder, ArchiveContent
 from iesplan.application.projects import (
     ensure_access,
+)
+from iesplan.application.projects import (
     load_content_object as _load_content_object,
+)
+from iesplan.application.projects import (
     store_content_object as _store_content_object,
 )
+from iesplan.core.content import Content
 from iesplan.core.contracts import (
     PlanningConfig,
     PlanningConfigError,
@@ -84,7 +96,7 @@ from iesplan.package import set_proposal_review as _set_proposal_review
 from iesplan.package.contracts import ImportProposalRecord
 from iesplan.planning.contracts import validate_planning_domain
 from iesplan.project.contracts import DraftRecord, ProjectRecord, ProjectVersionRecord
-from iesplan.storage import add_ref, get_object, object_info, put_object
+from iesplan.storage import add_ref, get_object, get_object_content, object_info, put_content, put_object
 
 #: 审计动作常量唯一所有者为 ``iesplan.audit`` 域门面(下文经 ``audit_domain``
 #: 引用, 本层不复制)。
@@ -133,7 +145,7 @@ def _collect_datasets(db: Session, dataset_version_ids: list[int]) -> list[dict]
                 obj = object_info(db, f.object_id)
             except NotFoundError:
                 continue
-            files.append({"file": f, "obj": obj, "content": get_object(db, obj["id"])})
+            files.append({"file": f, "obj": obj, "content": get_object_content(db, obj["id"])})
         out.append({"dataset": dataset, "version": version, "files": files})
     return out
 
@@ -150,11 +162,11 @@ def _collect_evidence(db: Session, project_id: int) -> list[dict]:
         snapshot = tasks_domain.get_snapshot(db, pkg.calc_snapshot_id) if pkg.calc_snapshot_id else None
         assessments = results_domain.list_package_assessments(db, pkg.id)
         index = results_domain.list_package_index(db, pkg.id)
-        content: bytes | None = None
+        content: Content | None = None
         obj: dict | None = None
         try:
             obj = object_info(db, pkg.object_id)
-            content = get_object(db, obj["id"])
+            content = get_object_content(db, obj["id"])
         except NotFoundError:
             pass
         out.append(
@@ -205,8 +217,8 @@ def _build_package_zip(
     project: ProjectRecord,
     draft: DraftRecord,
     draft_content: dict,
-) -> tuple[bytes, dict]:
-    """组装项目包 zip 字节与清单(流式写入; 不含账号/权限/会话/密钥，见 domain-model §对象生命周期)。
+) -> tuple[ArchiveContent, dict]:
+    """组装项目包内容引用与清单(流式写入; 不含账号/权限/会话/密钥)。
 
     版本经 project 域公开门面按 version_no 升序读取, 不直接访问版本表。
     """
@@ -235,12 +247,13 @@ def _build_package_zip(
         "configs": {},
     }
 
-    def _add(path: str, data: bytes, media_type: str) -> None:
+    def _add(path: str, data: Content | bytes, media_type: str) -> None:
         """写入 zip 条目并登记对象清单(路径/大小/类型, 不登记内容摘要)。"""
-        objects_manifest.append({"path": path, "size_bytes": len(data), "media_type": media_type})
+        size = len(data) if isinstance(data, bytes) else data.size_bytes
+        objects_manifest.append({"path": path, "size_bytes": size, "media_type": media_type})
 
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+    archive = ArchiveBuilder()
+    with archive as zf:
         # 项目元数据(不导出所有者/创建者等账号信息)
         project_meta = {
             "id": project.id,
@@ -559,7 +572,7 @@ def _build_package_zip(
         }
         manifest_raw = json.dumps(jsonable(manifest), ensure_ascii=False, indent=2).encode()
         zf.writestr("manifest.json", manifest_raw)
-    return buf.getvalue(), manifest
+    return archive.content(), manifest
 
 
 def export_package(db: Session, user: UserRecord, project_id: int) -> PackageExport:
@@ -575,11 +588,11 @@ def export_package(db: Session, user: UserRecord, project_id: int) -> PackageExp
     project = project_domain.require_project(db, project_id)
     draft = project_domain.require_current_draft(db, project)
     draft_content = _load_content_object(db, draft.content_object_id)
-    zip_bytes, manifest = _build_package_zip(db, project, draft, draft_content)
+    archive, manifest = _build_package_zip(db, project, draft, draft_content)
 
-    obj = put_object(
+    obj = put_content(
         db,
-        zip_bytes,
+        archive,
         PACKAGE_MEDIA_TYPE,
         source_category="project_package",
     )
@@ -603,7 +616,7 @@ def export_package(db: Session, user: UserRecord, project_id: int) -> PackageExp
         "project",
         project.id,
         revision=draft.revision,
-        result={"kind": "package", "package_object_id": obj.id, "size_bytes": len(zip_bytes)},
+        result={"kind": "package", "package_object_id": obj.id, "size_bytes": obj.size_bytes},
         extra={"file_name": f"project-package-{project.id}.zip"},
     )
     expires_at = datetime.now(UTC) + timedelta(seconds=DOWNLOAD_TOKEN_TTL_SECONDS)
@@ -972,7 +985,8 @@ def _check_package_step_relations(
         return
 
     from iesplan.assembly import check_step_relations, device_instance_refs
-    from iesplan.devices import from_dict as device_from_dict, list_devices
+    from iesplan.devices import from_dict as device_from_dict
+    from iesplan.devices import list_devices
 
     model = content.get("model") or {}
     devices = model.get("devices") or []
