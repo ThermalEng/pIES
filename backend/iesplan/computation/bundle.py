@@ -21,12 +21,13 @@ from typing import Any
 from jsonschema import Draft202012Validator
 
 from iesplan.computation.generators.descriptor import GeneratorDescriptor
-from iesplan.core.yamlmini import dump as _yaml_dump
 from iesplan.computation.protocols import (
     CalculationConfig,
     SolverBundle,
     SolverBundleManifest,
 )
+from iesplan.core.content import Content, MemoryContent
+from iesplan.core.yamlmini import dump as _yaml_dump
 
 SCHEMA_PATH = pathlib.Path(__file__).parent / "schema" / "solver-bundle-1.0.0.schema.json"
 
@@ -134,8 +135,8 @@ def manifest_to_yaml_bytes(manifest: SolverBundleManifest) -> bytes:
     return _yaml_dump(manifest.to_dict()).encode("utf-8")
 
 
-def export_bundle_files(bundle: SolverBundle) -> dict[str, bytes]:
-    """完整聚合 → 路径到字节映射（含 bundle.yaml 与全部输入文件）。
+def export_bundle_files(bundle: SolverBundle) -> dict[str, Content]:
+    """完整聚合 → 路径到内容映射（含 bundle.yaml 与全部输入文件）。
 
     返回独立副本；键为 Bundle 规范相对路径（bundle.yaml 在首位，
     其后输入文件按键排序），可直接物化为运行目录。
@@ -144,8 +145,8 @@ def export_bundle_files(bundle: SolverBundle) -> dict[str, bytes]:
         raise TypeError(
             f"bundle 须为 SolverBundle，得到 {type(bundle).__name__}"
         )
-    exported: dict[str, bytes] = {
-        "bundle.yaml": manifest_to_yaml_bytes(bundle.manifest)
+    exported: dict[str, Content] = {
+        "bundle.yaml": MemoryContent(manifest_to_yaml_bytes(bundle.manifest))
     }
     for path in sorted(bundle.files):
         exported[path] = bundle.files[path]

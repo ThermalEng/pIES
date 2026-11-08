@@ -4,6 +4,7 @@ import json
 from copy import deepcopy
 
 import pytest
+from bundle_testkit import content_bytes, materialized_file
 from test_p3_network_boundaries import BOUNDARIES, _case, _solve
 from test_p3_port_network import SOURCE, _inputs
 from test_project_model import LOAD_YAML, _evaluation_n
@@ -14,6 +15,7 @@ from iesplan.computation import materialize_non_predictive_series
 from iesplan.computation.generators.highs_milp import HIGHS_MILP_PROVIDER
 from iesplan.computation.generators.linear import LoweringUnsupportedError
 from iesplan.computation.generators.project import _new_builder
+from iesplan.core.content import read_content
 
 
 def _attach(inputs, doc, documents, block, outputs=None, **validation):
@@ -59,7 +61,7 @@ def test_delivery_binds_existing_ports_and_restores_independent_system_identity(
     assert system["block"] == "account" and system["variable"] == "dispatch"
     assert system["unit"] == "kW" and list(system["values"]) == [4] * 8760
     assert list(result.outputs["series"]["source.dispatch"]["values"]) == [4] * 8760
-    frozen = json.loads(build_hourly_files(result.outputs)["hourly/series.json"][0])
+    frozen = json.loads(read_content(build_hourly_files(result.outputs)["hourly/series.json"][0]))
     assert frozen["meta"]["series"]["source.dispatch"]["kind"] == "device"
     assert frozen["meta"]["series"]["system:account.dispatch"] == {
         "kind": "system",
@@ -68,7 +70,7 @@ def test_delivery_binds_existing_ports_and_restores_independent_system_identity(
         "variable": "dispatch",
         "unit": "kW",
     }
-    params = json.loads(bundle.files["input/parameters.json"])
+    params = json.loads(materialized_file(bundle, "input/parameters.json"))
     location = params["model_sources"]["sources"]["technical:system:account.source_total"]["location"]
     assert location["block_id"] == "account" and "instance_id" not in location
     assert params["model_sources"]["sources"]["technical:system:account.source_total"]["inputs"] == [
@@ -151,8 +153,8 @@ def test_system_state_uses_shared_initial_and_real_steps(tmp_path):
     )
     assert again.ok
     assert (
-        HIGHS_MILP_PROVIDER.generate(again.artifact, *new_inputs[1:]).files
-        == HIGHS_MILP_PROVIDER.generate(*new_inputs).files
+        content_bytes(HIGHS_MILP_PROVIDER.generate(again.artifact, *new_inputs[1:]).files)
+        == content_bytes(HIGHS_MILP_PROVIDER.generate(*new_inputs).files)
     )
 
 
@@ -256,7 +258,8 @@ def test_property_alias_bound_and_initial_share_planned_scale_and_blocks_are_ind
     builder = _new_builder(new_inputs[0], new_inputs[1], new_inputs[2], new_inputs[3], new_inputs[5])
     independent_series = [entry for entry in builder.step_series() if "block" in entry]
     bundle = HIGHS_MILP_PROVIDER.generate(*new_inputs)
-    assert independent_series == json.loads(bundle.files["input/parameters.json"])["system_series"]
+    parameters = json.loads(materialized_file(bundle, "input/parameters.json"))
+    assert independent_series == parameters["system_series"]
     result = _solve(bundle, tmp_path)
     assert result.math_status == "solved"
     assert set(result.outputs["system_series"]["system:account.memory"]["values"]) == {4}

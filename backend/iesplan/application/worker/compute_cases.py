@@ -35,8 +35,9 @@ storage/领域门面 + computation 公开门面)。
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from functools import partial
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -60,21 +61,21 @@ from iesplan.computation import (
     SolverBundle,
     SolverRuntime,
     StopProbe,
-    read_stop_reason,
     check_convergence,
     materialize_non_predictive_series,
     materialize_predicted_series,
     prediction_delta,
+    read_stop_reason,
     split_predictions_by_dependency,
     thaw_json_value,
 )
 from iesplan.computation.result_adapter import ResultAdapterRegistry
+from iesplan.core.content import Content, GeneratedContent, MemoryContent, json_chunks
 from iesplan.core.contracts import horizon_point_count
-from iesplan.core.jsonutil import canonical_json
 from iesplan.core.diagnostics import Diagnostic
 from iesplan.finance import EffectiveFinanceConfig, EvaluationInput
 from iesplan.modeling import DeviceMathContribution, contribution_from_dict
-from iesplan.storage import add_ref, get_object, put_object
+from iesplan.storage import add_ref, get_object, put_content
 from iesplan.tasks import BUSINESS_OUTCOMES
 
 __all__ = [
@@ -564,7 +565,7 @@ def execute_bundle(
     bundle: SolverBundle,
     attempt: AttemptContext,
     stop: StopProbe | None = None,
-) -> tuple[ExecutionReceipt, dict[str, bytes]]:
+) -> tuple[ExecutionReceipt, Mapping[str, Content]]:
     """经组合根装配的通用运行时执行完整 Bundle（调用方停止探针透传）。"""
     return plane.runtime.run(bundle, attempt, stop=stop)
 
@@ -614,7 +615,7 @@ def result_step_series(outputs: Mapping[str, object]) -> dict[str, dict]:
 
 def build_hourly_files(
     outputs: Mapping[str, object],
-) -> dict[str, tuple[bytes, str]]:
+) -> dict[str, tuple[Content, str]]:
     """已恢复统一序列 → hourly 对象字节（只序列化已恢复序列）。
 
     消费 ``ComputeResult.outputs["series"]``（ResultAdapter 按生成器声明
@@ -630,20 +631,20 @@ def build_hourly_files(
     series = result_step_series(outputs)
     if not series:
         return {}
-    data: dict[str, list[float]] = {}
+    data: dict[str, Sequence[float]] = {}
     units: dict[str, str] = {}
     identities: dict[str, dict[str, str]] = {}
     for series_id in sorted(series):
         entry = series[series_id]
-        data[series_id] = list(entry["values"])  # type: ignore[index]
+        data[series_id] = entry["values"]  # immutable shared sequence, no second value array
         units[series_id] = entry["unit"]  # type: ignore[index]
         identities[series_id] = {key: value for key, value in entry.items() if key != "values"}
-    blob = canonical_json({"data": data, "meta": {"units": units, "series": identities}})
-    return {HOURLY_OBJECT_PATH: (blob.encode("utf-8"), HOURLY_OBJECT_MEDIA_TYPE)}
+    value = {"data": data, "meta": {"units": units, "series": identities}}
+    return {HOURLY_OBJECT_PATH: (GeneratedContent(partial(json_chunks, value)), HOURLY_OBJECT_MEDIA_TYPE)}
 
 
 def seal_output_objects(
-    db: Session, files: Mapping[str, tuple[bytes, str]], *, actor_id: int | None
+    db: Session, files: Mapping[str, tuple[Content | bytes, str]], *, actor_id: int | None
 ) -> dict[str, dict[str, object]]:
     """声明文件字节以存储对象无损封存，返回按路径索引的描述子。
 
@@ -653,9 +654,9 @@ def seal_output_objects(
     sealed: dict[str, dict[str, object]] = {}
     for path in sorted(files):
         data, media_type = files[path]
-        handle = put_object(
+        handle = put_content(
             db,
-            data,
+            MemoryContent(data) if isinstance(data, bytes) else data,
             media_type,
             source_category="evidence",
             purpose="evidence_output",
@@ -664,7 +665,7 @@ def seal_output_objects(
         sealed[path] = {
             "object_id": handle.id,
             "media_type": media_type,
-            "size_bytes": len(data),
+            "size_bytes": handle.size_bytes,
         }
     return sealed
 

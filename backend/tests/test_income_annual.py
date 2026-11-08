@@ -10,14 +10,15 @@ from __future__ import annotations
 from decimal import Decimal
 
 import pytest
+from bundle_testkit import materialized_file
 from test_npv_objective import GEN_YAML, RATE, _contribution
 from test_vat_monthly import (
     ELEC_KW,
     GROSS_FACTOR,
     HOURS_2026,
     HOURS_2027,
-    _finance_payload,
     _collection_builder,
+    _finance_payload,
     _hand_chain,
     _hand_monthly,
     _hand_npv_with_vat,
@@ -344,6 +345,7 @@ def _gen_solve(inputs, tmp_path):
     import logging
     from time import perf_counter
     from unittest.mock import patch
+
     from iesplan.computation.generators.bound_inference import BoundInferenceEngine
 
     original = BoundInferenceEngine.bound_affine
@@ -993,14 +995,16 @@ def test_income_depreciation_excess_residual_rejected(tmp_path) -> None:
     B<=U*z、B>=R*z 应证明模型不可行，而非生成负折旧金额。
     """
     import subprocess
-    from iesplan.computation.result_adapters.highs import _parse_solution
+
     from test_vat_monthly import HIGHS_ADAPTER_PATH
+
+    from iesplan.computation.result_adapters.highs import _parse_solution
 
     payload = _residual_payload(_mix_payload, "100000")
     bundle = HIGHS_MILP_PROVIDER.generate(*_inputs(payload=payload))
     (tmp_path / "input").mkdir(exist_ok=True)
     (tmp_path / "output").mkdir(exist_ok=True)
-    (tmp_path / "input" / "problem.mps").write_bytes(bundle.files["input/problem.mps"])
+    (tmp_path / "input" / "problem.mps").write_bytes(materialized_file(bundle, "input/problem.mps"))
     completed = subprocess.run(
         [HIGHS_ADAPTER_PATH, "input/problem.mps", "--solution_file",
          "output/solution.sol", "--time_limit", "300", "--random_seed", "0"],

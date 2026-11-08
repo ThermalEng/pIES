@@ -12,6 +12,7 @@ import subprocess
 from decimal import Decimal
 
 import pytest
+from bundle_testkit import materialized_file
 from test_highs_result_adapter import SOLUTION_PATH, _receipt
 from test_highs_result_adapter import _bundle as _wrap_bundle
 
@@ -690,16 +691,15 @@ def _hand_npv_with_vat(
 def _solve_internal(bundle, tmp_path, *, check_soc_pin=True):
     """真实求解：返回（目标值 + 偏移，列名 → 取值，解字节）。
 
-    列顺序与解映射走生产读取（``_mps_column_names`` / ``_parse_solution``）；
+    列顺序由测试夹具读取 MPS，解值走生产读取（``_parse_solution``）；
     无系数固定变量（soc_pin）在生产 writer 显式占列，交接严格等长。
     无该变量的夹具传 ``check_soc_pin=False``。
     """
-    from iesplan.computation.result_adapters.highs import (
-        _mps_column_names,
-        _parse_solution,
-    )
+    from bundle_testkit import mps_columns
 
-    mps_raw = bundle.files["input/problem.mps"]
+    from iesplan.computation.result_adapters.highs import _parse_solution
+
+    mps_raw = materialized_file(bundle, "input/problem.mps")
     (tmp_path / "input").mkdir(parents=True, exist_ok=True)
     (tmp_path / "output").mkdir(parents=True, exist_ok=True)
     (tmp_path / "input" / "problem.mps").write_bytes(mps_raw)
@@ -724,13 +724,13 @@ def _solve_internal(bundle, tmp_path, *, check_soc_pin=True):
     solution_raw = (tmp_path / "output" / "solution.sol").read_bytes()
     solution = _parse_solution(solution_raw)
     assert solution["model_status"] == "HighsModelStatus.kOptimal"
-    order = _mps_column_names(mps_raw)
+    order = mps_columns(mps_raw)
     primals = solution["primals"]
     assert len(primals) == len(order)
     values = dict(zip(order, primals, strict=True))
     if check_soc_pin:
         assert values.get("soc_pin") == pytest.approx(0.5)
-    metadata = json.loads(bundle.files["input/parameters.json"].decode("utf-8"))
+    metadata = json.loads(materialized_file(bundle, "input/parameters.json").decode("utf-8"))
     return float(solution["objective"]) + metadata["objective_offset"], values, solution_raw
 
 
@@ -758,8 +758,8 @@ def test_vat_chain_matches_hand_and_npv(tmp_path) -> None:
     adapted = HIGHS_ADAPTER.adapt(
         _wrap_bundle(
             {
-                "input/problem.mps": bundle.files["input/problem.mps"],
-                "input/parameters.json": bundle.files["input/parameters.json"],
+                "input/problem.mps": materialized_file(bundle, "input/problem.mps"),
+                "input/parameters.json": materialized_file(bundle, "input/parameters.json"),
             }
         ),
         _receipt(),
@@ -849,7 +849,7 @@ def test_vat_overclaimed_refund_is_infeasible(tmp_path) -> None:
     )
     artifact, models, materialized, finance, config, evaluation = _inputs(refunds=refunds)
     bundle = HIGHS_MILP_PROVIDER.generate(artifact, models, materialized, finance, config, evaluation)
-    mps_text = bundle.files["input/problem.mps"].decode("utf-8")
+    mps_text = materialized_file(bundle, "input/problem.mps").decode("utf-8")
     (tmp_path / "input").mkdir(parents=True, exist_ok=True)
     (tmp_path / "output").mkdir(parents=True, exist_ok=True)
     (tmp_path / "input" / "problem.mps").write_text(mps_text, encoding="utf-8")

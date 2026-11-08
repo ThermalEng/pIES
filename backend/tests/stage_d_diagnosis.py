@@ -138,12 +138,11 @@ def solve_diagnostic(model: LinearModel, mps: bytes, sources: dict, *, mode: str
         if financial_declarations is not None:
             # Reuse the real adapter's affine recovery on this SAME primal;
             # never recalculate taxes or silently solve a second model.
-            from iesplan.computation.result_adapters.highs import _recover_financial_facts
+            from bundle_testkit import evaluate_fact_expressions
 
-            financial_facts = _recover_financial_facts(
-                financial_declarations,
-                {name: i for i, name in enumerate(lp.col_names_)}, solution.col_value,
-            )
+            from iesplan.computation.result_adapters.highs import _recover_financial_facts
+            financial_facts = _recover_financial_facts(evaluate_fact_expressions(
+                financial_declarations, values))
     mip = mode == "exact" and info.mip_node_count >= 0
     return {
         "mode": mode, "presolve": presolve, "solver_version": handle.version(),

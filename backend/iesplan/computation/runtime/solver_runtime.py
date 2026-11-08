@@ -20,7 +20,9 @@ import shutil
 import stat
 import tempfile
 import uuid
-from collections.abc import Callable, Mapping
+import weakref
+from collections.abc import Callable, Iterator, Mapping
+from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from iesplan.computation.errors import ComputationUnavailableError
@@ -36,12 +38,46 @@ from iesplan.computation.protocols import (
 from iesplan.computation.runtime.context import AttemptContext
 from iesplan.computation.runtime.policy import DeploymentPolicy
 from iesplan.computation.runtime.registry import ExecutorRegistry
+from iesplan.core.content import Content
 
 #: 命令未声明 success_exit_codes 时的协议默认（仅判断进程是否按协议结束）。
 _DEFAULT_SUCCESS_EXIT_CODES = (0,)
 
 #: 声明输出单次读取块大小（字节；总预算内分块读，超限不完整读入）。
 _OUTPUT_READ_CHUNK_BYTES = 65_536
+
+
+@dataclass(frozen=True, slots=True)
+class _OutputContent:
+    filename: str
+    size_bytes: int
+
+    def iter_chunks(self) -> Iterator[bytes]:
+        remaining = self.size_bytes
+        with open(self.filename, "rb") as source:
+            while remaining:
+                chunk = source.read(min(_OUTPUT_READ_CHUNK_BYTES, remaining))
+                if not chunk:
+                    break
+                remaining -= len(chunk)
+                yield chunk
+
+
+class RuntimeOutputs(dict[str, Content]):
+    """Runtime-owned output lifetime. Read before close; no paths escape the runtime."""
+
+    def __init__(self, values: Mapping[str, Content], root: str):
+        super().__init__(values)
+        self._cleanup = weakref.finalize(self, shutil.rmtree, root)
+
+    def close(self) -> None:
+        self._cleanup()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        self.close()
 
 
 def _normalize_timestamp(value: str) -> str:
@@ -58,7 +94,7 @@ class SolverRuntime:
     """通用求解执行编排（组合根持有，Worker 经 application 调用）。
 
     构造依赖已发布的 ``ExecutorRegistry`` 与 ``DeploymentPolicy``；
-    ``run`` 每次调用建立独立临时工作区，结束后清理。门禁或执行器解析
+    ``run`` 每次调用建立独立临时工作区，输出交接完成后清理。门禁或执行器解析
     失败返回 ``policy_rejected`` 回执且不调用 executor；启动前停止
     （含 provider 启动瞬间观测到的停止，此时进程必然未启动）返回
     ``cancelled``/``fenced`` 未执行回执；executor 调用后的非零退出、
@@ -90,9 +126,9 @@ class SolverRuntime:
         attempt: AttemptContext,
         *,
         stop: StopProbe | None = None,
-        handoff: Callable[[ExecutionReceipt, Mapping[str, bytes]], None] | None = None,
-    ) -> tuple[ExecutionReceipt, dict[str, bytes]]:
-        """执行完整 Bundle，返回 ``(唯一回执, 已核对声明输出字节)``。
+        handoff: Callable[[ExecutionReceipt, Mapping[str, Content]], Mapping[str, Content]] | None = None,
+    ) -> tuple[ExecutionReceipt, Mapping[str, Content]]:
+        """执行完整 Bundle，返回 ``(唯一回执, 声明输出内容)``。
 
         ``stop`` 为调用方停止探针：启动前已停止即不启动进程，直接签发
         ``cancelled``/``fenced`` 回执（含 provider 启动瞬间观测到的停止，
@@ -185,8 +221,11 @@ class SolverRuntime:
             )
             if handoff is not None:
                 delivered = False
-                handoff(receipt, outputs)
+                outputs = handoff(receipt, outputs)
                 delivered = True
+            else:
+                outputs = RuntimeOutputs(outputs, root)
+                delivered = False
             return receipt, outputs
         finally:
             if delivered:
@@ -240,7 +279,8 @@ class SolverRuntime:
             target = os.path.join(root, path)
             os.makedirs(os.path.dirname(target), exist_ok=True)
             with open(target, "wb") as handle:
-                handle.write(content)
+                for chunk in content.iter_chunks():
+                    handle.write(chunk)
         for entry in bundle.manifest.outputs:
             parent = os.path.dirname(str(entry["path"]))
             if parent:
@@ -257,7 +297,7 @@ class SolverRuntime:
         command: Mapping[str, object],
         outcome: ProcessOutcome,
         root: str,
-    ) -> tuple[ExecutionReceipt, dict[str, bytes]]:
+    ) -> tuple[ExecutionReceipt, dict[str, Content]]:
         """核对输出边界并签发回执（见 ``run`` 状态优先级）。"""
         manifest = bundle.manifest
         declared = {entry["path"]: entry for entry in manifest.outputs}
@@ -401,7 +441,7 @@ class SolverRuntime:
         root: str,
         manifest: SolverBundleManifest,
         nodes: list[tuple[str, str, int]],
-    ) -> tuple[dict[str, bytes], list[str]]:
+    ) -> tuple[dict[str, Content], list[str]]:
         """按节点排序单调分配预算并有界收集声明输出。
 
         对扫描到的全部实际节点按相对路径稳定排序，基于同一序列一次
@@ -412,7 +452,7 @@ class SolverRuntime:
         时取得槽位与字节资格的声明普通文件才有界读取进入 outputs；
         每个文件至多按其 stat 大小读取，大文件不读入内存。
         """
-        collected: dict[str, bytes] = {}
+        collected: dict[str, Content] = {}
         errors: list[str] = []
         max_files = self._policy.max_output_files
         budget = self._policy.max_output_bytes
@@ -441,28 +481,15 @@ class SolverRuntime:
             if kind != "regular" or rel not in declared:
                 continue
             try:
-                data = self._read_sized(os.path.join(root, rel), size)
+                data = _OutputContent(os.path.join(root, rel), size)
+                actual = 0
+                for chunk in data.iter_chunks():
+                    actual += len(chunk)
             except OSError:
                 errors.append(f"声明输出不可读: {rel!r}")
                 continue
-            collected[rel] = data
+            collected[rel] = _OutputContent(data.filename, actual)
         return collected, errors
-
-    @staticmethod
-    def _read_sized(full: str, size: int) -> bytes:
-        """按 stat 大小有界读取文件内容；IO 错误抛 ``OSError``。"""
-        chunks: list[bytes] = []
-        total = 0
-        with open(full, "rb") as handle:
-            while total < size:
-                piece = handle.read(
-                    min(_OUTPUT_READ_CHUNK_BYTES, size - total)
-                )
-                if not piece:
-                    break
-                chunks.append(piece)
-                total += len(piece)
-        return b"".join(chunks)
 
     def _unexecuted(
         self,
@@ -507,7 +534,7 @@ class SolverRuntime:
         outcome: ProcessOutcome,
         status: str,
         error: str,
-        collected: Mapping[str, bytes],
+        collected: Mapping[str, Content],
     ) -> ExecutionReceipt:
         """由过程结果与已核对输出签发唯一回执。"""
         manifest = bundle.manifest
@@ -520,7 +547,7 @@ class SolverRuntime:
                 {
                     "path": path,
                     "media_type": str(entry["media_type"]),
-                    "size_bytes": len(collected[path]),
+                    "size_bytes": collected[path].size_bytes,
                     "required": bool(entry["required"]),
                 }
             )

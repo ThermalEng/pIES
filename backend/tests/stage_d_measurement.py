@@ -13,6 +13,7 @@ from dataclasses import asdict, replace
 from pathlib import Path
 from unittest.mock import patch
 
+from bundle_testkit import materialized_file
 from test_highs_milp_provider import SAMPLES, _campus_inputs
 
 from iesplan.assembly import validate_assembly_text
@@ -161,13 +162,17 @@ def measure(years: int, *, solve_seconds: int = 0, profile_path: str | None = No
                      timed("bound_propagation", bound_inference.BoundInferenceEngine._propagate)),
         patch.object(highs_milp, "build_project_model_package",
                      timed("model_and_declarations", capture_package)),
-        patch.object(highs_milp, "write_mps", timed("mps_write", highs_milp.write_mps)),
         patch.object(highs_milp.HighsMilpProvider, "_metadata",
                      timed("metadata_serialization", highs_milp.HighsMilpProvider._metadata)),
     ):
         if profile:
             profile.enable()
         bundle = highs_milp.HIGHS_MILP_PROVIDER.generate(*inputs)
+        sizes = {}
+        for path, content in bundle.files.items():
+            label = "mps_write" if path == highs_milp.PROBLEM_PATH else "parameter_records"
+            sizes[path] = timed(label, lambda content=content: sum(
+                len(chunk) for chunk in content.iter_chunks()))()
         if profile:
             profile.disable()
     generate_seconds = time.perf_counter() - start
@@ -183,11 +188,12 @@ def measure(years: int, *, solve_seconds: int = 0, profile_path: str | None = No
         "inclusive_stages_not_additive": times, "template_stats": builder.template_stats,
         "propagation_stats": asdict(builder.analysis.propagation_stats),
         "matrix": matrix_summary(captured["model"], captured["sources"]),
-        "mps_bytes": len(bundle.files[highs_milp.PROBLEM_PATH]),
-        "metadata_bytes": len(bundle.files[highs_milp.PARAMETERS_PATH]),
+        "mps_bytes": sizes[highs_milp.PROBLEM_PATH],
+        "metadata_bytes": sum(size for path, size in sizes.items() if path != highs_milp.PROBLEM_PATH),
     }
     if solve_seconds:
-        result["native_solver"] = native_solve(bundle.files[highs_milp.PROBLEM_PATH], solve_seconds)
+        result["native_solver"] = native_solve(
+            materialized_file(bundle, highs_milp.PROBLEM_PATH), solve_seconds)
     result["fresh_process_peak_rss_kib"] = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
     result["rss_scope"] = (
         "input preparation + generate + statistics + optional native solve; not per-stage RSS"

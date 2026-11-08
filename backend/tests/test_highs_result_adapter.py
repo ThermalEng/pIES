@@ -15,6 +15,7 @@ import json
 from types import SimpleNamespace
 
 import pytest
+from bundle_testkit import fixture_files
 
 from iesplan.computation.errors import ComputationUnavailableError
 from iesplan.computation.protocols import (
@@ -28,7 +29,6 @@ from iesplan.computation.result_adapters.highs import (
     ADAPTER_REF,
     HIGHS_ADAPTER,
     HighsResultAdapter,
-    _mps_column_names,
 )
 
 PROBLEM_PATH = "input/problem.mps"
@@ -191,6 +191,7 @@ def _bundle(files: dict | None = None) -> SolverBundle:
             PROBLEM_PATH: TINY_MPS.encode("utf-8"),
             PARAMETERS_PATH: _parameters(),
         }
+    files = fixture_files(files)
     manifest = SolverBundleManifest(
         bundle={
             "generator": "ies.generator.highs_milp@1.0.0",
@@ -252,19 +253,6 @@ def test_identity_and_registry() -> None:
     with pytest.raises(ComputationUnavailableError) as exc_info:
         registry.resolve("ies.result-adapter.other@1.0.0")
     assert exc_info.value.reason == "no-result-adapter"
-
-
-def test_bundle_without_financial_facts_fails() -> None:
-    """旧包缺必需财务事实声明即自然失败，不回退、不补零。"""
-    doc = json.loads(_parameters().decode("utf-8"))
-    del doc["financial_facts"]
-    raw = (json.dumps(doc, sort_keys=True) + "\n").encode("utf-8")
-    files = {
-        PROBLEM_PATH: TINY_MPS.encode("utf-8"),
-        PARAMETERS_PATH: raw,
-    }
-    with pytest.raises(KeyError):
-        _adapt(files, _receipt(), SHIM_OPTIMAL.encode("utf-8"))
 
 
 def test_optimal_money_objective_keeps_currency() -> None:
@@ -472,8 +460,8 @@ def test_optimal_without_valid_primal_is_not_published() -> None:
         _adapt(None, _receipt(), raw.encode())
 
 
-def test_mps_repeated_name_lines_map() -> None:
-    """MPS 同名连续行属同一列；非连续列名复现即损坏。"""
+def test_adapter_uses_declared_positions_not_mps_text() -> None:
+    """The paired generator owns positions; adapter never opens MPS, even for inspection."""
     files = {
         PROBLEM_PATH: WRAPPED_MPS.encode("utf-8"),
         PARAMETERS_PATH: _parameters(),
@@ -484,16 +472,13 @@ def test_mps_repeated_name_lines_map() -> None:
         {"name": "x", "value": 3.0, "unit": "kW"},
         {"name": "y", "value": 0.0, "unit": "kW"},
     ]
-    duplicated = WRAPPED_MPS.replace(
-        "    y  r2  1.0\nRHS", "    y  r2  1.0\n    x  r2  9.0\nRHS"
-    )
-    files = {
-        PROBLEM_PATH: duplicated.encode("utf-8"),
-        PARAMETERS_PATH: _parameters(),
-    }
-    with pytest.raises(ComputationUnavailableError) as exc_info:
-        _adapt(files, _receipt(), SHIM_OPTIMAL.encode("utf-8"))
-    assert exc_info.value.reason == "result-protocol-failure"
+    bundle = _bundle(files)
+    class UnreadableMps:
+        def iter_chunks(self):
+            raise AssertionError("ResultAdapter must not read MPS")
+    bundle = SolverBundle(bundle.manifest, {**bundle.files, PROBLEM_PATH: UnreadableMps()})
+    actual = HIGHS_ADAPTER.adapt(bundle, _receipt(), {SOLUTION_PATH: SHIM_OPTIMAL.encode()})
+    assert actual == result
 
 
 def test_corrupt_inputs_fail() -> None:
@@ -520,20 +505,6 @@ def test_corrupt_inputs_fail() -> None:
     assert exc_info.value.reason == "result-protocol-failure"
     files = {
         PROBLEM_PATH: TINY_MPS.encode("utf-8"),
-        PARAMETERS_PATH: _parameters(offset=True),
-    }
-    with pytest.raises(ComputationUnavailableError) as exc_info:
-        _adapt(files, _receipt(), SHIM_OPTIMAL.encode("utf-8"))
-    assert exc_info.value.reason == "result-protocol-failure"
-    files = {
-        PROBLEM_PATH: TINY_MPS.encode("utf-8"),
-        PARAMETERS_PATH: _parameters(unit_map={"x": "kW", "ghost": "kW"}),
-    }
-    with pytest.raises(ComputationUnavailableError) as exc_info:
-        _adapt(files, _receipt(), SHIM_OPTIMAL.encode("utf-8"))
-    assert exc_info.value.reason == "result-protocol-failure"
-    files = {
-        PROBLEM_PATH: TINY_MPS.encode("utf-8"),
         PARAMETERS_PATH: _parameters(unit_map={"x": "not_a_unit_xyz"}),
     }
     with pytest.raises(ComputationUnavailableError) as exc_info:
@@ -541,19 +512,7 @@ def test_corrupt_inputs_fail() -> None:
     assert exc_info.value.reason == "result-protocol-failure"
 
 
-def test_column_order_reads_incrementally() -> None:
-    class NoWholeText(bytes):
-        def decode(self, *args, **kwargs):
-            raise AssertionError("不得完整解码 MPS")
-
-        def splitlines(self, *args, **kwargs):
-            raise AssertionError("不得物化完整 MPS 行列表")
-
-    assert _mps_column_names(NoWholeText(WRAPPED_MPS.encode())) == ["x", "y"]
-    assert _mps_column_names(WRAPPED_MPS.replace("\n", "\r\n").encode()) == ["x", "y"]
-
-
-def test_declared_components_evaluated_from_same_solution(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_declared_components_evaluated_from_same_solution() -> None:
     """声明分量用同一次真实解求值发布：金额守币种、年值与物理量换算。
 
     手算（tiny 最优解 x=3000, y=0；年内部以秒计，a = 31536000 s）：
@@ -561,14 +520,6 @@ def test_declared_components_evaluated_from_same_solution(monkeypatch: pytest.Mo
     om_year = from_si(0.5×3000, CNY/a) = 1500×31536000 = 47304000000 CNY/a；
     energy = 3600000 J = 1.0 kWh。
     """
-    class NoLinearSearchColumns(list):
-        def index(self, *args, **kwargs):
-            raise AssertionError("分量恢复不得对列名逐项线性搜索")
-
-    monkeypatch.setattr(
-        "iesplan.computation.result_adapters.highs._mps_column_names",
-        lambda _: NoLinearSearchColumns(["x", "y"]),
-    )
     components = {
         "capex": {
             "unit": "CNY",
@@ -603,25 +554,17 @@ def test_declared_components_evaluated_from_same_solution(monkeypatch: pytest.Mo
     assert got["energy"] == {"value": 1.0, "unit": "kWh", "caliber": "period"}
 
 
-def test_components_fail_loudly() -> None:
-    """分量声明引用未知 LP 变量、形态非法或缺键，一律协议失败。"""
+def test_components_nonfinite_values_fail_loudly() -> None:
+    """Actual amount overflow remains visible, without another internal structure validator."""
     bad_decls = [
         {
             "capex": {
                 "unit": "CNY",
                 "caliber": "upfront",
                 "constant": 0.0,
-                "terms": {"ghost": 1.0},
+                "terms": {"x": 1.0e308},
             }
         },
-        {
-            "capex": {
-                "unit": "CNY",
-                "caliber": "upfront",
-                "constant": 0.0,
-            }
-        },
-        {"capex": "not-a-mapping"},
     ]
     for decl in bad_decls:
         files = {
@@ -631,15 +574,6 @@ def test_components_fail_loudly() -> None:
         with pytest.raises(ComputationUnavailableError) as exc_info:
             _adapt(files, _receipt(), SHIM_OPTIMAL.encode("utf-8"))
         assert exc_info.value.reason == "result-protocol-failure"
-    raw = json.loads(_parameters().decode("utf-8"))
-    del raw["components"]
-    files = {
-        PROBLEM_PATH: TINY_MPS.encode("utf-8"),
-        PARAMETERS_PATH: (json.dumps(raw, sort_keys=True) + "\n").encode("utf-8"),
-    }
-    with pytest.raises(ComputationUnavailableError) as exc_info:
-        _adapt(files, _receipt(), SHIM_OPTIMAL.encode("utf-8"))
-    assert exc_info.value.reason == "result-protocol-failure"
 
 
 def test_series_recovers_by_declared_columns() -> None:
@@ -699,18 +633,6 @@ def test_series_absent_without_solution_request() -> None:
     assert "solution" not in result.outputs
 
 
-def test_legacy_bundle_without_step_series_fails() -> None:
-    """旧声明（无 step_series 键）自然失败，不回退、不忽略、不另造校验器。"""
-    raw = json.loads(_parameters().decode("utf-8"))
-    del raw["step_series"]
-    files = {
-        PROBLEM_PATH: TINY_MPS.encode("utf-8"),
-        PARAMETERS_PATH: (json.dumps(raw, sort_keys=True) + "\n").encode("utf-8"),
-    }
-    with pytest.raises(KeyError):
-        _adapt(files, _receipt(), SHIM_OPTIMAL.encode("utf-8"))
-
-
 def test_series_unknown_column_fails() -> None:
     """声明引用未知 LP 列即协议失败，不补零。"""
     decl = [{
@@ -718,14 +640,21 @@ def test_series_unknown_column_fails() -> None:
         "instance_id": "inst",
         "variable_id": "flow",
         "unit": "kW",
-        "columns": ["x", "ghost"],
+        "columns": ["x", "y"],
     }]
     files = {
         PROBLEM_PATH: TINY_MPS.encode("utf-8"),
         PARAMETERS_PATH: _parameters(step_series=decl),
     }
+    from iesplan.computation.generators.parameters import RECORDS_PATH
+    from iesplan.core.content import MemoryContent
+    bundle = _bundle(files)
+    records = b"".join(bundle.files[RECORDS_PATH].iter_chunks()).replace(
+        b'["positions",[0,1]]', b'["positions",[0,99]]',
+    )
+    bundle = SolverBundle(bundle.manifest, {**bundle.files, RECORDS_PATH: MemoryContent(records)})
     with pytest.raises(ComputationUnavailableError) as exc_info:
-        _adapt(files, _receipt(), SHIM_OPTIMAL.encode("utf-8"))
+        HIGHS_ADAPTER.adapt(bundle, _receipt(), {SOLUTION_PATH: SHIM_OPTIMAL.encode()})
     assert exc_info.value.reason == "result-protocol-failure"
 
 

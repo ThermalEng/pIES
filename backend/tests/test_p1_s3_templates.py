@@ -12,23 +12,30 @@ import time
 import tracemalloc
 
 import pytest
+from bundle_testkit import materialized_file
+from s2_reference_lowerer import lower_relation_s2
+from test_battery_planning import _rows
+from test_linear_lowering import (
+    BILINEAR_YAML,
+    HEATER_YAML,
+    MUTEX_YAML,
+    SOC_YAML,
+    _relation,
+)
+from test_project_model import _contribution
 
 from iesplan.computation.generators.compiler_ir import CompilerAnalysis
 from iesplan.computation.generators.linear import (
-    LinearConstraint, LinearExpression, LinearModel, LoweringUnsupportedError,
-    lower_expression, lower_relation,
+    LinearConstraint,
+    LinearExpression,
+    LinearModel,
+    LoweringUnsupportedError,
+    lower_expression,
+    lower_relation,
 )
 from iesplan.computation.generators.mps import write_mps
 from iesplan.computation.generators.project import _ProjectBuilder
-from iesplan.computation.generators.templates import compile_technical, bind_technical
-from s2_reference_lowerer import lower_relation_s2
-
-from test_battery_planning import battery, _rows
-from test_linear_lowering import (
-    _relation, HEATER_YAML, SOC_YAML, MUTEX_YAML, BILINEAR_YAML,
-)
-from test_project_model import _contribution
-from test_p1_compiler_s1 import measured_generate
+from iesplan.computation.generators.templates import bind_technical, compile_technical
 
 
 def _compiled(relation, symbols, *, step, initial=None):
@@ -277,6 +284,7 @@ def _reference_technical_benchmark(builder):
     row allocation / MPS. Never mislabel this as an S2 full-build benchmark.
     """
     from s2_reference_lowerer import lower_relation_s2
+
     from iesplan.core.contracts.baseline import TIMELINE_STEP_DURATION_VAR
 
     inputs = []
@@ -531,7 +539,7 @@ def test_public_campus_production_template_counts_and_resource_comparison(measur
     assert builder.template_stats["step_binds"] == (
         builder.point_count * builder.template_stats["step_compiles"]
     )
-    assert len(bundle.files["input/problem.mps"]) == full["mps_bytes"]
+    assert len(materialized_file(bundle, "input/problem.mps")) == full["mps_bytes"]
     comparison = _reference_technical_benchmark(builder)
     metrics = {
         **full,

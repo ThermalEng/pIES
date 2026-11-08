@@ -20,6 +20,7 @@ from pathlib import Path
 from time import perf_counter
 
 import pytest
+from bundle_testkit import materialized_file
 
 from iesplan.assembly import validate_assembly_text
 from iesplan.computation import (
@@ -47,6 +48,7 @@ from iesplan.computation.generators.highs_milp import (
 )
 from iesplan.computation.result_adapters.highs import HIGHS_ADAPTER
 from iesplan.computation.runtime import validate_highs_arguments
+from iesplan.core.content import read_content
 from iesplan.devices import init_registry, list_devices
 from iesplan.finance import (
     IRREvaluationStatus,
@@ -84,7 +86,7 @@ def _mps_dot(order: list[str], coefficients: dict[str, float], primals: list[flo
 
 def _diagnose_mps(bundle, label: str) -> None:
     """CI 定向证据：实际全年 MPS 的规模和数值量级，不影响求解文件。"""
-    mps = bundle.files[PROBLEM_PATH].decode("utf-8")
+    mps = materialized_file(bundle, PROBLEM_PATH).decode("utf-8")
     section = ""
     row_count = binary_count = 0
     columns = set()
@@ -326,7 +328,7 @@ def test_chain_success_reports_business_result() -> None:
     inputs = _timed("business.inputs", _campus_inputs)
     bundle = _timed("business.generate_bundle", _generate_bundle, inputs)
     assert bundle.manifest.command["executable"] == HIGHS_EXECUTABLE_REF
-    parameters = json.loads(bundle.files[PARAMETERS_PATH].decode("utf-8"))
+    parameters = json.loads(materialized_file(bundle, PARAMETERS_PATH).decode("utf-8"))
     unit_map = parameters["unit_map"]
     assert parameters["objective_unit"] == "CNY"
 
@@ -358,10 +360,10 @@ def test_chain_success_reports_business_result() -> None:
 
     # 独立复算：MPS 目标行点乘主解 + offset == 报告目标（业务数值保真）。
     file_objective, primals = _timed(
-        "business.parse_solution", _parse_v1_solution, collected[SOLUTION_PATH]
+        "business.parse_solution", _parse_v1_solution, read_content(collected[SOLUTION_PATH])
     )
     order, mps_coeffs = _timed(
-        "business.parse_mps", _mps_columns_and_objective, bundle.files[PROBLEM_PATH]
+        "business.parse_mps", _mps_columns_and_objective, materialized_file(bundle, PROBLEM_PATH)
     )
     assert len(primals) == len(order)
     dot = _timed("business.independent_objective", _mps_dot, order, mps_coeffs, primals)
@@ -376,7 +378,7 @@ def test_chain_success_reports_business_result() -> None:
     _, collected_again = _timed(
         "business.solve_second", runtime.run, bundle, _attempt("ok2")
     )
-    assert collected_again[SOLUTION_PATH] == collected[SOLUTION_PATH]
+    assert read_content(collected_again[SOLUTION_PATH]) == read_content(collected[SOLUTION_PATH])
 
 
 def test_chain_infeasible_model_reports_math_status() -> None:

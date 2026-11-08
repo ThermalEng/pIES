@@ -8,27 +8,28 @@ claimed before/after improvement or a customer case.
 from __future__ import annotations
 
 import copy
-from dataclasses import replace
 import json
 import logging
 import resource
 import time
 import tracemalloc
+from dataclasses import replace
 from unittest.mock import patch
 
 import pytest
+from bundle_testkit import materialized_file
+from bundle_testkit import mps_columns as _mps_column_names
+from test_highs_milp_provider import _campus_inputs
+from test_highs_result_adapter import _receipt
+from test_project_model import HEATER_YAML, POINTS, _contribution, _inputs
 
 from iesplan.assembly.contracts import ValidatedAssemblyArtifact, ValidationReceipt
 from iesplan.computation import MaterializedSet, build_registry, write_mps
 from iesplan.computation.generators import highs_milp as generator
 from iesplan.computation.generators import project
-from iesplan.computation.result_adapters.highs import HIGHS_ADAPTER, _mps_column_names
+from iesplan.computation.result_adapters.highs import HIGHS_ADAPTER
 from iesplan.computation.sequences import materialize_non_predictive_series
 from iesplan.finance import IncomeTaxRule
-
-from test_highs_milp_provider import _campus_inputs
-from test_highs_result_adapter import _receipt
-from test_project_model import _inputs, _contribution, HEATER_YAML, POINTS
 
 
 @pytest.fixture(scope="module")
@@ -43,7 +44,6 @@ def measured_generate():
     memory_peaks = {"whole_generate": 0}
     original_new = project._new_builder
     original_build = generator.build_project_model_package
-    original_writer = generator.write_mps
     original_metadata = generator.HighsMilpProvider._metadata
 
     def capture_builder(*args, **kwargs):
@@ -98,12 +98,18 @@ def measured_generate():
             patch.object(project, "_new_builder", capture_builder),
             patch.object(generator, "build_project_model_package",
                          measure("model_and_recovery_declarations", original_build)),
-            patch.object(generator, "write_mps",
-                         measure("mps_write", original_writer)),
             patch.object(generator.HighsMilpProvider, "_metadata",
                          measure("metadata_serialization", original_metadata)),
         ):
             bundle = generator.HIGHS_MILP_PROVIDER.generate(*inputs)
+            sizes = {}
+            for path, content in bundle.files.items():
+                label = "mps_write" if path == generator.PROBLEM_PATH else "parameter_records"
+                if path == generator.PARAMETERS_PATH:
+                    sizes[path] = sum(len(chunk) for chunk in content.iter_chunks())
+                else:
+                    sizes[path] = measure(label, lambda content=content: sum(
+                        len(chunk) for chunk in content.iter_chunks()))()
         total_ms = (time.perf_counter() - start) * 1000
         _current, last_interval_peak = tracemalloc.get_traced_memory()
         total_peak = max(memory_peaks["whole_generate"], last_interval_peak)
@@ -116,16 +122,16 @@ def measured_generate():
     baseline = {
         "fixture": "assembly/samples/valid/campus.assembly.yaml (public synthetic)",
         "measurement_note": "wall time includes tracemalloc tracing overhead",
-        "rss_note": "ru_maxrss is the cumulative Pytest-process high-water mark, not an isolated generate RSS",
+        "rss_note": "ru_maxrss is the cumulative Pytest-process high-water mark; not isolated generate RSS",
         "generator": generator.GENERATOR_REF,
         "points": captured["builder"].point_count,
         "columns": len(model.variables),
         "rows": len(model.constraints),
         "row_nonzeros": sum(len(r.expression.terms) for r in model.constraints),
         "objective_nonzeros": len(model.objective.terms),
-        "mps_bytes": len(bundle.files[generator.PROBLEM_PATH]),
-        "metadata_bytes": len(bundle.files[generator.PARAMETERS_PATH]),
-        "bundle_bytes": sum(len(blob) for blob in files.values()),
+        "mps_bytes": sizes[generator.PROBLEM_PATH],
+        "metadata_bytes": sum(size for path, size in sizes.items() if path != generator.PROBLEM_PATH),
+        "bundle_bytes": sum(sum(len(chunk) for chunk in content.iter_chunks()) for content in files.values()),
         "total_wall_ms": round(total_ms, 3),
         "bundle_assembly_and_checks_ms": round(
             max(0, total_ms - sum(v["wall_ms"] for v in stages.values())), 3,
@@ -157,9 +163,9 @@ def test_reproducible_generator_measurement(measured_generate):
     bundle, builder, data = measured_generate
     assert data["points"] == 8760
     assert data["rows"] and data["columns"] and data["row_nonzeros"]
-    assert data["mps_bytes"] == len(bundle.files[generator.PROBLEM_PATH])
+    assert data["mps_bytes"] == len(materialized_file(bundle, generator.PROBLEM_PATH))
     assert set(data["stages"]) == {
-        "model_and_recovery_declarations", "mps_write", "metadata_serialization",
+        "model_and_recovery_declarations", "mps_write", "metadata_serialization", "parameter_records",
     }
     assert data["total_wall_ms"] > 0
     assert data["full_generate_traced_peak_bytes"] >= max(
@@ -220,7 +226,7 @@ def test_source_inventory_stays_internal_with_minimal_persisted_sources(measured
             assert key in inventory.coefficients  # never misclassify a planning decision
     for sym in inventory.symbols.values():
         assert sym.source.field_path
-    metadata = json.loads(bundle.files[generator.PARAMETERS_PATH])
+    metadata = json.loads(materialized_file(bundle, generator.PARAMETERS_PATH))
     # S4 publishes only the approved source projection, never the compiler IR.
     assert "compiler_inventory" not in metadata
     assert metadata["model_sources"]["schema"] == "ies.model-sources"
@@ -230,8 +236,8 @@ def test_source_inventory_stays_internal_with_minimal_persisted_sources(measured
 def test_public_generate_adapter_reuses_one_bundle_mapping(measured_generate):
     """Synthetic full primal checks mapping only; actual solve stays in Docker integration tests."""
     bundle, _builder, _ = measured_generate
-    names = _mps_column_names(bundle.files[generator.PROBLEM_PATH])
-    params = json.loads(bundle.files[generator.PARAMETERS_PATH])
+    names = _mps_column_names(materialized_file(bundle, generator.PROBLEM_PATH))
+    params = json.loads(materialized_file(bundle, generator.PARAMETERS_PATH))
     series = next(s for s in params["step_series"] if s["columns"])
     first_column = series["columns"][0]
     values = [42.0 if name == first_column else 0.0 for name in names]
@@ -337,8 +343,8 @@ def test_two_instances_planned_initial_and_varying_steps():
         finance, public_config, evaluation,
     )
     mps_text, _offset = write_mps(model)
-    assert bundle.files[generator.PROBLEM_PATH] == mps_text.encode("utf-8")
-    metadata = json.loads(bundle.files[generator.PARAMETERS_PATH])
+    assert materialized_file(bundle, generator.PROBLEM_PATH) == mps_text.encode("utf-8")
+    metadata = json.loads(materialized_file(bundle, generator.PARAMETERS_PATH))
     assert "soc_plan" in metadata["unit_map"]
     assert len(next(s["columns"] for s in metadata["step_series"]
                     if s["series_id"] == "tank1.soc")) == POINTS

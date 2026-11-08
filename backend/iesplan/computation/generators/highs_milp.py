@@ -19,12 +19,14 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
+from functools import partial
 from typing import Any
 
 from iesplan.assembly.contracts import ValidatedAssemblyArtifact
 from iesplan.computation.errors import ComputationUnavailableError
 from iesplan.computation.generators.descriptor import GeneratorDescriptor
-from iesplan.computation.generators.mps import write_mps
+from iesplan.computation.generators.mps import iter_mps_chunks
+from iesplan.computation.generators.parameters import RECORDS_PATH, parameter_chunks
 from iesplan.computation.generators.project import build_project_model_package
 from iesplan.computation.protocols import (
     CalculationConfig,
@@ -35,6 +37,7 @@ from iesplan.computation.protocols import (
 )
 from iesplan.computation.result_adapters.highs import ADAPTER_REF as HIGHS_ADAPTER_REF
 from iesplan.computation.sequences import MaterializedSet
+from iesplan.core.content import GeneratedContent, MemoryContent
 from iesplan.finance import EffectiveFinanceConfig, EvaluationInput
 from iesplan.modeling import DeviceMathContribution
 
@@ -119,7 +122,7 @@ DESCRIPTOR = GeneratorDescriptor(
     deterministic=True,
     resource_limits={},
     unit_system="SI",
-    media_types=("application/mps", "application/json"),
+    media_types=("application/mps", "application/json", "application/x-ndjson"),
     seed_semantics="config.seed 直接固定进 Bundle；为 null 时使用固定种子 0；不读取随机全局状态",
 )
 
@@ -160,8 +163,8 @@ class HighsMilpProvider:
         评价确认为独立必需输入（无默认值；上游从同一任务冻结块恢复，
         不读最新草稿）。通用选择门禁已由 ``GeneratorRegistry.resolve``
         完成，此处信任；只执行本 provider 特有检查（实际绑定
-        tariff，不匹配即明确拒绝）→ ``build_project_model`` + ``write_mps``
-        （数学超出 lowerer 能力即明确不支持）→ manifest + 文件字节原子组装。
+        tariff，不匹配即明确拒绝）→ ``build_project_model`` → manifest 与
+        可重复分块读取的文件内容（数学超出 lowerer 能力即明确不支持）。
         同一组直接输入与本 provider 版本恒得逐字节相同的聚合。
         """
         self._check_capabilities(artifact, config, finance)
@@ -173,19 +176,16 @@ class HighsMilpProvider:
             )
         )
         self._check_stop(stop)
-        mps_text, offset = write_mps(model, stop=stop)
+        mps_content = GeneratedContent(partial(iter_mps_chunks, model, stop=stop))
+        offset = float(model.objective.constant)
         self._check_stop(stop)
         metadata = self._metadata(
             artifact,
-            unit_map,
             offset,
             objective_unit,
             seed,
             config,
-            components,
-            series,
-            facts,
-            sources,
+            len(model.columns),
         )
         self._check_stop(stop)
         manifest = SolverBundleManifest(
@@ -193,6 +193,7 @@ class HighsMilpProvider:
             inputs=[
                 {"path": PROBLEM_PATH, "media_type": "application/mps"},
                 {"path": PARAMETERS_PATH, "media_type": "application/json"},
+                {"path": RECORDS_PATH, "media_type": "application/x-ndjson"},
             ],
             command={
                 "executor": EXECUTOR_REF,
@@ -224,8 +225,12 @@ class HighsMilpProvider:
         return SolverBundle(
             manifest=manifest,
             files={
-                PROBLEM_PATH: mps_text.encode("utf-8"),
-                PARAMETERS_PATH: metadata,
+                PROBLEM_PATH: mps_content,
+                PARAMETERS_PATH: MemoryContent(metadata),
+                RECORDS_PATH: GeneratedContent(partial(
+                    parameter_chunks, model, unit_map, components, series, facts, sources,
+                    stop=stop,
+                )),
             },
         )
 
@@ -280,29 +285,17 @@ class HighsMilpProvider:
     def _metadata(
         self,
         artifact: ValidatedAssemblyArtifact,
-        unit_map: Mapping[str, str],
         offset: float,
         objective_unit: str,
         seed: int,
         config: CalculationConfig,
-        components: Mapping[str, Mapping[str, object]],
-        series: tuple[Mapping[str, object], ...],
-        facts: Mapping[str, object],
-        sources: Mapping[str, object],
+        column_count: int,
     ) -> bytes:
         """ResultAdapter 后续必需的最小规范 JSON 元数据（规范字节）。
 
-        只记录反向换算与追溯必需项（unit_map、目标偏移、目标业务单位、
-        财务分量求值声明 components、可发布步序列声明 step_series、结构化
-        财务事实声明 financial_facts、请求 outputs、固定 seed、precision、
-        装配/引用追溯），不复制完整 assembly、models、finance，不写 hash。
-        components 为分量 ident → {unit, caliber, constant, terms}，与目标
-        同一分量展开路径，供配套适配器用同一次真实解求值发布。
-        step_series 为可发布步序列声明（与建变量同一路径形成），供配套
-        适配器用同一次真实解恢复统一序列发布；无步变量时为空数组。
-        financial_facts 为与目标同源的结构化财务事实映射（格式页映射表
-        为唯一正文），供配套 4.0.0 适配器用同一次主解恢复发布；消费者
-        不得拆解其中求解列引用。
+        只记录目标偏移/单位、请求输出、固定配置、列数、装配身份及有序
+        记录文件的相对路径。单位、财务表达式、步序列与来源另按记录输出，
+        不在此头部复制大数组，也不复制 assembly、models 或 finance。
         """
         doc = json.loads(artifact.canonical_text)
         assembly = doc.get("assembly") or {}
@@ -311,18 +304,9 @@ class HighsMilpProvider:
                 "id": assembly.get("id"),
                 "schema_version": doc.get("schema_version"),
             },
-            "components": {
-                ident: {
-                    "unit": decl["unit"],
-                    "caliber": decl["caliber"],
-                    "constant": decl["constant"],
-                    "terms": dict(decl["terms"]),
-                }
-                for ident, decl in components.items()
-            },
             "generator": self.ref,
-            "financial_facts": dict(facts),
-            "model_sources": dict(sources),
+            "records": RECORDS_PATH,
+            "column_count": column_count,
             "objective_offset": offset,
             "objective_unit": objective_unit,
             "outputs": list(config.outputs),
@@ -330,19 +314,6 @@ class HighsMilpProvider:
             "result_adapter": ADAPTER_REF,
             "seed": seed,
             "solver": SOLVER_REF,
-            "step_series": [
-                {
-                    "series_id": entry["series_id"],
-                    "instance_id": entry["instance_id"],
-                    "variable_id": entry["variable_id"],
-                    "unit": entry["unit"],
-                    "columns": list(entry["columns"]),
-                }
-                for entry in series
-                if "instance_id" in entry
-            ],
-            "system_series": [dict(entry) for entry in series if "block" in entry],
-            "unit_map": dict(sorted(unit_map.items())),
         }
         return (
             json.dumps(

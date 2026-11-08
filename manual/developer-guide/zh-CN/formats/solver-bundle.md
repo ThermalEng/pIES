@@ -8,11 +8,11 @@ Solver Bundle 不由最终用户手写，也不能从未经校验的装配 YAML 
 
 ## manifest 与完整聚合
 
-`bundle.yaml` 是 manifest 本体：只声明引用、输入清单、结构化命令、输出声明与结果适配器，不携带文件字节。完整聚合的生效目标是 manifest 加按规范相对路径索引的只读输入内容映射；`manifest.inputs` 声明的路径与内容映射的键必须恰好对应。`outputs` 只是求解器允许写入的声明，生成包中不预建其内容。manifest 的 schema、规范化与校验只针对本体，不读取内容；两者关系唯一，不形成两套业务事实。
+`bundle.yaml` 是 manifest 本体：只声明引用、输入清单、结构化命令、输出声明与结果适配器，不携带文件字节。完整聚合为 manifest 加按规范相对路径索引的只读输入内容映射；`manifest.inputs` 声明的路径与内容映射的键必须恰好对应。`outputs` 只是求解器允许写入的声明，生成包中不预建其内容。manifest 的 schema、规范化与校验只针对本体，不读取内容；两者关系唯一，不形成两套业务事实。
 
 ### 分块内容与生命周期
 
-本节为生效目标契约；生产者与配套消费者须同步贯通后交付，不能把仅有writer或内容类型的实现视为完整迁移。当前自有schema仍为`1.0.0`，不新增格式版本、执行模式开关或旧包回退。
+当前自有schema为`1.0.0`，不设置格式版本协商、执行模式开关或旧包回退。Python内容协议为 `Content.iter_chunks() -> Iterator[bytes]`。
 
 - `files`的值统一为只读、可重复分块读取的内容协议。每次读取从头产生同一字节序列；块边界没有记录或UTF-8字符边界含义。消费者按块写出，不为了交接先汇集为完整文本或`bytes`。
 - 小内容可使用该协议的不可变内存实现；生成期内容可由已冻结的紧凑数据确定性产生。两者使用同一消费入口，不构成“bytes包”和“文件包”两种执行路径。内容协议不携带数据库会话、裸文件句柄或宿主机路径，不允许消费者反解存储实现。
@@ -35,7 +35,8 @@ solver-bundle/
 ├── bundle.yaml
 ├── input/
 │   ├── problem.mps
-│   └── parameters.json
+│   ├── parameters.json
+│   └── parameters.jsonl
 └── output/
 ```
 
@@ -56,6 +57,8 @@ inputs:
     media_type: application/mps
   - path: input/parameters.json
     media_type: application/json
+  - path: input/parameters.jsonl
+    media_type: application/x-ndjson
 
 command:
   executor: ies.executor.local_process@1.0.0
@@ -97,9 +100,30 @@ extensions: {}
 
 同一组直接输入与生成器版本必须产生相同输入字节；评价确认也属于生成输入。若底层文件格式本身含非确定字段，生成器必须移除或固定它们。
 
+## 内置配套参数记录
+
+内置生成器与适配器使用一个小JSON头部 `input/parameters.json` 和有序UTF-8记录文件 `input/parameters.jsonl`。头部包含 `assembly`、`generator`、`solver`、`result_adapter`、`seed`、`precision`、`outputs`、`objective_offset`、`objective_unit`、`column_count` 和 `records`。`records` 是manifest已声明的记录文件相对路径；头部不包含大数组、全量单位表或财务表达式。目标单位由生成器确定，不由适配器猜测。
+
+记录文件每行是一个JSON数组，第一个元素为以下标签；换行只在文件布局中分隔记录，内容块可以切在任意UTF-8或记录位置。所有位置、表达式编号均从0开始，是本次Bundle内部槽位，不作为公开业务ID。除小型字面量对象外，大列表拆成多个连续记录：
+
+| 标签及后续元素 | 含义与顺序 |
+| --- | --- |
+| `column_names, [name,…]`；`row_names, [name,…]` | 按实际求解行列顺序保存一次名称表；分批记录拼接为同一表，不重扫MPS、不从名称反解身份 |
+| `expression, id, constant`；`terms, [[column_position,coefficient],…]`；`expression_end` | 一个冻结仿射式；项记录可重复，按记录和项原顺序从常数开始累加，不能重排、合并或重新结合浮点运算 |
+| `units, [[column_position,unit],…]` | 可发布变量及业务单位，保持原有稳定发布顺序，内部辅助列没有伪业务单位 |
+| `component, identity, unit, caliber, expression_id` | 财务分量消费共享表达式的同次解值 |
+| `facts, object` | 结构化财务事实的字面量骨架；金额节点为 `{expression: id}`，引用已经声明的表达式 |
+| `series, object`；`positions, [column_position,…]`；`series_end` | 一条设备或系统序列的身份／单位元数据，后接按完整step排序的实际列位置 |
+| `sources, object` | 来源schema、来源表和结果字段关联，不含groups |
+| `source_group, object, indices`；`targets, [position,…]`；`indices, [index,…]`；`source_group_end` | 一个来源组的元数据及求解目标位置；role决定行或列。等差索引直接在头记录使用 `{start,stride,count}`；非等差时头值为null并接分批indices记录 |
+
+顺序为名称表、全部表达式、单位、分量、财务骨架、全部序列、来源表及来源组；同种分批记录顺序不可交换。表达式只共享同一已冻结来源及常数，不按近似值合并不同金额，不符号化改写。适配器按紧凑主解的实际列位置逐记录求值，一份表达式值供各消费处复用；无需恢复整份参数对象图。生成器的时变系数、独立实例／时步、跨年状态、财务期间与结果业务语义不变。
+
+这些记录由配套provider直接解释，不是通用Runtime的数学协议，也不是用户手写的新语言。内部已类型化声明不重复schema或完整性校验；实际生成、运算、读取或外部解解释失败仍可见。没有旧整包参数解析器或扫MPS回退路径。
+
 ## 步序列结果映射
 
-以下为生效目标契约，不表示当前 provider 已实现。配套生成器在 `input/parameters.json` 的 `step_series` 数组声明可发布的求解步序列，每条包含：
+配套生成器通过有序 `series`／`positions` 记录声明设备求解步序列，元数据包含：
 
 | 字段 | 语义 |
 | --- | --- |
@@ -107,7 +131,7 @@ extensions: {}
 | `instance_id` | 公开装配实例 ID |
 | `variable_id` | 该实例设备数学贡献中已声明的变量身份，包含接口变量，不猜设备类型 |
 | `unit` | 业务单位，与生成器单位映射同源 |
-| `columns` | 按连续 `step=0..n-1` 排列的具体求解列名，不是让下游重构列名的模板 |
+| 后接的 `positions` 记录 | 按连续 `step=0..n-1` 排列的实际求解列位置，不是列名模板 |
 
 声明由生成器在建立对应变量时形成，与真实求解列同源，覆盖该序列的完整运营时域；不复制装配或以物化输入冒充求解结果。无可发布步变量时声明空数组。ResultAdapter 直接使用明确列引用恢复同一次求解的结果，application、Worker 和前端不得按求解变量名反解实例或时步。
 
@@ -115,7 +139,7 @@ extensions: {}
 
 ## 系统序列映射
 
-以下为[系统方程](network-relations.md)新增输出的目标契约。配套生成器在 parameters.json 增加 `system_series` 数组；无请求时为 `[]`，不把系统块伪装成设备实例。每条恰为 `{series_id, block, variable, unit, columns}`：series_id 为不透明唯一身份，block/variable 为冻结系统块及辅助变量ID，unit 为业务单位，columns 为完整运营step顺序的真实求解列引用。
+配套生成器通过相同记录声明[系统方程](network-relations.md)输出；没有声明时不产生伪设备序列。系统 `series` 元数据恰为 `{series_id, block, variable, unit}`，后接完整运营step顺序的实际列位置。series_id 为不透明唯一身份，block/variable 为冻结系统块及辅助变量ID，unit 为业务单位。
 
 适配器由同次解发布 `ComputeResult.outputs.system_series`，以series_id为键，每项为 `{block, variable, unit, values}`；values为业务单位有限数值，顺序与完整运营时域一致。它与设备 outputs.series 分别拥有真实来源，不能复制一份设备序列再改名，也不在适配时重新求分配或来源比例。两张映射共享series_id命名空间；公共目录、分页和导出按[求解步序列读取](../contracts.md#求解步序列读取)的device/system判别联合发布，设备序列保留真实instance_id/variable_id，系统序列不填“假实例”。
 
@@ -137,7 +161,7 @@ extensions: {}
 
 ## 同次解财务事实映射
 
-配套生成器在 `parameters.json` 的 `financial_facts` 声明结构化财务事实映射，ResultAdapter 使用同一次主解恢复为 `ComputeResult.outputs.financial_facts`。声明复用既有仿射求值方式，包含明确字段、业务身份、期间、单位与求解列引用；消费者不拆解分量键、序列 ID 或列名。现金流声明与规划目标中的现金表达式同源，不重新建立税务模型。声明不复制完整财务配置，也不是新的用户公式语言。
+配套生成器在有序 `facts` 记录声明结构化财务事实映射，金额引用先前冻结表达式，ResultAdapter使用同一次主解恢复为 `ComputeResult.outputs.financial_facts`。声明保留明确字段、业务身份、期间、单位与实际求解列引用；消费者不拆解分量键、序列ID或列名。现金流声明与规划目标中的现金表达式同源，不重新建立税务模型，不复制完整财务配置，也不是新的用户公式语言。
 
 以下为建设激活目标生成器 `ies.generator.highs_milp@1.0.0` 与适配器 `ies.result-adapter.highs@1.0.0` 的业务输出；版本发布及迁移见[格式版本表](../file-formats.md#建设激活配套版本与迁移)：
 
@@ -168,7 +192,7 @@ extensions: {}
 
 ### 关联维护金额协议
 
-配套生成器与适配器使用 `{constant, terms}` 仿射节点声明内部 `financial_facts.annual_operation[].maintenance`；即使是确定金额也使用常数节点。适配器按同一次主解求值，公开输出仍为十进制金额字符串，不保留字符串／节点双轨解释。
+内部 `financial_facts.annual_operation[].maintenance` 引用有序记录中的冻结仿射式，即使确定金额也使用常数表达式。适配器按同一次主解求值，公开输出仍为十进制金额字符串，不保留字符串／节点双轨解释。
 
 维护现金、进项税与所得税处理均来自同一逐笔金额表达式，年度维护与净额声明保持同源；资本化项由折旧关系扣税，不再当期重复扣除。维护年度合计仍为金额字符串；来源身份保留在折旧明细，不另建全量维护支付结果副本。通用 Bundle、ComputeResult、solver 与 executor 协议不变。
 
@@ -226,7 +250,7 @@ extensions: {}
 
 ## 构模来源映射
 
-内置生成器 `ies.generator.highs_milp@1.0.0` 与适配器 `ies.result-adapter.highs@1.0.0` 配套使用 `input/parameters.json.model_sources`。该新增输出不改变现有解与财务字段、六项生成输入或通用 Bundle manifest；各 provider 按精确版本选择，不以新适配器补写旧任务。
+内置生成器 `ies.generator.highs_milp@1.0.0` 与适配器 `ies.result-adapter.highs@1.0.0` 通过有序来源记录传递以下映射；行列名各保存一次，组内以实际位置引用，恢复后公开结果仍使用真实名称。该表示不改变现有解与财务字段、六项生成输入或通用Bundle manifest；不以新适配器补写历史格式。
 
 来源映射为 `schema: ies.model-sources`、`schema_version: 1.0.0` 的对象：
 

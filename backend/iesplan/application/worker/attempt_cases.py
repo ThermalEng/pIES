@@ -31,11 +31,10 @@ dataset/project/storage 领域公开门面, 不声明裸表, 不导入 ``iesplan
 
 from __future__ import annotations
 
-import json
 import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime
+from functools import partial
 from uuid import UUID
 
 from sqlalchemy.orm import Session
@@ -71,6 +70,7 @@ from iesplan.application.worker.lease_cases import (
     verify_lease,
     write_diagnostic,
 )
+from iesplan.core.content import Content, GeneratedContent, json_chunks
 from iesplan.core.diagnostics import SEVERITY_ERROR, SEVERITY_INFO, TASK_QUEUED, TASK_TIMEOUT
 from iesplan.tasks import LEASE_TTL_SECONDS, TaskRecord, TaskStateError, check_transition
 
@@ -242,12 +242,12 @@ def submit_attempt_result(
     payload: dict,
     outcome: str,
     actor_id: int | None = None,
-    output_files: Mapping[str, Mapping[str, tuple[bytes, str]]] | None = None,
+    output_files: Mapping[str, Mapping[str, tuple[Content | bytes, str]]] | None = None,
     sealed_output_files: Mapping[str, Mapping[str, Mapping[str, object]]] | None = None,
 ) -> SubmitReceipt:
     """仅租约持有者可提交(03 §11.4): token 不符/租约过期 → 整笔回滚并抛 LeaseRejectedError。
 
-    未持久化输出字节随本单元封存，已提交阶段资产复用对象描述子：
+    未持久化输出内容随本单元封存，已提交阶段资产复用对象描述子：
     fencing 确认后、证据包创建前合并已有阶段文件与新输出描述子,
     证据包创建后挂接输出引用, 与提交同事务一次提交/回滚 —— 任一步失败
     则本次任务终态/结果/证据/新对象元数据/新引用全部回滚，先前已提交
@@ -324,7 +324,7 @@ def submit_attempt_result(
                         for series_id in ordered_ids
                     ],
                 }]
-            blob = _payload_bytes(payload)
+            blob = GeneratedContent(partial(json_chunks, payload))
             object_id = store_result_blob(db, blob, actor_id=who)
             evidence_id = create_evidence_record(
                 db, task_id=task.id, attempt_id=attempt_id, snapshot_id=snapshot.id,
@@ -504,22 +504,6 @@ def timeout_attempt(db: Session, claim: Claim, *, message: str) -> TaskRecord:
 # ---------------------------------------------------------------------------
 # 内部工具
 # ---------------------------------------------------------------------------
-
-
-def _payload_bytes(payload: dict) -> bytes:
-    """将结果 payload 确定性序列化为紧凑 JSON 字节。"""
-    return json.dumps(
-        payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=_json_default
-    ).encode("utf-8")
-
-
-def _json_default(value: object) -> object:
-    """JSON 兜底序列化: datetime → ISO 字符串; 其余交给标准编码器。"""
-    if isinstance(value, datetime):
-        return value.isoformat()
-    if isinstance(value, (set, tuple)):
-        return list(value)
-    raise TypeError(f"不可序列化类型: {type(value)!r}")
 
 
 def _dim(value: object) -> str:

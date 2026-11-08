@@ -6,10 +6,11 @@ hourly decision columns.  Solver tests use the existing HiGHS CI adapter.
 
 from __future__ import annotations
 
-import pytest
 from types import SimpleNamespace
 
+import pytest
 from test_issue06_s2 import _amount, _builder, _expense, _tiny_solve
+
 from iesplan.application.worker.compute_cases import build_financial_evaluation
 from iesplan.computation.result_adapters.highs import _recover_financial_facts
 
@@ -234,11 +235,8 @@ def test_recovery_and_annual_fee_switch_main_solution(tmp_path, recovery, annual
         )
     # Adapter's actual affine recovery path, on the very same MPS primal vector;
     # Worker projects it and evaluates, without reading the draft or rebuilding tax.
-    columns = list(solved)
-    restored = _recover_financial_facts(
-        facts, {name: index for index, name in enumerate(columns)},
-        [solved[name] for name in columns],
-    )
+    from bundle_testkit import evaluate_fact_expressions
+    restored = _recover_financial_facts(evaluate_fact_expressions(facts, solved))
     sealed = build_financial_evaluation(
         SimpleNamespace(evaluation={
             "construction_period": 0, "operation_years": 2,
@@ -269,12 +267,17 @@ def test_same_currency_annual_fixed_and_linear_end_to_end(tmp_path, currency):
     """
     import json
 
+    from test_highs_result_adapter import (
+        PARAMETERS_PATH,
+        PROBLEM_PATH,
+        SOLUTION_PATH,
+        _bundle,
+        _parameters,
+        _receipt,
+    )
+
     from iesplan.computation.generators.mps import write_mps
     from iesplan.computation.result_adapters.highs import HIGHS_ADAPTER
-    from test_highs_result_adapter import (
-        PARAMETERS_PATH, PROBLEM_PATH, SOLUTION_PATH, _bundle,
-        _parameters, _receipt,
-    )
 
     def annual(profile):
         profile["finance_types"]["same"]["annual_fixed_om"] = {

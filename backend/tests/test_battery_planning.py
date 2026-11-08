@@ -412,10 +412,8 @@ def test_planned_capacity_capex_and_dated_maintenance_recover_from_one_solution(
     primal = _solve(b, tmp_path, demand_w=4000)
     assert primal["battery_size"] == pytest.approx(36_000_000, abs=1)
     # 复用生产 HiGHS 适配器的财务事实恢复：列值来自上述同一次主解。
-    restored = _recover_financial_facts(
-        declared, {name: index for index, name in enumerate(primal)},
-        list(primal.values()),
-    )
+    from bundle_testkit import evaluate_fact_expressions
+    restored = _recover_financial_facts(evaluate_fact_expressions(declared, primal))
     assert restored["currency"] == "CNY"
     assert float(restored["construction_total"]) == pytest.approx(500, abs=1e-5)
     assert restored["payments_applied"][0]["t"] == 0

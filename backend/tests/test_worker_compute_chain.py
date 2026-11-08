@@ -321,9 +321,25 @@ class TestComputeChainEndToEnd:
     def test_restart_uses_committed_stage_without_resolving(
         self, client, db, engine, plane, monkeypatch, stage,
     ):
+        import weakref
         from datetime import UTC, datetime, timedelta
+        from functools import partial
 
+        from iesplan.computation import SolverBundle
+        from iesplan.core.content import GeneratedContent
         from iesplan.storage import find_refs_by_owner
+        from iesplan.storage import service as storage_service
+
+        original_read = storage_service.read_content
+
+        def small_read_only(content):
+            assert content.size_bytes < 1_000_000, "large checkpoint assets must stay chunk-backed"
+            return original_read(content)
+
+        def streaming_run(current_claim):
+            with monkeypatch.context() as patcher:
+                patcher.setattr(storage_service, "read_content", small_read_only)
+                return _run(engine, current_claim, plane)
 
         task_id = _submit_calc_task(client, db, dict(_CONFIG_BODY), dict(PLANNING_BODY))
         claim = _claim(db, task_id)
@@ -333,13 +349,27 @@ class TestComputeChainEndToEnd:
         calls = {"generate": 0, "execute": 0}
         expected = []
         crashed = False
+        owners = []
+
+        class Owner:
+            pass
+
+        def chunks(owner, content):
+            yield from content.iter_chunks()
 
         def generate(*args, **kwargs):
             calls["generate"] += 1
-            return original_generate(*args, **kwargs)
+            bundle = original_generate(*args, **kwargs)
+            owner = Owner()
+            owners.append(weakref.ref(owner))
+            return SolverBundle(bundle.manifest, {
+                path: GeneratedContent(partial(chunks, owner, content))
+                for path, content in bundle.files.items()
+            })
 
         def execute(**kwargs):
             nonlocal crashed
+            assert all(owner() is None for owner in owners), "release generator ownership after checkpoint"
             if stage == "generated" and not crashed:
                 crashed = True
                 raise SystemExit("simulated worker exit before solver")
@@ -362,7 +392,7 @@ class TestComputeChainEndToEnd:
         monkeypatch.setattr(worker_app, "execute_saved_bundle", execute)
         monkeypatch.setattr(worker_app, "adapt_result", adapt)
         with pytest.raises(SystemExit, match="simulated worker exit"):
-            _run(engine, claim, plane)
+            streaming_run(claim)
         assert results_store.latest_evidence_for_task(db, task_id) is None
         refs = find_refs_by_owner(db, "task_checkpoint", claim.attempt_id, "task_attempts")
         assert {ref["purpose"] for ref in refs} >= {"round-1:generated"}
@@ -375,7 +405,7 @@ class TestComputeChainEndToEnd:
         assert worker_app.recover_expired_attempts(db, "compute") == 1
         replacement = _claim(db, task_id)
         assert replacement.lease_token != claim.lease_token
-        assert _run(engine, replacement, plane) == "completed"
+        assert streaming_run(replacement) == "completed"
         assert calls == {"generate": 1, "execute": 1}
         db.expire_all()
         evidence = results_store.latest_evidence_for_task(db, task_id)
@@ -704,9 +734,8 @@ class TestSingleUnitSeal:
             sealed["compute_result"]["math_status"], list(sealed["compute_result"]["outputs"])
         )
         ref = refs[0]
-        params = json.loads(
-            get_object(db, sealed["bundle_files"]["input/parameters.json"]["object_id"]).decode("utf-8")
-        )
+        from bundle_testkit import stored_parameters
+        params = stored_parameters(db, sealed["bundle_files"])
         decls = params["step_series"]
         assert decls, "真实求解应有可发布步变量声明"
         assert ref["fields"] == sorted(d["series_id"] for d in decls)
@@ -1105,7 +1134,8 @@ def test_step_relation_real_task_freezes_ports_and_survives_later_draft(
     result = sealed["compute_result"]
     assert result["math_status"] == "solved"
     sources = result["outputs"]["model_sources"]
-    params = json.loads(get_object(db, sealed["bundle_files"]["input/parameters.json"]["object_id"]))
+    from bundle_testkit import stored_parameters
+    params = stored_parameters(db, sealed["bundle_files"])
     assert params["model_sources"] == sources
     assert sources["sources"]["relation:planning.step.pin_battery_port"]["location"] == {
         "field_path": "planning.constraints.pin_battery_port", "relation_id": "pin_battery_port",

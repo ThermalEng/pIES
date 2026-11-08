@@ -486,14 +486,16 @@ def bind_technical(
             initial=initial, where=where, cache=cache,
         )
     except LoweringUnsupportedError as exc:
-        lhs = exc
+        # This is a candidate failure, not a published error. Retaining its
+        # traceback creates a frame cycle that also retains the caller's model.
+        lhs = exc.with_traceback(None)
     try:
         rhs = _bind_compiled_expression(
             template.rhs, template.fast_rhs, step=step, known=known,
             initial=initial, where=where, cache=cache,
         )
     except LoweringUnsupportedError as exc:
-        rhs = exc
+        rhs = exc.with_traceback(None)
     if isinstance(lhs, _Affine) and isinstance(rhs, _Affine):
         lhs.constant -= rhs.constant
         for key, coeff in rhs.terms.items():

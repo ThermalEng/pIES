@@ -38,11 +38,13 @@ from iesplan.storage.service import (
     find_refs_by_entity_type,
     find_refs_by_owner,
     get_object,
+    get_object_content,
     list_pending_deleted,
     list_refs,
     object_info,
     orphaned_stats,
     purge_expired,
+    put_content,
     put_object,
     reconcile,
     remove_ref,
@@ -53,7 +55,6 @@ from iesplan.storage.service import (
     usage_summary,
     verify_object,
 )
-
 
 __all__ = [
     "BlobStore",
@@ -76,12 +77,14 @@ __all__ = [
     "find_refs_by_entity_type",
     "find_refs_by_owner",
     "get_object",
+    "get_object_content",
     "list_pending_deleted",
     "list_refs",
     "object_info",
     "orphaned_stats",
     "purge_expired",
     "put_object",
+    "put_content",
     "remove_ref",
     "reconcile",
     "safe_cleanup",

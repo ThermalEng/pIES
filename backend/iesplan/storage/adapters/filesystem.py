@@ -10,10 +10,26 @@ from __future__ import annotations
 
 import os
 import tempfile
+from collections.abc import Iterator
+from dataclasses import dataclass
 from pathlib import Path
 
 from iesplan.config import settings
+from iesplan.core.content import CHUNK_BYTES, Content
 from iesplan.storage.contracts import BlobMissingError
+
+
+@dataclass(frozen=True, slots=True)
+class _BlobContent:
+    storage_path: str
+
+    def iter_chunks(self) -> Iterator[bytes]:
+        try:
+            with _path_of(self.storage_path).open("rb") as source:
+                while chunk := source.read(CHUNK_BYTES):
+                    yield chunk
+        except OSError as exc:
+            raise BlobMissingError("", params={"reason": "missing"}) from exc
 
 
 def _objects_root() -> Path:
@@ -41,7 +57,7 @@ def _path_of(storage_path: str) -> Path:
 class FileSystemBlobStore:
     """本地文件系统字节存储(STO-07: 可被测试内存适配器替换)。"""
 
-    def put_blob(self, content: bytes, oid: str) -> str:
+    def put_blob(self, content: Content, oid: str) -> tuple[str, int]:
         """完整字节原子提交 → storage_path。
 
         流程: 临时区写入 → fsync → 原子 rename 到 data_dir/objects/{oid}。
@@ -50,9 +66,12 @@ class FileSystemBlobStore:
         """
         final_path = _objects_root() / oid
         fd, tmp_name = tempfile.mkstemp(dir=_tmp_root(), prefix="put-", suffix=".tmp")
+        size = 0
         try:
             with os.fdopen(fd, "wb") as fh:
-                fh.write(content)
+                for chunk in content.iter_chunks():
+                    fh.write(chunk)
+                    size += len(chunk)
                 fh.flush()
                 os.fsync(fh.fileno())
             os.replace(tmp_name, final_path)
@@ -62,18 +81,17 @@ class FileSystemBlobStore:
             except OSError:
                 pass
             raise
-        return f"objects/{oid}"
+        return f"objects/{oid}", size
 
-    def get_blob(self, storage_path: str) -> bytes:
-        """按 storage_path 读取字节; 文件缺失抛 BlobMissingError。"""
-        path = _path_of(storage_path)
+    def get_content(self, storage_path: str) -> Content:
+        return _BlobContent(storage_path)
+
+    def blob_size(self, storage_path: str) -> int:
+        """Only metadata for orphan registration; never read asset contents."""
         try:
-            return path.read_bytes()
+            return _path_of(storage_path).stat().st_size
         except OSError as exc:
-            raise BlobMissingError(
-                "",
-                params={"reason": "missing", "path": str(path)},
-            ) from exc
+            raise BlobMissingError("", params={"reason": "missing"}) from exc
 
     def delete_blob(self, storage_path: str) -> None:
         """删除字节(不存在幂等)。"""

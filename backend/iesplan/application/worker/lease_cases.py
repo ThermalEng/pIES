@@ -32,6 +32,7 @@ from iesplan import results as results_domain
 from iesplan import tasks as tasks_domain
 from iesplan.application.tasks import Claim
 from iesplan.config import settings
+from iesplan.core.content import Content
 from iesplan.core.diagnostics import (
     SEVERITY_ERROR,
     SEVERITY_INFO,
@@ -40,7 +41,7 @@ from iesplan.core.diagnostics import (
     TASK_QUEUED,
 )
 from iesplan.core.errors import AppError, NotFoundError
-from iesplan.storage import add_ref, put_object
+from iesplan.storage import add_ref, put_content
 from iesplan.tasks import (
     BUSINESS_OUTCOMES,
     LEASE_TTL_SECONDS,
@@ -261,9 +262,9 @@ def clear_cancel_signal(task_id: int) -> None:
     tasks_domain.clear_cancel(task_id)
 
 
-def store_result_blob(db: Session, blob: bytes, *, actor_id: int | None) -> int:
+def store_result_blob(db: Session, blob: Content, *, actor_id: int | None) -> int:
     """证据载荷写入对象存储, 返回对象 id(转调 storage 公开门面)。"""
-    return put_object(
+    return put_content(
         db, blob, "application/json", source_category="evidence",
         purpose="evidence_package", actor_id=actor_id,
     ).id

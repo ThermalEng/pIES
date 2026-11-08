@@ -1,8 +1,10 @@
 """Source closure through real generation; no private engineering input."""
+
 import json
 from dataclasses import replace
 
 import pytest
+from bundle_testkit import content_bytes, materialized_file
 from test_highs_milp_provider import _campus_inputs
 from test_project_model import TANK_YAML, _contribution, _inputs
 
@@ -11,6 +13,7 @@ from iesplan.computation.generators.highs_milp import HighsMilpProvider
 from iesplan.computation.generators.linear import LoweringUnsupportedError
 from iesplan.computation.generators.project import _ProjectBuilder, build_project_model_package
 from iesplan.computation.generators.sources import SourceTrace
+from iesplan.core.content import json_chunks
 from iesplan.finance import ConstructionPayment
 
 
@@ -19,8 +22,8 @@ def generated():
     inputs = _campus_inputs()
     model, units, _, _, _, _, sources = build_project_model_package(*inputs)
     bundle = HIGHS_MILP_PROVIDER.generate(*inputs)
-    published = json.loads(bundle.files["input/parameters.json"])["model_sources"]
-    assert published == sources
+    published = json.loads(materialized_file(bundle, "input/parameters.json"))["model_sources"]
+    assert published == json.loads(b"".join(json_chunks(sources)))
     return model, units, published, bundle
 
 
@@ -114,7 +117,7 @@ def test_source_indices_are_compact_without_losing_irregular_periods():
 def test_bundle_source_bytes_are_deterministic(generated):
     _, _, _, original = generated
     repeated = HIGHS_MILP_PROVIDER.generate(*_campus_inputs())
-    assert dict(original.files) == dict(repeated.files)
+    assert content_bytes(original.files) == content_bytes(repeated.files)
 
 
 def test_same_time_payments_retain_distinct_frozen_positions():

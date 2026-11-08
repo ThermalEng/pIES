@@ -49,15 +49,14 @@ from iesplan.api import projects as projects_api  # noqa: E402
 from iesplan.api.deps import get_request_db  # noqa: E402
 from iesplan.application.packages import operations as packages_uc  # noqa: E402
 from iesplan.application.projects import lifecycle as projects_lifecycle  # noqa: E402
+from iesplan.audit.persistence import AuditLog
 from iesplan.config import settings  # noqa: E402
 from iesplan.core.errors import ForbiddenError  # noqa: E402
-from iesplan.db import Base  # noqa: E402
-from iesplan.main import create_app  # noqa: E402
-from iesplan.audit.persistence import AuditLog
-from iesplan.package.persistence import ImportProposal
-from iesplan.tasks.persistence import CalcSnapshot, ComputeSlot, Task, TaskAttempt, TaskLease  # noqa: E402
 from iesplan.dataset.persistence import Dataset, DatasetFile, DatasetVersion  # noqa: E402
+from iesplan.db import Base  # noqa: E402
 from iesplan.identity.persistence import User  # noqa: E402
+from iesplan.main import create_app  # noqa: E402
+from iesplan.package.persistence import ImportProposal
 from iesplan.project.persistence import (  # noqa: E402
     AdminMaintenanceAction,
     Project,
@@ -65,6 +64,7 @@ from iesplan.project.persistence import (  # noqa: E402
 from iesplan.results.persistence import EvidencePackage, ResultAssessment, ResultIndex  # noqa: E402
 from iesplan.storage import put_object
 from iesplan.storage.persistence import ObjectRef  # noqa: E402
+from iesplan.tasks.persistence import CalcSnapshot, ComputeSlot, Task, TaskAttempt, TaskLease  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # 测试环境
@@ -613,6 +613,24 @@ def test_download_token_expired_and_tampered(client: TestClient, db: Session) ->
     assert info["object_id"] == object_id
     assert info["project_id"] == pid and info["user_id"] == owner.id
     assert info["object_id"] == object_id
+
+
+def test_download_missing_blob_reports_error_before_stream_headers(client: TestClient, db: Session) -> None:
+    owner = make_user(db, "stream_owner")
+    pid = _create_project(client, owner)
+    headers = _h(client, owner)
+    exported = client.post(f"/api/projects/{pid}/exports/package", headers=headers)
+    assert exported.status_code == 200, exported.text
+    token = exported.json()["token"]
+    info = package_domain.verify_download_token(token, expected_kind="package")
+    from iesplan.storage import object_info
+
+    obj = object_info(db, info["object_id"])
+    (settings.data_dir / "objects" / obj["oid"]).unlink()
+    response = client.get(f"/api/projects/{pid}/exports/package/download",
+                          params={"token": token}, headers=headers)
+    assert response.status_code == 500
+    assert response.json()["error"]["code"] == "OBJ-CORRUPT-001"
 
 
 def test_download_rejects_object_not_in_project(client: TestClient, db: Session) -> None:

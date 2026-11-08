@@ -181,6 +181,11 @@ def _solve_round(
         with ctx.session_factory() as db:
             generated_id, bundle_refs = worker_app.save_bundle_checkpoint(
                 db, ctx.claim, number, bundle, attempt)
+        # Replace generator-owned content after publication; release its matrix/metadata.
+        del bundle
+        with ctx.session_factory() as db:
+            saved = worker_app.restore_round(db, ctx.claim, number)
+        bundle = saved.bundle
     else:
         bundle = saved.bundle
         generated_id = saved.generated_id
@@ -354,7 +359,7 @@ def _execute_compute(ctx: RunContext) -> tuple[dict, dict]:
     output_files = {}
     payload = {
         "outcome": outcome,
-        "compute_result": result.to_dict(),
+        "compute_result": result.to_mapping(),
         "receipt": receipt.to_dict(),
         "bundle_manifest": bundle.manifest.to_dict(),
     }
