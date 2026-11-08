@@ -677,6 +677,18 @@ export interface TaskLease {
   expires_at: ISO8601
 }
 
+/** Deployment facts, not a per-task reservation or a memory forecast. */
+export interface WorkerResourceUsage {
+  source: 'cgroup_v2'
+  scope: 'worker_cgroup'
+  memory_limit: { status: 'limited' | 'unlimited' | 'unknown'; bytes: number | null }
+  swap_limit: { status: 'limited' | 'unlimited' | 'unknown'; bytes: number | null }
+  memory_current_bytes: number | null
+  memory_peak_bytes: number | null
+  swap_current_bytes: number | null
+  oom_kill_count: number | null
+}
+
 export interface TaskProgress {
   task_id: EntityId
   status: TaskStatus
@@ -684,7 +696,7 @@ export interface TaskProgress {
   attempt_no: number | null
   percent: number | null
   stage: string | null
-  detail: Record<string, unknown>
+  detail: Record<string, unknown> & { worker_resources?: WorkerResourceUsage }
   /** 进度行缺席时为 null(后端原样发布; 界面不消费此值)。 */
   updated_at: ISO8601 | null
   /** 数据来源(redis/pg),便于前端感知降级。 */

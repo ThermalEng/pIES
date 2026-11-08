@@ -32,6 +32,7 @@ dataset/project/storage 领域公开门面, 不声明裸表, 不导入 ``iesplan
 from __future__ import annotations
 
 import logging
+import signal
 from collections.abc import Mapping
 from dataclasses import dataclass
 from functools import partial
@@ -70,8 +71,17 @@ from iesplan.application.worker.lease_cases import (
     verify_lease,
     write_diagnostic,
 )
+from iesplan.computation import LocalResourceUsage
 from iesplan.core.content import Content, GeneratedContent, json_chunks
-from iesplan.core.diagnostics import SEVERITY_ERROR, SEVERITY_INFO, TASK_QUEUED, TASK_TIMEOUT
+from iesplan.core.diagnostics import (
+    SEVERITY_ERROR,
+    SEVERITY_INFO,
+    SEVERITY_WARNING,
+    TASK_PROCESS_EXITED,
+    TASK_QUEUED,
+    TASK_RESOURCE_EXHAUSTED,
+    TASK_TIMEOUT,
+)
 from iesplan.tasks import LEASE_TTL_SECONDS, TaskRecord, TaskStateError, check_transition
 
 __all__ = [
@@ -82,6 +92,8 @@ __all__ = [
     "assess_report_evidence",
     "cancel_attempt",
     "fail_attempt",
+    "fail_resource_attempt",
+    "report_task_process_exit",
     "renew_attempt_lease",
     "recover_expired_attempts",
     "report_attempt_progress",
@@ -396,6 +408,7 @@ def fail_attempt(
     outcome: str | None = None,
     level: str = SEVERITY_ERROR,
     model_source: dict | None = None,
+    context: dict | None = None,
 ) -> TaskRecord:
     """确定性失败收拢(带 fencing): 尝试 failed + 租约 revoked + 槽释放 + 任务 failed。
 
@@ -417,11 +430,74 @@ def fail_attempt(
         )
         write_diagnostic(
             db, task.id, claim.attempt_id, level=level, code=code, message=message,
-            context={"outcome": outcome or task.business_outcome,
+            context={**(context or {}), "outcome": outcome or task.business_outcome,
                      **({"model_source": model_source} if model_source is not None else {})},
         )
         db.commit()
         return task
+    except Exception:
+        db.rollback()
+        raise
+
+
+def fail_resource_attempt(
+    db: Session, claim: Claim, *, cause: str, resources: dict,
+) -> TaskRecord:
+    """Resource exhaustion is terminal, not an identical-resource retry loop.
+
+    Only a caller with actual MemoryError / executor OOM / supervised cgroup
+    evidence uses this command. Existing stage assets and recovery stay intact.
+    """
+    progress = tasks_domain.get_progress(db, claim.attempt_id)
+    stage = progress.stage if progress is not None else "not_reported"
+    limit = resources["memory_limit"]
+    if limit["status"] == "limited":
+        budget = f'{limit["bytes"]} bytes'
+    elif limit["status"] == "unlimited":
+        budget = "未设置容器硬限额（不代表物理内存无限）"
+    else:
+        budget = "未知"
+    return fail_attempt(
+        db, claim, code=TASK_RESOURCE_EXHAUSTED,
+        message=(
+            f"资源耗尽：阶段={stage}；原因={cause}；Worker 共享内存限额={budget}。"
+            "本次停止，不自动重复尝试；请调整部署资源后手动重试，"
+            "系统将复用已提交的阶段产物，未保存的阶段仍需重做。"
+        ),
+        context={"stage": stage, "worker_resources": resources, "cause": cause},
+    )
+
+
+def report_task_process_exit(
+    db: Session, claim: Claim, *, exit_code: int,
+    before: LocalResourceUsage, after: LocalResourceUsage,
+) -> None:
+    """A supervised SIGKILL plus an OOM event is evidence, SIGKILL alone is not."""
+    old, new = before.oom_kill_count, after.oom_kill_count
+    if exit_code == -signal.SIGKILL and old is not None and new is not None and new > old:
+        try:
+            fail_resource_attempt(
+                db, claim, cause=f"任务进程 SIGKILL，cgroup oom_kill 增加 {new - old}",
+                resources=after.to_dict(),
+            )
+        except LeaseRejectedError:
+            pass  # Another owner already fenced this attempt; no late writes.
+        return
+    try:
+        if verify_lease(db, claim.attempt_id, claim.lease_token) is None:
+            db.rollback()
+            return
+        progress = tasks_domain.get_progress(db, claim.attempt_id)
+        stage = progress.stage if progress is not None else "not_reported"
+        write_diagnostic(
+            db, claim.task_id, claim.attempt_id, level=SEVERITY_WARNING,
+            code=TASK_PROCESS_EXITED,
+            message=(f"任务进程异常退出：阶段={stage}，exit_code={exit_code}，"
+                     "具体原因未确认；将按既有租约回收及检查点恢复规则处理。"),
+            context={"stage": stage, "exit_code": exit_code,
+                     "worker_resources": after.to_dict()},
+        )
+        db.commit()
     except Exception:
         db.rollback()
         raise

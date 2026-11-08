@@ -21,7 +21,7 @@
  * mappers/api 只依赖 contracts/types/shared, 不导入 api/client 聚合器。
  */
 
-import type { TaskOutcome, TaskStatus, TaskType } from '../../types'
+import type { TaskOutcome, TaskStatus, TaskType, WorkerResourceUsage } from '../../types'
 
 // ---------------------------------------------------------------------------
 // 任务摘要(task_summary, 列表/详情/提交/取消/重试共用)
@@ -99,7 +99,7 @@ export interface TaskProgressDto {
   attempt_no: number | null
   percent: number | null
   stage: string | null
-  detail: Record<string, unknown> | null
+  detail: (Record<string, unknown> & { worker_resources?: WorkerResourceUsage }) | null
   updated_at: string | null
   source: string
 }

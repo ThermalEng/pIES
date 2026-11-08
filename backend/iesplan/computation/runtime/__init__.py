@@ -28,6 +28,7 @@ from iesplan.computation.runtime.registry import (
     ExecutorRegistry,
     build_executor_registry,
 )
+from iesplan.computation.runtime.resources import LocalResourceUsage, observe_local_resources
 from iesplan.computation.runtime.solver_runtime import SolverRuntime
 
 __all__ = [
@@ -45,6 +46,8 @@ __all__ = [
     "LocalExecutable",
     "LocalProcessProvider",
     "SolverRuntime",
+    "LocalResourceUsage",
+    "observe_local_resources",
     "build_executor_registry",
     "validate_highs_arguments",
 ]

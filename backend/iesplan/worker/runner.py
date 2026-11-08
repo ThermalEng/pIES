@@ -47,6 +47,7 @@ from iesplan.worker import executors
 from iesplan.worker.executors import (
     EngineRunError,
     LeaseFenced,
+    ResourceExhaustedError,
     RunContext,
     TaskCancelled,
     TaskTimedOut,
@@ -113,6 +114,8 @@ def _raise_for_receipt_status(receipt: Any) -> None:
             f"求解执行超时(receipt={receipt.receipt_id}): {receipt.error}"
         )
     if receipt.status != "succeeded":
+        if receipt.status == "process_failed" and receipt.termination_reason == "oom":
+            raise ResourceExhaustedError(f"执行器确认 OOM：{receipt.error}")
         raise EngineRunError(
             f"求解执行未成功(status={receipt.status}, "
             f"receipt={receipt.receipt_id}): {receipt.error}"
@@ -560,7 +563,8 @@ def run_task(
         with factory() as progress_db:
             accepted = worker_app.report_attempt_progress(
                 progress_db, claim.attempt_id, claim.lease_token,
-                task.id, percent, stage, detail,
+                task.id, percent, stage,
+                {**(detail or {}), "worker_resources": worker_app.observe_local_resources().to_dict()},
             )
         if not accepted:
             raise worker_app.LeaseRejectedError(
@@ -574,6 +578,7 @@ def run_task(
     )
     try:
         ctx.checkpoint("start")
+        ctx.progress(0, "start")
         payload, output_files = dispatch(ctx)
         ctx.checkpoint("submit")
         # 完成路径要求显式合法 outcome: 缺字段默认成功已删除, 缺失/非法
@@ -610,6 +615,16 @@ def run_task(
         AppError,
     ) as exc:
         return _handle_failure(factory, ctx, claim, exc)
+    except (MemoryError, ResourceExhaustedError) as exc:
+        try:
+            with factory() as db:
+                worker_app.fail_resource_attempt(
+                    db, claim, cause=type(exc).__name__ + (f": {exc}" if str(exc) else ""),
+                    resources=worker_app.observe_local_resources().to_dict(),
+                )
+        except worker_app.LeaseRejectedError:
+            return "lease_rejected"
+        return "failed"
     except Exception as exc:  # noqa: BLE001 - 尝试边界: 任何未预期异常落确定性失败
         logger.exception("任务执行内部错误: task=%s", task.id)
         return _handle_failure(factory, ctx, claim, RuntimeError(f"内部错误: {exc}"))

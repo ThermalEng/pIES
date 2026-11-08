@@ -44,6 +44,7 @@ from iesplan.computation.protocols import (
     read_stop_reason,
 )
 from iesplan.computation.runtime.descriptor import ExecutorDescriptor
+from iesplan.computation.runtime.resources import read_cgroup_oom_kills
 
 #: 超时/收口时等进程组退出的固定宽限（秒）；到期即强制终止整组。
 TERMINATE_GRACE_SECONDS = 2.0
@@ -295,17 +296,7 @@ def _read_oom_kills() -> int | None:
     只读 v2（``memory.events``）；v1 或不可读环境返回 None，调用方
     永不标 OOM，不做版本猜测。
     """
-    try:
-        with open(
-            "/sys/fs/cgroup/memory.events", encoding="utf-8"
-        ) as handle:
-            for line in handle:
-                name, _, value = line.partition(" ")
-                if name == "oom_kill":
-                    return int(value.strip())
-    except (OSError, ValueError):
-        return None
-    return None
+    return read_cgroup_oom_kills()
 
 
 def _oom_delta(before: int | None) -> int:

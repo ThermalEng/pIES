@@ -317,7 +317,7 @@ def _plane_with_stub_runtime(plane, status: str):
 
 
 class TestComputeChainEndToEnd:
-    @pytest.mark.parametrize("stage", ["generated", "executed", "adapted"])
+    @pytest.mark.parametrize("stage", ["generated", "executed", "adapted", "resource"])
     def test_restart_uses_committed_stage_without_resolving(
         self, client, db, engine, plane, monkeypatch, stage,
     ):
@@ -378,6 +378,9 @@ class TestComputeChainEndToEnd:
 
         def adapt(*args):
             nonlocal crashed
+            if stage == "resource" and not crashed:
+                crashed = True
+                raise MemoryError("simulated resource exhaustion after committed solve")
             if stage == "executed" and not crashed:
                 crashed = True
                 raise SystemExit("simulated worker exit before adaptation")
@@ -391,18 +394,29 @@ class TestComputeChainEndToEnd:
         monkeypatch.setattr(worker_app, "generate_bundle", generate)
         monkeypatch.setattr(worker_app, "execute_saved_bundle", execute)
         monkeypatch.setattr(worker_app, "adapt_result", adapt)
-        with pytest.raises(SystemExit, match="simulated worker exit"):
-            streaming_run(claim)
+        if stage == "resource":
+            assert streaming_run(claim) == "failed"
+            assert worker_app.get_task_record(db, task_id).attempt_count == 1
+        else:
+            with pytest.raises(SystemExit, match="simulated worker exit"):
+                streaming_run(claim)
         assert results_store.latest_evidence_for_task(db, task_id) is None
         refs = find_refs_by_owner(db, "task_checkpoint", claim.attempt_id, "task_attempts")
         assert {ref["purpose"] for ref in refs} >= {"round-1:generated"}
         generated_ref = next(ref for ref in refs if ref["purpose"] == "round-1:generated")
         original_files = json.loads(get_object(db, generated_ref["object_id"]))["data"]["files"]
-        lease = db.execute(select(TaskLease).where(
-            TaskLease.attempt_id == claim.attempt_id)).scalar_one()
-        lease.expires_at = datetime.now(UTC) - timedelta(seconds=1)
-        db.commit()
-        assert worker_app.recover_expired_attempts(db, "compute") == 1
+        if stage == "resource":
+            from iesplan.application.tasks import retry_task
+            from iesplan.identity import get_user
+
+            task = worker_app.get_task_record(db, task_id)
+            retry_task(db, get_user(db, task.requested_by), task_id)
+        else:
+            lease = db.execute(select(TaskLease).where(
+                TaskLease.attempt_id == claim.attempt_id)).scalar_one()
+            lease.expires_at = datetime.now(UTC) - timedelta(seconds=1)
+            db.commit()
+            assert worker_app.recover_expired_attempts(db, "compute") == 1
         replacement = _claim(db, task_id)
         assert replacement.lease_token != claim.lease_token
         assert streaming_run(replacement) == "completed"
@@ -420,7 +434,7 @@ class TestComputeChainEndToEnd:
         assert db.query(results_store.EvidencePackage).filter_by(task_id=task_id).count() == 1
 
     def test_real_higs_task_completes_with_sealed_evidence(
-        self, client: TestClient, db: Session, engine: Engine, plane
+        self, client: TestClient, db: Session, engine: Engine, plane, monkeypatch, tmp_path,
     ) -> None:
         """HiGHS 实任务：提交 → 领取 → 真实求解 → completed + 证据封存。
 
@@ -431,8 +445,13 @@ class TestComputeChainEndToEnd:
         追溯真实装配 id 与配置 revision。
         """
         task_id = _submit_calc_task(client, db, dict(_CONFIG_BODY), dict(PLANNING_BODY))
+        from iesplan.computation import observe_local_resources
+
+        unknown = observe_local_resources(tmp_path / "no-cgroup")
+        monkeypatch.setattr(worker_app, "observe_local_resources", lambda: unknown)
         claim = _claim(db, task_id)
         assert _run(engine, claim, plane) == "completed"
+        assert worker_app.get_task_record(db, task_id).status == "completed"
 
         task = db.execute(select(Task).where(Task.id == task_id)).scalar_one()
         assert task.status == "completed"

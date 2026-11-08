@@ -52,6 +52,8 @@ PARAM_CONFLICT = "PARAM-CONF-001"  # 参数相互冲突
 TASK_QUEUED = "TASK-QUEUE-001"  # 已加入队列
 TASK_EXEC_UNAVAILABLE = "TASK-EXEC-001"  # 任务执行入口未实现/不可用(非求解失败)
 TASK_SOLVE_FAILED = "TASK-SOLVE-001"  # 求解失败
+TASK_RESOURCE_EXHAUSTED = "TASK-RESOURCE-001"  # 有直接证据的资源耗尽
+TASK_PROCESS_EXITED = "TASK-EXEC-002"  # 任务进程异常退出，具体原因未确认
 TASK_INFEASIBLE = "TASK-SOLVE-002"  # 无可行解
 TASK_BASE_INFEASIBLE = "TASK-SOLVE-003"  # 基准方案无可行解(02 §5.3)
 TASK_TIMEOUT = "TASK-TIMEOUT-001"  # 超时
@@ -272,6 +274,8 @@ DIAG_MESSAGE_KEYS: dict[str, str] = {
     TASK_QUEUED: "ies.diag.task.queued",
     TASK_EXEC_UNAVAILABLE: "ies.diag.task.exec_unavailable",
     TASK_SOLVE_FAILED: "ies.diag.task.solve_failed",
+    TASK_RESOURCE_EXHAUSTED: "ies.diag.task.resource_exhausted",
+    TASK_PROCESS_EXITED: "ies.diag.task.process_exited",
     TASK_INFEASIBLE: "ies.diag.task.infeasible",
     TASK_BASE_INFEASIBLE: "ies.diag.task.base_infeasible",
     TASK_TIMEOUT: "ies.diag.task.timeout",
@@ -393,6 +397,8 @@ DIAG_FIX_HINT_KEYS: dict[str, str] = {
     PARAM_CONFLICT: "ies.fix.param.conflict",
     TASK_EXEC_UNAVAILABLE: "ies.fix.task.exec_unavailable",
     TASK_SOLVE_FAILED: "ies.fix.task.solve_failed",
+    TASK_RESOURCE_EXHAUSTED: "ies.fix.task.resource_exhausted",
+    TASK_PROCESS_EXITED: "ies.fix.task.process_exited",
     TASK_INFEASIBLE: "ies.fix.task.infeasible",
     TASK_BASE_INFEASIBLE: "ies.fix.task.base_infeasible",
     TASK_TIMEOUT: "ies.fix.task.timeout",

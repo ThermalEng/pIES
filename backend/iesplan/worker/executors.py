@@ -48,6 +48,10 @@ class EngineRunError(Exception):
     """引擎确定性失败（不含已明确终止的取消、超时与隔离）。"""
 
 
+class ResourceExhaustedError(Exception):
+    """Execution evidence explicitly identified a resource exhaustion."""
+
+
 class LeaseFenced(Exception):
     """租约隔离：回执证明执行期间租约已失效，本次执行结果不得提交。
 

@@ -14,6 +14,7 @@ export {
   retryTask,
   saveWorkingInputs,
 } from './api'
+export { WorkerResourcesView } from './WorkerResourcesView'
 export {
   buildInput,
   buildParams,

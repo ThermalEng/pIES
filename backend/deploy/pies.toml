@@ -37,7 +37,8 @@ project_bytes = 0
 [solver]
 # 单次求解上限 48 小时（秒）
 max_timeout_seconds = 172800
-# 内存允许上限 16 GiB（MiB）
+# 求解命令可申报的内存批准上限（MiB），不是 Worker 实际内存配额或预留。
+# 实际共享限额由部署平台设置，任务详情按可观测的容器边界展示。
 max_memory_mib = 16384
 # CPU 允许上限（核）
 max_cpu_cores = 8

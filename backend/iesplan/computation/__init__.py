@@ -131,8 +131,10 @@ from iesplan.computation.runtime import (
     FileExchangeExecutorProvider,
     LocalExecutable,
     LocalProcessProvider,
+    LocalResourceUsage,
     SolverRuntime,
     build_executor_registry,
+    observe_local_resources,
 )
 from iesplan.computation.sequences import (
     MaterializedPriceSeries,
@@ -143,6 +145,8 @@ from iesplan.computation.sequences import (
 )
 
 __all__ = [
+    "LocalResourceUsage",
+    "observe_local_resources",
     "CALCULATION_CONFIG_SCHEMA",
     "CALCULATION_CONFIG_VERSION",
     "COMPUTE_RESULT_SCHEMA",
