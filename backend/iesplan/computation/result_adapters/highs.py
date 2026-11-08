@@ -37,8 +37,9 @@ from __future__ import annotations
 
 import json
 import math
+from array import array
 from collections import Counter
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping, Sequence
 from decimal import Decimal
 from io import BytesIO, TextIOWrapper
 from typing import Any, NoReturn
@@ -112,22 +113,26 @@ def _fail(message: str) -> NoReturn:
 
 
 def _parse_solution(raw: bytes) -> dict[str, Any]:
-    """严格解析垫片 V1 文本；任一偏离即协议失败。
+    """逐行解析垫片 V1 文本，不复制整份解文本与行列表。"""
+    try:
+        with TextIOWrapper(BytesIO(raw), encoding="utf-8") as source:
+            return _read_solution(line.rstrip("\r\n") for line in source)
+    except UnicodeDecodeError as exc:
+        _fail(f"solution 非 UTF-8 文本: {exc}")
+
+
+def _read_solution(lines: Iterator[str]) -> dict[str, Any]:
+    """按原始列位置保存一份双精度主解；只在公开输出边界解释文法。
 
     只读状态与所需主解：数值写法按垫片 ``repr(float)`` 字母表由
     ``float()`` 直接解析；有限性只在发布处核对。
     """
-    try:
-        text = raw.decode("utf-8")
-    except UnicodeDecodeError as exc:
-        _fail(f"solution 非 UTF-8 文本: {exc}")
-    lines = text.splitlines()
-    if not lines or lines[0] != "HIGHS_SOLUTION_V1":
+    if next(lines, None) != "HIGHS_SOLUTION_V1":
         _fail("solution 缺 HIGHS_SOLUTION_V1 首行")
     facts: dict[str, str] = {}
-    primals: list[float] = []
+    primals = array("d")
     in_primal = False
-    for line in lines[1:]:
+    for line in lines:
         if line == "primal:":
             in_primal = True
             continue
@@ -533,7 +538,7 @@ class HighsResultAdapter:
 def _facts_value(
     node: Mapping[str, Any],
     index_of: Mapping[str, int],
-    primals: list[float],
+    primals: Sequence[float],
     label: str,
 ) -> str:
     """仿射声明节点 → 同次主解求值金额（十进制字符串，不作展示舍入）。
@@ -557,7 +562,7 @@ def _facts_value(
 def _recover_financial_facts(
     decl: Mapping[str, Any],
     index_of: Mapping[str, int],
-    primals: list[float],
+    primals: Sequence[float],
 ) -> dict[str, object]:
     """结构化财务事实声明 → 同次主解业务事实（格式页映射表为唯一正文）。
 
