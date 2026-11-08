@@ -59,6 +59,7 @@ from iesplan.computation.generators import (
     build_project_model,
     build_project_model_with_facts,
     build_registry,
+    iter_mps_chunks,
     write_mps,
 )
 from iesplan.computation.predictors import (
@@ -195,6 +196,7 @@ __all__ = [
     "SolverBundleManifest",
     "SolverRuntime",
     "SparseModel",
+    "iter_mps_chunks",
     "StopProbe",
     "TERMINATION_REASONS",
     "TRAINING_ARTIFACT_MEDIA_TYPE",

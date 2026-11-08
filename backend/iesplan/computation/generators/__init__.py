@@ -25,7 +25,7 @@ from iesplan.computation.generators.linear import (
     lower_relation,
 )
 from iesplan.computation.generators.matrix import SparseModel
-from iesplan.computation.generators.mps import write_mps
+from iesplan.computation.generators.mps import iter_mps_chunks, write_mps
 from iesplan.computation.generators.project import (
     build_project_model,
     build_project_model_with_facts,
@@ -50,6 +50,7 @@ __all__ = [
     "build_project_model",
     "build_project_model_with_facts",
     "build_registry",
+    "iter_mps_chunks",
     "lower_expression",
     "lower_mutex",
     "lower_planning_constraint",
