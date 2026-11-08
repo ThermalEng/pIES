@@ -625,7 +625,8 @@ export default function ResultsPage() {
   // 不留 series_id 备用显示与未知单位组掩盖缺件。
   const hourlyGroups = useMemo(() => {
     if (!hourly) return [] as { unit: string; series: LineSeries[] }[]
-    const palette = ['#0e5cad', '#b3261e', '#8a5a00', '#1e7d32', '#6a1b9a', '#00838f']
+    const palette = ['var(--ies-primary)', 'var(--ies-danger)', 'var(--ies-warning)',
+      'var(--ies-success)', 'var(--ies-chart-purple)', 'var(--ies-chart-teal)']
     const groups = new Map<string, { unit: string; series: LineSeries[] }>()
     let index = 0
     for (const meta of hourly.series) {

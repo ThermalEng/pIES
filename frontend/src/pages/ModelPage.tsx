@@ -92,10 +92,10 @@ type ParamSpecExt = ParameterSpec
 type ExtendedDeviceTypeSpec = DeviceTypeSpec
 
 const CARRIER_COLOR: Record<string, string> = {
-  electricity: '#0e5cad',
-  heat: '#c2410c',
-  cool: '#0891b2',
-  gas: '#8a5a00',
+  electricity: 'var(--ies-carrier-electricity)',
+  heat: 'var(--ies-carrier-heat)',
+  cool: 'var(--ies-carrier-cool)',
+  gas: 'var(--ies-carrier-gas)',
 }
 
 // ===========================================================================
@@ -782,12 +782,12 @@ function ModelCanvas({ projectId }: { projectId: number }) {
         target: c.toDeviceId,
         targetHandle: c.toHandle,
         label: connectionLabel(c.carrier),
-        labelStyle: { fontSize: 10, fontWeight: 600, fill: CARRIER_COLOR[c.carrier] ?? '#525c69' },
-        labelBgStyle: { fill: '#ffffff', fillOpacity: 0.85 },
+        labelStyle: { fontSize: 10, fontWeight: 600, fill: CARRIER_COLOR[c.carrier] ?? 'var(--ies-color-text-secondary)' },
+        labelBgStyle: { fill: 'var(--ies-color-surface)', fillOpacity: 0.95 },
         labelBgPadding: [4, 2] as [number, number],
         labelBgBorderRadius: 3,
-        markerEnd: { type: MarkerType.ArrowClosed, color: CARRIER_COLOR[c.carrier] ?? '#525c69' },
-        style: { stroke: CARRIER_COLOR[c.carrier] ?? '#525c69', strokeWidth: 1.8 },
+        markerEnd: { type: MarkerType.ArrowClosed, color: CARRIER_COLOR[c.carrier] ?? 'var(--ies-color-text-secondary)' },
+        style: { stroke: CARRIER_COLOR[c.carrier] ?? 'var(--ies-color-text-secondary)', strokeWidth: 1.8 },
         selected: c.id === selectedConnId,
       })),
     [connections, selectedConnId, connectionLabel],

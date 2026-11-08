@@ -51,6 +51,7 @@ import { errorMessage, useI18n } from '../i18n'
 import type { Locale } from '../i18n'  // Locale kept for setLocale typing if needed
 import { Alert, Badge, Button, FormField, Input } from '../components/ui'
 import { BrandMark } from '../components/BrandMark'
+import { ThemeToggle } from '../components/ThemeToggle'
 
 type View = 'login' | 'register' | 'change_password' | 'takeover'
 
@@ -517,6 +518,7 @@ export default function LoginPage() {
             </span>
             <span className={locale === 'en' ? 'is-active' : ''}>EN</span>
           </button>
+          <ThemeToggle />
         </footer>
       </section>
     </main>
