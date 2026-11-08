@@ -266,11 +266,10 @@ def run_claimed_task(
     进程间只传递领取身份及停止事件；输入、阶段检查点和终态仍通过原有
     application 公开门面与短事务交接。该进程不领取新任务或续租。
     """
-    from iesplan.bootstrap import assemble_compute_worker, assemble_io_worker
+    from iesplan.bootstrap import assemble_task_runtime
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
-    assemble = assemble_compute_worker if worker_type == "compute" else assemble_io_worker
-    ctx = assemble()
+    ctx = assemble_task_runtime(worker_type)
     compute = ctx.compute_execution_plane() if worker_type == "compute" else None
     runner.run_task(
         ctx.session_factory, claim, worker_id=worker_id,
