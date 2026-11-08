@@ -7,6 +7,9 @@
  */
 
 export const messagesEn: Record<string, string> = {
+  'ies.theme.dark_mode': 'Dark mode',
+  'ies.theme.to_dark': 'Switch to dark mode',
+  'ies.theme.to_light': 'Switch to light mode',
   // -------------------------------------------------------------------------
   // Common actions
   // -------------------------------------------------------------------------

@@ -15,6 +15,7 @@
  * ------------------------------------------------------------------------- */
 
 :root {
+  color-scheme: light;
   /* 字体 */
   --ies-font-family: system-ui, 'Segoe UI', 'Noto Sans SC', 'PingFang SC', 'Microsoft YaHei',
     'Helvetica Neue', Arial, sans-serif;
@@ -49,6 +50,12 @@
   --ies-primary-text-on: #ffffff;
   --ies-brand-secondary: #0891b2;
   --ies-brand-secondary-subtle: #e4f5f8;
+  --ies-carrier-electricity: #0e5cad;
+  --ies-carrier-heat: #c2410c;
+  --ies-carrier-cool: #0891b2;
+  --ies-carrier-gas: #8a5a00;
+  --ies-chart-purple: #6a1b9a;
+  --ies-chart-teal: #00838f;
 
   --ies-success: #1e7d32;
   --ies-success-hover: #186b2a;
@@ -106,6 +113,56 @@
 
   /* 过渡 */
   --ies-transition: 140ms ease;
+}
+
+:root[data-theme='dark'] {
+  color-scheme: dark;
+  --ies-color-bg: #101720;
+  --ies-color-surface: #18222e;
+  --ies-color-surface-2: #1e2b3a;
+  --ies-color-border: #394b60;
+  --ies-color-border-strong: #596f87;
+  --ies-color-text: #e9eef5;
+  --ies-color-text-secondary: #bdc8d7;
+  --ies-color-text-muted: #a1afc1;
+  --ies-color-text-disabled: #748397;
+
+  --ies-primary: #8fc6ff;
+  --ies-primary-hover: #add6ff;
+  --ies-primary-active: #c7e3ff;
+  --ies-primary-subtle: #223c58;
+  --ies-primary-text-on: #101720;
+  --ies-brand-secondary: #72d6e9;
+  --ies-brand-secondary-subtle: #163c46;
+  --ies-success: #88d9a1;
+  --ies-success-hover: #a4e6b8;
+  --ies-success-subtle: #173c2b;
+  --ies-success-text: #a4e6b8;
+  --ies-danger: #ffaaa2;
+  --ies-danger-hover: #ffcbc6;
+  --ies-danger-subtle: #472b30;
+  --ies-danger-text: #ffbdb7;
+  --ies-warning: #f3ca78;
+  --ies-warning-hover: #ffdc99;
+  --ies-warning-subtle: #40351f;
+  --ies-warning-text: #ffdc99;
+  --ies-info: #8fc6ff;
+  --ies-info-subtle: #223c58;
+  --ies-info-text: #b0d7ff;
+  --ies-neutral: #afbdce;
+  --ies-neutral-subtle: #293646;
+  --ies-neutral-text: #c9d4e2;
+  --ies-focus-ring-color: #8fc6ff;
+
+  --ies-carrier-electricity: #8fc6ff;
+  --ies-carrier-heat: #ffac81;
+  --ies-carrier-cool: #72d6e9;
+  --ies-carrier-gas: #f3ca78;
+  --ies-chart-purple: #d4a8ef;
+  --ies-chart-teal: #78d4d7;
+  --ies-shadow-sm: 0 1px 2px rgb(0 0 0 / 0.25);
+  --ies-shadow-md: 0 4px 12px rgb(0 0 0 / 0.3);
+  --ies-shadow-lg: 0 12px 32px rgb(0 0 0 / 0.4);
 }
 
 /* 4K(≥2560px)放大根字号;布局全部 rem 化,自动等比缩放 */
@@ -271,6 +328,37 @@ button {
   display: flex;
   align-items: center;
   gap: var(--ies-space-2);
+}
+
+/* Keep language/appearance controls visible; navigation scrolls on its own row. */
+@media (max-width: 900px) {
+  :root {
+    --ies-topbar-height: 96px;
+  }
+
+  .ies-topbar {
+    display: grid;
+    grid-template-columns: auto 1fr auto;
+    grid-template-rows: 32px 40px;
+    gap: 8px;
+    padding: 8px 12px;
+  }
+
+  .ies-topbar__brand { grid-area: 1 / 1; }
+  .ies-topbar__spacer { grid-area: 1 / 2; }
+  .ies-topbar__actions { grid-area: 1 / 3; }
+
+  .ies-topbar__nav {
+    grid-area: 2 / 1 / 3 / -1;
+    min-width: 0;
+    margin-left: 0;
+    overflow-x: auto;
+  }
+
+  .ies-topbar__link {
+    flex: none;
+    white-space: nowrap;
+  }
 }
 
 /* 内容区 */
@@ -446,6 +534,17 @@ button {
 .ies-btn--ghost:hover:not(:disabled) {
   background: var(--ies-color-surface-2);
   color: var(--ies-color-text);
+}
+
+.ies-theme-toggle {
+  flex: none;
+  min-width: 30px;
+  min-height: 30px;
+}
+
+.ies-theme-toggle[aria-pressed='true'] {
+  color: var(--ies-primary);
+  background: var(--ies-primary-subtle);
 }
 
 .ies-btn--icon {
@@ -1312,7 +1411,7 @@ button {
   background:
     radial-gradient(circle at 14% 18%, rgb(8 145 178 / 0.1), transparent 31rem),
     radial-gradient(circle at 88% 82%, rgb(14 92 173 / 0.12), transparent 34rem),
-    linear-gradient(145deg, #f8fbff 0%, var(--ies-color-bg) 48%, #eef4f8 100%);
+    linear-gradient(145deg, var(--ies-color-surface-2) 0%, var(--ies-color-bg) 48%, var(--ies-color-surface-2) 100%);
 }
 
 .ies-login__card {
@@ -1325,7 +1424,7 @@ button {
   background: var(--ies-color-surface);
   border: 1px solid var(--ies-color-border);
   border-radius: 14px;
-  box-shadow: 0 18px 48px rgb(31 38 48 / 0.12);
+  box-shadow: var(--ies-shadow-lg);
 }
 
 .ies-login__header {
@@ -1412,6 +1511,7 @@ button {
 /* 登录页底部语言切换(左下角, 与顶栏 中文/EN 同款交互, 纤细分段样式) */
 .ies-login__footer {
   display: flex;
+  gap: var(--ies-space-2);
   justify-content: flex-start;
   align-items: center;
   margin-top: var(--ies-space-2);
@@ -1439,13 +1539,13 @@ button {
 }
 
 .ies-login__locale:hover {
-  background: var(--ies-color-bg-subtle, #f6f8fb);
+  background: var(--ies-color-surface-2);
   border-color: var(--ies-color-border);
   color: var(--ies-color-text);
 }
 
 .ies-login__locale:focus-visible {
-  outline: 2px solid var(--ies-color-primary, #0e5cad);
+  outline: 2px solid var(--ies-focus-ring-color);
   outline-offset: 2px;
 }
 
@@ -2117,24 +2217,24 @@ button {
 .ies-custom-page { max-width: 960px; margin: 0 auto; padding: 24px 16px; }
 .ies-page-title-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .ies-custom-list { display: flex; flex-direction: column; gap: 12px; margin-top: 16px; }
-.ies-custom-card { border: 1px solid var(--ies-border, #d8dee6); border-radius: 8px; padding: 14px 16px; background: var(--ies-surface, #fff); }
+.ies-custom-card { border: 1px solid var(--ies-color-border); border-radius: 8px; padding: 14px 16px; background: var(--ies-color-surface); }
 .ies-custom-card__head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .ies-custom-card__name { font-weight: 600; border: none; background: none; cursor: pointer; color: inherit; text-align: left; }
-.ies-custom-card__meta { display: flex; gap: 16px; flex-wrap: wrap; margin-top: 6px; color: #667; font-size: 13px; }
+.ies-custom-card__meta { display: flex; gap: 16px; flex-wrap: wrap; margin-top: 6px; color: var(--ies-color-text-secondary); font-size: 13px; }
 .ies-custom-card__revisions { margin-top: 8px; display: flex; gap: 6px; align-items: center; font-size: 13px; }
-.ies-custom-card__rev { border: 1px solid var(--ies-border, #d8dee6); border-radius: 4px; padding: 2px 8px; background: none; cursor: pointer; }
+.ies-custom-card__rev { border: 1px solid var(--ies-color-border); border-radius: 4px; padding: 2px 8px; color: var(--ies-color-text); background: none; cursor: pointer; }
 .ies-custom-card__actions { margin-top: 10px; display: flex; gap: 8px; }
-.ies-custom-empty { color: #667; padding: 24px 0; }
+.ies-custom-empty { color: var(--ies-color-text-secondary); padding: 24px 0; }
 .ies-custom-editor { display: flex; flex-direction: column; gap: 12px; margin-top: 16px; }
 .ies-custom-editor__head { display: flex; align-items: center; gap: 12px; }
 .ies-custom-editor__yaml { font-family: ui-monospace, 'SFMono-Regular', Consolas, monospace; font-size: 13px; line-height: 1.5; }
-.ies-custom-warn { color: var(--ies-danger, #c0392b); font-size: 13px; }
+.ies-custom-warn { color: var(--ies-danger); font-size: 13px; }
 .ies-custom-editor__actions { display: flex; gap: 8px; }
 .ies-custom-diagnostics { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
-.ies-custom-diagnostics__item { border-left: 3px solid var(--ies-danger, #c0392b); background: var(--ies-danger-bg, #fdf0ef); padding: 8px 10px; font-size: 13px; border-radius: 0 4px 4px 0; }
+.ies-custom-diagnostics__item { border-left: 3px solid var(--ies-danger); background: var(--ies-danger-subtle); padding: 8px 10px; font-size: 13px; border-radius: 0 4px 4px 0; }
 .ies-custom-diagnostics__code { font-weight: 600; margin-right: 8px; font-family: ui-monospace, monospace; }
-.ies-custom-diagnostics__field { display: block; color: #667; margin-top: 2px; font-family: ui-monospace, monospace; font-size: 12px; }
-.ies-custom-diagnostics__expected { display: block; color: #667; margin-top: 2px; font-size: 12px; }
-.ies-custom-revision { border: 1px solid var(--ies-success, #27ae60); background: var(--ies-success-bg, #eafaf1); border-radius: 6px; padding: 10px 12px; }
+.ies-custom-diagnostics__field { display: block; color: var(--ies-color-text-secondary); margin-top: 2px; font-family: ui-monospace, monospace; font-size: 12px; }
+.ies-custom-diagnostics__expected { display: block; color: var(--ies-color-text-secondary); margin-top: 2px; font-size: 12px; }
+.ies-custom-revision { border: 1px solid var(--ies-success); background: var(--ies-success-subtle); border-radius: 6px; padding: 10px 12px; }
 .ies-custom-revision h3 { margin: 0 0 4px; font-size: 14px; }
 .ies-custom-revision p { margin: 0; font-size: 13px; }

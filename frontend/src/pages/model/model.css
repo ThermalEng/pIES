@@ -188,6 +188,18 @@
 .mp-canvas {
   width: 100%;
   height: 100%;
+  --xy-background-color: var(--ies-color-surface);
+  --xy-background-pattern-dots-color: var(--ies-color-border-strong);
+  --xy-controls-button-background-color: var(--ies-color-surface);
+  --xy-controls-button-background-color-hover: var(--ies-color-surface-2);
+  --xy-controls-button-color: var(--ies-color-text);
+  --xy-controls-button-color-hover: var(--ies-color-text);
+  --xy-controls-button-border-color: var(--ies-color-border);
+  --xy-attribution-background-color: var(--ies-color-surface);
+}
+
+.mp-canvas .react-flow__attribution a {
+  color: var(--ies-color-text-muted);
 }
 
 .mp-canvas-empty {

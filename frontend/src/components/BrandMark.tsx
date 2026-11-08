@@ -4,10 +4,10 @@ interface BrandMarkProps {
   variant?: 'color' | 'mono' | 'reverse'
 }
 
-/** pIES A2 标志。颜色只由 variant 决定，不承载业务状态。 */
+/** pIES A2 标志。颜色由 variant 与主题令牌决定，不承载业务状态。 */
 export function BrandMark({ className, title, variant = 'color' }: BrandMarkProps) {
-  const outer = variant === 'reverse' ? '#ffffff' : '#0e5cad'
-  const inner = variant === 'color' ? '#0891b2' : outer
+  const outer = variant === 'reverse' ? '#ffffff' : 'var(--ies-primary)'
+  const inner = variant === 'color' ? 'var(--ies-brand-secondary)' : outer
 
   return (
     <svg

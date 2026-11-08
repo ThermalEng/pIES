@@ -45,8 +45,12 @@ export type IconName =
   | 'plus'
   | 'minus'
   | 'trash'
+  | 'sun'
+  | 'moon'
 
 const ICON_PATHS: Record<IconName, ReactNode> = {
+  sun: <><circle cx="12" cy="12" r="4" /><path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.93 4.93l1.42 1.42M17.65 17.65l1.42 1.42M4.93 19.07l1.42-1.42M17.65 6.35l1.42-1.42" /></>,
+  moon: <path d="M21 12.8A9 9 0 0 1 11.2 3 9 9 0 1 0 21 12.8Z" />,
   check: <path d="M20 6 9 17l-5-5" />,
   cross: <path d="M18 6 6 18M6 6l12 12" />,
   warning: (

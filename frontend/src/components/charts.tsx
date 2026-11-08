@@ -4,7 +4,7 @@
  * - LineChart:多序列折线(计算步序列, 横轴为步序号),超出 maxPoints 自动抽稀。
  * - ScatterChart:Pareto 候选点散点图,支持键盘/鼠标选择。
  *
- * 颜色使用设计系统语义色的十六进制值,与 styles.css 令牌一致。
+ * 颜色使用设计系统语义色变量,随 styles.css 主题令牌切换。
  */
 
 import { useMemo } from 'react'

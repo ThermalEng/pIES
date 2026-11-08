@@ -39,6 +39,7 @@ import {
 import { getMe, logout } from './features/auth'
 import { hasSession, setUnauthorizedHandler } from './shared/http'
 import { BrandMark } from './components/BrandMark'
+import { ThemeToggle } from './components/ThemeToggle'
 import { errorMessage, useI18n } from './i18n'
 import { Alert, Button, Icon, PageLoadError, Spinner } from './components/ui'
 import type { User } from './types'
@@ -190,6 +191,7 @@ function AppShell() {
           <Button variant="ghost" size="sm" onClick={toggleLocale} aria-label={t('ies.nav.language')}>
             {locale === 'zh' ? 'EN' : '中文'}
           </Button>
+          <ThemeToggle />
           <Button variant="secondary" size="sm" onClick={handleLogout}>
             <Icon name="cross" size={13} />
             {t('ies.nav.logout')}
