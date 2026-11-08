@@ -8,8 +8,9 @@
  *   后端只输出消息键与参数,文案仅存在于前端 locale 资源)。
  */
 
-import { createContext, createElement, useCallback, useContext, useEffect, useMemo, useState } from 'react'
+import { createContext, createElement, useCallback, useContext, useMemo, useState } from 'react'
 import type { ReactNode } from 'react'
+import { readBrowserPreference, writeBrowserPreference } from '../shared/browserPreferences'
 
 import type { Diagnostic } from '../types'
 import { ApiError } from '../types'
@@ -154,27 +155,27 @@ interface I18nContextValue {
 
 const I18nContext = createContext<I18nContextValue | null>(null)
 
-function readInitialLocale(): Locale {
-  if (typeof window === 'undefined') return 'zh'
-  return resolveLocale(window.localStorage.getItem(LOCALE_STORAGE_KEY))
+/** Restore the browser preference before React mounts, like the theme. */
+export function initializeLocale(): Locale {
+  const locale = resolveLocale(readBrowserPreference(LOCALE_STORAGE_KEY))
+  applyLocale(locale)
+  return locale
+}
+
+/** Keep non-React formatters and document language current before rendering. */
+function applyLocale(locale: Locale): void {
+  currentLocale = locale
+  document.documentElement.lang = locale === 'zh' ? 'zh-CN' : 'en'
 }
 
 /** 国际化 Provider:包裹应用根节点。 */
 export function I18nProvider({ children }: { children: ReactNode }) {
-  const [locale, setLocaleState] = useState<Locale>(readInitialLocale)
-
-  useEffect(() => {
-    currentLocale = locale
-    document.documentElement.lang = locale === 'zh' ? 'zh-CN' : 'en'
-  }, [locale])
+  const [locale, setLocaleState] = useState<Locale>(getLocale)
 
   const setLocale = useCallback((next: Locale) => {
+    applyLocale(next)
     setLocaleState(next)
-    try {
-      window.localStorage.setItem(LOCALE_STORAGE_KEY, next)
-    } catch {
-      // 隐私模式下 localStorage 不可用,仅内存生效
-    }
+    writeBrowserPreference(LOCALE_STORAGE_KEY, next)
   }, [])
 
   const value = useMemo<I18nContextValue>(

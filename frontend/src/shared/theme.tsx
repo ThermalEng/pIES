@@ -1,18 +1,14 @@
 /** Browser-local appearance preference, independent of users and projects. */
 import { createContext, useContext, useState } from 'react'
 import type { ReactNode } from 'react'
+import { readBrowserPreference, writeBrowserPreference } from './browserPreferences'
 
 type Theme = 'light' | 'dark'
 const STORAGE_KEY = 'iesplan.theme'
 
 /** Apply before React mounts so the first application render has the saved theme. */
 export function initializeTheme(): Theme {
-  let theme: Theme = 'light'
-  try {
-    if (window.localStorage.getItem(STORAGE_KEY) === 'dark') theme = 'dark'
-  } catch {
-    // Browsers may disallow local preferences; the switch still works for this visit.
-  }
+  const theme: Theme = readBrowserPreference(STORAGE_KEY) === 'dark' ? 'dark' : 'light'
   document.documentElement.dataset.theme = theme
   return theme
 }
@@ -25,11 +21,7 @@ export function ThemeProvider({ initialTheme, children }: { initialTheme: Theme;
     const next = theme === 'light' ? 'dark' : 'light'
     document.documentElement.dataset.theme = next
     setTheme(next)
-    try {
-      window.localStorage.setItem(STORAGE_KEY, next)
-    } catch {
-      // Same browser restriction as reading the preference above.
-    }
+    writeBrowserPreference(STORAGE_KEY, next)
   }
   return <ThemeContext.Provider value={{ theme, toggleTheme }}>{children}</ThemeContext.Provider>
 }

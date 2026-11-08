@@ -1,6 +1,9 @@
 // Appearance is browser-local, not an account/project field. All theme changes
 // use the real button; API calls below only prepare unrelated model fixtures.
 import { chromium, test, expect, type Page } from '@playwright/test'
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { createSession, uniqueName, strongPassword } from './fixtures'
 import { APP_URL } from './fixtures/env'
 import { buildMinimalModel, createEngineer, createProject, loginToken } from './setup/api'
@@ -22,9 +25,11 @@ async function expectAdjacentToLanguage(page: Page) {
   expect(await language.evaluate((el) => el.nextElementSibling?.classList.contains('ies-theme-toggle'))).toBe(true)
 }
 
-test('登录页一键/键盘切换，语言独立，关闭浏览器后保留两种模式', async ({}, testInfo) => {
+test('语言与外观独立保存，关闭浏览器后保留中英文及深浅两种选择', async ({}, testInfo) => {
   // Real persistent Chromium profile, without injecting storageState/preferences.
-  const profile = testInfo.outputPath('browser-profile')
+  // Chromium creates mode-0700 profile directories. Keep the disposable profile
+  // outside uploaded artifacts so the host CI artifact collector can read them.
+  const profile = await mkdtemp(join(tmpdir(), 'pies-preferences-'))
   const launch = () => chromium.launchPersistentContext(profile, {
     baseURL: APP_URL, viewport: { width: 1280, height: 800 },
   })
@@ -35,6 +40,7 @@ test('登录页一键/键盘切换，语言独立，关闭浏览器后保留两�
     let page = context.pages()[0]
     monitor(page)
     await page.goto('/login')
+    await expect(page.locator('html')).toHaveAttribute('lang', 'zh-CN')
     await expectTheme(page, 'light')
     await expectAdjacentToLanguage(page)
     await themeButton(page).focus()
@@ -44,6 +50,7 @@ test('登录页一键/键盘切换，语言独立，关闭浏览器后保留两�
     await expect(page.locator('.ies-login__card')).toHaveCSS('background-color', 'rgb(24, 34, 46)')
     await expect(page.getByLabel(/用户名/)).toHaveCSS('color', 'rgb(233, 238, 245)')
     await page.getByRole('button', { name: '语言', exact: true }).click()
+    await expect(page.locator('html')).toHaveAttribute('lang', 'en')
     await expect(page.getByRole('heading', { name: 'Sign in' })).toBeVisible()
     await expectTheme(page, 'dark')
     await page.reload()
@@ -60,7 +67,12 @@ test('登录页一键/键盘切换，语言独立，关闭浏览器后保留两�
     await page.goto('/login')
     await expectTheme(page, 'dark')
     await expect(page.getByRole('heading', { name: 'Sign in' })).toBeVisible()
+    await expect(page.locator('html')).toHaveAttribute('lang', 'en')
     await themeButton(page).click()
+    await expectTheme(page, 'light')
+    await page.getByRole('button', { name: 'Language', exact: true }).click()
+    await expect(page.getByRole('heading', { name: '登录', exact: true })).toBeVisible()
+    await expect(page.locator('html')).toHaveAttribute('lang', 'zh-CN')
     await expectTheme(page, 'light')
     await page.reload()
     await expectTheme(page, 'light')
@@ -71,9 +83,12 @@ test('登录页一键/键盘切换，语言独立，关闭浏览器后保留两�
     monitor(page)
     await page.goto('/login')
     await expectTheme(page, 'light')
+    await expect(page.getByRole('heading', { name: '登录', exact: true })).toBeVisible()
+    await expect(page.locator('html')).toHaveAttribute('lang', 'zh-CN')
     expect(errors).toEqual([])
   } finally {
     await context.close()
+    await rm(profile, { recursive: true })
   }
 })
 
