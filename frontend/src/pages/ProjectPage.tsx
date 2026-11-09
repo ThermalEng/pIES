@@ -173,14 +173,6 @@ export default function ProjectPage() {
   return (
     <div className="wb">
       <aside className="wb-sidebar">
-        <div className="wb-sidebar__head">
-          <span className="wb-sidebar__mark" aria-hidden="true">
-            IES
-          </span>
-          <span className="wb-sidebar__project-name" title={projectName}>
-            {projectName}
-          </span>
-        </div>
         <nav className="wb-sidebar__nav" aria-label={t('ies.nav.workbench')}>
           {NAV_ITEMS.map((item) => (
             <NavLink

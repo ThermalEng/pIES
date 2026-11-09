@@ -124,7 +124,7 @@ test.describe('场景 1: 认证与会话 @basic', () => {
 // ---------------------------------------------------------------------------
 
 test.describe('场景 2: 项目与页面导航 @basic', () => {
-  test('创建项目并逐个访问工作台 7 个子页面', async ({ browser }) => {
+  test('创建项目并逐个访问工作台 7 个子页面', async ({ browser }, testInfo) => {
     const username = uniqueName('es-proj')
     const password = strongPassword('Init')
     const apiCtx = await browser.newContext({ baseURL: process.env.E2E_APP_URL ?? 'http://web:80' })
@@ -136,7 +136,7 @@ test.describe('场景 2: 项目与页面导航 @basic', () => {
     const session = await createSession(page, username, password)
 
     // 2a. 新建项目(UI)
-    const projectName = uniqueName('QA 验收项目')
+    const projectName = `项目标题验收-${uniqueName('p')}`
     await page.getByRole('button', { name: /新建项目|New project/i }).first().click()
     await page.getByLabel(/名称|Name/i).fill(projectName)
     await page.locator('#pp-create-start-year').fill('2026')
@@ -147,6 +147,15 @@ test.describe('场景 2: 项目与页面导航 @basic', () => {
     await page.getByText(projectName).click()
     await expect(page).toHaveURL(/\/projects\/\d+\/tasks$/)
     await expect(page.getByRole('button', { name: /提交任务|Submit task/i }).first()).toBeVisible()
+    const expectSingleProjectTitle = async () => {
+      await expect(page.getByRole('heading', { level: 1, name: projectName, exact: true })).toBeVisible()
+      await expect(page.getByText(projectName, { exact: true })).toHaveCount(1)
+      await expect(page.locator('.wb-sidebar')).not.toContainText(projectName)
+      await expect(page.locator('.wb-sidebar__mark')).toHaveCount(0)
+      await expect(page.locator('.wb-header__meta')).toContainText('CNY')
+    }
+    await expectSingleProjectTitle()
+    await page.screenshot({ path: testInfo.outputPath('project-header-light.png') })
 
     // 2c. 遍历 7 个子页面: 模型/数据/配置/校验/任务/结果/导出
     // 各页标题结构不同(tasks/results 用 Card 标题, 无 h1), 统一断言:
@@ -165,7 +174,19 @@ test.describe('场景 2: 项目与页面导航 @basic', () => {
       await expect(page).toHaveURL(pathRe)
       // 页面已渲染(非占位组件)
       await expect(page.locator('.wb-content .ies-page-placeholder')).not.toBeVisible({ timeout: 10_000 })
+      await expectSingleProjectTitle()
     }
+
+    await page.getByRole('button', { name: /^(深色模式|Dark mode)$/ }).click()
+    await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark')
+    await expectSingleProjectTitle()
+    await page.screenshot({ path: testInfo.outputPath('project-header-dark.png') })
+    await page.getByRole('button', { name: '语言', exact: true }).click()
+    await page.setViewportSize({ width: 375, height: 812 })
+    await expectSingleProjectTitle()
+    await expect(page.getByRole('navigation', { name: 'Workbench' })
+      .getByRole('link', { name: 'System Modeling' })).toBeVisible()
+    await page.screenshot({ path: testInfo.outputPath('project-header-mobile.png') })
 
     const projectId = page.url().match(/\/projects\/(\d+)/)![1]
     session.assertNoErrors([
