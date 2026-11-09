@@ -6,7 +6,7 @@
 // 合法缺席用公开 metrics-only 任务(outputs=["metrics"], 与
 // financial-absence A 同源)。不注库、不注入页面状态，画布拖放不测。
 
-import { test, expect } from '@playwright/test'
+import { test, expect, type Request } from '@playwright/test'
 import { createSession, uniqueName, strongPassword } from './fixtures'
 import { createEngineer, loginToken, requestJson } from './setup/api'
 import { APP, scaffoldProject } from './financial-scaffold'
@@ -180,18 +180,18 @@ test.describe('R3: 曲线读取失败可见', () => {
     await expect(page.getByText(payLine).first()).toBeVisible()
     expect(writePosts).toEqual([])
 
-    // 预期内噪声: 首轮每序列恰一次 500(单页, rows < 后端上限)。
+    // 首个序列失败即停止整组读取，不再向其余序列发请求。
     session.assertNoErrors([{
       method: 'GET',
       path: `/api/projects/${pid}/tasks/${taskId}/result/hourly`,
       status: 500,
-      times: metas.length,
+      times: 1,
     }])
     await apiCtx.close()
     await context.close()
   })
 
-  test('慢曲线不阻塞主结果、恢复后为真实值', async ({ browser }) => {
+  test('慢曲线不阻塞主结果、切页取消且重入后为真实值', async ({ browser }) => {
     const userName = uniqueName('es-r3slow-doer')
     const password = strongPassword('Init')
     const apiCtx = await browser.newContext({ baseURL: APP })
@@ -295,11 +295,16 @@ test.describe('R3: 曲线读取失败可见', () => {
     const page = await context.newPage()
     let releaseGate!: () => void
     const gate = new Promise<void>((resolve) => { releaseGate = resolve })
-    let entered = false
+    const entered: Request[] = []
+    const failed = new Set<Request>()
+    page.on('requestfailed', request => failed.add(request))
+    let hold = true
     await context.route('**/result/hourly*', async (route) => {
-      entered = true
+      if (!hold) return route.continue()
+      entered.push(route.request())
       const res = await route.fetch()
       await gate
+      if (failed.has(route.request())) return
       await route.fulfill({ response: res })
     })
     const session = await createSession(page, userName, password)
@@ -308,7 +313,7 @@ test.describe('R3: 曲线读取失败可见', () => {
       await expect(page.getByRole('button', { name: /导出 Excel/i }).first()).toBeEnabled({ timeout: 60_000 })
 
       // 等至少一个真实曲线请求进入闸门(响应仍被挂起, 未释放)。
-      await expect.poll(async () => entered, { timeout: 30_000 }).toBe(true)
+      await expect.poll(async () => entered.length, { timeout: 30_000 }).toBeGreaterThan(0)
 
       // 挂起期间: 曲线处加载中、无图表; 封存财务与规划解变量已显示。
       // 旧代码(主结果状态位于曲线 await 之后)在此会因规划解未发布而失败。
@@ -318,12 +323,31 @@ test.describe('R3: 曲线读取失败可见', () => {
       expect(await card.locator('.ies-chart').count()).toBe(0)
       await expect(page.getByText(totalLine).first()).toBeVisible({ timeout: 30_000 })
       await expect(page.getByText('hp1_cap').first()).toBeVisible({ timeout: 30_000 })
+      // A slow first page must not fan out all the other series. Leaving the
+      // result page aborts it, and unrelated real pages remain usable.
+      expect(entered).toHaveLength(1)
+      const navigation = page.getByRole('navigation', { name: /工作台|Workspace/i })
+      await Promise.all([
+        page.waitForEvent('requestfailed', { predicate: request => request === entered[0] }),
+        navigation.getByText('任务中心', { exact: true }).click(),
+      ])
+      await expect(page).toHaveURL(new RegExp(`/projects/${pid}/tasks$`))
+      await page.getByRole('row').filter({ hasText: `#${taskId}` }).click()
+      await expect(page.getByRole('link', { name: /查看结果|View results/i }).first()).toBeVisible()
+      await navigation.getByText('版本历史', { exact: true }).click()
+      await expect(page).toHaveURL(new RegExp(`/projects/${pid}/versions$`))
+      await expect(page.getByRole('button', { name: /创建版本|Create version/i }).first()).toBeVisible()
+      expect(entered).toHaveLength(1)
     } finally {
       // 测试失败也释放闸门, 不留挂起请求。
+      hold = false
       releaseGate()
     }
 
-    // 释放后真实恢复: 图例与 API 身份一致, 点数一致。
+    // Re-enter via the workspace, with no re-solve. All actual series recover.
+    await page.getByRole('navigation', { name: /工作台|Workspace/i })
+      .getByText('结果分析', { exact: true }).click()
+    await expect(page).toHaveURL(new RegExp(`/projects/${pid}/results$`))
     const card = page.locator('.ies-section', { hasText: '计算步曲线' }).first()
     await expect(async () => {
       const items = await card.locator('.ies-chart__legend-item').allInnerTexts()

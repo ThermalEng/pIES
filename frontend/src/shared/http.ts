@@ -100,7 +100,8 @@ function createAbort(external?: AbortSignal, timeoutMs?: number): {
   const controller = new AbortController()
   const onExternalAbort = () => controller.abort()
   if (external) {
-    external.addEventListener('abort', onExternalAbort, { once: true })
+    if (external.aborted) controller.abort()
+    else external.addEventListener('abort', onExternalAbort, { once: true })
   }
   let timer: ReturnType<typeof setTimeout> | undefined
   if (timeoutMs && timeoutMs > 0) {

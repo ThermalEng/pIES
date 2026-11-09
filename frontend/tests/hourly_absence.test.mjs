@@ -119,7 +119,7 @@ async function expectReject(name, fn) {
 // 5. 第二序列后续页失败 → 整组 reject，无部分成功。
 {
   installStub({ refs: refOf(), failAt: { field: 'b.y', start: 2 } })
-  // 首轮两序列各发 start=0；b.y 第二页 start=2 失败。
+  // 完整读取 a.x 后读取 b.y；b.y 第二页 start=2 失败。
   await expectReject('后续页失败整组抛错', () => api.results.hourly(7, 11))
 }
 
