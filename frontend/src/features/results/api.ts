@@ -100,7 +100,9 @@ export async function select(
 /**
  * 逐时结果读取(单序列分页查询, 声明列表全量消费)。
  */
-export async function readHourly(projectId: number, taskId: number): Promise<HourlyRead> {
+export async function readHourly(
+  projectId: number, taskId: number, window?: { start: number; limit: number },
+): Promise<HourlyRead> {
   const envelope = await request<ResultViewEnvelopeDto>(
     `/projects/${projectId}/tasks/${taskId}/result`,
   )
@@ -111,6 +113,8 @@ export async function readHourly(projectId: number, taskId: number): Promise<Hou
 
   const series: HourlySeriesMeta[] = ref.series.map((s) => ({ ...s }))
   const rows = ref.rows
+  const first = Math.min(Math.max(window?.start ?? 0, 0), Math.max(rows - 1, 0))
+  const end = Math.min(rows, first + (window?.limit ?? rows))
 
   const pages = await Promise.all(
     series.map(async (meta) => {
@@ -119,12 +123,12 @@ export async function readHourly(projectId: number, taskId: number): Promise<Hou
           const page = await request<HourlyResponseDto>(
             `/projects/${projectId}/tasks/${taskId}/result/hourly`,
             {
-              query: { field: meta.series_id, start, end: rows, limit },
+              query: { field: meta.series_id, start: first + start, end, limit },
             },
           )
-          return { values: page.values, next_start: page.next_start }
+          return { values: page.values, next_start: page.next_start === null ? null : page.next_start - first }
         },
-        rows,
+        end - first,
       )
       return [meta.series_id, values] as const
     }),
@@ -134,5 +138,5 @@ export async function readHourly(projectId: number, taskId: number): Promise<Hou
   for (const [fieldId, values] of pages) {
     flows[fieldId] = values
   }
-  return { absent: false, flows, series }
+  return { absent: false, flows, series, start: first, end, totalRows: rows }
 }

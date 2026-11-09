@@ -41,6 +41,7 @@ from uuid import UUID
 from sqlalchemy.orm import Session
 
 from iesplan import tasks as tasks_domain
+from iesplan.application.results import store_evidence_projection
 from iesplan.application.tasks import Claim
 from iesplan.application.worker.compute_cases import (
     HOURLY_OBJECT_PATH,
@@ -343,6 +344,7 @@ def submit_attempt_result(
                 object_id=object_id, created_by=who,
             )
             attach_result_ref(db, object_id, evidence_id, actor_id=who)
+            store_evidence_projection(db, evidence_id, payload, snapshot)
             for sealed in sealed_groups.values():
                 attach_evidence_objects(db, evidence_id, sealed, actor_id=who)
 

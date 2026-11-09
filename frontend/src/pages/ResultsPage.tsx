@@ -229,7 +229,9 @@ export default function ResultsPage() {
   const [finAbsence, setFinAbsence] = useState<FinancialAbsence>(null)
   const [noEvidence, setNoEvidence] = useState(false)
   const [assessments, setAssessments] = useState<ResultAssessment[]>([])
-  const [hourly, setHourly] = useState<{ flows: Record<string, number[]>; series: HourlySeriesMeta[] } | null>(null)
+  const [hourly, setHourly] = useState<{ flows: Record<string, number[]>; series: HourlySeriesMeta[];
+    start: number; end: number; totalRows: number } | null>(null)
+  const [hourlyJump, setHourlyJump] = useState('0')
   /** 曲线合法缺席(后端显式无逐时引用, 非失败, 不清其他结果)。 */
   const [hourlyAbsent, setHourlyAbsent] = useState(false)
   /** 曲线读取失败(整组失败, 不清财务/指标/摘要, 可重试)。 */
@@ -424,13 +426,14 @@ export default function ResultsPage() {
         hourlySeq.current = mySeq
         setHourlyLoading(true)
         try {
-          const hr = await readHourly(projectId, taskId)
+          const hr = await readHourly(projectId, taskId, { start: 0, limit: 1000 })
           if (cancelled || hourlySeq.current !== mySeq) return
           if (hr.absent) {
             setHourly(null)
             setHourlyAbsent(true)
           } else {
-            setHourly({ flows: hr.flows, series: hr.series })
+            setHourly(hr)
+            setHourlyJump(String(hr.start))
             setHourlyAbsent(false)
           }
           setHourlyError(null)
@@ -476,20 +479,21 @@ export default function ResultsPage() {
 
   // 曲线重试: 仅重读所选任务曲线, 不重求解/重评估; 旧读按序号丢弃,
   // 不覆盖切换后的新选择。重试期间不碰财务/指标/摘要状态。
-  const retryHourly = useCallback(async () => {
+  const retryHourly = useCallback(async (start = hourly?.start ?? 0) => {
     const taskId = pickedTaskId
     const mySeq = hourlySeq.current + 1
     hourlySeq.current = mySeq
     setHourlyError(null)
     setHourlyLoading(true)
     try {
-      const hr = await readHourly(projectId, taskId)
+      const hr = await readHourly(projectId, taskId, { start, limit: 1000 })
       if (hourlySeq.current !== mySeq) return
       if (hr.absent) {
         setHourly(null)
         setHourlyAbsent(true)
       } else {
-        setHourly({ flows: hr.flows, series: hr.series })
+        setHourly(hr)
+        setHourlyJump(String(hr.start))
         setHourlyAbsent(false)
       }
     } catch (err) {
@@ -498,7 +502,7 @@ export default function ResultsPage() {
     } finally {
       if (hourlySeq.current === mySeq) setHourlyLoading(false)
     }
-  }, [pickedTaskId, projectId, selectedPkgId])
+  }, [pickedTaskId, projectId, selectedPkgId, hourly?.start])
 
   // 快照来源展示: 仅按原快照引用解析名称, 不读当前最新。
   // 名称缺失显示精确引用 id; 查询失败可见, 不静默吞错。
@@ -1137,8 +1141,30 @@ export default function ResultsPage() {
         hourlyGroups.length > 0 ? (
           <Card title={t('ies.result.hourly_chart')} className="ies-section">
             <p style={{ fontSize: 'var(--ies-fs-xs)', color: 'var(--ies-color-text-secondary)', marginBottom: 'var(--ies-space-2)' }}>
-              {t('ies.result.hourly_note', { n: hourlyPointCount })}
+              {t('ies.result.hourly_note', { n: hourlyPointCount, start: hourly?.start ?? 0,
+                end: (hourly?.end ?? 1) - 1, total: hourly?.totalRows ?? 0 })}
             </p>
+            {hourly ? <div className="ies-form-row" style={{ marginBottom: 'var(--ies-space-2)' }}>
+              <Button disabled={hourlyLoading || hourly.start === 0}
+                onClick={() => void retryHourly(Math.max(0, hourly.start - 1000))}>
+                {t('ies.result.hourly_previous')}
+              </Button>
+              <Button disabled={hourlyLoading || hourly.end >= hourly.totalRows}
+                onClick={() => void retryHourly(hourly.end)}>
+                {t('ies.result.hourly_next')}
+              </Button>
+              <label>{t('ies.result.hourly_start')}
+                <input type="number" min={0} max={hourly.totalRows - 1} step={1}
+                  value={hourlyJump} onChange={e => setHourlyJump(e.target.value)} />
+              </label>
+              <Button disabled={hourlyLoading || hourlyJump === '' || !Number.isInteger(Number(hourlyJump))
+                || Number(hourlyJump) < 0 || Number(hourlyJump) >= hourly.totalRows}
+                onClick={() => void retryHourly(Number(hourlyJump))}>
+                {t('ies.result.hourly_go')}
+              </Button>
+              {hourlyLoading ? <span role="status">{t('ies.common.loading')}</span> : null}
+              {hourlyError ? <Alert variant="error">{hourlyError}</Alert> : null}
+            </div> : null}
             {hourlyGroups.map((group) => (
               <div className="ies-section" key={group.unit}>
                 <LineChart
@@ -1146,6 +1172,7 @@ export default function ResultsPage() {
                   ariaLabel={`${t('ies.result.hourly_chart')} (${group.unit})`}
                   yLabel={group.unit}
                   xLabel={t('ies.result.hourly_step_axis')}
+                  xOffset={hourly?.start ?? 0}
                 />
               </div>
             ))}

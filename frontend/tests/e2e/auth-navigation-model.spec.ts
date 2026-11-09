@@ -16,6 +16,29 @@ import { createEngineer } from './setup/api'
 // ---------------------------------------------------------------------------
 
 test.describe('场景 1: 认证与会话 @basic', () => {
+  test('Cookie 到期不再发送凭证时，当前页与刷新均返回登录', async ({ browser }) => {
+    const username = uniqueName('es-cookie-expiry')
+    const password = strongPassword('Expiry')
+    const apiCtx = await browser.newContext({ baseURL: process.env.E2E_APP_URL ?? 'http://web:80' })
+    await createEngineer(apiCtx.request, username, password)
+    await apiCtx.close()
+    const context = await browser.newContext()
+    const page = await context.newPage()
+    await loginViaUI(page, username, password)
+    // 登录本身走真实 UI；清除已发出的 Cookie 模拟浏览器到期删除它，
+    // 不注入登录标记、不 stub API，下一请求接受后端真实 AUTH-REQ-001。
+    await context.clearCookies({ name: 'ies_session' })
+    await page.getByRole('button', { name: /进行中|Active/i }).click()
+    await expect(page).toHaveURL(/\/login/)
+    await expect(page.getByText(/登录已过期|session has expired/i)).toBeVisible()
+    await loginViaUI(page, username, password)
+    await context.clearCookies({ name: 'ies_session' })
+    await page.reload()
+    await expect(page).toHaveURL(/\/login/)
+    await expect(page.getByText(/登录已过期|session has expired/i)).toBeVisible()
+    await context.close()
+  })
+
   test('登录、强制改密、退出、新窗口会话失效', async ({ browser }) => {
     // 独立用户(API 造数, 与被测 UI 隔离); forceChange 使首登强制改密
     const username = uniqueName('es-auth')

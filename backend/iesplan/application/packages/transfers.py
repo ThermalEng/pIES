@@ -13,6 +13,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from openpyxl import Workbook
+from openpyxl.cell import WriteOnlyCell
 from openpyxl.styles import Font
 from sqlalchemy.orm import Session
 
@@ -43,6 +44,7 @@ from iesplan.application.models import (
     save_project_model_in_transaction as _save_project_model_in_transaction,
 )
 from iesplan.application.packages.archive import ArchiveBuilder, ArchiveContent
+from iesplan.application.packages.report_series import write_hourly_sheets
 from iesplan.application.projects import (
     ensure_access,
 )
@@ -52,6 +54,7 @@ from iesplan.application.projects import (
 from iesplan.application.projects import (
     store_content_object as _store_content_object,
 )
+from iesplan.application.results import evidence_content as read_evidence_content
 from iesplan.core.content import Content
 from iesplan.core.contracts import (
     PlanningConfig,
@@ -90,7 +93,6 @@ from iesplan.package import list_proposals_for_proposer as _list_proposals_for_p
 from iesplan.package import (
     media_file_kind as _media_file_kind,
 )
-from iesplan.package import parse_evidence_content as _parse_evidence_content
 from iesplan.package import parse_package as _parse_package
 from iesplan.package import set_proposal_review as _set_proposal_review
 from iesplan.package.contracts import ImportProposalRecord
@@ -1860,23 +1862,21 @@ def _excel_safe(value: Any) -> Any:
 
 def _set_sheet_title(ws, title_zh: str, title_en: str) -> None:
     """写入双语节标题(加粗)。"""
-    cell = ws.cell(row=1, column=1, value=_excel_safe(f"{title_zh} / {title_en}"))
+    cell = WriteOnlyCell(ws, value=_excel_safe(f"{title_zh} / {title_en}"))
     cell.font = Font(bold=True)
+    ws.append((cell,))
 
 
-def _write_kv(ws, rows: list[tuple[str, Any]], start_row: int = 3) -> int:
-    """写键值行(两列), 返回下一可用行号(全部值经 _excel_safe 防公式注入)。"""
-    row = start_row
+def _write_kv(ws, rows: list[tuple[str, Any]], *, blank_row: bool = True) -> None:
+    """逐行写键值(两列)，不在内存中累积单元格。"""
+    if blank_row:
+        ws.append(())
     for key, value in rows:
-        ws.cell(row=row, column=1, value=_excel_safe(str(key)))
         if value is None:
-            ws.cell(row=row, column=2, value="—")
+            value = "—"
         elif isinstance(value, (dict, list)):
-            ws.cell(row=row, column=2, value=_excel_safe(json.dumps(value, ensure_ascii=False)[:500]))
-        else:
-            ws.cell(row=row, column=2, value=_excel_safe(value))
-        row += 1
-    return row
+            value = json.dumps(value, ensure_ascii=False)[:500]
+        ws.append((_excel_safe(str(key)), _excel_safe(value)))
 
 
 def _is_sealed_evaluation(section: Any) -> bool:
@@ -2081,20 +2081,16 @@ def _write_sealed_construction_units(ws, fin: dict[str, Any]) -> None:
         "建设单元 / Unit ID", "实例 / Instance ID", "建设方式 / Mode",
         "建设状态 / Built", "规划变量 / Planning variable", "规模 / Value", "单位 / Unit",
     )
-    for column, header in enumerate(headers, 1):
-        ws.cell(row=2, column=column, value=header)
+    ws.append(headers)
     if not fin["construction_units"]:
-        ws.cell(row=3, column=1, value="未声明建设单元 / No construction units declared")
-    row_no = 3
+        ws.append(("未声明建设单元 / No construction units declared",))
     for unit in fin["construction_units"]:
         for scale in unit["scales"]:
             values = (
                 unit["unit_id"], unit["instance_id"], unit["mode"], unit["built"],
                 scale["planning_variable_id"], scale["value"], scale["unit"],
             )
-            for column, value in enumerate(values, 1):
-                ws.cell(row=row_no, column=column, value=_excel_safe(value))
-            row_no += 1
+            ws.append(tuple(_excel_safe(value) for value in values))
 
 
 def _write_sealed_monthly_demand(ws, fin: dict[str, Any]) -> None:
@@ -2106,19 +2102,17 @@ def _write_sealed_monthly_demand(ws, fin: dict[str, Any]) -> None:
         "月峰值 / Peak", "峰值单位 / Peak unit", "费率 / Rate",
         "费率单位 / Rate unit", "月费用 / Charge", "币种 / Currency",
     )
-    for col, header in enumerate(headers, 1):
-        ws.cell(row=2, column=col, value=header)
+    ws.append(headers)
     if not fin["monthly_demand"]:
-        ws.cell(row=3, column=1, value="无计量绑定 / No demand meter bindings")
-    for row_no, item in enumerate(fin["monthly_demand"], 3):
+        ws.append(("无计量绑定 / No demand meter bindings",))
+    for item in fin["monthly_demand"]:
         values = (
             item["billing_id"], item["charge_id"], item["calendar_year"],
             item["calendar_month"], item["financial_year"], item["peak_power"],
             item["peak_unit"], item["rate"]["value"], item["rate"]["unit"],
             item["charge"], fin["currency"],
         )
-        for col, value in enumerate(values, 1):
-            ws.cell(row=row_no, column=col, value=_excel_safe(value))
+        ws.append(tuple(_excel_safe(value) for value in values))
 
 
 def _write_sealed_cost_items(ws, fin: dict[str, Any]) -> None:
@@ -2129,17 +2123,15 @@ def _write_sealed_cost_items(ws, fin: dict[str, Any]) -> None:
         "明细 / Item ID", "期间轴 / Axis", "期间 / Period", "原额 / Raw",
         "含税额 / Gross", "可抵进项 / Deductible input", "净基础 / Net basis", "单位 / Unit",
     )
-    for column, header in enumerate(headers, 1):
-        ws.cell(row=2, column=column, value=header)
+    ws.append(headers)
     if not fin["cost_items"]:
-        ws.cell(row=3, column=1, value="无适用命名成本项 / No applicable named cost items")
+        ws.append(("无适用命名成本项 / No applicable named cost items",))
     fields = (
         "instance_id", "finance_type", "component", "item_id", "axis", "period",
         "raw", "gross", "deductible_input", "net_basis", "unit",
     )
-    for row_no, item in enumerate(fin["cost_items"], 3):
-        for column, field in enumerate(fields, 1):
-            ws.cell(row=row_no, column=column, value=_excel_safe(item[field]))
+    for item in fin["cost_items"]:
+        ws.append(tuple(_excel_safe(item[field]) for field in fields))
 
 
 def _write_sealed_amounts(ws, fin: dict[str, Any]) -> None:
@@ -2148,28 +2140,22 @@ def _write_sealed_amounts(ws, fin: dict[str, Any]) -> None:
     headers = (
         "金额 / Amount ID", "期间轴 / Axis", "期间 / Period", "金额 / Value", "单位 / Unit",
     )
-    for column, header in enumerate(headers, 1):
-        ws.cell(row=2, column=column, value=header)
+    ws.append(headers)
     if not fin["amounts"]:
-        ws.cell(row=3, column=1, value="无适用命名金额 / No applicable named amounts")
-    row_no = 3
+        ws.append(("无适用命名金额 / No applicable named amounts",))
     for item in fin["amounts"]:
         for period in item["values"]:
             values = (item["id"], item["axis"], period["period"], period["value"], item["unit"])
-            for column, value in enumerate(values, 1):
-                ws.cell(row=row_no, column=column, value=_excel_safe(value))
-            row_no += 1
+            ws.append(tuple(_excel_safe(value) for value in values))
 
 
 def _write_frozen_relation_table(ws, headers: tuple[str, ...], rows: list[tuple[Any, ...]]) -> None:
     """Display each frozen row verbatim; no amount parsing, totals or tax inference."""
-    for column, header in enumerate(headers, 1):
-        ws.cell(row=2, column=column, value=header)
+    ws.append(headers)
     if not rows:
-        ws.cell(row=3, column=1, value="无适用项 / No applicable items")
-    for row_no, values in enumerate(rows, 3):
-        for column, value in enumerate(values, 1):
-            ws.cell(row=row_no, column=column, value=_excel_safe(value))
+        ws.append(("无适用项 / No applicable items",))
+    for values in rows:
+        ws.append(tuple(_excel_safe(value) for value in values))
 
 
 def _write_sealed_transactions(wb, fin: dict[str, Any]) -> None:
@@ -2290,7 +2276,7 @@ def export_excel(
     version_content: dict = {}
     if version is not None:
         version_content = _load_content_object(db, version.content_object_id)
-    evidence_content = _parse_evidence_content(get_object(db, evidence.object_id))
+    evidence_content = read_evidence_content(db, evidence)
     compute = results_domain.evidence_inner(evidence_content).get("compute_result")
     solver_summary = compute["outputs"].get("solver_summary") if compute is not None else None
 
@@ -2312,9 +2298,8 @@ def export_excel(
             }
         )
 
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "报告总览"
+    wb = Workbook(write_only=True)
+    ws = wb.create_sheet("报告总览")
     if solver_summary is not None:
         solver_sheet = wb.create_sheet("求解状态")
         _set_sheet_title(solver_sheet, "求解状态（封存）", "Sealed Solver Status")
@@ -2329,10 +2314,11 @@ def export_excel(
             ("已证明最优 / Optimality proven", solver_summary["math_status"] == "solved"),
         ])
     # 固定标题: 中英双语(默认简体中文在前)
-    title = ws.cell(row=1, column=1, value="pIES 项目结果报告 / pIES Project Result Report")
+    title = WriteOnlyCell(ws, value="pIES 项目结果报告 / pIES Project Result Report")
     title.font = Font(bold=True, size=14)
+    ws.append((title,))
     lang_label = "简体中文" if lang != "en" else "English"
-    ws.cell(row=2, column=1, value=f"生成语言: {lang_label} / Language: {lang}")
+    ws.append((f"生成语言: {lang_label} / Language: {lang}",))
 
     overview: list[tuple[str, Any]] = []
     overview.append(("项目名称 / Project name", project.name))
@@ -2373,84 +2359,62 @@ def export_excel(
         )
     )
     overview.append(("评估意见 / Assessment comment", assessment.comment or "—"))
-    _write_kv(ws, overview)
-    row = 3 + len(overview) + 1
+    _write_kv(ws, overview, blank_row=False)
     # 适用范围与限制(固定引用证据与评估, 不重新求解)
     applicability = _first_section(evidence_content, "applicability", "scope", "适用")
-    ws.cell(row=row, column=1, value="适用范围与限制 / Applicability and limitations").font = Font(bold=True)
-    _write_kv(ws, _section_rows(applicability) or [("适用范围", "—")], start_row=row + 1)
-    ws.cell(
-        row=row + 6,
-        column=1,
+    ws.append(())
+    title = WriteOnlyCell(ws, value="适用范围与限制 / Applicability and limitations")
+    title.font = Font(bold=True)
+    ws.append((title,))
+    _write_kv(ws, _section_rows(applicability) or [("适用范围", "—")], blank_row=False)
+    ws.append(())
+    note = WriteOnlyCell(ws,
         value="本报告固定引用证据包与结果评估, 导出时不重新求解 / "
         "This report references a fixed evidence package and assessment; no re-solve on export.",
-    ).font = Font(italic=True)
-    ws.cell(
-        row=row + 7,
-        column=1,
-        value="适用单位 / Units: 指标单位以各摘要表注记为准(如 kWh、MW、°C、元/kWh、kgCO₂/kWh)。",
     )
-    ws.cell(
-        row=row + 8,
-        column=1,
-        value="数据来源 / Data sources: "
+    note.font = Font(italic=True)
+    ws.append((note,))
+    ws.append(("适用单位 / Units: 指标单位以各摘要表注记为准(如 kWh、MW、°C、元/kWh、kgCO₂/kWh)。",))
+    ws.append(("数据来源 / Data sources: "
         + (
             "; ".join(
                 f"{d['dataset']} v{d['version_no']}({d['resolution']}, 许可证 {d['license'] or '—'})"
                 for d in dataset_rows
             )
             or "无绑定数据版本"
-        ),
-    )
+        ),))
 
     # 主要指标表
     kpis = _first_section(evidence_content, "kpis", "key_metrics", "metrics")
     kp_sheet = wb.create_sheet("主要指标")
     _set_sheet_title(kp_sheet, "主要指标表", "Key Metrics Table")
     kp_rows = kpis if isinstance(kpis, list) else _section_rows(kpis)
-    r = 3
     if kp_rows:
-        kp_sheet.cell(row=2, column=1, value="指标 / Metric")
-        kp_sheet.cell(row=2, column=2, value="值 / Value")
-        kp_sheet.cell(row=2, column=3, value="单位 / Unit")
+        kp_sheet.append(("指标 / Metric", "值 / Value", "单位 / Unit"))
         for item in kp_rows:
             if isinstance(item, dict):
-                kp_sheet.cell(
-                    row=r,
-                    column=1,
-                    value=_excel_safe(str(item.get("name") or item.get("key") or "")),
-                )
-                kp_sheet.cell(row=r, column=2, value=_excel_safe(item.get("value")))
-                kp_sheet.cell(row=r, column=3, value=_excel_safe(item.get("unit") or ""))
+                kp_sheet.append((_excel_safe(str(item.get("name") or item.get("key") or "")),
+                                 _excel_safe(item.get("value")), _excel_safe(item.get("unit") or "")))
             elif isinstance(item, tuple) and len(item) >= 2:
-                kp_sheet.cell(row=r, column=1, value=_excel_safe(str(item[0])))
-                kp_sheet.cell(row=r, column=2, value=_excel_safe(item[1]))
-            r += 1
+                kp_sheet.append((_excel_safe(str(item[0])), _excel_safe(item[1])))
     else:
-        kp_sheet.cell(row=3, column=1, value="无指标数据 / No metric data")
+        kp_sheet.append(())
+        kp_sheet.append(("无指标数据 / No metric data",))
 
     # 设备配置(来自版本内容模型, 只展示不重算, REQ-RESULT-002)
     dev_sheet = wb.create_sheet("设备配置")
     _set_sheet_title(dev_sheet, "设备配置", "Equipment Configuration")
     devices = version_content.get("model", {}).get("devices", [])
     if devices:
-        dev_sheet.cell(row=2, column=1, value="名称 / Name")
-        dev_sheet.cell(row=2, column=2, value="类型 / Type")
-        dev_sheet.cell(row=2, column=3, value="参数 / Parameters")
-        r = 3
+        dev_sheet.append(("名称 / Name", "类型 / Type", "参数 / Parameters"))
         for dev in devices:
             params = dev.get("params") or {}
             type_name = dev.get("device_type") or "—"
-            dev_sheet.cell(row=r, column=1, value=_excel_safe(str(dev.get("name") or "")))
-            dev_sheet.cell(row=r, column=2, value=_excel_safe(str(type_name)))
-            dev_sheet.cell(
-                row=r,
-                column=3,
-                value=_excel_safe(json.dumps(params, ensure_ascii=False)[:300]),
-            )
-            r += 1
+            dev_sheet.append((_excel_safe(str(dev.get("name") or "")), _excel_safe(str(type_name)),
+                              _excel_safe(json.dumps(params, ensure_ascii=False)[:300])))
     else:
-        dev_sheet.cell(row=3, column=1, value="无设备配置 / No equipment")
+        dev_sheet.append(())
+        dev_sheet.append(("无设备配置 / No equipment",))
 
     # 财务/环境/工程摘要(证据包内容, 固定引用, 不重新求解)
     for sheet_name, title_zh, title_en, section in (
@@ -2496,23 +2460,7 @@ def export_excel(
 
     refs = evidence_content.get("hourly_refs") or []
     if refs:
-        directory = wb.create_sheet("步序列目录")
-        values_sheet = wb.create_sheet("步序列值")
-        headings = ("series_id", "kind", "instance_id", "variable_id", "block", "variable", "unit", "rows")
-        directory.append(headings)
-        all_data = {}
-        for ref in refs:
-            frozen = json.loads(get_object(db, int(ref["object_id"])).decode("utf-8"))
-            for series_id in sorted(frozen["data"]):
-                values = frozen["data"][series_id]
-                meta = frozen["meta"]["series"][series_id]
-                directory.append(tuple(meta.get(key) if key != "rows" else len(values) for key in headings))
-                all_data[series_id] = values
-        ordered = sorted(all_data)
-        values_sheet.append(("step", *ordered))
-        if ordered:
-            for step in range(len(all_data[ordered[0]])):
-                values_sheet.append((step, *(all_data[key][step] for key in ordered)))
+        write_hourly_sheets(db, wb, refs)
 
     buf = io.BytesIO()
     wb.save(buf)

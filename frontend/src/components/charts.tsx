@@ -27,6 +27,8 @@ export interface LineChartProps {
   yLabel?: string
   /** X 轴标题(可选, 计算步序号说明)。 */
   xLabel?: string
+  /** 当前窗口首点的原始计算步，不重编号。 */
+  xOffset?: number
   /** 最多渲染点数(超出按步长抽稀)。 */
   maxPoints?: number
   /** 高度(px,viewBox 逻辑单位)。 */
@@ -67,7 +69,7 @@ function formatAxisValue(v: number): string {
 }
 
 /** 多序列折线图。 */
-export function LineChart({ series, ariaLabel, yLabel, xLabel, maxPoints = 1000, height = 240 }: LineChartProps) {
+export function LineChart({ series, ariaLabel, yLabel, xLabel, xOffset = 0, maxPoints = 1000, height = 240 }: LineChartProps) {
   const plot = useMemo(() => {
     const n = series.reduce((max, s) => Math.max(max, s.values.length), 0)
     const step = Math.max(1, Math.ceil(n / maxPoints))
@@ -139,7 +141,7 @@ export function LineChart({ series, ariaLabel, yLabel, xLabel, maxPoints = 1000,
                 className="ies-chart__tick"
                 textAnchor={i === 0 ? 'start' : 'end'}
               >
-                {Math.round(i * step)}
+                {xOffset + Math.round(i * step)}
               </text>
             ))
           : null}

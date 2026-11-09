@@ -35,11 +35,13 @@ from iesplan import project as project_domain
 from iesplan import results as results_domain
 from iesplan import tasks as tasks_domain
 from iesplan.application.projects import ensure_access
+from iesplan.application.results.content import read_evidence_projection, store_evidence_projection
 from iesplan.application.tasks import (
     ensure_task_belongs,
     submit_task,
 )
 from iesplan.core.errors import AppError, ConflictError, NotFoundError
+from iesplan.core.jsonstream import ArrayReader, JsonReadError, ObjectFields, project_json
 from iesplan.core.jsonutil import canonical_json
 from iesplan.identity.contracts import UserRecord
 from iesplan.results.contracts import (
@@ -52,7 +54,7 @@ from iesplan.results.contracts import (
     ResultInvalidRequestError,
     ResultSelectionRecord,
 )
-from iesplan.storage import add_ref, get_object, object_info, put_object
+from iesplan.storage import add_ref, get_object_content, object_info, put_object
 from iesplan.tasks.contracts import CalcSnapshotRecord, TaskAttemptRecord, TaskRecord
 
 # 领域规则复导出(application 公开面保持稳定, 权威归 results 域):
@@ -265,6 +267,10 @@ def _submit_evidence(
         purpose="evidence_content",
         actor_id=payload.get("created_by") or task.requested_by,
     )
+    if not problems:
+        store_evidence_projection(
+            db, package.id, payload, tasks_domain.get_snapshot(db, task.calc_snapshot_id)
+        )
     _audit(
         db,
         "evidence_packages",
@@ -313,11 +319,10 @@ def get_evidence(db: Session, package_id: int) -> EvidencePackageRecord:
 
 
 def evidence_content(db: Session, package: EvidencePackageRecord) -> dict[str, Any]:
-    """读取证据包内容(对象引用定位; 对象缺失/损坏抛数据损坏错误)。只读。"""
-    raw = get_object(db, package.object_id)
+    """读取封存证据的查询投影，不物化完整求解列/逐步值。只读。"""
     try:
-        parsed = json.loads(raw.decode("utf-8"))
-    except (ValueError, UnicodeDecodeError) as exc:
+        parsed = read_evidence_projection(db, package)
+    except (ValueError, UnicodeDecodeError, JsonReadError) as exc:
         raise AppError(
             "证据包内容解析失败(数据损坏)",
             code="SYS-STORE-004",
@@ -759,10 +764,25 @@ def read_hourly(
             code="RES-REQ-007",
             params={"field": field, "available": fields},
         )
-    raw = get_object(db, int(ref["object_id"]))
+    start_i = max(int(start), 0)
+    limit = max(1, min(int(limit), MAX_HOURLY_LIMIT))
+    requested_end = start_i + limit if end is None else min(max(int(end), start_i), start_i + limit)
+
+    def page(items):
+        values = []
+        total = 0
+        for total, item in enumerate(items, 1):
+            if start_i <= total - 1 < requested_end:
+                values.append(item)
+        return total, values
+
     try:
-        doc = json.loads(raw.decode("utf-8"))
-    except (ValueError, UnicodeDecodeError) as exc:
+        doc = project_json(get_object_content(db, int(ref["object_id"])), ObjectFields({
+            "data": ObjectFields({field: ArrayReader(page)}),
+            "meta": ObjectFields({"units": ObjectFields({field: True}),
+                                  "series": ObjectFields({field: True})}),
+        }))
+    except (ValueError, UnicodeDecodeError, JsonReadError) as exc:
         raise AppError(
             "逐时结果对象解析失败(数据损坏)",
             code="SYS-STORE-004",
@@ -780,7 +800,7 @@ def read_hourly(
         )
     data = doc.get("data")
     values = data.get(field) if isinstance(data, dict) else None
-    if not isinstance(values, list):
+    if values is None:
         raise AppError(
             f"逐时结果对象缺少字段 {field}(数据损坏)",
             code="SYS-STORE-004",
@@ -788,8 +808,7 @@ def read_hourly(
             message_key="ies.diag.store.corrupt",
             params={"object_id": ref["object_id"], "field": field},
         )
-    total = len(values)
-    start_i = max(int(start), 0)
+    total, values = values
     end_i = total if end is None else min(max(int(end), start_i), total)
     # 身份与单位取对象内已封存元数据（与值同源），分支前统一读取，
     # 空窗口（start>=total）同样返回同一身份和单位。
@@ -807,7 +826,6 @@ def read_hourly(
             "next_start": None,
             "total_rows": total,
         }
-    limit = max(1, min(int(limit), MAX_HOURLY_LIMIT))
     chunk_end = min(end_i, start_i + limit)
     return {
         "field": field,
@@ -815,7 +833,7 @@ def read_hourly(
         **{key: value for key, value in identity.items() if key not in ("series_id", "unit")},
         "start": start_i,
         "end": chunk_end,
-        "values": values[start_i:chunk_end],
+        "values": values,
         "next_start": chunk_end if chunk_end < end_i else None,
         "total_rows": total,
     }

@@ -173,7 +173,8 @@ test.describe('R3: 曲线读取失败可见', () => {
       expect(legends.some((t) => t.includes(label))).toBe(true)
     }
     const note = await card.getByText(/个数据点/).first().innerText()
-    expect(note).toContain(`共 ${refs[0].rows} 个数据点`)
+    expect(note).toContain(`共 ${Math.min(1000, refs[0].rows)} 个数据点`)
+    expect(note).toContain(`全周期 ${refs[0].rows} 步`)
     // 重试后封存财务关键值仍原样保留。
     await expect(page.getByText(totalLine).first()).toBeVisible()
     await expect(page.getByText(payLine).first()).toBeVisible()
@@ -333,7 +334,8 @@ test.describe('R3: 曲线读取失败可见', () => {
       expect(legends.some((t) => t.includes(label))).toBe(true)
     }
     const note = await card.getByText(/个数据点/).first().innerText()
-    expect(note).toContain(`共 ${refs[0].rows} 个数据点`)
+    expect(note).toContain(`共 ${Math.min(1000, refs[0].rows)} 个数据点`)
+    expect(note).toContain(`全周期 ${refs[0].rows} 步`)
 
     session.assertNoErrors()
     await apiCtx.close()

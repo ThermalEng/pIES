@@ -61,4 +61,5 @@ export interface TaskResult {
 /** 逐时序列读取模型。 */
 export type HourlyRead =
   | { absent: true }
-  | { absent: false; flows: Record<string, number[]>; series: HourlySeriesMeta[] }
+  | { absent: false; flows: Record<string, number[]>; series: HourlySeriesMeta[];
+      start: number; end: number; totalRows: number }

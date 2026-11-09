@@ -15,6 +15,7 @@
  */
 
 import { api } from '../src/api/client.ts'
+import { readHourly } from '../src/features/results/api.ts'
 
 let failures = 0
 function check(name, cond, detail = '') {
@@ -83,6 +84,11 @@ globalThis.fetch = async (url) => {
 }
 
 const out = await api.results.hourly(7, 9)
+const window = await readHourly(7, 9, { start: 5, limit: 3 })
+check('窗口保留真实全周期行号', window.start === 5 && window.end === 8 && window.totalRows === ROWS)
+check('窗口不删除序列', window.series.length === SERIES.length)
+check('窗口只返回请求范围的原始数值', SERIES.every(s =>
+  JSON.stringify(window.flows[s.series_id]) === JSON.stringify(s.values.slice(5, 8))))
 
 check('成功非缺席', out.absent === false, JSON.stringify(out.absent))
 check('17 条全部返回', Object.keys(out.flows).length === 17, String(Object.keys(out.flows).length))
