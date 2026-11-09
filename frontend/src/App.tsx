@@ -144,11 +144,11 @@ function AppShell() {
   }, [])
 
   useEffect(() => {
-    if (!currentUser) return
+    // 外壳已由 RequireAuth 挂载；续期不依赖角色展示查询一次成功。
     return startSessionActivity(refreshSession, (error) => {
       setSessionError(error === null ? null : errorMessage(error))
     })
-  }, [currentUser])
+  }, [])
 
   const isAdmin = userLoaded ? currentUser?.role === 'admin' : null
 

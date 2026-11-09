@@ -73,6 +73,28 @@ test.describe('场景 1: 认证与会话 @basic', () => {
     await context.close()
   })
 
+  test('首次身份读取网络失败后，真实操作仍能续期', async ({ browser }) => {
+    const username = uniqueName('es-idle-recover')
+    const password = strongPassword('Recover')
+    const apiCtx = await browser.newContext({ baseURL: process.env.E2E_APP_URL ?? 'http://web:80' })
+    await createEngineer(apiCtx.request, username, password)
+    await apiCtx.close()
+    const context = await browser.newContext()
+    const page = await context.newPage()
+    // 只对首次角色读取注入断网；登录、业务查询、续期和 Cookie 均走真实服务。
+    await page.route('**/api/auth/me', route => route.abort('connectionreset'), { times: 1 })
+    const failedMe = page.waitForEvent('requestfailed', request => request.url().endsWith('/api/auth/me'))
+    await loginViaUI(page, username, password)
+    await failedMe
+    await expect(page.getByRole('heading', { level: 1 })).toBeVisible()
+    const renewal = page.waitForResponse(response => response.url().endsWith('/api/auth/refresh'))
+    await page.getByRole('button', { name: /新建项目|New project/i }).first().click()
+    expect((await renewal).status()).toBe(200)
+    await page.getByLabel(/名称|Name/i).fill('身份显示失败不阻断活动续期')
+    await expect(page.getByLabel(/名称|Name/i)).toHaveValue('身份显示失败不阻断活动续期')
+    await context.close()
+  })
+
   test('Cookie 到期不再发送凭证时，当前页与刷新均返回登录', async ({ browser }) => {
     const username = uniqueName('es-cookie-expiry')
     const password = strongPassword('Expiry')
