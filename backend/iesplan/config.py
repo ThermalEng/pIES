@@ -157,7 +157,7 @@ class Settings(BaseSettings):
     compute_slots: int = Field(exclude=True, gt=0)
     #: IO 任务并发槽数（与计算并发槽共用租约槽位表，部署可调）
     io_slots: int = Field(exclude=True, gt=0)
-    #: 会话 TTL(分钟)
+    #: 用户无操作的会话期限(分钟；真实操作续期，后台轮询不续期)
     session_ttl_minutes: int = Field(exclude=True, gt=0)
     #: 对象存储最小剩余空间阈值(字节), 低于该值拒绝写入
     storage_min_free_bytes: int = Field(exclude=True, ge=0)

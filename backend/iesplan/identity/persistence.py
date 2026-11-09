@@ -31,8 +31,8 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Mapped, Session, mapped_column
 
 from iesplan.db import (
-    Base,
     JSONB,
+    Base,
     InetType,
     bigint_pk,
     drop_trigger_function_sql,
@@ -42,12 +42,12 @@ from iesplan.db import (
 )
 from iesplan.identity.contracts import (
     EMAIL_RE,
-    USERNAME_RE,
     SESSION_STATUS_ACTIVE,
     SESSION_STATUS_EXPIRED,
     SESSION_STATUS_REVOKED,
     SESSION_STATUS_TAKEOVER_PENDING,
     USER_STATUS_ACTIVE,
+    USERNAME_RE,
     AppSettingRecord,
     AuthEventRecord,
     CredentialRecord,
@@ -576,7 +576,7 @@ def expire_sessions(db: Session, user_id: int | None = None) -> int:
         expires_at = row.expires_at
         if expires_at is not None:
             aware = expires_at if expires_at.tzinfo is not None else expires_at.replace(tzinfo=UTC)
-            if aware < now:
+            if aware <= now:
                 row.status = SESSION_STATUS_EXPIRED
                 row.revoked_at = now
                 count += 1

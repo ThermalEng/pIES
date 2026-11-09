@@ -16,13 +16,14 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
+from iesplan import bootstrap
 from iesplan.api.auth import SESSION_COOKIE_NAME
 from iesplan.api.auth import router as auth_router
 from iesplan.api.deps import get_request_db
-from iesplan.db import Base
-from iesplan.main import create_app
-from iesplan.identity.persistence import AuthEvent, User, WindowSession
 from iesplan.application import identity
+from iesplan.db import Base
+from iesplan.identity.persistence import AuthEvent, User, WindowSession
+from iesplan.main import create_app
 
 ADMIN_PASSWORD = "Admin12345"
 USER_PASSWORD = "Alice12345"
@@ -40,6 +41,8 @@ def db_session() -> Iterator[Session]:
         connect_args={"check_same_thread": False},
         poolclass=StaticPool,
     )
+    # 与启动组合根一致，经公开钩子加载全部关联表；不依赖其他测试的导入顺序。
+    bootstrap.collect_trigger_statements()
     Base.metadata.create_all(engine)
     TestingSession = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
     with TestingSession() as session:
@@ -294,14 +297,69 @@ def test_logout_revokes_session(client: TestClient, db_session: Session) -> None
 
 
 def test_refresh_extends_session(client: TestClient, db_session: Session) -> None:
-    """会话续期: 返回新过期时刻且原会话仍可用。"""
+    """会话续期: 原 token 不变，服务端与 HttpOnly Cookie 同步延长。"""
     seed_admin(db_session, force_change=False)
     r = login(client, "admin", ADMIN_PASSWORD)
     token = r.json()["token"]
     resp = client.post("/api/auth/refresh", headers=bearer(token))
     assert resp.status_code == 200
     assert resp.json()["expires_at"]
+    cookie = resp.headers["set-cookie"]
+    assert f"{SESSION_COOKIE_NAME}={token}" in cookie
+    assert "HttpOnly" in cookie
+    assert "Max-Age=28800" in cookie
+    assert "SameSite=lax" in cookie
     assert client.post("/api/auth/refresh", headers=bearer(token)).status_code == 200
+
+
+def test_refresh_https_cookie_preserves_security(client: TestClient, db_session: Session) -> None:
+    seed_engineer(db_session)
+    token = login(client, "alice", USER_PASSWORD).json()["token"]
+    resp = client.post("https://testserver/api/auth/refresh", headers=bearer(token))
+    assert resp.status_code == 200
+    assert "Secure" in resp.headers["set-cookie"]
+    assert "HttpOnly" in resp.headers["set-cookie"]
+
+
+def test_activity_extends_idle_window_but_reads_do_not(
+    client: TestClient, db_session: Session, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """登录后持续操作可跨越原八小时；轮询只读不会把空闲会话续活。"""
+    from iesplan.application.identity import auth_cases, service
+    from iesplan.identity import persistence
+
+    now = datetime.now(UTC)
+    monkeypatch.setattr(service, "utcnow", lambda: now)
+    monkeypatch.setattr(auth_cases, "utcnow", lambda: now)
+    monkeypatch.setattr(persistence, "_now", lambda: now)
+    seed_engineer(db_session)
+    token = login(client, "alice", USER_PASSWORD).json()["token"]
+    session = db_session.execute(select(WindowSession)).scalar_one()
+    original_expiry = service.as_utc(session.expires_at)
+    assert original_expiry == now + timedelta(hours=8)
+
+    now += timedelta(hours=7, minutes=55)
+    # /me 与业务/任务轮询共用认证入口，但不代表用户操作。
+    assert client.get("/api/auth/me", headers=bearer(token)).status_code == 200
+    db_session.refresh(session)
+    assert service.as_utc(session.expires_at) == original_expiry
+    assert service.as_utc(session.last_seen_at) == now
+
+    renewed = client.post("/api/auth/refresh")  # 真实浏览器的 Cookie 路径
+    assert renewed.status_code == 200
+    expiry = datetime.fromisoformat(renewed.json()["expires_at"])
+    assert expiry == now + timedelta(hours=8)
+    now += timedelta(minutes=10)
+    assert now > original_expiry
+    assert client.get("/api/auth/me", headers=bearer(token)).status_code == 200
+    db_session.refresh(session)
+    assert service.as_utc(session.expires_at) == expiry
+
+    now = expiry  # 到期点即失效，不能用续期接口复活。
+    assert client.post("/api/auth/refresh", headers=bearer(token)).status_code == 401
+    db_session.refresh(session)
+    assert session.status == "expired"
+    assert service.as_utc(session.expires_at) == expiry
 
 
 def test_expired_session_rejected(client: TestClient, db_session: Session) -> None:
