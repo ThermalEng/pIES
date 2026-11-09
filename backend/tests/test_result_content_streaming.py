@@ -7,10 +7,13 @@ from unittest.mock import Mock
 
 import pytest
 from openpyxl import Workbook, load_workbook
+from sqlalchemy import create_engine, text
+from sqlalchemy.orm import Session
+from sqlalchemy.pool import QueuePool
 
 from iesplan.application.packages import report_series
 from iesplan.application.results import content as result_content
-from iesplan.application.results import writes
+from iesplan.application.results import endpoint_cases, writes
 from iesplan.core.content import GeneratedContent, MemoryContent, freeze_owned_json, json_chunks
 from iesplan.core.errors import AppError
 from iesplan.core.jsonstream import ObjectFields, project_json, project_value
@@ -102,7 +105,8 @@ def test_hourly_reads_only_requested_window(monkeypatch, start, end, limit, expe
     monkeypatch.setattr(writes, "get_object_content", lambda *a: MemoryContent(json.dumps(doc).encode()))
     field = 'z.功率"'
     content = {"hourly_refs": [{"object_id": 1, "fields": list(doc["data"])}]}
-    result = writes.read_hourly(None, content, field, start, end, limit)
+    prepared = writes.prepare_hourly_read(None, content, field)
+    result = writes.read_hourly(prepared, start, end, limit)
     assert result["values"] == doc["data"][field][start:expected_end]
     assert result["total_rows"] == 8200
     assert result["instance_id"] == "设备"
@@ -110,6 +114,45 @@ def test_hourly_reads_only_requested_window(monkeypatch, start, end, limit, expe
     assert result["start"] == start and result["end"] == expected_end
     expected_next = expected_end if expected_end < (8200 if end is None else end) else None
     assert result["next_start"] == expected_next
+
+
+def test_hourly_scan_returns_connection_before_reading_content(monkeypatch, tmp_path):
+    """A real one-connection pool remains available during the complete file scan."""
+    engine = create_engine(
+        f"sqlite+pysqlite:///{tmp_path / 'hourly.db'}",
+        poolclass=QueuePool, pool_size=1, max_overflow=0, pool_timeout=0.1,
+    )
+    doc = hourly_document()
+    field = 'z.功率"'
+    content = {"hourly_refs": [{"object_id": 1, "fields": list(doc["data"])}]}
+    scans = []
+
+    def chunks():
+        # The request Session has already queried metadata. File scanning must
+        # not keep that connection from another page's independent Session.
+        with Session(engine) as other:
+            scans.append(other.scalar(text("SELECT 7")))
+        yield json.dumps(doc).encode()
+
+    def ensure_access(db, *_):
+        assert db.scalar(text("SELECT 1")) == 1
+
+    monkeypatch.setattr(endpoint_cases, "ensure_access", ensure_access)
+    monkeypatch.setattr(endpoint_cases, "ensure_task_belongs", lambda *a: None)
+    monkeypatch.setattr(writes, "latest_evidence", lambda *a: SimpleNamespace(id=2))
+    monkeypatch.setattr(writes, "evidence_content", lambda *a: content)
+    monkeypatch.setattr(writes, "get_object_content", lambda *a: GeneratedContent(chunks))
+    try:
+        with Session(engine) as db:
+            result = endpoint_cases.read_task_hourly(db, None, 3, 4, field, start=2, limit=3)
+            assert not db.in_transaction()
+        assert scans == [7]
+        assert result["values"] == [0.25, 0.375, 0.5]
+        assert result["instance_id"] == "设备"
+        assert result["unit"] == "kW"
+        assert result["next_start"] == 5
+    finally:
+        engine.dispose()
 
 
 def test_excel_transpose_crosses_pages_and_keeps_all_values(monkeypatch):

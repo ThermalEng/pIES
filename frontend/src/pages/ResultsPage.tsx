@@ -286,6 +286,7 @@ export default function ResultsPage() {
   selectedPkgRef.current = selectedPkgId
   // 曲线读取序号: 切换证据/重试后迟到的旧读响应丢弃, 不覆盖新选择。
   const hourlySeq = useRef(0)
+  const hourlyAbort = useRef<AbortController | null>(null)
 
   // 重新评估对话框(只触发系统四维检查, FE-BE-03)
   const [assessOpen, setAssessOpen] = useState(false)
@@ -342,6 +343,7 @@ export default function ResultsPage() {
   // 选中证据包的结果/评估/逐时数据
   // -------------------------------------------------------------------------
   useEffect(() => {
+    hourlyAbort.current?.abort()
     if (!selectedPkgId) {
       // 取消选择即作废在途曲线/重试读, 不向空选择发布旧响应。
       hourlySeq.current += 1
@@ -395,14 +397,16 @@ export default function ResultsPage() {
     schemeReadSeq.current += 1
     hourlySeq.current += 1
     let cancelled = false
+    const controller = new AbortController()
+    hourlyAbort.current = controller
     const load = async () => {
       // 结果域 API 以任务为路由键: 选中证据包所属任务即绑定任务(同源, 不反查)。
       const taskId = pickedTaskId
       try {
         const [res, ass] = await Promise.all([
           // 主结果读取失败必须可见: 不吞错, 由外层错误呈现。
-          getResult(projectId, taskId),
-          listAssessments(projectId, taskId),
+          getResult(projectId, taskId, controller.signal),
+          listAssessments(projectId, taskId, controller.signal),
         ])
         if (cancelled) return
         setMetrics(res.metrics)
@@ -426,7 +430,7 @@ export default function ResultsPage() {
         hourlySeq.current = mySeq
         setHourlyLoading(true)
         try {
-          const hr = await readHourly(projectId, taskId, { start: 0, limit: 1000 })
+          const hr = await readHourly(projectId, taskId, { start: 0, limit: 1000 }, controller.signal)
           if (cancelled || hourlySeq.current !== mySeq) return
           if (hr.absent) {
             setHourly(null)
@@ -471,6 +475,8 @@ export default function ResultsPage() {
     void load()
     return () => {
       cancelled = true
+      controller.abort()
+      hourlyAbort.current?.abort()
       // 卸载/切换时作废曲线与重试在途读: 旧响应不再发布(含 retryHourly,
       // 它只认序号、不认 cancelled)。
       hourlySeq.current += 1
@@ -480,13 +486,16 @@ export default function ResultsPage() {
   // 曲线重试: 仅重读所选任务曲线, 不重求解/重评估; 旧读按序号丢弃,
   // 不覆盖切换后的新选择。重试期间不碰财务/指标/摘要状态。
   const retryHourly = useCallback(async (start = hourly?.start ?? 0) => {
+    hourlyAbort.current?.abort()
+    const controller = new AbortController()
+    hourlyAbort.current = controller
     const taskId = pickedTaskId
     const mySeq = hourlySeq.current + 1
     hourlySeq.current = mySeq
     setHourlyError(null)
     setHourlyLoading(true)
     try {
-      const hr = await readHourly(projectId, taskId, { start, limit: 1000 })
+      const hr = await readHourly(projectId, taskId, { start, limit: 1000 }, controller.signal)
       if (hourlySeq.current !== mySeq) return
       if (hr.absent) {
         setHourly(null)

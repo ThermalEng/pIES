@@ -35,9 +35,10 @@ import {
 /**
  * 获取任务结果视图(四维结论、指标摘要、财务评价与快照引用)。
  */
-export async function getResult(projectId: number, taskId: number): Promise<TaskResult> {
+export async function getResult(projectId: number, taskId: number, signal?: AbortSignal): Promise<TaskResult> {
   const envelope = await request<ResultViewEnvelopeDto>(
     `/projects/${projectId}/tasks/${taskId}/result`,
+    { signal },
   )
   return mapResultViewDtoToModel(envelope.result)
 }
@@ -48,9 +49,11 @@ export async function getResult(projectId: number, taskId: number): Promise<Task
 export async function listAssessments(
   projectId: number,
   taskId: number,
+  signal?: AbortSignal,
 ): Promise<ResultAssessment[]> {
   const envelope = await request<AssessmentListEnvelopeDto>(
     `/projects/${projectId}/tasks/${taskId}/result/assessments`,
+    { signal },
   )
   return envelope.items.map(mapAssessmentDtoToModel)
 }
@@ -98,13 +101,15 @@ export async function select(
 }
 
 /**
- * 逐时结果读取(单序列分页查询, 声明列表全量消费)。
+ * 逐时结果读取(序列和分页串行查询, 声明列表全量消费)。
  */
 export async function readHourly(
   projectId: number, taskId: number, window?: { start: number; limit: number },
+  signal?: AbortSignal,
 ): Promise<HourlyRead> {
   const envelope = await request<ResultViewEnvelopeDto>(
     `/projects/${projectId}/tasks/${taskId}/result`,
+    { signal },
   )
   const rawRefs = envelope.result.hourly_refs
   if (rawRefs === null || rawRefs.length === 0) return { absent: true }
@@ -116,27 +121,23 @@ export async function readHourly(
   const first = Math.min(Math.max(window?.start ?? 0, 0), Math.max(rows - 1, 0))
   const end = Math.min(rows, first + (window?.limit ?? rows))
 
-  const pages = await Promise.all(
-    series.map(async (meta) => {
-      const values = await collectHourlyValues(
-        async (start, limit) => {
-          const page = await request<HourlyResponseDto>(
-            `/projects/${projectId}/tasks/${taskId}/result/hourly`,
-            {
-              query: { field: meta.series_id, start: first + start, end, limit },
-            },
-          )
-          return { values: page.values, next_start: page.next_start === null ? null : page.next_start - first }
-        },
-        end - first,
-      )
-      return [meta.series_id, values] as const
-    }),
-  )
-
   const flows: Record<string, number[]> = {}
-  for (const [fieldId, values] of pages) {
-    flows[fieldId] = values
+  for (const meta of series) {
+    const values = await collectHourlyValues(
+      async (start, limit) => {
+        signal?.throwIfAborted()
+        const page = await request<HourlyResponseDto>(
+          `/projects/${projectId}/tasks/${taskId}/result/hourly`,
+          {
+            query: { field: meta.series_id, start: first + start, end, limit },
+            signal,
+          },
+        )
+        return { values: page.values, next_start: page.next_start === null ? null : page.next_start - first }
+      },
+      end - first,
+    )
+    flows[meta.series_id] = values
   }
   return { absent: false, flows, series, start: first, end, totalRows: rows }
 }

@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
@@ -40,6 +41,7 @@ from iesplan.application.tasks import (
     ensure_task_belongs,
     submit_task,
 )
+from iesplan.core.content import Content
 from iesplan.core.errors import AppError, ConflictError, NotFoundError
 from iesplan.core.jsonstream import ArrayReader, JsonReadError, ObjectFields, project_json
 from iesplan.core.jsonutil import canonical_json
@@ -739,20 +741,20 @@ def _pick_hourly_ref(refs: list[dict[str, Any]], solution_id: int | None) -> dic
     return refs[0]
 
 
-def read_hourly(
+@dataclass(frozen=True)
+class HourlyReadSource:
+    source: Content
+    object_id: int
+    field: str
+
+
+def prepare_hourly_read(
     db: Session,
     content: dict[str, Any],
     field: str,
-    start: int = 0,
-    end: int | None = None,
-    limit: int = DEFAULT_HOURLY_LIMIT,
     solution_id: int | None = None,
-) -> dict[str, Any]:
-    """逐时结果查询(从对象存储按对象 id 读取; 行号分页)。
-
-    返回: {field, unit, instance_id, variable_id, start, end, values,
-    next_start, total_rows}。身份取对象内已封存元数据, 不读当前项目。
-    """
+) -> HourlyReadSource:
+    """检查公开查询字段并解析会话独立的内容源，尚不扫描文件。"""
     refs = content.get("hourly_refs")
     if not isinstance(refs, list) or not refs:
         raise NotFoundError("证据包无逐时结果引用", params={"reason": "no_hourly_refs"})
@@ -764,6 +766,18 @@ def read_hourly(
             code="RES-REQ-007",
             params={"field": field, "available": fields},
         )
+    object_id = int(ref["object_id"])
+    return HourlyReadSource(get_object_content(db, object_id), object_id, field)
+
+
+def read_hourly(
+    prepared: HourlyReadSource,
+    start: int = 0,
+    end: int | None = None,
+    limit: int = DEFAULT_HOURLY_LIMIT,
+) -> dict[str, Any]:
+    """不持有数据库连接的逐时分页扫描；身份与单位取封存对象。"""
+    field = prepared.field
     start_i = max(int(start), 0)
     limit = max(1, min(int(limit), MAX_HOURLY_LIMIT))
     requested_end = start_i + limit if end is None else min(max(int(end), start_i), start_i + limit)
@@ -777,7 +791,7 @@ def read_hourly(
         return total, values
 
     try:
-        doc = project_json(get_object_content(db, int(ref["object_id"])), ObjectFields({
+        doc = project_json(prepared.source, ObjectFields({
             "data": ObjectFields({field: ArrayReader(page)}),
             "meta": ObjectFields({"units": ObjectFields({field: True}),
                                   "series": ObjectFields({field: True})}),
@@ -788,7 +802,7 @@ def read_hourly(
             code="SYS-STORE-004",
             severity="error",
             message_key="ies.diag.store.corrupt",
-            params={"object_id": ref["object_id"]},
+            params={"object_id": prepared.object_id},
         ) from exc
     if not isinstance(doc, dict):
         raise AppError(
@@ -796,7 +810,7 @@ def read_hourly(
             code="SYS-STORE-004",
             severity="error",
             message_key="ies.diag.store.corrupt",
-            params={"object_id": ref["object_id"]},
+            params={"object_id": prepared.object_id},
         )
     data = doc.get("data")
     values = data.get(field) if isinstance(data, dict) else None
@@ -806,7 +820,7 @@ def read_hourly(
             code="SYS-STORE-004",
             severity="error",
             message_key="ies.diag.store.corrupt",
-            params={"object_id": ref["object_id"], "field": field},
+            params={"object_id": prepared.object_id, "field": field},
         )
     total, values = values
     end_i = total if end is None else min(max(int(end), start_i), total)
