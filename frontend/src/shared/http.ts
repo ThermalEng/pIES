@@ -161,10 +161,23 @@ async function parseJson(res: Response): Promise<unknown> {
   }
 }
 
+/** 代理等返回 HTML 错误页时按实际 HTTP 失败显示，不误报成功正文格式错误。 */
+async function responseError(res: Response): Promise<ApiError> {
+  try {
+    return toApiError(res.status, await parseJson(res))
+  } catch (err) {
+    if (err instanceof ApiError && err.message_key === 'ies.error.bad_json') {
+      return toApiError(res.status, null)
+    }
+    throw err
+  }
+}
+
 /**
  * 401 响应统一处理(区分「会话失效」与「其他 401」):
  * - 后端认证失败均带诊断信封(message_key);仅当明确表示会话无效
- *   (ies.diag.auth.session_invalid)或响应不可识别时, 才清除本地会话并跳登录页。
+ *   (session_invalid 或 Cookie 到期后的 required)或响应不可识别时,
+ *   清除本地会话并跳登录页。
  * - takeover_pending 属于"旧窗口被降级/新会话待确认"中间态(H-01),
  *   不应立即清空会话/跳登录页(避免循环登录);由调用方在确认接管后恢复。
  * - 登录请求自身的 401 不触发跳转(页面内展示错误)。
@@ -172,9 +185,10 @@ async function parseJson(res: Response): Promise<unknown> {
 function handleUnauthorized(path: string, envelope: ApiErrorBody | null): ApiError {
   const isLoginPath = path.startsWith('/auth/login')
   const sessionInvalid = envelope?.message_key === 'ies.diag.auth.session_invalid'
+  const sessionMissing = envelope?.message_key === 'ies.diag.auth.required'
   const takeoverPending =
     sessionInvalid && (envelope?.params as { reason?: string } | undefined)?.reason === 'takeover_pending'
-  if (!isLoginPath && !takeoverPending && (sessionInvalid || !envelope)) {
+  if (!isLoginPath && !takeoverPending && (sessionInvalid || sessionMissing || !envelope)) {
     notifyUnauthorized()
   }
   return new ApiError(401, envelope, envelope ? undefined : 'ies.diag.auth.session_invalid')
@@ -223,11 +237,10 @@ export async function request<T>(path: string, opts: RequestOptions = {}): Promi
       throw handleUnauthorized(path, envelope)
     }
 
-    const payload = await parseJson(res)
     if (!res.ok) {
-      throw toApiError(res.status, payload)
+      throw await responseError(res)
     }
-    return payload as T
+    return await parseJson(res) as T
   } finally {
     cleanup()
   }
@@ -252,8 +265,7 @@ export async function requestBlob(path: string, opts: RequestOptions = {}): Prom
       throw handleUnauthorized(path, envelope)
     }
     if (!res.ok) {
-      const payload = await parseJson(res)
-      throw toApiError(res.status, payload)
+      throw await responseError(res)
     }
     return await res.blob()
   } catch (err) {
