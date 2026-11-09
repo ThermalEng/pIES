@@ -1246,6 +1246,10 @@ def test_state_advance_with_fake_executor(client: TestClient, db: Session) -> No
     assert float(row.progress_percent) == 45.5
     live = queue.get_progress(task_id, claim.attempt_no)
     assert float(live["percent"]) == 45.5
+    running = client.get(f"/api/projects/{pid}/tasks/{task_id}", headers=_h(client, owner))
+    assert running.status_code == 200
+    assert running.json()["task"]["summary"]["percent"] == 45.5
+    assert running.json()["task"]["progress"]["stage"] == "solve"
 
     # 完成: OPTIMAL → normal_completion; 尝试 succeeded; 租约 released; 槽释放
     completed = _complete_task(db, task_id, outcome=tasks_domain.map_business_outcome("OPTIMAL"))
@@ -1266,10 +1270,53 @@ def test_state_advance_with_fake_executor(client: TestClient, db: Session) -> No
     assert detail["status"] == "completed"
     assert detail["business_outcome"] == "normal_completion"
     assert detail["attempts"][0]["status"] == "succeeded"
-    assert detail["progress"]["percent"] == 45.5
+    assert detail["summary"]["percent"] == 100.0
+    assert detail["summary"]["stage"] == "done"
+    assert detail["progress"]["percent"] == 100.0
+    assert detail["progress"]["stage"] == "done"
+    assert detail["progress"]["detail"] == {"iterations": 120}
+    # 完成视图不改写最后一次阶段观测，历史进度与资源详情仍保留。
+    assert float(db.get(TaskProgress, row.id).progress_percent) == 45.5
+    listing = client.get(f"/api/projects/{pid}/tasks", headers=_h(client, owner))
+    assert listing.status_code == 200
+    item = next(item for item in listing.json()["items"] if item["id"] == task_id)
+    assert item["summary"]["percent"] == 100.0
+    assert item["summary"]["stage"] == "done"
     assert detail["calc_snapshot"]["id"] == detail["calc_snapshot_id"]
     assert detail["calc_snapshot"]["random_seed"] is not None
     assert detail["current_lease"] is None  # 终态无活跃租约
+
+
+@pytest.mark.parametrize("status", ["failed", "timed_out", "cancelled"])
+def test_uncompleted_terminal_progress_keeps_last_observation(
+    client: TestClient, db: Session, status: str,
+) -> None:
+    """失败、超时和取消保留停止处进度，不因进入终态而显示100%。"""
+    owner = make_user(db, f"owner_progress_{status}")
+    pid = _prepare_project(client, db, owner)
+    rev = _save_config(client, pid, owner)
+    _, body = _submit_task(
+        client, pid, owner, config={"config_revision": rev},
+        idempotency_key=f"progress-{status}",
+    )
+    task_id = body["task"]["id"]
+    _claim(db, task_id, "fake-progress")
+    _record_task_progress(db, task_id, "execute", 85.0, {"receipt_status": "succeeded"})
+    task = _get_task(db, task_id)
+    if status == "cancelled":
+        task = tasks_domain.set_task_status(db, task_id, "cancelling")
+    tasks_domain.check_transition(task, status)
+    _finish_attempt(db, task, status="stopped" if status == "cancelled" else "failed",
+                    stop_reason=status)
+    tasks_domain.set_task_status(db, task_id, status)
+    db.commit()
+
+    response = client.get(f"/api/projects/{pid}/tasks/{task_id}", headers=_h(client, owner))
+    assert response.status_code == 200
+    detail = response.json()["task"]
+    assert detail["status"] == status
+    assert detail["summary"]["percent"] == detail["progress"]["percent"] == 85.0
+    assert detail["summary"]["stage"] == detail["progress"]["stage"] == "execute"
 
 
 def test_state_machine_guards(client: TestClient, db: Session) -> None:
