@@ -227,7 +227,7 @@ def resolve_auth_context(
     elif session.status != "active":
         raise SessionInvalidError()
     expires_at = as_utc(session.expires_at)
-    if expires_at is not None and expires_at < now:
+    if expires_at is not None and expires_at <= now:
         # 已过期: 置终态(系统自动过期, 无操作者; 会话写入经 application 身份用例)
         expire_session(db, session.id)
         raise SessionInvalidError()

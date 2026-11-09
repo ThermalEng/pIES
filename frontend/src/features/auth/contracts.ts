@@ -44,6 +44,12 @@ export interface LogoutResponseDto {
   ok: boolean
 }
 
+/** 用户活动续期；Cookie 由服务端同步刷新，过期会话返回 401。 */
+export interface RefreshResponseDto {
+  ok: boolean
+  expires_at: string
+}
+
 /** 修改密码请求体(POST /api/auth/change-password)。 */
 export interface ChangePasswordRequestDto {
   old_password: string

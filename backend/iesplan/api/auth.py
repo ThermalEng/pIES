@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Annotated
+from typing import Annotated, cast
 
 from fastapi import APIRouter, Depends, Request, Response
 from fastapi.responses import RedirectResponse
@@ -312,9 +312,11 @@ def change_password(
 
 
 @router.post("/refresh", summary="会话续期")
-def refresh(request: Request, ctx: AuthCtx) -> dict:
-    """会话续期: 按 TTL 顺延过期时刻, 返回新的过期时间。"""
+def refresh(request: Request, response: Response, ctx: AuthCtx) -> dict:
+    """用户活动续期: 同步顺延服务端会话与浏览器 Cookie。"""
     expires_at = identity.extend_session(ctx.db, ctx.session)
+    # AuthCtx 已确权该凭证；续期不更换 token，也不复活已失效会话。
+    _set_session_cookie(response, request, cast(str, _extract_token(request)))
     return {"ok": True, "expires_at": expires_at}
 
 

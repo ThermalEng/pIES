@@ -16,7 +16,7 @@ compute_slots = 2
 io_slots = 2
 
 [session]
-# 会话 TTL（分钟）
+# 用户无操作的会话期限（分钟）；真实操作续期，后台轮询不续期
 ttl_minutes = 480
 
 [storage]
