@@ -144,7 +144,7 @@ test.describe('R5/R6: 计算步序列闭环', () => {
       expect(hourlyBody.unit).toBe(m.unit)
       expect(hourlyBody.instance_id).toBe(m.instance_id)
       expect(hourlyBody.variable_id).toBe(m.variable_id)
-      for (const v of hourlyBody.values) expect(Number.isFinite(v)).toBe(true)
+      expect(hourlyBody.values.every(Number.isFinite)).toBe(true)
       if (hourlyBody.values.some((v) => v !== 0)) nonZero += 1
     }
     expect(nonZero).toBeGreaterThan(0)
@@ -231,7 +231,8 @@ test.describe('R5/R6: 计算步序列闭环', () => {
     await expect(card.getByText(/按计算步展示/)).toBeVisible()
     const note = await card.getByText(/个数据点/).first().innerText()
     const noteCount = Number((note.match(/共 (\d+) 个数据点/) ?? [])[1])
-    expect(noteCount).toBe(refs[0].rows)
+    expect(noteCount).toBe(Math.min(1000, refs[0].rows))
+    expect(note).toContain(`全周期 ${refs[0].rows} 步`)
     expect(note).not.toContain('168')
     expect(await card.getByText(/小时/).count()).toBe(0)
     expect(await card.getByText('逐时曲线').count()).toBe(0)
@@ -249,6 +250,18 @@ test.describe('R5/R6: 计算步序列闭环', () => {
     const axisTitles = await card.locator('.ies-chart__axis-title').allTextContents()
     const yTitles = axisTitles.filter((t) => t !== '计算步')
     expect([...new Set(yTitles)].sort()).toEqual([...expectedUnits].sort())
+
+    // 从 UI 定位后续窗口，后端仍返回原始步号和值；不下载/重编号全周期。
+    expect(refs[0].rows).toBeGreaterThan(1)
+    await card.getByLabel('起始计算步').fill('1')
+    await card.getByRole('button', { name: '查看窗口', exact: true }).click()
+    await expect(card.getByText(/当前窗口 1–/)).toBeVisible()
+    const shifted = await card.locator('svg text').allTextContents()
+    expect(shifted).toContain('1')
+    await expect(card.getByRole('button', { name: '上一窗口', exact: true })).toBeEnabled()
+    await card.getByRole('button', { name: '上一窗口', exact: true }).click()
+    await expect(card.getByText(/当前窗口 0–/)).toBeVisible()
+    await expect(card.getByRole('button', { name: '上一窗口', exact: true })).toBeDisabled()
 
     // --- 任务切换(同一证据选择器): 第二任务为真实求解的 metrics-only --------
     // 切换断言: 任务身份更新、旧曲线不残留、缺席有明确说明, 切回按同一
@@ -276,7 +289,8 @@ test.describe('R5/R6: 计算步序列闭环', () => {
       expect(backLegends.some((t) => t.includes(label))).toBe(true)
     }
     const backNote = await card.getByText(/个数据点/).first().innerText()
-    expect(backNote).toContain(`共 ${refs[0].rows} 个数据点`)
+    expect(backNote).toContain(`共 ${Math.min(1000, refs[0].rows)} 个数据点`)
+    expect(backNote).toContain(`全周期 ${refs[0].rows} 步`)
     expect(await card.getByText(/所选任务无计算步曲线数据/).count()).toBe(0)
 
     await apiCtx.close()

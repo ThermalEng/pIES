@@ -4,6 +4,15 @@
 顶层用例拥有事务提交/回滚, 内部步骤只 flush。
 """
 
+from iesplan.application.results.content import index_evidence_projection, store_evidence_projection
+from iesplan.application.results.endpoint_cases import (
+    assess_task_evidence,
+    create_check_task_case,
+    get_selection_diff,
+    list_assessments_case,
+    read_task_hourly,
+    select_task_result,
+)
 from iesplan.application.results.writes import (
     ASSESSMENT_RULE_VERSION,
     ASSESSMENT_TYPES,
@@ -39,16 +48,10 @@ from iesplan.application.results.writes import (
     submit_evidence,
     update_result_index,
 )
-from iesplan.application.results.endpoint_cases import (
-    assess_task_evidence,
-    create_check_task_case,
-    get_selection_diff,
-    list_assessments_case,
-    read_task_hourly,
-    select_task_result,
-)
 
 __all__ = [
+    "index_evidence_projection",
+    "store_evidence_projection",
     "ASSESSMENT_RULE_VERSION",
     "ASSESSMENT_TYPES",
     "DEFAULT_GAP_THRESHOLD_PCT",
