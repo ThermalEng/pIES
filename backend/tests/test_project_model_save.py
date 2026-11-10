@@ -32,23 +32,24 @@ from sqlalchemy.engine import Engine  # noqa: E402
 from sqlalchemy.orm import Session, sessionmaker  # noqa: E402
 from sqlalchemy.pool import StaticPool  # noqa: E402
 
+from iesplan import project as project_domain  # noqa: E402
 from iesplan.api.deps import get_request_db
+from iesplan.application import identity  # noqa: E402
 from iesplan.application.models import (
+    load_project_device_documents,
     save_project_model,
     validate_candidate,
 )
+from iesplan.application.projects import lifecycle as projects_uc  # noqa: E402
+from iesplan.audit.persistence import AuditLog  # noqa: E402
 from iesplan.config import settings  # noqa: E402
 from iesplan.db import Base  # noqa: E402
-from iesplan.main import create_app  # noqa: E402
-from iesplan.audit.persistence import AuditLog  # noqa: E402
 from iesplan.identity.persistence import User  # noqa: E402
-from iesplan.project.persistence import Project  # noqa: E402
-from iesplan.tasks.persistence import Task  # noqa: E402,F401
+from iesplan.main import create_app  # noqa: E402
 from iesplan.model.persistence import ProjectModel, ProjectModelSequence  # noqa: E402
-from iesplan import project as project_domain  # noqa: E402
-from iesplan.application import identity  # noqa: E402
-from iesplan.application.projects import lifecycle as projects_uc  # noqa: E402
+from iesplan.project.persistence import Project  # noqa: E402
 from iesplan.storage import find_refs_by_entity_type  # noqa: E402
+from iesplan.tasks.persistence import Task  # noqa: E402,F401
 
 PASSWORD = "Test12345"
 
@@ -264,7 +265,9 @@ def _headers_for(client: TestClient, db: Session, username: str) -> dict:
     return headers
 
 
-def _publish_template(client: TestClient, headers: dict, yaml_text: str, slug: str = "electric-load") -> tuple[str, int]:
+def _publish_template(
+    client: TestClient, headers: dict, yaml_text: str, slug: str = "electric-load",
+) -> tuple[str, int]:
     """通过真实模板生命周期创建并发布模板, 返回 (template_id, revision)。"""
     if "acme.device.electric_load" in yaml_text:
         token = headers.get("Authorization", "").replace("Bearer ", "")
@@ -474,6 +477,48 @@ def test_save_success_direct_yaml(client: TestClient, db_session: Session) -> No
     resp_list = client.get(f"/api/projects/{pid}/models", headers=headers)
     assert resp_list.status_code == 200
     assert [m["suffix"] for m in resp_list.json()["project_models"]] == [1]
+
+
+@pytest.mark.parametrize("source", ["direct_yaml", "template"])
+def test_save_and_load_preserve_bound_property_refs(
+    client: TestClient, db_session: Session, source: str,
+) -> None:
+    headers, pid = _make_owner(client, db_session, "sv_bound_refs")
+    yaml_text = HEAT_PUMP_YAML.replace(
+        "heat_out:\n    type: out\n    carrier: heat\n    unit: kW\n"
+        "    valid_range:\n      minimum: 0\n      maximum: null",
+        "heat_out:\n    type: out\n    carrier: heat\n    unit: kW\n"
+        "    valid_range:\n      minimum: 0\n      maximum: {property_ref: rated_heat_kw}",
+    ).replace(
+        "  variables: {}",
+        "  variables:\n    bounded_heat:\n      unit: kW\n      valid_range:\n"
+        "        minimum: 0\n        maximum: {property_ref: rated_heat_kw}",
+    )
+    if source == "template":
+        from iesplan.core.namespace import build_stable_id
+
+        token = headers["Authorization"].removeprefix("Bearer ")
+        template = yaml_text.replace(
+            "properties:\n", "inputs:\n  properties:\n    rated_heat_kw:\n"
+            "      value: {type: number, unit: kW, valid_range: {minimum: 0, maximum: 1000000}}\n"
+            "properties:\n", 1,
+        ).replace("acme.device.heat_pump", build_stable_id(_token_ns_map[token], "bound-refs"))
+        template_id, revision = _publish_template(client, headers, template, slug="bound-refs")
+        resp = _save(
+            client, pid, headers, "", source="template", template_id=template_id,
+            template_revision=revision, template_inputs={"properties": {"rated_heat_kw": {"value": 600}}},
+        )
+    else:
+        resp = _save(client, pid, headers, yaml_text)
+    assert resp.status_code == 201, resp.text
+    model = resp.json()["project_model"]
+    documents = load_project_device_documents(db_session, {"project_models": [{"id": model["id"]}]})
+    document = documents[model["device_id"]]
+    assert document.device.id == model["device_id"]
+    assert document.device.id.endswith("_1")
+    assert document.properties["rated_heat_kw"].value == (600 if source == "template" else 500)
+    assert document.interfaces["heat_out"].maximum_property_ref == "rated_heat_kw"
+    assert document.equations.variables["bounded_heat"].maximum_property_ref == "rated_heat_kw"
 
 
 def test_save_validation_failure_no_save_no_number(client: TestClient, db_session: Session) -> None:

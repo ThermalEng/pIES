@@ -87,12 +87,19 @@ interfaces:
     unit: kW
     valid_range:
       minimum: 0
-      maximum: null
+      maximum: {property_ref: rated_demand_kw}
 equations:
-  variables: {}
+  variables:
+    received:
+      unit: kW
+      valid_range:
+        minimum: 0
+        maximum: {property_ref: rated_demand_kw}
   relations:
     - id: serve
       expression: "heat_in[t] = rated_demand_kw"
+    - id: received_flow
+      expression: "received[t] = heat_in[t]"
 `
 
 const escapeRegExp = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
@@ -453,6 +460,8 @@ test.describe('项目已保存模型消费链', () => {
     expect(frozenSink.variables.rated_demand_kw.value).toBe(SINK_DEFAULT_DEMAND_KW)
     expect(frozenSink.interfaces.heat_in.type).toBe('in')
     expect(frozenSink.interfaces.heat_in.carrier).toBe('heat')
+    expect(frozenSink.interfaces.heat_in.maximum_property_ref).toBe('rated_demand_kw')
+    expect(frozenSink.variables.received.maximum_property_ref).toBe('rated_demand_kw')
     expect(
       frozenSink.relations.some((r: { rhs_refs: Array<{ name: string }> }) =>
         (r.rhs_refs ?? []).some((x) => x.name === 'rated_demand_kw'),

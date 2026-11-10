@@ -141,6 +141,7 @@ properties:
 - `carrier` 表达接口承载的稳定技术对象；连接双方 carrier 必须相同；
 - `unit` 必须来自公共单位规范，连接双方必须量纲兼容；
 - `valid_range` 约束每个时间点的数据有效区间，越界必须阻断，不能自动截断；接口与方程变量的值域界可写成 `{property_ref: <property>}` 引用实例额定能力（实例级按实例 property 值解析，量纲必须一致），数值/`null`/引用三选一；
+- 规范化保存、最终设备 ID 分配和读取必须保留上下界引用，不得将引用写成 `null` 或提前代入模型默认值。已丢失引用的历史对象无法仅凭 `null` 恢复，应从正确原始模型保存新的不可变内容并显式选择；不改写历史模型、项目版本、快照或结果；
 - 所有 interface 都禁止携带 `source`、`mode`、`value`、`data_ref` 或 `target_type`；
 - `in`、`out`、`bidirectional` 只能通过装配连接取得或提供序列；
 - `predefined` 不连接其他设备；每个项目实例都必须在装配的 `predefined_interfaces` 中显式声明来源且不得缺省；
