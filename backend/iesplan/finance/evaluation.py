@@ -9,9 +9,9 @@ NPV、IRR、静态/动态回收期。指标与明细同源:全部由同一行数
 - 贴现流 d[t] = CF[t] / (1+r)^t,全程 Decimal 精确计算;
 - NPV = Σd[t](即末年贴现累计);
 - 动态回收期 = 对贴现流套用与静态回收期同一规则
-  (hourly.compute_payback:累计首次非负、年内线性插值);r=0 时贴现流
+  (hourly.evaluate_payback:实质累计负值首次回收、年内线性插值);r=0 时贴现流
   与原始流完全一致,动态与静态回收期相等;
-- 未回收 → 值为 None 并附明确状态,不伪造数值。
+- 未发生实质资金缺口为不适用；发生缺口而未回收为未回收，均无数值。
 
 IRR 状态名以生效的 modules/finance.md 公开语义为准
 (normal/no_solution/multiple/degenerate/out_of_domain/numeric_failure);
@@ -28,7 +28,7 @@ from decimal import Decimal
 from enum import StrEnum
 from typing import Final
 
-from iesplan.finance.hourly import compute_payback
+from iesplan.finance.hourly import PaybackStatus, evaluate_payback
 from iesplan.finance.metrics import IRRStatus, cashflow_irr
 
 EVALUATION_SCHEMA: Final[str] = "ies.project-evaluation"
@@ -52,13 +52,6 @@ class IRREvaluationStatus(StrEnum):
     degenerate = "degenerate"
     out_of_domain = "out_of_domain"
     numeric_failure = "numeric_failure"
-
-
-class PaybackStatus(StrEnum):
-    """回收期状态:recovered(已回收,值为年数) / not_recovered(未回收,值为 None)。"""
-
-    recovered = "recovered"
-    not_recovered = "not_recovered"
 
 
 _IRR_STATUS_MAP: Final[dict[IRRStatus, IRREvaluationStatus]] = {
@@ -95,7 +88,7 @@ class ProjectEvaluation:
         npv: 净现值(== 末年贴现累计,金额)。
         irr: 内部收益率(无量纲比例,无解时为 None)。
         irr_status: IRR 评价状态(IRREvaluationStatus)。
-        static_payback/dynamic_payback: 静态/动态回收期(年,未回收为 None)。
+        static_payback/dynamic_payback: 静态/动态回收期(年,未回收/不适用为 None)。
         static_status/dynamic_status: 回收期状态(PaybackStatus)。
     """
 
@@ -230,8 +223,8 @@ def evaluate_project_investment(
         denom *= base
 
     irr_value, irr_raw_status, _message = cashflow_irr(flows)
-    static = compute_payback(flows)
-    dynamic = compute_payback(discounted)
+    static, static_status = evaluate_payback(flows)
+    dynamic, dynamic_status = evaluate_payback(discounted)
 
     return ProjectEvaluation(
         currency=currency,
@@ -244,13 +237,9 @@ def evaluate_project_investment(
         irr=irr_value,
         irr_status=_IRR_STATUS_MAP[irr_raw_status],
         static_payback=static,
-        static_status=(
-            PaybackStatus.recovered if static is not None else PaybackStatus.not_recovered
-        ),
+        static_status=static_status,
         dynamic_payback=dynamic,
-        dynamic_status=(
-            PaybackStatus.recovered if dynamic is not None else PaybackStatus.not_recovered
-        ),
+        dynamic_status=dynamic_status,
     )
 
 

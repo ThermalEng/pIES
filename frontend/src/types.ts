@@ -1120,9 +1120,9 @@ export interface FinancialEvaluationBlock {
     irr: number | null
     irr_status: string
     static_payback: number | null
-    static_status: string
+    static_status: 'recovered' | 'not_recovered' | 'not_applicable'
     dynamic_payback: number | null
-    dynamic_status: string
+    dynamic_status: 'recovered' | 'not_recovered' | 'not_applicable'
   }
 }
 

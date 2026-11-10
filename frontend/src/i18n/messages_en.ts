@@ -720,6 +720,7 @@ export const messagesEn: Record<string, string> = {
   'ies.result.fin_year_unit': 'yr',
   'ies.result.fin_pb_recovered': 'Recovered',
   'ies.result.fin_pb_not_recovered': 'Not recovered',
+  'ies.result.fin_pb_not_applicable': 'Not applicable',
   'ies.result.fin_absence_outcome_not_normal': 'Task outcome is {outcome}; this evidence contains no sealed financial evaluation. Financial validity is not assumed.',
   'ies.result.fin_absence_solution_not_requested': 'The snapshot did not request solution output, so no solution data was published and no financial evaluation exists.',
   'ies.result.fin_absence_missing_unknown': 'Solution was requested but this evidence carries no financial evaluation (possibly historical); do not treat as evaluated.',
