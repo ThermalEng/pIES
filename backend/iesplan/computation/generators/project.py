@@ -85,6 +85,7 @@ from iesplan.computation.generators.compiler_ir import (
     VatPoolOperation,
     VatRuleSource,
 )
+from iesplan.computation.generators.demand import monotone_demand_meters
 from iesplan.computation.generators.linear import (
     LinearConstraint,
     LinearExpression,
@@ -3241,10 +3242,13 @@ class _ProjectBuilder:
     def _build_monthly_demand(self) -> None:
         """Exact natural-month max over the collected demand relations.
 
-        The original binary-selection formulation is retained.  Every actual
-        point bound now comes through the same analysis used by the technical
-        and tax condition operations; no invented finite box is introduced.
+        A strictly adverse NPV effect certifies a tight continuous epigraph;
+        all other uses retain binary selection. Both use the same actual
+        point bounds as the technical and tax condition operations.
         """
+        envelope_meters = monotone_demand_meters(
+            self.doc, self.finance, self.analysis, self._financial_graph,
+        )
         baseline_year = self.doc["project_baseline"]["start_year"]
         construction = self.evaluation.construction_period
         for operation in self.analysis.relations("demand"):
@@ -3284,7 +3288,8 @@ class _ProjectBuilder:
                     peak_name = f"{instance}__{interface}__demand_peak_m{month}"
                     self._declare(peak_name, lower, upper, "continuous", None)
                     peak.add_term(peak_name, 1.0)
-                    bit_count = (len(names) - 1).bit_length()
+                    envelope = (instance, interface) in envelope_meters
+                    bit_count = 0 if envelope else (len(names) - 1).bit_length()
                     bits = [
                         self._declare(
                             f"{peak_name}__bit{bit}", 0.0, 1.0, "binary", None
@@ -3308,6 +3313,8 @@ class _ProjectBuilder:
                             name=f"{peak_name}__floor_{offset}",
                             expression=floor.freeze(), sense="ge", rhs=0.0,
                         ))
+                        if envelope:
+                            continue
                         slack = upper - float(lo)
                         select = floor.snapshot()
                         ones = 0
