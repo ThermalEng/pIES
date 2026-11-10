@@ -52,7 +52,8 @@ POWER_KW = 7.0 / 0.9
 def _inputs(*, resolution="1h", start_year=2024, rate="12",
             second_rate=None, bounded=True, empty=False, vat=False,
             income=False, basis="tax_inclusive", deductible="1",
-            dispatch=False, sales=False, income_deduct_demand=True):
+            dispatch=False, sales=False, income_deduct_demand=True,
+            configure=None, operation_years=1, discount_rate=0.0):
     doc = _doc()
     doc["project_baseline"]["resolution"] = resolution
     doc["project_baseline"]["start_year"] = start_year
@@ -126,11 +127,9 @@ def _inputs(*, resolution="1h", start_year=2024, rate="12",
             "carrier": "electricity", "direction": "purchase", "kind": "constant",
             "value": {"value": "0.01", "unit": "CNY/kWh"},
         }
-        doc["tariff_bindings"] = {
-            "utility": {
-                "price": "utility_energy", "instance": "grid1",
-                "interface": "supply", "aggregation": "integrate_positive",
-            },
+        doc["tariff_bindings"]["utility"] = {
+            "price": "utility_energy", "instance": "grid1",
+            "interface": "supply", "aggregation": "integrate_positive",
         }
         doc["planning"]["objective"] = {
             "sense": "maximize", "expression": "system.after_tax_npv",
@@ -177,6 +176,8 @@ def _inputs(*, resolution="1h", start_year=2024, rate="12",
             "depreciation": [], "loss_carryforward_years": 0,
             "opening_losses": [],
         }
+    if configure is not None:
+        configure(doc, profile)
     finance = merge_effective(FinanceProfile.from_dict(profile), None)
     # Nonnegative alone is insufficient for the negative-bound test.
     # A fixed load indirectly bounds the meter through the existing bus;
@@ -207,12 +208,12 @@ def _inputs(*, resolution="1h", start_year=2024, rate="12",
     )
     assert result.artifact is not None, [d.to_dict() for d in result.diagnostics]
     evaluation = EvaluationInput(
-        evaluation_years=2, construction_period=1, operation_years=1,
-        discount_rate=0.0,
+        evaluation_years=1 + operation_years, construction_period=1, operation_years=operation_years,
+        discount_rate=discount_rate,
         construction_payments=(ConstructionPayment(t=0, ratio="1"),),
         maintenance_expenses=(),
     )
-    mat = materialize_non_predictive_series(result.artifact, {}, operation_years=1)
+    mat = materialize_non_predictive_series(result.artifact, {}, operation_years=operation_years)
     config = CalculationConfig(
         mode="planning", generator=GENERATOR_REF,
         solver="ies.solver.highs@1.7.2", precision="medium",
@@ -236,8 +237,10 @@ def _solved(inputs, tmp_path):
     )
     sealed = build_financial_evaluation(
         SimpleNamespace(evaluation={
-            "evaluation_years": 2, "construction_period": 1,
-            "operation_years": 1, "discount_rate": 0.0,
+            "evaluation_years": evaluation.evaluation_years,
+            "construction_period": evaluation.construction_period,
+            "operation_years": evaluation.operation_years,
+            "discount_rate": evaluation.discount_rate,
         }),
         finance, adapted,
     )
