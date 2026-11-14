@@ -575,6 +575,7 @@ export const messagesZh: Record<string, string> = {
   'ies.result.math_not_solved': '尚无可用可行解，不能据此认定问题不可行。',
   'ies.result.math_infeasible': '已证明问题不可行。',
   'ies.result.math_unbounded': '已证明目标无界。',
+  'ies.result.math_numeric_failure': '候选解存在数值失败或未满足约束等价性，未发布可行解。',
   'ies.result.termination_optimal': '已证明最优',
   'ies.result.termination_time_limit': '达到求解时间限制',
   'ies.result.termination_infeasible': '不可行',

@@ -454,6 +454,84 @@ def test_time_limit_incumbent_is_not_optimal_and_keeps_offset_bound_and_gap() ->
     assert worker_app.build_financial_evaluation(snapshot, finance, no_primal) is None
 
 
+def test_epigraph_incumbent_tightness_gate_in_adapter() -> None:
+    """Non-tight epigraph candidates are rejected; tight kTimeLimit remains feasible."""
+    from iesplan.application import worker as worker_app
+    from iesplan.metrics import OptimalityValidity
+    from iesplan.results import check_optimality
+
+    time_limit_raw = (
+        SHIM_OPTIMAL.replace("kOptimal", "kTimeLimit")
+        .replace("best_bound: 3000.0", "best_bound: 2400.0")
+        .replace("relative_gap: 0.0", "relative_gap: 0.2")
+    )
+    tight_params = json.loads(_parameters())
+    tight_params["epigraphs"] = [["x", ["x", "y"]]]
+    tight_res = _adapt(
+        {PROBLEM_PATH: TINY_MPS.encode(), PARAMETERS_PATH: json.dumps(tight_params).encode()},
+        _receipt(), time_limit_raw.encode(),
+    )
+    assert tight_res.math_status == "feasible"
+    assert tight_res.outputs["solver_summary"]["has_feasible_solution"] is True
+    assert "solution" in tight_res.outputs
+    assert worker_app.business_outcome_for(tight_res) == "restricted_results"
+
+    snapshot = SimpleNamespace(evaluation={
+        "construction_period": 0, "operation_years": 1,
+        "evaluation_years": 1, "discount_rate": 0.08,
+    })
+    finance = SimpleNamespace(
+        currency="CNY", price_basis="tax_inclusive", base_year=2026, profile_id="test",
+    )
+
+    for requested in (["solution", "metrics"], ["metrics"]):
+        inflated_params = json.loads(_parameters(outputs=requested))
+        inflated_params["epigraphs"] = [["x", ["y"]]]
+        rejected = _adapt(
+            {PROBLEM_PATH: TINY_MPS.encode(), PARAMETERS_PATH: json.dumps(inflated_params).encode()},
+            _receipt(), time_limit_raw.encode(),
+        )
+        assert rejected.execution_status == "completed"
+        assert rejected.math_status == "not_solved"
+        assert set(rejected.outputs) == {"solver_summary"}
+        summary = rejected.outputs["solver_summary"]
+        assert summary["termination_reason"] == "time_limit"
+        assert summary["math_status"] == "not_solved"
+        assert summary["has_feasible_solution"] is False
+        assert summary["objective_value"] is None
+        assert summary["relative_gap"] is None
+        assert summary["best_bound"] == 2401.5
+        assert worker_app.business_outcome_for(rejected) == "insufficient_evidence"
+        assert worker_app.build_financial_evaluation(snapshot, finance, rejected) is None
+        validity, _ = check_optimality({
+            "compute_result": {"outputs": {"solver_summary": dict(summary)}},
+        })
+        assert validity == OptimalityValidity.insufficient
+
+    optimal_params = json.loads(_parameters())
+    optimal_params["epigraphs"] = [["x", ["y"]]]
+    optimal_rejected = _adapt(
+        {PROBLEM_PATH: TINY_MPS.encode(), PARAMETERS_PATH: json.dumps(optimal_params).encode()},
+        _receipt(), SHIM_OPTIMAL.encode(),
+    )
+    assert optimal_rejected.execution_status == "completed"
+    assert optimal_rejected.math_status == "numeric_failure"
+    assert set(optimal_rejected.outputs) == {"solver_summary"}
+    opt_summary = optimal_rejected.outputs["solver_summary"]
+    assert opt_summary["termination_reason"] == "optimal"
+    assert opt_summary["math_status"] == "numeric_failure"
+    assert opt_summary["has_feasible_solution"] is False
+    assert opt_summary["objective_value"] is None
+    assert opt_summary["relative_gap"] is None
+    assert opt_summary["best_bound"] == 3001.5
+    assert worker_app.business_outcome_for(optimal_rejected) == "insufficient_evidence"
+    assert worker_app.build_financial_evaluation(snapshot, finance, optimal_rejected) is None
+    opt_validity, _ = check_optimality({
+        "compute_result": {"outputs": {"solver_summary": dict(opt_summary)}},
+    })
+    assert opt_validity == OptimalityValidity.failed
+
+
 def test_optimal_without_valid_primal_is_not_published() -> None:
     raw = SHIM_OPTIMAL.replace("has_feasible_solution: true", "has_feasible_solution: false")
     with pytest.raises(ComputationUnavailableError, match="有效主解"):
