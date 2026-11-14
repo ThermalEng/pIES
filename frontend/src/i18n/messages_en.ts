@@ -565,6 +565,7 @@ export const messagesEn: Record<string, string> = {
   'ies.result.math_not_solved': 'No usable feasible solution was found. Infeasibility has not been proven.',
   'ies.result.math_infeasible': 'The problem was proven infeasible.',
   'ies.result.math_unbounded': 'The objective was proven unbounded.',
+  'ies.result.math_numeric_failure': 'Solver numerical failure or invalid candidate; no feasible solution published.',
   'ies.result.termination_optimal': 'Optimality proven',
   'ies.result.termination_time_limit': 'Solver time limit reached',
   'ies.result.termination_infeasible': 'Infeasible',
