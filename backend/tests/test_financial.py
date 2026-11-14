@@ -7,7 +7,7 @@ from decimal import Decimal
 
 import pytest
 
-from iesplan.metrics.financial import (
+from iesplan.finance import (
     IRRStatus,
     build_equity_cashflows,
     build_project_cashflows,

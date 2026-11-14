@@ -730,6 +730,7 @@ export const messagesZh: Record<string, string> = {
   'ies.result.fin_year_unit': '年',
   'ies.result.fin_pb_recovered': '已回收',
   'ies.result.fin_pb_not_recovered': '未回收',
+  'ies.result.fin_pb_not_applicable': '不适用',
   'ies.result.fin_absence_outcome_not_normal': '任务业务结局为{outcome}；本证据未封存财务评价，不视为评价通过。',
   'ies.result.fin_absence_solution_not_requested': '快照未请求 solution 输出, 解数据未发布, 故无财务评价; 如需评价请请求 solution 后重算。',
   'ies.result.fin_absence_missing_unknown': '该证据请求了 solution 但未封存财务评价(可能为历史证据), 不视为评价通过。',

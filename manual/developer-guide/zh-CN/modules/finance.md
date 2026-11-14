@@ -174,7 +174,11 @@ IRR 与 `normal、no_solution、multiple、degenerate、out_of_domain、numeric_
 
 ### 项目投资口径评价规则
 
-项目投资口径评价以覆盖建设和运营的完整现金流 `CF[0..evaluation_years]` 与用户显式确认的评价参数为输入；`t=0` 为开工时点，后续时点按整数年排列，序列长度为 `evaluation_years + 1`。不由现金流或运行序列长度反推评价年限，不未经等价证明将单年结果复制为多年；等价优化遵循[生成器规则](generators.md#时间结构与等价优化)。逐年明细行含原始净流、贴现流（`CF[t]/(1+r)^t`）与两种累计，NPV、IRR、静态/动态回收期与明细同源复算。动态回收期对贴现流沿用静态回收期同一规则（累计首次非负、年内线性插值），未回收为无值并附明确状态，`r=0` 时与静态回收期一致。IRR 状态采用本页公开语义（`normal/no_solution/multiple/degenerate/out_of_domain/numeric_failure`）。
+项目投资口径评价以覆盖建设和运营的完整现金流 `CF[0..evaluation_years]` 与用户显式确认的评价参数为输入；`t=0` 为开工时点，后续时点按整数年排列，序列长度为 `evaluation_years + 1`。不由现金流或运行序列长度反推评价年限，不未经等价证明将单年结果复制为多年；等价优化遵循[生成器规则](generators.md#时间结构与等价优化)。逐年明细行含原始净流、贴现流（`CF[t]/(1+r)^t`）与两种累计，NPV、IRR、静态/动态回收期与明细同源复算。动态回收期对贴现流沿用静态回收期同一规则（实质累计负值首次回收、年内线性插值），未回收或不适用均为无值并附明确状态，`r=0` 时与静态回收期一致。IRR 状态采用本页公开语义（`normal/no_solution/multiple/degenerate/out_of_domain/numeric_failure`）。
+
+指标判零阈值为 `max(1e-6, 1e-12 × max(abs(CF)))`，金额单位为输入现金流所用币种的基本单位。仅 IRR 求根和回收期判断忽略阈值内的近零项，不改写封存原始现金流、逐年明细或 NPV。全序列均在阈值内时，IRR 为 `null / degenerate`；没有实质变号时不伪造收益率。前导零不阻止后续真实投资及换新现金流的评价，也不移除其年份。
+
+回收期只在累计现金流先出现实质负值后，计算其首次回到零容差范围的时点，按原始年轴线性插值。未发生实质资金缺口为 `null / not_applicable`，不返回 0 年；发生缺口但在评价期内未回收为 `null / not_recovered`。动态回收期对贴现现金流使用同一规则。
 
 ### 封存评价块 `financial_evaluation`
 
@@ -192,7 +196,7 @@ Worker 对同次已求解结果计算一次评价，随结果载荷同一证据�
 - `monthly_demand`：原样保留同次解的需量月明细；字段、金额与单位以[同次解财务事实](../formats/solver-bundle.md#同次解财务事实映射)为准。无绑定为空数组，零费率绑定仍保留真实峰值与零费用；
 - `tax_cash`、`annual_net_flows`：原样保留同次解财务事实中的结构与金额；数组单位由 `currency` 指定，年度现金流长度为 `evaluation_years+1`。空税则表示不适用，税务结算后的现金流仍完整存在；
 - `comparison`：沿[同次结果声明](../formats/solver-bundle.md#关系事实映射)保留冻结基准来源、原选择器、比较确认及事实；difference 的指标只使用同次声明的 `evaluation_net_flows`，原候选 `annual_net_flows` 不被覆盖。读取或导出不再扣一次基准；
-- `evaluation`：逐年明细与指标：`rows[{year, net, discounted, cumulative, cumulative_discounted}]`（金额字符串）；`npv`（字符串）+ `npv_unit`；`irr`（数或 null）+ `irr_status`（本页 IRR 状态枚举）；`static/dynamic_payback`（年数或 null）+ `_unit`（有值为 `"year"`）+ `_status`（`recovered`／`not_recovered`）。
+- `evaluation`：逐年明细与指标：`rows[{year, net, discounted, cumulative, cumulative_discounted}]`（金额字符串）；`npv`（字符串）+ `npv_unit`；`irr`（数或 null）+ `irr_status`（本页 IRR 状态枚举）；`static/dynamic_payback`（年数或 null）+ `_unit`（有值为 `"year"`，无值为 null）+ `_status`（`recovered`／`not_recovered`／`not_applicable`）。
 
 ### 评价确认与快照冻结
 
