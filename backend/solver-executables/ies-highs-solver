@@ -31,6 +31,8 @@ from __future__ import annotations
 import math
 import os
 import sys
+import time
+from contextlib import contextmanager
 
 #: 自检在给定目录内使用的输入/声明输出文件名（固定约定）。
 SELF_TEST_MPS = "self-test.mps"
@@ -62,7 +64,43 @@ SELF_TEST_TOLERANCE = 1e-6
 
 def _fail(message: str) -> int:
     sys.stderr.write(f"ies-highs-solver: {message}\n")
+    sys.stderr.flush()
     return 2
+
+
+def _log_stage(
+    stage: str,
+    event: str,
+    *,
+    elapsed_seconds: float | None = None,
+    status: str | None = None,
+) -> None:
+    parts = [f"stage={stage}", f"event={event}"]
+    if status is not None:
+        parts.append(f"status={status}")
+    if elapsed_seconds is not None:
+        parts.append(f"elapsed_seconds={elapsed_seconds:.6f}")
+    sys.stderr.write("ies-highs-solver: " + " ".join(parts) + "\n")
+    sys.stderr.flush()
+
+
+@contextmanager
+def _timed_stage(stage: str):
+    started = time.monotonic()
+    _log_stage(stage, "start")
+    status = "ok"
+    try:
+        yield
+    except BaseException:
+        status = "error"
+        raise
+    finally:
+        _log_stage(
+            stage,
+            "end",
+            elapsed_seconds=time.monotonic() - started,
+            status=status,
+        )
 
 
 def _check_relative_path(value: str, name: str) -> str:
@@ -85,13 +123,23 @@ def _solve_model(mps_path: str, time_limit: float, seed: int):
     import highspy
 
     handle = highspy.Highs()
-    if handle.readModel(mps_path) != highspy.HighsStatus.kOk:
-        raise RuntimeError(f"MPS 读取失败: {mps_path!r}")
+    with _timed_stage("read_model"):
+        if handle.readModel(mps_path) != highspy.HighsStatus.kOk:
+            raise RuntimeError(f"MPS 读取失败: {mps_path!r}")
     handle.setOptionValue("time_limit", time_limit)
     handle.setOptionValue("random_seed", seed)
-    if handle.run() == highspy.HighsStatus.kError:
-        raise RuntimeError("HiGHS 求解执行错误")
+    with _timed_stage("run"):
+        if handle.run() == highspy.HighsStatus.kError:
+            raise RuntimeError("HiGHS 求解执行错误")
     return handle, handle.getModelStatus()
+
+
+def _write_solution(handle, model_status, sol_path: str) -> None:
+    """生成 ``HIGHS_SOLUTION_V1`` 内容并写出声明文件；失败抛异常。"""
+    with _timed_stage("solution_write"):
+        content = _solution_text(handle, model_status)
+        with open(sol_path, "w", encoding="utf-8") as stream:
+            stream.write(content)
 
 
 def _solution_text(handle, model_status) -> str:
@@ -144,8 +192,8 @@ def _cmd_solve(args: list[str]) -> int:
         if flag2 != "--time_limit":
             raise ValueError("arguments[3] 须为 --time_limit")
         time_limit = float(limit_text)
-        if not time_limit > 0:
-            raise ValueError("arguments[4] 须为正数秒数")
+        if not (math.isfinite(time_limit) and time_limit > 0):
+            raise ValueError("arguments[4] 须为正有限秒数")
         if flag3 != "--random_seed":
             raise ValueError("arguments[5] 须为 --random_seed")
         seed = int(seed_text, 10)
@@ -155,8 +203,7 @@ def _cmd_solve(args: list[str]) -> int:
         return _fail(str(exc))
     try:
         handle, model_status = _solve_model(mps_path, time_limit, seed)
-        with open(sol_path, "w", encoding="utf-8") as stream:
-            stream.write(_solution_text(handle, model_status))
+        _write_solution(handle, model_status, sol_path)
     except Exception as exc:  # 求解链基础设施失败，不伪造输出
         return _fail(f"求解失败: {exc}")
     return 0
@@ -175,8 +222,7 @@ def _cmd_self_test(args: list[str]) -> int:
         with open(mps_path, "w", encoding="utf-8") as stream:
             stream.write(SELF_TEST_MPS_TEXT)
         handle, model_status = _solve_model(mps_path, 60.0, 0)
-        with open(sol_path, "w", encoding="utf-8") as stream:
-            stream.write(_solution_text(handle, model_status))
+        _write_solution(handle, model_status, sol_path)
     except Exception as exc:
         return _fail(f"自检求解失败: {exc}")
     ok_status = str(model_status) == "HighsModelStatus.kOptimal"

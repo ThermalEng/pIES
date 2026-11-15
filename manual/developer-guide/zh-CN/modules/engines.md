@@ -124,7 +124,7 @@ SolverRuntime 根据 allowlist 解析结构化命令，在隔离目录执行，�
 - 扩展适配器只需实现 `ResultAdapter` 公开身份（`descriptor`/`ref`/`available`）与唯一业务调用 `adapt(Bundle, receipt, outputs)`，经 `build_result_adapter_registry` 原子发布，按 manifest/回执固定的精确引用解析。
 - 内置 `ies.result-adapter.highs@1.0.0`消费配套executable的`HIGHS_SOLUTION_V1`当前文本：`model_status`、`has_feasible_solution`、`objective_value`、`best_bound`、`relative_gap`、`num_columns`及按索引的`primal`。布尔写true／false；不可用数值写none，不写NaN／Inf或伪造0。可行解须由HiGHS的primal可行状态及有效主解共同确认，不靠存在一串列值判断。无可行解不写主解列或目标值。MIP始终保留实际可用界和Gap，包括在最优性容差内返回`kOptimal`且Gap非零的情形；只有已最优的LP无MIP统计时采用目标值作为界、Gap为0。“已证明最优”使用求解器的最优性容差口径，不额外宣称界精确相等。
 - `kOptimal`映射`solved`；正常`kTimeLimit`有可行解映射`feasible`、无可行解映射`not_solved`，不误报不可行。两者均以完整求解状态文件正常结束；真正`kError`、不可读输入或写出失败仍非零退出。监督超时、取消、OOM和进程错误保持原回执，不接受残留文件伪装正常完成。`kInfeasible`／`kUnbounded`仍映射同名状态，`kUnboundedOrInfeasible`仍为`not_solved`，不发布方案。其余未知或不可发布状态、损坏文件及非有限发布值仍为结果协议失败。
-- 求解时限原样传入HiGHS；Bundle进程壁钟为该时限加60秒启动／读写预算，部署策略仍核对完整壁钟。两层时限不能相同以致正常写出被抢先终止；超过壁钟预算仍由原执行器强制收拢，不修改取消、租约隔离或资源失败规则。
+- 求解时限原样传入HiGHS；内置HiGHS生成器的Bundle进程监督壁钟预算为该时限加600秒有界宽限，用于进程启动、读模、正常收尾、解生成与文件写出，部署策略继续按完整`command.timeout_seconds`核对硬上限并在超限时启动前拒绝，不静默缩短求解时长或裁剪预算。该600秒仍为有限预算，超慢输入仍可能触发真实外层超时；两层时限不能相同以致正常收尾与写出被抢先终止，超过壁钟预算或收到取消／租约隔离时仍由原执行器收拢并保留原回执，不凭残留解文件升级为成功，不修改取消、租约隔离或资源失败规则。内置HiGHS适配可执行文件通过标准错误按单调时钟分段记录读模、求解与写解的起止事件及耗时，沿用既有stdout/stderr采集机制定位中断阶段，不新增独立监控服务，Worker与通用运行时不解析求解日志控制时限。
 - `solved`与`feasible`使用同一完整主解恢复变量、分量、序列和财务事实，不重求解或补零。变量依MPS列序和`unit_map`恢复，目标与最优界均只加一次`objective_offset`、按`objective_unit`换算；币种保持原值，物理单位反向换算。分量保留`{value, unit, caliber}`；序列和财务事实随solution请求发布，metrics按请求发布。结果始终携带bundle／receipt身份，不读当前项目。
 
 ### 求解终止与最优性摘要

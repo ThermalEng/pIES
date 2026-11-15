@@ -173,7 +173,7 @@ Bundle 规范化与原子发布
 
 首个内置 provider 为 `ies.generator.highs_milp@1.0.0`（见“首个内置链”）：mode 只要 `planning`、精度只要 `medium`、solver 只要 `ies.solver.highs@1.7.2`；options 只接受空对象；输出请求支持 `solution` 与 `metrics`（`metrics` 为 ResultAdapter 后处理请求，不对应求解器第二个原始文件，未知输出明确拒绝）；只消费装配实际绑定的 constant/time_series/monthly_daily 计费价格（快照中未绑定的价格条目不触发拒绝），未知价格类型明确拒绝；`seed` 为 null 时使用固定种子 `0`，种子同时固定进求解命令与元数据，不读取随机全局状态。
 
-`generate` 返回唯一完整聚合：manifest（即 `bundle.yaml` 内容）加按规范相对路径索引的只读内容映射。`input/problem.mps` 从紧凑矩阵按列分块产生，不建立整份文本；`input/parameters.json` 只保存目标偏移／业务单位、列数、请求输出、固定配置、装配身份与记录路径。`input/parameters.jsonl` 按[参数记录契约](../formats/solver-bundle.md#内置配套参数记录)保存共享冻结表达式、实际求解行列位置、单位、时序、财务和来源声明；适配器直接消费记录，不扫MPS或建立整份参数对象。金额守财务币种，物理量反向换算口径不变；结构化命令按真实CLI语法逐项存储，`time_limit_seconds`与求解器选项语义一致。同一组输入产生同一字节序列，生成器不写临时目录、不访问storage、不启动solver。
+`generate` 返回唯一完整聚合：manifest（即 `bundle.yaml` 内容）加按规范相对路径索引的只读内容映射。`input/problem.mps` 从紧凑矩阵按列分块产生，不建立整份文本；`input/parameters.json` 只保存目标偏移／业务单位、列数、请求输出、固定配置、装配身份与记录路径。`input/parameters.jsonl` 按[参数记录契约](../formats/solver-bundle.md#内置配套参数记录)保存共享冻结表达式、实际求解行列位置、单位、时序、财务和来源声明；适配器直接消费记录，不扫MPS或建立整份参数对象。金额守财务币种，物理量反向换算口径不变；结构化命令按真实CLI语法逐项存储，`time_limit_seconds`原样传入求解器内部时限，内置HiGHS生成器的外层进程监督壁钟另留600秒有界宽限（`timeout_seconds = time_limit_seconds + 600`）用于启停、读模、正常收尾及解写出，完整预算仍以部署上限作启动前策略检查。同一组输入产生同一字节序列，生成器不写临时目录、不访问storage、不启动solver。
 
 注册表注册真实 provider 实例：`ref` 与描述符引用单一来源；`resolve` 完成通用门禁后返回可调用 provider，快照与目录只公开描述符数据；任一候选不符即整体构建失败。组合根显式注册内置 provider，不动态扫描。
 

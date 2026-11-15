@@ -403,6 +403,48 @@ def test_all_receipt_statuses_map() -> None:
         assert result.receipt_id == "receipt-7"
 
 
+def test_outer_termination_never_upgrades_residual_solution() -> None:
+    """真正外层超时、取消、隔离或失败时，即使残存解文件也绝不升级为成功。"""
+    residual_feasible = (
+        SHIM_OPTIMAL.replace("kOptimal", "kTimeLimit")
+        .replace("best_bound: 3000.0", "best_bound: 2400.0")
+        .replace("relative_gap: 0.0", "relative_gap: 0.2")
+    ).encode("utf-8")
+    outer_cases = [
+        (
+            {"status": "timed_out", "termination_reason": "timeout", "exit_code": None, "signal_number": 15},
+            "timed_out",
+        ),
+        (
+            {
+                "status": "cancelled",
+                "termination_reason": "cancelled",
+                "exit_code": None,
+                "signal_number": 15,
+            },
+            "cancelled",
+        ),
+        (
+            {"status": "fenced", "termination_reason": "fenced", "exit_code": None, "signal_number": 15},
+            "fenced",
+        ),
+        (
+            {"status": "process_failed", "termination_reason": "exited", "exit_code": 2},
+            "failed",
+        ),
+        (
+            {"status": "output_protocol_failed"},
+            "protocol_failed",
+        ),
+    ]
+    for residual in (SHIM_OPTIMAL.encode("utf-8"), residual_feasible):
+        for facts, expected in outer_cases:
+            result = _adapt(None, _receipt(**facts), residual)
+            assert result.execution_status == expected
+            assert result.math_status == "not_solved"
+            assert dict(result.outputs) == {}
+
+
 def test_time_limit_without_incumbent_preserves_stop_reason() -> None:
     result = _adapt(None, _receipt(), V1_TIME_LIMIT.encode())
     assert result.math_status == "not_solved"

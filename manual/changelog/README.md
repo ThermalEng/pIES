@@ -17,6 +17,12 @@
 
 ## Unreleased
 
+### 2026-11-15 — 求解器内部时限与外层进程监督预算衔接
+
+- `ies.generator.highs_milp@1.0.0` 将外层进程监督宽限 `PROCESS_IO_GRACE_SECONDS` 由 60 秒调整为 600 秒（`command.timeout_seconds = time_limit_seconds + 600`），仍原样将用户请求的 `time_limit_seconds` 传入 HiGHS 内部 `--time_limit`，不扣除读模耗时，也不为迎合部署硬上限而静默缩短求解时长；完整进程预算继续由既有 `DeploymentPolicy.max_timeout_seconds` 在启动前校验，超限时启动前拒绝、不裁剪预算。该 600 秒有界宽限用于进程启动、`readModel`（独立读模诊断约 88～93 秒；此前日志中的 177 秒属 presolve 而非读模，且保留日志未出现整数可行解）、正常收尾、解内容生成与文件写出，属于有限预算，更慢输入仍可能触发真实外层超时。
+- 受信任可执行文件 `ies-highs-solver` 通过 `stderr` 使用单调时钟分别记录 `read_model`、`run` 与 `solution_write` 的起止事件、状态和耗时，沿用现有 stdout/stderr 采集链路定位中断阶段，不新增独立监控服务或由 Worker/运行时解析求解日志控制时限；保持原有 `kTimeLimit`（有可行解正常退出 `feasible`、无可行解正常退出 `not_solved`）、外层超时/取消/租约隔离（不凭残留解文件升级为成功）及输入读取/`kError`/写出失败非零退出语义不变，无新增配置字段或协议版本。
+- Docker 后端定向回归分批 371 项通过（覆盖预算生成与确定性、`max_timeout_seconds` 启动前边界、延迟读写耗时、真实 HiGHS 原生时限含/无可行解、外层强杀/取消/租约隔离、阶段计时日志、计算链、Worker/任务 API 及架构门禁），变更文件 Ruff、`help_markdown` 逻辑测试及 CI 测试选择自检通过；本次未修改前端界面或重启既有工程验收栈，不宣称 `0.15.0` 整体验收完成。
+
 ### 2026-11-10 — 近零现金流 IRR 与回收期状态修正
 
 - IRR 和回收期统一使用绝对金额及相对尺度判零，避免将求解浮点残差解释为有效收益率；全零或仅有近零残差的现金流返回无值及退化状态。原始现金流、逐年金额和 NPV 保持原精度，不改写历史封存事实。
