@@ -166,6 +166,7 @@ def test_parameter_records_keep_solver_positions_identity_and_sum_order():
     sources = {"groups": [], "sources": {}, "outputs": []}
     units = {"fixed": "1", "x": "1", "z": "1"}
     records = list(parameter_records(model, units, components, series, facts, sources))
+    assert not any(row[0] in ("epigraph", "epigraph_flows", "epigraph_end") for row in records)
     assert len([row for row in records if row[0] == "expression"]) == 2
     references = [row[-1] for row in records if row[0] == "component"]
     assert references == [0, 0, 1]
@@ -182,6 +183,45 @@ def test_parameter_records_keep_solver_positions_identity_and_sum_order():
     assert result["financial_facts"] == {"amount": 1.0, "same": 1.0}
     assert list(result["series"]["state"]["values"]) == [1.0, 1.0, 1.0]
     assert [entry["name"] for entry in result["variables"]] == list(units)
+    assert result["epigraph_inflated"] is False
+
+
+def test_parameter_records_epigraph_tightness_check():
+    from test_compact_final_matrix import _public_model
+
+    model = SparseModel.from_public(_public_model())
+    epigraphs = (("fixed", ("z", "x")),)
+    records = list(parameter_records(
+        model, {"fixed": "1"}, {}, (), {}, {"groups": []}, epigraphs=epigraphs,
+    ))
+    tags = [row[0] for row in records]
+    assert ["epigraph", "epigraph_flows", "epigraph_end"] == [
+        tag for tag in tags if tag.startswith("epigraph")
+    ]
+    pos = {name: model.column_position(name) for name in ("fixed", "z", "x")}
+    assert next(row for row in records if row[0] == "epigraph") == ["epigraph", pos["fixed"]]
+    assert next(row for row in records if row[0] == "epigraph_flows") == [
+        "epigraph_flows", [pos["z"], pos["x"]],
+    ]
+
+    def fail(message):
+        raise AssertionError(message)
+
+    content = GeneratedContent(partial(
+        parameter_chunks, model, {"fixed": "1"}, {}, (), {}, {"groups": []}, epigraphs=epigraphs,
+    ))
+    tight = array("d", [0.0] * len(model.columns))
+    tight[pos["x"]] = 5.0
+    tight[pos["fixed"]] = 5.0 + 1e-9
+    for include_solution in (True, False):
+        res = recover_declarations(content, tight, fail, include_solution=include_solution)
+        assert res["epigraph_inflated"] is False
+
+    inflated = array("d", tight)
+    inflated[pos["fixed"]] = 6.0
+    for include_solution in (True, False):
+        res = recover_declarations(content, inflated, fail, include_solution=include_solution)
+        assert res["epigraph_inflated"] is True
 
 
 def test_parameter_record_emission_cooperates_with_existing_stop_probe():

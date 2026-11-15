@@ -232,6 +232,7 @@ def check_optimality(content: dict[str, Any]) -> tuple[OptimalityValidity, dict]
             "feasible": OptimalityValidity.restricted,
             "infeasible": OptimalityValidity.failed,
             "unbounded": OptimalityValidity.failed,
+            "numeric_failure": OptimalityValidity.failed,
             "not_solved": OptimalityValidity.insufficient,
         }[summary["math_status"]]
         return fine, dict(summary)

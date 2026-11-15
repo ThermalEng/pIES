@@ -17,6 +17,12 @@
 
 ## Unreleased
 
+### 2026-11-15 — 月度需量连续上包络紧度检查与对照收口
+
+- 生成器启用连续需量上包络时，在 `input/parameters.jsonl` 记录月峰与同月流量变量的实际求解列位置（未启用上包络不输出）；HiGHS 结果适配器在发布 `kTimeLimit` 或 `kOptimal` 解前核对 `peak - max(flow[t]) <= tol`，发现峰值虚高时拒绝发布失真账单、税额与现金流，并分别映射为 `not_solved`（时限原模型无可行解）与 `numeric_failure`（最优容差停机未压紧），`results.rules.check_optimality`、前端 `SolverSummary` 与中英文求解状态文案同步支持 `numeric_failure`。
+- 修复 PR #75 遗留的非最优候选虚高需量峰漏洞，并补齐独立/全零/混合零费率真实求解、`margin < 0` 反例、`assets` / `net_cashflows` / 多种税额度量与嵌套派生税、禁用约束、滞后派生税跨闰年折现手算对照、同模型认证与精确计量点隔离及真实 HiGHS 虚高分支拦截测试。
+- Docker 后端定向回归在最终代码状态分批通过 211 项（`test_demand_envelope.py` 25 项、`test_issue04_d2.py` 14 项、`test_highs_milp_provider.py` 11 项及适配器/参数流/结果接口/架构门禁等 161 项，含 31 项架构门禁），前端 26 个逻辑测试文件、构建与帮助清单生成通过，隔离 Docker Playwright Chromium 定向 15 项（`infra`、`result-planning-solution`、`tax-chain`、`admin-help-lang`）通过，Ruff 与 CI 选择器自检通过。不掩盖精确分支在窄区间 `2**k` 缩放下的既有限制，未修改既有快照、任务或验收部署，不宣称 `0.15.0` 整体验收完成。
+
 ### 2026-11-10 — 近零现金流 IRR 与回收期状态修正
 
 - IRR 和回收期统一使用绝对金额及相对尺度判零，避免将求解浮点残差解释为有效收益率；全零或仅有近零残差的现金流返回无值及退化状态。原始现金流、逐年金额和 NPV 保持原精度，不改写历史封存事实。

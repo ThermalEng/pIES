@@ -170,9 +170,11 @@ class HighsMilpProvider:
         self._check_capabilities(artifact, config, finance)
         self._check_stop(stop)
         seed = config.seed if config.seed is not None else FIXED_SEED
+        epigraphs: list[tuple[str, tuple[str, ...]]] = []
         model, unit_map, objective_unit, facts, components, series, sources = (
             build_project_model_package(
-                artifact, models, materialized, finance, config, evaluation, stop=stop,
+                artifact, models, materialized, finance, config, evaluation,
+                stop=stop, epigraphs=epigraphs,
             )
         )
         self._check_stop(stop)
@@ -229,7 +231,7 @@ class HighsMilpProvider:
                 PARAMETERS_PATH: MemoryContent(metadata),
                 RECORDS_PATH: GeneratedContent(partial(
                     parameter_chunks, model, unit_map, components, series, facts, sources,
-                    stop=stop,
+                    epigraphs=tuple(epigraphs), stop=stop,
                 )),
             },
         )
