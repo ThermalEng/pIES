@@ -345,6 +345,7 @@ def build_project_model_package(
     evaluation: EvaluationInput,
     *,
     stop: StopProbe | None = None,
+    epigraphs: list[tuple[str, tuple[str, ...]]] | None = None,
 ) -> tuple[
     SparseModel, Mapping[str, str], str, Mapping[str, object],
     Mapping[str, Mapping[str, object]], tuple[Mapping[str, object], ...],
@@ -353,6 +354,8 @@ def build_project_model_package(
     """一次建模取得 MPS、财务事实、分量与时序声明，不重复展开月峰。"""
     builder = _new_builder(artifact, models, materialized, finance, evaluation, stop=stop)
     model, unit_map, objective_unit = builder.build()
+    if epigraphs is not None:
+        epigraphs.extend(builder.demand_epigraphs())
     return (
         model, unit_map, objective_unit,
         builder.financial_facts(), builder.finance_components(),
@@ -480,6 +483,7 @@ class _ProjectBuilder:
         #: ``financial_facts`` 声明；键与结构见格式页映射表）。
         self._demand_peaks: dict[tuple[str, str, int], _AffineAcc] = {}
         self._demand_peak_sources: dict[tuple[str, str, int], str] = {}
+        self._demand_epigraphs: list[tuple[str, tuple[str, ...]]] = []
         self._demand_rows: list[dict[str, Any]] = []
         self._demand_totals: dict[str, _AffineAcc] = {}
         self._fact_cash: dict[int, _AffineAcc] = {}
@@ -3349,6 +3353,8 @@ class _ProjectBuilder:
                             expression=select.freeze(), sense="le",
                             rhs=(slack * ones) * scale,
                         ))
+                    if envelope:
+                        self._demand_epigraphs.append((peak_name, tuple(names)))
                 self._demand_peaks[key] = peak
                 self._demand_peak_sources[key] = f"relation:{operation.identity}"
             else:
@@ -5193,6 +5199,10 @@ class _ProjectBuilder:
         return sorted(cost_items, key=lambda row: (
             row["instance_id"], row["component"], row["item_id"], row["period"],
         ))
+
+    def demand_epigraphs(self) -> tuple[tuple[str, tuple[str, ...]], ...]:
+        """连续上包络峰值与同月实际流量列名（供结果适配器检验候选紧度）。"""
+        return tuple(self._demand_epigraphs)
 
     def build(self) -> tuple[SparseModel, Mapping[str, str], str]:
         try:

@@ -327,10 +327,30 @@ class HighsResultAdapter:
             _fail("数学状态有解但缺有效主解或目标值")
         if len(solution["primals"]) != params["column_count"]:
             _fail("声明列数与 solution primal 个数不一致")
-        params.update(recover_declarations(
+        declarations = recover_declarations(
             params.pop("records"), solution["primals"], _fail,
             include_solution="solution" in params["requested"],
-        ))
+        )
+        if declarations.get("epigraph_inflated"):
+            # Continuous demand epigraph is only equivalent when peak == max(flow).
+            # An inflated non-optimal or tolerance-stopped candidate violates the
+            # original exact relation and must not publish distorted bills/taxes.
+            rejected_status = "numeric_failure" if status == _STATUS_SOLVED else "not_solved"
+            rejected_summary = {
+                **summary,
+                "math_status": rejected_status,
+                "has_feasible_solution": False,
+                "objective_value": None,
+                "relative_gap": None,
+            }
+            return ComputeResult(
+                bundle_id=receipt.bundle_id,
+                receipt_id=receipt.receipt_id,
+                execution_status="completed",
+                math_status=rejected_status,
+                outputs={"solver_summary": rejected_summary},
+            )
+        params.update(declarations)
         variables = params["variables"]
         objective_unit = params["objective_unit"]
         business_total = summary["objective_value"]
