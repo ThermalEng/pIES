@@ -14,13 +14,15 @@ import logging
 import math
 import runpy
 import subprocess
+import threading
 from pathlib import Path
 
 import pytest
-from bundle_testkit import materialized_file
+from bundle_testkit import fixture_files, materialized_file, mps_columns
 
 from iesplan.assembly import validate_assembly_text
 from iesplan.computation import (
+    HIGHS_ADAPTER,
     HIGHS_ADAPTER_PATH,
     HIGHS_EXECUTABLE_REF,
     HIGHS_MILP_PROVIDER,
@@ -30,18 +32,24 @@ from iesplan.computation import (
     ComputationUnavailableError,
     DeploymentPolicy,
     ExecutableReadiness,
+    ExecutionReceipt,
     ExecutorDescriptor,
     LocalExecutable,
     LocalProcessProvider,
+    SolverBundle,
+    SolverBundleManifest,
     SolverRuntime,
     build_executor_registry,
     build_registry,
     materialize_non_predictive_series,
 )
 from iesplan.computation.generators.highs_milp import (
+    ADAPTER_REF,
     EXECUTOR_REF,
     GENERATOR_REF,
+    PARAMETERS_PATH,
     PROBLEM_PATH,
+    PROCESS_IO_GRACE_SECONDS,
     SOLUTION_PATH,
     SOLVER_REF,
 )
@@ -164,19 +172,20 @@ def _provider() -> LocalProcessProvider:
     return LocalProcessProvider(_descriptor(), (_binding(),), base_environ={})
 
 
-def _runtime(provider=None) -> SolverRuntime:
+def _runtime(provider=None, policy=None) -> SolverRuntime:
     provider = provider if provider is not None else _provider()
-    policy = DeploymentPolicy(
-        executables=(HIGHS_EXECUTABLE_REF,),
-        environment_vars=(),
-        max_timeout_seconds=660,
-        max_memory_mib=4096,
-        max_cpu_cores=4,
-        allow_network=False,
-        max_output_files=16,
-        # campus 真实 solution 约 1.7MB；部署按实际输出规模定配额。
-        max_output_bytes=8_388_608,
-    )
+    if policy is None:
+        policy = DeploymentPolicy(
+            executables=(HIGHS_EXECUTABLE_REF,),
+            environment_vars=(),
+            max_timeout_seconds=1200,
+            max_memory_mib=4096,
+            max_cpu_cores=4,
+            allow_network=False,
+            max_output_files=16,
+            # campus 真实 solution 约 1.7MB；部署按实际输出规模定配额。
+            max_output_bytes=8_388_608,
+        )
     return SolverRuntime(build_executor_registry([provider]), policy)
 
 
@@ -203,7 +212,7 @@ def test_refs_single_source_and_exact_version() -> None:
 
 
 def test_adapter_reports_exact_version() -> None:
-    """固定路径可执行并原样报告精确版本 1.7.2。"""
+    """固定路径可执行并原样报告精确版本 1.7.2，且不污染 stderr。"""
     completed = subprocess.run(
         [HIGHS_ADAPTER_PATH, "--version"],
         capture_output=True,
@@ -212,6 +221,7 @@ def test_adapter_reports_exact_version() -> None:
     )
     assert completed.returncode == 0
     assert completed.stdout.decode("utf-8").strip() == "1.7.2"
+    assert completed.stderr == b""
 
 
 def test_adapter_rejects_non_structured_args() -> None:
@@ -351,6 +361,22 @@ def test_end_to_end_campus_bundle() -> None:
     assert len(facts["primals"]) == int(facts["num_columns"])
     assert receipt.outputs[0]["path"] == SOLUTION_PATH
     assert receipt.outputs[0]["size_bytes"] == len(read_content(outputs[SOLUTION_PATH]))
+    stage_records = _parse_stage_logs(receipt.stderr)
+    assert [(r["stage"], r["event"]) for r in stage_records] == [
+        ("read_model", "start"),
+        ("read_model", "end"),
+        ("run", "start"),
+        ("run", "end"),
+        ("solution_write", "start"),
+        ("solution_write", "end"),
+    ]
+    assert all(
+        r["status"] == "ok"
+        and math.isfinite(float(r["elapsed_seconds"]))
+        and float(r["elapsed_seconds"]) >= 0.0
+        for r in stage_records
+        if r["event"] == "end"
+    )
 
 
 def _tiny_model(*, lower, upper, obj_coeff: float, rows: tuple = ()):
@@ -426,31 +452,35 @@ def test_native_optimal_mip_preserves_actual_bound_and_nonzero_gap():
 
 
 def test_real_shim_time_limit_without_incumbent_is_normal_exit(tmp_path):
-    import highspy
-    import numpy as np
-
-    handle = highspy.Highs()
-    handle.setOptionValue("output_flag", False)
-    n = 100
-    indices = np.arange(n, dtype=np.int32)
-    handle.addVars(n, np.zeros(n), np.ones(n))
-    handle.changeColsIntegrality(n, indices, np.ones(n, dtype=np.uint8))
-    handle.changeColsCost(n, indices, -np.arange(1, n + 1, dtype=float))
-    rng = np.random.default_rng(42)
-    for _ in range(50):
-        handle.addRow(0., 100., n, indices, rng.integers(1, 10, size=n).astype(float))
-    handle.writeModel(str(tmp_path / "problem.mps"))
+    mps_text = _knapsack_mps(n=100, m=50, rhs=100.0, seed=42)
+    (tmp_path / "problem.mps").write_text(mps_text, encoding="utf-8")
     completed = subprocess.run(
         [HIGHS_ADAPTER_PATH, "problem.mps", "--solution_file", "solution.sol",
          "--time_limit", "0.000000001", "--random_seed", "0"],
         cwd=tmp_path, capture_output=True, timeout=30,
     )
     assert completed.returncode == 0, completed.stderr
-    facts = _parse_solution((tmp_path / "solution.sol").read_text())
+    sol_bytes = (tmp_path / "solution.sol").read_bytes()
+    facts = _parse_solution(sol_bytes.decode("utf-8"))
     assert facts["model_status"] == "HighsModelStatus.kTimeLimit"
     assert facts["has_feasible_solution"] == "false"
     assert facts["objective_value"] == "none"
     assert facts["primals"] == []
+
+    # Adapter mapping preserves exit-0 / completed / math_status=not_solved semantics.
+    mps_bytes = (tmp_path / "problem.mps").read_bytes()
+    bundle = _minimal_bundle(
+        mps_bytes,
+        time_limit=1,
+        timeout_seconds=1 + PROCESS_IO_GRACE_SECONDS,
+    )
+    receipt = _synthetic_ok_receipt(bundle)
+    adapted = HIGHS_ADAPTER.adapt(bundle, receipt, {SOLUTION_PATH: sol_bytes})
+    assert adapted.execution_status == "completed"
+    assert adapted.math_status == "not_solved"
+    assert set(adapted.outputs) == {"solver_summary"}
+    assert adapted.outputs["solver_summary"]["termination_reason"] == "time_limit"
+    assert adapted.outputs["solver_summary"]["has_feasible_solution"] is False
 
 
 def _ge_row(rhs: float):
@@ -614,3 +644,546 @@ class TestUnboundedLowerFiniteUpperHighs:
         text = _tiny_model(lower=None, upper=5.0, obj_coeff=1.0)
         _, facts = _run_tiny_mps(tmp_path, text)
         assert facts["model_status"] == "HighsModelStatus.kUnbounded"
+
+
+def _parse_stage_logs(stderr_text: str) -> list[dict[str, str]]:
+    """提取 ies-highs-solver 写入 stderr 的结构化阶段日志。"""
+    records: list[dict[str, str]] = []
+    for line in stderr_text.splitlines():
+        if not line.startswith("ies-highs-solver: "):
+            continue
+        tokens = line.removeprefix("ies-highs-solver: ").split()
+        if not any(tok.startswith("stage=") for tok in tokens):
+            continue
+        entry: dict[str, str] = {}
+        for tok in tokens:
+            key, sep, value = tok.partition("=")
+            if sep:
+                entry[key] = value
+        records.append(entry)
+    return records
+
+
+def _minimal_bundle(
+    mps_bytes: bytes,
+    *,
+    time_limit: int = 5,
+    timeout_seconds: int = 10,
+) -> SolverBundle:
+    """构造可由 SolverRuntime 与 HIGHS_ADAPTER 消费的最小合法 Bundle。"""
+    columns = mps_columns(mps_bytes)
+    zero = {"constant": 0.0, "terms": {}}
+    params = {
+        "assembly": {"id": "assembly-highs", "schema_version": "1.0.0"},
+        "components": {},
+        "financial_facts": {
+            "currency": "CNY",
+            "construction_total": dict(zero),
+            "annual_fixed_om": dict(zero),
+            "payments_applied": [],
+            "net_cashflows": [],
+            "construction_units": [],
+            "cost_items": [],
+            "amounts": [],
+            "cash_movements": [],
+            "assets": [],
+            "annual_operation": [],
+            "monthly_demand": [],
+            "tax_cash": {
+                "vat": [],
+                "vat_rules": [],
+                "refunds": [],
+                "income": [],
+                "depreciation": [],
+                "loss_balances": [],
+                "derived": [],
+            },
+            "annual_net_flows": [dict(zero)],
+            "comparison": {"mode": "absolute"},
+        },
+        "model_sources": {
+            "schema": "ies.model-sources",
+            "schema_version": "1.0.0",
+            "sources": {},
+            "groups": [],
+            "outputs": [],
+        },
+        "generator": GENERATOR_REF,
+        "objective_offset": 0.0,
+        "objective_unit": "CNY",
+        "outputs": ["solution", "metrics"],
+        "precision": "medium",
+        "result_adapter": ADAPTER_REF,
+        "seed": 0,
+        "solver": SOLVER_REF,
+        "step_series": [],
+        "system_series": [],
+        "unit_map": dict.fromkeys(columns, "kW"),
+    }
+    files = fixture_files(
+        {
+            PROBLEM_PATH: mps_bytes,
+            PARAMETERS_PATH: (json.dumps(params, sort_keys=True) + "\n").encode("utf-8"),
+        }
+    )
+    manifest = SolverBundleManifest(
+        bundle={"generator": GENERATOR_REF, "solver": SOLVER_REF},
+        inputs=[
+            {"path": PROBLEM_PATH, "media_type": "application/mps"},
+            {"path": PARAMETERS_PATH, "media_type": "application/json"},
+            {"path": "input/parameters.jsonl", "media_type": "application/x-ndjson"},
+        ],
+        command={
+            "executor": EXECUTOR_REF,
+            "executable": SOLVER_REF,
+            "arguments": [
+                PROBLEM_PATH,
+                "--solution_file",
+                SOLUTION_PATH,
+                "--time_limit",
+                str(time_limit),
+                "--random_seed",
+                "0",
+            ],
+            "working_directory": ".",
+            "timeout_seconds": timeout_seconds,
+            "network": False,
+            "success_exit_codes": [0],
+        },
+        outputs=[
+            {
+                "path": SOLUTION_PATH,
+                "media_type": "text/plain",
+                "required": True,
+            }
+        ],
+        result_adapter=ADAPTER_REF,
+        extensions={},
+    )
+    return SolverBundle(manifest=manifest, files=files)
+
+
+def _synthetic_ok_receipt(bundle: SolverBundle) -> ExecutionReceipt:
+    return ExecutionReceipt(
+        receipt_id="receipt-shim",
+        bundle_id="bundle-shim",
+        assembly_id="assembly-shim",
+        calculation_config_id="config-shim",
+        attempt_id="attempt-shim",
+        generator_ref=bundle.manifest.bundle["generator"],
+        solver_ref=bundle.manifest.bundle["solver"],
+        executor_ref=EXECUTOR_REF,
+        executable_ref=HIGHS_EXECUTABLE_REF,
+        result_adapter_ref=ADAPTER_REF,
+        status="succeeded",
+        exit_code=0,
+        termination_reason="exited",
+        started_at="2026-09-24T00:00:00Z",
+        ended_at="2026-09-24T00:00:01Z",
+    )
+
+
+def _make_delayed_wrapper(
+    tmp_path: Path,
+    *,
+    read_delay: float = 0.0,
+    write_delay: float = 0.0,
+    write_residual: bool = False,
+) -> LocalProcessProvider:
+    """构造测试专属可执行替身：调用真实 ies-highs-solver 并在读写期制造可控延迟。"""
+    wrapper = tmp_path / "delayed_highs_wrapper.py"
+    script = f"""#!/usr/local/bin/python
+from __future__ import annotations
+
+import importlib.machinery
+import importlib.util
+import sys
+import time
+
+import highspy
+
+loader = importlib.machinery.SourceFileLoader("ies_highs_under_test", {HIGHS_ADAPTER_PATH!r})
+spec = importlib.util.spec_from_loader(loader.name, loader)
+assert spec is not None
+mod = importlib.util.module_from_spec(spec)
+loader.exec_module(mod)
+
+is_solve = len(sys.argv) == 8 and sys.argv[1] not in ("--version", "--self-test")
+if is_solve:
+    real_highs = highspy.Highs
+    orig_solution_text = mod._solution_text
+
+    class _WrappedHighs:
+        def __init__(self) -> None:
+            self._inner = real_highs()
+
+        def readModel(self, path: str):
+            if {read_delay!r} > 0:
+                time.sleep({read_delay!r})
+            return self._inner.readModel(path)
+
+        def setOptionValue(self, key: str, value):
+            if key == "time_limit":
+                sys.stderr.write(f"test-wrapper: observed_time_limit={{value!r}}\\n")
+                sys.stderr.flush()
+            return self._inner.setOptionValue(key, value)
+
+        def __getattr__(self, name: str):
+            return getattr(self._inner, name)
+
+    def _wrapped_solution_text(handle, status) -> str:
+        if {write_residual!r}:
+            sol_path = sys.argv[3]
+            with open(sol_path, "w", encoding="utf-8") as handle_out:
+                handle_out.write(
+                    "HIGHS_SOLUTION_V1\\n"
+                    "model_status: HighsModelStatus.kOptimal\\n"
+                    "has_feasible_solution: true\\n"
+                    "objective_value: 0.0\\n"
+                    "best_bound: 0.0\\n"
+                    "relative_gap: 0.0\\n"
+                    "num_columns: 1\\n"
+                    "primal:\\n"
+                    "0: 0.0\\n"
+                )
+        if {write_delay!r} > 0:
+            time.sleep({write_delay!r})
+        return orig_solution_text(handle, status)
+
+    highspy.Highs = _WrappedHighs
+    mod._solution_text = _wrapped_solution_text
+
+sys.exit(mod.main(sys.argv[1:]))
+"""
+    wrapper.write_text(script, encoding="utf-8")
+    wrapper.chmod(0o755)
+    return LocalProcessProvider(
+        _descriptor(),
+        (
+            LocalExecutable(
+                ref=HIGHS_EXECUTABLE_REF,
+                path=str(wrapper),
+                argv_validator=validate_highs_arguments,
+                readiness=_readiness(),
+            ),
+        ),
+        base_environ={},
+    )
+
+
+def _policy(*, max_timeout_seconds: float) -> DeploymentPolicy:
+    return DeploymentPolicy(
+        executables=(HIGHS_EXECUTABLE_REF,),
+        environment_vars=(),
+        max_timeout_seconds=max_timeout_seconds,
+        max_memory_mib=4096,
+        max_cpu_cores=4,
+        allow_network=False,
+        max_output_files=16,
+        max_output_bytes=8_388_608,
+    )
+
+
+def test_deployment_policy_timeout_boundary_via_runtime(monkeypatch) -> None:
+    """完整进程预算等于部署上限时正常执行，超过 1 秒则在启动前拒绝且不裁剪时限。"""
+    artifact, models, materialized, finance, base_config = _campus_inputs()
+    config = CalculationConfig(
+        mode=base_config.mode,
+        generator=base_config.generator,
+        solver=base_config.solver,
+        precision=base_config.precision,
+        time_limit_seconds=30,
+        outputs=list(base_config.outputs),
+        seed=base_config.seed,
+    )
+    provider = build_registry((HIGHS_MILP_PROVIDER,)).resolve(config)
+    bundle = provider.generate(artifact, models, materialized, finance, config, _campus_evaluation())
+    expected_timeout = 30 + PROCESS_IO_GRACE_SECONDS
+    assert bundle.manifest.command["timeout_seconds"] == expected_timeout == 630
+    args = list(bundle.manifest.command["arguments"])
+    assert args[args.index("--time_limit") + 1] == "30"
+
+    # 边界放行：max_timeout_seconds == 630
+    receipt_ok, outputs_ok = _runtime(policy=_policy(max_timeout_seconds=expected_timeout)).run(
+        bundle, _attempt()
+    )
+    assert receipt_ok.status == "succeeded"
+    assert receipt_ok.exit_code == 0
+    assert SOLUTION_PATH in outputs_ok
+
+    # 超限拒绝：max_timeout_seconds == 629，启动前拒绝，零 Popen 调用，不裁剪用户求解时限
+    rej_runtime = _runtime(policy=_policy(max_timeout_seconds=expected_timeout - 1))
+    popen_calls: list[object] = []
+    real_popen = subprocess.Popen
+
+    def _spy_popen(*args_p, **kwargs_p):
+        popen_calls.append(args_p)
+        return real_popen(*args_p, **kwargs_p)
+
+    monkeypatch.setattr(subprocess, "Popen", _spy_popen)
+    receipt_rej, outputs_rej = rej_runtime.run(bundle, _attempt())
+    assert receipt_rej.status == "policy_rejected"
+    assert str(expected_timeout - 1) in receipt_rej.error
+    assert outputs_rej == {}
+    assert popen_calls == []
+
+
+def test_stage_timing_logs_cover_success_read_and_write_failures(tmp_path: Path) -> None:
+    """stderr 分阶段记录单调耗时，并可区分正常结束、读模失败和写解失败。"""
+    mps_text = _tiny_model(lower=0.0, upper=5.0, obj_coeff=1.0)
+    (tmp_path / "problem.mps").write_text(mps_text, encoding="utf-8")
+
+    # 正常完成：read_model -> run -> solution_write 三阶段均写 start/end 与 status=ok
+    ok_proc = subprocess.run(
+        [
+            HIGHS_ADAPTER_PATH,
+            "problem.mps",
+            "--solution_file",
+            "solution.sol",
+            "--time_limit",
+            "5",
+            "--random_seed",
+            "0",
+        ],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert ok_proc.returncode == 0, ok_proc.stderr
+    ok_records = _parse_stage_logs(ok_proc.stderr)
+    assert [(r["stage"], r["event"]) for r in ok_records] == [
+        ("read_model", "start"),
+        ("read_model", "end"),
+        ("run", "start"),
+        ("run", "end"),
+        ("solution_write", "start"),
+        ("solution_write", "end"),
+    ]
+    for rec in ok_records:
+        if rec["event"] == "end":
+            assert rec["status"] == "ok"
+            elapsed = float(rec["elapsed_seconds"])
+            assert math.isfinite(elapsed) and elapsed >= 0.0
+
+    # 读模失败：read_model 报 status=error，不进入 run/solution_write
+    err_read = subprocess.run(
+        [
+            HIGHS_ADAPTER_PATH,
+            "missing.mps",
+            "--solution_file",
+            "missing_out.sol",
+            "--time_limit",
+            "5",
+            "--random_seed",
+            "0",
+        ],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert err_read.returncode == 2
+    assert not (tmp_path / "missing_out.sol").exists()
+    read_records = _parse_stage_logs(err_read.stderr)
+    assert [(r["stage"], r["event"]) for r in read_records] == [
+        ("read_model", "start"),
+        ("read_model", "end"),
+    ]
+    assert read_records[1]["status"] == "error"
+    assert float(read_records[1]["elapsed_seconds"]) >= 0.0
+
+    # 写解失败：read_model/run 为 ok，solution_write 报 status=error
+    err_write = subprocess.run(
+        [
+            HIGHS_ADAPTER_PATH,
+            "problem.mps",
+            "--solution_file",
+            "missing_dir/solution.sol",
+            "--time_limit",
+            "5",
+            "--random_seed",
+            "0",
+        ],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert err_write.returncode == 2
+    write_records = _parse_stage_logs(err_write.stderr)
+    assert [(r["stage"], r["event"]) for r in write_records] == [
+        ("read_model", "start"),
+        ("read_model", "end"),
+        ("run", "start"),
+        ("run", "end"),
+        ("solution_write", "start"),
+        ("solution_write", "end"),
+    ]
+    assert [r["status"] for r in write_records if r["event"] == "end"] == ["ok", "ok", "error"]
+
+
+def test_delayed_read_and_write_consume_process_grace_while_keeping_solve_limit(
+    tmp_path: Path,
+) -> None:
+    """可控读模和写解延迟占用外层宽限；求解器收到的 time_limit 仍保持原样。"""
+    mps_bytes = _tiny_model(lower=1.0, upper=5.0, obj_coeff=2.0).encode("utf-8")
+    bundle = _minimal_bundle(mps_bytes, time_limit=1, timeout_seconds=10)
+    provider = _make_delayed_wrapper(tmp_path, read_delay=0.6, write_delay=0.6)
+    receipt, outputs = _runtime(provider=provider, policy=_policy(max_timeout_seconds=10)).run(
+        bundle, _attempt()
+    )
+    assert receipt.status == "succeeded", receipt.stderr
+    assert receipt.exit_code == 0
+    assert SOLUTION_PATH in outputs
+    assert "test-wrapper: observed_time_limit=1.0" in receipt.stderr
+
+    records = _parse_stage_logs(receipt.stderr)
+    ends = {r["stage"]: r for r in records if r["event"] == "end"}
+    assert set(ends) == {"read_model", "run", "solution_write"}
+    assert all(r["status"] == "ok" for r in ends.values())
+    assert float(ends["read_model"]["elapsed_seconds"]) >= 0.5
+    assert float(ends["solution_write"]["elapsed_seconds"]) >= 0.5
+
+
+def test_excessive_read_delay_triggers_outer_timeout_and_logs_stage(tmp_path: Path) -> None:
+    """超过外层宽限的读模延迟仍触发真实监督超时，日志可定位中断在 read_model。"""
+    mps_bytes = _tiny_model(lower=1.0, upper=5.0, obj_coeff=2.0).encode("utf-8")
+    bundle = _minimal_bundle(mps_bytes, time_limit=5, timeout_seconds=2)
+    provider = _make_delayed_wrapper(tmp_path, read_delay=10.0)
+    receipt, outputs = _runtime(provider=provider, policy=_policy(max_timeout_seconds=10)).run(
+        bundle, _attempt()
+    )
+    assert receipt.status == "timed_out"
+    assert receipt.termination_reason == "timeout"
+    assert outputs == {}
+    records = _parse_stage_logs(receipt.stderr)
+    assert ("read_model", "start") in [(r["stage"], r["event"]) for r in records]
+    assert ("read_model", "end") not in [(r["stage"], r["event"]) for r in records]
+    assert all(r["stage"] != "run" for r in records)
+
+    adapted = HIGHS_ADAPTER.adapt(bundle, receipt, outputs)
+    assert adapted.execution_status == "timed_out"
+    assert adapted.math_status == "not_solved"
+    assert dict(adapted.outputs) == {}
+
+
+def test_excessive_write_delay_with_residual_file_never_upgrades(tmp_path: Path) -> None:
+    """写出阶段超时即便留下残留解文件，也保持 timed_out 且绝不升级为成功。"""
+    mps_bytes = _tiny_model(lower=1.0, upper=5.0, obj_coeff=2.0).encode("utf-8")
+    bundle = _minimal_bundle(mps_bytes, time_limit=5, timeout_seconds=2)
+    provider = _make_delayed_wrapper(tmp_path, write_delay=10.0, write_residual=True)
+    receipt, outputs = _runtime(provider=provider, policy=_policy(max_timeout_seconds=10)).run(
+        bundle, _attempt()
+    )
+    assert receipt.status == "timed_out"
+    assert receipt.termination_reason == "timeout"
+    records = _parse_stage_logs(receipt.stderr)
+    events = [(r["stage"], r["event"]) for r in records]
+    assert ("read_model", "end") in events
+    assert ("run", "end") in events
+    assert ("solution_write", "start") in events
+    assert ("solution_write", "end") not in events
+
+    # 即便 SolverRuntime 采回磁盘上残存的 solution.sol，ResultAdapter 也不升级为成功。
+    assert SOLUTION_PATH in outputs
+    adapted = HIGHS_ADAPTER.adapt(bundle, receipt, outputs)
+    assert adapted.execution_status == "timed_out"
+    assert adapted.math_status == "not_solved"
+    assert dict(adapted.outputs) == {}
+
+
+@pytest.mark.parametrize("reason", ["cancelled", "fenced"])
+def test_outer_cancel_or_fence_during_delayed_read_preserves_status_and_stage_log(
+    tmp_path: Path,
+    reason: str,
+) -> None:
+    """运行中取消或租约隔离正确终止整组、定位中断阶段且不升级残留解。"""
+    mps_bytes = _tiny_model(lower=1.0, upper=5.0, obj_coeff=2.0).encode("utf-8")
+    bundle = _minimal_bundle(mps_bytes, time_limit=5, timeout_seconds=30)
+    provider = _make_delayed_wrapper(tmp_path, read_delay=10.0)
+    flag = threading.Event()
+    timer = threading.Timer(0.4, flag.set)
+    timer.start()
+    try:
+        receipt, outputs = _runtime(
+            provider=provider, policy=_policy(max_timeout_seconds=30)
+        ).run(bundle, _attempt(), stop=lambda: reason if flag.is_set() else None)
+    finally:
+        timer.cancel()
+    assert receipt.status == reason
+    assert receipt.termination_reason == reason
+    assert outputs == {}
+    records = _parse_stage_logs(receipt.stderr)
+    events = [(r["stage"], r["event"]) for r in records]
+    assert ("read_model", "start") in events
+    assert ("read_model", "end") not in events
+    adapted = HIGHS_ADAPTER.adapt(bundle, receipt, outputs)
+    assert adapted.execution_status == reason
+    assert adapted.math_status == "not_solved"
+    assert dict(adapted.outputs) == {}
+
+
+def _knapsack_mps(*, n: int, m: int, rhs: float, seed: int) -> str:
+    """用统一 write_mps 格式生成确定性二维多背包 0-1 MIP（x=0 恒可行）。"""
+    import numpy as np
+
+    rng = np.random.default_rng(seed)
+    vars_ = tuple(
+        LinearVariable(name=f"x{i:03d}", lower=0.0, upper=1.0, kind="binary")
+        for i in range(n)
+    )
+    rows = []
+    for row_idx in range(m):
+        weights = rng.integers(1, 10, size=n)
+        terms = tuple(((f"x{i:03d}", 0), float(weights[i])) for i in range(n))
+        rows.append(
+            LinearConstraint(
+                name=f"cap_{row_idx:03d}",
+                expression=LinearExpression(terms=terms),
+                sense="le",
+                rhs=rhs,
+            )
+        )
+    obj_terms = tuple(((f"x{i:03d}", 0), -float(i + 1)) for i in range(n))
+    model = LinearModel(
+        variables=vars_,
+        constraints=tuple(rows),
+        objective=LinearExpression(terms=obj_terms),
+        sense="minimize",
+    )
+    text, _ = write_mps(model)
+    return text
+
+
+def test_native_time_limit_with_incumbent_end_to_end_via_runtime() -> None:
+    """真实 HiGHS 在 1 秒原生时限内带可行解正常退出并经 ResultAdapter 映射为 feasible。"""
+    mps_bytes = _knapsack_mps(n=240, m=80, rhs=120.0, seed=7).encode("utf-8")
+
+    total_budget = 1 + PROCESS_IO_GRACE_SECONDS
+    bundle = _minimal_bundle(mps_bytes, time_limit=1, timeout_seconds=total_budget)
+    receipt, outputs = _runtime(policy=_policy(max_timeout_seconds=total_budget)).run(
+        bundle, _attempt()
+    )
+    assert receipt.status == "succeeded", receipt.stderr
+    assert receipt.exit_code == 0
+    assert SOLUTION_PATH in outputs
+    sol_text = read_content(outputs[SOLUTION_PATH]).decode("utf-8")
+    facts = _parse_solution(sol_text)
+    assert facts["model_status"] == "HighsModelStatus.kTimeLimit"
+    assert facts["has_feasible_solution"] == "true"
+
+    adapted = HIGHS_ADAPTER.adapt(bundle, receipt, outputs)
+    assert adapted.execution_status == "completed"
+    assert adapted.math_status == "feasible"
+    summary = adapted.outputs["solver_summary"]
+    assert summary["termination_reason"] == "time_limit"
+    assert summary["has_feasible_solution"] is True
+    assert math.isfinite(summary["objective_value"])
+    assert math.isfinite(summary["best_bound"])
+    assert math.isfinite(summary["relative_gap"])
+    assert summary["relative_gap"] > 0.0
+    assert adapted.outputs["solution"]["objective_value"] == summary["objective_value"]

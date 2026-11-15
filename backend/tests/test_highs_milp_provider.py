@@ -47,8 +47,10 @@ from iesplan.computation.generators.highs_milp import (
     ADAPTER_REF,
     EXECUTOR_REF,
     GENERATOR_REF,
+    PROCESS_IO_GRACE_SECONDS,
     SOLVER_REF,
 )
+from iesplan.core.yamlmini import load as load_yaml
 from iesplan.devices import init_registry, list_devices
 from iesplan.finance import effective_from_yaml
 from iesplan.modeling import build_math_contribution
@@ -187,8 +189,8 @@ def test_campus_generate_full_bundle() -> None:
         "0",
     ]
     assert command["working_directory"] == "."
-    # 求解600秒不变；独立壁钟允许启动/读取/结果写出，不与原生时限竞速。
-    assert command["timeout_seconds"] == 660
+    # 求解 600 秒原样传入；PROCESS_IO_GRACE_SECONDS = 600 仅作启停/读写宽限。
+    assert command["timeout_seconds"] == 1200
     assert command["network"] is False
     assert list(command["success_exit_codes"]) == [0]
     assert manifest.outputs == (
@@ -237,6 +239,44 @@ def test_generate_is_byte_deterministic_and_writes_nothing(
     monkeypatch.chdir(tmp_path)
     _resolved_generate()
     assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize("limit", [1, 15, 600, 43200])
+def test_timeout_budget_preserves_user_time_limit_and_freezes_deterministically(limit: int) -> None:
+    """用户求解时限原样下传 HiGHS，外层预算固定 +600，且冻结输出逐字节确定。"""
+    assert PROCESS_IO_GRACE_SECONDS == 600
+    artifact, models, materialized, finance, base_config, evaluation = _campus_inputs(seed=42)
+    config = CalculationConfig(
+        mode=base_config.mode,
+        generator=base_config.generator,
+        solver=base_config.solver,
+        precision=base_config.precision,
+        time_limit_seconds=limit,
+        outputs=list(base_config.outputs),
+        seed=base_config.seed,
+    )
+    provider = build_registry((HIGHS_MILP_PROVIDER,)).resolve(config)
+    first = provider.generate(artifact, models, materialized, finance, config, evaluation)
+    second = provider.generate(artifact, models, materialized, finance, config, evaluation)
+
+    command = first.manifest.command
+    args = list(command["arguments"])
+    limit_idx = args.index("--time_limit")
+    assert args[limit_idx + 1] == str(limit)
+    assert command["timeout_seconds"] == limit + 600
+    assert args[args.index("--random_seed") + 1] == "42"
+
+    exported_first = export_bundle_files(first)
+    exported_second = export_bundle_files(second)
+    assert content_bytes(exported_first) == content_bytes(exported_second)
+
+    frozen_bytes = content_bytes({"bundle.yaml": exported_first["bundle.yaml"]})["bundle.yaml"]
+    frozen_manifest = load_yaml(frozen_bytes.decode("utf-8"))
+    assert frozen_manifest["command"]["timeout_seconds"] == limit + 600
+    frozen_args = frozen_manifest["command"]["arguments"]
+    assert frozen_args[frozen_args.index("--time_limit") + 1] == str(limit)
+    meta = json.loads(materialized_file(first, "input/parameters.json").decode("utf-8"))
+    assert meta["seed"] == 42
 
 
 def _config_with(**kwargs) -> CalculationConfig:

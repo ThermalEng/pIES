@@ -52,9 +52,11 @@ ASSEMBLY_SCHEMA_VERSION = "1.0.0"
 #: seed 为 null 时 descriptor 明示的固定种子。
 FIXED_SEED = 0
 
-#: 本地进程额外壁钟预算，用于Python启动、MPS读取与结果写出。
-#: HiGHS实际求解时限仍为用户请求值；超出此预算仍由执行器强制终止。
-PROCESS_IO_GRACE_SECONDS = 60
+#: 本地进程额外壁钟预算（秒），用于进程启动、``readModel``、求解正常收尾、
+#: 解内容生成与文件写出；总监督壁钟 ``command.timeout_seconds`` 为
+#: ``time_limit_seconds + 600``。HiGHS 内部 ``time_limit`` 仍原样使用用户
+#: 请求值；该 600 秒仍为有限预算，超慢输入仍可能触发外层进程监督超时。
+PROCESS_IO_GRACE_SECONDS = 600
 
 #: 本 provider 支持的输出请求（metrics 为 ResultAdapter 后处理请求，
 #: 不对应求解器第二个原始文件）。
@@ -342,6 +344,7 @@ __all__ = [
     "HighsMilpProvider",
     "PARAMETERS_PATH",
     "PROBLEM_PATH",
+    "PROCESS_IO_GRACE_SECONDS",
     "SOLUTION_MEDIA_TYPE",
     "SOLUTION_PATH",
     "SOLVER_REF",
