@@ -1,6 +1,7 @@
 """M3/M4: bounded content, positional records and no full-result copies."""
 from __future__ import annotations
 
+import gc
 import io
 import json
 import weakref
@@ -184,6 +185,34 @@ def test_parameter_records_keep_solver_positions_identity_and_sum_order():
     assert list(result["series"]["state"]["values"]) == [1.0, 1.0, 1.0]
     assert [entry["name"] for entry in result["variables"]] == list(units)
     assert result["epigraph_inflated"] is False
+
+
+@pytest.mark.parametrize("close_early", [False, True])
+def test_parameter_stream_releases_facts_without_cyclic_gc(close_early):
+    from test_compact_final_matrix import _public_model
+
+    class Terms(dict):
+        pass
+
+    def stream():
+        terms = Terms(fixed=1.0)
+        facts = {"amount": {"constant": 0.0, "terms": terms}}
+        records = parameter_records(SparseModel.from_public(_public_model()), {}, {}, (), facts,
+                                    {"groups": []})
+        return records, weakref.ref(terms)
+
+    was_enabled = gc.isenabled()
+    gc.disable()
+    try:
+        records, terms_ref = stream()
+        for record in records:
+            if close_early and record[0] == "expression":
+                records.close()
+                break
+        assert terms_ref() is None
+    finally:
+        if was_enabled:
+            gc.enable()
 
 
 def test_parameter_records_epigraph_tightness_check():

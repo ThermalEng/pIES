@@ -37,7 +37,7 @@ import json
 import math
 import time
 from collections import Counter
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from datetime import datetime, timedelta
 from types import MappingProxyType
 from typing import Any
@@ -438,6 +438,24 @@ def step_series_declarations(
     return _new_builder(artifact, models, materialized, finance, evaluation).step_series()
 
 
+def _sampled_stop_checkpoint(stop: StopProbe | None) -> Callable[[], None]:
+    """The analysis keeps this callback without keeping the builder alive."""
+    ticks = 0
+
+    def checkpoint() -> None:
+        nonlocal ticks
+        if stop is None:
+            return
+        ticks += 1
+        if ticks % 128:
+            return
+        reason = read_stop_reason(stop)
+        if reason is not None:
+            raise ComputationUnavailableError("项目模型生成已停止", reason=reason)
+
+    return checkpoint
+
+
 class _ProjectBuilder:
     """项目级构造的内部编排（实例方法只传 derived 状态，直接输入只进厂）。"""
 
@@ -457,7 +475,7 @@ class _ProjectBuilder:
         system_equations: Mapping[str, Any] | None = None,
     ) -> None:
         self.stop = stop
-        self._stop_ticks = 0
+        self._checkpoint = _sampled_stop_checkpoint(stop)
         self._frozen_amounts: dict[int, tuple[_AffineAcc, dict[str, object]]] = {}
         self.doc = doc
         self.devices = devices
@@ -582,17 +600,6 @@ class _ProjectBuilder:
         for var_name, var in self.plan_vars.items():
             key = (var["device_ref"], var["parameter"])
             self.bound_prop[key] = var_name
-
-    def _checkpoint(self) -> None:
-        """生成器协作停止；按有限步数采样，不引入线程或进程管理。"""
-        if self.stop is None:
-            return
-        self._stop_ticks += 1
-        if self._stop_ticks % 128:
-            return
-        reason = read_stop_reason(self.stop)
-        if reason is not None:
-            raise ComputationUnavailableError("项目模型生成已停止", reason=reason)
 
     # ------------------------------------------------------------------
     # 变量声明
@@ -5211,6 +5218,11 @@ class _ProjectBuilder:
             if exc.model_source is None:
                 exc.model_source = self.source_trace.location()
             raise
+        finally:
+            # The suspended tax generators hold self in their frames. Their
+            # accumulated facts are already owned by the builder, not the iterators.
+            self._vat_iterators.clear()
+            self._income_iterators.clear()
 
     def _build(self) -> tuple[SparseModel, Mapping[str, str], str]:
         if self.stop is not None:
