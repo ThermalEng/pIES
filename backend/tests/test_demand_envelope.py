@@ -1,8 +1,10 @@
 """Exact demand epigraphs: public synthetic inputs, actual HiGHS, counterexamples."""
 from __future__ import annotations
 
+import gc
 import json
 import re
+import weakref
 from collections.abc import Mapping, Sequence
 from types import SimpleNamespace
 
@@ -20,6 +22,30 @@ from iesplan.computation.generators.demand import monotone_demand_meters
 from iesplan.computation.generators.parameters import RECORDS_PATH
 from iesplan.computation.result_adapters.highs import ADAPTER_REF, HIGHS_ADAPTER
 from iesplan.core.content import text_lines
+
+
+@pytest.mark.parametrize(("vat", "income"), [(False, False), (True, False), (False, True), (True, True)])
+def test_generation_releases_builder_before_streaming_without_cyclic_gc(monkeypatch, vat, income):
+    builder_refs = []
+    new_builder = project._new_builder
+
+    def observe_builder(*args, **kwargs):
+        builder = new_builder(*args, **kwargs)
+        builder_refs.append(weakref.ref(builder))
+        return builder
+
+    monkeypatch.setattr(project, "_new_builder", observe_builder)
+    inputs = _inputs(vat=vat, income=income)
+    was_enabled = gc.isenabled()
+    gc.disable()
+    try:
+        bundle = HIGHS_MILP_PROVIDER.generate(*inputs, stop=lambda: None)
+        assert len(builder_refs) == 1
+        assert builder_refs[0]() is None
+        assert next(bundle.files["input/problem.mps"].iter_chunks()).startswith(b"NAME")
+    finally:
+        if was_enabled:
+            gc.enable()
 
 
 def _solved(inputs, tmp_path):
