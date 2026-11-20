@@ -18,7 +18,6 @@ from iesplan.finance import (
     freeze_comparison,
     parse_amount_period,
 )
-from iesplan.storage import get_object
 from iesplan.tasks import InvalidRequestError
 
 
@@ -48,7 +47,10 @@ def resolve_comparison(db, actor, evaluation, currency):
                 params={"detail": "基准须为已完成且有封存财务结果的任务"},
                 location={"object_type": "task", "field": field + ".task_id"},
             )
-        content = json.loads(get_object(db, evidence.object_id))
+        # Results also uses task views; resolve its public reader at use time.
+        from iesplan.application.results import evidence_content
+
+        content = evidence_content(db, evidence)
         financial = content.get("financial_evaluation")
         if financial is None or financial["status"] != "evaluated":
             raise InvalidRequestError(

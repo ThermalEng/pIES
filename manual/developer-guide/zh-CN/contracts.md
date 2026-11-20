@@ -162,7 +162,7 @@ kind是必填判别字段，只接受所属形态的字段。series_id在同一�
 
 `baseline` 恰选：
 
-- `{kind: task_result, task_id, evidence_id}`：明确指定可访问的已封存可用结果。task_id/evidence_id 沿用已有公开ID类型；不得填当前任务、运行中任务、latest或可变项目草稿。提交用例解析该精确证据，记录其任务、attempt及结果对象引用；不额外计算一个“零容量基准”。
+- `{kind: task_result, task_id, evidence_id}`：明确指定可访问的已封存可用结果。task_id/evidence_id 沿用已有公开ID类型；不得填当前任务、运行中任务、latest或可变项目草稿。提交用例从该精确证据的[查询投影](modules/worker.md#阶段产物与恢复)读取封存财务事实，记录其任务、attempt及原证据对象引用；无索引时按现有投影规则流式读取，不额外计算一个“零容量基准”。
 - `{kind: declared, currency, evaluation_years, annual_net_flows, facts}`：用户明确提供并确认的数据。currency 与本项目相同，evaluation_years 与本次 E 相同。difference 模式下 annual_net_flows 必须为按t=0..E排列的E+1个有符号金额字符串；reference模式此字段必须为null，不能伪造全零基准现金流。facts 为下述已声明基准量表，不代表平台证明其物理可行。
 
 Task baseline的评价E和币种须与本次相同；difference模式还须已有完整财务现金流。不能只因状态completed就推断有可用评价，也不把缺失税额当成零。双方建设/运行安排或税务配置不必相同，但差异必须在本次确认中公开说明，不要求财务快照对象ID相等。
