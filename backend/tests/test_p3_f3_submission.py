@@ -3,6 +3,7 @@
 
 import json
 
+import pytest
 from auth_helpers import make_user
 from test_task_draft_load import (  # noqa: F401,F811
     _clean_state,
@@ -17,9 +18,11 @@ from iesplan import results as results_domain
 from iesplan import tasks as tasks_domain
 from iesplan.application import packages as packages_uc
 from iesplan.application.projects import load_content_object
+from iesplan.application.results import content as result_content
 from iesplan.finance import comparison_as_declared, freeze_comparison, parse_comparison
 from iesplan.project import get_draft
 from iesplan.storage import get_object, put_object
+from iesplan.storage import service as storage_service
 
 
 def _source(client, db):
@@ -83,24 +86,47 @@ def _evaluation(tid, evidence_id):
     }
 
 
-def test_submit_freezes_exact_evidence_not_latest_and_load_as_declared(client, db):
+@pytest.mark.parametrize("indexed", [True, False], ids=["projection", "stream"])
+def test_submit_freezes_exact_evidence_not_latest_and_load_as_declared(client, db, monkeypatch, indexed):
     pid, tid, user, evidence = _source(client, db)
+    source = evidence[0]
+    if indexed:
+        result_content.index_evidence_projection(db, source.id)
+    whole_read = storage_service.read_content
+    stream_read = result_content.get_object_content
+    fully_read = []
+    streamed = []
+
+    def observe_full_read(content):
+        if content.object_id == source.object_id:
+            fully_read.append(content.object_id)
+        return whole_read(content)
+
+    def stream_evidence(session, object_id):
+        streamed.append(object_id)
+        return stream_read(session, object_id)
+
+    monkeypatch.setattr(storage_service, "read_content", observe_full_read)
+    monkeypatch.setattr(result_content, "get_object_content", stream_evidence)
     revision = client.get(f"/api/projects/{pid}/config", headers=_h(client, user)).json()["revision"]
     status, body = _submit_task(
         client,
         pid,
         user,
         config={"config_revision": revision},
-        evaluation=_evaluation(tid, evidence[0].id),
+        evaluation=_evaluation(tid, source.id),
         idempotency_key="f3-frozen",
     )
     assert status == 201, body
     task = body["task"]
     snapshot = tasks_domain.get_snapshot(db, task["calc_snapshot_id"])
     comparison = snapshot.evaluation["comparison"]
+    assert fully_read == []
+    assert streamed == ([] if indexed else [source.object_id])
+    assert comparison["baseline_net_flows"] == ("-100", "60")
     assert comparison["facts"]["budget"]["values"] == ("10",)
-    assert comparison["baseline_source"]["evidence_id"] == evidence[0].id
-    assert comparison["baseline_source"]["object_id"] == evidence[0].object_id
+    assert comparison["baseline_source"]["evidence_id"] == source.id
+    assert comparison["baseline_source"]["object_id"] == source.object_id
     response = client.post(f"/api/projects/{pid}/tasks/{task['id']}/load-draft", headers=_h(client, user))
     assert response.status_code == 200, response.text
     draft = client.get(f"/api/projects/{pid}", headers=_h(client, user)).json()["draft"]["content"]
