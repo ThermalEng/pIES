@@ -66,7 +66,6 @@ export function mapStorageStatusDto(dto: StorageStatusResponseDto): StorageStatu
   return {
     total_bytes: usageBytes,
     used_bytes: usageBytes,
-    quota_bytes: null,
     object_count: dto.objects.count,
   }
 }

@@ -901,7 +901,6 @@ export const messagesEn: Record<string, string> = {
   'ies.admin.reset_done_confirm': 'I have copied/saved, confirm',
   'ies.admin.reset_done_hint': 'Please copy or screenshot now. This password is shown only once.',
   'ies.admin.storage_used': 'Used',
-  'ies.admin.storage_quota': 'Quota',
   'ies.admin.object_count': 'Objects',
   'ies.admin.health_ok': 'OK',
   'ies.admin.health_degraded': 'Degraded',
@@ -983,6 +982,7 @@ export const messagesEn: Record<string, string> = {
   // -------------------------------------------------------------------------
   'ies.error.app': 'Application error: {reason}',
   'ies.error.internal': 'Internal server error',
+  'ies.diag.obj.write_failed': 'Object storage write failed ({reason})',
   'ies.error.http_exception': 'Request failed (HTTP {status_code})',
   'ies.error.invalid_request': 'Invalid request: {count} error(s)',
   'ies.error.route_not_found': 'The requested endpoint does not exist',
@@ -995,8 +995,6 @@ export const messagesEn: Record<string, string> = {
   'ies.error.no_assessment_available': 'No assessment record exists for this evidence package yet; please retry.',
   'ies.error.no_hourly_data': 'No hourly result data for this task (evidence package not submitted or without hourly refs).',
   'ies.error.rate_limited': 'Too many requests. Please retry later.',
-  'ies.error.upload_quota_exceeded': 'Upload exceeds quota ({used_bytes}/{quota_bytes} bytes). Please clean up and retry.',
-  'ies.error.meta_invalid': 'Dataset metadata or field info is invalid: {errors}',
   'ies.msg.err.generic': 'Operation failed: {reason}',
 
   // -------------------------------------------------------------------------
@@ -1065,7 +1063,6 @@ export const messagesEn: Record<string, string> = {
   'ies.diag.store.migration_needed': 'Project format {from} needs migration to {to}; migration will run automatically.',
   'ies.diag.store.migration_failed': 'Project migration failed: {reason}. The original file was kept.',
   'ies.diag.store.package_ok': 'Project package created: {path}.',
-  'ies.diag.store.quota_exceeded': 'Insufficient storage: {need} MB required, {avail} MB available.',
   'ies.diag.store.config_invalid': 'Calculation config {config} is invalid: {reason}.',
   'ies.diag.sec.sandbox_violation': 'Extension {ext_id} declares capabilities beyond the sandbox boundary and was rejected.',
   'ies.diag.perm.denied': 'No permission to perform {action}.',
@@ -1144,7 +1141,6 @@ export const messagesEn: Record<string, string> = {
   'ies.fix.store.config_invalid': 'Fix config {config} and revalidate',
   'ies.fix.store.corrupt': 'Continue with the backup created by automatic repair',
   'ies.fix.store.migration_failed': 'Contact the administrator about the failed migration',
-  'ies.fix.store.quota_exceeded': 'Clean up old projects or increase the storage quota',
   'ies.fix.perm.denied': 'Ask the project owner or administrator for access',
   'ies.fix.sec.sandbox_violation': 'Remove capability declarations beyond the sandbox boundary',
   'ies.fix.expr.syntax_error': 'Fix the expression syntax error',

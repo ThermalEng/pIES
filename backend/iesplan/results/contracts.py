@@ -21,13 +21,6 @@ class ResultConflictError(ConflictError):
     """结果索引/选中并发冲突（沿用基类诊断码，不新增码）。"""
 
 
-class EvidenceWriteDeniedError(ConflictError):
-    """证据写入资格校验失败(尝试状态/租约/fencing), HTTP 409。"""
-
-    code = "EVID-FENCE-001"
-    message_key = "ies.diag.evidence.write_denied"
-
-
 class EvidenceInvalidError(AppError):
     """证据载荷结构非法(无法打包), HTTP 400。"""
 

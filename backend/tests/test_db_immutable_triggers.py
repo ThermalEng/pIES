@@ -31,12 +31,11 @@ _REQUIRED_FRAGMENTS = (
     lambda t: f"CREATE FUNCTION tg_{t}_immutable() RETURNS trigger",
     lambda t: f"CREATE TRIGGER tg_{t}_no_update BEFORE UPDATE ON {t}",
     lambda t: f"CREATE TRIGGER tg_{t}_no_delete BEFORE DELETE ON {t}",
-    lambda t: f"REVOKE UPDATE, DELETE ON {t} FROM PUBLIC;",
 )
 
 
 def test_immutable_trigger_ddl_covers_all_tables() -> None:
-    """部署语句覆盖不可变表清单中每一张表(函数/两触发器/REVOKE)。"""
+    """部署语句覆盖不可变表清单中每一张表(函数/两触发器)。"""
     ddl = "\n\n".join(collect_trigger_statements())
     for table in collect_immutable_tables():
         for fragment in _REQUIRED_FRAGMENTS:

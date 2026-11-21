@@ -38,9 +38,7 @@ DEFAULT_DEPLOY_CONFIG_FILE = Path(__file__).resolve().parent.parent / "deploy" /
 _ALLOWED_DEPLOY_SECTIONS: dict[str, frozenset[str]] = {
     "worker": frozenset({"compute_slots", "io_slots"}),
     "session": frozenset({"ttl_minutes"}),
-    "storage": frozenset({"min_free_bytes"}),
     "rate_limit": frozenset({"enabled", "window_seconds", "max_requests", "exempt_paths"}),
-    "quotas": frozenset({"upload_bytes", "project_bytes"}),
     "solver": frozenset({
         "max_timeout_seconds",
         "max_memory_mib",
@@ -57,13 +55,10 @@ _APP_TOML_MAP: tuple[tuple[str, str, str], ...] = (
     ("compute_slots", "worker", "compute_slots"),
     ("io_slots", "worker", "io_slots"),
     ("session_ttl_minutes", "session", "ttl_minutes"),
-    ("storage_min_free_bytes", "storage", "min_free_bytes"),
     ("rate_limit_enabled", "rate_limit", "enabled"),
     ("rate_limit_window_seconds", "rate_limit", "window_seconds"),
     ("rate_limit_max_requests", "rate_limit", "max_requests"),
     ("rate_limit_exempt_paths", "rate_limit", "exempt_paths"),
-    ("upload_quota_bytes", "quotas", "upload_bytes"),
-    ("project_quota_bytes", "quotas", "project_bytes"),
     ("solver_max_timeout_seconds", "solver", "max_timeout_seconds"),
     ("solver_max_memory_mib", "solver", "max_memory_mib"),
     ("solver_max_cpu_cores", "solver", "max_cpu_cores"),
@@ -148,15 +143,12 @@ class Settings(BaseSettings):
 
     # --- 应用运行层：部署文件唯一权威（禁环境变量，禁程序内默认）---
     # 有效性约束只设在本边界一次：槽数/窗口/上限/TTL/资源上限/表单初值为正数，
-    # 存储阈值与配额为非负数（0 表示阈值关闭/不限）；非法部署输入在启动入口失败。
     #: 计算并发槽数
     compute_slots: int = Field(exclude=True, gt=0)
     #: IO 任务并发槽数（与计算并发槽共用租约槽位表，部署可调）
     io_slots: int = Field(exclude=True, gt=0)
     #: 会话 TTL(分钟)
     session_ttl_minutes: int = Field(exclude=True, gt=0)
-    #: 对象存储最小剩余空间阈值(字节), 低于该值拒绝写入
-    storage_min_free_bytes: int = Field(exclude=True, ge=0)
     #: 全局限流开关
     rate_limit_enabled: bool = Field(exclude=True)
     #: 全局限流窗口(秒); 单 IP 在窗口内超过上限即 429
@@ -165,10 +157,6 @@ class Settings(BaseSettings):
     rate_limit_max_requests: int = Field(exclude=True, gt=0)
     #: 全局限流豁免路径(逗号分隔)
     rate_limit_exempt_paths: str = Field(exclude=True)
-    #: 用户上传配额(字节); 0 = 不限
-    upload_quota_bytes: int = Field(exclude=True, ge=0)
-    #: 项目级上传配额(字节); 0 = 不限
-    project_quota_bytes: int = Field(exclude=True, ge=0)
     #: 求解单次超时上限(秒)：策略上限，非单次计算默认请求
     solver_max_timeout_seconds: int = Field(exclude=True, gt=0)
     #: 求解内存允许上限(MiB)：策略上限，非硬件保证

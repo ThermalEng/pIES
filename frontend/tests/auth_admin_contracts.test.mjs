@@ -158,26 +158,20 @@ function check(name, cond, detail = '') {
 
   const storageDto = {
     healthy: true,
-    corrupt_count: 0,
     cleanup_candidates: 3,
     objects: {
       count: 142,
       total_bytes: 8540120,
       by_status: { active: 142 },
       orphan_count: 0,
-      pending_deletion_count: 0,
     },
     capacity: {
       free_bytes: 500000000,
-      safe_threshold: 10000000,
-      ok: true,
     },
     refs: { count: 320, referenced_objects: 142 },
-    pending_deletion_count: 0,
   }
   const storage = mapStorageStatusDto(storageDto)
   check('mapStorageStatusDto 总用量与对象数', storage.total_bytes === 8540120 && storage.used_bytes === 8540120 && storage.object_count === 142)
-  check('mapStorageStatusDto 配额诚实为 null', storage.quota_bytes === null)
 
   const healthDto = {
     status: 'ok',
@@ -188,7 +182,7 @@ function check(name, cond, detail = '') {
     readiness: { db: true },
     metrics: { tasks_by_status: {}, projects_by_status: {}, users: 2 },
     queue: {},
-    storage: { capacity: {}, corrupt_count: 0, orphan_count: 0, object_count: 142, ok: true, verify: {} },
+    storage: { capacity: {}, orphan_count: 0, object_count: 142, ok: true },
   }
   const health = mapAdminHealthDto(healthDto)
   check('mapAdminHealthDto 状态与版本', health.status === 'ok' && health.version === '0.14.0')
@@ -377,11 +371,10 @@ function check(name, cond, detail = '') {
     }
     if (method === 'GET' && text.endsWith('/api/admin/storage')) {
       return new Response(JSON.stringify({
-        healthy: true, corrupt_count: 0, cleanup_candidates: 0,
-        objects: { count: 10, total_bytes: 4096, by_status: {}, orphan_count: 0, pending_deletion_count: 0 },
-        capacity: { free_bytes: 100000, safe_threshold: 1000, ok: true },
+        healthy: true, cleanup_candidates: 0,
+        objects: { count: 10, total_bytes: 4096, by_status: {}, orphan_count: 0 },
+        capacity: { free_bytes: 100000 },
         refs: { count: 20, referenced_objects: 10 },
-        pending_deletion_count: 0,
       }), { status: 200 })
     }
     if (method === 'GET' && text.endsWith('/api/admin/health')) {
@@ -389,7 +382,7 @@ function check(name, cond, detail = '') {
         status: 'ok', service: 'iesplan', version: '0.14.0', time: '2026-10-16T12:00:00Z',
         liveness: { ok: true, process: 'alive' }, readiness: { db: true },
         metrics: { tasks_by_status: {}, projects_by_status: {}, users: 2 }, queue: {},
-        storage: { capacity: {}, corrupt_count: 0, orphan_count: 0, object_count: 10, ok: true, verify: {} },
+        storage: { capacity: {}, orphan_count: 0, object_count: 10, ok: true },
       }), { status: 200 })
     }
     if (method === 'GET' && text.includes('/api/admin/audit')) {

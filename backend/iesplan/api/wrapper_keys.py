@@ -73,16 +73,9 @@ WRAPPER_KEYS: dict[str, frozenset[str]] = {
     # ---- model.py (旧 1.0 系统图端点已删除, 只保留设备类型注册表) ----
     "device_types_public": frozenset({"items"}),
     # ---- objects.py ----
-    "admin_storage": frozenset(
-        {"capacity", "cleanup_candidates", "corrupt_count", "healthy", "objects", "pending_deletion_count", "refs"}
-    ),
-    "admin_cleanup": frozenset({"cleaned", "count", "dry_run"}),
-    "admin_pending_objects": frozenset({"data", "meta"}),
-    "admin_restore_object": frozenset({"data", "meta"}),
-    "admin_purge_objects": frozenset({"purged_count", "dry_run"}),
-    "admin_storage_health": frozenset(
-        {"capacity", "corrupt_count", "object_count", "ok", "orphan_count", "pending_deletion_count", "reconcile"}
-    ),
+    "admin_storage": frozenset({"capacity", "cleanup_candidates", "healthy", "objects", "refs"}),
+    "admin_cleanup": frozenset({"candidates", "cleaned", "count", "dry_run", "errors", "retained", "total_bytes"}),
+    "admin_storage_health": frozenset({"capacity", "object_count", "ok", "orphan_count"}),
     # ---- projects.py ----
     "create_project_endpoint": frozenset({"my_role", "project"}),
     "list_projects_endpoint": frozenset({"projects"}),

@@ -1,12 +1,5 @@
-"""资源使用边界(0.2.0 A4)测试: 全局限流 + 上传配额 + dataset meta 白名单。
+"""全局限流和带元数据的数据集上传。"""
 
-覆盖(严格对应 A4 验收):
-- 限流触发: 阈值内放行, 超阈值 429(标准错误信封 API-RL-001);
-- 豁免路径(健康/就绪/登录)不参与限流;
-- 配额超限: 用户/项目上传配额超限 413(API-QUOTA-001);
-- meta 白名单: 未知键/畸形 provenance 拒绝 400(API-META-001);
-- 合法上传不受影响(白名单放行合法 meta/fields)。
-"""
 from __future__ import annotations
 
 import math
@@ -201,131 +194,12 @@ def test_rate_limit_disabled_passes_through(client: TestClient, db: Session, mon
 # ---------------------------------------------------------------------------
 
 
-def test_upload_quota_blocks_over_quota_dataset(client: TestClient, db: Session, monkeypatch) -> None:
-    """用户上传配额超限: 数据集版本上传拒绝 413(API-QUOTA-001)。"""
-    monkeypatch.setattr(settings, "upload_quota_bytes", 1024)
-    monkeypatch.setattr(settings, "project_quota_bytes", 0)
-    user = _make_user(db, "quota_user")
-    pid = _create_project(client, user)
-    ds_id = _create_dataset(client, user, pid)
-    csv_bytes = _make_csv(n=8760)
-    assert len(csv_bytes) > 1024  # 本次上传即超配额
-
-    resp = client.post(
-        f"/api/projects/{pid}/datasets/{ds_id}/versions",
-        data={"resolution": "1h", "utc_offset_minutes": "480"},
-        files={"file": ("data.csv", csv_bytes, "text/csv")},
-        headers=_login(client, user),
-    )
-    assert resp.status_code == 413, resp.text
-    body = resp.json()
-    assert body["error"]["code"] == "API-QUOTA-001"
-    assert body["error"]["message_key"] == "ies.error.upload_quota_exceeded"
-    assert body["error"]["params"]["scope"] == "user"
-
-
-def test_upload_quota_allows_within_quota(client: TestClient, db: Session, monkeypatch) -> None:
-    """配额内合法上传不受影响(200 创建数据集 + 201 上传版本)。"""
-    monkeypatch.setattr(settings, "upload_quota_bytes", 10 * 1024 * 1024)  # 10MB
-    monkeypatch.setattr(settings, "project_quota_bytes", 0)
-    user = _make_user(db, "quota_ok")
-    pid = _create_project(client, user)
-    ds_id = _create_dataset(client, user, pid)
-    csv_bytes = _make_csv(n=8760)
-
-    resp = client.post(
-        f"/api/projects/{pid}/datasets/{ds_id}/versions",
-        data={"resolution": "1h", "utc_offset_minutes": "480"},
-        files={"file": ("data.csv", csv_bytes, "text/csv")},
-        headers=_login(client, user),
-    )
-    assert resp.status_code == 201, resp.text
-    assert resp.json()["dataset_version"]["version_no"] == 1
-
-
-def test_import_quota_blocks_over_quota(client: TestClient, db: Session, monkeypatch) -> None:
-    """项目包导入计入用户配额: 超限拒绝 413。"""
-    monkeypatch.setattr(settings, "upload_quota_bytes", 64)
-    monkeypatch.setattr(settings, "project_quota_bytes", 0)
-    user = _make_user(db, "import_quota")
-    # 构造一个非 zip(但够大) —— 配额门禁先于格式校验? 实现顺序: 配额在
-    # _parse_package 之前, 故超配额直接 413 而非 400 格式错误。
-    resp = client.post(
-        "/api/projects/import",
-        files={"file": ("pkg.bin", b"x" * 256, "application/zip")},
-        headers=_login(client, user),
-    )
-    assert resp.status_code == 413, resp.text
-    body = resp.json()
-    assert body["error"]["code"] == "API-QUOTA-001"
-    assert body["error"]["params"]["scope"] == "user"
-
-
 # ---------------------------------------------------------------------------
 # dataset meta/fields 白名单
 # ---------------------------------------------------------------------------
 
 
-def test_meta_whitelist_rejects_unknown_keys(client: TestClient, db: Session) -> None:
-    """meta 顶层未知键拒绝 400(API-META-001), 不污染质量报告。"""
-    user = _make_user(db, "meta_bad")
-    pid = _create_project(client, user)
-    ds_id = _create_dataset(client, user, pid)
-    resp = client.post(
-        f"/api/projects/{pid}/datasets/{ds_id}/versions",
-        data={
-            "resolution": "1h",
-            "utc_offset_minutes": "480",
-            "meta": '{"evil_payload": {"x": 1}, "created_reason": "upload"}',
-        },
-        files={"file": ("data.csv", _make_csv(n=8760), "text/csv")},
-        headers=_login(client, user),
-    )
-    assert resp.status_code == 400, resp.text
-    body = resp.json()
-    assert body["error"]["code"] == "API-META-001"
-    assert "evil_payload" in body["error"]["params"]["errors"][0]
-
-
-def test_meta_whitelist_rejects_malformed_provenance(client: TestClient, db: Session) -> None:
-    """畸形 provenance(嵌套任意对象/未知溯源键)拒绝 400。"""
-    user = _make_user(db, "meta_prov")
-    pid = _create_project(client, user)
-    ds_id = _create_dataset(client, user, pid)
-    resp = client.post(
-        f"/api/projects/{pid}/datasets/{ds_id}/versions",
-        data={
-            "resolution": "1h",
-            "utc_offset_minutes": "480",
-            "meta": '{"provenance": {"__proto__": {"polluted": true}}}',
-        },
-        files={"file": ("data.csv", _make_csv(n=8760), "text/csv")},
-        headers=_login(client, user),
-    )
-    assert resp.status_code == 400, resp.text
-    assert resp.json()["error"]["code"] == "API-META-001"
-
-
-def test_fields_whitelist_rejects_unknown_attributes(client: TestClient, db: Session) -> None:
-    """fields 未知属性(仅允许 unit)拒绝 400。"""
-    user = _make_user(db, "fields_bad")
-    pid = _create_project(client, user)
-    ds_id = _create_dataset(client, user, pid)
-    resp = client.post(
-        f"/api/projects/{pid}/datasets/{ds_id}/versions",
-        data={
-            "resolution": "1h",
-            "utc_offset_minutes": "480",
-            "fields": '{"e_load": {"unit": "kWh", "injected": {"a": 1}}}',
-        },
-        files={"file": ("data.csv", _make_csv(n=8760), "text/csv")},
-        headers=_login(client, user),
-    )
-    assert resp.status_code == 400, resp.text
-    assert resp.json()["error"]["code"] == "API-META-001"
-
-
-def test_legal_upload_with_meta_whitelist_pass(client: TestClient, db: Session) -> None:
+def test_upload_with_metadata(client: TestClient, db: Session) -> None:
     """合法 meta(provenance 标准键)与合法 fields 正常上传 201。"""
     user = _make_user(db, "meta_ok")
     pid = _create_project(client, user)

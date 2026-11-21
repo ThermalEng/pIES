@@ -1,7 +1,6 @@
 """存储公开门面与审计不可变契约测试（切片 C 回归）。
 
 覆盖切片 C 发现缺口（宪法 §10–§13 + persistence/storage 手册）：
-- 对象配额拒绝写入（OBJ-QUOTA）；
 - attach/detach/list_owners 引用语义与幂等；
 - reconcile/safe_cleanup 幂等且不误删有引用对象；
 - audit_log 不可变（更新/删除被 DB 约束或触发器拒绝）。
@@ -64,7 +63,7 @@ def test_reconcile_and_safe_cleanup_do_not_delete_referenced():
     eng = _engine()
     db = _db(eng)
     h1 = _put(db, b"keep-me")
-    _put(db, b"delete-me")
+    h2 = _put(db, b"delete-me")
     from iesplan.storage.service import attach, reconcile, safe_cleanup
     attach(db, h1.id, "project", 10, ref_entity_type="projects")
     db.flush()
@@ -72,7 +71,7 @@ def test_reconcile_and_safe_cleanup_do_not_delete_referenced():
     plan = safe_cleanup(db, dry_run=True)
     cands = [c["id"] for c in plan["candidates"]]
     assert h1.id not in cands
-    # 无引用 h2 应在候选内（或 pending 逻辑下可清理）
+    assert h2.id in cands
     # reconcile 幂等：两次 dry_run 结果一致
     r1 = reconcile(db, dry_run=True)
     r2 = reconcile(db, dry_run=True)

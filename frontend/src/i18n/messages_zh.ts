@@ -911,7 +911,6 @@ export const messagesZh: Record<string, string> = {
   'ies.admin.reset_done_confirm': '我已复制/截图，确认',
   'ies.admin.reset_done_hint': '请务必复制或截图保存，此密码仅显示一次，关闭后将无法再次查看。',
   'ies.admin.storage_used': '已用空间',
-  'ies.admin.storage_quota': '配额',
   'ies.admin.object_count': '对象数',
   'ies.admin.health_ok': '正常',
   'ies.admin.health_degraded': '降级',
@@ -993,6 +992,7 @@ export const messagesZh: Record<string, string> = {
   // -------------------------------------------------------------------------
   'ies.error.app': '应用错误:{reason}',
   'ies.error.internal': '服务器内部错误',
+  'ies.diag.obj.write_failed': '对象存储写入失败（{reason}）',
   'ies.error.http_exception': '请求失败(HTTP {status_code})',
   'ies.error.invalid_request': '请求参数不合法: 共 {count} 项错误',
   'ies.error.route_not_found': '请求的接口不存在',
@@ -1005,8 +1005,6 @@ export const messagesZh: Record<string, string> = {
   'ies.error.no_assessment_available': '该证据包尚无评估记录,请稍后再试',
   'ies.error.no_hourly_data': '任务尚无逐时结果数据(证据包未提交或不含逐时引用)',
   'ies.error.rate_limited': '请求过于频繁,请稍后再试',
-  'ies.error.upload_quota_exceeded': '上传超出配额({used_bytes}/{quota_bytes} 字节),请清理后重试',
-  'ies.error.meta_invalid': '数据集元数据或字段信息不合法:{errors}',
   'ies.msg.err.generic': '操作失败:{reason}',
 
   // -------------------------------------------------------------------------
@@ -1075,7 +1073,6 @@ export const messagesZh: Record<string, string> = {
   'ies.diag.store.migration_needed': '项目格式版本 {from} 需升级至 {to},将自动迁移',
   'ies.diag.store.migration_failed': '项目迁移失败:{reason};已保留原始文件',
   'ies.diag.store.package_ok': '项目包已生成:{path}',
-  'ies.diag.store.quota_exceeded': '存储空间不足:需要 {need} MB,可用 {avail} MB',
   'ies.diag.store.config_invalid': '计算配置 {config} 无效:{reason}',
   'ies.diag.sec.sandbox_violation': '扩展 {ext_id} 声明了超出沙箱边界的能力,已拒绝加载',
   'ies.diag.perm.denied': '无权限执行操作 {action}',
@@ -1154,7 +1151,6 @@ export const messagesZh: Record<string, string> = {
   'ies.fix.store.config_invalid': '修正配置 {config} 后重新校验',
   'ies.fix.store.corrupt': '使用自动修复生成的备份继续工作',
   'ies.fix.store.migration_failed': '联系管理员处理迁移失败的项目',
-  'ies.fix.store.quota_exceeded': '清理旧项目或扩充存储配额',
   'ies.fix.perm.denied': '联系项目所有者或管理员获取权限',
   'ies.fix.sec.sandbox_violation': '移除超出沙箱边界的能力声明',
   'ies.fix.expr.syntax_error': '修正表达式语法错误',

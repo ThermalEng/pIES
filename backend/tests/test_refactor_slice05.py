@@ -21,6 +21,8 @@ from uuid import uuid4
 
 import pytest
 import sqlalchemy as sa
+from worker_testkit import seal_test_evidence
+
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
@@ -259,9 +261,9 @@ def test_tasks_service_belongs_through_domain(db: Session) -> None:
 
 def _submit(db: Session, task_id: int, snapshot_id: int):
     hourly_id = _store(db, {"hourly": True}, "hourly")
-    attempt_id, token = _claim(db, task_id)
+    attempt_id, _token = _claim(db, task_id)
     payload = _evidence_payload(snapshot_id, hourly_id)
-    package = results_uc.submit_evidence(db, task_id, attempt_id, token, payload)
+    package = seal_test_evidence(db, task_id, attempt_id, payload)
     assert package.status == "complete"
     assert package.task_id == task_id and package.attempt_id == attempt_id
     return package

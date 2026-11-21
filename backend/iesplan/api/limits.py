@@ -1,24 +1,4 @@
-"""资源使用边界(0.2.0 批次A A4): 全局限流 + 上传配额 + dataset meta 白名单。
-
-第三方攻击面侦察结论(0.2.0):
-1. 除登录外的所有 API 无 IP/频控, 第三方可低成本刷任务/重复上传制造计算/存储压力。
-2. dataset 上传的 provenance/fields/meta 由客户端 JSON 传入, 无 schema 白名单,
-   可注入任意 JSON 污染质量报告展示。
-3. 既有门禁: 登录限速(identity.py)、上传大小门禁(dataset 512MB / 包 2GB)、
-   磁盘余量门禁(storage/service.py)、任务级 estimate_storage。
-
-本模块只防第三方/外部请求(不做账户级配额重系统、不做管理员审批), 本地开发
-默认宽松阈值可配置, 不误伤 e2e/本地开发。
-
-实现:
-- ``RateLimitMiddleware``: 按 IP 限流(内存 + Redis 降级, 复用登录限速模式)。
-  只对非豁免路径做限流; 本地/e2e 默认阈值宽松(每窗口 120 次), 可经
-  IESPLAN_RATE_LIMIT_MAX_REQUESTS 收紧。
-- ``QuotaError`` / ``check_upload_quota``: 按用户/项目统计已用对象存储,
-  超配额拒绝(复用 storage 的 usage 聚合; 每次写入新建对象, 按实际占用计)。
-- ``validate_upload_meta`` / ``validate_upload_fields``: dataset 上传的
-  provenance/fields/meta schema 白名单, 拒绝未知键或畸形结构。
-"""
+"""全局请求限流。"""
 
 from __future__ import annotations
 
@@ -32,11 +12,6 @@ from typing import Any, Final
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
-
-from iesplan.application.datasets import (
-    QuotaError as QuotaError,
-    check_upload_quota as check_upload_quota,
-)
 from iesplan.config import settings
 from iesplan.core.errors import error_envelope
 
@@ -46,15 +21,6 @@ logger = logging.getLogger(__name__)
 RATE_LIMIT_CODE: Final[str] = "API-RL-001"
 RATE_LIMIT_MESSAGE_KEY: Final[str] = "ies.error.rate_limited"
 RATE_LIMIT_FIX_HINT: Final[str] = "ies.fix.rate_retry"
-
-#: 配额错误信封(413; 超过上传配额拒绝)
-QUOTA_CODE: Final[str] = "API-QUOTA-001"
-QUOTA_MESSAGE_KEY: Final[str] = "ies.error.upload_quota_exceeded"
-
-#: 元数据白名单拒绝错误信封(400; 未知键/畸形结构)
-META_CODE: Final[str] = "API-META-001"
-META_MESSAGE_KEY: Final[str] = "ies.error.meta_invalid"
-
 
 # ---------------------------------------------------------------------------
 # 全局限速(进程内存 + Redis 降级, 复用登录限速模式)
@@ -254,113 +220,3 @@ def _check_and_count(ip: str) -> bool:
         except Exception:  # noqa: BLE001 - 运行期错误降级内存
             return _memory_check_and_count(ip)
     return _memory_check_and_count(ip)
-
-
-# ---------------------------------------------------------------------------
-# 上传配额(每用户/每项目)
-# ---------------------------------------------------------------------------
-# 判定与统计由 application/datasets/quotas 用例负责(ORM 经
-# dataset/project 域门面); 本模块只转发公开契约(QuotaError/check_upload_quota,
-# 见文件头导入), 既有调用方(datasets/projects/project_models)与测试导入
-# 路径不变, HTTP 行为(413 信封字段)不变。
-#
-# (原函数内局部 ORM 导入 _dataset_files_bytes/_project_ids_for_user 已删除,
-#  职责由 quotas.dataset_files_bytes/quotas.project_ids_for_user 接管。)
-
-
-# ---------------------------------------------------------------------------
-# dataset 上传 meta/fields/provenance schema 白名单
-# ---------------------------------------------------------------------------
-
-#: meta 顶层允许的键(source_category/license/provenance/created_reason)
-_META_ALLOWED_KEYS: frozenset[str] = frozenset(
-    {"source_category", "license", "provenance", "created_reason"}
-)
-
-#: provenance 允许的键(合法溯源字段; 拒绝任意嵌套污染)
-#: 与内置样例(builtin_sample)生成的溯源形状对齐: 含 time_range 嵌套对象。
-_PROVENANCE_ALLOWED_KEYS: frozenset[str] = frozenset(
-    {"source_category", "generator", "region", "region_name", "resolution",
-     "utc_offset_minutes", "seed", "description_zh", "origin", "tag", "time_range"}
-)
-
-#: provenance 允许的嵌套值类型(str / int / float / bool / None / list[str] / dict[str, scalar])
-_SCALAR_TYPES = (str, int, float, bool, type(None))
-
-
-def _is_provenance_value(value: Any, depth: int = 0) -> bool:
-    """provenance 值类型白名单: 标量 / 字符串列表 / 简单字典(递归最多 2 层)。"""
-    if depth > 2:
-        return False
-    if isinstance(value, _SCALAR_TYPES):
-        return True
-    if isinstance(value, list):
-        return all(_is_provenance_value(v, depth + 1) for v in value)
-    if isinstance(value, dict):
-        return all(isinstance(k, str) and _is_provenance_value(v, depth + 1) for k, v in value.items())
-    return False
-
-
-def _validate_provenance(prov: Any, path: str = "meta.provenance") -> list[str]:
-    """校验 provenance: 必须是 dict, 键在白名单内, 值类型受控。"""
-    errors: list[str] = []
-    if prov is None:
-        return errors
-    if not isinstance(prov, dict):
-        errors.append(f"{path}: 必须是 JSON 对象")
-        return errors
-    for key in prov:
-        if key not in _PROVENANCE_ALLOWED_KEYS:
-            errors.append(f"{path}.{key}: 未知溯源字段")
-        elif not _is_provenance_value(prov[key]):
-            errors.append(f"{path}.{key}: 值类型非法")
-    return errors
-
-
-def validate_upload_meta(meta: dict | None) -> list[str]:
-    """校验上传 meta 白名单: 拒绝未知顶层键与畸形 provenance/created_reason。
-
-    返回错误信息列表(空 = 合法); 不影响 source_category/license 等合法字段。
-    """
-    meta = dict(meta or {})
-    errors: list[str] = []
-    for key in meta:
-        if key not in _META_ALLOWED_KEYS:
-            errors.append(f"meta.{key}: 未知元信息字段")
-    if "source_category" in meta and not isinstance(meta["source_category"], str):
-        errors.append("meta.source_category: 必须为字符串")
-    if "license" in meta and not isinstance(meta["license"], str):
-        errors.append("meta.license: 必须为字符串")
-    if "created_reason" in meta and not isinstance(meta["created_reason"], str):
-        errors.append("meta.created_reason: 必须为字符串")
-    if "provenance" in meta:
-        errors.extend(_validate_provenance(meta["provenance"]))
-    return errors
-
-
-def validate_upload_fields(fields: dict | None) -> list[str]:
-    """校验上传 fields 白名单: 键为列名(≤200), 值为 {unit: str} 形态。
-
-    合法声明示例: {"e_load": {"unit": "kWh"}} 或 {"e_load": "kWh"}。
-    拒绝未知字段形状(如嵌套任意 JSON、数组、非字符串 unit)与超大字段字典。
-    """
-    fields = dict(fields or {})
-    errors: list[str] = []
-    if len(fields) > 200:
-        errors.append("fields: 字段数超过上限 200")
-        return errors
-    for key, value in fields.items():
-        if not isinstance(key, str) or not key:
-            errors.append("fields: 字段名必须为非空字符串")
-            continue
-        if isinstance(value, dict):
-            for vk, vv in value.items():
-                if vk != "unit":
-                    errors.append(f"fields.{key}: 未知字段属性 {vk!r}(仅允许 unit)")
-                elif not isinstance(vv, str):
-                    errors.append(f"fields.{key}.unit: 必须为字符串")
-        elif isinstance(value, str):
-            pass  # 简写 {"e_load": "kWh"}
-        else:
-            errors.append(f"fields.{key}: 字段声明必须为 {{'unit': str}} 或字符串")
-    return errors

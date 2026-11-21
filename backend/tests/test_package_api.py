@@ -703,8 +703,7 @@ def test_admin_health_storage_and_audit(client: TestClient, db: Session) -> None
     # STO-07: 单一 StorageStatusDto(无兼容并集)
     body = resp.json()
     assert "objects" in body and "refs" in body and "capacity" in body
-    assert "corrupt_count" in body and "cleanup_candidates" in body
-    assert "stats" not in body and "sample_verify" not in body
+    assert "cleanup_candidates" in body
 
     resp = client.get("/api/admin/audit", params={"entity_type": "project"}, headers=_h(client, admin))
     assert resp.status_code == 200

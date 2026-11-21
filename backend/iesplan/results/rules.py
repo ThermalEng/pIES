@@ -127,50 +127,6 @@ def planning_solution_params(
     ]
 
 
-def validate_evidence_structure(payload: dict[str, Any]) -> list[str]:
-    """证据/用户自定义输出的结构校验(纯结构, 无数据库访问)。
-
-    覆盖公开输出的字段、类型与 rows/fields 结构规则; hourly object
-    引用的存在性与任务 snapshot 一致性不在此列, 由 application 跨域
-    组合 storage/tasks/results 完成。这是必要边界校验, 必须保留。
-    """
-    problems: list[str] = []
-    missing = [key for key in REQUIRED_EVIDENCE_KEYS if key not in payload]
-    if missing:
-        problems.append(f"缺少必需字段: {','.join(missing)}")
-    try:
-        int(payload["snapshot_id"])
-    except (TypeError, ValueError, KeyError):
-        problems.append("snapshot_id 须为整数")
-    content = payload.get("content")
-    if not isinstance(content, dict):
-        problems.append("content 必须是对象")
-    if not isinstance(payload.get("seed"), int):
-        problems.append("seed 必须是整数")
-    for key in ("stop_condition", "solve", "metrics"):
-        if not isinstance(payload.get(key), dict):
-            problems.append(f"{key} 必须是对象")
-    indices = payload.get("candidate_indices")
-    if not isinstance(indices, list) or not all(isinstance(i, int) for i in indices):
-        problems.append("candidate_indices 必须是整数数组")
-    hourly_refs = payload.get("hourly_refs")
-    if not isinstance(hourly_refs, list) or not hourly_refs:
-        problems.append("hourly_refs 必须是非空数组(逐时结果对象引用)")
-    else:
-        for ref in hourly_refs:
-            if not isinstance(ref, dict):
-                problems.append("hourly_refs 元素必须是对象")
-                continue
-            if not isinstance(ref.get("object_id"), int):
-                problems.append("hourly_refs 元素缺少 object_id")
-                continue
-            if not isinstance(ref.get("fields"), list) or not ref["fields"]:
-                problems.append("hourly_refs 元素缺少 fields 清单")
-            if not isinstance(ref.get("rows"), int) or ref["rows"] <= 0:
-                problems.append("hourly_refs 元素缺少 rows 数")
-    return problems
-
-
 # ---------------------------------------------------------------------------
 # 四维有效性检查
 # ---------------------------------------------------------------------------

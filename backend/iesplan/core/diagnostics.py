@@ -88,7 +88,6 @@ PERM_DENIED = "PERM-DENIED-001"  # 无权限执行操作
 # SYS 域:系统
 SYS_STORE_CORRUPT = "SYS-STORE-001"  # 项目文件损坏
 SYS_STORE_MIGRATION_FAILED = "SYS-STORE-002"  # 项目迁移失败
-SYS_STORE_QUOTA_EXCEEDED = "SYS-STORE-003"  # 存储空间不足
 SYS_CFG_INVALID = "SYS-CFG-001"  # 配置无效(新码,见 NEW_DIAG_CODES)
 
 # ---------------------------------------------------------------------------
@@ -295,7 +294,6 @@ DIAG_MESSAGE_KEYS: dict[str, str] = {
     PERM_DENIED: "ies.diag.perm.denied",
     SYS_STORE_CORRUPT: "ies.diag.store.corrupt",
     SYS_STORE_MIGRATION_FAILED: "ies.diag.store.migration_failed",
-    SYS_STORE_QUOTA_EXCEEDED: "ies.diag.store.quota_exceeded",
     SYS_CFG_INVALID: "ies.diag.store.config_invalid",
     **{
         code: "ies.diag.data.ts_" + suffix
@@ -418,7 +416,6 @@ DIAG_FIX_HINT_KEYS: dict[str, str] = {
     PERM_DENIED: "ies.fix.perm.denied",
     SYS_STORE_CORRUPT: "ies.fix.store.corrupt",
     SYS_STORE_MIGRATION_FAILED: "ies.fix.store.migration_failed",
-    SYS_STORE_QUOTA_EXCEEDED: "ies.fix.store.quota_exceeded",
     SYS_CFG_INVALID: "ies.fix.store.config_invalid",
     **{
         code: "ies.fix.data.ts_row_count"

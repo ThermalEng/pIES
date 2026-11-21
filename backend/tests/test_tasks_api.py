@@ -1,7 +1,7 @@
 """任务与资源调度(U08) API 与服务集成测试。
 
 覆盖: 幂等创建(同键返回同任务)→ 状态推进(注入假执行器)→ 取消(queued 直接 /
-running 经 cancelling)→ 重试同快照 → 槽限制(2 并发)→ 存储门禁(模拟空间不足)
+running 经 cancelling)→ 重试同快照 → 槽限制(2 并发)→ 实际存储写入失败
 → report(io 队列)与队列/心跳/进度/取消信号读写。
 
 - 数据库: SQLite :memory:(models 全部表 create_all, StaticPool 共享连接);
@@ -13,6 +13,7 @@ running 经 cancelling)→ 重试同快照 → 槽限制(2 并发)→ 存储门�
 
 from __future__ import annotations
 
+import errno
 import os
 from collections.abc import Iterator
 from pathlib import Path
@@ -51,7 +52,6 @@ from iesplan.main import create_app  # noqa: E402
 from iesplan.tasks.persistence import CalcSnapshot, ComputeSlot, Task, TaskLease, TaskProgress  # noqa: E402
 from iesplan.dataset.persistence import DatasetVersion  # noqa: E402,F401
 from iesplan.identity.persistence import User  # noqa: E402,F401
-from iesplan.storage.persistence import StoredObject  # noqa: E402
 from iesplan.tasks import queue  # noqa: E402
 
 # ---------------------------------------------------------------------------
@@ -134,22 +134,14 @@ def _create_project(client: TestClient, user, name: str) -> int:
     return resp.json()["project"]["id"]
 
 
-def _seed_dataset(db: Session, user, pid: int, *, quota_bytes: int = 0) -> int:
+def _seed_dataset(db: Session, user, pid: int) -> int:
     """经公开用例生成内置样例数据版本(真实数据本体 + 可读对象), 返回 version id。
 
     手造对象行(无 blob)会制造门面必然报错的不可能状态，本函数不用。
-    quota_bytes 模拟配额不足：写到真实对象行配额字段(配额管理同语义)。
     """
-    from iesplan import dataset as dataset_domain
     from iesplan.application.datasets import lifecycle as datasets_uc
 
     version = datasets_uc.create_builtin_sample(db, pid, "1h", user_id=user.id)
-    if quota_bytes:
-        for f in dataset_domain.list_files(db, version.id):
-            obj = db.get(StoredObject, f.object_id)
-            assert obj is not None
-            obj.quota_bytes = quota_bytes
-        db.commit()
     return version.id
 
 
@@ -262,7 +254,7 @@ def _bind_and_freeze(
 
 def _prepare_project(
     client: TestClient, db: Session, user, *,
-    dataset_size: int = 0, quota_bytes: int = 0, name: str = "任务测试项目",
+    dataset_size: int = 0, name: str = "任务测试项目", freeze: bool = True,
 ) -> int:
     """准备可提交计算任务的项目: 建项目 + 显式财务/装配声明 + 显式计算声明 + (可选)数据集 + 绑定 + 固化版本。"""
     pid = _create_project(client, user, name)
@@ -270,12 +262,13 @@ def _prepare_project(
     device_ref, revision = _declare_device_and_planning(client, db, user, pid)
     dvid = None
     if dataset_size > 0:
-        dvid = _seed_dataset(db, user, pid, quota_bytes=quota_bytes)
+        dvid = _seed_dataset(db, user, pid)
     revision = _set_explicit_calc(client, pid, user, revision)
     revision = _declare_assembly_sections(
         client, pid, user, revision, {device_ref: {"type": "none"}}
     )
-    _bind_and_freeze(client, pid, user, dvid, revision=revision)
+    if freeze:
+        _bind_and_freeze(client, pid, user, dvid, revision=revision)
     return pid
 
 
@@ -546,6 +539,27 @@ def test_compute_submission_uses_unified_assembly_gate(
     assert resp.json()["error"]["code"] == "PROJ-CMD-005"
     assert db.execute(select(func.count(Task.id))).scalar() == 0
     assert db.execute(select(func.count(CalcSnapshot.id))).scalar() == 0
+
+
+def test_submit_reports_actual_storage_write_error(client, db, monkeypatch):
+    from iesplan.storage.adapters.filesystem import FileSystemBlobStore
+
+    user = make_user(db, "disk_full")
+    pid = _prepare_project(client, db, user, freeze=False)
+    revision = _save_config(client, pid, user)
+
+    def disk_full(*_args):
+        raise OSError(errno.ENOSPC, "No space left on device", "/internal/object/path")
+
+    monkeypatch.setattr(FileSystemBlobStore, "put_blob", disk_full)
+    status, body = _submit_task(
+        client, pid, user, config={"config_revision": revision}, idempotency_key="disk-full",
+    )
+    assert status == 500
+    assert body["error"]["code"] == "OBJ-WRITE-001"
+    assert body["error"]["params"] == {"reason": "ENOSPC"}
+    assert "/internal/object/path" not in str(body)
+    assert db.scalar(select(func.count()).select_from(Task)) == 0
 
 
 def test_submit_accepts_tax_rules_with_capable_generator(
@@ -1516,42 +1530,6 @@ def test_slot_limit_two_concurrent(client: TestClient, db: Session) -> None:
 # ---------------------------------------------------------------------------
 # 存储门禁
 # ---------------------------------------------------------------------------
-
-
-def test_storage_gate_blocks_and_suggests(client: TestClient, db: Session) -> None:
-    """存储门禁: 配额不足 → 409 SYS-STORE-003 + 清理建议, 不创建任务/快照。"""
-    owner = make_user(db, "owner_gate")
-    # 数据集对象: 8 MB 已用, 配额仅 1 字节 → 可用空间 ≈ 0
-    pid = _prepare_project(client, db, owner, dataset_size=8_000_000, quota_bytes=1)
-    rev = _save_config(client, pid, owner)
-
-    status, body = _submit_task(
-        client, pid, owner, config={"config_revision": rev}, idempotency_key="gate-1"
-    )
-    assert status == 409
-    error = body["error"]
-    assert error["code"] == "SYS-STORE-003"
-    assert error["message_key"] == "ies.diag.store.quota_exceeded"
-    assert error["severity"] == "blocking"
-    assert error["params"]["need_bytes"] > error["params"]["avail_bytes"]
-    suggestions = error["params"]["suggestions"]
-    assert suggestions and suggestions[0]["action"] == "cleanup_orphaned_objects"
-    # 未创建任务与快照
-    assert db.execute(select(func.count(Task.id))).scalar() == 0
-    assert db.execute(select(func.count(CalcSnapshot.id))).scalar() == 0
-
-    # 配额放大后同输入可提交(门禁放行; 快照新建)
-    objs = db.execute(select(StoredObject).where(StoredObject.quota_bytes == 1)).scalars().all()
-    assert objs, "种子样例对象缺失"
-    for obj in objs:
-        obj.quota_bytes = 10**18
-    db.commit()
-    status, body = _submit_task(
-        client, pid, owner, config={"config_revision": rev}, idempotency_key="gate-1"
-    )
-    assert status == 201
-    assert body["task"]["status"] == "queued"
-    assert db.execute(select(func.count(CalcSnapshot.id))).scalar() == 1
 
 
 # ---------------------------------------------------------------------------

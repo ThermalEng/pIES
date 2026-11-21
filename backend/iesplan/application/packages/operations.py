@@ -19,7 +19,6 @@ from sqlalchemy.orm import Session
 
 from iesplan import package as package_domain
 from iesplan import project as project_domain
-from iesplan.application.datasets import check_upload_quota
 from iesplan.application.packages.transfers import (
     confirm_import as _confirm_import,
     export_package as _export_package,
@@ -103,9 +102,7 @@ def propose_import_case(
     故只应用用户级配额(口径与原路由一致)。
 
     异常:
-        QuotaError: 配额超限(API 层转换为 413)。
     """
-    check_upload_quota(db, user_id=user.id, project_id=None, incoming_bytes=len(file_bytes))
     return propose_import(db, user, file_bytes, idempotency_key=idempotency_key)
 
 

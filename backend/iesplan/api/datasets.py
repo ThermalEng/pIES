@@ -34,15 +34,6 @@ from sqlalchemy.orm import Session
 
 from iesplan.api.auth import CurrentUser
 from iesplan.api.deps import get_request_db
-from iesplan.api.limits import (
-    META_CODE,
-    META_MESSAGE_KEY,
-    QUOTA_CODE,
-    QUOTA_MESSAGE_KEY,
-    QuotaError,
-    validate_upload_fields,
-    validate_upload_meta,
-)
 from iesplan.application import datasets as dataset_ops
 from iesplan.application.datasets import DataValidationError
 from iesplan.core.errors import error_envelope, http_error
@@ -253,7 +244,7 @@ def upload_version(
     须与表单一致，不要求已知项目年限；规范字节对象 oid 记入质量报告
     ``price_object_id``，供财务 ``time_series.ref`` 填写。
 
-    授权 → 归属 → 配额 → 保存的业务顺序由完整用例拥有; 本路由只做传输适配、
+    授权 → 归属 → 保存的业务顺序由完整用例拥有; 本路由只做传输适配、
     输入 DTO 校验与错误/响应映射。
     """
     if resolution not in RESOLUTIONS:
@@ -279,17 +270,6 @@ def upload_version(
     fields_dict = _parse_json_field(fields, "fields")
     meta_dict = _parse_json_field(meta, "meta")
 
-    # 0.2.0 A4: meta/fields schema 白名单 —— 拒绝未知键与畸形结构(不破坏合法上传)
-    meta_errors = validate_upload_meta(meta_dict)
-    fields_errors = validate_upload_fields(fields_dict)
-    if meta_errors or fields_errors:
-        raise http_error(
-            400, META_CODE, META_MESSAGE_KEY,
-            errors=meta_errors + fields_errors,
-        )
-
-    # 完整用例(授权 → 归属 → 配额 → 保存); 配额超限 413, 阻断性诊断 400 信封。
-    # 0.2.0 A4 配额门禁语义不变(超配额 413; 默认不启用, 本地开发宽松)。
     try:
         version = dataset_ops.upload_dataset_version_case(
             db, user,
@@ -297,12 +277,6 @@ def upload_version(
             resolution=resolution, utc_offset_minutes=utc_offset_minutes,
             fields=fields_dict, data=data, meta=meta_dict,
         )
-    except QuotaError as exc:
-        raise http_error(
-            413, QUOTA_CODE, QUOTA_MESSAGE_KEY,
-            used_bytes=exc.used_bytes, quota_bytes=exc.quota_bytes,
-            scope=exc.scope, owner_id=exc.owner_id,
-        ) from exc
     except DataValidationError as exc:
         return _validation_response(exc)
     return {

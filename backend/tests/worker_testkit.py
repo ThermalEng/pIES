@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 from typing import Any
@@ -235,7 +236,6 @@ def setup_environment(
     - devices: 自定义设备清单(缺省: 电网 + 电池, 见 mini_content)。
     """
     settings.data_dir = tmp_path
-    settings.storage_min_free_bytes = 0  # 测试环境关闭存储门禁
     global _env_seq
     _env_seq += 1
     user = User(username=f"worker-tester-{_env_seq}", display_name="测试用户")
@@ -322,3 +322,21 @@ def setup_environment(
         "snapshot": snapshot, "dataset_version_id": dver_id,
         "task": task, "content": content,
     }
+
+
+def seal_test_evidence(db: Session, task_id: int, attempt_id: int, payload: dict):
+    """Seed a sealed evidence fixture independently of the Worker lifecycle."""
+    from iesplan import results, tasks
+    from iesplan.application.results.content import store_evidence_projection
+    from iesplan.storage import add_ref, put_object
+
+    task = tasks.get_task(db, task_id)
+    obj = put_object(db, json.dumps(payload).encode(), "application/json", source_category="evidence")
+    package = results.create_evidence(
+        db, task_id=task_id, calc_snapshot_id=task.calc_snapshot_id,
+        object_id=obj.id, status="complete", attempt_id=attempt_id, created_by=task.requested_by,
+    )
+    add_ref(db, obj.id, "evidence_package", package.id, purpose="evidence_content")
+    store_evidence_projection(db, package.id, payload, tasks.get_snapshot(db, task.calc_snapshot_id))
+    db.commit()
+    return package

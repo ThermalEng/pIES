@@ -3,7 +3,7 @@
 - GET /api/admin/health: 全系统运维健康视图(存活/就绪/任务/队列/存储),
   由本端点一次转交完整用例 ``application.health.health_view``(只读探针,
   再透传各域/服务/存储公开函数):
-  - 存储 → 门面 storage_stats/sample_verify(容量 + 抽样校验);
+  - 存储 → 门面 storage_stats（容量与对象元数据）;
   - 队列 → 门面 queue_status();
   - 任务/项目/用户计数 → 门面只读统计。
 - 存储路由不再实现健康聚合(边界: 存储模块只提供自己的健康结果)。

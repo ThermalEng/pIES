@@ -49,11 +49,9 @@ export interface AuditEntry {
  * 存储状态前端模型。
  * 注: objects.total_bytes 是对象存储中已存对象的总大小(已使用量),
  * total_bytes 与 used_bytes 作为展示别名保持一致;
- * quota_bytes 在后端未设配额时为 null。
  */
 export interface StorageStatus {
   total_bytes: number
   used_bytes: number
-  quota_bytes: number | null
   object_count: number
 }

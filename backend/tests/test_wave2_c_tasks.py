@@ -804,12 +804,3 @@ def test_claim_task_lease_shape(client: TestClient, db: Session, engine: Engine)
     assert (old_claim.task_id, old_claim.attempt_no) == (t2.id, 1)
     assert isinstance(old_claim.lease_token, UUID)
     assert tasks_domain.get_task(db, t2.id).status == "running"
-
-
-def test_estimate_storage_readonly_stable(client: TestClient, db: Session) -> None:
-    """存储门禁估算: 重复估算数值一致(只读, 不写库)。"""
-    owner = _user(db, "w2c_owner_est")
-    pid = _project(client, owner, "w2c-proj-est")
-    new = tasks_uc.estimate_storage(db, pid, "optimization", {})
-    old = tasks_uc.estimate_storage(db, pid, "optimization", {})
-    assert (new.need, new.avail, new.blocked) == (old.need, old.avail, old.blocked)

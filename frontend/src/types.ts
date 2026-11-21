@@ -1236,7 +1236,6 @@ export interface AdminUserListParams {
 export interface StorageStats {
   total_bytes: number
   used_bytes: number
-  quota_bytes: number | null
   object_count: number
   by_format: Record<string, number>
 }

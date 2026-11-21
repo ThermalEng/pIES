@@ -22,6 +22,8 @@ os.environ.setdefault("IESPLAN_QUEUE", "memory")
 import pytest  # noqa: E402
 from auth_helpers import login_headers, make_user  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
+from worker_testkit import seal_test_evidence
+
 from sqlalchemy import create_engine  # noqa: E402
 from sqlalchemy.engine import Engine  # noqa: E402
 from sqlalchemy.orm import Session, sessionmaker  # noqa: E402
@@ -303,45 +305,6 @@ def _prepare_running(
 # ---------------------------------------------------------------------------
 
 
-def test_submit_evidence_commits_and_repeatable(
-    client: TestClient, db: Session, engine: Engine
-) -> None:
-    owner = _user(db, "w2c_res_owner")
-    pid, task_id, claim, snap = _prepare_running(client, db, owner, "w2c-proj-ev", "w2c-ev-1")
-    obj_a = _store_hourly(db)
-    obj_b = _store_hourly(db, fields=["p_grid_buy"])
-    payload = _build_payload(snap, [obj_a, obj_b], owner.id)
-
-    pkg = results_uc.submit_evidence(db, task_id, claim.attempt_id, claim.lease_token, payload)
-    assert pkg.status == "complete"
-
-    # 事务提交证明: 新会话可见
-    with _fresh_db(engine) as fresh:
-        got = results_domain.get_evidence(fresh, pkg.id)
-        assert got is not None and got.status == "complete"
-
-    # 行为对照: 同任务追加提交, 同为 complete 且行数 +1
-    before = len(results_domain.list_evidence_for_tasks(db, [task_id]))
-    old = results_uc.submit_evidence(db, task_id, claim.attempt_id, claim.lease_token, payload)
-    assert old.status == pkg.status == "complete"
-    after = len(results_domain.list_evidence_for_tasks(db, [task_id]))
-    assert after == before + 1
-
-    # fencing 对照: 错误 token 新旧同为 EVID-FENCE-001
-    with pytest.raises(results_uc.EvidenceWriteDeniedError) as e1:
-        results_uc.submit_evidence(
-            db, task_id, claim.attempt_id, "00000000-0000-0000-0000-000000000000", payload
-        )
-    assert e1.value.code == "EVID-FENCE-001"
-    db.rollback()
-    with pytest.raises(results_uc.EvidenceWriteDeniedError) as e2:
-        results_uc.submit_evidence(
-            db, task_id, claim.attempt_id, "00000000-0000-0000-0000-000000000000", payload
-        )
-    assert e2.value.code == "EVID-FENCE-001"
-    db.rollback()
-
-
 # ---------------------------------------------------------------------------
 # 评估写入: 独立提交 + 维度一致
 # ---------------------------------------------------------------------------
@@ -353,7 +316,7 @@ def test_run_assessment_commits_and_repeatable(
     owner = _user(db, "w2c_res_owner2")
     pid, task_id, claim, snap = _prepare_running(client, db, owner, "w2c-proj-as", "w2c-as-1")
     payload = _build_payload(snap, [_store_hourly(db), _store_hourly(db)], owner.id)
-    pkg = results_uc.submit_evidence(db, task_id, claim.attempt_id, claim.lease_token, payload)
+    pkg = seal_test_evidence(db, task_id, claim.attempt_id, payload)
 
     asm = results_uc.run_assessment(db, pkg.id, "full", user=owner)
     assert asm.detail["dimensions"]["physical"] == "passed"
@@ -390,7 +353,7 @@ def test_update_result_index_pointer_and_handover(
     owner = _user(db, "w2c_res_owner3")
     pid, task_id, claim, snap = _prepare_running(client, db, owner, "w2c-proj-ix", "w2c-ix-1")
     payload = _build_payload(snap, [_store_hourly(db), _store_hourly(db)], owner.id)
-    pkg1 = results_uc.submit_evidence(db, task_id, claim.attempt_id, claim.lease_token, payload)
+    pkg1 = seal_test_evidence(db, task_id, claim.attempt_id, payload)
     asm1 = results_uc.run_assessment(db, pkg1.id, "full", user=owner)
 
     idx1 = results_uc.update_result_index(db, task_id, asm1.id)
@@ -404,7 +367,7 @@ def test_update_result_index_pointer_and_handover(
     assert idx2.id == idx1.id and idx2.assessment_id == asm2.id
 
     # 新证据 → 转交 latest(旧行翻转 + 新行)
-    pkg2 = results_uc.submit_evidence(db, task_id, claim.attempt_id, claim.lease_token, payload)
+    pkg2 = seal_test_evidence(db, task_id, claim.attempt_id, payload)
     asm3 = results_uc.run_assessment(db, pkg2.id, "full", user=owner)
     idx3 = results_uc.update_result_index(db, task_id, asm3.id)
     assert idx3.id != idx1.id and idx3.is_latest is True

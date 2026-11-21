@@ -37,7 +37,6 @@ from iesplan.db import (
     JSONB,
     bigint_pk,
     drop_trigger_function_sql,
-    immutable_revoke_sql,
     immutable_trigger_sql,
 )
 from iesplan.project.contracts import (
@@ -730,7 +729,6 @@ def install_triggers() -> tuple[str, ...]:
     """公开钩子: 返回本域触发器部署语句(按执行序, 含幂等 DROP, 供组合根编排收集)。"""
     statements = [drop_trigger_function_sql(f"tg_{table}_immutable") for table in IMMUTABLE_TABLES]
     statements.extend(immutable_trigger_sql(table) for table in IMMUTABLE_TABLES)
-    statements.extend(immutable_revoke_sql(table) for table in IMMUTABLE_TABLES)
     statements.extend(
         drop_trigger_function_sql(func)
         for func in ("tg_projects_baseline_immutable", "tg_project_versions_baseline_immutable")

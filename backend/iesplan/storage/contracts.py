@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from typing import Protocol, TypeAlias
 
 from iesplan.core.content import Content, SizedContent
-from iesplan.core.errors import AppError, ConflictError
+from iesplan.core.errors import AppError
 
 ObjectId: TypeAlias = int | str
 
@@ -140,11 +140,12 @@ class ObjectCorruptError(AppError):
     http_status = 500
 
 
-class ObjectQuotaError(ConflictError):
-    """对象配额(quota_bytes)超限, 拒绝写入(01 §10.1)。"""
+class ObjectWriteError(AppError):
+    """实际对象文件写入失败。"""
 
-    code = "SYS-STORE-005"
-    message_key = "ies.error.object_quota_exceeded"
+    code = "OBJ-WRITE-001"
+    message_key = "ies.diag.obj.write_failed"
+    http_status = 500
 
 
 class ReferenceNotFoundError(AppError):
@@ -153,11 +154,3 @@ class ReferenceNotFoundError(AppError):
     code = "OBJ-REF-001"
     message_key = "ies.diag.obj.ref_not_found"
     http_status = 404
-
-
-class ObjectNotPendingDeletionError(AppError):
-    """对象不在"待物理回收"状态, 不能执行 undelete(0.2.0-B3 恢复路径)。"""
-
-    code = "OBJ-RESTORE-001"
-    message_key = "ies.diag.obj.not_pending_deletion"
-    http_status = 409

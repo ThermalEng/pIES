@@ -252,11 +252,6 @@ export default function SettingsPage() {
                     <span className="ies-form-message">
                       {t('ies.admin.storage_used')}: {formatBytes(storage.total_bytes)}
                     </span>
-                    {storage.quota_bytes !== null ? (
-                      <span className="ies-form-message">
-                        {t('ies.admin.storage_quota')}: {formatBytes(storage.quota_bytes)}
-                      </span>
-                    ) : null}
                     <span className="ies-form-message">
                       {t('ies.admin.object_count')}: {storage.object_count}
                     </span>

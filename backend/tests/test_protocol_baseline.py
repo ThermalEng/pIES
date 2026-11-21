@@ -574,7 +574,7 @@ def test_success_wrappers_datasets_auth_admin_exports_domain(client: TestClient,
     _assert_wrapper(client.get("/api/auth/users", headers=_bearer(adm_tok)), {"users"})
     _assert_wrapper(
         client.get("/api/admin/storage", headers=_bearer(adm_tok)),
-        {"objects", "refs", "capacity", "corrupt_count", "cleanup_candidates", "pending_deletion_count", "healthy"},
+        {"objects", "refs", "capacity", "cleanup_candidates", "healthy"},
     )
     _assert_wrapper(client.get("/api/admin/objects/pending", headers=_bearer(adm_tok)), {"data", "meta"})
     _assert_wrapper(client.get("/api/admin/audit", headers=_bearer(adm_tok)), {"items", "next_cursor"})

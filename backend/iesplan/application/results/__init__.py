@@ -25,8 +25,6 @@ from iesplan.application.results.writes import (
     EVIDENCE_SCHEMA_VERSION,
     MAX_HOURLY_LIMIT,
     SELECTION_TYPES,
-    EvidenceInvalidError,
-    EvidenceWriteDeniedError,
     ResultInvalidRequestError,
     assess_evidence,
     assessment_to_dict,
@@ -45,9 +43,10 @@ from iesplan.application.results.writes import (
     run_check_task,
     select_result,
     selection_diff,
-    submit_evidence,
     update_result_index,
 )
+
+from iesplan.results import EvidenceInvalidError
 
 __all__ = [
     "index_evidence_projection",
@@ -64,7 +63,6 @@ __all__ = [
     "MAX_HOURLY_LIMIT",
     "SELECTION_TYPES",
     "EvidenceInvalidError",
-    "EvidenceWriteDeniedError",
     "ResultInvalidRequestError",
     "assess_evidence",
     "assess_task_evidence",
@@ -89,6 +87,5 @@ __all__ = [
     "select_result",
     "select_task_result",
     "selection_diff",
-    "submit_evidence",
     "update_result_index",
 ]

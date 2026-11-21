@@ -90,6 +90,6 @@ application 协调其他模块并最终 commit 或 rollback
 - 关键不变量同时有领域测试和 PostgreSQL 约束测试；
 - migration 可从支持的上一版本升级，并能在失败后安全恢复；
 - API、Worker 和其他模块不直接导入领域 ORM；
-- 删除、软删除、保留和对象引用生命周期一致。
+- 业务删除及对象引用解绑成对执行；孤儿对象由存储清理用例处理。
 
 阅读代码时先确认表和 repository 的领域所有者，再从公开 repository 行为进入 ORM；`models/` 的物理位置不能替代所有权判断。数据库测试必须在 Docker 的 PostgreSQL 环境运行。

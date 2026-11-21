@@ -142,4 +142,3 @@ def test_collect_trigger_statements_covers_immutable_tables() -> None:
         assert f"CREATE FUNCTION tg_{table}_immutable() RETURNS trigger" in ddl
         assert f"CREATE TRIGGER tg_{table}_no_update BEFORE UPDATE ON {table}" in ddl
         assert f"CREATE TRIGGER tg_{table}_no_delete BEFORE DELETE ON {table}" in ddl
-        assert f"REVOKE UPDATE, DELETE ON {table} FROM PUBLIC;" in ddl

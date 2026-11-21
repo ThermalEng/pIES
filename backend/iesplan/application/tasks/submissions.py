@@ -4,7 +4,7 @@
 ``services.queue`` 语义，旧服务已删除):
 
 - 提交: 权限 → 项目状态 → 类型/幂等键必填与父任务校验 → 幂等命中 →
-  存储门禁 → 快照装配(含草稿固化, 相同输入复用快照) → 任务行 → 诊断 → 入队；
+  快照装配(含草稿固化, 相同输入复用快照) → 任务行 → 诊断 → 入队；
 - 取消: 终态拒绝 → queued 直接取消 → running 转 cancelling + 取消信号 +
   批量子任务传播；确认取消收拢尝试/租约/槽；
 - 重试: 仅终态可重试(计算类须有快照) → 回 queued + 入队；
@@ -28,7 +28,6 @@ from __future__ import annotations
 
 import json
 import re
-import shutil
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
@@ -47,7 +46,6 @@ from iesplan import dataset as dataset_domain
 from iesplan import identity as identity_domain
 from iesplan import modeling as modeling_domain
 from iesplan import project as project_domain
-from iesplan import results as results_domain
 from iesplan import tasks as tasks_domain
 from iesplan.application.models import (
     load_project_device_base_ids,
@@ -91,8 +89,6 @@ from iesplan.storage import (
     add_ref,
     get_object,
     object_info,
-    orphaned_stats,
-    usage_summary,
 )
 from iesplan.tasks.contracts import (
     COMPUTE_TYPES,
@@ -104,7 +100,6 @@ from iesplan.tasks.contracts import (
     CancelDeniedError,
     ComputeSlotRecord,
     InvalidRequestError,
-    StorageQuotaError,
     TaskAttemptRecord,
     TaskRecord,
     TaskStateError,
@@ -119,12 +114,6 @@ from iesplan.tasks.contracts import parse_evaluation_input as _parse_evaluation_
 
 #: 任务类型/池/状态机/结局映射与任务错误唯一权威见 tasks 域
 #: (``iesplan.tasks`` 门面, 本模块顶层导入复用); 此处不复制。
-#: 逐时结果每行估算字节(~1 KB)
-_HOURLY_BYTES_PER_ROW = 1024
-#: 中间文件系数(默认 0.5)
-_INTERMEDIATE_FACTOR = 0.5
-#: 证据包系数(默认 0.1)
-_EVIDENCE_FACTOR = 0.1
 #: 幂等键格式唯一权威见 tasks.contracts(顶层导入 _IDEMPOTENCY_KEY_RE)。
 
 #: 项目所有者能力集唯一权威: iesplan.project.OWNER_CAPABILITIES(经 project_domain 取用, 此处不复制)。
@@ -138,24 +127,6 @@ class Claim:
     attempt_id: int
     attempt_no: int
     lease_token: UUID
-
-
-@dataclass(frozen=True, slots=True)
-class StorageEstimate:
-    """存储门禁估算结果。"""
-
-    need: int
-    avail: int
-    blocked: bool
-    suggestions: list[dict[str, Any]]
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "need_bytes": self.need,
-            "avail_bytes": self.avail,
-            "blocked": self.blocked,
-            "suggestions": self.suggestions,
-        }
 
 
 # ---------------------------------------------------------------------------
@@ -187,10 +158,6 @@ def _get_current_draft(db: Session, project: ProjectRecord):
             location={"object_type": "project", "object_id": project.id},
         )
     return draft
-
-
-
-
 
 
 # ---------------------------------------------------------------------------
@@ -231,10 +198,6 @@ def _resolve_project_inputs(
     # 草稿内容, 否则与已有版本路径的输入口径不一致。
     version = _freeze_snapshot_version(db, actor, project, draft)
     return version, load_content_object(db, version.content_object_id)
-
-
-
-
 
 
 def _bound_dataset_ids(content: dict) -> list[int]:
@@ -1796,122 +1759,6 @@ def _dataset_contents_for(
 
 
 # ---------------------------------------------------------------------------
-# 存储门禁(复制 services.tasks.estimate_storage 语义)
-# ---------------------------------------------------------------------------
-
-
-def _resolve_storage_estimate_inputs(
-    db: Session, project: ProjectRecord, actor: UserRecord
-) -> tuple[dict, list[int]]:
-    """只读解析估算输入(版本或草稿内容, 不固化不写库)。"""
-    _version, content = _resolve_project_inputs(db, project, actor, freeze=False)
-    return content, _bound_dataset_ids(content)
-
-
-def list_cleanup_suggestions(db: Session) -> list[dict[str, Any]]:
-    """清理建议(按"最安全 → 最激进"排序, 每项含对象清单与预计释放量)。"""
-    suggestions: list[dict[str, Any]] = []
-
-    orphaned = orphaned_stats(db)
-    suggestions.append(
-        {
-            "action": "cleanup_orphaned_objects",
-            "message_key": "ies.fix.store.orphaned",
-            "count": orphaned["count"],
-            "estimate_bytes": orphaned["total_bytes"],
-        }
-    )
-
-    report_count = results_domain.count_reports(db)
-    suggestions.append(
-        {
-            "action": "archive_old_reports",
-            "message_key": "ies.fix.store.reports",
-            "count": int(report_count),
-            "estimate_bytes": 0,
-        }
-    )
-
-    terminal_tasks = tasks_domain.count_tasks_by_statuses(db, TERMINAL_STATUSES)
-    suggestions.append(
-        {
-            "action": "cleanup_terminal_task_files",
-            "message_key": "ies.fix.store.task_files",
-            "count": int(terminal_tasks),
-            "estimate_bytes": 0,
-        }
-    )
-
-    suggestions.append(
-        {
-            "action": "archive_project_versions",
-            "message_key": "ies.fix.store.versions",
-            "count": 0,
-            "estimate_bytes": 0,
-        }
-    )
-    suggestions.append(
-        {
-            "action": "reduce_samples_or_horizon",
-            "message_key": "ies.fix.store.business_throttle",
-            "count": 0,
-            "estimate_bytes": 0,
-        }
-    )
-    return suggestions
-
-
-def estimate_storage(
-    db: Session, project_id: int, task_type: str, config: dict[str, Any] | None = None
-) -> StorageEstimate:
-    """提交前存储需求估算与安全阈值检查。
-
-    S_need = S_snap + S_inter + S_hourly(+S_samples) + S_evid;
-    S_avail = min(配额余额, 卷空闲空间); 配额未配置时仅以卷空闲空间为准。
-    只读, 不拥有事务。
-    """
-    project = require_project(db, project_id)
-    actor = identity_domain.get_user(db, project.owner_id)
-    if actor is None:
-        raise NotFoundError("项目所有者不存在", params={"project_id": project_id})
-    content, dataset_ids = _resolve_storage_estimate_inputs(db, project, actor)
-    params = config or {}
-
-    # 快照与输入: 数据集版本对象大小之和
-    snap_bytes = 0
-    for dvid in dataset_ids:
-        snap_bytes += sum(f.size_bytes or 0 for f in dataset_domain.list_files(db, dvid))
-
-    # 逐时结果: 行数 × ~1 KB(Y = 规划年数; 多目标解点 × 解点数)
-    years = int(params.get("horizon_years", 1) or 1)
-    n_solutions = int(params.get("n_solutions", 1) or 1)
-    hourly_rows = 8760 * max(years, 1) * max(n_solutions, 1)
-    hourly_bytes = hourly_rows * _HOURLY_BYTES_PER_ROW
-    # 样本结果(uncertainty 批次: 样本数 × 逐时规模)
-    sample_bytes = 0
-    if task_type == "uncertainty":
-        n_samples = int(params.get("n_samples", 0) or 0)
-        sample_bytes = max(n_samples, 0) * hourly_bytes
-    result_bytes = hourly_bytes + sample_bytes
-    inter_bytes = int(_INTERMEDIATE_FACTOR * result_bytes)
-    evid_bytes = int(_EVIDENCE_FACTOR * (snap_bytes + result_bytes))
-    need = snap_bytes + inter_bytes + result_bytes + evid_bytes
-
-    # 可用空间: min(配额余额, 卷空闲空间); 配额未配置视为无限
-    usage = usage_summary(db)
-    volume_free = shutil.disk_usage(settings.data_dir).free
-    if int(usage["quota_bytes"] or 0) > 0:
-        avail = max(int(usage["quota_bytes"]) - int(usage["used_bytes"]), 0)
-    else:
-        avail = volume_free
-    avail = min(avail, volume_free)
-
-    blocked = need > avail - settings.storage_min_free_bytes
-    suggestions = list_cleanup_suggestions(db) if blocked else []
-    return StorageEstimate(need=need, avail=avail, blocked=blocked, suggestions=suggestions)
-
-
-# ---------------------------------------------------------------------------
 # 任务提交(复制 services.tasks.create_task 语义; 顶层拥有事务)
 # ---------------------------------------------------------------------------
 
@@ -2046,20 +1893,7 @@ def _submit_task(
                 location={"object_type": "task", "field": exc.field},
             ) from exc
         parsed_evaluation = replace(parsed_evaluation, comparison=comparison)
-        # 2) 存储门禁(门禁失败不创建快照不创建任务)
-        estimate = estimate_storage(db, project_id, task_type, config)
-        if estimate.blocked:
-            raise StorageQuotaError(
-                "存储空间不足, 任务提交被拒绝",
-                params={
-                    "need_bytes": estimate.need,
-                    "avail_bytes": estimate.avail,
-                    "min_pad_bytes": settings.storage_min_free_bytes,
-                    "suggestions": estimate.suggestions,
-                },
-                location={"object_type": "project", "object_id": project_id},
-            )
-        # 3) 快照装配(相同输入复用既有快照, 见 _assemble_snapshot)
+        # 2) 快照装配(相同输入复用既有快照, 见 _assemble_snapshot)
         snapshot = _assemble_snapshot(
             db, project_id, task_type, config=config, user=user,
             calculation_config=pinned, generator_registry=generator_registry,

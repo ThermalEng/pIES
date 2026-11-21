@@ -25,7 +25,6 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping
 from typing import Any
-from uuid import UUID
 
 from sqlalchemy.orm import Session
 
@@ -34,27 +33,24 @@ from iesplan import project as project_domain
 from iesplan import results as results_domain
 from iesplan import tasks as tasks_domain
 from iesplan.application.projects import ensure_access
-from iesplan.application.results.content import read_evidence_projection, store_evidence_projection
+from iesplan.application.results.content import read_evidence_projection
 from iesplan.application.tasks import (
     ensure_task_belongs,
     submit_task,
 )
 from iesplan.core.errors import AppError, ConflictError, NotFoundError
 from iesplan.core.jsonstream import ArrayReader, JsonReadError, ObjectFields, project_json
-from iesplan.core.jsonutil import canonical_json
 from iesplan.identity.contracts import UserRecord
 from iesplan.results.contracts import (
     SINGLE_SOLUTION_ID,
-    EvidenceInvalidError,
     EvidencePackageRecord,
-    EvidenceWriteDeniedError,
     ResultAssessmentRecord,
     ResultIndexRecord,
     ResultInvalidRequestError,
     ResultSelectionRecord,
 )
-from iesplan.storage import add_ref, get_object_content, object_info, put_object
-from iesplan.tasks.contracts import CalcSnapshotRecord, TaskAttemptRecord, TaskRecord
+from iesplan.storage import get_object_content
+from iesplan.tasks.contracts import CalcSnapshotRecord, TaskRecord
 
 # 领域规则复导出(application 公开面保持稳定, 权威归 results 域):
 # 证据/评估状态、评估/选中类型、规则版本、评估阈值、结果错误。
@@ -121,178 +117,6 @@ def _evidence_project_version(db: Session, task: TaskRecord) -> int | None:
             return snapshot.project_version_id
     project = project_domain.get_project(db, task.project_id)
     return project.current_version_id if project is not None else None
-
-
-# ---------------------------------------------------------------------------
-# 证据写入(复制 services.results.submit_evidence 语义; 顶层拥有事务)
-# ---------------------------------------------------------------------------
-
-
-def _verify_write_eligibility(
-    db: Session, task: TaskRecord, attempt_id: int, token: str | UUID
-) -> TaskAttemptRecord:
-    """校验当前尝试的证据写入资格(租约 + fencing)。
-
-    要求:
-      1. 尝试存在且属于该任务, 状态为 running;
-      2. 租约 active 且 lease_token 与调用方持有 token 一致;
-    任一不满足抛 EvidenceWriteDeniedError(409)。
-    """
-    attempt = tasks_domain.get_attempt(db, attempt_id)
-    if attempt is None:
-        raise EvidenceWriteDeniedError(
-            "尝试不存在",
-            params={"task_id": task.id, "attempt_id": attempt_id},
-            location={"object_type": "task_attempt", "object_id": attempt_id},
-        )
-    if attempt.task_id != task.id:
-        raise EvidenceWriteDeniedError(
-            "尝试不属于该任务",
-            params={"task_id": task.id, "attempt_id": attempt_id},
-            location={"object_type": "task_attempt", "object_id": attempt_id},
-        )
-    if attempt.status != "running":
-        raise EvidenceWriteDeniedError(
-            "尝试已结束, 不再具备证据写入资格",
-            params={"task_id": task.id, "attempt_id": attempt_id, "attempt_status": attempt.status},
-            location={"object_type": "task_attempt", "object_id": attempt_id},
-        )
-    try:
-        token_uuid = token if isinstance(token, UUID) else UUID(str(token))
-    except (ValueError, TypeError) as exc:
-        raise EvidenceWriteDeniedError(
-            "fencing token 格式非法",
-            params={"task_id": task.id, "attempt_id": attempt_id},
-        ) from exc
-    lease = tasks_domain.get_lease_by_token(db, str(token_uuid))
-    if lease is None or lease.status != "active" or lease.attempt_id != attempt_id:
-        raise EvidenceWriteDeniedError(
-            "租约不匹配或已失效(fencing 拒绝)",
-            params={"task_id": task.id, "attempt_id": attempt_id},
-            location={"object_type": "task_lease", "object_id": attempt_id},
-        )
-    return attempt
-
-
-def _validate_evidence_payload(
-    db: Session, task: TaskRecord, payload: dict[str, Any]
-) -> tuple[dict[str, Any], list[str]]:
-    """校验证据载荷(清单校验), 返回 (content, 问题清单)。
-
-    校验不通过不抛错, 以问题清单返回 —— 由调用方落库为 status='invalid'。
-    纯结构规则归 results 公开能力; 本函数只保留跨域一致性:
-    证据 snapshot 与任务 snapshot 一致性、hourly object 引用存在性
-    (组合 storage/tasks/results)。
-    """
-    problems = results_domain.validate_evidence_structure(payload)
-    try:
-        snapshot_id = int(payload["snapshot_id"])
-    except (TypeError, ValueError, KeyError):
-        snapshot_id = None
-    if snapshot_id is not None and snapshot_id != task.calc_snapshot_id:
-        problems.append(f"快照不一致: 证据 {snapshot_id} != 任务输入 {task.calc_snapshot_id}")
-    content = payload.get("content")
-    for ref in payload.get("hourly_refs") or []:
-        if not isinstance(ref, dict):
-            continue
-        obj_id = ref.get("object_id")
-        if not isinstance(obj_id, int):
-            continue
-        try:
-            object_info(db, obj_id)
-        except NotFoundError:
-            problems.append(f"hourly_refs 引用的对象不存在: object_id={obj_id}")
-    return content if isinstance(content, dict) else {}, problems
-
-
-def _submit_evidence(
-    db: Session,
-    task_id: int,
-    attempt_id: int,
-    token: str | UUID,
-    payload: dict[str, Any],
-) -> EvidencePackageRecord:
-    """提交证据包(不可变)。
-
-    流程: 写入资格校验 → 载荷清单校验 → 打包为对象存储对象 → 建立证据包行 →
-    建立对象引用。证据包只 INSERT, 同一任务每次提交追加新行。内部步骤只
-    flush, 由顶层 submit_evidence 提交。
-    """
-    task = _get_task(db, task_id)
-    if not isinstance(payload, dict):
-        raise EvidenceInvalidError("证据载荷必须是 JSON 对象", code="EVID-DATA-001")
-    _verify_write_eligibility(db, task, attempt_id, token)
-
-    # 载荷校验: 校验失败仍落库但标记 invalid, 保留审计
-    problems = _validate_evidence_payload(db, task, payload)[1]
-    status = EVIDENCE_INVALID if problems else EVIDENCE_COMPLETE
-    invalid_reason = ";".join(problems) if problems else None
-
-    # 打包: 规范化序列化整个载荷并落盘为对象存储对象
-    blob = canonical_json(payload).encode("utf-8")
-    obj = put_object(
-        db,
-        blob,
-        content_type="application/json",
-        source_category="evidence",
-        actor_id=payload.get("created_by") or task.requested_by,
-        actor_type="system",
-    )
-    package = results_domain.create_evidence(
-        db,
-        task_id=task.id,
-        calc_snapshot_id=task.calc_snapshot_id,
-        object_id=obj.id,
-        status=status,
-        attempt_id=attempt_id,
-        created_by=int(payload.get("created_by") or task.requested_by),
-    )
-    # 对象引用: 证据包引用对象 → 禁止进入清理候选
-    add_ref(
-        db,
-        obj.id,
-        "evidence_package",
-        package.id,
-        purpose="evidence_content",
-        actor_id=payload.get("created_by") or task.requested_by,
-    )
-    if not problems:
-        store_evidence_projection(
-            db, package.id, payload, tasks_domain.get_snapshot(db, task.calc_snapshot_id)
-        )
-    _audit(
-        db,
-        "evidence_packages",
-        package.id,
-        "evidence_package_created",
-        actor_id=payload.get("created_by") or task.requested_by,
-        after={
-            "task_id": task.id,
-            "attempt_id": attempt_id,
-            "object_id": obj.id,
-            "status": status,
-            "invalid_reason": invalid_reason,
-            "size_bytes": len(blob),
-        },
-    )
-    return package
-
-
-def submit_evidence(
-    db: Session,
-    task_id: int,
-    attempt_id: int,
-    token: str | UUID,
-    payload: dict[str, Any],
-) -> EvidencePackageRecord:
-    """提交证据包用例; 本层拥有事务提交/回滚。"""
-    try:
-        result = _submit_evidence(db, task_id, attempt_id, token, payload)
-        db.commit()
-        return result
-    except Exception:
-        db.rollback()
-        raise
 
 
 def get_evidence(db: Session, package_id: int) -> EvidencePackageRecord:

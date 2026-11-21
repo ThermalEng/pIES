@@ -10,7 +10,7 @@
 - 应用: create_app() + include_router(projects/tasks/results),
   dependency_overrides 替换 get_request_db;
 - 对象存储: settings.data_dir 指向 pytest tmp_path, 证据/逐时对象真实落盘;
-- 证据提交无 HTTP 端点(Worker 通道), 测试直接调用 results 用例 submit_evidence,
+- 证据提交无 HTTP 端点(Worker 通道), 测试直接调用 持久化证据夹具,
   评估/选择/差异/逐时/检查走 HTTP。
 """
 
@@ -30,6 +30,8 @@ os.environ.setdefault("IESPLAN_QUEUE", "memory")
 import pytest  # noqa: E402
 from auth_helpers import login_headers, make_user  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
+from worker_testkit import seal_test_evidence
+
 from sqlalchemy import create_engine, select  # noqa: E402
 from sqlalchemy.engine import Engine  # noqa: E402
 from sqlalchemy.orm import Session, sessionmaker  # noqa: E402
@@ -50,7 +52,7 @@ from iesplan.core.errors import NotFoundError  # noqa: E402
 from iesplan.db import Base  # noqa: E402
 from iesplan.identity.persistence import User  # noqa: E402,F401
 from iesplan.main import create_app  # noqa: E402
-from iesplan.tasks.persistence import Task, TaskLease  # noqa: E402
+from iesplan.tasks.persistence import Task  # noqa: E402
 from iesplan.results.persistence import EvidencePackage, ResultSelection  # noqa: E402
 from iesplan.storage import put_object
 from iesplan.tasks import queue  # noqa: E402
@@ -435,11 +437,7 @@ def _submit_evidence(
     db: Session, task_id: int, claim: Any, payload: dict[str, Any]
 ) -> EvidencePackage:
     """假 Worker 通道: 提交证据包并提交事务。"""
-    pkg = results_uc.submit_evidence(
-        db, task_id, claim.attempt_id, claim.lease_token, payload
-    )
-    db.commit()
-    return pkg
+    return seal_test_evidence(db, task_id, claim.attempt_id, payload)
 
 
 def _prepare_task_with_evidence(
@@ -514,68 +512,6 @@ def test_sealed_solver_summary_view_assessment_and_excel(client, db, has_solutio
     assert pairs["求解器相对间隙 / Solver relative gap"] == (0.2 if has_solution else "—")
 
 # ---------------------------------------------------------------------------
-
-
-def test_evidence_submit_and_fencing(client: TestClient, db: Session) -> None:
-    """证据提交: 正常写入 → 不可变内容校验; 过期/失效 token 拒绝(409)。"""
-    owner = make_user(db, "owner_fence")
-    pid = _prepare_project(client, db, owner)
-    rev = _save_config(client, pid, owner)
-    task = _submit_task(client, pid, owner, idempotency_key="fence-1", config_revision=rev)
-    task_id = task["id"]
-    claim = _claim(db, task_id)
-    obj_a = _store_hourly(db, 100)
-    obj_b = _store_hourly(db, 100, fields=["p_grid_buy"])
-    payload = _build_payload(task["calc_snapshot_id"], [obj_a, obj_b], owner.id)
-
-    # 1) 正常提交: 快照/算法/种子/逐时引用落库
-    pkg = _submit_evidence(db, task_id, claim, payload)
-    assert pkg.task_id == task_id
-    assert pkg.attempt_id == claim.attempt_id
-    assert pkg.calc_snapshot_id == task["calc_snapshot_id"]
-    assert pkg.status == "complete"
-    assert pkg.object_id is not None
-    assert pkg.created_by == owner.id
-
-    # 2) 读取内容校验: 字段齐全（不做内部摘要重算比对）
-    loaded = results_uc.evidence_content(db, results_uc.get_evidence(db, pkg.id))
-    assert loaded["content"] == payload["content"]
-    assert loaded["content"]["algorithm"] == "milp"
-    assert loaded["content"]["seed"] == 42
-    assert loaded["content"]["candidate_indices"] == [0, 1]
-    assert loaded["content"]["hourly_refs"][0]["object_id"] == obj_a
-    assert loaded["content"]["hourly_refs"][1]["object_id"] == obj_b
-
-    # 3) 证据不可变追加: 同尝试再次提交(同内容) → 新行, 不覆盖
-    pkg2 = _submit_evidence(db, task_id, claim, payload)
-    assert pkg2.id != pkg.id
-    rows = db.execute(
-        select(EvidencePackage).where(EvidencePackage.task_id == task_id)
-        .order_by(EvidencePackage.id)
-    ).scalars().all()
-    assert [r.id for r in rows] == [pkg.id, pkg2.id]
-
-    # 4) fencing: 伪造/失效 token 拒绝
-    with pytest.raises(results_uc.EvidenceWriteDeniedError) as exc:
-        results_uc.submit_evidence(db, task_id, claim.attempt_id, uuid4(), payload)
-    assert exc.value.http_status == 409
-
-    # 5) fencing: 租约撤销拒绝
-    lease = db.execute(
-        select(TaskLease).where(TaskLease.attempt_id == claim.attempt_id)
-    ).scalar_one()
-    lease.status = "revoked"
-    db.commit()
-    with pytest.raises(results_uc.EvidenceWriteDeniedError) as exc:
-        results_uc.submit_evidence(db, task_id, claim.attempt_id, claim.lease_token, payload)
-    assert exc.value.http_status == 409
-
-    # 6) fencing: 尝试已结束(任务完成, 租约吊销)拒绝
-    _complete_task(db, task_id, outcome=tasks_domain.map_business_outcome("OPTIMAL"))
-    db.commit()
-    with pytest.raises(results_uc.EvidenceWriteDeniedError):
-        results_uc.submit_evidence(db, task_id, claim.attempt_id, claim.lease_token, payload)
-
 
 
 # ---------------------------------------------------------------------------

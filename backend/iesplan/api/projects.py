@@ -27,7 +27,6 @@ from sqlalchemy.orm import Session
 
 from iesplan.api.auth import CurrentUser
 from iesplan.api.deps import get_request_db
-from iesplan.api.limits import QUOTA_CODE, QUOTA_MESSAGE_KEY, QuotaError
 from iesplan.application import packages as package_ops
 from iesplan.application import projects as project_ops
 from iesplan.core.errors import http_error
@@ -331,18 +330,9 @@ def import_package_endpoint(
             413, "PKG-SIZE-001", "ies.diag.pkg.too_large",
             reason="package_too_large", max_bytes=package_ops.MAX_PACKAGE_BYTES,
         )
-    # 完整用例(用户级配额 → 校验暂存; 导入创建新项目身份, 无目标项目,
-    # 故只应用用户级配额; 默认不启用, 本地开发宽松)
-    try:
-        proposal = package_ops.propose_import_case(
-            db, user, file_bytes=data, idempotency_key=idempotency_key
-        )
-    except QuotaError as exc:
-        raise http_error(
-            413, QUOTA_CODE, QUOTA_MESSAGE_KEY,
-            used_bytes=exc.used_bytes, quota_bytes=exc.quota_bytes,
-            scope=exc.scope, owner_id=exc.owner_id,
-        ) from exc
+    proposal = package_ops.propose_import_case(
+        db, user, file_bytes=data, idempotency_key=idempotency_key,
+    )
     return {"proposal": _proposal_to_dict(proposal)}
 
 

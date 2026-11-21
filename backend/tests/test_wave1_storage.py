@@ -189,7 +189,7 @@ def test_safe_cleanup_holds_orphan_under_retention_rule(
     plan = safe_cleanup(session, dry_run=True)
 
     assert plan["count"] == 0
-    assert plan["retained_count"] == 1
+    assert len(plan["retained"]) == 1
     assert plan["retained"][0]["id"] == orphan.id
     assert plan["retained"][0]["retention_days"] == 36500
 
@@ -202,5 +202,5 @@ def test_safe_cleanup_releases_orphan_without_rule(session: Session, data_dir) -
     plan = safe_cleanup(session, dry_run=True)
 
     assert plan["count"] == 1
-    assert plan["retained_count"] == 0
+    assert len(plan["retained"]) == 0
     assert plan["candidates"][0]["id"] == orphan.id

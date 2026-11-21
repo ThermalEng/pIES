@@ -83,11 +83,7 @@ export interface SecuritySettingsUpdateRequestDto {
 
 /** 存储容量 DTO。 */
 export interface StorageCapacityDto {
-  free_bytes: number
-  safe_threshold: number
-  ok: boolean
-  message?: string
-  reason?: string
+  free_bytes: number | null
 }
 
 /** 存储对象摘要 DTO。 */
@@ -96,7 +92,6 @@ export interface StorageObjectsDto {
   total_bytes: number
   by_status: Record<string, number>
   orphan_count: number
-  pending_deletion_count: number
 }
 
 /** 存储引用摘要 DTO。 */
@@ -108,12 +103,10 @@ export interface StorageRefsDto {
 /** 存储视图响应 DTO(GET /api/admin/storage)。 */
 export interface StorageStatusResponseDto {
   healthy: boolean
-  corrupt_count: number
   cleanup_candidates: number
   objects: StorageObjectsDto
   capacity: StorageCapacityDto
   refs: StorageRefsDto
-  pending_deletion_count: number
 }
 
 /** 运维健康响应 DTO(GET /api/admin/health)。 */
@@ -132,11 +125,9 @@ export interface AdminHealthResponseDto {
   queue: Record<string, unknown>
   storage: {
     capacity: Record<string, unknown>
-    corrupt_count: number
     orphan_count: number
     object_count: number
     ok: boolean
-    verify: Record<string, unknown>
   }
 }
 

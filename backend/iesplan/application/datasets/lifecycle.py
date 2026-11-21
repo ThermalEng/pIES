@@ -26,7 +26,6 @@ from sqlalchemy.orm import Session
 from iesplan import dataset as dataset_domain
 from iesplan import identity as identity_domain
 from iesplan import project as project_domain
-from iesplan.application.datasets.quotas import check_upload_quota
 from iesplan.application.projects import ensure_access
 from iesplan.core.diagnostics import (
     DATA_COL_UNIT_UNKNOWN,
@@ -1141,7 +1140,7 @@ __all__ = [
 # HTTP 完整用例(第二轮纠偏 Wave 1 切片 3: 上传与 quota)
 #
 # 每个 HTTP 业务动作只转交其中一个完整用例; 用例内部按原路由顺序完成
-# 授权 → 归属 → 配额 → 保存/读取, 返回与 HTTP 无关的结果(API 只做 DTO、
+# 授权 → 归属 → 保存/读取, 返回与 HTTP 无关的结果(API 只做 DTO、
 # 一次调用和错误/响应映射)。传输适配(封顶读取、JSON 字段解析)与输入
 # DTO 校验(分辨率/偏移/白名单/大小门禁)仍在 API 层, 本层不新增校验。
 # 归因口径保持原调用一致: 创建数据集沿用默认操作者, 上传版本不指定
@@ -1217,15 +1216,13 @@ def upload_dataset_version_case(
     data: bytes,
     meta: dict,
 ) -> DatasetVersionRecord:
-    """上传版本完整用例: edit 授权 → 归属 → 配额 → 校验保存(提交/回滚由保存步骤拥有)。
+    """上传版本完整用例: edit 授权 → 归属 → 校验保存(提交/回滚由保存步骤拥有)。
 
     异常:
-        QuotaError: 配额超限(API 层转换为 413)。
         DataValidationError: 存在阻断性诊断(API 层转换为 400 信封响应)。
     """
     ensure_access(db, user, project_id, "edit")
     _require_project_dataset(db, project_id, dataset_id)
-    check_upload_quota(db, user_id=user.id, project_id=project_id, incoming_bytes=len(data))
     return upload_dataset_version(
         db, dataset_id, resolution, utc_offset_minutes, fields, data, meta
     )

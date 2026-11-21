@@ -19,9 +19,7 @@ from types import MappingProxyType
 from typing import Any
 
 from iesplan.core.diagnostics import (
-    SEVERITY_BLOCKING,
     SEVERITY_ERROR,
-    SYS_STORE_QUOTA_EXCEEDED,
     TASK_EXEC_UNAVAILABLE,
 )
 from iesplan.core.errors import AppError, ConflictError, NotFoundError
@@ -76,15 +74,6 @@ class CancelDeniedError(AppError):
     http_status = 409
     severity = SEVERITY_ERROR
     message_key = "ies.diag.task.cancel_denied"
-
-
-class StorageQuotaError(AppError):
-    """任务提交存储门禁未通过(HTTP 409; blocking 级 SYS-STORE-003)。"""
-
-    code = SYS_STORE_QUOTA_EXCEEDED
-    http_status = 409
-    severity = SEVERITY_BLOCKING
-    message_key = "ies.diag.store.quota_exceeded"
 
 
 class ExecutionUnavailableError(AppError):

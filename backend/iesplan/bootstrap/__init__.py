@@ -158,8 +158,6 @@ def _check_database(session_factory: Any) -> bool:
 def _check_storage(storage: Any) -> bool:
     """存储适配能力检查: 已装配的公开句柄可响应存在性探针(只验证装配, 不判容量)。
 
-    容量门禁由写路径 ``check_capacity`` 与运维健康视图负责, 此处仅确认
-    句柄真实可用(异常即不可用)。
     """
     try:
         storage.exists("objects/.health-probe")

@@ -97,7 +97,7 @@ class FileSystemBlobStore:
         """删除字节(不存在幂等)。"""
         try:
             _path_of(storage_path).unlink()
-        except OSError:
+        except FileNotFoundError:
             pass
 
     def exists(self, storage_path: str) -> bool:

@@ -13,7 +13,7 @@
   自己的 persistence 后自然完成声明注册；不设无行为的安装钩子。
 - 不拥有跨领域表名与触发器规则: 规则归各自领域 persistence 的
   ``install_triggers()`` 钩子所有, 本模块只提供无业务状态的 DDL 构造
-  (``immutable_trigger_sql`` / ``immutable_revoke_sql`` /
+  (``immutable_trigger_sql`` /
   ``drop_trigger_function_sql``)与执行(``deploy_trigger_statements``)帮助函数。
 - 不从业务领域反向导入任何 contracts: 正则等唯一权威留在各领域
   contracts, 由拥有者 persistence 直接引用(本模块仅保留 ``HASH64_RE``
@@ -160,11 +160,6 @@ CREATE TRIGGER tg_{table}_no_update BEFORE UPDATE ON {table}
 CREATE TRIGGER tg_{table}_no_delete BEFORE DELETE ON {table}
   FOR EACH ROW EXECUTE FUNCTION tg_{table}_immutable();
 """
-
-
-def immutable_revoke_sql(table: str) -> str:
-    """生成单张不可变表的 REVOKE DDL(三道防线第2层: 不授予任何角色 UPDATE/DELETE)。"""
-    return f"REVOKE UPDATE, DELETE ON {table} FROM PUBLIC;"
 
 
 def drop_trigger_function_sql(func: str) -> str:

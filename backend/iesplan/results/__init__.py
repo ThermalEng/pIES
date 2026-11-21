@@ -10,7 +10,6 @@ from iesplan.results import persistence, rules
 from iesplan.results.contracts import (
     EvidenceInvalidError,
     EvidencePackageRecord,
-    EvidenceWriteDeniedError,
     ReportRecord,
     ResultAssessmentRecord,
     ResultConflictError,
@@ -72,7 +71,6 @@ fine_states = rules.fine_states
 fine_to_db = rules.fine_to_db
 overall_score = rules.overall_score
 summarize_assessment = rules.summarize_assessment
-validate_evidence_structure = rules.validate_evidence_structure
 
 #: 领域不可变表清单(唯一真相归 persistence 所有, 本门面只做引用重导出)。
 IMMUTABLE_TABLES = persistence.IMMUTABLE_TABLES
@@ -99,7 +97,6 @@ __all__ = [
     "SystemAssessmentDraft",
     "EvidenceInvalidError",
     "EvidencePackageRecord",
-    "EvidenceWriteDeniedError",
     "ReportRecord",
     "ResultAssessmentRecord",
     "ResultConflictError",
@@ -145,7 +142,6 @@ __all__ = [
     "point_index_latest",
     "select_result",
     "summarize_assessment",
-    "validate_evidence_structure",
     "IMMUTABLE_TABLES",
     "install_triggers",
 ]
