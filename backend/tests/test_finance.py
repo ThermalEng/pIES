@@ -220,9 +220,9 @@ def test_compute_payback_basic():
 
 
 def test_compute_payback_boundaries():
-    """边界:未回收 / 首期即回收 / 空序列。"""
+    """边界:未回收 / 无须回收 / 空序列。"""
     assert compute_payback([-100, 30, 30]) is None
-    assert compute_payback([100, 5]) == 0.0
+    assert compute_payback([100, 5]) is None
     assert compute_payback([]) is None
 
 

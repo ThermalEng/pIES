@@ -99,6 +99,7 @@ def fixture_files(files):
         Positions(), head.pop("unit_map"), head.pop("components"),
         head.pop("step_series") + head.pop("system_series"),
         head.pop("financial_facts"), head.pop("model_sources"),
+        head.pop("epigraphs", ()),
     )))
     head["records"] = RECORDS_PATH
     head["column_count"] = len(names)
@@ -119,6 +120,8 @@ def materialized_file(bundle, path):
     doc = dict(head, unit_map={}, components={}, step_series=[], system_series=[])
     group = None
     entry = None
+    epigraphs = []
+    epigraph_entry = None
 
     def refs(node):
         if isinstance(node, dict):
@@ -136,6 +139,13 @@ def materialized_file(bundle, path):
             names.extend(record[1])
         elif kind == "row_names":
             row_names.extend(record[1])
+        elif kind == "epigraph":
+            epigraph_entry = [names[record[1]], []]
+        elif kind == "epigraph_flows":
+            epigraph_entry[1].extend(names[index] for index in record[1])
+        elif kind == "epigraph_end":
+            epigraphs.append(epigraph_entry)
+            epigraph_entry = None
         elif kind == "expression":
             entry = {"constant": record[2], "terms": {}}
         elif kind == "terms":
@@ -165,5 +175,7 @@ def materialized_file(bundle, path):
             group["indices"].extend(record[1])
         elif kind == "source_group_end":
             doc["model_sources"]["groups"].append(group)
+    if epigraphs:
+        doc["epigraphs"] = epigraphs
     doc.pop("records")
     return json.dumps(doc).encode()

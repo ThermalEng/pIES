@@ -1119,9 +1119,9 @@ export interface FinancialEvaluationBlock {
     irr: number | null
     irr_status: string
     static_payback: number | null
-    static_status: string
+    static_status: 'recovered' | 'not_recovered' | 'not_applicable'
     dynamic_payback: number | null
-    dynamic_status: string
+    dynamic_status: 'recovered' | 'not_recovered' | 'not_applicable'
   }
 }
 
@@ -1152,7 +1152,7 @@ export interface PlanningSolutionParam {
 /** 同次求解封存状态；未知数值为 null，不从任务完成推断最优性。 */
 export interface SolverSummary {
   termination_reason: 'optimal' | 'time_limit' | 'infeasible' | 'unbounded' | 'not_solved'
-  math_status: 'solved' | 'feasible' | 'infeasible' | 'unbounded' | 'not_solved'
+  math_status: 'solved' | 'feasible' | 'infeasible' | 'unbounded' | 'numeric_failure' | 'not_solved'
   has_feasible_solution: boolean
   objective_value: number | null
   objective_unit: string

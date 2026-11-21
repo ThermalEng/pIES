@@ -36,7 +36,7 @@ import {
   useOutletContext,
 } from 'react-router-dom'
 
-import { getMe, logout } from './features/auth'
+import { getMe, logout, refreshSession, startSessionActivity } from './features/auth'
 import { hasSession, setUnauthorizedHandler } from './shared/http'
 import { BrandMark } from './components/BrandMark'
 import { ThemeToggle } from './components/ThemeToggle'
@@ -113,6 +113,7 @@ function AppShell() {
   const [currentUser, setCurrentUser] = useState<User | null>(null)
   const [userLoaded, setUserLoaded] = useState(false)
   const [logoutError, setLogoutError] = useState<string | null>(null)
+  const [sessionError, setSessionError] = useState<string | null>(null)
 
   // 会话失效(401)统一处理:清除会话并跳转登录页
   useEffect(() => {
@@ -140,6 +141,13 @@ function AppShell() {
     return () => {
       cancelled = true
     }
+  }, [])
+
+  useEffect(() => {
+    // 外壳已由 RequireAuth 挂载；续期不依赖角色展示查询一次成功。
+    return startSessionActivity(refreshSession, (error) => {
+      setSessionError(error === null ? null : errorMessage(error))
+    })
   }, [])
 
   const isAdmin = userLoaded ? currentUser?.role === 'admin' : null
@@ -201,6 +209,7 @@ function AppShell() {
       <main className="ies-app__main">
         <div className="ies-content">
           {logoutError !== null ? <Alert variant="error">{logoutError}</Alert> : null}
+          {sessionError !== null ? <Alert variant="error">{sessionError}</Alert> : null}
           <Outlet context={{ isAdmin }} />
         </div>
       </main>

@@ -155,6 +155,7 @@ const IRR_LABEL: Record<string, string> = {
 const PAYBACK_LABEL: Record<string, string> = {
   recovered: '已回收',
   not_recovered: '未回收',
+  not_applicable: '不适用',
 }
 
 function norm(text: string | null): string {
@@ -568,6 +569,66 @@ test.describe('T3: K1N2 财务评价确认/求解/结果/导出', () => {
     await apiCtx.close()
     session.assertNoErrors()
     await context.close()
+  })
+
+  test('C: 零现金流→IRR退化与回收期不适用，页面和Excel同源', async ({ browser }) => {
+    const username = uniqueName('es-fin-zero')
+    const password = strongPassword('Init')
+    const projectName = uniqueName('零现金流指标项目')
+    const apiCtx = await browser.newContext({ baseURL: APP })
+    await createEngineer(apiCtx.request, username, password)
+    const token = await loginToken(apiCtx.request, username, password)
+    const pid = await scaffoldProject(requestJson, apiCtx.request, token, projectName, `zero-${Date.now()}`, {
+      includeElectricLoad: false,
+      financeTypes: {
+        heat_pump_system: {
+          upfront_capex: { fixed: { value: '0', unit: 'CNY' } },
+          annual_fixed_om: { linear: { heat_kw: { unit_cost: { value: '0', unit: 'CNY/kW·a' } } } },
+          period_variable_om: { linear: { consumed_kwh: { unit_cost: { value: '0', unit: 'CNY/kWh' } } } },
+        },
+      },
+      extraEnergyPrices: {
+        grid_import: { carrier: 'electricity', direction: 'purchase', kind: 'constant',
+          value: { value: '0', unit: 'CNY/kWh' } },
+      },
+    })
+    const context = await browser.newContext()
+    const page = await context.newPage()
+    const session = await createSession(page, username, password)
+    await page.getByText(projectName).click()
+    await submitEvaluationViaUI(page, '[]')
+    await waitCompleted(page)
+    await openResults(page)
+    const snapshot = await captureSealedCard(page)
+    const listed = await requestJson(page.request, 'GET', `/api/projects/${pid}/tasks?limit=10`)
+    const taskId = listed.items[0].id
+    const result = await requestJson(page.request, 'GET', `/api/projects/${pid}/tasks/${taskId}/result`)
+    const fin = result.result.financial_evaluation as SealedEvaluation
+    expect(fin.annual_net_flows.map(Number)).toEqual([0, 0, 0, 0])
+    expect(fin.evaluation.irr).toBeNull()
+    expect(fin.evaluation.irr_status).toBe('degenerate')
+    expect(fin.evaluation.static_status).toBe('not_applicable')
+    expect(fin.evaluation.dynamic_status).toBe('not_applicable')
+    expect(fin.evaluation.static_payback).toBeNull()
+    expect(fin.evaluation.dynamic_payback).toBeNull()
+    expectSealedCardMatches(snapshot, fin)
+    expect(snapshot.irr).toBe('—')
+    expect(snapshot.irrStatus).toBe('退化')
+    expect(snapshot.staticPayback).toBe('— 不适用')
+    expect(snapshot.dynamicPayback).toBe('— 不适用')
+
+    await page.getByRole('navigation', { name: /工作台|Workspace/i }).getByText('导出').click()
+    const downloadPromise = page.waitForEvent('download', { timeout: 120_000 })
+    await page.getByRole('button', { name: /导出 Excel 报告|Export Excel report/i }).click()
+    const reportPath = path.join(process.env.E2E_OUTPUT_DIR ?? '/app/e2e/test-results', 'zero-metrics.xlsx')
+    await (await downloadPromise).saveAs(reportPath)
+    const summary = excelSummaryPairs(reportPath)
+    expect(summary.get('内部收益率 IRR / IRR')).toBe('— / degenerate')
+    expect(summary.get('静态回收期 / static payback')).toBe('— / not_applicable')
+    expect(summary.get('动态回收期 / dynamic payback')).toBe('— / not_applicable')
+    session.assertNoErrors()
+    await context.close()
+    await apiCtx.close()
   })
 
   test('B: 正收益可回收→非空 IRR 与两种回收期数值', async ({ browser }) => {

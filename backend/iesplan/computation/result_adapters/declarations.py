@@ -23,6 +23,8 @@ def recover_declarations(content, primals, fail, *, include_solution=True):
     series = None
     column_names = []
     row_names = []
+    epigraph_peak = None
+    epigraph_max = None
 
     def value(position, unit):
         try:
@@ -49,6 +51,31 @@ def recover_declarations(content, primals, fail, *, include_solution=True):
         elif kind == "row_names":
             if include_solution:
                 row_names.extend(record[1])
+        elif kind == "epigraph":
+            try:
+                epigraph_peak = primals[record[1]]
+            except IndexError as exc:
+                fail(f"需量包络峰值列位置不存在: {record[1]!r}: {exc}")
+            if not math.isfinite(epigraph_peak):
+                fail(f"需量包络峰值列位置 {record[1]!r} 非有限")
+            epigraph_max = None
+        elif kind == "epigraph_flows":
+            for position in record[1]:
+                try:
+                    flow = primals[position]
+                except IndexError as exc:
+                    fail(f"需量包络流量列位置不存在: {position!r}: {exc}")
+                if not math.isfinite(flow):
+                    fail(f"需量包络流量列位置 {position!r} 非有限")
+                if epigraph_max is None or flow > epigraph_max:
+                    epigraph_max = flow
+        elif kind == "epigraph_end":
+            if epigraph_max is not None:
+                tol = max(1e-4, 1e-7 * max(1.0, abs(epigraph_max), abs(epigraph_peak)))
+                if epigraph_peak - epigraph_max > tol:
+                    return {"epigraph_inflated": True}
+            epigraph_peak = None
+            epigraph_max = None
         elif kind == "expression":
             total = float(record[2])
         elif kind == "terms":
@@ -98,4 +125,5 @@ def recover_declarations(content, primals, fail, *, include_solution=True):
             raise ValueError(f"未知参数记录: {kind!r}")
     return {"variables": variables, "components": components,
             "financial_facts": facts, "model_sources": sources,
-            "series": device_series, "system_series": system_series}
+            "series": device_series, "system_series": system_series,
+            "epigraph_inflated": False}

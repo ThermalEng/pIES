@@ -66,6 +66,8 @@ docker compose up -d --build
 
 Compose 服务承担不同职责：Web 提供静态前端，backend 处理同步 HTTP，compute/I/O Worker 执行相应任务，PostgreSQL 保存权威事实，Redis 保存可重建队列与进度。某个服务能够启动，不代表整体已经 ready。
 
+每个 Worker 进程同时执行一个任务。需要并行执行多个计算任务时，部署多个 `compute_worker` 实例，并在 API 与 Worker 共用的部署配置 `[worker]` 中设置相应的 `compute_slots` 总额度；实际并发同时受可用 Worker 数量和空闲槽位限制，只提高其中一项不能提高并发。I/O 任务使用独立的 Worker 与 `io_slots`。部署者应按实际内存和 CPU 承载能力设置并发；验收脚本要求串行运行长计算，是测试纪律，不是系统只能执行一个任务的业务限制。
+
 实现“算法插件”后，Compose 还必须提供独立 `plugin_runner` 服务。普通 Worker 只发送输入引用、租约上下文和资源限制，不向用户插件解释器暴露 Docker Socket、数据库、`./data`、仓库目录或业务秘密。runner 使用只读根文件系统、非 root 身份、临时工作目录和默认断网策略；依赖只从构建阶段批准的离线来源取得。具体 contract 见[模型与算法](customization-center.md)和[算法插件包](formats/algorithm-plugin-package.md)。
 
 ## Solver 执行隔离

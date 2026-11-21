@@ -37,7 +37,7 @@ import json
 import math
 import time
 from collections import Counter
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from datetime import datetime, timedelta
 from types import MappingProxyType
 from typing import Any
@@ -85,6 +85,7 @@ from iesplan.computation.generators.compiler_ir import (
     VatPoolOperation,
     VatRuleSource,
 )
+from iesplan.computation.generators.demand import monotone_demand_meters
 from iesplan.computation.generators.linear import (
     LinearConstraint,
     LinearExpression,
@@ -344,6 +345,7 @@ def build_project_model_package(
     evaluation: EvaluationInput,
     *,
     stop: StopProbe | None = None,
+    epigraphs: list[tuple[str, tuple[str, ...]]] | None = None,
 ) -> tuple[
     SparseModel, Mapping[str, str], str, Mapping[str, object],
     Mapping[str, Mapping[str, object]], tuple[Mapping[str, object], ...],
@@ -352,6 +354,8 @@ def build_project_model_package(
     """一次建模取得 MPS、财务事实、分量与时序声明，不重复展开月峰。"""
     builder = _new_builder(artifact, models, materialized, finance, evaluation, stop=stop)
     model, unit_map, objective_unit = builder.build()
+    if epigraphs is not None:
+        epigraphs.extend(builder.demand_epigraphs())
     return (
         model, unit_map, objective_unit,
         builder.financial_facts(), builder.finance_components(),
@@ -434,6 +438,24 @@ def step_series_declarations(
     return _new_builder(artifact, models, materialized, finance, evaluation).step_series()
 
 
+def _sampled_stop_checkpoint(stop: StopProbe | None) -> Callable[[], None]:
+    """The analysis keeps this callback without keeping the builder alive."""
+    ticks = 0
+
+    def checkpoint() -> None:
+        nonlocal ticks
+        if stop is None:
+            return
+        ticks += 1
+        if ticks % 128:
+            return
+        reason = read_stop_reason(stop)
+        if reason is not None:
+            raise ComputationUnavailableError("项目模型生成已停止", reason=reason)
+
+    return checkpoint
+
+
 class _ProjectBuilder:
     """项目级构造的内部编排（实例方法只传 derived 状态，直接输入只进厂）。"""
 
@@ -453,7 +475,7 @@ class _ProjectBuilder:
         system_equations: Mapping[str, Any] | None = None,
     ) -> None:
         self.stop = stop
-        self._stop_ticks = 0
+        self._checkpoint = _sampled_stop_checkpoint(stop)
         self._frozen_amounts: dict[int, tuple[_AffineAcc, dict[str, object]]] = {}
         self.doc = doc
         self.devices = devices
@@ -479,6 +501,7 @@ class _ProjectBuilder:
         #: ``financial_facts`` 声明；键与结构见格式页映射表）。
         self._demand_peaks: dict[tuple[str, str, int], _AffineAcc] = {}
         self._demand_peak_sources: dict[tuple[str, str, int], str] = {}
+        self._demand_epigraphs: list[tuple[str, tuple[str, ...]]] = []
         self._demand_rows: list[dict[str, Any]] = []
         self._demand_totals: dict[str, _AffineAcc] = {}
         self._fact_cash: dict[int, _AffineAcc] = {}
@@ -577,17 +600,6 @@ class _ProjectBuilder:
         for var_name, var in self.plan_vars.items():
             key = (var["device_ref"], var["parameter"])
             self.bound_prop[key] = var_name
-
-    def _checkpoint(self) -> None:
-        """生成器协作停止；按有限步数采样，不引入线程或进程管理。"""
-        if self.stop is None:
-            return
-        self._stop_ticks += 1
-        if self._stop_ticks % 128:
-            return
-        reason = read_stop_reason(self.stop)
-        if reason is not None:
-            raise ComputationUnavailableError("项目模型生成已停止", reason=reason)
 
     # ------------------------------------------------------------------
     # 变量声明
@@ -3241,10 +3253,13 @@ class _ProjectBuilder:
     def _build_monthly_demand(self) -> None:
         """Exact natural-month max over the collected demand relations.
 
-        The original binary-selection formulation is retained.  Every actual
-        point bound now comes through the same analysis used by the technical
-        and tax condition operations; no invented finite box is introduced.
+        A strictly adverse NPV effect certifies a tight continuous epigraph;
+        all other uses retain binary selection. Both use the same actual
+        point bounds as the technical and tax condition operations.
         """
+        envelope_meters = monotone_demand_meters(
+            self.doc, self.finance, self.analysis, self._financial_graph,
+        )
         baseline_year = self.doc["project_baseline"]["start_year"]
         construction = self.evaluation.construction_period
         for operation in self.analysis.relations("demand"):
@@ -3284,7 +3299,8 @@ class _ProjectBuilder:
                     peak_name = f"{instance}__{interface}__demand_peak_m{month}"
                     self._declare(peak_name, lower, upper, "continuous", None)
                     peak.add_term(peak_name, 1.0)
-                    bit_count = (len(names) - 1).bit_length()
+                    envelope = (instance, interface) in envelope_meters
+                    bit_count = 0 if envelope else (len(names) - 1).bit_length()
                     bits = [
                         self._declare(
                             f"{peak_name}__bit{bit}", 0.0, 1.0, "binary", None
@@ -3308,6 +3324,8 @@ class _ProjectBuilder:
                             name=f"{peak_name}__floor_{offset}",
                             expression=floor.freeze(), sense="ge", rhs=0.0,
                         ))
+                        if envelope:
+                            continue
                         slack = upper - float(lo)
                         select = floor.snapshot()
                         ones = 0
@@ -3342,6 +3360,8 @@ class _ProjectBuilder:
                             expression=select.freeze(), sense="le",
                             rhs=(slack * ones) * scale,
                         ))
+                    if envelope:
+                        self._demand_epigraphs.append((peak_name, tuple(names)))
                 self._demand_peaks[key] = peak
                 self._demand_peak_sources[key] = f"relation:{operation.identity}"
             else:
@@ -5187,6 +5207,10 @@ class _ProjectBuilder:
             row["instance_id"], row["component"], row["item_id"], row["period"],
         ))
 
+    def demand_epigraphs(self) -> tuple[tuple[str, tuple[str, ...]], ...]:
+        """连续上包络峰值与同月实际流量列名（供结果适配器检验候选紧度）。"""
+        return tuple(self._demand_epigraphs)
+
     def build(self) -> tuple[SparseModel, Mapping[str, str], str]:
         try:
             return self._build()
@@ -5194,6 +5218,11 @@ class _ProjectBuilder:
             if exc.model_source is None:
                 exc.model_source = self.source_trace.location()
             raise
+        finally:
+            # The suspended tax generators hold self in their frames. Their
+            # accumulated facts are already owned by the builder, not the iterators.
+            self._vat_iterators.clear()
+            self._income_iterators.clear()
 
     def _build(self) -> tuple[SparseModel, Mapping[str, str], str]:
         if self.stop is not None:

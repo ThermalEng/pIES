@@ -37,8 +37,8 @@ from iesplan import tasks as tasks_domain  # noqa: E402
 from iesplan.api.deps import get_request_db  # noqa: E402
 from iesplan.application import tasks as tasks_uc  # noqa: E402
 from iesplan.config import settings  # noqa: E402
-from iesplan.db import Base  # noqa: E402
 from iesplan.core.yamlmini import load as yaml_load  # noqa: E402
+from iesplan.db import Base  # noqa: E402
 from iesplan.devices import parse_device_model_v2, to_dict  # noqa: E402
 from iesplan.devices.contracts2 import from_dict  # noqa: E402
 from iesplan.identity.persistence import User  # noqa: E402,F401
@@ -81,7 +81,7 @@ interfaces:
     unit: kW
     valid_range:
       minimum: 0
-      maximum: null
+      maximum: {property_ref: rated_demand_kw}
 equations:
   variables: {}
   relations:
@@ -410,8 +410,8 @@ def test_snapshot_freezes_project_model_math(
 ) -> None:
     import json
 
-    from iesplan.application.configuration.calc_config import save_calculation_config_case
     from iesplan.application import configuration as config_cases
+    from iesplan.application.configuration.calc_config import save_calculation_config_case
 
     owner = _user(db, "consume_task_owner")
     pid = _project(client, owner, "消费链计算项目")
@@ -470,7 +470,9 @@ def test_snapshot_freezes_project_model_math(
     revision = _declare_assembly(
         client, owner, pid, revision, {"load2": {"type": "none"}, "gas1": {"type": "none"}}
     )
-    saved = save_calculation_config_case(db, owner, pid, dict(CONFIG_BODY), None, generator_registry=_registry(client))
+    saved = save_calculation_config_case(
+        db, owner, pid, dict(CONFIG_BODY), None, generator_registry=_registry(client),
+    )
 
     task, flags = tasks_uc.submit_task(
         db,
@@ -501,6 +503,7 @@ def test_snapshot_freezes_project_model_math(
     assert frozen["variables"]["rated_demand_kw"]["value"] == 10
     assert frozen["interfaces"]["heat_in"]["type"] == "in"
     assert frozen["interfaces"]["heat_in"]["carrier"] == "heat"
+    assert frozen["interfaces"]["heat_in"]["maximum_property_ref"] == "rated_demand_kw"
     assert any(
         ref["name"] == "rated_demand_kw"
         for relation in frozen["relations"]

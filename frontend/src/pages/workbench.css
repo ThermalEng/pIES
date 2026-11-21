@@ -23,36 +23,6 @@
   border-right: 1px solid var(--ies-color-border);
 }
 
-.wb-sidebar__head {
-  display: flex;
-  align-items: center;
-  gap: var(--ies-space-2);
-  padding: var(--ies-space-4);
-  border-bottom: 1px solid var(--ies-color-border);
-}
-
-.wb-sidebar__mark {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 26px;
-  height: 26px;
-  flex: none;
-  border-radius: var(--ies-radius-sm);
-  background: var(--ies-primary);
-  color: var(--ies-primary-text-on);
-  font-size: var(--ies-fs-sm);
-  font-weight: 700;
-}
-
-.wb-sidebar__project-name {
-  font-size: var(--ies-fs-sm);
-  font-weight: 600;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 .wb-sidebar__nav {
   display: flex;
   flex-direction: column;
@@ -177,10 +147,6 @@
     overflow-x: auto;
     border-right: 0;
     border-bottom: 1px solid var(--ies-color-border);
-  }
-
-  .wb-sidebar__head {
-    display: none;
   }
 
   .wb-sidebar__nav {

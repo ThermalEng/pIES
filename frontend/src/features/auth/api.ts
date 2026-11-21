@@ -14,6 +14,7 @@ import type {
   LoginRequestDto,
   LogoutResponseDto,
   PublicSettingsDto,
+  RefreshResponseDto,
   RegisterRequestDto,
   UserOutDto,
 } from './contracts'
@@ -42,6 +43,11 @@ export async function login(input: LoginRequestDto): Promise<LoginResult> {
 export async function logout(): Promise<void> {
   await request<LogoutResponseDto>('/auth/logout', { method: 'POST' })
   clearSession()
+}
+
+/** 仅由真实用户活动触发；普通业务请求、任务轮询不自动续期。 */
+export async function refreshSession(signal: AbortSignal): Promise<void> {
+  await request<RefreshResponseDto>('/auth/refresh', { method: 'POST', signal })
 }
 
 /**

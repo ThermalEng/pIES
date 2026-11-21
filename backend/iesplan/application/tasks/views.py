@@ -69,10 +69,10 @@ def _progress_summary(
             percent = float(row.progress_percent)
             stage = row.stage
             detail = row.detail
-    if task.status in tasks_domain.TERMINAL_STATUSES and stage is None:
-        # 终态无进度行: 完成定格 100, 其余 0
-        percent = 100.0 if task.status == "completed" else percent
-        stage = "done" if task.status == "completed" else None
+    if task.status == "completed":
+        # 任务完成即整体100%；最后阶段观测只保留为详情，不覆盖任务终态。
+        percent = 100.0
+        stage = "done"
     return attempt.attempt_no, percent, stage, detail
 
 

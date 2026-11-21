@@ -17,11 +17,18 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from decimal import Decimal
+from enum import StrEnum
 
 import numpy as np
 
 from iesplan.core.units import convert as units_convert
-from iesplan.finance.metrics import IRRStatus, build_project_cashflows, cashflow_irr, npv
+from iesplan.finance.metrics import (
+    IRRStatus,
+    build_project_cashflows,
+    cashflow_irr,
+    cashflow_zero_tolerance,
+    npv,
+)
 from iesplan.finance.params import FinanceParams
 
 # ---------------------------------------------------------------------------
@@ -181,30 +188,38 @@ def compute_lcoe(total_lifecycle_cost: Decimal | float, total_energy_kwh: Decima
     return cost / energy
 
 
-def compute_payback(cashflows: list[Decimal] | tuple[Decimal, ...]) -> float | None:
-    """静态回收期:累计现金流首次转正的年数(小数,线性插值);未转正 → None。
+class PaybackStatus(StrEnum):
+    """已回收、存在资金缺口但未回收、未发生实质资金缺口（不适用）。"""
 
-    - 首期(含 CF[0])累计已非负 → 0.0(投资期即回收);
-    - 空序列 → None。
-    """
+    recovered = "recovered"
+    not_recovered = "not_recovered"
+    not_applicable = "not_applicable"
+
+
+def evaluate_payback(
+    cashflows: list[Decimal] | tuple[Decimal, ...],
+) -> tuple[float | None, PaybackStatus]:
+    """从 t=0 起首次实质资金缺口的回收时点；原年轴内线性插值。"""
     if not cashflows:
-        return None
+        return None, PaybackStatus.not_applicable
+    flows = [_to_decimal(value) for value in cashflows]
+    tolerance = Decimal(str(cashflow_zero_tolerance(float(max(abs(c) for c in flows)))))
     cum = Decimal("0")
-    prev: Decimal | None = None
-    for i, c in enumerate(cashflows):
-        c = _to_decimal(c)
-        cum += c
-        if i == 0:
-            if cum >= 0:
-                return 0.0
-            prev = cum
-            continue
-        if prev < 0 <= cum:
-            delta = cum - prev
-            frac = float(-prev / delta) if delta > 0 else 0.0
-            return float(i - 1) + frac
+    deficit = False
+    for i, c in enumerate(flows):
         prev = cum
-    return None
+        if abs(c) > tolerance:
+            cum += c
+        if prev < -tolerance and cum >= -tolerance:
+            frac = min(1.0, float(-prev / (cum - prev)))
+            return float(i - 1) + frac, PaybackStatus.recovered
+        deficit = deficit or cum < -tolerance
+    return None, PaybackStatus.not_recovered if deficit else PaybackStatus.not_applicable
+
+
+def compute_payback(cashflows: list[Decimal] | tuple[Decimal, ...]) -> float | None:
+    """累计负现金流首次回收的年数；无须回收或未回收均为 None。"""
+    return evaluate_payback(cashflows)[0]
 
 
 def compute_financials(

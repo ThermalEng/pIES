@@ -93,6 +93,16 @@ def test_financial_rows_render_sealed_block_verbatim():
     assert "-123020.31" in text and "no_solution" in text and "not_recovered" in text
 
 
+def test_financial_rows_preserve_not_applicable_payback():
+    fin = _sealed()
+    fin["evaluation"].update(irr_status="degenerate", static_status="not_applicable",
+                             dynamic_status="not_applicable")
+    rows = dict(_sealed_evaluation_rows(fin))
+    assert rows["内部收益率 IRR / IRR"] == "— / degenerate"
+    assert rows["静态回收期 / static payback"] == "— / not_applicable"
+    assert rows["动态回收期 / dynamic payback"] == "— / not_applicable"
+
+
 def test_financial_absence_reasons(monkeypatch):
     """有块→None; 非 normal 结局→outcome_not_normal; 正常结局下以快照
     outputs 是否请求 solution 区分, 不把所有缺块猜为未请求。"""

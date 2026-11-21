@@ -16,6 +16,85 @@ import { createEngineer } from './setup/api'
 // ---------------------------------------------------------------------------
 
 test.describe('场景 1: 认证与会话 @basic', () => {
+  test('真实操作续期且 Cookie 同步，编辑未提交也有效，空闲和轮询不保活', async ({ browser }) => {
+    const username = uniqueName('es-idle')
+    const password = strongPassword('Idle')
+    const apiCtx = await browser.newContext({ baseURL: process.env.E2E_APP_URL ?? 'http://web:80' })
+    await createEngineer(apiCtx.request, username, password)
+    await apiCtx.close()
+    const context = await browser.newContext()
+    const page = await context.newPage()
+    const errors: string[] = []
+    page.on('pageerror', error => errors.push(error.message))
+    let refreshes = 0
+    page.on('response', response => {
+      if (response.url().endsWith('/api/auth/refresh') && response.status() === 200) refreshes++
+    })
+    await loginViaUI(page, username, password)
+    await expect(page.getByRole('button', { name: /退出登录|Logout/i })).toBeVisible()
+    // 等身份恢复完毕；只读定位，不注入登录态或替换被测响应。
+    await expect(page.getByRole('heading', { level: 1 })).toBeVisible()
+    await page.clock.install()
+    await page.clock.fastForward(31_000)
+    const beforeIdle = refreshes
+    // 模拟后台只读请求；它们走真实认证入口，不经任何用户事件。
+    const statuses = await page.evaluate(async () => {
+      const result = []
+      for (let i = 0; i < 3; i++) result.push((await fetch('/api/auth/me')).status)
+      return result
+    })
+    expect(statuses).toEqual([200, 200, 200])
+    await page.clock.fastForward(10 * 60_000)
+    expect(refreshes).toBe(beforeIdle)
+
+    const originalCookie = (await context.cookies()).find(cookie => cookie.name === 'ies_session')!
+    // Cookie 的 Max-Age 是浏览器真实墙钟，不随页面假时钟前进。
+    await new Promise(resolve => setTimeout(resolve, 1100))
+    const firstRefresh = page.waitForResponse(response => response.url().endsWith('/api/auth/refresh'))
+    await page.getByRole('button', { name: /新建项目|New project/i }).first().click()
+    expect((await firstRefresh).status()).toBe(200)
+    const renewedCookie = (await context.cookies()).find(cookie => cookie.name === 'ies_session')!
+    expect(renewedCookie.value).toBe(originalCookie.value)
+    expect(renewedCookie.expires).toBeGreaterThan(originalCookie.expires)
+    expect(renewedCookie.httpOnly).toBe(true)
+    expect(renewedCookie.sameSite).toBe('Lax')
+
+    // 没有保存动作，仅在编辑框中用键盘输入。
+    await page.getByLabel(/名称|Name/i).focus()
+    await page.keyboard.type('未提交的编辑也保持活跃')
+    const tailRefresh = page.waitForResponse(response => response.url().endsWith('/api/auth/refresh'))
+    await page.clock.fastForward(31_000)
+    expect((await tailRefresh).status()).toBe(200)
+    await expect(page.getByLabel(/名称|Name/i)).toHaveValue('未提交的编辑也保持活跃')
+    const afterEditing = refreshes
+    await page.clock.fastForward(10 * 60_000)
+    expect(refreshes).toBe(afterEditing)
+    expect(errors).toEqual([])
+    await context.close()
+  })
+
+  test('首次身份读取网络失败后，真实操作仍能续期', async ({ browser }) => {
+    const username = uniqueName('es-idle-recover')
+    const password = strongPassword('Recover')
+    const apiCtx = await browser.newContext({ baseURL: process.env.E2E_APP_URL ?? 'http://web:80' })
+    await createEngineer(apiCtx.request, username, password)
+    await apiCtx.close()
+    const context = await browser.newContext()
+    const page = await context.newPage()
+    // 只对首次角色读取注入断网；登录、业务查询、续期和 Cookie 均走真实服务。
+    await page.route('**/api/auth/me', route => route.abort('connectionreset'), { times: 1 })
+    const failedMe = page.waitForEvent('requestfailed', request => request.url().endsWith('/api/auth/me'))
+    await loginViaUI(page, username, password)
+    await failedMe
+    await expect(page.getByRole('heading', { level: 1 })).toBeVisible()
+    const renewal = page.waitForResponse(response => response.url().endsWith('/api/auth/refresh'))
+    await page.getByRole('button', { name: /新建项目|New project/i }).first().click()
+    expect((await renewal).status()).toBe(200)
+    await page.getByLabel(/名称|Name/i).fill('身份显示失败不阻断活动续期')
+    await expect(page.getByLabel(/名称|Name/i)).toHaveValue('身份显示失败不阻断活动续期')
+    await context.close()
+  })
+
   test('Cookie 到期不再发送凭证时，当前页与刷新均返回登录', async ({ browser }) => {
     const username = uniqueName('es-cookie-expiry')
     const password = strongPassword('Expiry')
@@ -111,7 +190,7 @@ test.describe('场景 1: 认证与会话 @basic', () => {
 // ---------------------------------------------------------------------------
 
 test.describe('场景 2: 项目与页面导航 @basic', () => {
-  test('创建项目并逐个访问工作台 7 个子页面', async ({ browser }) => {
+  test('创建项目并逐个访问工作台 7 个子页面', async ({ browser }, testInfo) => {
     const username = uniqueName('es-proj')
     const password = strongPassword('Init')
     const apiCtx = await browser.newContext({ baseURL: process.env.E2E_APP_URL ?? 'http://web:80' })
@@ -123,7 +202,7 @@ test.describe('场景 2: 项目与页面导航 @basic', () => {
     const session = await createSession(page, username, password)
 
     // 2a. 新建项目(UI)
-    const projectName = uniqueName('QA 验收项目')
+    const projectName = `项目标题验收-${uniqueName('p')}`
     await page.getByRole('button', { name: /新建项目|New project/i }).first().click()
     await page.getByLabel(/名称|Name/i).fill(projectName)
     await page.locator('#pp-create-start-year').fill('2026')
@@ -134,6 +213,15 @@ test.describe('场景 2: 项目与页面导航 @basic', () => {
     await page.getByText(projectName).click()
     await expect(page).toHaveURL(/\/projects\/\d+\/tasks$/)
     await expect(page.getByRole('button', { name: /提交任务|Submit task/i }).first()).toBeVisible()
+    const expectSingleProjectTitle = async () => {
+      await expect(page.getByRole('heading', { level: 1, name: projectName, exact: true })).toBeVisible()
+      await expect(page.getByText(projectName, { exact: true })).toHaveCount(1)
+      await expect(page.locator('.wb-sidebar')).not.toContainText(projectName)
+      await expect(page.locator('.wb-sidebar__mark')).toHaveCount(0)
+      await expect(page.locator('.wb-header__meta')).toContainText('CNY')
+    }
+    await expectSingleProjectTitle()
+    await page.screenshot({ path: testInfo.outputPath('project-header-light.png') })
 
     // 2c. 遍历 7 个子页面: 模型/数据/配置/校验/任务/结果/导出
     // 各页标题结构不同(tasks/results 用 Card 标题, 无 h1), 统一断言:
@@ -152,7 +240,19 @@ test.describe('场景 2: 项目与页面导航 @basic', () => {
       await expect(page).toHaveURL(pathRe)
       // 页面已渲染(非占位组件)
       await expect(page.locator('.wb-content .ies-page-placeholder')).not.toBeVisible({ timeout: 10_000 })
+      await expectSingleProjectTitle()
     }
+
+    await page.getByRole('button', { name: /^(深色模式|Dark mode)$/ }).click()
+    await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark')
+    await expectSingleProjectTitle()
+    await page.screenshot({ path: testInfo.outputPath('project-header-dark.png') })
+    await page.getByRole('button', { name: '语言', exact: true }).click()
+    await page.setViewportSize({ width: 375, height: 812 })
+    await expectSingleProjectTitle()
+    await expect(page.getByRole('navigation', { name: 'Workbench' })
+      .getByRole('link', { name: 'System Modeling' })).toBeVisible()
+    await page.screenshot({ path: testInfo.outputPath('project-header-mobile.png') })
 
     const projectId = page.url().match(/\/projects\/(\d+)/)![1]
     session.assertNoErrors([

@@ -5,6 +5,7 @@ HiGHS 真实求解仅在 Docker 环境运行；本文件不运行 GUI。
 """
 from __future__ import annotations
 
+import json
 import subprocess
 
 import pytest
@@ -29,9 +30,12 @@ from iesplan.modeling.contract2 import contribution_from_dict, contribution_to_d
 def battery():
     init_registry()
     document = next(d for d in list_devices() if d.device.id == "ies.device.battery")
-    assert from_dict(to_dict(document)).equations.variables["stored_energy"].initial_expression == (
+    document = from_dict(json.loads(canonical_bytes(document)))
+    assert document.equations.variables["stored_energy"].initial_expression == (
         "initial_soc * capacity_kwh"
     )
+    for flow in ("charge", "discharge"):
+        assert document.equations.variables[flow].maximum_property_ref == "rated_power_kw"
     result = build_math_contribution(document)
     assert result.ok, result.diagnostics
     contribution = contribution_from_dict(contribution_to_dict(result.contribution))
@@ -233,6 +237,15 @@ def test_zero_capacity_has_no_free_initial_energy(battery, tmp_path):
         assert primal[f"cell__stored_energy__t{step}"] == pytest.approx(0, abs=1e-6)
         assert primal[f"cell__charge__t{step}"] == pytest.approx(0, abs=1e-6)
         assert primal[f"cell__discharge__t{step}"] == pytest.approx(0, abs=1e-6)
+
+
+def test_saved_model_fixed_power_limits_are_instance_values(battery, tmp_path):
+    b = _rows(battery, capacity=10, power=4, discharge_efficiency=1)
+    for step in (0, 1):
+        for flow in ("charge", "discharge"):
+            assert b.variables[f"cell__{flow}__t{step}"].upper == pytest.approx(4000)
+    primal = _solve(b, tmp_path, demand_w=4000)
+    assert primal["cell__discharge__t0"] == pytest.approx(4000)
 
 
 def test_cost_and_annual_maintenance_use_the_same_planned_size(battery):

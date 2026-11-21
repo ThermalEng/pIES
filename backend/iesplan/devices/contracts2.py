@@ -15,9 +15,10 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import Any, Mapping
+from typing import Any
 
 #: 统一文件契约标识与版本
 SCHEMA_ID = "ies.device-model"
@@ -165,7 +166,7 @@ class TemplateInputSpec:
     type: str
     unit: str | None = None
     valid_range: tuple[float | None, float | None] | None = None
-    children: tuple["TemplateInputSpec", ...] = ()  # object/array 子声明
+    children: tuple[TemplateInputSpec, ...] = ()  # object/array 子声明
 
 
 @dataclass(frozen=True, slots=True)
@@ -186,6 +187,20 @@ class CanonicalModel:
     @property
     def canonical_bytes(self) -> bytes:
         return self.canonical_text.encode("utf-8")
+
+
+def _flow_range_to_dict(
+    valid_range: tuple[float | None, float | None],
+    minimum_property_ref: str | None,
+    maximum_property_ref: str | None,
+) -> dict[str, Any]:
+    """接口/内部变量的数值界与属性引用使用同一公开值域形态。"""
+    return {
+        "minimum": {"property_ref": minimum_property_ref}
+        if minimum_property_ref is not None else valid_range[0],
+        "maximum": {"property_ref": maximum_property_ref}
+        if maximum_property_ref is not None else valid_range[1],
+    }
 
 
 def to_dict(document: DeviceModelDocument) -> dict[str, Any]:
@@ -213,7 +228,9 @@ def to_dict(document: DeviceModelDocument) -> dict[str, Any]:
             "type": iface.type,
             "carrier": iface.carrier,
             "unit": iface.unit,
-            "valid_range": {"minimum": iface.minimum, "maximum": iface.maximum},
+            "valid_range": _flow_range_to_dict(
+                iface.valid_range, iface.minimum_property_ref, iface.maximum_property_ref,
+            ),
         }
         for iid, iface in document.interfaces.items()
     }
@@ -221,7 +238,9 @@ def to_dict(document: DeviceModelDocument) -> dict[str, Any]:
         "variables": {
             vid: {
                 "unit": v.unit,
-                **({"valid_range": {"minimum": v.valid_range[0], "maximum": v.valid_range[1]}}
+                **({"valid_range": _flow_range_to_dict(
+                    v.valid_range, v.minimum_property_ref, v.maximum_property_ref,
+                )}
                    if v.valid_range is not None else {}),
                 **({"initial": {"property_ref": v.initial_property_ref}}
                    if v.initial_property_ref is not None else {}),
@@ -249,6 +268,21 @@ def _valid_range_of(raw: object) -> tuple[float | None, float | None] | None:
     if not isinstance(raw, Mapping):
         return None
     return (raw.get("minimum"), raw.get("maximum"))
+
+
+def _flow_range_of(raw: Mapping[str, Any] | None) -> dict[str, Any]:
+    """还原已规范化的接口/内部变量值域，不重新解析或校验模型。"""
+    if raw is None:
+        return {"valid_range": None}
+    minimum, maximum = raw.get("minimum"), raw.get("maximum")
+    return {
+        "valid_range": (
+            None if isinstance(minimum, Mapping) else minimum,
+            None if isinstance(maximum, Mapping) else maximum,
+        ),
+        "minimum_property_ref": minimum["property_ref"] if isinstance(minimum, Mapping) else None,
+        "maximum_property_ref": maximum["property_ref"] if isinstance(maximum, Mapping) else None,
+    }
 
 
 def from_dict(raw: Mapping[str, Any]) -> DeviceModelDocument:
@@ -281,7 +315,7 @@ def from_dict(raw: Mapping[str, Any]) -> DeviceModelDocument:
             type=str(item["type"]),
             carrier=str(item["carrier"]),
             unit=str(item["unit"]),
-            valid_range=_valid_range_of(item.get("valid_range")) or (None, None),
+            **_flow_range_of(item.get("valid_range") or {}),
         )
     equations_raw = raw.get("equations") or {}
     variables = MappingProxyType(
@@ -289,7 +323,7 @@ def from_dict(raw: Mapping[str, Any]) -> DeviceModelDocument:
             str(vid): EquationVariable(
                 id=str(vid),
                 unit=str(item["unit"]),
-                valid_range=_valid_range_of(item.get("valid_range")),
+                **_flow_range_of(item.get("valid_range")),
                 initial_property_ref=(item.get("initial") or {}).get("property_ref"),
                 initial_expression=(item.get("initial") or {}).get("expression"),
             )

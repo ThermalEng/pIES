@@ -238,7 +238,7 @@ def _runtime(policy=None) -> SolverRuntime:
         policy = DeploymentPolicy(
             executables=(HIGHS_EXECUTABLE_REF,),
             environment_vars=(),
-            max_timeout_seconds=660,
+            max_timeout_seconds=1200,
             max_memory_mib=4096,
             max_cpu_cores=4,
             allow_network=False,
@@ -588,7 +588,7 @@ def test_chain_policy_rejected_never_executes() -> None:
     denied = DeploymentPolicy(
         executables=("ies.executor.unused@1.0.0",),
         environment_vars=(),
-        max_timeout_seconds=660,
+        max_timeout_seconds=1200,
         max_memory_mib=4096,
         max_cpu_cores=4,
         allow_network=False,

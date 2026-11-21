@@ -431,7 +431,7 @@ export function Badge({ label, variant = 'neutral', icon, pulse = false, size = 
   return (
     <span className={`ies-badge ies-badge--${variant} ies-badge--shape-square ies-badge--${size}`.trim()}>
       {icon ? (
-        <span className="ies-badge__icon" aria-hidden="true">
+        <span className={`ies-badge__icon${icon === 'spinner' ? ' ies-spinner' : ''}`} aria-hidden="true">
           <Icon name={icon} size={size === 'sm' ? 11 : 13} />
         </span>
       ) : null}

@@ -153,9 +153,11 @@ def read_task_hourly(
             location={"object_type": "evidence_package", "object_id": None},
         )
     content = results_writes.evidence_content(db, package)
-    return results_writes.read_hourly(
-        db, content, field, start=start, end=end, limit=limit, solution_id=solution_id
-    )
+    prepared = results_writes.prepare_hourly_read(db, content, field, solution_id)
+    # 本用例只有读操作；身份活跃时间已由认证用例单独提交。
+    # 内容源独立于 Session，大对象扫描不占用请求的数据库连接。
+    db.rollback()
+    return results_writes.read_hourly(prepared, start=start, end=end, limit=limit)
 
 
 def create_check_task_case(

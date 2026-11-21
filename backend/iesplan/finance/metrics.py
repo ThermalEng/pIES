@@ -1,6 +1,7 @@
 """财务指标模块:IRR 求根分类与税后现金流构建(自 metrics/financial.py 迁入,签名与 Decimal 语义不变)。
 
-依据 modules/finance.md 与 ARCHITECTURE_CONSTITUTION.md §4.6（IRR 语义、基准方案与净收益、税后现金流 ATCF；默认参数见 FinanceParams）。
+依据 modules/finance.md 与 ARCHITECTURE_CONSTITUTION.md §4.6。
+涵盖 IRR 语义、基准方案与净收益、税后现金流 ATCF；默认参数见 FinanceParams。
 
 金额一律使用 Decimal;内部数值求根使用 numpy float64。
 """
@@ -27,6 +28,15 @@ _RATE_TOL = 1e-9
 _NPV_REL_TOL = 1e-6
 # 牛顿迭代上限
 _MAX_ITER = 200
+
+
+def cashflow_zero_tolerance(scale: float) -> float:
+    """指标判零阈值，单位为现金流所用币种的基本金额单位。
+
+    绝对阈值排除求解浮点残差；相对阈值沿用指标的尺度判定。
+    只用于 IRR/回收期，不舍入或改写现金流、NPV 等财务事实。
+    """
+    return max(1e-6, 1e-12 * scale)
 
 
 class IRRStatus(StrEnum):
@@ -204,12 +214,15 @@ def cashflow_irr(
     if arr is None:
         return None, IRRStatus.numerical_failure, "现金流为空或包含非有限值"
     scale = float(np.max(np.abs(arr)))
-    if scale == 0.0:
-        return None, IRRStatus.degenerate, "现金流全为零,无法求 IRR"
+    zero_tol = cashflow_zero_tolerance(scale)
+    if scale <= zero_tol:
+        return None, IRRStatus.degenerate, "现金流在金额零容差内,无法求 IRR"
+    # arr 是输入转换后的独立数组；仅指标求根忽略近零项，原始事实不变。
+    arr[np.abs(arr) <= zero_tol] = 0.0
     # 退化:所有元素近似相等(常数现金流,NPV 恒不为 0)
-    if float(np.max(arr) - np.min(arr)) <= 1e-12 * scale:
+    if float(np.max(arr) - np.min(arr)) <= zero_tol:
         return None, IRRStatus.degenerate, "现金流为常数,无时间价值差异"
-    n_changes = _sign_changes(arr, zero_tol=1e-12 * scale)
+    n_changes = _sign_changes(arr, zero_tol=zero_tol)
     if n_changes == 0:
         return None, IRRStatus.none, "现金流符号无变化(全部同号),r>=0 上无根"
 
