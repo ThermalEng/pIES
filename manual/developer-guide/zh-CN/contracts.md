@@ -2,42 +2,32 @@
 
 > 文档状态：生效蓝图；规范版本：1.0.0；上位规范：[架构宪法](ARCHITECTURE_CONSTITUTION.md)
 
-本章定义跨进程、跨模块和扩展可依赖的稳定语义。具体 HTTP 路径与字段表由运行版本的 OpenAPI/schema 生成，不在手册中维护第二份易漂移副本。
+本章规定跨进程、跨模块及前后端之间共享的基础传输与业务输入契约。具体 HTTP 路径与字段清单以运行版本的 OpenAPI 与 Schema 为准，手册不维护第二份接口表。
 
 ## JSON 与数据类型
 
-- UTF-8、`application/json`；
-- 字段统一使用 `snake_case`；
-- 枚举值使用小写 `snake_case`；
-- 对外实体 ID 作为不透明十进制字符串传输，不能做算术；
-- 稳定扩展 ID 使用命名空间字符串；
-- 精确金额和费率结算值使用十进制定点字符串；
-- 连续物理量使用 JSON number，拒绝 `NaN` 和无穷值；
-- HTTP、事件、数据库和证据元数据中的时间戳使用带 `Z` 的 ISO 8601 UTC；项目计算序列与人工 CSV 按[设备数据 CSV](formats/device-data-csv.md)只使用 `step`、采样间隔和点数，不引入时区；
-- 长期结构必须声明 `schema_version`。
-- 计算与存储内部表示（`float64`、`Decimal`/`NUMERIC`、整数主键、时间戳存储类型）由实现决定，不得泄漏到公开 DTO。
-
-一个字段只能有一种未标记形态。缺失、空值和加载失败必须区分，不能用默认值或空数组掩盖错误。
+- 编码与媒体类型：UTF-8、`application/json`。
+- 命名约定：字段名与枚举值统一使用小写 `snake_case`。
+- 标识符：对外实体 ID 为不透明十进制字符串（禁止算术运算）；扩展与 Provider ID 使用带版本号的命名空间字符串（如 `ies.generator.highs_milp@1.0.0`）。
+- 数值表示：精确金额与结算费率使用十进制定点字符串；连续物理量使用有限 JSON number（禁止 `NaN`、`Infinity`）；比例统一使用 `0..1` 规范值；整数计数与年份使用 JSON integer。
+- 时间戳：HTTP、事件与元数据统一使用带 `Z` 的 ISO 8601 UTC 字符串；计算序列与数据 CSV 使用从 `0` 开始的连续 `step` 序号，不引入时区语义。
+- 长期结构：均声明 `schema_version`；缺失、`null` 与加载失败必须严格区分，不得用空数组或默认值掩盖错误。
 
 ## 成功与错误
 
-成功资源响应顶层使用**一级命名键包装**，每个键名直接表达资源语义：
+### 响应信封
 
-- 单资源响应：顶层为 `{<resource_name>, ...}`，例如 `{project, draft, versions, my_role}` / `{task, replayed, hint}` / `{result}` / `{assessment}` / `{report, stored}`。
-- 列表 + 分页：顶层固定为 `{items, total}` 或 `{items, next_cursor}` 二键（具体由端点选择一种）。
-- 动作响应（确认/状态变更/校验触发）：顶层为 `{ok, ...}`，必要时附 message_key/expires_at/result 等。
-- 必要时可嵌套（如 `{project, draft, versions, my_role}`），嵌套键名同样遵循自我文档化原则。
+成功资源响应顶层采用**一级命名键包装**，以键名直接表达资源语义，禁止使用 `{data, meta}` 等通用包装，也不得在同一端点混用裸对象与包装对象：
 
-**每个路由端点的允许顶层键集必须登记**在 [`iesplan/api/wrapper_keys.py`](../../../backend/iesplan/api/wrapper_keys.py) 的 `WRAPPER_KEYS` 集中登记表（对应错误信封 `NEW_DIAG_CODES` 的管理模式）：新增/修改端点先登记再改代码，协议基线测试 `test_wrapper_keys_registered`（AST 全量扫描，含间接返回端点）强制校验，未登记或键集超出登记即失败。非 JSON 响应端点（302 重定向 / 二进制下载）豁免。
+- 单资源 / 复合视图：`{project, draft, versions, my_role}`、`{task, replayed, hint}`、`{result}`、`{assessment}`、`{report, stored}` 等；
+- 列表与分页：`{items, total}` 或 `{items, next_cursor}`；
+- 动作响应：`{ok, ...}`；无正文操作返回 HTTP `204 No Content`。
 
-禁止：
+所有 JSON 端点的允许顶层键集在 API 层集中登记并受协议基线测试约束。
 
-- `{data, meta}` 这种通用包装（破坏键名自我文档化，分散前端适配层决策）；
-- 同一资源端点既返回裸对象又返回包装对象（裸/包装两版并存）—— 协议基线测试 [`backend/tests/test_protocol_baseline.py`](../../../backend/tests/test_protocol_baseline.py) 的 AST 门禁禁止新增此类违规；
-- `{**data, "data": data}` 双前缀；
-- 204 No Content 返回伪造 JSON。
+### 标准错误信封
 
-错误统一使用以下标准信封（参见宪法 §8，构造器权威源 `iesplan/core/errors.py:error_envelope`）：
+所有错误响应使用统一结构：
 
 ```json
 {
@@ -54,248 +44,116 @@
 }
 ```
 
-`code` 用于稳定分类（域-类别-三位序号），`message_key + params` 用于本地化，`location` 用于定位资源或字段。客户端不得接收堆栈、SQL、宿主机路径或凭证。
-
-**`code` 格式**：`DOMAIN-CATEGORY-NNN`。`DOMAIN` 是 API 子域（API/PROJ/TASK/DATA/CONFIG/OBJ/PERM/AUTH），`CATEGORY` 是错误类别（REQ/VAL/NF/CONFLICT/SEC/QUOTA/MISS 等）。**同 code 可跨 message_key 复用**（同语义不同文案，由前端按 message_key 渲染），但**禁止跨 code 共享 message_key**（每个 message_key 必须绑定唯一 code）。新码须在 `core/diagnostics.py NEW_DIAG_CODES` 集中登记，未登记即在 `Diagnostic` 构造时抛 ValueError（包络码从 `core/errors.py` 走时不受此约束，但建议同样登记）。
-
-`fix_hint_key` 字段：值为 `""` 表示无修复建议（非 null），与前端 `client.ts:217 ?? null` 容错路径兼容。
+- `code` 采用 `<DOMAIN>-<CATEGORY>-<NNN>`（如 `API` / `PROJ` / `TASK` / `DATA` / `CONFIG` / `OBJ` / `PERM` / `AUTH`），新诊断码须集中登记。
+- 同一个 `code` 可对应多个 `message_key`，但每个 `message_key` 必须绑定唯一的 `code`。
+- `fix_hint_key` 无建议时固定为空字符串 `""`；堆栈、SQL、宿主机路径和凭证禁止输出到客户端。
 
 ## HTTP 语义
 
-- GET 只读且可重试；
-- POST 创建资源或执行命令；
-- PUT 完整替换，PATCH 显式部分更新；
-- DELETE 执行明确生命周期操作；
-- 创建使用 201，异步接受使用 202，无正文使用 204；
-- 认证、授权、不存在、冲突和校验失败使用一致的标准状态码；
-- 可重试写操作使用作用域明确的幂等键；
-- 并发编辑使用 revision、ETag 或等价乐观锁。
+- `GET` 只读且幂等；`POST` 用于创建资源或执行命令；`PUT` 完整替换；`PATCH` 显式部分更新；`DELETE` 执行生命周期删除。
+- 异步受理返回 `202`；可重试写操作携带幂等键；并发编辑通过 `expected_revision` 实现乐观锁，冲突时返回 `409`。
+- 上传端点必须声明媒体类型与大小上限；下载返回受控字节流或短期授权，客户端不拼接对象存储路径。
 
-**状态码全局选择规则**（ADR-0005）：
-
-| 状态码 | 触发条件 | 典型码前缀 |
+| 状态码 | 触发条件 | 典型错误码前缀 |
 |---|---|---|
-| 200 / 201 / 204 | 正常成功 / 创建成功 / 无正文成功 | — |
-| 400 | 请求体**业务内容**校验失败（数据集行数/时间戳/缺失、配置业务字段越界） | `*-VAL-*` / `DATA-VAL-*` |
-| 401 | 未认证 | `AUTH-*-001` |
-| 403 | 已认证但无权限 / CSRF / 跨源 | `PERM-DENIED-*` / `AUTH-CSRF-*` |
-| 404 | 资源不存在 / 路由不存在 | `RES-MISS-*` / `API-NF-*` |
-| 409 | 资源状态冲突（重复/乐观锁失败/确认缺失） | `*-CONFLICT-*` / `ADMIN-CONFIRM-*` |
-| 413 | 上传文件过大 / 配额超限 | `API-QUOTA-*` |
-| 422 | 请求体**结构/语义**不可处理（Pydantic schema 错、配置变量类型错/算法参数越界） | `API-REQ-001` / `CONFIG-VAL-*` |
-| 429 | 限流触发 | `API-RL-001` |
-| 500 | 未捕获异常 | `API-500-001` |
+| `200 / 201 / 204` | 正常成功 / 创建成功 / 无正文成功 | — |
+| `400` | 请求体业务内容校验失败（如 CSV 行数不足、时间戳乱序） | `*-VAL-*`、`DATA-VAL-*` |
+| `401` | 未认证或会话已失效 | `AUTH-*-001` |
+| `403` | 已认证但无权限、CSRF 或跨源拦截 | `PERM-DENIED-*`、`AUTH-CSRF-*` |
+| `404` | 资源或路由不存在 | `RES-MISS-*`、`API-NF-*` |
+| `409` | 状态冲突（乐观锁修订不匹配、重复操作或确认缺失） | `*-CONFLICT-*`、`ADMIN-CONFIRM-*` |
+| `413` | 上传文件或配额超限 | `API-QUOTA-*` |
+| `422` | 请求体结构/Schema 不可处理（类型错误、必填缺失、参数越界） | `API-REQ-001`、`CONFIG-VAL-*` |
+| `429` | 触发限流 | `API-RL-001` |
+| `500` | 未捕获内部异常 | `API-500-001` |
 
-**400 与 422 的核心区分**：400 用于**业务内容**校验失败（数据本身有问题，如上传 CSV 行数不够、时间戳乱序）；422 用于**请求体结构/语义**不可处理（schema 不匹配、配置变量类型错、算法参数越界、必填字段缺失）。同一域内选择必须保持一致；端点设计时参考本表并查阅同类端点历史示例。
+**400 与 422 的分工**：请求结构、类型或 Schema 校验失败使用 `422`；请求结构合法但业务内容不符合领域规则（如数据时轴冲突、引用语义不成立）使用 `400`。
 
-**上传与下载错误**：413 用于文件大小/配额超限（封顶）；429 用于限流（重试导向）。两者都不视为校验错误，前端按 message_key 渲染。
+## 单位、时间与集合
 
-上传必须声明媒体类型和大小约束。下载返回受控资源或短期授权，客户端不拼接存储路径。
-
-**应用方案 POST /api/projects/{id}/apply-result（来源版本基线）**：请求 `{task_id, solution_id, name?, description?, expected_revision?}`，只接受任务引用与解标识，不接受浏览器侧参数补丁；服务端从任务快照解析来源版本与封存规划参数，在来源版本工作状态上写回并派生新版本（切换为当前），不叠加当前草稿；`expected_revision` 为打开确认框时捕获的当前草稿修订，发送前不重读，不符 → 409（不创建版本、不替换新编辑）；响应唯一 `{version, draft}`。具体字段表以运行版本 OpenAPI 为准。
-
-## 单位边界
-
-系统区分：
-
-1. GUI 展示单位；
-2. HTTP/业务契约的规范单位；
-3. 生成器/求解器内部单位。
-
-前端 mapper 完成表单字符串、百分比和简单展示换算；后端校验单位、量纲、范围和领域规则；装配阶段证明单位兼容并保留明确业务单位，业务单位到求解器内部单位只在 GeneratorProvider 边界发生，结果反向换算只在 ResultAdapter 边界发生。设备方程解析、运行时和业务服务中不得散落隐式换算常量。
-
-公共表达式按 `能量 = 功率 × 时间` 约简量纲，包括相应的乘除与整数幂；因此功率乘 `step_duration` 可与带能量单位的常数比较。不相容量纲仍拒绝，量纲约简不改变数值、币种或单位换算边界。
-
-## 时间与集合
-
-项目计算不建立时区语义。项目创建时固定时间分辨率、单场景模式与运行起始年（无闰年字段，闰年逐年按公历推导）；计算序列使用从零开始的连续 `step`，并声明分辨率、点数和单位。`data_repeat` 的完整来源序列整体作为重复基线，可为完整日、周或年且不另设周期字段；`data_full` 必须原样覆盖全周期全部点数；`data_predict` 的输入覆盖范围由预测目标和算法契约规定，输出覆盖完整运营期。各来源必须与项目基线分辨率一致并保持自身 `step` 连续。装配前不做重采样、插值、聚合、融合或补齐；计算阶段物化后，所有计算序列的点数和 `step` 必须完全一致（全周期点数由分辨率、起始年与已确认运营年限 `operation_years` 推导）。
-
-列表是否有序必须显式。需稳定排序的集合按稳定键规范化；JSON 字段顺序没有业务语义。大型逐时数组通过字段、时间范围或对象引用读取，不无条件嵌入普通 DTO。
+- **三层单位边界**：前端 mapper 仅负责表单字符串、百分比与简单展示单位换算；后端及装配证明规范业务单位与量纲兼容；业务单位到求解器内部单位（SI 等）的换算只在 `GeneratorProvider` 边界发生，反向换算只在 `ResultAdapter` 边界发生。公共表达式支持 `能量 = 功率 × 时间` 的自动量纲约简。
+- **时间基准**：项目不设立时区；创建项目时固定的 `resolution`、`scenario_mode` 与 `start_year` 唯一确定全周期点数（闰年逐年按公历推导）。`data_repeat` 将完整日、周或年序列作为重复基线，`data_full` 必须原样覆盖全运营期，`data_predict` 按预测目标生成全周期序列。所有输入在物化前均保持各自来源分辨率并从 `step=0` 连续递增。
+- **集合与大数组**：需确定性输出的集合按稳定业务键排序；大型逐步计算曲线通过独立分页接口读取，不无条件嵌入摘要 DTO。
 
 ### 求解步序列读取
 
-以下为生效目标契约，不表示当前链已实现。适配器内部统一结果形状见[计算生成与求解](modules/engines.md#统一求解步序列)及[Bundle映射](formats/solver-bundle.md#系统序列映射)；本节是公共目录、分页与导出身份的唯一正文。结果视图仍沿用`hourly_refs`引用组，每组`{rows, series}`中，rows是完整计算步数，series是序列元数据目录，不含完整值数组。每个目录条目为下列判别联合，不把系统块伪装成设备：
+结果视图中的 `hourly_refs`（每组 `{rows, series}`）与结果对象 `meta.series` 采用以下判别联合区分设备序列与系统方程辅助序列，`series_id` 在同一次结果中共享唯一命名空间：
 
-| kind | 完整目录条目 |
-| --- | --- |
-| `device` | `{kind: device, series_id, instance_id, variable_id, unit}`；保留设备原有实例/变量字段，身份来自outputs.series |
-| `system` | `{kind: system, series_id, block, variable, unit}`；block/variable为冻结system_equations的块/辅助变量ID，身份来自outputs.system_series；不携带instance_id/variable_id |
+| `kind` | 完整目录条目字段 | 说明 |
+|---|---|---|
+| `device` | `{kind: "device", series_id, instance_id, variable_id, unit}` | 身份对应装配实例与设备变量 |
+| `system` | `{kind: "system", series_id, block, variable, unit}` | 身份对应 `system_equations` 块与辅助变量，不含实例字段 |
 
-kind是必填判别字段，只接受所属形态的字段。series_id在同一封存结果/候选的全部设备、系统序列和引用组中共享唯一命名空间，与Bundle及对象中字段键相同；不同任务不要求全局唯一。目录按series_id排序，消费者只用kind与显式身份分组，不解析series_id、显示名或solver列名。元数据、单位与值来自同一证据，不从当前项目补齐；名称相同的设备变量与系统变量也不互相覆盖。
-
-既有`GET /api/projects/{project_id}/tasks/{task_id}/result/hourly`及`field`参数用于从该任务已选定封存结果中选择series_id；请求不另填设备ID或kind来猜序列位置。`start`、`end`、`next_start`均沿既有计算步分页语义，不是小时。响应保留`field/unit/start/end/values/next_start/total_rows`，并携带所选条目的kind及该形态身份：device增加`kind: device, instance_id, variable_id`，system增加`kind: system, block, variable`；field就是目录中的series_id。单位、总行数和身份不随分页变化。消费者按next_start读取到null，不凭一次请求或行数上限声称取得完整时域。缺席、未知field与实际读取失败分别处理，不伪造序列或空数据成功。
-
-结果对象沿既有`{data, meta.units}`形状序列化，data和meta.units以series_id为键；`meta.series`为同样以series_id为键的上述目录条目（条目仍含series_id），保留判别身份。application只做同次适配器结果的投影，不解释求解器变量，也不新增内部长度/hash校验。公开读取不把存储对象引用或路径交给前端拼装。
-
-既有证据导出不新增设备/系统两套入口：步序列目录列固定为`series_id, kind, instance_id, variable_id, block, variable, unit, rows`，不适用的身份列在表格留空，按kind解释；值表以series_id为列键并显式保留step。Excel中的显示标签可另作展示，不能取代身份、覆盖同名曲线或截断完整时域。项目包保留同一meta.series、单位及序列值，导入后不从名称重建归属。前端按公开身份与单位通用选取、分组及展示，横轴使用计算步序号；不得按旧字段名推断设备语义或把所有序列默认标为kW。
+逐时读取端点 `GET /api/projects/{project_id}/tasks/{task_id}/result/hourly` 通过 `field`（即 `series_id`）与步号窗口 `[start, end)` 分页拉取，返回 `{field, unit, start, end, values, next_start, total_rows}` 及对应 `kind` 身份字段；当 `next_start` 为 `null` 时表示读取完整。Excel 导出中的步序列目录沿用 `series_id, kind, instance_id, variable_id, block, variable, unit, rows` 统一列头。
 
 ## 快照与异步契约
 
-长时间计算、分析、导入和报告生成使用任务。任务请求携带幂等信息，消费不可变快照，并以不可变证据或对象提交结果。
+计算类任务提交时在快照 `CalcSnapshot@1.0.0` 中冻结以下独立事实：
 
-计算类任务必须明确引用本项目已保存的计算配置 revision；提交时冻结该 revision 的完整配置与来源，后续保存新 revision 不改变已提交任务。缺失或不存在的引用不得回退到当前草稿、最新配置或默认配置；任务级参数不得覆盖计算配置正文。具体 HTTP 字段和错误信封以运行版本的 OpenAPI 为准。
+1. 已校验的规范装配产物、按实例冻结的设备数学贡献、绑定数据集与价格对象引用；
+2. 所选已保存计算配置 revision 及其指向的 `Generator`、`Solver`、`Executor` 与 `ResultAdapter` 精确版本；
+3. **显式评价确认 `evaluation`**：作为任务提交的顶层结构化字段，以下各字段均无默认值：
 
-计算类任务提交的类型化输入包含显式评价确认 `evaluation`，以任务提交顶层字段提交，不在宽泛任务参数字典内，以下字段均无业务默认值：
+| 字段 | 类型与约束 |
+|---|---|
+| `evaluation_years` | 正整数，财务评价总年限，必须等于 `construction_period + operation_years` |
+| `construction_period` | 非负整数年，不得为浮点数 |
+| `operation_years` | 正整数，投产后的运营年限 |
+| `discount_rate` | 无量纲比例（`0..1`，`0` 合法） |
+| `construction_payments` | 建设付款比例列表 `[{t, ratio}]`；`t` 为自开工起的整数年 `0..construction_period`，`ratio` 按十进制精确求和须为 `1.0` |
+| `maintenance_expenses` | 年度维护/换新清单 `[{year, currency, amount, terms?}]`；`year` 为评价年（`construction_period+1..evaluation_years`），支持空列表 `[]` |
+| `comparison` | 可选评价比较输入，省略等价于 `{mode: "absolute"}` |
 
-| 字段 | 公开输入语义 |
-| --- | --- |
-| `evaluation_years` | 正整数，财务评价总年限，包含建设期 |
-| `construction_period` | 非负整数年，不接受浮点年或起止月 |
-| `operation_years` | 正整数，投产后的运营年限；必须满足 `evaluation_years = construction_period + operation_years` |
-| `discount_rate` | 无量纲比例，API 规范值 `0..1`，零合法 |
-| `construction_payments` | 显式付款比例清单 `[{t: integer, ratio: number}]`；`t` 为自开工起的整数年时点，`0..construction_period`；比例各在 `0..1`，按十进制语义求和须精确等于 `1.0`，不猜金额、不自动均摊 |
-| `maintenance_expenses` | 显式年度维护／换新清单；`year` 为从开工起的财务发生年（对应 `CF[year]`，范围 `construction_period+1..evaluation_years`），不是公历年份；币种与有效财务配置一致。金额来源支持非负十进制定点金额，或对指定实例规模属性／成本分量的受限声明式引用与系数，允许组合；最终金额与规划同次求解。空清单明确表示无额外支出；金额语义见[财务计算](modules/finance.md#运行期换新与指标口径)，传输结构以对应版本的 OpenAPI/schema 为准 |
+服务端提交时记录 `confirmed_by` 与 `confirmed_at`，并在提交边界一次性核对财务规则与生成器能力声明。应用方案（`POST /api/projects/{id}/apply-result`）基于任务快照对应的来源版本工作状态派生新版本，携带打开确认弹窗时捕获的 `expected_revision` 检查并发冲突。
 
-服务端在任务提交时记录 `confirmed_by`/`confirmed_at`，将上述确认及运行年度边界随任务冻结。无确认、时间关系不成立、付款比例不成立或必要财务参数未确定，在公开提交边界阻断；项目预检不以缺少另一次 `baseline-confirm` 审计阻断进入评价确认。自由字典式审计记录不作为参数来源。冻结块仍为 `evaluation`，结构变化按快照版本规则升级，不保留旧字段语义或双轨读取。评价确认作为独立的不可变输入直接交给 Generator，不混入运行步序列、财务三件套或封闭计算配置。建设支出与运营净流的时点映射以[财务计算](modules/finance.md)为唯一语义正文。
+任务结果查询（`GET /projects/{id}/tasks/{task_id}/result`）直接投影同一冻结证据：
+
+- `solver_summary`：包含 `termination_reason`、`math_status`、`has_feasible_solution`、`objective_value`、`objective_unit`、`best_bound` 与 `relative_gap`。
+- `financial_evaluation`：存在可行解且已评价时按[封存评价块](modules/finance.md#封存评价块-financial_evaluation)结构返回，否则为 `null` 并通过 `financial_absence` 明确说明原因（`outcome_not_normal` / `solution_not_requested` / `missing_unknown`）。
 
 ### 评价范围与冻结基准
 
-本节定义评价比较输入。业务语义归[评价边界与基准](modules/finance.md#评价边界与基准)；金额引用归[命名金额关系](formats/finance-relations.md)。不新增 baseline-confirm 流程、基准任务自动求解、汇率服务或第二套评价引擎。
+`evaluation.comparison` 用于声明有/无项目比较边界与外部基准事实，为判别联合：
 
-`evaluation` 增加可选 `comparison`。省略与 `{mode: absolute}` 一致，沿用原项目绝对现金流，不自动采用基准或切换增量计税。comparison 是以下判别联合，只接受所选形态字段：
+| `mode` | 完整字段 | 语义 |
+|---|---|---|
+| `absolute` | `{mode: "absolute"}` | 评价当前完整项目绝对现金流 |
+| `difference` | `{mode: "difference", baseline, facts, comparability}` | 双方按各自冻结税务规则分别计税形成税后现金流后，计算 `CF_c(x) - CF_b` |
+| `reference` | `{mode: "reference", baseline, facts, comparability}` | 仅向财务金额或规划 `amount_relation` 提供基准常量，最终仍评价候选自身现金流 |
 
-| mode | 完整字段与含义 |
-| --- | --- |
-| `absolute` | 仅 `{mode: absolute}`；评价原完整项目现金流，无基准 |
-| `difference` | `{mode: difference, baseline, facts, comparability}`；先按双方各自明确税务规则形成税后现金流，再作候选减基准 |
-| `reference` | `{mode: reference, baseline, facts, comparability}`；只提供独立基准常量给声明的金额关系或[金额引用约束](formats/assembly-yaml.md#金额引用约束)，不自动减基准现金流，最终指标仍评价本次模型明确形成的现金流 |
+- **`baseline` 来源**：恰选其一：
+  - `{kind: "task_result", task_id, evidence_id}`：引用已完成且含有效评价的已封存结果，禁止指向运行中任务或当前草稿；提交时一次性解析并冻结值与来源，项目包导入时自动转为 `declared` 形态。
+  - `{kind: "declared", currency, evaluation_years, annual_net_flows, facts}`：人工显式声明基准；`difference` 模式下 `annual_net_flows` 须提供 `E+1` 个金额字符串，`reference` 模式下固定为 `null`。
+- **`comparability`**：必填 `{service_basis, differences}`，均为非空字符串，由确认人明确服务范围与已知差异。
+- **`facts` 选择器**：用于为财务公式的 `kind: baseline` 引用提供局部别名。`task_result` 来源支持以下类型化选择器（`declared` 来源对应 `declared_fact` 引用其 `facts` 中 `{unit, axis, values}` 声明）：
 
-`baseline` 恰选：
+| `kind` | 选择器结构与取值 |
+|---|---|
+| `operation` | `{kind: "operation", measure}`，`measure` 为 `energy_net` / `fixed_om` / `variable_om` / `maintenance` / `demand_charge` |
+| `cashflow` | `{kind: "cashflow", measure: "net"}` |
+| `amount` | `{kind: "amount", id}` |
+| `movement` | `{kind: "movement", id, measure}`，`measure` 为 `gross` / `net_basis` / `net_revenue` / `paid` |
+| `asset` | `{kind: "asset", id, measure}`，`measure` 为 `basis` / `depreciation` / `book_value` |
+| `tax` | `{kind: "tax", source, measure}`，映射规范见[税额输出引用](formats/finance-relations.md#税额输出引用)与[封存对应表](formats/solver-bundle.md#税额引用与封存字段) |
 
-- `{kind: task_result, task_id, evidence_id}`：明确指定可访问的已封存可用结果。task_id/evidence_id 沿用已有公开ID类型；不得填当前任务、运行中任务、latest或可变项目草稿。提交用例解析该精确证据，记录其任务、attempt及结果对象引用；不额外计算一个“零容量基准”。
-- `{kind: declared, currency, evaluation_years, annual_net_flows, facts}`：用户明确提供并确认的数据。currency 与本项目相同，evaluation_years 与本次 E 相同。difference 模式下 annual_net_flows 必须为按t=0..E排列的E+1个有符号金额字符串；reference模式此字段必须为null，不能伪造全零基准现金流。facts 为下述已声明基准量表，不代表平台证明其物理可行。
-
-Task baseline的评价E和币种须与本次相同；difference模式还须已有完整财务现金流。不能只因状态completed就推断有可用评价，也不把缺失税额当成零。双方建设/运行安排或税务配置不必相同，但差异必须在本次确认中公开说明，不要求财务快照对象ID相等。
-
-`comparability` 必填 `{service_basis, differences}`：均为非空文字，明确比较的服务需求、经济承担范围和已知方案差异；完全相同可明确写“无额外差异”。它是本次评价确认的一部分，不是第二次人工批准。提交边界核对币种、评价轴、引用存在及权限；服务假设的工程真实性由用户声明，程序不以文字确认冒充供需可行性证明。
-
-`facts` 是本次对基准量的稳定局部别名映射，供财务 `kind: baseline` 引用。Task来源每项为以下已发布业务量选择器，不接受JSON数组下标、列名或任意对象路径：
-
-| kind | 选择字段与量 |
-| --- | --- |
-| `operation` | `{kind: operation, measure}`，measure 为 energy_net／fixed_om／variable_om／maintenance／demand_charge，取得逐评价年已封存经营事实 |
-| `cashflow` | `{kind: cashflow, measure: net}`，取得完整CF[0..E] |
-| `amount` | `{kind: amount, id}`，取得基准已发布命名金额，含其轴、单位及期间 |
-| `movement` | `{kind: movement, id, measure}`，measure 为gross／net_basis／net_revenue／paid，按发生或支付期间明确取值，净基础/净收入须与方向相容 |
-| `asset` | `{kind: asset, id, measure}`，measure 为basis／depreciation／book_value |
-| `tax` | `{kind: tax, source, measure}`，source/measure 复用[税额输出引用](formats/finance-relations.md#税额输出引用)；每项按[封存对应表](formats/solver-bundle.md#税额引用与封存字段)选择真实字段及轴，不能从共享池实缴反推规则销项/进项或读取当前配置重算 |
-
-Declared来源的baseline.facts每项为 `{unit, axis, values}`：axis为scalar／financial_year／tax_month；scalar的values恰一个值，financial_year恰E+1个（含时点0），tax_month恰12E个（从月1起）。金额/金额费率为十进制字符串，纯物理量为有限JSON number，沿用公共数值规范。不适用的年度时点明确填零，未知不能填零。comparison.facts 每项为 `{kind: declared_fact, id}`，引用该已声明量表。金额币种一致，其他单位遵守公共单位规则，禁止隐式换汇。
-
-公开提交一次解析选择器并冻结所用具名值、单位、轴、来源身份及比较确认；Generator仍只收到原独立evaluation输入，不增加数据库/对象读取入口或第七个输入。可信结果内部恢复不重新校验或复算基准，不复制整份基准模型、逐步解或财务配置。项目包导出保存这些冻结值和来源说明；导入为新项目计算时作为 declared 来源明确确认，不伪造目标系统中的原task/evidence身份。历史证据原样保留原来源，不回写。
-
-冻结块的 `comparison` 使用同次结果的 `mode/baseline_source/comparability/facts` 形状；difference 另存 `baseline_net_flows`。`baseline_source.selectors` 保留“本地别名→本次明确选择器”，与来源任务、attempt、证据及对象身份一起用于追溯，不在 Worker 中重新执行选择器。再次将历史任务载入草稿时，比较输入转为 declared，保留相同值与比较确认，由新任务提交重新确认，不伪造可用的旧服务器引用。
-
-设候选按其冻结规则得到 `CF_c[t](x)`，基准独立给出 `CF_b[t]`：difference 模式的评价及 `system.after_tax_npv` 目标使用 `CF_c[t](x)-CF_b[t]`；reference/absolute使用`CF_c[t](x)`。NPV、IRR、回收期和导出使用同一条选定现金流。结果同时区分原候选、基准与差额，不能把全厂绝对支出称作设备增量损益，也不伪造主营收入使IRR有值。
-
-difference 固定为**分别计税后比较**。不提供一个把已计税差额重新套税率的开关：`Tax(c)-Tax(b)` 一般不等于 `Tax(c-b)`。例如候选应税基础`c=-4`、基准`b=-10`、无结转且税率0.2时，候选减基准为6，分别计税的差`Tax(-4)-Tax(-10)=0`，而对差额计税`Tax(6)=1.2`。反过来候选-10、基准-4则差额为-6，两种结果均为0，不能作为不等价反例。本契约不把这两种算法当成可互换的精度设置。
-
-reference允许模型显式消费基准事实，影响税务的基准必须进入声明的金额及税务关系，与候选同次求解；影响财务约束的量通过amount_relation绑定明确期间，不能把基准别名直接写成全局规划名称或放进技术system_equations。它**不自动构成简化增量计税**，也不自动生成另一份现金账。若要新增专用增量税基/税盾兑现算法，必须先定义其核算主体、期初税务状态及现金范围契约，再扩展能力；不得在本次开发中自行解释为“默认税盾全兑现”。这一区分属于范围边界，不阻断分别计税的通用差额评价。
-
-comparison 非absolute时要求 `finance.frozen_baseline`；difference 另要求 `finance.cashflow_difference`，并要求同次financial_facts。缺能力在提交边界以TASK-REQ-007和触发字段明确拒收；未取得某个基准事实则报告其别名和来源选择器，不猜零值。没有基准需求的absolute任务不额外要求这些能力。
+**重要财务语义**：`difference` 模式固定采用**分别计税后求差**（`Tax(c) - Tax(b)` 通常不等于 `Tax(c - b)`），不提供“对现金差额重新套税率”的开关。使用 `comparison` 非 `absolute` 时，所选生成器须具备 `finance.frozen_baseline`（`difference` 另需 `finance.cashflow_difference` 及 `finance.financial_facts`）。
 
 ### 年度维护金额来源
 
-每笔维护保留 `year`、`currency` 和 `amount`；`amount` 表示非负十进制定点的确定金额加项，纯关联金额填写 `"0"`。可选 `terms` 为有序关联加项列表，省略或 `[]` 均表示只有确定金额；提交冻结时统一保存明确列表。该省略语义属于同一输入契约，不建立旧版读取分支。
+`evaluation.maintenance_expenses` 中每笔条目为 `{year, currency, amount, terms?}`：
 
-关联项以 `kind` 判别，仅支持：
+- `amount` 为非负十进制确定金额（纯关联费用填 `"0"`）；`terms` 为可选有序关联加项列表，省略或 `[]` 表示仅有确定金额。
+- 关联项仅支持以下两种 `kind`（引用范围、量纲及生成器 `finance.affine_maintenance` 能力在提交边界检查）：
 
-| `kind` | 引用与系数 |
-| --- | --- |
-| `scale_unit_cost` | `instance_id`、`property`、`unit_cost: {value, unit}`；引用实例的标量规模属性，非负单位费用为十进制字符串，乘属性单位后为本项目币种 |
-| `cost_component_share` | `instance_id`、`component: upfront_capex`、`ratio`；比例为 `0..1` 的 JSON number，引用该实例本课题的有效建设成本总分量 |
+| `kind` | 必填字段与金额含义 |
+|---|---|
+| `scale_unit_cost` | `instance_id`、`property`、`unit_cost: {value, unit}`；按实例冻结属性或规划变量规模乘单位费用计取 |
+| `cost_component_share` | `instance_id`、`component: "upfront_capex"`、`ratio`（`0..1`）；按该实例本课题实际建设总分量乘比例计取（不可引用 `existing` 沉没投资） |
 
-规模属性被规划变量接管时使用该变量，否则使用冻结的实例属性；不要求再填写规划变量 ID，不以当前草稿或设备默认值替换实例有效值。固定容量与既有设备均可作为规模引用对象。成本引用只取本课题的实际建设成本，不将既有设备沉没投资重新计入；不增加成本子分量选择器，不引用维护、税额、现金流或评价指标形成循环。
+每笔维护按冻结清单中的 `(year, position)`（同评价年内从 1 起顺序编号）作为唯一税务与折旧引用身份；组合项仍视为同一笔支付。资本化与费用扣除冲突规则见[财务金额来源](formats/finance-yaml.md#金额来源与折旧期间)。
 
-引用存在性、属性归属、币种量纲、非负金额及所选生成器能力在公开提交边界核对，复用装配已签发的属性与规划归属事实，不重复校验已成立的规则。金额表达式不得引入两个决策量相乘。税务身份继续使用冻结清单的 `(year, position)`，同年顺序从 1 开始；组合项仍是一笔支付，不拆项改变税务身份。
+## 契约演进原则
 
-`position` 是消费端按冻结清单同年顺序确定的引用身份，不是支付输入字段；不增加 description、is_capitalized 或重复金额。资本化折旧引用及费用扣除冲突按[财务金额来源](formats/finance-yaml.md#金额来源与折旧期间)处理。year 对应 `CF[year]`；运营第 j 年末的支付使用 `year=construction_period+j`，不是直接填写 j。
-
-快照版本为 `1.0.0`，冻结关联项结构，内部恢复直接消费该版本，不增加旧快照兼容。维护关联不改变财务三件套或装配结构，其独立版本分别以[财务格式](formats/finance-yaml.md)和[装配格式](formats/assembly-yaml.md)为准。生成器与适配器的配套版本见 [Solver Bundle 财务事实映射](formats/solver-bundle.md#同次解财务事实映射)。
-
-财务三件套 `1.0.0` 的来源引用与净现金项目属于已有冻结财务块，评价输入形状及快照顶层结构不变，快照版本不机械跟随财务版本提升。快照冻结完整 Effective、评价清单和配套 provider 精确版本；内部不读取旧版字段别名，也不将旧任务重新解释为新财务关系。
-
-### 逐步技术约束的保存与冻结
-
-规划保存、读取和项目包往返保留[逐步技术约束](formats/assembly-yaml.md#逐步技术约束)的完整类型、引用、表达式与启用状态；HTTP 使用同一业务结构，不增加设备专用输入。提交冻结规划 revision、规范装配及配套生成器精确版本，后续执行只消费冻结端口引用与运营时域。此关系属于已有规划／装配块，装配按自身版本解释，`CalcSnapshot@1.0.0` 顶层结构不变。
-
-### 月份日价格的冻结
-
-任务冻结实际计费引用的月份日价格完整定义，字段与来源规则以[月份日价格](formats/finance-yaml.md#月份日价格)为准。月份映射、来源对象与元数据属于既有冻结财务事实并参与快照复用身份；同一来源被多个月份使用时保留一次对象引用，不把未使用的价格变成任务依赖。该来源不新增快照顶层字段，不额外提升顶层版本。
-
-提交边界核对来源与项目时轴；执行时仅按已冻结的运行起始年、分辨率和运营年限物化。历史任务不读取当前草稿、最新Profile或Overrides，不把展开结果另存为可编辑的价格事实。读取失败按实际错误报告，不恢复旧来源或补默认价格。
-
-Worker 只有在命令可解析、租约有效且写入资格仍成立时才能提交进度和结果。失败保留结构化诊断；取消、超时和重试遵守公开状态转换。
-
-任务结果读取（`GET /projects/{id}/tasks/{task_id}/result` 的 `result` 视图）复用同一证据内容，不另建财务结果存储、不重新运行评价：有证据时原样投影 `financial_evaluation`（形态见[财务计算](modules/finance.md)“封存评价块”，无块时为 null）；同时给出缺块原因 `financial_absence`（有块时恒为 null）：`outcome_not_normal` 表示业务结局不是正常完成或有可行解的受限结果；`solution_not_requested` 表示快照 `outputs` 未请求 `solution`（解数据未发布）；`missing_unknown` 表示请求了 `solution` 但该证据未封存财务评价（如历史证据）。正常完成和受限结果按同一快照输出规则区分后两种缺席；不得把缺块猜为未请求或伪装为评价通过。
-
-任务结果视图另投影`solver_summary`：同次封存的终止原因、数学状态、是否有可行解、业务单位目标值／最优界及求解器原相对Gap，字段语义见[求解终止与最优性摘要](modules/engines.md#求解终止与最优性摘要)。非计算证据或没有该provider摘要时为null，不根据任务completed猜最优。超时且有可行解可提供同次财务评价，业务结局为受限结果；没有可行解不发布方案或虚构财务数值。结果页、重新评估和Excel读取同一封存事实，不用当前配置重算Gap。
-
-## 兼容与演进
-
-产品正式发布前，错误的旧字段、响应并集和静默 fallback 应一次性删除。正式发布后：
-
-- 兼容新增按次版本演进；
-- 缺陷修复按修订版本演进；
-- 2.0 正式发布前只维护当前公开契约，格式标记固定为 `1.0.0`；变更直接同步调用方与测试，不建立兼容或迁移链；
-- schema、文件格式、provider 和产品版本各自拥有独立版本，不能机械同步。
-
-版本计划、发布操作与完成状态不属于本公共契约；它们由独立的版本与更新记录维护。
-
-## 公共文件契约
-
-核心计算和离线交换继续使用四种版本化契约：设备模型 YAML、设备数据 CSV、装配 YAML 和 Solver Bundle。用户算法扩展另使用[算法插件包](formats/algorithm-plugin-package.md)交付契约；它由通用计算 provider 在隔离环境解释，不能代替 Solver Bundle。完整标准见[文件格式标准](file-formats.md)。
-
-- 前三种允许人工编写，但必须先经过对应 schema 校验和规范化；
-- 装配成功产出 `ValidatedAssemblyArtifact`，不能把原始 YAML `dict` 直接交给计算；
-- GeneratorProvider 只从规范装配生成 Solver Bundle；
-- SolverRuntime 只按 Bundle 的结构化命令执行，不解释业务字段；
-- 设备、数据和装配文件禁止实现模块路径、shell 字符串、宿主机绝对路径和凭证；算法插件入口只能出现在插件 manifest 的受控字段中，并且只由隔离运行器解释。
-
-核心 schema 与算法插件包 schema 均固定为 `1.0.0`，只解释当前字段与语义；不按版本选择解析器，不以“尽可能解析”掩盖实际内容错误。
-
-前端生成文件的契约测试必须把实际序列化字节提交给正式后端文件入口，并验证关键业务值完整往返。解析或领域错误统一进入标准错误信封；测试专用解析器、前端预解析对象和直接构造领域模型都不能替代这条链路。
-
-## 设计一个新 contract
-
-不要从现有 ORM 或页面表单直接复制字段。按下面顺序设计：
-
-1. 写出调用方要完成的动作和接收方承诺的结果；
-2. 为 contract 指定唯一所有者和版本；
-3. 区分命令、查询、领域结果、应用结果和 HTTP DTO；
-4. 对每个字段说明类型、单位、空值、顺序和稳定性；
-5. 定义成功、业务失败、冲突和内部失败；
-6. 决定幂等、revision、分页或异步语义；
-7. 用前后端/模块协议测试证明关键值完整往返；
-8. 再从权威 schema 生成具体字段文档。
-
-如果同一字段需要“旧字符串或新对象都能用”，应先完成调用方迁移，再一次性采用唯一形态，而不是把并集写进正式 contract。
-
-## Contract 在各层的变化
-
-| 边界 | 输入 | 输出 | 不应跨越的内容 |
-|---|---|---|---|
-| GUI ↔ feature | FormState | FrontendModel | 原始 HTTP 与业务数据库概念 |
-| feature ↔ API | Request/Response Contract | JSON/文件 | React 状态和显示单位 |
-| API ↔ application | Actor + Command | ApplicationResult | Cookie、Response、ORM |
-| application ↔ domain | 领域命令/值对象 | 领域结果/诊断 | 跨模块私有实现 |
-| assembly/modeling/finance/computation → generator | 装配产物、设备数学贡献、物化序列、有效财务快照、`CalculationConfig`、冻结评价确认，分别直传 | Solver Bundle | 原始 YAML、项目草稿、ORM、存储路径 |
-| generator ↔ runtime | Solver Bundle | `ExecutionReceipt` + 原始输出 | 设备私有实现、数据库、shell 字符串 |
-| runtime ↔ result adapter | 只读 Bundle、回执、声明输出 | `ComputeResult` | 进程句柄、当前项目、隐式重试 |
-| Worker ↔ results | attempt + evidence contract | 写入回执 | 无 fencing 的裸结果 |
-
-同一个业务概念可以在不同边界有不同类型，但转换必须存在于明确 mapper 中，不能依靠字段名碰巧相同。
-
-## 示例：保存计算配置
-
-前端 FormState 可保存百分数文本和未完成输入；提交 mapper 把它变为规范比例与明确枚举的请求 DTO。API 只校验传输结构并形成应用命令；application 校验权限与 revision；配置领域校验目标、变量和算法兼容性；成功后返回新的配置修订和诊断摘要。任一失败都保持原表单，并通过标准错误或诊断回到对应字段。
-
-这个流程中不存在“后端替前端除以 100”、路由直接写 ORM、页面接受两种响应形状或配置失败后返回旧数据。
-
-## 完成标准
-
-- contract 的所有者、调用方和版本明确；
-- 输入输出、单位、空值、失败和并发语义完整；
-- 具体字段由 schema 生成，不在多份手册重复；
-- 关键 ID、金额、单位、枚举和错误参数有跨边界往返测试；
-- 旧形态已迁移删除，没有静默 fallback。
+- 2.0 正式发布前，自有文件与内部扩展契约版本统一固定为 `1.0.0`，变更时直接同步生产者、消费者、样例与测试，不保留多版本兼容矩阵或旧字段别名。
+- 正式发布后，向后兼容新增提升次版本（MINOR），缺陷修复提升修订版本（PATCH）；破坏性变更须先经 ADR 批准并提升主版本（MAJOR）。
+- 前后端及模块契约测试必须覆盖序列化字节到正式后端解析入口的完整往返，验证关键业务数值、单位、ID 与标准错误信封。

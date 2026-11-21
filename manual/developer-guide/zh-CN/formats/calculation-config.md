@@ -1,31 +1,29 @@
 # CalculationConfig
 
-> 文档状态：生效目标契约；契约标识：`ies.calculation-config`；目标 schema：`1.0.0`；选择方：计算提交；消费者：GeneratorProvider（生成前能力核对）。
+> 契约标识：`ies.calculation-config`；目标 `schema_version`：`"1.0.0"`；消费者：任务提交校验与 `GeneratorProvider`
 
-CalculationConfig 固定一次计算的全部选择：mode、预测目标所用算法与参数、generator、solver、计算精度、耦合预测收敛条件、时间限制、选项、随机种子和输出选择。计算按项目基线完整连续序列进行，不采用典型日、分段近似、容量步长或场景缩减；本契约不含离散化字段，也不含规划目标/变量/约束、设备参数、财务配置、资源或装配内容。
+`CalculationConfig` 固定单次计算任务的全部算法与求解器选项。计算按项目基线完整连续时间轴执行，本契约不包含典型日缩减、规划目标约束、设备参数、财务规则或装配连接内容，与 `ValidatedAssemblyArtifact` 独立冻结。
 
-CalculationConfig 不进入 assembly，在计算包生成时与 `ValidatedAssemblyArtifact` 一起固定。
+## 顶层字段
 
-## 字段
+以下 12 个顶层字段全部必需（`convergence` 与 `seed` 无值时显式传 `null`，禁止省略），拒绝未知字段与非有限数值：
 
-| 字段 | 形态 | 说明 |
+| 字段 | 类型与格式 | 说明 |
 |---|---|---|
-| `schema` | `ies.calculation-config` | 字头 |
-| `schema_version` | `1.0.0` | 字头 |
-| `mode` | 非空字符串 | 计算模式，由 GeneratorDescriptor.modes 声明；首个内置模式为 `planning` |
-| `predictions` | 列表（可空列表，不接受 null） | 预测配置；每项 `{target: {instance, interface}, algorithm, parameters}`，`algorithm` 为精确 provider 引用，`parameters` 为对象；`target` 不得重复 |
-| `generator` | `<稳定ID>@<语义化版本>` | 所选生成器精确引用 |
-| `solver` | `<稳定ID>@<语义化版本>` | 所选求解器精确引用 |
-| `precision` | `low`、`medium`、`high` | 计算精度（与界面精度语义一致） |
-| `convergence` | null 或 `{tolerance, max_iterations}` | 有耦合预测时必填：`tolerance` 为正有限的无量纲阈值，算法按其公开规则返回无量纲收敛量，所有耦合目标均满足阈值才收敛；`max_iterations` 为总求解轮数上限，含首次求解，至少为 2。仅有独立预测或无预测时为 null |
-| `time_limit_seconds` | 正整数 | 时间限制（秒） |
-| `options` | 对象（可空对象，不接受 null） | 生成/求解选项；生成前由所选 descriptor 的 options schema 核对，未知字段与类型/范围错误直接拒绝 |
-| `seed` | 整数（不接受布尔值）或 null | 随机种子 |
-| `outputs` | 非空字符串列表 | 输出请求，顺序保留 |
+| `schema` | 字符串 | 固定为 `ies.calculation-config` |
+| `schema_version` | 字符串 | 固定为 `"1.0.0"` |
+| `mode` | 非空字符串 | 计算模式，须在所选 `GeneratorDescriptor.modes` 中（内置为 `planning`） |
+| `predictions` | 数组（可为 `[]`） | 预测配置列表，每项为 `{target: {instance, interface}, algorithm, parameters}`，`target` 不可重复 |
+| `generator` | `<ID>@<版本>` | 所选生成器精确引用 |
+| `solver` | `<ID>@<版本>` | 所选求解器精确引用 |
+| `precision` | 枚举 | 计算精度：`low`、`medium`、`high` |
+| `convergence` | `null` 或 `{tolerance, max_iterations}` | 当包含耦合预测目标时必填（`tolerance > 0` 无量纲阈值，`max_iterations >= 2`）；仅有独立预测或无预测时固定为 `null` |
+| `time_limit_seconds` | 正整数 | 请求求解时限（秒） |
+| `options` | 对象（可为 `{}`） | 生成/求解扩展选项，按所选 `GeneratorDescriptor` 的 `options_schema` 严格校验 |
+| `seed` | 整数或 `null` | 随机种子（禁止布尔值） |
+| `outputs` | 非空字符串数组 | 请求发布的结果输出项（顺序保留，如 `["solution", "metrics"]`） |
 
-12 个顶层字段全部必需（`convergence` 与 `seed` 允许显式 null，但不得省略）；未知字段一律拒绝，不静默丢弃，不补默认。`NaN`、`Infinity`、`-Infinity` 不得进入（含嵌套值）。
-
-## 示例
+## JSON 示例
 
 ```json
 {
@@ -39,23 +37,18 @@ CalculationConfig 不进入 assembly，在计算包生成时与 `ValidatedAssemb
       "parameters": {}
     }
   ],
-  "generator": "acme.generator@1.0.0",
+  "generator": "ies.generator.highs_milp@1.0.0",
   "solver": "ies.solver.highs@1.7.2",
   "precision": "medium",
   "convergence": null,
   "time_limit_seconds": 43200,
-  "options": { "gap_rel": 0.001 },
+  "options": {},
   "seed": 42,
   "outputs": ["solution", "metrics"]
 }
 ```
 
-示例中的 12 小时是一次计算的显式请求，不是部署硬上限。新建表单可用统一部署配置给出初值；保存后该值属于项目计算配置 revision，任务提交时冻结，部署配置变更不得改写历史输入。
+## 时限预算与校验边界
 
-内置HiGHS生成器将用户请求的`time_limit_seconds`原样传给求解器内部`time_limit`（不扣除读模耗时，也不为迎合部署硬上限而静默缩短求解时长）；进程监督另留600秒有界壁钟宽限，用于进程启动、MPS读取、求解正常收尾、解内容生成与文件写出，避免在原生时限到达或读模较慢时被外层提前强杀。即Bundle的`command.timeout_seconds`为`time_limit_seconds + 600`，仍须由执行前策略核对满足部署的`max_timeout_seconds`（超限即在启动前拒绝，不裁剪预算）；超过该壁钟预算仍记为监督超时，不凭残留解文件升级为成功。该600秒宽限不增加HiGHS的求解时长，仍属有限预算，超慢输入仍可能触发真实外层超时。
-
-## 校验边界
-
-公开 CalculationConfig 输入边界校验全部字段形态与领域规则；生成前由 GeneratorDescriptor 核对 mode、精度与 solver 兼容性。预测目标按绑定和算法输入要求校验，收敛配置按预测能力声明的计算依赖确定。`1.0.0` 以依赖关系取代旧版按目标数量选择流程的规则。
-
-算法参数与收敛调用以[预测能力契约](../modules/engines.md#预测参数与收敛能力)为准；不要求所有算法提供同名尺度参数。该目标契约的输入与执行统一使用 `1.0.0`，不保留旧数量分流或双版本解析入口。
+- **求解时限与外层监督**：内置 HiGHS 生成器将用户请求的 `time_limit_seconds` 原样传入求解器内部 `--time_limit`，并在外层进程监督预留 `+600` 秒有界宽限（`command.timeout_seconds = time_limit_seconds + 600`）用于启动、MPS 读模与解写出；整体壁钟仍须在部署策略 `max_timeout_seconds` 允许范围内（超限在启动前拒绝）。
+- **静态能力检查**：配置保存与任务提交阶段依据所选 `GeneratorDescriptor` 校验 `mode`、`precision`、`solver`、`outputs`、`options` 与预测算法参数规则（参见[预测参数与收敛能力](../modules/engines.md#预测参数与收敛能力)）；具体数学模型是否可成功降级由生成阶段判定。

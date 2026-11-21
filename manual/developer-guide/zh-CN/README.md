@@ -1,55 +1,45 @@
 # pIES 开发者指南
 
-本指南面向维护者、集成开发者、扩展开发者和贡献者。它不仅规定边界，也解释每个部分为什么存在、接收什么、产出什么，以及怎样在不破坏解耦的前提下继续开发。
+本指南面向项目维护者、扩展开发者与贡献者，说明系统架构边界、公共数据契约、文件格式标准、模块职责及部署验收方式。
 
-开始一个局部开发任务时，先阅读架构宪法，再进入对应的模块手册。模块手册与该模块的公开代码和测试共同构成开发入口；一般不需要回到历史 Review 或旧规格寻找上下文。
+进行具体设计与实现前，应先阅读[架构宪法](ARCHITECTURE_CONSTITUTION.md)了解全局约束，再按需查阅对应格式标准或模块文档；模块文档与对应模块的公开接口及测试共同构成开发依据。
 
-## 规范与蓝图
+## 指南目录
 
-1. [架构宪法](ARCHITECTURE_CONSTITUTION.md)：最高原则与冲突裁决；
-2. [系统架构蓝图](architecture.md)：系统上下文、端到端流程、模块职责和依赖方向；
-3. [文件格式标准](file-formats.md)：可手写的设备模型 YAML、数据 CSV、财务 YAML、装配 YAML，以及生成器产出的 Solver Bundle；
-4. [模块开发手册](module-development.md)：按模块选择开发入口、统一阅读方法和完成标准；
-5. [领域模型与追溯链](domain-model.md)：项目、数据、配置、任务、结果和对象生命周期；
-6. [公共契约](contracts.md)：HTTP、数据类型、单位、时间、诊断和异步语义；
-7. [扩展体系](extensions.md)：设备技术内容、方程转换、生成器、运行时、存储和数据 provider；
-8. [模型与算法](customization-center.md)：外部模型/插件的文件交付、版本、共享、安装和选择规则；
-9. [前端与帮助中心](frontend.md)：前端输入输出、状态、GUI 开发流程与正式文档；
-10. [部署与运行](deployment.md)：Docker 部署、安全、健康、备份和恢复；
-11. [规范索引与文档边界](normative-index.md)：查找唯一权威来源、引用稳定规则和识别归档材料。
+1. [架构宪法](ARCHITECTURE_CONSTITUTION.md)：全局强制原则与冲突裁决顺序。
+2. [系统架构蓝图](architecture.md)：系统分层、端到端业务链、模块边界与依赖方向。
+3. [文件格式标准](file-formats.md)：设备 YAML、数据 CSV、财务 YAML、装配 YAML、计算配置、Solver Bundle 与项目包规范。
+4. [模块开发手册](module-development.md)：后端各业务模块的职责总览与跨模块协作规范。
+5. [领域模型与追溯链](domain-model.md)：草稿、版本、快照、任务与证据的生命周期及不可变追溯关系。
+6. [公共契约](contracts.md)：HTTP/JSON 规范、错误信封、单位与时间基准、异步任务与结果读取契约。
+7. [扩展体系](extensions.md)：设备内容、方程能力、计算 Provider 与存储适配器的扩展机制。
+8. [模型与算法](customization-center.md)：用户自定义设备模型、算法插件包与共享目录设计（规划中）。
+9. [前端与帮助中心](frontend.md)：前端分层架构、状态管理、GUI 与后端契约边界、帮助中心机制。
+10. [部署与运行](deployment.md)：Docker 容器化部署、统一配置、Worker 并发与求解隔离、健康排查及备份恢复。
+11. [规范索引与文档边界](normative-index.md)：各文档权威归属与维护约定。
 
-## 按任务进入
+## 按开发任务索引
 
-| 要开发的内容 | 首先阅读 |
+| 开发任务 | 对应参考文档 |
 |---|---|
-| provider 发现、依赖注入或启动就绪 | [组合根与启动](modules/bootstrap.md) |
-| 通用类型、诊断、单位或时间轴 | [Core 基础能力](modules/core.md) |
-| 新设备或设备描述 | [设备目录](modules/devices.md) |
-| 手写或校验设备模型 YAML | [设备模型 YAML](formats/device-model-yaml.md) |
-| 手写或校验设备时序 CSV | [设备数据 CSV](formats/device-data-csv.md) |
-| 设备方程如何形成声明式数学贡献 | [技术方程建模](modules/modeling.md) |
-| 手写装配、项目图校验或规范产物 | [装配 YAML](formats/assembly-yaml.md)与[装配与检查](modules/assembly.md) |
-| 手写或校验财务 YAML（FinanceProfile/Overrides/Effective） | [财务 YAML](formats/finance-yaml.md) |
-| 网络边界、分配与系统辅助状态 | [网络与系统方程](formats/network-relations.md) |
-| 命名金额、支付、资产、派生税与基准 | [金额关系](formats/finance-relations.md)与[评价范围](contracts.md#评价范围与冻结基准) |
-| 从规范装配生成求解器输入和命令 | [计算生成器](modules/generators.md) |
-| 安全执行求解器命令 | [求解运行时](modules/solver-runtime.md) |
-| 计算全链路或结果适配 | [计算生成与求解](modules/engines.md) |
-| 财务指标 | [财务计算](modules/finance.md) |
-| 敏感性、批量或结果评估 | [结果分析](modules/analysis.md) |
-| 对象、引用、清理或存储适配器 | [对象存储](modules/storage.md) |
-| 跨模块业务流程 | [应用用例](modules/application.md) |
-| HTTP 路由与 DTO | [API 适配](modules/api.md) |
-| 后台任务、租约与结果提交 | [Worker](modules/worker.md) |
-| repository、数据库约束或 migration | [持久化](modules/persistence.md) |
-| 页面、表单、状态或帮助中心 | [前端与帮助中心](frontend.md) |
-| 用户自定义模型、算法插件、共享安装或选择 | [模型与算法](customization-center.md) |
-
-## 使用原则
-
-- 架构宪法规定“为什么不能越界”；模块手册说明“这个部分怎样工作和怎样开发”。
-- 稳定公共设计写在本指南；版本计划、实施顺序、完成状态和内部过程控制不属于本指南。
-- Review 只提供证据和历史上下文，不能成为实现的第二套权威说明。
-- 文档标记为“生效目标契约”表示后续实现必须以此为目标；它不对当前完成状态作出声明。
+| 启动装配、Provider 注册与就绪检查 | [组合根与启动](modules/bootstrap.md) |
+| 公共基础类型、诊断码、单位换算与时间轴 | [Core 基础能力](modules/core.md) |
+| 新增内置设备或维护设备描述目录 | [设备目录](modules/devices.md)、[设备模型 YAML](formats/device-model-yaml.md) |
+| 编写或校验设备/价格时序 CSV | [设备数据 CSV](formats/device-data-csv.md)、[价格序列 CSV](formats/price-series-csv.md) |
+| 受限技术方程解析与数学贡献转换 | [技术方程建模](modules/modeling.md) |
+| 装配图校验、端口网络边界与系统方程 | [装配与检查](modules/assembly.md)、[装配 YAML](formats/assembly-yaml.md)、[网络边界与系统方程](formats/network-relations.md) |
+| 财务三件套、命名金额、税务规则与项目评价 | [财务计算](modules/finance.md)、[财务 YAML](formats/finance-yaml.md)、[命名金额、支付与资产](formats/finance-relations.md) |
+| 评估范围、冻结基准与年度维护来源 | [公共契约](contracts.md#评价范围与冻结基准)、[年度维护金额来源](contracts.md#年度维护金额来源) |
+| 数学问题构建与 Solver Bundle 生成 | [计算生成器](modules/generators.md)、[Solver Bundle](formats/solver-bundle.md) |
+| 隔离执行求解命令与回执采集 | [求解运行时](modules/solver-runtime.md) |
+| 计算全链路、预测算法与结果适配 | [计算生成与求解](modules/engines.md) |
+| 敏感性、批量扫描与系统四维评估 | [结果分析](modules/analysis.md) |
+| 不可变对象存储、引用生命周期与清理恢复 | [对象存储](modules/storage.md) |
+| 跨模块业务编排与事务边界 | [应用用例](modules/application.md) |
+| HTTP 路由、DTO 映射与错误响应 | [API 适配](modules/api.md) |
+| 后台守护进程、租约、检查点与重试 | [Worker](modules/worker.md) |
+| 领域表归属、Repository 与数据库迁移 | [持久化](modules/persistence.md) |
+| 前端页面、Feature 分层、浏览器验收与帮助中心 | [前端与帮助中心](frontend.md) |
+| 自定义模型库、算法插件与共享园地（`1.1.0` 目标） | [模型与算法](customization-center.md) |
 
 返回[正式文档入口](../../README.md)或[项目入口](../../../README.md)。
