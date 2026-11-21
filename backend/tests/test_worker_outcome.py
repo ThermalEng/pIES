@@ -435,7 +435,7 @@ class TestReportStageCommands:
             select(TaskLease).where(TaskLease.attempt_id == claim.attempt_id)
         ).scalars().first()
         assert row is not None
-        row.status = "expired"  # 模拟守护进程过期回收
+        row.status = "revoked"
         db.commit()
 
         with pytest.raises(worker_app.LeaseRejectedError):
@@ -453,15 +453,15 @@ class TestReportStageCommands:
 class TestWorkerExecutionGuards:
     """权限与错误语义回归: 非持有者写回被拒、取消信号中止执行。"""
 
-    def test_expired_lease_rejects_run(self, db: Session, env: dict[str, Any], factory):
-        """租约过期后执行: 迟到写回整笔拒绝, 任务保持 running。"""
+    def test_revoked_lease_rejects_run(self, db: Session, env: dict[str, Any], factory):
+        """租约撤销后执行: 迟到写回整笔拒绝, 任务保持 running。"""
         task = _add_task(db, env, "report")
         claim = _claim_task(db, task.id)
         row = db.execute(
             select(TaskLease).where(TaskLease.attempt_id == claim.attempt_id)
         ).scalars().first()
         assert row is not None
-        row.status = "expired"  # 模拟守护进程过期回收
+        row.status = "revoked"
         db.commit()
 
         status = runner.run_task(factory, claim, worker_id="w-report")
@@ -515,10 +515,10 @@ class TestWorkerExecutionGuards:
         lease = db.execute(
             select(TaskLease).where(TaskLease.attempt_id == claim.attempt_id)
         ).scalar_one()
-        lease.status = "expired"
+        lease.status = "revoked"
         db.commit()
 
         assert runner.run_task(factory, claim, worker_id="cw-lost") == "lease_rejected"
         db.expire_all()
         assert db.get(Task, task.id).status == "cancelling"
-        assert lease.status == "expired"
+        assert lease.status == "revoked"

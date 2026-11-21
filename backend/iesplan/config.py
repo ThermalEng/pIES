@@ -46,8 +46,6 @@ _ALLOWED_DEPLOY_SECTIONS: dict[str, frozenset[str]] = {
         "max_memory_mib",
         "max_cpu_cores",
         "allow_network",
-        "max_output_files",
-        "max_output_bytes",
         "allowed_executables",
         "allowed_environment_vars",
     }),
@@ -70,8 +68,6 @@ _APP_TOML_MAP: tuple[tuple[str, str, str], ...] = (
     ("solver_max_memory_mib", "solver", "max_memory_mib"),
     ("solver_max_cpu_cores", "solver", "max_cpu_cores"),
     ("solver_allow_network", "solver", "allow_network"),
-    ("solver_max_output_files", "solver", "max_output_files"),
-    ("solver_max_output_bytes", "solver", "max_output_bytes"),
     ("solver_allowed_executables", "solver", "allowed_executables"),
     ("solver_allowed_environment_vars", "solver", "allowed_environment_vars"),
     ("calc_time_limit_seconds", "calculation", "time_limit_seconds"),
@@ -181,10 +177,6 @@ class Settings(BaseSettings):
     solver_max_cpu_cores: int = Field(exclude=True, gt=0)
     #: 求解是否允许联网(普通 solver 默认断网)
     solver_allow_network: bool = Field(exclude=True)
-    #: 声明输出文件数上限
-    solver_max_output_files: int = Field(exclude=True, gt=0)
-    #: 声明输出总量上限(字节)
-    solver_max_output_bytes: int = Field(exclude=True, gt=0)
     #: 默认允许的 executable 精确引用
     solver_allowed_executables: tuple[str, ...] = Field(exclude=True, min_length=1)
     #: 允许注入的环境变量名(空 = 不允许任何环境变量)

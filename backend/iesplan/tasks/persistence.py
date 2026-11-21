@@ -11,7 +11,7 @@
 from __future__ import annotations
 
 from collections.abc import Collection, Mapping
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
@@ -135,8 +135,7 @@ def _row_to_lease(row: TaskLease) -> TaskLeaseRecord:
         lease_token=str(row.lease_token),
         status=row.status,
         acquired_by=row.acquired_by,
-        expires_at=_iso(row.expires_at),
-        renewed_at=_iso(row.renewed_at),
+        acquired_at=_iso(row.acquired_at),
     )
 
 
@@ -543,7 +542,6 @@ def acquire_lease(
     attempt_id: int,
     lease_token: str,
     acquired_by: str | None = None,
-    ttl_seconds: int = 60,
 ) -> TaskLeaseRecord:
     """领取租约；同 attempt 已有 active 租约抛 TaskConflictError。"""
     existing = db.execute(
@@ -557,23 +555,9 @@ def acquire_lease(
         lease_token=UUID(str(lease_token)),
         acquired_by=acquired_by,
         acquired_at=now,
-        renewed_at=now,
-        expires_at=now + timedelta(seconds=ttl_seconds),
         status="active",
     )
     db.add(row)
-    db.flush()
-    return _row_to_lease(row)
-
-
-def renew_lease(db: Session, attempt_id: int, lease_token: str) -> TaskLeaseRecord:
-    """续租（token 不符抛 TaskConflictError）。"""
-    row = db.execute(
-        select(TaskLease).where(TaskLease.attempt_id == attempt_id, TaskLease.status == "active")
-    ).scalar_one_or_none()
-    if row is None or str(row.lease_token) != str(lease_token):
-        raise TaskConflictError("租约 token 不符或租约非 active", params={"attempt_id": attempt_id})
-    row.renewed_at = _now()
     db.flush()
     return _row_to_lease(row)
 
@@ -989,87 +973,18 @@ def pool_has_free_slot(db: Session, pool_name: str, capacity: int) -> bool:
     return any(row.in_use < row.capacity for row in rows)
 
 
-def fence_renew_lease(
-    db: Session, attempt_id: int, lease_token: UUID | str, *, ttl_seconds: int
-) -> int:
-    """带 fencing 的租约续期（renewed_at/expires_at 推进；返回影响行数）。"""
-    token = lease_token if isinstance(lease_token, UUID) else UUID(str(lease_token))
-    now = _now()
-    return int(
-        db.execute(
-            update(TaskLease)
-            .where(
-                TaskLease.attempt_id == attempt_id,
-                TaskLease.lease_token == token,
-                TaskLease.status == "active",
-                TaskLease.expires_at > now,
-            )
-            .values(renewed_at=now, expires_at=now + timedelta(seconds=ttl_seconds))
-            .execution_options(synchronize_session="fetch")
-        ).rowcount
-        or 0
-    )
-
-
 def get_valid_lease(
     db: Session, attempt_id: int, lease_token: UUID | str
 ) -> TaskLeaseRecord | None:
-    """取得并锁定尚未到期的写入资格，与续租/回收在同一租约行上串行。"""
+    """取得并锁定当前尝试的写入资格，与撤销在同一租约行上串行。"""
     row = db.execute(
         select(TaskLease).where(
             TaskLease.attempt_id == attempt_id,
             TaskLease.lease_token == UUID(str(lease_token)),
             TaskLease.status == "active",
-            TaskLease.expires_at > _now(),
         ).with_for_update()
     ).scalar_one_or_none()
     return _row_to_lease(row) if row is not None else None
-
-
-def recover_expired_attempts(db: Session, pool: str) -> list[TaskRecord]:
-    """同池到期尝试原子收拢；调用方提交后重建队列提示，不提交事务。"""
-    now = _now()
-    types = [kind for kind, owner in POOL_BY_TYPE.items() if owner == pool]
-    leases = db.execute(
-        select(TaskLease)
-        .join(TaskAttempt, TaskAttempt.id == TaskLease.attempt_id)
-        .join(Task, Task.id == TaskAttempt.task_id)
-        .where(
-            TaskLease.status == "active", TaskLease.expires_at <= now,
-            TaskAttempt.status == "running", Task.type.in_(types),
-            Task.status.in_(("running", "cancelling")),
-        )
-        .order_by(TaskLease.id)
-        .with_for_update(skip_locked=True, of=TaskLease)
-    ).scalars().all()
-    recovered = []
-    for lease in leases:
-        attempt = db.get(TaskAttempt, lease.attempt_id)
-        # 租约锁后再取得最新任务状态，避免覆盖并发到达的取消请求。
-        task = db.execute(
-            select(Task).where(Task.id == attempt.task_id).with_for_update()
-            .execution_options(populate_existing=True)
-        ).scalar_one()
-        lease.status = "expired"
-        finish_attempt(db, attempt.id, "stopped", stop_reason="lease_expired")
-        release_slot(db, attempt.id)
-        outcome = None
-        if task.status == "cancelling":
-            status = "cancelled"
-            if task.type == "uncertainty" and count_completed_samples(db, task.id) > 0:
-                outcome = "partial_batch"
-        else:
-            status = "queued" if task.attempt_count < task.max_attempts else "failed"
-        record = set_task_status(db, task.id, status, business_outcome=outcome)
-        append_diagnostic(
-            db, task_id=task.id, attempt_id=attempt.id, level="warning",
-            code="TASK-LEASE-001", message=f"执行租约过期，旧尝试已停止；任务状态：{status}",
-            context={"recovery": "restart_from_snapshot" if status == "queued" else status,
-                     "status": status},
-        )
-        recovered.append(record)
-    db.flush()
-    return recovered
 
 
 def fence_release_lease(
@@ -1238,15 +1153,11 @@ class TaskLease(Base):
     acquired_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=sa.func.now()
     )
-    renewed_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=sa.func.now()
-    )
-    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     status: Mapped[str] = mapped_column(Text, nullable=False)
 
     __table_args__ = (
         CheckConstraint(
-            "status IN ('active','expired','released','revoked')", name="ck_task_leases_status"
+            "status IN ('active','released','revoked')", name="ck_task_leases_status"
         ),
         UniqueConstraint("lease_token", name="uq_task_leases_token"),
         Index(
@@ -1257,12 +1168,6 @@ class TaskLease(Base):
             sqlite_where=sa.text("status = 'active'"),
         ),
         Index("idx_task_leases_token", "lease_token"),
-        Index(
-            "idx_task_leases_expiry",
-            "expires_at",
-            postgresql_where=sa.text("status = 'active'"),
-            sqlite_where=sa.text("status = 'active'"),
-        ),
     )
 
 

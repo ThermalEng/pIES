@@ -317,12 +317,52 @@ def _plane_with_stub_runtime(plane, status: str):
 
 
 class TestComputeChainEndToEnd:
+    def test_compute_completes_after_database_disconnect_during_output_handoff(
+        self, client, db, engine, plane, monkeypatch,
+    ):
+        from sqlalchemy.exc import OperationalError
+
+        from iesplan.application.worker import checkpoints, transactions
+
+        task_id = _submit_calc_task(client, db, dict(_CONFIG_BODY), dict(PLANNING_BODY))
+        claim = _claim(db, task_id)
+        clock = 0
+        native_seal = checkpoints.seal_output_objects
+
+        def publish_outputs(*args, **kwargs):
+            if clock < 121 and not kwargs.get("actor_id"):
+                raise OperationalError(
+                    "INSERT", None, OSError("database disconnected"),
+                    connection_invalidated=True,
+                )
+            return native_seal(*args, **kwargs)
+
+        def advance(seconds):
+            nonlocal clock
+            clock += seconds
+
+        with monkeypatch.context() as patch:
+            patch.setattr(transactions, "sleep", advance)
+            original_run = type(plane.runtime).run
+
+            def run_with_outage(*args, **kwargs):
+                # Enter the outage during the actual execution, before its output handoff.
+                patch.setattr(checkpoints, "seal_output_objects", publish_outputs)
+                return original_run(*args, **kwargs)
+
+            patch.setattr(type(plane.runtime), "run", run_with_outage)
+            assert _run(engine, claim, plane) == "completed"
+        assert clock == 121
+        db.expire_all()
+        assert db.get(Task, task_id).attempt_count == 1
+        assert db.get(TaskAttempt, claim.attempt_id).status == "succeeded"
+        assert worker_app.slot_available(db, "compute")
+
     @pytest.mark.parametrize("stage", ["generated", "executed", "adapted", "resource"])
     def test_restart_uses_committed_stage_without_resolving(
         self, client, db, engine, plane, monkeypatch, stage,
     ):
         import weakref
-        from datetime import UTC, datetime, timedelta
         from functools import partial
 
         from iesplan.computation import SolverBundle
@@ -412,11 +452,12 @@ class TestComputeChainEndToEnd:
             task = worker_app.get_task_record(db, task_id)
             retry_task(db, get_user(db, task.requested_by), task_id)
         else:
-            lease = db.execute(select(TaskLease).where(
-                TaskLease.attempt_id == claim.attempt_id)).scalar_one()
-            lease.expires_at = datetime.now(UTC) - timedelta(seconds=1)
-            db.commit()
-            assert worker_app.recover_expired_attempts(db, "compute") == 1
+            from iesplan.application.tasks.maintenance import unlock_task_case
+
+            task = worker_app.get_task_record(db, claim.task_id)
+            assert unlock_task_case(
+                db, task_id=task.id, admin_id=task.requested_by, confirm=True,
+            ).outcome == "unlocked"
         replacement = _claim(db, task_id)
         assert replacement.lease_token != claim.lease_token
         assert streaming_run(replacement) == "completed"
@@ -934,9 +975,6 @@ def _controlled_plane(plane, mode: str, started: threading.Event, timeout: float
 
     helper = str(Path(__file__).with_name("local_exec_probe.py"))
 
-    def validate(args):
-        assert tuple(args) == (helper, "sleep", "10")
-
     class ObservedProcess(LocalProcessProvider):
         def execute(self, command, workdir, *, stop=None):
             started.set()
@@ -951,7 +989,6 @@ def _controlled_plane(plane, mode: str, started: threading.Event, timeout: float
         ),
         (LocalExecutable(
             ref="test.solver.probe@1.0.0", path=sys.executable,
-            argv_validator=validate,
         ),),
         base_environ={},
     )
@@ -959,7 +996,6 @@ def _controlled_plane(plane, mode: str, started: threading.Event, timeout: float
     policy = DeploymentPolicy(
         executables=("test.solver.probe@1.0.0",),
         max_timeout_seconds=20, max_memory_mib=128, max_cpu_cores=1,
-        max_output_files=2, max_output_bytes=1024,
     )
     controlled = worker_app.ComputeExecutionPlane(
         generator_registry=GeneratorRegistry({

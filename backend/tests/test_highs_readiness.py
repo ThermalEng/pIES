@@ -52,7 +52,6 @@ from iesplan.computation.generators.linear import (
     LinearVariable,
 )
 from iesplan.computation.generators.mps import write_mps
-from iesplan.computation.runtime import validate_highs_arguments
 from iesplan.core.content import read_content
 from iesplan.devices import init_registry, list_devices
 from iesplan.finance import effective_from_yaml
@@ -147,7 +146,6 @@ def _readiness(**kwargs) -> ExecutableReadiness:
 def _binding(**kwargs) -> LocalExecutable:
     kwargs.setdefault("ref", HIGHS_EXECUTABLE_REF)
     kwargs.setdefault("path", HIGHS_ADAPTER_PATH)
-    kwargs.setdefault("argv_validator", validate_highs_arguments)
     kwargs.setdefault("readiness", _readiness())
     return LocalExecutable(**kwargs)
 
@@ -173,9 +171,7 @@ def _runtime(provider=None) -> SolverRuntime:
         max_memory_mib=4096,
         max_cpu_cores=4,
         allow_network=False,
-        max_output_files=16,
         # campus 真实 solution 约 1.7MB；部署按实际输出规模定配额。
-        max_output_bytes=8_388_608,
     )
     return SolverRuntime(build_executor_registry([provider]), policy)
 
@@ -253,7 +249,6 @@ def test_readiness_available_and_atomic_reject() -> None:
             LocalExecutable(
                 ref=HIGHS_EXECUTABLE_REF,
                 path="/nonexistent/ies-highs-solver",
-                argv_validator=validate_highs_arguments,
                 readiness=_readiness(),
             ),
         ),

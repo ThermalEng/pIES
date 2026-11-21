@@ -47,7 +47,6 @@ from iesplan.computation.generators.highs_milp import (
     SOLVER_REF,
 )
 from iesplan.computation.result_adapters.highs import HIGHS_ADAPTER
-from iesplan.computation.runtime import validate_highs_arguments
 from iesplan.core.content import read_content
 from iesplan.devices import init_registry, list_devices
 from iesplan.finance import (
@@ -226,7 +225,6 @@ def _runtime(policy=None) -> SolverRuntime:
             LocalExecutable(
                 ref=HIGHS_EXECUTABLE_REF,
                 path=HIGHS_ADAPTER_PATH,
-                argv_validator=validate_highs_arguments,
                 readiness=ExecutableReadiness(
                     version=HIGHS_VERSION,
                     self_test=("--self-test",),
@@ -244,9 +242,7 @@ def _runtime(policy=None) -> SolverRuntime:
             max_memory_mib=4096,
             max_cpu_cores=4,
             allow_network=False,
-            max_output_files=16,
             # campus 真实 solution 约 1.7MB；配额按实际输出规模。
-            max_output_bytes=8_388_608,
         )
     return SolverRuntime(build_executor_registry([provider]), policy)
 
@@ -596,8 +592,6 @@ def test_chain_policy_rejected_never_executes() -> None:
         max_memory_mib=4096,
         max_cpu_cores=4,
         allow_network=False,
-        max_output_files=16,
-        max_output_bytes=8_388_608,
     )
     receipt, collected = _runtime(policy=denied).run(bundle, _attempt("rej"))
     assert receipt.status == "policy_rejected"

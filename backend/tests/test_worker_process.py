@@ -32,11 +32,9 @@ def _exit_abruptly():
 def worker(monkeypatch):
     instance = worker_main.Worker(
         compute=object(), session_factory=nullcontext,
-        heartbeat_interval=0.03, renew_interval=0.03, poll_interval=0.01,
+        heartbeat_interval=0.03, poll_interval=0.01,
     )
     monkeypatch.setattr(worker_app, "publish_heartbeat", Mock())
-    monkeypatch.setattr(worker_app, "recover_expired_attempts", Mock(return_value=0))
-    monkeypatch.setattr(worker_app, "renew_attempt_lease", Mock(return_value=True))
     yield instance
     if instance._task_process is not None:
         instance._cancel_event.set()
@@ -55,40 +53,11 @@ def test_claim_starts_spawn_process_with_only_claim_and_stop(worker, monkeypatch
     assert worker._cancel_event is context.Event.return_value
     context.Process.assert_called_once_with(
         target=worker_main.run_claimed_task,
-        args=("compute", worker.worker_id, claim, worker._cancel_event), name="task-11",
+        args=("compute", worker.worker_id, claim, worker._fence_event, worker._cancel_event), name="task-11",
     )
     context.Process.return_value.start.assert_called_once_with()
     # This test only checks launch arguments; there is no real process to reap.
     worker._task_process = None
-
-
-def test_task_gil_pause_does_not_block_heartbeat_renewal_or_fencing(worker):
-    context = worker._process_context
-    assert context.get_start_method() == "spawn"
-    started, finished, stop = context.Event(), context.Event(), context.Event()
-    worker._cancel_event = stop
-    worker._current_task_id = 11
-    worker._attempt_id, worker._lease_token = 12, "token"
-    worker._task_process = context.Process(target=_hold_gil, args=(started, finished, stop, 1.2))
-    worker._task_process.start()
-    assert started.wait(10)
-    worker_app.renew_attempt_lease.reset_mock()
-    worker_app.publish_heartbeat.reset_mock()
-    deadline = time.monotonic() + 0.7
-    while time.monotonic() < deadline:
-        worker._tick()
-        time.sleep(0.01)
-    assert not finished.is_set(), "the task must still be inside the GIL-holding call"
-    assert worker_app.renew_attempt_lease.call_count >= 3
-    assert worker_app.publish_heartbeat.call_count >= 3
-    worker_app.renew_attempt_lease.return_value = False
-    worker._renew_or_cancel()
-    assert stop.is_set()  # Cross-process cancellation, not a thread-local event.
-    assert finished.wait(5)
-    worker._task_process.join(timeout=5)
-    worker._tick()
-    assert worker._task_process is None
-    assert worker._current_task_id is None
 
 
 def test_process_start_failure_does_not_leave_a_phantom_running_process(worker, monkeypatch):
@@ -96,6 +65,7 @@ def test_process_start_failure_does_not_leave_a_phantom_running_process(worker, 
     monkeypatch.setattr(worker_app, "acquire_attempt", Mock(return_value=claim))
     context = Mock()
     worker._process_context = context
+    monkeypatch.setattr(worker_app, "fail_attempt", Mock())
     context.Process.return_value.start.side_effect = OSError("cannot start process")
     with pytest.raises(OSError, match="cannot start process"):
         worker._claim_and_run(claim.task_id)
@@ -116,8 +86,7 @@ def test_abrupt_task_exit_is_reaped_without_fabricating_terminal_state(worker, m
     worker._tick()
     assert worker._task_process is None
     assert worker._current_task_id is None
-    worker_app.renew_attempt_lease.assert_not_called()
-    fail.assert_not_called()  # Existing expiry recovery owns interrupted attempts.
+    fail.assert_not_called()  # No claim was registered for this process.
 
 
 def test_supervised_exit_reports_evidence_with_the_original_claim(worker, monkeypatch):
@@ -137,21 +106,6 @@ def test_supervised_exit_reports_evidence_with_the_original_claim(worker, monkey
     assert worker._claim is None and worker._resource_start is None
 
 
-def test_worker_shutdown_terminates_and_reaps_unresponsive_task(worker, monkeypatch):
-    context = worker._process_context
-    started, finished, stop = context.Event(), context.Event(), context.Event()
-    worker._cancel_event = stop
-    worker._task_process = context.Process(target=_hold_gil, args=(started, finished, stop, 10))
-    worker._task_process.start()
-    assert started.wait(10)
-    monkeypatch.setattr(worker_main, "SHUTDOWN_GRACE", 0.05)
-    worker.stop()
-    worker.run()
-    assert worker._task_process is None
-    assert worker._cancel_event is None
-    assert not finished.is_set()
-
-
 @pytest.mark.parametrize("worker_type", ["compute", "io"])
 def test_task_entrypoint_assembles_its_own_runtime(worker_type, monkeypatch):
     from iesplan import bootstrap
@@ -161,11 +115,11 @@ def test_task_entrypoint_assembles_its_own_runtime(worker_type, monkeypatch):
     monkeypatch.setattr(bootstrap, "assemble_task_runtime", assembly)
     run_task = Mock()
     monkeypatch.setattr(worker_main.runner, "run_task", run_task)
-    claim, stop = object(), object()
-    worker_main.run_claimed_task(worker_type, "worker", claim, stop)
+    claim, stop, cancel = object(), object(), object()
+    worker_main.run_claimed_task(worker_type, "worker", claim, stop, cancel)
     assembly.assert_called_once_with(worker_type)
     run_task.assert_called_once_with(
-        context.session_factory, claim, worker_id="worker", stop_event=stop,
+        context.session_factory, claim, worker_id="worker", stop_event=stop, cancel_event=cancel,
         compute=context.compute_execution_plane.return_value if worker_type == "compute" else None,
     )
 
@@ -240,3 +194,27 @@ def test_spawned_attempt_completes_real_solve_and_seals_results(tmp_path, monkey
             process.wait()
         engine.dispose()
     assert process.returncode == 0, log_path.read_text()
+
+
+def test_control_plane_pause_does_not_stop_a_live_attempt(worker, monkeypatch):
+    from sqlalchemy.exc import OperationalError
+
+    worker._claim = SimpleNamespace(task_id=11)
+    process = Mock()
+    worker._task_process = process
+    worker._fence_event = worker._process_context.Event()
+    worker._cancel_event = worker._process_context.Event()
+    check = Mock(side_effect=[OperationalError("SELECT", None, OSError("DB offline")), None])
+    monkeypatch.setattr(worker_app, "attempt_stop_reason", check)
+    monotonic = Mock(side_effect=[100.0, 221.0])
+    monkeypatch.setattr(worker_main.time, "monotonic", monotonic)
+
+    try:
+        with pytest.raises(OperationalError):
+            worker._tick()
+        worker._tick()
+        assert not worker._fence_event.is_set()
+        assert not worker._cancel_event.is_set()
+        process.terminate.assert_not_called()
+    finally:
+        worker._task_process = None

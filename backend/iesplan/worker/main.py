@@ -1,18 +1,4 @@
-"""计算 Worker / I/O Worker 入口(03-task-scheduling.md §1.1/§4/§5/§7)。
-
-main() 职责:
-- 按 worker_type(compute|io) 订阅对应队列(Redis 可重建视图; 不可用自动降级
-  内存后端, 单进程模式);
-- 循环: 槽门禁 → 出队 → 领取(acquire_attempt: 建尝试 + 租约 + fencing token)
-  → 执行(runner.run_task)→ 提交/失败/取消收拢;
-- 心跳(Redis heartbeat:{worker_id}, 5 s)与租约续期(PG, 15 s; 0 行 → 立即
-  取消当前任务并停止一切写回, 03 §4.4 自毁契约);
-- 信号处理: SIGTERM/SIGINT 优雅退出(置停止事件 → 取消当前任务 → 等待退出)。
-
-并发模型: 单任务子进程 + 主循环轮询(心跳/续租/取消); 槽并发由 compute_slots
-约束(每池 capacity 行, 03 §5.2), 本进程同一时刻至多执行一个任务(多 Worker
-进程由部署编排)。计算与控制不共享解释器，构模的 GIL / GC 停顿不阻塞续租。
-"""
+"""计算与 I/O Worker 入口：领取任务、发布心跳和监督任务进程。"""
 
 from __future__ import annotations
 
@@ -34,12 +20,8 @@ from iesplan.worker import runner
 
 logger = logging.getLogger(__name__)
 
-#: 默认参数(03 附录 A: 心跳 5 s、续租 15 s、租约 TTL 60 s)
 HEARTBEAT_INTERVAL = 5.0
-RENEW_INTERVAL = 15.0
 POLL_INTERVAL = 1.0
-#: 优雅退出等待当前任务的最长秒数
-SHUTDOWN_GRACE = 30.0
 
 
 class Worker:
@@ -54,7 +36,6 @@ class Worker:
         compute: Any = None,
         poll_interval: float = POLL_INTERVAL,
         heartbeat_interval: float = HEARTBEAT_INTERVAL,
-        renew_interval: float = RENEW_INTERVAL,
     ) -> None:
         if worker_type not in ("compute", "io"):
             raise ValueError(f"非法 worker_type: {worker_type!r}(可选 compute/io)")
@@ -71,22 +52,20 @@ class Worker:
         self.session_factory = session_factory
         self.poll_interval = poll_interval
         self.heartbeat_interval = heartbeat_interval
-        self.renew_interval = renew_interval
         self._stop = threading.Event()
         self._process_context = multiprocessing.get_context("spawn")
         self._task_process: Any = None
         self._cancel_event: Any = None
+        self._fence_event: Any = None
         self._current_task_id: int | None = None
         self._claim: worker_app.Claim | None = None
         self._resource_start: Any = None
         self._last_heartbeat = 0.0
-        self._last_renew = 0.0
-        self._last_recovery = 0.0
 
     # -- 生命周期 ---------------------------------------------------------
 
     def run(self) -> None:
-        """主循环: 心跳/续租/领取执行, 直至收到停止信号。"""
+        """主循环: 心跳与领取执行, 直至收到停止信号。"""
         self._install_signal_handlers()
         logger.info("Worker 启动: id=%s type=%s pool=%s pid=%s",
                     self.worker_id, self.worker_type, self.pool, os.getpid())
@@ -96,20 +75,13 @@ class Worker:
             except Exception:  # noqa: BLE001 - 单次 tick 异常不影响进程存活
                 logger.exception("Worker tick 异常")
             time.sleep(self.poll_interval)
-        # 优雅退出: 取消当前任务并等待其收拢(03 §6.1 子进程 SIGTERM → SIGKILL)
-        if self._task_process is not None and self._task_process.is_alive():
-            logger.info("优雅退出: 等待当前任务收拢(task=%s)", self._current_task_id)
-            if self._cancel_event is not None:
-                self._cancel_event.set()  # 执行器检查点 + 隔离子进程取消
-            self._task_process.join(timeout=SHUTDOWN_GRACE)
-            if self._task_process.is_alive():
-                logger.warning("当前任务未在 %s s 内收拢, 终止任务进程", SHUTDOWN_GRACE)
-                self._task_process.terminate()
-                self._task_process.join(timeout=5.0)
-                if self._task_process.is_alive():
-                    self._task_process.kill()
-                    self._task_process.join()
-        self._reap_task_process()
+        # 停止领取，等待已领取任务完成。
+        while self._task_process is not None:
+            try:
+                self._tick()
+            except Exception:
+                logger.exception("退出前收拢任务失败")
+            time.sleep(self.poll_interval)
         self._clear_heartbeat()
         logger.info("Worker 退出: %s", self.worker_id)
 
@@ -118,24 +90,15 @@ class Worker:
         self._stop.set()
 
     def _tick(self) -> None:
-        """单轮: 心跳 → 续租/取消 → 空闲时领取并执行新任务。"""
+        """单轮: 心跳、进程收拢与空闲时领取。"""
         now = time.monotonic()
         if now - self._last_heartbeat >= self.heartbeat_interval:
             self._heartbeat()
             self._last_heartbeat = now
-        # 必须先回收到期尝试，再检查槽；失联尝试可能占满整个资源池。
-        if now - self._last_recovery >= self.renew_interval:
-            with self.session_factory() as db:
-                recovered = worker_app.recover_expired_attempts(db, self.pool)
-            self._last_recovery = now
-            if recovered:
-                logger.info("过期尝试回收: pool=%s count=%s", self.pool, recovered)
+            self._check_task_control()
         if self._task_process is not None:
             if self._task_process.is_alive():
-                if now - self._last_renew >= self.renew_interval:
-                    self._renew_or_cancel()
-                    self._last_renew = now
-                return  # 有任务在执行, 本 tick 不领取
+                return
             self._reap_task_process()
             return
         # 槽门禁(03 §5.2 第 1 步): 无空槽则等待
@@ -170,19 +133,15 @@ class Worker:
         """退出时清除心跳(供管理界面判定失联)。"""
         worker_app.publish_heartbeat(self.worker_id, {}, ttl=1)
 
-    def _renew_or_cancel(self) -> None:
-        """续租; 失败(0 行) → 租约失效 → 立即取消当前任务(03 §4.4 自毁契约)。"""
-        task_id = self._current_task_id
-        if task_id is None or self._cancel_event is None:
-            return
-        attempt_id = getattr(self, "_attempt_id", None)
-        token = getattr(self, "_lease_token", None)
-        if attempt_id is None or token is None:
+    def _check_task_control(self) -> None:
+        if self._claim is None or not self._task_process.is_alive():
             return
         with self.session_factory() as db:
-            if not worker_app.renew_attempt_lease(db, attempt_id, token):
-                logger.warning("租约失效, 取消当前任务: task=%s", task_id)
-                self._cancel_event.set()  # 执行器检查点抛 TaskCancelled → 收拢
+            reason = worker_app.attempt_stop_reason(db, self._claim)
+        if reason == "fenced":
+            self._fence_event.set()
+        elif reason == "cancelled":
+            self._cancel_event.set()
 
     def _slot_gate(self) -> bool:
         """槽门禁(03 §5.2): 池内存在可用槽才尝试领取。"""
@@ -203,28 +162,31 @@ class Worker:
         if claim is None:
             logger.info("领取失败(无槽/非 queued): task=%s", task_id)
             return
-        self._attempt_id = claim.attempt_id
-        self._attempt_no = claim.attempt_no
-        self._lease_token = claim.lease_token
         self._current_task_id = task_id
         self._claim = claim
         self._resource_start = worker_app.observe_local_resources()
         self._cancel_event = self._process_context.Event()
+        self._fence_event = self._process_context.Event()
         self._task_process = self._process_context.Process(
             target=run_claimed_task,
-            args=(self.worker_type, self.worker_id, claim, self._cancel_event),
+            args=(self.worker_type, self.worker_id, claim, self._fence_event, self._cancel_event),
             name=f"task-{task_id}",
         )
         try:
             self._task_process.start()
-        except Exception:
+        except Exception as exc:
             self._task_process.close()
             self._task_process = None
             self._cancel_event = None
+            self._fence_event = None
             self._current_task_id = None
             self._claim = None
             self._resource_start = None
-            raise  # 未执行的领取由现有到期回收路径收拢。
+            with self.session_factory() as db:
+                worker_app.fail_attempt(
+                    db, claim, code="TASK-EXEC-001", message=f"任务进程启动失败：{exc}",
+                )
+            raise
         logger.info("任务领取: task=%s attempt=%s worker=%s", task_id, claim.attempt_id, self.worker_id)
 
     def _reap_task_process(self) -> None:
@@ -234,7 +196,7 @@ class Worker:
         if self._task_process.exitcode:
             logger.error("任务进程退出: task=%s exit_code=%s",
                          self._current_task_id, self._task_process.exitcode)
-            if self._claim is not None and not self._cancel_event.is_set():
+            if self._claim is not None:
                 with self.session_factory() as db:
                     worker_app.report_task_process_exit(
                         db, self._claim, exit_code=self._task_process.exitcode,
@@ -244,6 +206,7 @@ class Worker:
         self._task_process.close()
         self._task_process = None
         self._cancel_event = None
+        self._fence_event = None
         self._current_task_id = None
         self._claim = None
         self._resource_start = None
@@ -273,12 +236,13 @@ class Worker:
 
 
 def run_claimed_task(
-    worker_type: str, worker_id: str, claim: worker_app.Claim, stop_event: Any,
+    worker_type: str, worker_id: str, claim: worker_app.Claim,
+    stop_event: Any, cancel_event: Any,
 ) -> None:
     """任务进程入口：在组合根重新装配，不继承连接、provider 对象或大文件。
 
     进程间只传递领取身份及停止事件；输入、阶段检查点和终态仍通过原有
-    application 公开门面与短事务交接。该进程不领取新任务或续租。
+    application 公开门面与短事务交接。该进程只执行已领取任务。
     """
     from iesplan.bootstrap import assemble_task_runtime
 
@@ -287,7 +251,7 @@ def run_claimed_task(
     compute = ctx.compute_execution_plane() if worker_type == "compute" else None
     runner.run_task(
         ctx.session_factory, claim, worker_id=worker_id,
-        stop_event=stop_event, compute=compute,
+        stop_event=stop_event, cancel_event=cancel_event, compute=compute,
     )
 
 

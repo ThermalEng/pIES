@@ -21,7 +21,7 @@ os.environ.setdefault("IESPLAN_DB_URL", "sqlite+pysqlite://")
 os.environ.setdefault("IESPLAN_QUEUE", "memory")
 
 import pytest  # noqa: E402
-from sqlalchemy import create_engine, select  # noqa: E402
+from sqlalchemy import create_engine  # noqa: E402
 from sqlalchemy.engine import Engine  # noqa: E402
 from sqlalchemy.orm import sessionmaker  # noqa: E402
 from worker_testkit import setup_environment  # noqa: E402
@@ -29,7 +29,6 @@ from worker_testkit import setup_environment  # noqa: E402
 from iesplan import tasks as tasks_domain  # noqa: E402
 from iesplan.application import worker as worker_app  # noqa: E402
 from iesplan.db import Base  # noqa: E402
-from iesplan.tasks.persistence import Task, TaskLease  # noqa: E402
 from iesplan.tasks import queue  # noqa: E402
 
 # ---------------------------------------------------------------------------
@@ -114,35 +113,3 @@ class TestProgressVisibleAcrossSessions:
 # ---------------------------------------------------------------------------
 # 2. 续租在独立会话短事务中提交
 # ---------------------------------------------------------------------------
-
-
-class TestRenewIndependentSession:
-    def test_renew_survives_caller_rollback(
-        self, factory, env: dict[str, Any]
-    ):
-        claim = _claim(factory, env["task"].id)
-        with factory() as reader:
-            before = reader.execute(
-                select(TaskLease).where(TaskLease.attempt_id == claim.attempt_id)
-            ).scalars().one().expires_at
-
-        caller = factory()
-        try:
-            row = caller.get(Task, env["task"].id)
-            assert row is not None
-            row.priority = 999  # 调用方未提交的脏写
-            # 续租走独立会话(Worker 心跳线程形态), 提交自己的短事务
-            with factory() as renew_db:
-                assert worker_app.renew_attempt_lease(
-                    renew_db, claim.attempt_id, claim.lease_token
-                ) is True
-            caller.rollback()  # 调用方回滚不得连带续租
-        finally:
-            caller.close()
-
-        with factory() as other:
-            lease_row = other.execute(
-                select(TaskLease).where(TaskLease.attempt_id == claim.attempt_id)
-            ).scalars().one()
-            assert lease_row.expires_at > before
-            assert other.get(Task, env["task"].id).priority != 999

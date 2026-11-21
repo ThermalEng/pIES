@@ -133,8 +133,7 @@ def main():
             policy = DeploymentPolicy(
                 executables=executor.descriptor.executables,
                 max_timeout_seconds=saved.bundle.manifest.command["timeout_seconds"],
-                max_memory_mib=8192, max_cpu_cores=2, max_output_files=10,
-                max_output_bytes=1024 * 1024,
+                max_memory_mib=8192, max_cpu_cores=2,
             )
             runtime = SolverRuntime(registry=build_executor_registry([executor]), policy=policy)
 

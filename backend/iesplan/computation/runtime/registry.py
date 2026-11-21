@@ -76,6 +76,8 @@ class ExecutorRegistry:
 
 def build_executor_registry(
     candidates: Iterable[ExecutorProvider],
+    *,
+    check_readiness: bool = True,
 ) -> ExecutorRegistry:
     """原子构建并发布执行器目录。
 
@@ -102,7 +104,7 @@ def build_executor_registry(
                 "执行器 ref 与描述符引用不一致: "
                 f"{candidate.ref!r} x {descriptor.ref!r}"
             )
-        if not candidate.available():
+        if check_readiness and not candidate.available():
             raise ComputationUnavailableError(
                 f"执行器候选当前不可用: {candidate.ref!r}",
                 reason="no-executor",

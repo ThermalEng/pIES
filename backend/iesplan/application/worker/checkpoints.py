@@ -10,6 +10,7 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from iesplan import tasks
+from iesplan.application.worker.transactions import run_worker_transaction
 from iesplan.application.tasks import Claim
 from iesplan.application.worker.compute_cases import seal_output_objects
 from iesplan.application.worker.lease_cases import LeaseRejectedError, verify_lease
@@ -139,20 +140,19 @@ def execute_saved_bundle(
         nonlocal files
         if receipt.status == "fenced":
             return {}
-        with session_factory() as db:
-            try:
-                media = {entry["path"]: entry["media_type"] for entry in receipt.outputs}
-                files = seal_output_objects(
-                    db, {path: (raw, media[path]) for path, raw in outputs.items()}, actor_id=None,
-                )
-                _publish(db, claim, number, "execution", {
-                    "generated_id": generated_id, "receipt": receipt.to_dict(), "files": files,
-                }, {"solution": files})
-                return {path: get_object_content(db, ref["object_id"])
-                        for path, ref in files.items()}
-            except Exception:
-                db.rollback()
-                raise
+        def publish(db: Session) -> Mapping[str, Content]:
+            nonlocal files
+            media = {entry["path"]: entry["media_type"] for entry in receipt.outputs}
+            files = seal_output_objects(
+                db, {path: (raw, media[path]) for path, raw in outputs.items()}, actor_id=None,
+            )
+            _publish(db, claim, number, "execution", {
+                "generated_id": generated_id, "receipt": receipt.to_dict(), "files": files,
+            }, {"solution": files})
+            return {path: get_object_content(db, ref["object_id"])
+                    for path, ref in files.items()}
+
+        return run_worker_transaction(session_factory, publish)
 
     receipt, outputs = plane.runtime.run(bundle, attempt, stop=stop, handoff=handoff)
     return receipt, outputs, files

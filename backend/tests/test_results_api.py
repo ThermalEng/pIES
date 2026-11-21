@@ -560,11 +560,11 @@ def test_evidence_submit_and_fencing(client: TestClient, db: Session) -> None:
         results_uc.submit_evidence(db, task_id, claim.attempt_id, uuid4(), payload)
     assert exc.value.http_status == 409
 
-    # 5) fencing: 租约过期拒绝
+    # 5) fencing: 租约撤销拒绝
     lease = db.execute(
         select(TaskLease).where(TaskLease.attempt_id == claim.attempt_id)
     ).scalar_one()
-    lease.expires_at = lease.expires_at.replace(year=2020)
+    lease.status = "revoked"
     db.commit()
     with pytest.raises(results_uc.EvidenceWriteDeniedError) as exc:
         results_uc.submit_evidence(db, task_id, claim.attempt_id, claim.lease_token, payload)

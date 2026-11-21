@@ -141,14 +141,14 @@ class TestSecurity:
         with pytest.raises(ExpressionSecurityError):
             parse_expr("a.__class__", VARS)
 
-    def test_import_pattern_rejected(self):
-        with pytest.raises(ExpressionSecurityError):
-            parse_expr("import os", VARS)
+    def test_import_call_rejected(self):
         with pytest.raises(ExpressionSecurityError):
             parse_expr("__import__('os')", VARS)
-        # 混淆手段(04 §4.3:任何含 import/eval 字样的标识符一律拒绝)
-        with pytest.raises(ExpressionSecurityError):
-            parse_expr("a_import_x(1)", VARS)
+
+    def test_variables_with_common_substrings_are_allowed(self):
+        values = {"grid_import": 4, "valve_open": 1, "eval_cost": 2}
+        expr = parse_expr("grid_import + valve_open + eval_cost", values)
+        assert expr.eval(values) == 7
 
     def test_eval_exec_rejected(self):
         with pytest.raises(ExpressionSecurityError):

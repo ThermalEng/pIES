@@ -61,8 +61,6 @@ def test_defaults_from_deploy_file() -> None:
     assert s.solver_max_memory_mib == 16384
     assert s.solver_max_cpu_cores == 8
     assert s.solver_allow_network is False
-    assert s.solver_max_output_files == 64
-    assert s.solver_max_output_bytes == 536870912
     assert tuple(s.solver_allowed_executables) == ("ies.solver.highs@1.7.2",)
     assert tuple(s.solver_allowed_environment_vars) == ()
     assert s.calc_time_limit_seconds == 43200

@@ -618,8 +618,7 @@ class TaskLeaseRecord:
     lease_token: str
     status: str
     acquired_by: str | None = None
-    expires_at: str | None = None
-    renewed_at: str | None = None
+    acquired_at: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -742,8 +741,6 @@ VALID_TRANSITIONS: dict[str, frozenset[str]] = {
     "timed_out": frozenset({"queued"}),
     "cancelled": frozenset({"queued"}),
 }
-#: 租约 TTL(秒, 默认 60 s)
-LEASE_TTL_SECONDS = 60
 
 
 def check_transition(task: TaskRecord, new_status: str) -> None:

@@ -251,13 +251,12 @@ def task_detail(
     lease = tasks_domain.get_active_lease_for_task(db, task.id)
     detail["current_lease"] = None
     if lease is not None:
-        # 只暴露 acquired_by/renewed_at/expires_at, 不暴露 lease_token
+        # 只暴露 acquired_by/acquired_at, 不暴露 lease_token
         attempt = tasks_domain.get_attempt(db, lease.attempt_id)
         detail["current_lease"] = {
             "attempt_no": attempt.attempt_no if attempt else None,
             "acquired_by": lease.acquired_by,
-            "renewed_at": lease.renewed_at,
-            "expires_at": lease.expires_at,
+            "acquired_at": lease.acquired_at,
         }
 
     attempt_no, percent, stage, detail_json = _progress_summary(db, task)

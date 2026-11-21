@@ -96,7 +96,6 @@ from iesplan.storage import (
 )
 from iesplan.tasks.contracts import (
     COMPUTE_TYPES,
-    LEASE_TTL_SECONDS,
     POOL_BY_TYPE,
     SNAPSHOT_SCHEMA_VERSION,
     TASK_TYPES,
@@ -2191,7 +2190,6 @@ def _claim_task(db: Session, task_id: int, worker_id: str) -> Claim | None:
         attempt_id=attempt.id,
         lease_token=str(token),
         acquired_by=worker_id,
-        ttl_seconds=LEASE_TTL_SECONDS,
     )
     tasks_domain.set_task_status(db, task.id, "running")
     tasks_domain.bind_slot_attempt(db, slot.id, attempt.id)

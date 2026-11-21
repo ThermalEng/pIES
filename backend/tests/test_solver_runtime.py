@@ -123,8 +123,6 @@ def _policy(**kwargs) -> DeploymentPolicy:
     kwargs.setdefault("max_memory_mib", 4096)
     kwargs.setdefault("max_cpu_cores", 4)
     kwargs.setdefault("allow_network", False)
-    kwargs.setdefault("max_output_files", 16)
-    kwargs.setdefault("max_output_bytes", 1_048_576)
     return DeploymentPolicy(**kwargs)
 
 
@@ -172,13 +170,12 @@ class _FakeExecutor:
 
 
 def _success_handler(probe: dict, write_optional: bool = True):
-    """成功 handler：核对输入字节与只读位语义，再写声明输出。"""
+    """成功 handler：核对输入字节，再写声明输出。"""
 
     def handle(command, workdir):
         input_path = os.path.join(workdir, "input/problem.mps")
         with open(input_path, "rb") as handle_in:
             probe["input_ok"] = handle_in.read() == INPUT_BYTES
-        probe["input_mode"] = stat.S_IMODE(os.stat(input_path).st_mode)
         probe["input_dir_owner_writable"] = bool(
             stat.S_IMODE(os.stat(os.path.join(workdir, "input")).st_mode)
             & 0o200
@@ -238,7 +235,6 @@ def test_success_collects_declared_outputs_and_receipt() -> None:
     runtime = _runtime(_FakeExecutor(handler=_success_handler(probe)))
     receipt, outputs = runtime.run(_bundle(), _attempt())
     assert probe["input_ok"] is True
-    assert probe["input_mode"] == 0o444
     assert probe["input_dir_owner_writable"] is True
     assert {path: read_content(content) for path, content in outputs.items()} == {
         "output/solution.json": SOLUTION_BYTES,
@@ -515,41 +511,6 @@ def test_missing_required_output_is_protocol_failed() -> None:
     assert outputs == {}
 
 
-def test_undeclared_output_and_symlink_are_protocol_failed() -> None:
-    """未声明文件与符号链接分别形成输出协议失败，不加入结果。"""
-
-    def handle_extra(command, workdir):
-        os.makedirs(os.path.join(workdir, "output"), exist_ok=True)
-        with open(
-            os.path.join(workdir, "output/solution.json"), "wb"
-        ) as handle_out:
-            handle_out.write(SOLUTION_BYTES)
-        with open(
-            os.path.join(workdir, "output/sneaky.bin"), "wb"
-        ) as handle_extra_out:
-            handle_extra_out.write(b"x")
-        return _outcome()
-
-    receipt, outputs = _runtime(_FakeExecutor(handler=handle_extra)).run(
-        _bundle(), _attempt()
-    )
-    assert receipt.status == "output_protocol_failed"
-    assert "sneaky.bin" in receipt.error
-    assert {path: read_content(content) for path, content in outputs.items()} == {
-        "output/solution.json": SOLUTION_BYTES,
-    }
-
-    def handle_link(command, workdir):
-        os.symlink("solution.json", os.path.join(workdir, "evil-link"))
-        return _outcome()
-
-    receipt, _ = _runtime(_FakeExecutor(handler=handle_link)).run(
-        _bundle(), _attempt()
-    )
-    assert receipt.status == "output_protocol_failed"
-    assert "evil-link" in receipt.error
-
-
 def test_workdir_is_unique_per_call_and_cleaned() -> None:
     """每次调用工作区独立，结束后清理；输入字节真实写入。"""
     probe_one: dict = {}
@@ -621,12 +582,7 @@ def test_constructor_and_input_types_are_checked() -> None:
     with pytest.raises(ValueError, match="executables 不得为空"):
         DeploymentPolicy(
             max_timeout_seconds=1, max_memory_mib=1, max_cpu_cores=1,
-            max_output_files=1, max_output_bytes=1,
         )
-    with pytest.raises(ValueError, match="max_output_files 须为正整数"):
-        _policy(max_output_files=0)
-    with pytest.raises(ValueError, match="max_output_bytes 须为正整数"):
-        _policy(max_output_bytes=-5)
     with pytest.raises(ValueError, match="attempt 上下文"):
         AttemptContext()
     with pytest.raises(ValueError, match="恰有一个有值"):

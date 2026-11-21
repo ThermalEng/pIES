@@ -3,21 +3,15 @@
 ``SolverRuntime`` 是通用实现（非 Protocol/ABC/占位）：消费完整 typed
 ``SolverBundle``、attempt 上下文、部署策略、已发布执行器注册表与调用方
 停止探针，拥有执行编排全过程——启动前停止检查、精确选择、策略检查、
-独立临时工作区、输入只读写入、executor 调用、声明输出核对（含数量/
-总字节上限与特殊文件边界）、唯一回执签发与工作区清理。
+独立临时工作区、声明输出的分块交接、回执签发与工作区清理。
 
-信任边界：typed ``SolverBundle`` 是可信内部交接，不重跑 JSON schema，
-不算 hash，不重复装配或文件内容校验；只执行本层拥有的真实外部进程
-边界门禁（精确 executor/executable、环境 allowlist、资源上限、网络
-开关、隔离目录与声明输出范围）。资源需求只做策略上限比对，不做真实
-隔离实施；进程启动、运行中停止、超时与回收归 provider 实现。
+执行器选择及部署策略在运行时应用。进程启动、运行中停止、超时与回收归 provider 实现。
 """
 
 from __future__ import annotations
 
 import os
 import shutil
-import stat
 import tempfile
 import uuid
 import weakref
@@ -31,7 +25,6 @@ from iesplan.computation.protocols import (
     ExecutorProvider,
     ProcessOutcome,
     SolverBundle,
-    SolverBundleManifest,
     StopProbe,
     read_stop_reason,
 )
@@ -43,7 +36,7 @@ from iesplan.core.content import Content
 #: 命令未声明 success_exit_codes 时的协议默认（仅判断进程是否按协议结束）。
 _DEFAULT_SUCCESS_EXIT_CODES = (0,)
 
-#: 声明输出单次读取块大小（字节；总预算内分块读，超限不完整读入）。
+#: 声明输出单次读取块大小（字节）。
 _OUTPUT_READ_CHUNK_BYTES = 65_536
 
 
@@ -53,13 +46,8 @@ class _OutputContent:
     size_bytes: int
 
     def iter_chunks(self) -> Iterator[bytes]:
-        remaining = self.size_bytes
         with open(self.filename, "rb") as source:
-            while remaining:
-                chunk = source.read(min(_OUTPUT_READ_CHUNK_BYTES, remaining))
-                if not chunk:
-                    break
-                remaining -= len(chunk)
+            while chunk := source.read(_OUTPUT_READ_CHUNK_BYTES):
                 yield chunk
 
 
@@ -262,15 +250,7 @@ class SolverRuntime:
         bundle: SolverBundle,
         command: Mapping[str, object],
     ) -> str:
-        """建立 Bundle 根工作区：输入只读写入，声明输出父目录预建为空。
-
-        返回 Bundle 根目录（即 executor 可见的 ``workdir``；manifest
-        内全部路径均按 Bundle 根定位）。``command`` 声明的子进程工作
-        目录仅预建，不改变输入/输出定位。全部输入正常写完后，仅把
-        输入文件置只读（0o444）；输入目录保持本进程可写以便清理。
-        该位语义只防误写，不声称为完整安全隔离，不可绕过的只读挂载
-        归生产隔离 provider。
-        """
+        """在独立工作区写入输入并建立声明输出的父目录。"""
         run_sub = os.path.normpath(
             os.path.join(root, str(command.get("working_directory", ".")))
         )
@@ -285,8 +265,6 @@ class SolverRuntime:
             parent = os.path.dirname(str(entry["path"]))
             if parent:
                 os.makedirs(os.path.join(root, parent), exist_ok=True)
-        for path in bundle.files:
-            os.chmod(os.path.join(root, path), 0o444)
         return root
 
     def _finish(
@@ -300,16 +278,7 @@ class SolverRuntime:
     ) -> tuple[ExecutionReceipt, dict[str, Content]]:
         """核对输出边界并签发回执（见 ``run`` 状态优先级）。"""
         manifest = bundle.manifest
-        declared = {entry["path"]: entry for entry in manifest.outputs}
-        input_paths = {entry["path"] for entry in manifest.inputs}
-        nodes, scan_errors = self._scan_output_nodes(
-            root, declared, input_paths
-        )
-        boundary_errors = scan_errors
-        collected, collect_errors = self._collect_declared(
-            root, manifest, nodes
-        )
-        boundary_errors.extend(collect_errors)
+        collected = self._collect_declared(root, manifest.outputs)
         success_codes = tuple(
             command.get("success_exit_codes", _DEFAULT_SUCCESS_EXIT_CODES)
         )
@@ -325,7 +294,6 @@ class SolverRuntime:
                 f"执行超时终止: exit_code={outcome.exit_code!r} "
                 f"signal={outcome.signal_number!r}"
             ]
-            parts.extend(boundary_errors)
             if missing:
                 parts.append(f"必需输出缺失: {missing!r}")
             error = "; ".join(parts)
@@ -336,7 +304,6 @@ class SolverRuntime:
                 f"exit_code={outcome.exit_code!r} "
                 f"signal={outcome.signal_number!r}"
             ]
-            parts.extend(boundary_errors)
             if missing:
                 parts.append(f"必需输出缺失: {missing!r}")
             error = "; ".join(parts)
@@ -351,7 +318,6 @@ class SolverRuntime:
                 f"{lead}: exit_code={outcome.exit_code!r} "
                 f"signal={outcome.signal_number!r}"
             ]
-            parts.extend(boundary_errors)
             if missing:
                 parts.append(f"必需输出缺失: {missing!r}")
             error = "; ".join(parts)
@@ -368,13 +334,9 @@ class SolverRuntime:
                 "memory_limit_bytes="
                 f"{applied.get('memory_limit_bytes') if isinstance(applied, Mapping) else None!r}"
             ]
-            parts.extend(boundary_errors)
             if missing:
                 parts.append(f"必需输出缺失: {missing!r}")
             error = "; ".join(parts)
-        elif boundary_errors:
-            status = "output_protocol_failed"
-            error = "; ".join(boundary_errors)
         elif outcome.exit_code is None:
             status = "process_failed"
             error = (
@@ -398,98 +360,18 @@ class SolverRuntime:
         )
         return receipt, collected
 
-    def _scan_output_nodes(
-        self,
-        root: str,
-        declared: Mapping[str, object],
-        input_paths: set[str],
-    ) -> tuple[list[tuple[str, str, int]], list[str]]:
-        """扫描工作区输出节点事实。
-
-        返回 ``([(相对路径, 类型, 字节数)], 违规)``；类型为
-        ``"regular"``/``"special"``/``"symlink"``，字节数仅普通文件取
-        lstat 事实。目录与输入跳过（不计配额）。符号链接、特殊文件与
-        未声明文件记违规，但节点仍保留供配额统计。
-        """
-        nodes: list[tuple[str, str, int]] = []
-        errors: list[str] = []
-        for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
-            for name in list(dirnames) + filenames:
-                full = os.path.join(dirpath, name)
-                rel = os.path.relpath(full, root)
-                try:
-                    info = os.lstat(full)
-                except OSError:
-                    continue
-                mode = info.st_mode
-                if stat.S_ISDIR(mode) or rel in input_paths:
-                    continue
-                if stat.S_ISLNK(mode):
-                    nodes.append((rel, "symlink", 0))
-                    errors.append(f"工作区存在符号链接: {rel!r}")
-                elif not stat.S_ISREG(mode):
-                    nodes.append((rel, "special", 0))
-                    errors.append(f"工作区存在特殊文件: {rel!r}")
-                else:
-                    nodes.append((rel, "regular", info.st_size))
-                    if rel not in declared:
-                        errors.append(f"未声明输出: {rel!r}")
-        return nodes, errors
-
-    def _collect_declared(
-        self,
-        root: str,
-        manifest: SolverBundleManifest,
-        nodes: list[tuple[str, str, int]],
-    ) -> tuple[dict[str, Content], list[str]]:
-        """按节点排序单调分配预算并有界收集声明输出。
-
-        对扫描到的全部实际节点按相对路径稳定排序，基于同一序列一次
-        性分配预算：节点序号占文件槽位（超 ``max_output_files`` 后无槽
-        位），普通文件按 lstat 大小单调累计字节（累计超
-        ``max_output_bytes`` 后无字节资格）；未声明、特殊、symlink、
-        不可读或过大未收录的节点照样消耗预算，不回退、不腾出。只有同
-        时取得槽位与字节资格的声明普通文件才有界读取进入 outputs；
-        每个文件至多按其 stat 大小读取，大文件不读入内存。
-        """
+    @staticmethod
+    def _collect_declared(root: str, outputs: tuple) -> dict[str, Content]:
         collected: dict[str, Content] = {}
-        errors: list[str] = []
-        max_files = self._policy.max_output_files
-        budget = self._policy.max_output_bytes
-        ordered = sorted(nodes, key=lambda node: node[0])
-        declared = {str(entry["path"]) for entry in manifest.outputs}
-        total_bytes = sum(
-            size for _, kind, size in ordered if kind == "regular"
-        )
-        if len(ordered) > max_files:
-            errors.append(
-                f"输出文件数超过上限 {max_files}（实际 {len(ordered)}）"
-            )
-        if total_bytes > budget:
-            errors.append(
-                f"输出总字节超过上限 {budget}（实际 {total_bytes}）"
-            )
-        used_bytes = 0
-        for index, (rel, kind, size) in enumerate(ordered):
-            has_slot = index < max_files
-            has_bytes = True
-            if kind == "regular":
-                has_bytes = used_bytes + size <= budget
-                used_bytes += size
-            if not has_slot or not has_bytes:
-                continue
-            if kind != "regular" or rel not in declared:
-                continue
+        for entry in outputs:
+            path = str(entry["path"])
+            filename = os.path.join(root, path)
             try:
-                data = _OutputContent(os.path.join(root, rel), size)
-                actual = 0
-                for chunk in data.iter_chunks():
-                    actual += len(chunk)
-            except OSError:
-                errors.append(f"声明输出不可读: {rel!r}")
+                size = os.lstat(filename).st_size
+            except FileNotFoundError:
                 continue
-            collected[rel] = _OutputContent(data.filename, actual)
-        return collected, errors
+            collected[path] = _OutputContent(filename, size)
+        return collected
 
     def _unexecuted(
         self,

@@ -24,7 +24,6 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
-from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
@@ -137,7 +136,6 @@ def _verify_write_eligibility(
     要求:
       1. 尝试存在且属于该任务, 状态为 running;
       2. 租约 active 且 lease_token 与调用方持有 token 一致;
-      3. 租约未过期(expires_at > now)。
     任一不满足抛 EvidenceWriteDeniedError(409)。
     """
     attempt = tasks_domain.get_attempt(db, attempt_id)
@@ -171,15 +169,6 @@ def _verify_write_eligibility(
         raise EvidenceWriteDeniedError(
             "租约不匹配或已失效(fencing 拒绝)",
             params={"task_id": task.id, "attempt_id": attempt_id},
-            location={"object_type": "task_lease", "object_id": attempt_id},
-        )
-    expires_dt = datetime.fromisoformat(lease.expires_at)
-    if expires_dt.tzinfo is None:
-        expires_dt = expires_dt.replace(tzinfo=UTC)
-    if datetime.now(UTC) > expires_dt:
-        raise EvidenceWriteDeniedError(
-            "租约已过期, 证据写入被拒绝(fencing)",
-            params={"task_id": task.id, "attempt_id": attempt_id, "expires_at": expires_dt.isoformat()},
             location={"object_type": "task_lease", "object_id": attempt_id},
         )
     return attempt

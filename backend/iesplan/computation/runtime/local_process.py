@@ -32,7 +32,7 @@ import subprocess
 import tempfile
 import threading
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
@@ -89,41 +89,6 @@ def _check_bundle_relative_path(value: object, name: str) -> str:
     return value
 
 
-def _check_int_text(value: object, name: str, minimum: int) -> None:
-    """校验整数文本参数（字符串形态，下限约束）。"""
-    if not isinstance(value, str):
-        raise ValueError(f"{name} 须为整数文本: {value!r}")
-    try:
-        number = int(value, 10)
-    except ValueError:
-        raise ValueError(f"{name} 须为整数文本: {value!r}") from None
-    if number < minimum:
-        raise ValueError(f"{name} 不得小于 {minimum}: {value!r}")
-
-
-def validate_highs_arguments(arguments: tuple[str, ...]) -> None:
-    """校验 HiGHS argv 与生成器当前形状一致（位置固定的七参数）。
-
-    形状：``[问题路径, --solution_file, 解路径, --time_limit, 秒数,
-    --random_seed, 种子]``；路径参数只允许 Bundle 内规范相对路径，
-    禁止响应文件形态；非路径参数按当前真实 HiGHS 选项检查。不建立
-    通用规则 DSL；生成器形状变化时同步更新本函数与对应测试。
-    """
-    args = tuple(arguments)
-    if len(args) != 7:
-        raise ValueError(f"HiGHS 参数须恰为七项，得到 {len(args)} 项")
-    _check_bundle_relative_path(args[0], "arguments[0]")
-    if args[1] != "--solution_file":
-        raise ValueError(f"arguments[1] 须为 --solution_file: {args[1]!r}")
-    _check_bundle_relative_path(args[2], "arguments[2]")
-    if args[3] != "--time_limit":
-        raise ValueError(f"arguments[3] 须为 --time_limit: {args[3]!r}")
-    _check_int_text(args[4], "arguments[4]", 1)
-    if args[5] != "--random_seed":
-        raise ValueError(f"arguments[5] 须为 --random_seed: {args[5]!r}")
-    _check_int_text(args[6], "arguments[6]", 0)
-
-
 @dataclass(frozen=True, slots=True)
 class ExecutableReadiness:
     """executable 部署就绪探针：精确版本证明 + 最小离线自检。
@@ -159,7 +124,7 @@ class ExecutableReadiness:
 
 @dataclass(frozen=True, slots=True)
 class LocalExecutable:
-    """单个 executable 的部署绑定：精确引用、固定绝对二进制路径与参数验证。
+    """单个 executable 的部署绑定：精确引用、固定绝对二进制路径与参数数组。
 
     四者收敛在同一绑定内，不设平行映射，避免错配；无验证函数即构造
     拒绝，不默认放行任何形状。``readiness`` 为空表示不做版本与自检
@@ -168,7 +133,6 @@ class LocalExecutable:
 
     ref: str = ""
     path: str = ""
-    argv_validator: Callable[[tuple[str, ...]], None] | None = None
     readiness: ExecutableReadiness | None = None
 
     def __post_init__(self) -> None:
@@ -179,8 +143,6 @@ class LocalExecutable:
             raise ValueError(
                 f"二进制路径须为固定绝对路径，禁止 PATH 发现: {self.path!r}"
             )
-        if self.argv_validator is None or not callable(self.argv_validator):
-            raise ValueError(f"executable 缺参数验证绑定: {self.ref!r}")
         if self.readiness is not None and not isinstance(
             self.readiness, ExecutableReadiness
         ):
@@ -351,7 +313,7 @@ def _check_readiness(path: str, probe: ExecutableReadiness) -> bool:
 class LocalProcessProvider:
     """本地受信任进程执行器（部署配置持有，组合根注册）。
 
-    构造绑定 ``descriptor``、精确引用到固定二进制与参数验证的收敛
+    构造绑定 ``descriptor``、精确引用到固定二进制与参数数组的收敛
     绑定，以及可选空白基线环境。``execute`` 只做本 executable 边界
     必需的门禁，不重复校验已类型化 Bundle，不解释业务语义。
     """
@@ -438,7 +400,7 @@ class LocalProcessProvider:
     ) -> ProcessOutcome:
         """启动受控进程组并监督至组消失，返回最小过程结果。
 
-        精确引用查固定二进制（禁止 PATH 发现）；参数验证来自绑定，
+        精确引用查固定二进制（禁止 PATH 发现）；参数数组来自绑定，
         在启动前拒绝。子进程工作目录为 ``workdir`` 下命令声明目录；
         环境只含显式基线与命令环境键，不继承宿主环境。``stop`` 为调用方
         停止探针：启动前已停止即不启动进程；运行中首次观测到停止即终止
@@ -463,8 +425,6 @@ class LocalProcessProvider:
                 f"executable 未映射到本地二进制: {executable_ref!r}",
                 reason="unknown-executable",
             ) from None
-        assert binding.argv_validator is not None
-        binding.argv_validator(tuple(command["arguments"]))  # type: ignore[arg-type]
         run_cwd = os.path.normpath(
             os.path.join(workdir, str(command.get("working_directory", ".")))
         )
@@ -625,5 +585,4 @@ __all__ = [
     "ExecutableReadiness",
     "LocalExecutable",
     "LocalProcessProvider",
-    "validate_highs_arguments",
 ]

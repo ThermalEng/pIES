@@ -1202,10 +1202,6 @@ class TestPredictEndToEnd:
 
         monkeypatch.setattr(worker_app, "execute_saved_bundle", execute)
         if interrupt:
-            from datetime import UTC, datetime, timedelta
-
-            from iesplan.tasks.persistence import TaskLease
-
             adaptations = []
             native_adapt = worker_app.adapt_result
 
@@ -1218,11 +1214,12 @@ class TestPredictEndToEnd:
             monkeypatch.setattr(worker_app, "adapt_result", adapt)
             with pytest.raises(SystemExit, match="coupled round 2"):
                 _run(engine, claim, chase_plane)
-            lease = db.execute(select(TaskLease).where(
-                TaskLease.attempt_id == claim.attempt_id)).scalar_one()
-            lease.expires_at = datetime.now(UTC) - timedelta(seconds=1)
-            db.commit()
-            assert worker_app.recover_expired_attempts(db, "compute") == 1
+            from iesplan.application.tasks.maintenance import unlock_task_case
+
+            task = worker_app.get_task_record(db, claim.task_id)
+            assert unlock_task_case(
+                db, task_id=task.id, admin_id=task.requested_by, confirm=True,
+            ).outcome == "unlocked"
             claim = _claim(db, task.id)
         assert _run(engine, claim, chase_plane) == "completed"
         assert executions == [1, 2, 3]

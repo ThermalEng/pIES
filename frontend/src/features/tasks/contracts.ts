@@ -86,12 +86,11 @@ export interface TaskAttemptDto {
   finished_at: string | null
 }
 
-/** 当前租约(只暴露 acquired_by/renewed_at/expires_at, 无 token)。 */
+/** 当前租约(只暴露 acquired_by/acquired_at, 无 token)。 */
 export interface TaskLeaseDto {
   attempt_no: number | null
+  acquired_at: string
   acquired_by: string
-  renewed_at: string
-  expires_at: string
 }
 
 /** 进度全量块(与 task_detail progress 同形)。 */

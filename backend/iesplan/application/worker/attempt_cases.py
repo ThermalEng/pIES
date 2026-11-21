@@ -9,7 +9,6 @@
 - acquire_attempt: 占槽 + 建尝试 + 建租约(fencing token) + 任务 running,
   同事务提交 —— 领取先形成正确可见的租约/尝试状态, 后续执行回滚不再
   丢失租约(旧链路回滚后租约丢失曾被误判为 lease_rejected);
-- renew_attempt_lease: 续租行级更新, 独立事务(与执行路径隔离);
 - report_attempt_progress: 带 fencing 的进度回写, 独立短事务提交, 提交后
   即刻对其他会话可见, 不随终态事务一并提交;
 - assess_report_evidence: report 单步评估写入, 独立短事务提交(内含 fencing
@@ -66,7 +65,6 @@ from iesplan.application.worker.lease_cases import (
     get_task_record,
     insert_result_index,
     record_task_progress,
-    renew_lease_once,
     store_result_blob,
     timeout_task_record,
     verify_lease,
@@ -77,13 +75,12 @@ from iesplan.core.content import Content, GeneratedContent, json_chunks
 from iesplan.core.diagnostics import (
     SEVERITY_ERROR,
     SEVERITY_INFO,
-    SEVERITY_WARNING,
     TASK_PROCESS_EXITED,
     TASK_QUEUED,
     TASK_RESOURCE_EXHAUSTED,
     TASK_TIMEOUT,
 )
-from iesplan.tasks import LEASE_TTL_SECONDS, TaskRecord, TaskStateError, check_transition
+from iesplan.tasks import TaskRecord, TaskStateError, check_transition
 
 __all__ = [
     "CheckAssessment",
@@ -95,8 +92,6 @@ __all__ = [
     "fail_attempt",
     "fail_resource_attempt",
     "report_task_process_exit",
-    "renew_attempt_lease",
-    "recover_expired_attempts",
     "report_attempt_progress",
     "submit_attempt_result",
     "timeout_attempt",
@@ -136,50 +131,8 @@ def acquire_attempt(db: Session, task_id: int, worker_id: str) -> Claim | None:
 
 
 # ---------------------------------------------------------------------------
-# 续租(独立事务, 与执行路径隔离)
+# 尝试写入
 # ---------------------------------------------------------------------------
-
-
-def recover_expired_attempts(db: Session, pool: str) -> int:
-    """收拢到期尝试并提交，随后重建需要重试任务的队列提示。"""
-    try:
-        recovered = tasks_domain.recover_expired_attempts(db, pool)
-        db.commit()
-    except Exception:
-        db.rollback()
-        raise
-    for task in recovered:
-        tasks_domain.clear_cancel(task.id)
-        if task.status == "queued":
-            tasks_domain.enqueue(
-                task.id, pool, task_type=task.type, snapshot_id=task.calc_snapshot_id,
-                priority=task.priority,
-            )
-    return len(recovered)
-
-
-def renew_attempt_lease(
-    db: Session, attempt_id: int, token: UUID | str, *, ttl_seconds: int = LEASE_TTL_SECONDS
-) -> bool:
-    """续租(03 §4.2): 成功提交并返回 True; 0 行 → 回滚并返回 False。
-
-    返回 False = 租约已失效, 调用方必须立即自毁(终止子进程、停止写回)。
-    """
-    try:
-        n = renew_lease_once(db, attempt_id, token, ttl_seconds=ttl_seconds)
-    except Exception:
-        db.rollback()
-        raise
-    if n == 1:
-        try:
-            db.commit()
-        except Exception:
-            db.rollback()
-            raise
-        return True
-    db.rollback()
-    logger.warning("续租失败(租约已失效): attempt=%s token=%s", attempt_id, token)
-    return False
 
 
 # ---------------------------------------------------------------------------
@@ -258,7 +211,7 @@ def submit_attempt_result(
     output_files: Mapping[str, Mapping[str, tuple[Content | bytes, str]]] | None = None,
     sealed_output_files: Mapping[str, Mapping[str, Mapping[str, object]]] | None = None,
 ) -> SubmitReceipt:
-    """仅租约持有者可提交(03 §11.4): token 不符/租约过期 → 整笔回滚并抛 LeaseRejectedError。
+    """仅租约持有者可提交(03 §11.4): token 不符/租约已撤销 → 整笔回滚并抛 LeaseRejectedError。
 
     未持久化输出内容随本单元封存，已提交阶段资产复用对象描述子：
     fencing 确认后、证据包创建前合并已有阶段文件与新输出描述子,
@@ -485,24 +438,17 @@ def report_task_process_exit(
         except LeaseRejectedError:
             pass  # Another owner already fenced this attempt; no late writes.
         return
+    progress = tasks_domain.get_progress(db, claim.attempt_id)
+    stage = progress.stage if progress is not None else "not_reported"
     try:
-        if verify_lease(db, claim.attempt_id, claim.lease_token) is None:
-            db.rollback()
-            return
-        progress = tasks_domain.get_progress(db, claim.attempt_id)
-        stage = progress.stage if progress is not None else "not_reported"
-        write_diagnostic(
-            db, claim.task_id, claim.attempt_id, level=SEVERITY_WARNING,
-            code=TASK_PROCESS_EXITED,
-            message=(f"任务进程异常退出：阶段={stage}，exit_code={exit_code}，"
-                     "具体原因未确认；将按既有租约回收及检查点恢复规则处理。"),
+        fail_attempt(
+            db, claim, code=TASK_PROCESS_EXITED,
+            message=f"任务进程异常退出：阶段={stage}，exit_code={exit_code}",
             context={"stage": stage, "exit_code": exit_code,
                      "worker_resources": after.to_dict()},
         )
-        db.commit()
-    except Exception:
-        db.rollback()
-        raise
+    except LeaseRejectedError:
+        pass
 
 
 def cancel_attempt(

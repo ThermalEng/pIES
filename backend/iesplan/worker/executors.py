@@ -55,8 +55,7 @@ class ResourceExhaustedError(Exception):
 class LeaseFenced(Exception):
     """租约隔离：回执证明执行期间租约已失效，本次执行结果不得提交。
 
-    控制流异常（非错误）：调用方直接返回，不写任务终态、不报取消，
-    不留诊断；过期租约由领取循环自然回收。
+    控制流异常（非错误）：调用方直接返回，不写任务终态、不报取消。
     """
 
 
@@ -76,6 +75,7 @@ class RunContext:
     session_factory: Callable[[], Session]
     worker_id: str = ""
     stop_event: threading.Event | None = None
+    cancel_event: threading.Event | None = None
     progress_fn: Callable[[float, str, dict | None], None] | None = None
     snapshot: worker_app.CalcSnapshotRecord | None = None  # 计算类任务快照记录; 网关读出
     io_params: dict[str, Any] = field(default_factory=dict)  # io 任务参数(队列消息扩展)
@@ -93,10 +93,19 @@ class RunContext:
 
         用户取消与租约/Worker 停止是不同控制流，均阻断后续写回。
         """
-        if _cancel_signal(self.task.id):
-            raise TaskCancelled(stage)
-        if self.stop_event is not None and self.stop_event.is_set():
+        reason = self.stop_reason()
+        if reason == "fenced":
             raise LeaseFenced()
+        if reason == "cancelled":
+            raise TaskCancelled(stage)
+
+    def stop_reason(self):
+        if self.stop_event is not None and self.stop_event.is_set():
+            return "fenced"
+        if (self.cancel_event is not None and self.cancel_event.is_set()
+                or _cancel_signal(self.task.id)):
+            return "cancelled"
+        return None
 
 
 def _cancel_signal(task_id: int) -> bool:

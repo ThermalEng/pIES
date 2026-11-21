@@ -44,7 +44,6 @@ from iesplan.core.errors import AppError, NotFoundError
 from iesplan.storage import add_ref, put_content
 from iesplan.tasks import (
     BUSINESS_OUTCOMES,
-    LEASE_TTL_SECONDS,
     POOL_BY_TYPE,
     CalcSnapshotRecord,
     InvalidRequestError,
@@ -147,7 +146,6 @@ def acquire_task(db: Session, task_id: int, worker_id: str) -> Claim | None:
         attempt_id=attempt.id,
         lease_token=str(token),
         acquired_by=worker_id,
-        ttl_seconds=LEASE_TTL_SECONDS,
     )
     tasks_domain.set_task_status(db, task.id, "running")
     tasks_domain.bind_slot_attempt(db, slot.id, attempt.id)
@@ -290,6 +288,15 @@ def publish_heartbeat(worker_id: str, payload: dict[str, Any], ttl: int) -> None
     tasks_domain.set_heartbeat(worker_id, payload, ttl)
 
 
+def attempt_stop_reason(db: Session, claim: Claim) -> str | None:
+    """Read authoritative task control without turning connection loss into a stop."""
+    if tasks_domain.get_active_lease_for_attempt(db, claim.attempt_id) is None:
+        return "fenced"
+    if _get_task(db, claim.task_id).status == "cancelling":
+        return "cancelled"
+    return None
+
+
 def slot_available(db: Session, pool: str) -> bool:
     """槽门禁: 全池总量低于额度且有空闲行(领取前确认; 未初始化视为有空位)。"""
     capacities = {"compute": settings.compute_slots, "io": settings.io_slots}
@@ -297,15 +304,8 @@ def slot_available(db: Session, pool: str) -> bool:
 
 
 def verify_lease(db: Session, attempt_id: int, token: UUID | str) -> TaskLeaseRecord | None:
-    """取得该token尚未到期的写入资格；与过期回收互斥，失效返回None。"""
+    """取得当前 token 的写入资格，与租约撤销互斥。"""
     return tasks_domain.get_valid_lease(db, attempt_id, token)
-
-
-def renew_lease_once(
-    db: Session, attempt_id: int, token: UUID | str, *, ttl_seconds: int
-) -> int:
-    """续租行级更新(renewed_at/expires_at 推进; 返回影响行数, 不提交事务)。"""
-    return tasks_domain.fence_renew_lease(db, attempt_id, token, ttl_seconds=ttl_seconds)
 
 
 def fence_release_lease(

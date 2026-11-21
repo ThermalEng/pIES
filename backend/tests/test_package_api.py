@@ -25,7 +25,7 @@ import os
 import time
 import zipfile
 from collections.abc import Iterator
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
@@ -729,8 +729,7 @@ def test_admin_unlock_task(client: TestClient, db: Session) -> None:
     db.add(attempt)
     db.flush()
     db.add(TaskLease(attempt_id=attempt.id, lease_token=uuid4(), acquired_by="w1",
-                     acquired_at=now, renewed_at=now,
-                     expires_at=now + timedelta(seconds=60), status="active"))
+                     acquired_at=now, status="active"))
     db.add(ComputeSlot(pool_name="compute", slot_no=0, status="busy", capacity=1, in_use=1,
                        current_attempt_id=attempt.id))
     db.commit()

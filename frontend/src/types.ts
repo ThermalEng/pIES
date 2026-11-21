@@ -673,8 +673,7 @@ export interface TaskLease {
   /** 租约无对应尝试行时为 null(后端原样发布, 当前无界面消费者)。 */
   attempt_no: number | null
   acquired_by: string
-  renewed_at: ISO8601
-  expires_at: ISO8601
+  acquired_at: ISO8601
 }
 
 /** Deployment facts, not a per-task reservation or a memory forecast. */

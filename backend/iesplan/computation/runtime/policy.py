@@ -1,8 +1,7 @@
 """部署执行策略：执行层实际消费的门禁与上限。
 
 只包含执行层真正检查的项：executable 精确引用 allowlist、
-环境变量名 allowlist、资源需求上限（超时/内存/CPU）、网络开关，
-以及输出文件数量与总字节上限（扫描声明输出时实际执行）。
+环境变量名 allowlist、资源需求上限（超时/内存/CPU）与网络开关。
 插件隔离状态随后续执行器切片落地，不在此预留字段。
 """
 
@@ -23,10 +22,7 @@ class DeploymentPolicy:
     表示不允许任何环境变量）；``max_*`` 为命令声明需求不得超过的
     批准上限（不是资源预留；实际硬限额由部署平台实施。命令未声明
     某项需求时该项无需求可比，直接通过）；
-    ``allow_network`` 为是否允许命令声明联网（默认拒绝）；
-    ``max_output_files`` 为进入回执的声明输出文件数上限（仅计输出
-    文件，不计输入与目录）；``max_output_bytes`` 为进入回执的声明
-    输出总字节上限（读取有界，超限部分不读入）。
+    ``allow_network`` 为是否允许命令声明联网（默认拒绝）。
     """
 
     executables: tuple[str, ...] = ()
@@ -35,8 +31,6 @@ class DeploymentPolicy:
     max_memory_mib: float = 0.0
     max_cpu_cores: float = 0.0
     allow_network: bool = False
-    max_output_files: int = 0
-    max_output_bytes: int = 0
 
     def __post_init__(self) -> None:
         executables = tuple(self.executables)
@@ -65,14 +59,6 @@ class DeploymentPolicy:
             object.__setattr__(self, name, float(value))
         if not isinstance(self.allow_network, bool):
             raise TypeError("allow_network 须为布尔值")
-        for name in ("max_output_files", "max_output_bytes"):
-            value = getattr(self, name)
-            if (
-                not isinstance(value, int)
-                or isinstance(value, bool)
-                or value <= 0
-            ):
-                raise ValueError(f"{name} 须为正整数: {value!r}")
 
     def allows_executable(self, executable_ref: str) -> bool:
         """该 executable 精确引用是否在 allowlist 内（精确相等）。"""
@@ -87,8 +73,6 @@ class DeploymentPolicy:
             "max_memory_mib": self.max_memory_mib,
             "max_cpu_cores": self.max_cpu_cores,
             "allow_network": self.allow_network,
-            "max_output_files": self.max_output_files,
-            "max_output_bytes": self.max_output_bytes,
         }
 
 

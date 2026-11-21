@@ -45,8 +45,6 @@ max_cpu_cores = 8
 # 普通 solver 默认断网
 allow_network = false
 # 声明输出总量上限：512 MiB（字节）/ 64 文件
-max_output_files = 64
-max_output_bytes = 536870912
 # 默认允许的 executable 精确引用
 allowed_executables = ["ies.solver.highs@1.7.2"]
 # 允许注入的环境变量名（空 = 不允许任何环境变量）

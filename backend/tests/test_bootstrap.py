@@ -62,8 +62,6 @@ def test_assemble_worker_subsets() -> None:
     assert policy.max_memory_mib == settings.solver_max_memory_mib
     assert policy.max_cpu_cores == settings.solver_max_cpu_cores
     assert policy.allow_network is settings.solver_allow_network
-    assert policy.max_output_files == settings.solver_max_output_files
-    assert policy.max_output_bytes == settings.solver_max_output_bytes
     assert compute.health()["executors"] == "ok"
     plane = compute.compute_execution_plane()
     assert plane is not None

@@ -219,12 +219,10 @@ def _deployment_policy_from_settings() -> Any:
         max_memory_mib=settings.solver_max_memory_mib,
         max_cpu_cores=settings.solver_max_cpu_cores,
         allow_network=settings.solver_allow_network,
-        max_output_files=settings.solver_max_output_files,
-        max_output_bytes=settings.solver_max_output_bytes,
     )
 
 
-def _assemble_execution_plane(policy: Any) -> tuple[Any, Any, Any]:
+def _assemble_execution_plane(policy: Any, *, check_readiness: bool) -> tuple[Any, Any, Any]:
     """装配计算执行面三件套(执行器目录 + 适配器目录 + 通用运行时)。
 
     HiGHS 本地进程绑定与结果适配器均为组合根显式注册的内置真实
@@ -245,7 +243,6 @@ def _assemble_execution_plane(policy: Any) -> tuple[Any, Any, Any]:
         build_result_adapter_registry,
     )
     from iesplan.computation.generators.highs_milp import EXECUTOR_REF
-    from iesplan.computation.runtime import validate_highs_arguments
 
     executor_id, _, executor_version = EXECUTOR_REF.rpartition("@")
     local_provider = LocalProcessProvider(
@@ -258,7 +255,6 @@ def _assemble_execution_plane(policy: Any) -> tuple[Any, Any, Any]:
             LocalExecutable(
                 ref=HIGHS_EXECUTABLE_REF,
                 path=HIGHS_ADAPTER_PATH,
-                argv_validator=validate_highs_arguments,
                 readiness=ExecutableReadiness(
                     version=HIGHS_VERSION,
                     self_test=("--self-test",),
@@ -268,7 +264,7 @@ def _assemble_execution_plane(policy: Any) -> tuple[Any, Any, Any]:
         ),
         base_environ={},
     )
-    executor_registry = build_executor_registry([local_provider])
+    executor_registry = build_executor_registry([local_provider], check_readiness=check_readiness)
     adapter_registry = build_result_adapter_registry([HIGHS_ADAPTER])
     runtime = SolverRuntime(executor_registry, policy)
     return executor_registry, adapter_registry, runtime
@@ -344,6 +340,7 @@ def _assemble(
     with_registry: bool,
     with_generators: bool,
     with_execution_plane: bool,
+    check_readiness: bool = False,
 ) -> ApplicationContext:
     """装配进程内连接、目录和执行能力，不执行数据库部署或身份播种。
 
@@ -391,7 +388,7 @@ def _assemble(
     if with_execution_plane:
         deployment_policy = _deployment_policy_from_settings()
         executor_registry, result_adapter_registry, solver_runtime = _assemble_execution_plane(
-            deployment_policy
+            deployment_policy, check_readiness=check_readiness
         )
     context = ApplicationContext(
         session_factory=db_module.SessionLocal,
@@ -449,7 +446,10 @@ def assemble_compute_worker() -> ApplicationContext:
     不领取无法执行的计算任务。
     """
     _initialize_database()
-    return assemble_task_runtime("compute")
+    return _assemble(
+        with_storage=True, with_registry=True, with_generators=True,
+        with_execution_plane=True, check_readiness=True,
+    )
 
 
 def assemble_io_worker() -> ApplicationContext:

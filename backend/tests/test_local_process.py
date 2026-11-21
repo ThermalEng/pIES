@@ -35,10 +35,6 @@ from iesplan.computation import (
     build_executor_registry,
 )
 from iesplan.computation.generators.highs_milp import (
-    PROBLEM_PATH,
-    SOLUTION_PATH,
-)
-from iesplan.computation.generators.highs_milp import (
     SOLVER_REF as GENERATOR_SOLVER_REF,
 )
 from iesplan.computation.protocols import TERMINATION_REASONS
@@ -46,9 +42,7 @@ from iesplan.computation.runtime.local_process import (
     HIGHS_EXECUTABLE_REF,
     MAX_STREAM_BYTES,
     TERMINATE_GRACE_SECONDS,
-    validate_highs_arguments,
 )
-from iesplan.core.content import read_content
 
 HELPER = os.path.join(os.path.dirname(__file__), "local_exec_probe.py")
 HELPER_REF = "t.helper.exec@1.0.0"
@@ -57,22 +51,11 @@ EXECUTOR_VERSION = "1.0.0"
 EXECUTOR_REF = f"{EXECUTOR_ID}@{EXECUTOR_VERSION}"
 
 
-def _helper_validator(arguments: tuple[str, ...]) -> None:
-    """测试 helper 参数门禁：首项须为已知 helper 绝对路径，余项为字符串。"""
-    args = tuple(arguments)
-    if not args or args[0] != HELPER:
-        raise ValueError(f"测试 helper 首参数须为 {HELPER!r}")
-    for item in args[1:]:
-        if not isinstance(item, str):
-            raise ValueError(f"helper 参数须为字符串: {item!r}")
-
-
 def _binding(path: str = "") -> LocalExecutable:
     """测试绑定：helper 引用到给定二进制，参数门禁收敛在同一绑定。"""
     return LocalExecutable(
         ref=HELPER_REF,
         path=path or sys.executable,
-        argv_validator=_helper_validator,
     )
 
 
@@ -136,9 +119,7 @@ def test_unmapped_executable_rejected_before_spawn(tmp_path) -> None:
 
 
 def test_binding_convergence_and_duplicates() -> None:
-    """绑定缺验证函数或引用重复即构造拒绝，不形成错配 provider。"""
-    with pytest.raises(ValueError, match="缺参数验证绑定"):
-        LocalExecutable(ref=HELPER_REF, path=sys.executable)
+    """绑定引用重复即构造拒绝，不形成错配 provider。"""
     with pytest.raises(ValueError, match="重复"):
         LocalProcessProvider(_descriptor(), (_binding(), _binding()))
     assert _provider().available() is True
@@ -150,7 +131,6 @@ def test_available_checks_bound_binaries(tmp_path) -> None:
         _descriptor(),
         (LocalExecutable(
             ref=HELPER_REF, path="/nonexistent/bin-probe",
-            argv_validator=_helper_validator,
         ),),
     )
     assert missing.available() is False
@@ -162,31 +142,6 @@ def test_available_checks_bound_binaries(tmp_path) -> None:
         (_binding(path=str(plain)),),
     )
     assert nonexec.available() is False
-
-
-def test_highs_argv_shape_matches_generator() -> None:
-    """HiGHS 七参数形状与生成器当前 argv 一致；变体在启动前拒绝。"""
-    good = (
-        PROBLEM_PATH, "--solution_file", SOLUTION_PATH,
-        "--time_limit", "600", "--random_seed", "0",
-    )
-    validate_highs_arguments(good)
-    bad_cases = [
-        good[:6],
-        (*good, "extra"),
-        ("/abs/problem.mps", *good[1:]),
-        ("../evil.mps", *good[1:]),
-        ("@resp.txt", *good[1:]),
-        ("-x", *good[1:]),
-        (good[0], "--solve", *good[2:]),
-        (good[0], good[1], "/abs/out.sol", *good[3:]),
-        (*good[:4], "0", *good[5:]),
-        (*good[:4], "x", *good[5:]),
-        (*good[:6], "-1"),
-    ]
-    for bad in bad_cases:
-        with pytest.raises(ValueError):
-            validate_highs_arguments(bad)
 
 
 def test_argv_passed_verbatim_without_shell(tmp_path) -> None:
@@ -416,7 +371,6 @@ def test_start_failure_is_infrastructure_error(tmp_path) -> None:
         _descriptor(),
         (LocalExecutable(
             ref=HELPER_REF, path="/nonexistent/bin-probe",
-            argv_validator=_helper_validator,
         ),),
     )
     with pytest.raises(ComputationUnavailableError) as exc_info:
@@ -465,8 +419,6 @@ def _runtime(provider) -> SolverRuntime:
         max_memory_mib=4096,
         max_cpu_cores=4,
         allow_network=False,
-        max_output_files=16,
-        max_output_bytes=1_048_576,
     )
     return SolverRuntime(build_executor_registry([provider]), policy)
 
@@ -539,7 +491,7 @@ def test_runtime_reports_timeout_receipt() -> None:
     assert outputs == {}
 
 
-def test_runtime_timeout_keeps_priority_over_output_violations() -> None:
+def test_runtime_timeout_with_missing_required_output() -> None:
     """超时且遗留未声明文件/缺必需输出：主状态仍为 timed_out，问题追加。"""
     receipt, outputs = _runtime(_provider()).run(
         _runtime_bundle(
@@ -556,7 +508,6 @@ def test_runtime_timeout_keeps_priority_over_output_violations() -> None:
     )
     assert receipt.status == "timed_out"
     assert "超时" in receipt.error
-    assert "sneaky.bin" in receipt.error
     assert "必需输出缺失" in receipt.error
     assert outputs == {}
 
@@ -725,197 +676,6 @@ def test_inert_probe_normal_run(tmp_path) -> None:
                    stop=lambda: None)
     assert outcome.exit_code == 0
     assert outcome.termination_reason == "exited"
-
-
-def _files_run(specs, policy_kwargs, helper_mode="write-files",
-               helper_extra=(), **cmd_kwargs):
-    """声明输出文件集的一次真实运行；specs 为 [(路径, 字节数|None)]。
-
-    字节数为 None 表示声明但不写（缺失）。``helper_extra`` 为透传给
-    helper 的附加参数（如 ``d:`` 建目录探针）。返回 ``(回执, 输出映射)``。
-    """
-    outputs = [
-        {"path": path, "media_type": "application/json", "required": True}
-        for path, _ in specs
-    ]
-    written = [f"{path}={size}" for path, size in specs if size is not None]
-    bundle = _runtime_bundle(
-        outputs=outputs, arguments=[HELPER, helper_mode, *written,
-                                    *helper_extra],
-        **cmd_kwargs,
-    )
-    policy = DeploymentPolicy(
-        executables=(HELPER_REF,),
-        environment_vars=(),
-        max_timeout_seconds=600,
-        max_memory_mib=4096,
-        max_cpu_cores=4,
-        allow_network=False,
-        **policy_kwargs,
-    )
-    runtime = SolverRuntime(build_executor_registry([_provider()]), policy)
-    return runtime.run(bundle, _attempt())
-
-
-def test_output_count_exact_and_over() -> None:
-    """文件数恰好上限通过，上限+1 拒绝且只收录配额内文件。"""
-    specs = [("output/a.json", 10), ("output/b.json", 10)]
-    receipt, outputs = _files_run(
-        specs, {"max_output_files": 2, "max_output_bytes": 1_048_576}
-    )
-    assert receipt.status == "succeeded"
-    assert sorted(outputs) == ["output/a.json", "output/b.json"]
-    receipt, outputs = _files_run(
-        specs, {"max_output_files": 1, "max_output_bytes": 1_048_576}
-    )
-    assert receipt.status == "output_protocol_failed"
-    assert "超过上限" in receipt.error
-    assert list(outputs) == ["output/a.json"]
-    assert receipt.to_dict()["policy_evaluated"]["max_output_files"] == 1
-
-
-def test_output_bytes_exact_and_over() -> None:
-    """总字节恰好上限通过，上限+1 的文件被排除且不完整读入。"""
-    receipt, outputs = _files_run(
-        [("output/a.json", 100)], {"max_output_files": 16,
-                                   "max_output_bytes": 100}
-    )
-    assert receipt.status == "succeeded"
-    assert len(read_content(outputs["output/a.json"])) == 100
-    bundle_specs = [("output/a.json", 100), ("output/b.json", 101)]
-    outputs_decl = [
-        {"path": path, "media_type": "application/json", "required": False}
-        for path, _ in bundle_specs
-    ]
-    bundle = _runtime_bundle(
-        outputs=outputs_decl,
-        arguments=[HELPER, "write-files",
-                   "output/a.json=100", "output/b.json=101"],
-    )
-    policy = DeploymentPolicy(
-        executables=(HELPER_REF,), environment_vars=(),
-        max_timeout_seconds=600, max_memory_mib=4096, max_cpu_cores=4,
-        allow_network=False, max_output_files=16, max_output_bytes=100,
-    )
-    runtime = SolverRuntime(build_executor_registry([_provider()]), policy)
-    receipt, outputs = runtime.run(bundle, _attempt())
-    assert receipt.status == "output_protocol_failed"
-    assert "超过上限" in receipt.error
-    assert list(outputs) == ["output/a.json"]
-
-
-def test_big_file_not_fully_read() -> None:
-    """10MB 超限文件耗尽字节预算且不读入；后续小文件无字节资格。"""
-    receipt, outputs = _files_run(
-        [("output/big.bin", 10 * 1024 * 1024), ("output/small.json", 10)],
-        {"max_output_files": 16, "max_output_bytes": 1_048_576},
-    )
-    assert receipt.status == "output_protocol_failed"
-    assert "总字节超过上限" in receipt.error
-    assert outputs == {}
-
-
-def test_big_first_small_later_counts_once() -> None:
-    """超大文件排序在前：小文件不得因大文件未收录重获字节预算。"""
-    receipt, outputs = _files_run(
-        [("output/big.bin", 200), ("output/small.json", 10)],
-        {"max_output_files": 2, "max_output_bytes": 100},
-    )
-    assert receipt.status == "output_protocol_failed"
-    assert "总字节超过上限" in receipt.error
-    assert "文件数超过上限" not in receipt.error
-    assert outputs == {}
-
-
-def test_undeclared_file_consumes_count_quota() -> None:
-    """未声明节点排序在前且文件上限为 1：声明节点无槽位不得收录。"""
-    bundle = _runtime_bundle(
-        outputs=[{"path": "output/a.json", "media_type": "application/json",
-                  "required": False}],
-        arguments=[HELPER, "write-files",
-                   "output/a.json=10", "output/0sneaky.bin=10"],
-    )
-    policy = DeploymentPolicy(
-        executables=(HELPER_REF,), environment_vars=(),
-        max_timeout_seconds=600, max_memory_mib=4096, max_cpu_cores=4,
-        allow_network=False, max_output_files=1,
-        max_output_bytes=1_048_576,
-    )
-    runtime = SolverRuntime(build_executor_registry([_provider()]), policy)
-    receipt, outputs = runtime.run(bundle, _attempt())
-    assert receipt.status == "output_protocol_failed"
-    assert "文件数超过上限" in receipt.error
-    assert "未声明输出" in receipt.error
-    assert "0sneaky.bin" in receipt.error
-    assert outputs == {}
-
-
-def test_total_bytes_over_with_each_under() -> None:
-    """两个 60 字节声明文件在总量 100 下超限；只收录预算内首个。"""
-    receipt, outputs = _files_run(
-        [("output/a.json", 60), ("output/b.json", 60)],
-        {"max_output_files": 16, "max_output_bytes": 100},
-    )
-    assert receipt.status == "output_protocol_failed"
-    assert "总字节超过上限" in receipt.error
-    assert list(outputs) == ["output/a.json"]
-
-
-def test_declared_fifo_excluded() -> None:
-    """声明输出为命名管道即特殊文件违规，不阻塞、不进入 outputs。"""
-    bundle = _runtime_bundle(
-        outputs=[{"path": "output/pipe.json", "media_type": "application/json",
-                  "required": False}],
-        arguments=[HELPER, "mkfifo", "output/pipe.json"],
-    )
-    policy = DeploymentPolicy(
-        executables=(HELPER_REF,), environment_vars=(),
-        max_timeout_seconds=600, max_memory_mib=4096, max_cpu_cores=4,
-        allow_network=False, max_output_files=16, max_output_bytes=1_048_576,
-    )
-    runtime = SolverRuntime(build_executor_registry([_provider()]), policy)
-    receipt, outputs = runtime.run(bundle, _attempt())
-    assert receipt.status == "output_protocol_failed"
-    assert "特殊文件" in receipt.error
-    assert outputs == {}
-
-
-def test_undeclared_socket_excluded() -> None:
-    """未声明 socket 节点即违规；合法声明输出仍可收录。"""
-    bundle = _runtime_bundle(
-        outputs=[{"path": "output/a.json", "media_type": "application/json",
-                  "required": False}],
-        arguments=[HELPER, "write-and-sock",
-                   "output/a.json=10", "output/sneaky.sock"],
-    )
-    policy = DeploymentPolicy(
-        executables=(HELPER_REF,), environment_vars=(),
-        max_timeout_seconds=600, max_memory_mib=4096, max_cpu_cores=4,
-        allow_network=False, max_output_files=16,
-        max_output_bytes=1_048_576,
-    )
-    runtime = SolverRuntime(build_executor_registry([_provider()]), policy)
-    receipt, outputs = runtime.run(bundle, _attempt())
-    assert receipt.status == "output_protocol_failed"
-    assert "特殊文件" in receipt.error
-    assert "sneaky.sock" in receipt.error
-    assert list(outputs) == ["output/a.json"]
-
-
-def test_inputs_and_dirs_not_counted() -> None:
-    """输入文件与空目录不计输出配额；配额 1 下单输出仍成功。
-
-    输入 ``input/problem.mps`` 由 bundle 自带（见 ``_runtime_bundle``），
-    空目录由 helper 建在输出区下；两者都不应占用文件数配额。
-    """
-    receipt, outputs = _files_run(
-        [("output/a.json", 10)],
-        {"max_output_files": 1, "max_output_bytes": 1_048_576},
-        helper_extra=["d:output/emptydir"],
-    )
-    assert receipt.status == "succeeded"
-    assert list(outputs) == ["output/a.json"]
-    assert read_content(outputs["output/a.json"]) == b"f" * 10
 
 
 @pytest.mark.parametrize("reason", ["cancelled", "fenced"])

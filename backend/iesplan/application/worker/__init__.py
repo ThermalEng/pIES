@@ -12,7 +12,7 @@ commit/rollback)。
 
 阶段命令:
 - 领取/续租/进度/提交/失败/取消: ``acquire_attempt``/
-  ``renew_attempt_lease``/``report_attempt_progress``/
+  ``report_attempt_progress``/
   ``submit_attempt_result``/``fail_attempt``/``cancel_attempt``;
 - 队列/槽/心跳/取消: ``dequeue_task``/``slot_available``/
   ``publish_heartbeat``/``cancel_requested``;
@@ -41,8 +41,6 @@ from iesplan.application.worker.attempt_cases import (
     cancel_attempt,
     fail_attempt,
     fail_resource_attempt,
-    recover_expired_attempts,
-    renew_attempt_lease,
     report_attempt_progress,
     report_task_process_exit,
     submit_attempt_result,
@@ -82,6 +80,7 @@ from iesplan.application.worker.lease_cases import (
     TaskRecord,
     dequeue_task,
     publish_heartbeat,
+    attempt_stop_reason,
     slot_available,
     verify_lease,
 )
@@ -107,7 +106,10 @@ from iesplan.tasks import (
     ExecutionUnavailableError,
 )
 
+from iesplan.application.worker.transactions import run_worker_transaction
+
 __all__ = [
+    "run_worker_transaction",
     "observe_local_resources",
     "fail_resource_attempt",
     "report_task_process_exit",
@@ -160,10 +162,9 @@ __all__ = [
     "prediction_delta",
     "split_predictions_by_dependency",
     "publish_heartbeat",
-    "renew_attempt_lease",
-    "recover_expired_attempts",
     "report_attempt_progress",
     "seal_output_objects",
+    "attempt_stop_reason",
     "slot_available",
     "submit_attempt_result",
     "timeout_attempt",

@@ -76,7 +76,6 @@ def test_confirmed_process_oom_fails_immediately_without_identical_retry(db, env
     task = worker.get_task_record(db, claim.task_id)
     assert task.status == "failed" and task.attempt_count == 1
     assert tasks.get_attempt(db, claim.attempt_id).stop_reason == TASK_RESOURCE_EXHAUSTED
-    assert worker.recover_expired_attempts(db, "compute") == 0
     assert all(slot.in_use == 0 for slot in db.scalars(select(ComputeSlot)))
     diag = _task_diagnostics(db, claim.task_id)[-1]
     assert diag.code == TASK_RESOURCE_EXHAUSTED
@@ -95,9 +94,9 @@ def test_abrupt_exit_without_matching_evidence_is_not_oom(
     before = observation(tmp_path / "before", kills=before_kills)
     after = observation(tmp_path / "after", kills=after_kills)
     worker.report_task_process_exit(db, claim, exit_code=exit_code, before=before, after=after)
-    assert worker.get_task_record(db, claim.task_id).status == "running"
+    assert worker.get_task_record(db, claim.task_id).status == "failed"
     diag = _task_diagnostics(db, claim.task_id)[-1]
-    assert diag.code == TASK_PROCESS_EXITED and "原因未确认" in diag.message
+    assert diag.code == TASK_PROCESS_EXITED and str(exit_code) in diag.message
 
 
 def test_oom_cannot_overwrite_a_fenced_attempt(db, env, tmp_path):

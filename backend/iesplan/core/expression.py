@@ -42,19 +42,6 @@ WHITELIST_FUNCTIONS: frozenset[str] = frozenset(
     {"abs", "min", "max", "sin", "cos", "tan", "exp", "log", "sqrt", "pow", "if"}
 )
 
-#: 禁止的标识符模式(双扫描之一;AST 白名单为主防线)
-FORBIDDEN_IDENT_PATTERNS: tuple[str, ...] = (
-    "import",
-    "eval",
-    "exec",
-    "compile",
-    "getattr",
-    "globals",
-    "locals",
-    "open",
-    "__",
-)
-
 #: 维度类型标签(与 04 §8.3 业务简写一致)
 DIM_ENERGY = "energy"
 DIM_POWER = "power"
@@ -514,13 +501,7 @@ def parse_expr(
     dims = {name: _dim_of(dict(dimension)) for name, dimension in dims.items()}
     allowed = frozenset(allowed_vars) | {k for k in dims if k.startswith(_QCONST_PREFIX)}
 
-    # 双扫描之一:危险标识符模式(混淆手段一律拒绝,04 §4.3 禁止列表)
-    lowered = text.lower()
-    for pat in FORBIDDEN_IDENT_PATTERNS:
-        if pat in lowered:
-            raise ExpressionSecurityError(f"表达式含被禁止的标识符模式 {pat!r}", pattern=pat, expr=text)
-
-    # 语法归一化(在危险模式扫描之后进行,避免引入扫描误报):
+    # 语法归一化:
     # 1) 04 §4.1 BNF 中幂运算符为 '^'(power := atom ('^' atom)?),先转为 Python 的 '**';
     # 2) BNF 的 if(cond, a, b) 是 Python 关键字,先改写为内部标记名,
     #    编译时再映射回 if 控制结构;仅改写"前导非标识符字符"的 if(。

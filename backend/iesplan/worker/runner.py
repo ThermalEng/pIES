@@ -7,7 +7,7 @@
   执行 → 短事务提交(证据包/四维评估/结果索引/业务结局)或失败/取消收拢,
   全部经由 application.worker 阶段网关的 fencing 协议(03 §4.4: 迟到的写回
   永远不入权威库)。一次长时 attempt 不是一个事务: 任务/快照记录读完即
-  关闭读取会话, 求解/分析/导出在无数据库事务状态下运行, 领取/进度/续租/
+  关闭读取会话, 求解/分析/导出在无数据库事务状态下运行, 领取/进度/
   评估写入/提交/失败/取消各自使用新的短会话与 application.worker 短事务
   用例。
 
@@ -82,21 +82,7 @@ class InvalidTaskTypeError(AppError):
 
 
 def _stop_probe(ctx: RunContext):
-    """停止探针: 独立查询用户取消；租约/Worker 停止 → fenced。
-
-    未设置 stop_event 时也必须消费用户取消。其余停止只可能是租约
-    失效（续租失败置位）或进程退出：隔离必须记 fenced，不得误写
-    cancelled。探针内查询走可重建队列视图，不持数据库会话。
-    """
-
-    def probe():
-        if worker_app.cancel_requested(ctx.task.id):
-            return "cancelled"
-        if ctx.stop_event is not None and ctx.stop_event.is_set():
-            return "fenced"
-        return None
-
-    return probe
+    return ctx.stop_reason
 
 
 def _raise_for_receipt_status(receipt: Any) -> None:
@@ -525,6 +511,7 @@ def run_task(
     *,
     worker_id: str = "",
     stop_event: Any = None,
+    cancel_event: Any = None,
     compute: Any = None,
 ) -> str:
     """执行已领取的任务并落终态(带 fencing 提交/失败/取消收拢)。
@@ -538,34 +525,39 @@ def run_task(
     返回:
         终态状态: completed / failed / cancelled / lease_rejected / fenced。
         fenced 表示回执证明租约已失效：本次执行结果被丢弃，不写任何终态、
-        不报取消（过期租约由领取循环自然回收）。
+        不报取消。
     事务边界: 本函数不调用 commit/rollback, 不持有跨阶段的 Session, 不写
     ORM; 任务/快照读完即关闭读取会话, 求解/分析/导出在无数据库事务状态
-    下运行, 领取/进度/续租/评估写入/提交/失败/取消各自的新短会话短事务
+    下运行, 领取/进度/评估写入/提交/失败/取消各自的新短会话短事务
     由 application.worker 用例拥有并提交(领取已在执行前提交, 故执行期
     回滚不会丢失租约; 失败收拢不再误判为 lease_rejected)。计算阶段产物
     经公开网关分段保存；最终提交复用已有对象并封存新输出，证据/评价/
     索引/终态同事务发布，失败不撤销先前检查点。本函数只编排和传参。
     """
     factory = session_factory
+
     # 输入加载: 短读会话, 读完即关(task/snapshot 为脱离会话的值对象)
-    with factory() as db:
+    def load_task_inputs(db: Session):
         task = worker_app.get_task_record(db, claim.task_id)
         snapshot = (
             worker_app.get_snapshot_record(db, task.calc_snapshot_id)
             if task is not None and task.calc_snapshot_id else None
         )
+        return task, snapshot
+
+    task, snapshot = worker_app.run_worker_transaction(factory, load_task_inputs)
     if task is None:
         raise SnapshotInputError("任务不存在", params={"task_id": claim.task_id})
 
     def _report_progress(percent: float, stage: str, detail: dict | None) -> None:
         # 每次进度各自新短会话短事务, 提交后即刻对其他会话可见
-        with factory() as progress_db:
-            accepted = worker_app.report_attempt_progress(
-                progress_db, claim.attempt_id, claim.lease_token,
-                task.id, percent, stage,
+        accepted = worker_app.run_worker_transaction(
+            factory,
+            lambda db: worker_app.report_attempt_progress(
+                db, claim.attempt_id, claim.lease_token, task.id, percent, stage,
                 {**(detail or {}), "worker_resources": worker_app.observe_local_resources().to_dict()},
-            )
+            ),
+        )
         if not accepted:
             raise worker_app.LeaseRejectedError(
                 "进度上报遭租约拒绝", params={"attempt_id": claim.attempt_id},
@@ -573,7 +565,7 @@ def run_task(
 
     ctx = RunContext(
         task=task, claim=claim, session_factory=factory, worker_id=worker_id,
-        stop_event=stop_event, snapshot=snapshot,
+        stop_event=stop_event, cancel_event=cancel_event, snapshot=snapshot,
         progress_fn=_report_progress, compute=compute,
     )
     try:
@@ -586,11 +578,14 @@ def run_task(
         outcome = payload.get("outcome")
         if outcome not in worker_app.BUSINESS_OUTCOMES:
             raise EngineRunError(f"执行器未返回显式合法 outcome: {outcome!r}")
-        with factory() as db:
-            worker_app.submit_attempt_result(
+        worker_app.run_worker_transaction(
+            factory,
+            lambda db: worker_app.submit_attempt_result(
                 db, claim, payload=payload, outcome=outcome,
                 actor_id=task.requested_by, output_files=output_files,
-                sealed_output_files=ctx.sealed_output_files)
+                sealed_output_files=ctx.sealed_output_files,
+            ),
+        )
         return "completed"
     except LeaseFenced:
         logger.warning("租约隔离，丢弃本次执行结果: task=%s", task.id)
@@ -598,9 +593,11 @@ def run_task(
     except TaskCancelled as exc:
         return _handle_cancel(factory, ctx, claim, exc.stage)
     except TaskTimedOut as exc:
+        message = str(exc)
         try:
-            with factory() as db:
-                worker_app.timeout_attempt(db, claim, message=str(exc))
+            worker_app.run_worker_transaction(
+                factory, lambda db: worker_app.timeout_attempt(db, claim, message=message),
+            )
         except worker_app.LeaseRejectedError:
             return "lease_rejected"
         return "timed_out"
@@ -648,8 +645,9 @@ def _handle_cancel(
             outcome = "partial_batch"
     for retry in range(6):
         try:
-            with factory() as db:
-                worker_app.cancel_attempt(db, claim, outcome=outcome)
+            worker_app.run_worker_transaction(
+                factory, lambda db: worker_app.cancel_attempt(db, claim, outcome=outcome),
+            )
             return "cancelled"
         except worker_app.LeaseRejectedError:
             logger.warning("取消收拢遭租约隔离，停止写回: task=%s", task.id)
@@ -685,7 +683,7 @@ def _handle_failure(
 
     每次收拢写各自新短会话; 收拢事务由 application.worker 用例提交, 本函数
     不调用 commit/rollback。返回失败终态; 真正的租约失效类错误不写终态
-    (由调度器守护回收, 03 §4.3), 执行失败本身绝不误判为 lease_rejected。
+    执行失败按实际错误收拢。
     已提交的进度/评估不受本次收拢回滚影响(各短事务互不包揽)。
     """
     if isinstance(exc, worker_app.LeaseRejectedError):
