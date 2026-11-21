@@ -176,8 +176,8 @@ test.describe('S3-A: 规划解参数预览与历史来源', () => {
     await expect(kv.getByText('v2', { exact: true })).toBeVisible()
     await expect(kv.getByText(/e2e-sample v1/)).toBeVisible()
 
-    // HTTP 同源: 预览值/绑定/引用与后端一致。
-    // 先把浏览器停到无轮询的项目列表页: 随后 API 登录顶号不产生前台 401。
+    // HTTP 同源: 预览值/绑定/引用与后端一致（多会话并行有效，API 登录不使浏览器会话失效）。
+    // 先回到项目列表页，随后通过 API 修改草稿与数据集并重新进入结果页验证来源不变。
     await page.goto('/')
     await expect(page.getByText(projectName)).toBeVisible({ timeout: 30_000 })
     const token2 = await loginToken(apiCtx.request, username, password)
@@ -226,10 +226,7 @@ test.describe('S3-A: 规划解参数预览与历史来源', () => {
     expect(result2.result.solver_summary).toEqual(result.result.solver_summary)
     expect(result2.result.financial_evaluation.construction_units).toEqual(result.result.financial_evaluation.construction_units)
 
-    // token2 已顶替浏览器会话(单登录): 重新 GUI 登录后重进历史结果。
-    // 重登录时 App 壳用旧会话探活各一次(下文精确声明), 属测试自身双登录
-    // 的确定性后果, 非应用异常。
-    await createSession(page, username, password)
+    // 多会话并行有效: 浏览器仍保持已登录状态在项目列表页, 直接重进项目与历史结果页。
     await page.getByText(projectName).click({ timeout: 30_000 })
     await page.getByRole('navigation', { name: /工作台|Workspace/i }).getByText('结果分析').click({ timeout: 30_000 })
     await expect(page).toHaveURL(/\/results/)
@@ -240,13 +237,7 @@ test.describe('S3-A: 规划解参数预览与历史来源', () => {
     await expect(kv2.getByText(/e2e-sample v1/)).toBeVisible()
 
     await apiCtx.close()
-    // 预期内噪声: API 登录顶号后、浏览器重登录前, App 壳用旧会话探活
-    // /me 与项目列表各一次 401(单登录语义的确定性后果, 与 S2 同源);
-    // harness 按 method+path+status+次数精确核对, 其余仍零容忍。
-    session.assertNoErrors([
-      { method: 'GET', path: '/api/auth/me', status: 401, times: 1 },
-      { method: 'GET', path: '/api/projects', status: 401, times: 1 },
-    ])
+    session.assertNoErrors()
     await context.close()
   })
   }
