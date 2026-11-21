@@ -30,7 +30,7 @@ export interface LoginRequestDto {
   device?: string
 }
 
-/** 登录/接管响应 DTO(AuthResponse)。 */
+/** 登录响应 DTO(AuthResponse)。 */
 export interface AuthResponseDto {
   token: string
   token_type: string
@@ -53,8 +53,6 @@ export interface ChangePasswordResponseDto {
   ok: boolean
   message_key: string
 }
-
-/** 确认接管响应 DTO(AuthResponse)。 */
 
 /** 自助注册请求体(POST /api/auth/register)。 */
 export interface RegisterRequestDto {

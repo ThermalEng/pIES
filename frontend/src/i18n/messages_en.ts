@@ -95,8 +95,6 @@ export const messagesEn: Record<string, string> = {
   'ies.workbench.autosave_saved': 'Autosaved',
   'ies.workbench.autosave_dirty': 'Unsaved changes',
   'ies.workbench.autosave_error': 'Autosave failed',
-  'ies.workbench.offline': 'Offline',
-  'ies.workbench.offline_hint': 'Network is disconnected; displayed data may be stale.',
   'ies.workbench.load_failed': 'Failed to load project info',
 
   // -------------------------------------------------------------------------
@@ -213,8 +211,6 @@ export const messagesEn: Record<string, string> = {
   'ies.auth.role_invalid': 'Invalid role',
   'ies.auth.bad_request': 'Invalid request: {reason}',
   'ies.auth.password_reset': 'Password has been reset. Sign in with the new password.',
-  'ies.auth.offline': 'Offline',
-  'ies.auth.offline_hint': 'Cannot reach the server. If the server runs on this machine or your local network, check the connection and retry.',
 
   // -------------------------------------------------------------------------
   // Project

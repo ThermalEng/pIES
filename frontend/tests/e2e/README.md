@@ -160,3 +160,15 @@ docker compose -p pies-ext-csv-gui --profile e2e run --rm --build --no-deps e2e 
 - `fixtures/env.ts` — 独立用户/项目/密码生成(幂等键);
 - `setup/api.ts` — 仅造数/清理的 API 客户端(与被测动作隔离);
 - `playwright.config.ts` — 单 worker 串行(共享部署环境),trace/screenshot on failure。
+
+### 排队任务取消
+
+使用独立 Compose 项目，先启动 Web 与 API，在启动计算 Worker 前执行用例。
+此用例通过真实任务中心提交任务并取消，计算任务在操作期间保持排队。
+运行中任务的进程组终止和槽位释放另外由 Docker 后端集成测试覆盖。
+
+```bash
+docker compose up -d --build web backend
+docker compose run --rm --build -e E2E_QUEUED_CANCEL=1 e2e \
+  npx playwright test queued-task-cancel.spec.ts --project=chromium
+```

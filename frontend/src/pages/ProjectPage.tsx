@@ -166,7 +166,7 @@ function AutosaveIndicator({ status }: { status: AutosaveStatus }) {
  */
 export default function ProjectPage() {
   const { t } = useI18n()
-  const { projectId, project, currentVersion, offline, autosave } = useWorkbench()
+  const { projectId, project, currentVersion, autosave } = useWorkbench()
 
   const projectName = project?.name ?? t('ies.nav.workbench')
 
@@ -215,18 +215,6 @@ export default function ProjectPage() {
           </div>
           <div className="wb-header__status">
             <AutosaveIndicator status={autosave} />
-            {offline ? (
-              <span
-                className="ies-badge ies-badge--warning ies-badge--shape-square"
-                title={t('ies.workbench.offline_hint')}
-                role="status"
-              >
-                <span className="ies-badge__icon" aria-hidden="true">
-                  <Icon name="warning" size={12} />
-                </span>
-                <span className="ies-badge__label">{t('ies.workbench.offline')}</span>
-              </span>
-            ) : null}
           </div>
         </header>
         <main className="wb-content">

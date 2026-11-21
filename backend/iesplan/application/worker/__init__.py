@@ -11,7 +11,7 @@ Worker(``iesplan.worker``)只经本包推进, 不再直连 ``services.*`` 与
 commit/rollback)。
 
 阶段命令:
-- 领取/续租/进度/提交/失败/取消: ``acquire_attempt``/
+- 领取/进度/提交/失败/取消: ``acquire_attempt``/
   ``report_attempt_progress``/
   ``submit_attempt_result``/``fail_attempt``/``cancel_attempt``;
 - 队列/槽/心跳/取消: ``dequeue_task``/``slot_available``/

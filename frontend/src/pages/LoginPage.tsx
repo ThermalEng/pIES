@@ -11,10 +11,9 @@ import {
   register,
 } from '../features/auth'
 import type { PublicAuthSettings } from '../features/auth'
-import { ApiError } from '../types'
 import { errorMessage, useI18n } from '../i18n'
 import type { Locale } from '../i18n'  // Locale kept for setLocale typing if needed
-import { Alert, Badge, Button, FormField, Input } from '../components/ui'
+import { Alert, Button, FormField, Input } from '../components/ui'
 import { BrandMark } from '../components/BrandMark'
 import { ThemeToggle } from '../components/ThemeToggle'
 
@@ -24,30 +23,6 @@ type View = 'login' | 'register' | 'change_password'
 // 辅助
 // ---------------------------------------------------------------------------
 
-/** 浏览器在线状态(online/offline 事件同步)。 */
-function useOnlineStatus(): boolean {
-  const [online, setOnline] = useState<boolean>(() =>
-    typeof navigator !== 'undefined' ? navigator.onLine : true,
-  )
-  useEffect(() => {
-    const handleOnline = () => setOnline(true)
-    const handleOffline = () => setOnline(false)
-    window.addEventListener('online', handleOnline)
-    window.addEventListener('offline', handleOffline)
-    return () => {
-      window.removeEventListener('online', handleOnline)
-      window.removeEventListener('offline', handleOffline)
-    }
-  }, [])
-  return online
-}
-
-/** 是否网络层失败(连接失败/超时,区别于后端业务错误信封)。 */
-function isNetworkFailure(err: unknown): boolean {
-  if (!(err instanceof ApiError)) return false
-  return err.status === 0 && (err.message_key === 'ies.error.network' || err.message_key === 'ies.error.timeout')
-}
-
 // ---------------------------------------------------------------------------
 // 登录页
 // ---------------------------------------------------------------------------
@@ -56,7 +31,6 @@ export default function LoginPage() {
   const { t, locale, setLocale } = useI18n()
   const navigate = useNavigate()
   const location = useLocation()
-  const browserOnline = useOnlineStatus()
 
   // 路由状态:会话过期回跳(带 reason=expired)与登录后目标地址(RequireAuth 传入 from)
   const routeState = location.state as { reason?: string; from?: string } | null
@@ -71,7 +45,6 @@ export default function LoginPage() {
   const [password, setPassword] = useState('')
   const [loginError, setLoginError] = useState<string | null>(null)
   const [loginBusy, setLoginBusy] = useState(false)
-  const [loginOffline, setLoginOffline] = useState(false)
 
   // 强制改密
   const [oldPassword, setOldPassword] = useState('')
@@ -106,7 +79,6 @@ export default function LoginPage() {
 
   const handleLogin = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
-    setLoginOffline(false)
     setNotice(null)
     if (!username.trim() || !password) {
       setLoginError(t('ies.auth.required'))
@@ -130,7 +102,6 @@ export default function LoginPage() {
         navigate(redirectTarget, { replace: true })
       }
     } catch (err) {
-      setLoginOffline(isNetworkFailure(err))
       setLoginError(errorText(err))
     } finally {
       setLoginBusy(false)
@@ -203,7 +174,6 @@ export default function LoginPage() {
     }
   }
 
-  const showOffline = !browserOnline || loginOffline
 
   return (
     <main className="ies-login">
@@ -216,13 +186,6 @@ export default function LoginPage() {
           <h1 className="ies-login__title">{t('ies.auth.login_title')}</h1>
           <p className="ies-login__tagline">{t('ies.auth.brand_tagline')}</p>
         </header>
-
-        {showOffline ? (
-          <div className="ies-login__offline" role="status">
-            <Badge label={t('ies.auth.offline')} variant="warning" icon="warning" />
-            <p className="ies-login__offline-hint">{t('ies.auth.offline_hint')}</p>
-          </div>
-        ) : null}
 
         {sessionExpired ? <Alert variant="warning" title={t('ies.auth.session_expired')} /> : null}
         {notice ? (

@@ -113,18 +113,21 @@ def _predict_round(
     previous: Mapping[str, object] | None,
 ) -> tuple[tuple, tuple]:
     """复用已保存预测，否则计算实际预测并另经短事务保存产物。"""
-    with ctx.session_factory() as db:
-        saved = worker_app.load_prediction_checkpoint(db, ctx.claim, 1)
+    saved = worker_app.run_worker_transaction(
+        ctx.session_factory, worker_app.load_prediction_checkpoint,
+        ctx.claim, 1,
+    )
     if saved is not None:
         ctx.prediction_artifacts[1] = saved[2]
         return saved[:2]
-    with ctx.session_factory() as db:
-        series, predicted = worker_app.predict_target_round(
-            db, plane, ctx.task.project_id, snapshot, previous=previous,
-        )
-    with ctx.session_factory() as db:
-        ctx.prediction_artifacts[1] = worker_app.save_prediction_checkpoint(
-            db, ctx.claim, 1, series, predicted)
+    series, predicted = worker_app.run_worker_transaction(
+        ctx.session_factory, worker_app.predict_target_round,
+        plane, ctx.task.project_id, snapshot, previous=previous,
+    )
+    ctx.prediction_artifacts[1] = worker_app.run_worker_transaction(
+        ctx.session_factory, worker_app.save_prediction_checkpoint,
+        ctx.claim, 1, series, predicted,
+    )
     return series, predicted
 
 
@@ -133,18 +136,21 @@ def _predict_selected_round(
     entries: tuple, previous: Mapping[str, object] | None, number: int,
 ) -> tuple[tuple, tuple]:
     """耦合轮次复用已保存产物，否则计算指定条目并提交本轮检查点。"""
-    with ctx.session_factory() as db:
-        saved = worker_app.load_prediction_checkpoint(db, ctx.claim, number)
+    saved = worker_app.run_worker_transaction(
+        ctx.session_factory, worker_app.load_prediction_checkpoint,
+        ctx.claim, number,
+    )
     if saved is not None:
         ctx.prediction_artifacts[number] = saved[2]
         return saved[:2]
-    with ctx.session_factory() as db:
-        series, predicted = worker_app.predict_selected_round(
-            db, plane, ctx.task.project_id, snapshot, entries, previous=previous,
-        )
-    with ctx.session_factory() as db:
-        ctx.prediction_artifacts[number] = worker_app.save_prediction_checkpoint(
-            db, ctx.claim, number, series, predicted)
+    series, predicted = worker_app.run_worker_transaction(
+        ctx.session_factory, worker_app.predict_selected_round,
+        plane, ctx.task.project_id, snapshot, entries, previous=previous,
+    )
+    ctx.prediction_artifacts[number] = worker_app.run_worker_transaction(
+        ctx.session_factory, worker_app.save_prediction_checkpoint,
+        ctx.claim, number, series, predicted,
+    )
     return series, predicted
 
 
@@ -161,19 +167,24 @@ def _solve_round(
     不读最新草稿。返回 (bundle, receipt, collected, result, outcome, sealed_files)。
     """
     ctx.checkpoint("restore_round")
-    with ctx.session_factory() as db:
-        saved = worker_app.restore_round(db, ctx.claim, number)
+    saved = worker_app.run_worker_transaction(
+        ctx.session_factory, worker_app.restore_round,
+        ctx.claim, number,
+    )
     if saved is None:
         bundle = worker_app.generate_bundle(
             plane, snapshot, artifact, models, materialized, finance, config, evaluation,
             stop=_stop_probe(ctx))
-        with ctx.session_factory() as db:
-            generated_id, bundle_refs = worker_app.save_bundle_checkpoint(
-                db, ctx.claim, number, bundle, attempt)
+        generated_id, bundle_refs = worker_app.run_worker_transaction(
+            ctx.session_factory, worker_app.save_bundle_checkpoint,
+            ctx.claim, number, bundle, attempt,
+        )
         # Replace generator-owned content after publication; release its matrix/metadata.
         del bundle
-        with ctx.session_factory() as db:
-            saved = worker_app.restore_round(db, ctx.claim, number)
+        saved = worker_app.run_worker_transaction(
+            ctx.session_factory, worker_app.restore_round,
+            ctx.claim, number,
+        )
         bundle = saved.bundle
     else:
         bundle = saved.bundle
@@ -252,10 +263,10 @@ def _execute_compute(ctx: RunContext) -> tuple[dict, dict]:
     if plane is None:
         raise worker_app.ComputationUnavailableError(
             "计算执行面未装配，计算任务不可执行", reason="compute-plane-missing")
-    with ctx.session_factory() as db:
-        artifact, models, materialized, finance, config, evaluation = worker_app.load_compute_inputs(
-            db, task.project_id, snapshot
-        )
+    artifact, models, materialized, finance, config, evaluation = worker_app.run_worker_transaction(
+        ctx.session_factory, worker_app.load_compute_inputs,
+        task.project_id, snapshot,
+    )
     ctx.checkpoint("materialize")
     ctx.progress(10.0, "materialize", None)
     predicted: tuple = ()
@@ -596,7 +607,7 @@ def run_task(
         message = str(exc)
         try:
             worker_app.run_worker_transaction(
-                factory, lambda db: worker_app.timeout_attempt(db, claim, message=message),
+                factory, worker_app.timeout_attempt, claim, message=message,
             )
         except worker_app.LeaseRejectedError:
             return "lease_rejected"
@@ -639,14 +650,16 @@ def _handle_cancel(
     logger.info("任务取消: task=%s stage=%s", task.id, stage)
     outcome = None
     if task.type == "uncertainty":
-        with factory() as db:
-            completed = worker_app.count_completed_samples(db, task.id)
+        completed = worker_app.run_worker_transaction(
+            factory, worker_app.count_completed_samples,
+            task.id,
+        )
         if completed > 0:
             outcome = "partial_batch"
     for retry in range(6):
         try:
             worker_app.run_worker_transaction(
-                factory, lambda db: worker_app.cancel_attempt(db, claim, outcome=outcome),
+                factory, worker_app.cancel_attempt, claim, outcome=outcome,
             )
             return "cancelled"
         except worker_app.LeaseRejectedError:

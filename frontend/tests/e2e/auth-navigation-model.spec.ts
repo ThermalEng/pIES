@@ -176,6 +176,10 @@ test.describe('场景 3: 建模与连线 @basic', () => {
     await apiCtx.close()
 
     const context: BrowserContext = await browser.newContext()
+    // Report an offline flag while leaving the real Docker HTTP connection available.
+    await context.addInitScript(() => {
+      Object.defineProperty(Navigator.prototype, 'onLine', { get: () => false })
+    })
     const page: Page = await context.newPage()
     const session = await createSession(page, username, password)
 
@@ -235,6 +239,13 @@ test.describe('场景 3: 建模与连线 @basic', () => {
       expect(nodeHandle).toBeTruthy()
       await nodeHandle!.waitForElementState('stable', { timeout: 10_000 })
     }
+    const refresh = page.locator('.mp-toolbar').getByRole('button', { name: /刷新|Refresh/i })
+    await expect(refresh).toBeEnabled()
+    const refreshed = page.waitForResponse((response) =>
+      response.request().method() === 'GET' && new URL(response.url()).pathname === `/api/projects/${projectId}`,
+    )
+    await refresh.click()
+    expect((await refreshed).ok()).toBe(true)
     await addDevice('电网连接')
     await addDevice('电负荷')
     await addDevice('热泵')

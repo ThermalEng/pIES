@@ -177,8 +177,8 @@ def get_auth_context(request: Request, db: DbSession) -> AuthContext:
     """解析窗口凭证并校验: HTTP 凭证提取归本层, 身份业务校验归 application 用例。
 
     本层只从 Authorization 头/Cookie 提取凭证原文; 哈希匹配、状态、
-    过期、凭证版本、用户有效、H-01 接管门禁、C-02 强制改密门禁与
-    last_seen_at 刷新全部经 ``resolve_auth_context`` 完整用例。
+    过期、凭证版本、账号状态和 last_seen_at 刷新由
+    ``resolve_auth_context`` 处理。
     """
     token = _extract_token(request)
     user, session = identity.resolve_auth_context(db, token=token)
@@ -231,7 +231,7 @@ def _set_session_cookie(response: Response, request: Request, token: str) -> Non
 
 
 # ---------------------------------------------------------------------------
-# 公开端点: 登录 / 登出 / 改密 / 续期 / 接管 / 注册
+# 会话与注册端点
 # ---------------------------------------------------------------------------
 
 

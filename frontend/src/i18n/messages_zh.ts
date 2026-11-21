@@ -105,8 +105,6 @@ export const messagesZh: Record<string, string> = {
   'ies.workbench.autosave_saved': '已自动保存',
   'ies.workbench.autosave_dirty': '有未保存的更改',
   'ies.workbench.autosave_error': '自动保存失败',
-  'ies.workbench.offline': '离线',
-  'ies.workbench.offline_hint': '网络已断开,展示的数据可能不是最新',
   'ies.workbench.load_failed': '项目信息加载失败',
 
   // -------------------------------------------------------------------------
@@ -223,8 +221,6 @@ export const messagesZh: Record<string, string> = {
   'ies.auth.role_invalid': '无效的角色',
   'ies.auth.bad_request': '请求参数错误:{reason}',
   'ies.auth.password_reset': '密码已重置,请使用新密码登录',
-  'ies.auth.offline': '离线状态',
-  'ies.auth.offline_hint': '无法连接服务器。若服务器位于本机或局域网,请检查网络连接后重试。',
 
   // -------------------------------------------------------------------------
   // 项目

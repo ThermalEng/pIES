@@ -2,22 +2,27 @@
 
 from collections.abc import Callable
 from time import sleep
-from typing import TypeVar
+from typing import Concatenate, ParamSpec, TypeVar
 
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 T = TypeVar("T")
+P = ParamSpec("P")
 
 
 def run_worker_transaction(
-    session_factory: Callable[[], Session], operation: Callable[[Session], T],
+    session_factory: Callable[[], Session],
+    operation: Callable[Concatenate[Session, P], T],
+    /,
+    *args: P.args,
+    **kwargs: P.kwargs,
 ) -> T:
     """Leave the attempt active while the database recovers."""
     while True:
         with session_factory() as db:
             try:
-                return operation(db)
+                return operation(db, *args, **kwargs)
             except OperationalError as exc:
                 state = getattr(exc.orig, "sqlstate", None)
                 if not exc.connection_invalidated and (

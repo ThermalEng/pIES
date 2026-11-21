@@ -35,8 +35,6 @@ export interface WorkbenchValue {
   versions: ProjectVersion[]
   /** 当前版本(最新版本号)。 */
   currentVersion: ProjectVersion | null
-  /** 是否离线(navigator.onLine)。 */
-  offline: boolean
   /** 自动保存状态。 */
   autosave: AutosaveStatus
   /** 更新自动保存状态(由子页面保存草稿时调用)。 */
@@ -144,9 +142,6 @@ export function WorkbenchProvider({ projectId, children }: { projectId: number; 
   // Provider 已按 projectId 键控重挂: 上方初始化器每次挂载按新项目键读取
   // 持久化选择, 前一项目的任务 id 不得泄漏到新项目, 无需第二个同步 effect。
   const [autosave, setAutosave] = useState<AutosaveStatus>('saved')
-  const [offline, setOffline] = useState(() =>
-    typeof navigator === 'undefined' ? false : !navigator.onLine,
-  )
 
   // 摘要刷新序列(同实例内): 挂载双读/任务页双读/任务载入后刷新等同一项目
   // 的并发重读以后发起者为准, 先发起的迟到回包不得覆盖更新的发布(含
@@ -259,17 +254,6 @@ export function WorkbenchProvider({ projectId, children }: { projectId: number; 
     refresh()
   }, [refresh])
 
-  useEffect(() => {
-    const goOnline = () => setOffline(false)
-    const goOffline = () => setOffline(true)
-    window.addEventListener('online', goOnline)
-    window.addEventListener('offline', goOffline)
-    return () => {
-      window.removeEventListener('online', goOnline)
-      window.removeEventListener('offline', goOffline)
-    }
-  }, [])
-
   const currentVersion = versions.length > 0 ? versions[versions.length - 1] : null
 
   const value = useMemo<WorkbenchValue>(
@@ -280,7 +264,6 @@ export function WorkbenchProvider({ projectId, children }: { projectId: number; 
       projectError,
       versions,
       currentVersion,
-      offline,
       autosave,
       setAutosave,
       selectedTaskId,
@@ -291,7 +274,7 @@ export function WorkbenchProvider({ projectId, children }: { projectId: number; 
       refresh,
       refreshDetailed,
     }),
-    [projectId, project, projectLoading, projectError, versions, currentVersion, offline, autosave, refresh, refreshDetailed, selectedTaskId, setSelectedTaskId, draftLoadingTaskId, workspaceCoord, selectTaskWithDraft],
+    [projectId, project, projectLoading, projectError, versions, currentVersion, autosave, refresh, refreshDetailed, selectedTaskId, setSelectedTaskId, draftLoadingTaskId, workspaceCoord, selectTaskWithDraft],
   )
 
   return <WorkbenchContext.Provider value={value}>{children}</WorkbenchContext.Provider>

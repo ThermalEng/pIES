@@ -128,7 +128,7 @@ def test_task_runtime_does_not_redeploy_database_or_seed_identity(worker_type, m
 
 
 def test_collect_trigger_statements_covers_immutable_tables() -> None:
-    """触发器语句由各领域钩子编排收集: 每张不可变表都有函数/两触发器/REVOKE 片段。"""
+    """触发器语句由各领域钩子编排收集: 每张不可变表都有函数和两个触发器。"""
     statements = collect_trigger_statements()
     assert statements
     ddl = "\n\n".join(statements)
@@ -136,3 +136,14 @@ def test_collect_trigger_statements_covers_immutable_tables() -> None:
         assert f"CREATE FUNCTION tg_{table}_immutable() RETURNS trigger" in ddl
         assert f"CREATE TRIGGER tg_{table}_no_update BEFORE UPDATE ON {table}" in ddl
         assert f"CREATE TRIGGER tg_{table}_no_delete BEFORE DELETE ON {table}" in ddl
+
+
+def test_highs_readiness_probes_once_in_compute_worker_entry(monkeypatch) -> None:
+    from iesplan.computation import LocalProcessProvider
+
+    readiness = Mock(return_value=True)
+    monkeypatch.setattr(LocalProcessProvider, "available", readiness)
+    assemble_compute_worker()
+    assemble_task_runtime("compute")
+    assemble_task_runtime("compute")
+    readiness.assert_called_once_with()

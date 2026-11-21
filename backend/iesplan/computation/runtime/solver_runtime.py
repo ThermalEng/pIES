@@ -86,8 +86,7 @@ class SolverRuntime:
     失败返回 ``policy_rejected`` 回执且不调用 executor；启动前停止
     （含 provider 启动瞬间观测到的停止，此时进程必然未启动）返回
     ``cancelled``/``fenced`` 未执行回执；executor 调用后的非零退出、
-    必需输出缺失、未声明输出分别形成明确回执，不回退、不切换
-    executor、不伪造成功；只有无法建立可信回执的基础设施错误
+    必需输出缺失分别形成明确回执；只有无法建立可信回执的基础设施错误
     （工作区不可建、executor 抛非停止异常、清理失败）才向上传播异常。
     """
 
@@ -126,13 +125,10 @@ class SolverRuntime:
         退出后仍有组成员被强制收口 → ``process_failed``
         （``group_terminated`` 不得签发 ``succeeded``）；运行中停止 →
         ``cancelled``/``fenced`` 为主状态；凭 cgroup oom_kill 证据标定的
-        OOM → ``process_failed``（``oom``）；输出边界问题追加进 ``error``
-        供解释，不改写上述主状态。非停止执行的输出边界违规（未声明文件/
-        特殊文件/符号链接/不可读/数量超限/总量超限）→
-        ``output_protocol_failed``；退出码不在成功集合 →
+        OOM → ``process_failed``（``oom``）；退出码不在成功集合 →
         ``process_failed``；必需输出缺失 →
         ``output_protocol_failed``；否则 ``succeeded``。成功与失败都
-        尽量形成回执；输出映射只含已核对的声明输出。
+        尽量形成回执；输出映射只含声明文件。
         """
         if not isinstance(bundle, SolverBundle):
             raise TypeError(

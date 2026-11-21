@@ -1480,19 +1480,6 @@ button {
   margin-bottom: 0;
 }
 
-.ies-login__offline {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: var(--ies-space-2);
-  text-align: center;
-}
-
-.ies-login__offline-hint {
-  font-size: var(--ies-fs-xs);
-  color: var(--ies-color-text-secondary);
-}
-
 
 .ies-login__actions {
   display: flex;

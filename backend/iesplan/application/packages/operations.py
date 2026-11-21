@@ -81,10 +81,7 @@ def confirm_import(db: Session, user: UserRecord, proposal_id: int) -> ProjectRe
 
 
 # ---------------------------------------------------------------------------
-# HTTP 完整用例(第二轮纠偏 Wave 1 切片 3: 上传与 quota)
-#
-# 每个 HTTP 业务动作只转交其中一个完整用例; 配额 → 保存/导入的顺序收进
-# 同一用例, API 只做传输适配(封顶读取)、DTO 与错误/响应映射, 本层不新增校验。
+# HTTP 用例封装导入流程，API 负责流式封顶读取、DTO 和响应映射。
 # ---------------------------------------------------------------------------
 
 
@@ -95,13 +92,7 @@ def propose_import_case(
     file_bytes: bytes,
     idempotency_key: str | None = None,
 ) -> ImportProposalRecord:
-    """导入提案完整用例: 用户级配额 → 校验暂存(提交/回滚由提案步骤拥有)。
-
-    提案阶段不创建普通项目(确认时才创建新项目身份)、无目标项目,
-    故只应用用户级配额(口径与原路由一致)。
-
-    异常:
-    """
+    """校验上传包并暂存导入提案，确认时创建项目。"""
     return propose_import(db, user, file_bytes, idempotency_key=idempotency_key)
 
 

@@ -696,7 +696,7 @@ def revoke_all_user_sessions(
     *,
     revoked_by: int | None = None,
 ) -> int:
-    """撤销用户全部活动/待接管会话(凭证变更/停用时调用), 返回撤销数量。"""
+    """撤销用户全部活动会话(凭证变更/停用时调用), 返回撤销数量。"""
     rows = identity_domain.list_active_sessions(db, user.id)
     for s in rows:
         identity_domain.set_session_status(

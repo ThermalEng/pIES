@@ -134,21 +134,20 @@ def execute_check(ctx: RunContext) -> dict:
     """
     msg_params = ctx.io_params or {}
     # 定位阶段: 短会话只读, 读完即关, 不跨越后续检查点与评估写入
-    with ctx.session_factory() as db:
-        evidence_id = worker_app.locate_report_evidence(
-            db,
-            project_id=ctx.task.project_id,
-            evidence_package_id=msg_params.get("evidence_package_id"),
-            task_id=msg_params.get("task_id"),
-        )
+    evidence_id = worker_app.run_worker_transaction(
+        ctx.session_factory, worker_app.locate_report_evidence,
+        project_id=ctx.task.project_id,
+        evidence_package_id=msg_params.get("evidence_package_id"),
+        task_id=msg_params.get("task_id"),
+    )
 
     ctx.progress(20, "load_evidence", {"evidence_package_id": evidence_id})
     ctx.checkpoint("load_evidence")
     # 评估阶段: 独立短会话, 短事务由阶段命令提交后即关
-    with ctx.session_factory() as db:
-        result = worker_app.assess_report_stage(
-            db, ctx.claim, evidence_id=evidence_id
-        )
+    result = worker_app.run_worker_transaction(
+        ctx.session_factory, worker_app.assess_report_stage,
+        ctx.claim, evidence_id=evidence_id,
+    )
     if result.assessment is not None:
         ctx.progress(100, "done", {"assessment_id": result.assessment.id})
     return result.payload

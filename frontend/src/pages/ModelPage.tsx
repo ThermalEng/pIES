@@ -119,7 +119,7 @@ export default function ModelPage() {
 
 function ModelCanvas({ projectId }: { projectId: number }) {
   const { t, locale } = useI18n()
-  const { setAutosave, offline } = useWorkbench()
+  const { setAutosave } = useWorkbench()
   const { screenToFlowPosition, fitView } = useReactFlow()
   const navigate = useNavigate()
 
@@ -830,8 +830,7 @@ function ModelCanvas({ projectId }: { projectId: number }) {
             variant="primary"
             size="sm"
             onClick={() => void reloadGraph()}
-            disabled={loading || offline || saveState === 'saving'}
-            title={offline ? lt('save.error') : undefined}
+            disabled={loading || saveState === 'saving'}
           >
             {t('ies.common.refresh')}
           </Button>
