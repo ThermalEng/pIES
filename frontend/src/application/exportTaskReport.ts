@@ -8,7 +8,7 @@ export function isNoAssessmentError(err: unknown): err is ApiError {
   return err instanceof ApiError && err.message_key === 'ies.error.no_assessment_available'
 }
 
-export async function exportTaskReport(input: ExcelExportInput): Promise<number> {
+export async function exportTaskReport(input: ExcelExportInput): Promise<{ blob: Blob; filename: string }> {
   const assessments = await listAssessments(input.project_id, input.task_id)
   const latest = assessments[0]
   if (!latest) throw new ApiError(404, null, 'ies.error.no_assessment_available')

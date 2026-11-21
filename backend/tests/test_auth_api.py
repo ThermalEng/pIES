@@ -1,4 +1,4 @@
-"""身份认证 API 集成测试(U01): 登录/限速/改密/接管/登出/管理员操作/注册。
+"""身份认证 API 集成测试(U01): 登录/改密/多会话/登出/管理员操作/注册。
 
 运行方式: 内存 SQLite + app.dependency_overrides 替换 get_request_db 依赖
 (不触碰真实数据库, 与 CONTRACT 第 4 节一致)。
@@ -57,7 +57,6 @@ def client(db_session: Session) -> Iterator[TestClient]:
         yield db_session
 
     app.dependency_overrides[get_request_db] = override_request_db
-    identity.reset_login_rate_limit()
     with TestClient(app, raise_server_exceptions=False) as test_client:
         yield test_client
 
@@ -109,7 +108,6 @@ def test_login_success_returns_token_and_cookie(client: TestClient, db_session: 
     body = resp.json()
     assert body["token"]
     assert body["token_type"] == "bearer"
-    assert body["needs_takeover_confirm"] is False
     user = body["user"]
     assert user["username"] == "admin"
     assert user["role"] == "admin"
@@ -128,34 +126,6 @@ def test_login_failure_message_unified(client: TestClient, db_session: Session) 
     e2 = r2.json()["error"]
     assert e1["message_key"] == e2["message_key"] == "ies.diag.auth.login_failed"
     assert "Wrong12345" not in r1.text  # 响应不泄露密码
-
-
-def test_login_rate_limit_locks_after_five_failures(client: TestClient, db_session: Session) -> None:
-    """登录限速: 5 次失败锁定 15 分钟, 锁定期间即使密码正确也拒绝(429)。"""
-    seed_admin(db_session)
-    for _ in range(5):
-        assert login(client, "admin", "Wrong12345").status_code == 401
-    resp = login(client, "admin", "Wrong12345")
-    assert resp.status_code == 429
-    assert resp.json()["error"]["message_key"] == "ies.diag.auth.locked"
-    # 锁定期间正确密码同样被拒
-    resp = login(client, "admin", ADMIN_PASSWORD)
-    assert resp.status_code == 429
-    assert resp.json()["error"]["message_key"] == "ies.diag.auth.locked"
-    # 限速按用户名隔离: 其他用户名不受影响
-    assert login(client, "alice", USER_PASSWORD).status_code == 401  # 用户不存在但未被锁定
-
-
-def test_login_success_resets_rate_limit(client: TestClient, db_session: Session) -> None:
-    """限速计数: 4 次失败后成功登录, 计数清零(再失败 4 次不触发锁定)。"""
-    seed_admin(db_session)
-    for _ in range(4):
-        login(client, "admin", "Wrong12345")
-    assert login(client, "admin", ADMIN_PASSWORD).status_code == 200
-    for _ in range(4):
-        assert login(client, "admin", "Wrong12345").status_code == 401
-    # 未达 5 次不锁定
-    assert login(client, "admin", "Wrong12345").status_code == 401
 
 
 # ---------------------------------------------------------------------------
@@ -215,66 +185,25 @@ def test_change_password_flow(client: TestClient, db_session: Session) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 窗口接管（单活动窗口，见 manual/developer-guide/zh-CN/ARCHITECTURE_CONSTITUTION.md §16 安全与审计； manual/developer-guide/zh-CN/modules/api.md）
+# 多窗口会话
 # ---------------------------------------------------------------------------
-
-
-def test_window_takeover_and_confirm(client: TestClient, db_session: Session) -> None:
-    """接管: 新登录使旧窗口撤销, 新窗口 pending(确认前无业务权限); 确认后转 active。"""
-    seed_admin(db_session, force_change=False)
-    r1 = login(client, "admin", ADMIN_PASSWORD, device="window-A")
-    token_a = r1.json()["token"]
-    assert r1.json()["needs_takeover_confirm"] is False
-
-    # 第二窗口登录 → 提示确认接管
-    r2 = login(client, "admin", ADMIN_PASSWORD, device="window-B")
-    token_b = r2.json()["token"]
-    assert r2.json()["needs_takeover_confirm"] is True
-
-    # 旧窗口凭证立即失效(取消防止新操作)
-    assert client.post("/api/auth/refresh", headers=bearer(token_a)).status_code == 401
-
-    # 新窗口确认接管 → 当前待接管会话保留为 active(凭证不变)
-    r3 = client.post("/api/auth/confirm-takeover", headers=bearer(token_b))
-    assert r3.status_code == 200
-    token_c = r3.json()["token"]
-    assert token_c == token_b
-
-    # B 凭证确认后转 active 可用(不轮换: 客户端既有凭证立即生效)
-    assert client.post("/api/auth/refresh", headers=bearer(token_b)).status_code == 200
-    assert client.post("/api/auth/refresh", headers=bearer(token_c)).status_code == 200
-
-    # 数据库状态: A revoked → B active(保留), 且 A 的 replaced_by 指向 B
-    # (B 为保留会话, 不再派生新会话)
-    sessions = list(db_session.execute(select(WindowSession).order_by(WindowSession.id)).scalars())
-    assert [s.status for s in sessions] == ["revoked", "active"]
-    assert sessions[0].replaced_by_session_id == sessions[1].id
-    assert sessions[1].replaced_by_session_id is None
-
-
-def test_takeover_pending_session_revoked_on_next_login(client: TestClient, db_session: Session) -> None:
-    """连续接管(H-01): 接管未确认前再次登录, 更早的 pending 会话被撤销,
-    新会话仍为 takeover_pending(每用户至多一条 pending, 无 active 被绕过)。"""
-    seed_admin(db_session, force_change=False)
-    r1 = login(client, "admin", ADMIN_PASSWORD)
-    assert r1.status_code == 200
-    r2 = login(client, "admin", ADMIN_PASSWORD)
-    assert r2.status_code == 200
-    r3 = login(client, "admin", ADMIN_PASSWORD)
-    assert r3.status_code == 200
-    assert r3.json()["needs_takeover_confirm"] is True
-    sessions = list(db_session.execute(select(WindowSession).order_by(WindowSession.id)).scalars())
-    statuses = [s.status for s in sessions]
-    # 三次登录: 前两次会话均被撤销, 当前会话为 takeover_pending(等待确认)
-    assert statuses == ["revoked", "revoked", "takeover_pending"]
-    assert statuses.count("active") == 0
-    assert statuses.count("takeover_pending") == 1
-    assert statuses[0] == "revoked"
 
 
 # ---------------------------------------------------------------------------
 # 登出 / 续期 / 过期
 # ---------------------------------------------------------------------------
+
+
+def test_multiple_logins_keep_independent_sessions(client: TestClient, db_session: Session) -> None:
+    seed_engineer(db_session)
+    first = login(client, "alice", USER_PASSWORD).json()["token"]
+    second = login(client, "alice", USER_PASSWORD).json()["token"]
+    assert first != second
+    for token in (first, second):
+        assert client.get("/api/projects", headers=bearer(token)).status_code == 200
+    assert client.post("/api/auth/logout", headers=bearer(second)).status_code == 200
+    assert client.get("/api/projects", headers=bearer(first)).status_code == 200
+    assert client.get("/api/projects", headers=bearer(second)).status_code == 401
 
 
 def test_logout_revokes_session(client: TestClient, db_session: Session) -> None:
@@ -484,8 +413,7 @@ def test_login_and_me_keep_user_semantics(client: TestClient, db_session: Sessio
 
 
 def test_admin_delete_user_cascades_projects(client: TestClient, db_session: Session) -> None:
-    """删除账号(0.2.0 B1 误操作防护): 先预览取得确认令牌, 携带 confirm+令牌删除成功,
-    该账号拥有的项目一并软删, 账号停用且会话失效。"""
+    """预览受影响项目，管理员删除账号时一并软删项目并使会话失效。"""
     seed_admin(db_session, force_change=False)
     alice = seed_engineer(db_session)
     r = login(client, "admin", ADMIN_PASSWORD)
@@ -506,7 +434,7 @@ def test_admin_delete_user_cascades_projects(client: TestClient, db_session: Ses
     pid1 = p1.json()["project"]["id"]
     pid2 = p2.json()["project"]["id"]
 
-    # 第一步: 删除预告 → 返回将受影响项目清单 + 确认令牌
+    # 预览受影响项目
     preview = client.post(f"/api/auth/users/{alice.id}/delete-preview", headers=admin_headers)
     assert preview.status_code == 200
     prev = preview.json()
@@ -514,13 +442,11 @@ def test_admin_delete_user_cascades_projects(client: TestClient, db_session: Ses
     assert prev["username"] == "alice"
     assert prev["project_count"] == 2
     assert [p["id"] for p in prev["projects"]] == sorted([pid1, pid2])
-    assert prev["confirm_token"]
 
-    # 第二步: 携带 confirm + 令牌删除 → 两个项目一并软删
+    # 删除账号及其两个项目
     resp = client.request(
         "DELETE",
         f"/api/auth/users/{alice.id}",
-        json={"confirm": True, "confirm_token": prev["confirm_token"]},
         headers=admin_headers,
     )
     assert resp.status_code == 200
@@ -538,76 +464,6 @@ def test_admin_delete_user_cascades_projects(client: TestClient, db_session: Ses
     assert client.get(f"/api/projects/{pid1}", headers=admin_headers).status_code == 404
 
 
-def test_admin_delete_user_requires_confirm_and_token(client: TestClient, db_session: Session) -> None:
-    """删除账号(0.2.0 B1): 无 confirm / 无令牌 / 令牌无效 / 清单变化均被拒(400),
-    账号与项目均不受影响。"""
-    seed_admin(db_session, force_change=False)
-    alice = seed_engineer(db_session)
-    r = login(client, "admin", ADMIN_PASSWORD)
-    admin_headers = bearer(r.json()["token"])
-    alice_headers = bearer(login(client, "alice", USER_PASSWORD).json()["token"])
-
-    p1 = client.post(
-        "/api/projects", json={"name": "需确认项目", "currency": "CNY", "baseline_resolution": "1h", "baseline_start_year": 2026, "baseline_scenario_mode": "single"},
-        headers=alice_headers,
-    )
-    assert p1.status_code == 201
-    pid1 = p1.json()["project"]["id"]
-
-    # 1) 无 confirm(裸 DELETE)→ 400
-    resp = client.delete(f"/api/auth/users/{alice.id}", headers=admin_headers)
-    assert resp.status_code == 400
-    assert resp.json()["error"]["message_key"] == "ies.diag.auth.delete_confirm_required"
-
-    # 2) confirm=true 但无令牌 → 400
-    resp = client.request(
-        "DELETE", f"/api/auth/users/{alice.id}", json={"confirm": True}, headers=admin_headers
-    )
-    assert resp.status_code == 400
-    assert resp.json()["error"]["message_key"] == "ies.diag.auth.delete_confirm_required"
-
-    # 3) confirm=true + 伪造令牌 → 400
-    resp = client.request(
-        "DELETE",
-        f"/api/auth/users/{alice.id}",
-        json={"confirm": True, "confirm_token": "forged-token"},
-        headers=admin_headers,
-    )
-    assert resp.status_code == 400
-    assert resp.json()["error"]["message_key"] == "ies.diag.auth.delete_confirm_required"
-
-    # 4) 预览后项目清单变化(新增项目)→ 旧令牌拒绝(需重新预览)
-    preview = client.post(f"/api/auth/users/{alice.id}/delete-preview", headers=admin_headers)
-    assert preview.status_code == 200
-    old_token = preview.json()["confirm_token"]
-    p2 = client.post(
-        "/api/projects", json={"name": "清单变化项目", "currency": "CNY", "baseline_resolution": "1h", "baseline_start_year": 2026, "baseline_scenario_mode": "single"},
-        headers=alice_headers,
-    )
-    assert p2.status_code == 201
-    resp = client.request(
-        "DELETE",
-        f"/api/auth/users/{alice.id}",
-        json={"confirm": True, "confirm_token": old_token},
-        headers=admin_headers,
-    )
-    assert resp.status_code == 400
-    assert resp.json()["error"]["message_key"] == "ies.diag.auth.delete_confirm_required"
-
-    # 全部被拒后账号与项目均不受影响
-    assert client.post("/api/auth/refresh", headers=alice_headers).status_code == 200
-    assert login(client, "alice", USER_PASSWORD).status_code == 200
-    # 重复登录触发接管, 确认接管后取得可用凭证再访问项目细节
-    alice_tok = login(client, "alice", USER_PASSWORD).json()["token"]
-    alice2_headers = bearer(
-        client.post("/api/auth/confirm-takeover", headers=bearer(alice_tok)).json()["token"]
-    )
-    admin_view = client.get("/api/projects/admin-visible", headers=admin_headers)
-    by_id = {p["id"]: p for p in admin_view.json()["projects"]}
-    assert by_id[pid1]["status"] == "active"
-    assert client.get(f"/api/projects/{pid1}", headers=alice2_headers).status_code == 200
-
-
 def test_admin_delete_user_preview_zero_projects(client: TestClient, db_session: Session) -> None:
     """删除预告: 无项目账号返回空清单 + 可正常确认删除。"""
     seed_admin(db_session, force_change=False)
@@ -620,12 +476,10 @@ def test_admin_delete_user_preview_zero_projects(client: TestClient, db_session:
     prev = preview.json()
     assert prev["project_count"] == 0
     assert prev["projects"] == []
-    assert prev["confirm_token"]
 
     resp = client.request(
         "DELETE",
         f"/api/auth/users/{alice.id}",
-        json={"confirm": True, "confirm_token": prev["confirm_token"]},
         headers=admin_headers,
     )
     assert resp.status_code == 200
@@ -732,38 +586,13 @@ def test_service_expire_sessions(client: TestClient, db_session: Session) -> Non
     assert login(client, "admin", ADMIN_PASSWORD).status_code == 200
 
 
-def test_service_revoke_other_sessions(client: TestClient, db_session: Session) -> None:
-    """revoke_other_sessions: 撤销指定会话以外的全部活动/待接管会话。
-
-    单活动窗口语义(H-01)下每用户至多一条 active/pending: 第二次登录时旧
-    active 已被撤销, 因此通常无可撤销的"其他"会话; 保留会话确认接管后可用。
-    """
-    seed_admin(db_session, force_change=False)
-    r1 = login(client, "admin", ADMIN_PASSWORD)
-    token_a = r1.json()["token"]
-    r2 = login(client, "admin", ADMIN_PASSWORD)
-    token_b = r2.json()["token"]
-    user = db_session.execute(select(User).where(User.username == "admin")).scalar_one()
-    keep = db_session.execute(
-        select(WindowSession).where(WindowSession.session_token_hash == identity.token_hash(token_b))
-    ).scalar_one()
-    assert identity.revoke_other_sessions(db_session, user, keep_session_id=keep.id) == 0
-    # 保留的会话仍为待接管(不因 revoke_other_sessions 变化): 确认接管后可用
-    r3 = client.post("/api/auth/confirm-takeover", headers=bearer(token_b))
-    assert r3.status_code == 200, r3.text
-    token_c = r3.json()["token"]
-    assert client.post("/api/auth/refresh", headers=bearer(token_c)).status_code == 200
-    # 被接管撤销的旧会话不可用
-    assert client.post("/api/auth/refresh", headers=bearer(token_a)).status_code == 401
-
-
 # ---------------------------------------------------------------------------
 # 审计
 # ---------------------------------------------------------------------------
 
 
 def test_auth_events_recorded(client: TestClient, db_session: Session) -> None:
-    """登录成功/失败/登出/改密/接管/重置/停用均写入 auth_events 审计。"""
+    """登录成功/失败/登出/改密/停用均写入 auth_events 审计。"""
     seed_admin(db_session, force_change=False)
     alice = seed_engineer(db_session)
     login(client, "admin", ADMIN_PASSWORD, device="audit-window")
@@ -783,10 +612,7 @@ def test_auth_events_recorded(client: TestClient, db_session: Session) -> None:
 
     r2 = login(client, "admin", ADMIN_PASSWORD)
     admin_token = r2.json()["token"]
-    # 第二次登录的新窗口为待接管(H-01), 确认接管后取得正式凭证再执行管理操作
-    r2c = client.post("/api/auth/confirm-takeover", headers=bearer(admin_token))
-    assert r2c.status_code == 200, r2c.text
-    admin_headers = bearer(r2c.json()["token"])
+    admin_headers = bearer(admin_token)
     client.post(f"/api/auth/users/{alice.id}/deactivate", headers=admin_headers)
 
     types = [e.event_type for e in db_session.execute(select(AuthEvent)).scalars()]
@@ -796,7 +622,6 @@ def test_auth_events_recorded(client: TestClient, db_session: Session) -> None:
         "logout",
         "password_change",
         "account_disabled",
-        "session_takeover",
     ):
         assert expected in types, f"缺少审计事件: {expected}"
 
@@ -896,7 +721,7 @@ def test_oidc_callback_disabled(client: TestClient, db_session: Session) -> None
 def test_auth_view_fields_consistent_across_endpoints(
     client: TestClient, db_session: Session
 ) -> None:
-    """展示视图一致性: login/me/register/confirm-takeover/list 返回同一视图字段。
+    """展示视图一致性: login/me/register/list 返回同一视图字段。
 
     各端点经完整用例一次组装视图 + API 纯映射, 同一用户在各端点的
     role/status/force_password_change/credential_version 必须一致。
@@ -924,17 +749,6 @@ def test_auth_view_fields_consistent_across_endpoints(
     assert reg["role"] == "engineer"
     assert reg["force_password_change"] is False
     assert reg["status"] == "active"
-
-    # 第二窗口登录 → 确认接管返回同一视图(凭证不变)
-    pending = login(client, "alice", USER_PASSWORD, device="window-B").json()
-    assert pending["needs_takeover_confirm"] is True
-    took = client.post(
-        "/api/auth/confirm-takeover", headers=bearer(pending["token"])
-    ).json()
-    assert took["token"] == pending["token"]
-    assert took["user"]["role"] == "engineer"
-    assert took["user"]["force_password_change"] is False
-    assert took["user"]["credential_version"] == login_user["credential_version"]
 
     # 管理员列表同用户视图一致(含改密状态与项目数)
     by_name = {

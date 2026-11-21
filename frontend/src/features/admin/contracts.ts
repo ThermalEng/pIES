@@ -52,17 +52,10 @@ export interface UserDeletePreviewProjectDto {
 
 /** 删除账号预告响应 DTO(POST /api/auth/users/{id}/delete-preview)。 */
 export interface UserDeletePreviewResponseDto {
-  confirm_token: string
   project_count: number
   projects: UserDeletePreviewProjectDto[]
   user_id: number
   username: string
-}
-
-/** 删除账号确认请求体(DELETE /api/auth/users/{id})。 */
-export interface UserDeleteConfirmRequestDto {
-  confirm: boolean
-  confirm_token: string
 }
 
 /** 删除账号响应 DTO。 */

@@ -221,9 +221,9 @@ test.describe('R8: Excel 导出语言', () => {
       data: { evidence_package_id: zhPkg, assessment_id: assessmentId },
     })
     expect(rawExport.ok()).toBe(true)
-    const token = ((await rawExport.json()) as { token: string }).token
+    const { object_id } = await rawExport.json()
     const dl = await apiCtx.request.fetch(
-      `${APP}/api/projects/${pid}/exports/excel/download?token=${token}`,
+      `${APP}/api/projects/${pid}/exports/excel/${object_id}/download`,
       { headers: { Authorization: `Bearer ${freshToken}` } },
     )
     if (!dl.ok()) throw new Error(`download excel -> ${dl.status()}`)

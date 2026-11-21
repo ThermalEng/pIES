@@ -4,11 +4,11 @@
 - SQLite 测试库下 ``db.deploy_trigger_statements`` 直接跳过, 不解析 plpgsql
   语法、不报错(生产 Postgres 才执行);
 - 部署语句与不可变表清单完全一致: 每张表都有函数 + BEFORE UPDATE/DELETE
-  触发器 + REVOKE(规则归各自领域 persistence 所有, 组合根编排收集,
+  触发器(规则归各自领域 persistence 所有, 组合根编排收集,
   此处只校验收集结果的 DDL 生成正确性, 供 Postgres 部署前静态校验);
 - ``init_db`` 在 SQLite 下仍可安全执行(含触发器部署早退)。
 
-依据: ARCHITECTURE_CONSTITUTION.md §11 数据库与持久化 / §16 安全与审计（三道防线：应用写入单元、REVOKE、触发器）。
+依据: ARCHITECTURE_CONSTITUTION.md §11 数据库与持久化 / §16 安全与审计（应用写入单元与数据库触发器）。
 """
 
 from __future__ import annotations

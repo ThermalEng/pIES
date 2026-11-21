@@ -165,7 +165,7 @@ test('N3 system document survives editing and feeds same-solve curves and export
   expect(restored.draft.content.system_equations).toEqual(changed.system_equations)
   expect(restored.draft.content.outputs).toEqual(document.outputs)
   const restoredPackage = await requestJson(setup.request, 'POST', `/api/projects/${imported.project.id}/exports/package`, undefined, importerToken)
-  const downloaded = await setup.request.get(`${APP}/api/projects/${imported.project.id}/exports/package/download?token=${restoredPackage.token}`, {
+  const downloaded = await setup.request.get(`${APP}/api/projects/${imported.project.id}/exports/package/${restoredPackage.object_id}/download`, {
     headers: { Authorization: `Bearer ${importerToken}` },
   })
   expect(downloaded.ok()).toBe(true)

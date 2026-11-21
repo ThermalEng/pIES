@@ -58,7 +58,6 @@ from iesplan.identity.persistence import User  # noqa: E402,F401
 from iesplan.main import create_app  # noqa: E402
 from iesplan.storage.persistence import StoredObject  # noqa: E402,F401
 from iesplan.tasks.persistence import Task  # noqa: E402,F401
-from iesplan.application import identity  # noqa: E402
 
 PASSWORD = "Test12345"
 
@@ -113,12 +112,7 @@ def client(db: Session) -> Iterator[TestClient]:
         yield db
 
     app.dependency_overrides[get_request_db] = _override_request_db
-    identity.reset_login_rate_limit()
-    # 全局限流状态为进程级共享: 同时清空, 防止本文件残留计数影响后续
-    # 文件的 401 断言(或反之被前序高频文件打成 429)
-    from iesplan.api.limits import reset_rate_limit
 
-    reset_rate_limit()
     with TestClient(app, raise_server_exceptions=False) as c:
         yield c
 
@@ -352,37 +346,6 @@ def test_error_envelope_shape_all_error_paths(
     codes = [d["code"] for d in err["params"]["diagnostics"]]
     assert "DATA-TS-004" in codes
 
-    # --- 3) CSRF 403(AUTH-CSRF-001): 带会话 Cookie 的跨源状态变更 ---
-    # TestClient 登录后已持有 ies_session Cookie; 携带非可信 Origin 的 POST 被拒
-    resp = client.post(
-        "/api/projects",
-        json={"name": "跨源项目"},
-        headers={"Origin": "http://evil.example.com"},
-    )
-    assert_error_envelope(resp, 403, code="AUTH-CSRF-001")
-
-    # --- 4) 限流 429(API-RL-001): 调低阈值后打满 ---
-    from iesplan.api.limits import reset_rate_limit
-    from iesplan.config import settings
-
-    monkeypatch.setattr(settings, "rate_limit_max_requests", 3)
-    monkeypatch.setattr(settings, "rate_limit_window_seconds", 60)
-    reset_rate_limit()
-    # 限流探针须用匿名客户端: 主 client 持有登录 Cookie, 带 Cookie 的请求会以
-    # 会话身份进入业务逻辑(如 admin 无项目权限 → 403 而非 401), 干扰计数预期
-    with TestClient(client.app, raise_server_exceptions=False) as anon:
-        for _ in range(3):
-            resp = anon.get("/api/projects/1/datasets")  # 非豁免路径(401 也计入)
-            assert resp.status_code == 401, resp.text
-        resp = anon.get("/api/projects/1/datasets")
-    err = assert_error_envelope(resp, 429, code="API-RL-001", message_key="ies.error.rate_limited")
-    assert err["params"]["retry_after"] == 60
-    # 重置限流计数并恢复宽松阈值, 避免本测试后续请求被 429 误伤
-    # (窗口内已计 4 次, 后续 404/500/403/401/业务断言还会发多个请求;
-    # monkeypatch 在测试结束后自动还原)
-    monkeypatch.setattr(settings, "rate_limit_max_requests", 100000)
-    reset_rate_limit()
-
     # --- 5) 404 路由未找到(API-NF-001) ---
     resp = client.get("/api/no-such-route")
     assert_error_envelope(resp, 404, code="API-NF-001", message_key="ies.error.route_not_found")
@@ -417,28 +380,6 @@ def test_error_envelope_shape_all_error_paths(
     # --- 10) 业务错误 B: 数据集不存在 404(RES-MISS-003, 归属校验) ---
     resp = client.get(f"/api/projects/{pid}/datasets/999999", headers=_bearer(owner_tok))
     assert_error_envelope(resp, 404, code="RES-MISS-003")
-
-    # --- 11) 业务错误 C: 管理员解锁缺确认 409(ADMIN-CONFIRM-REQUIRED) ---
-    # 任务须在最小夹具项目(单电池, 无汇问题)上提交: 含 PV 无汇的项目会被
-    # 装配检查 ASM-CHECK-FAILED(ASM-SOLV-002 no_sink)拦截, 无法进入队列
-    pid2 = _create_project(client, owner_tok, "解锁任务项目")
-    _declare_explicit_calc(client, db, owner_tok, pid2, owner.id)
-    rev2 = _save_config(client, owner_tok, pid2)
-    resp = client.post(f"/api/projects/{pid2}/tasks", json={"task_type": "optimization", "config": {"config_revision": rev2}, "evaluation": {
-                "evaluation_years": 1, "construction_period": 0,
-                "operation_years": 1, "discount_rate": 0.08,
-                "construction_payments": [{"t": 0, "ratio": 1}],
-                "maintenance_expenses": [],
-            }, "idempotency_key": "wrap-unlock-1"}, headers=_bearer(owner_tok))
-    assert resp.status_code == 201, resp.text
-    task_id = resp.json()["task"]["id"]
-    resp = client.post(
-        "/api/admin/unlock-task",
-        json={"task_id": task_id, "confirm": False},
-        headers=_bearer(admin_tok),
-    )
-    err = assert_error_envelope(resp, 409, code="ADMIN-CONFIRM-REQUIRED")
-    assert err["message_key"] == "ies.diag.admin.confirm_required"
 
     # --- 12) 业务错误 D: 登录失败 401(AUTH-LOGIN-001, 统一文案) ---
     resp = client.post("/api/auth/login", json={"username": "proto_owner", "password": "wrong-pass"})
@@ -545,7 +486,7 @@ def test_success_wrappers_datasets_auth_admin_exports_domain(client: TestClient,
     """datasets/auth/admin/objects/exports 域包装键锁定。
 
     差异记录:
-    - auth 登录实际返回 {"token", "token_type", "user", "needs_takeover_confirm"}
+    - auth 登录实际返回 {"token", "token_type", "user"}
       (AuthResponse 模型), 非任务书假设的 {"ok", ...}; 登出为 {"ok"}。
     - objects 域两版形状并存: /api/admin/storage 为 7 键单一 StorageStatusDto;
       /api/admin/objects/pending 等列表端点为 {"data", "meta"}。两者分别锁定。
@@ -561,11 +502,11 @@ def test_success_wrappers_datasets_auth_admin_exports_domain(client: TestClient,
     assert resp.status_code == 201, resp.text
     _assert_wrapper(client.get(f"/api/projects/{pid}/datasets", headers=_bearer(tok)), {"datasets"})
 
-    # exports 项目包包装键由独立契约套件锁定(含下载与坏 token 路径, 此处不再重复)
+    # exports 项目包包装键由独立契约套件锁定(含对象下载, 此处不再重复)
 
     # auth(登录响应是 AuthResponse 模型; 登出为 {"ok"})
     resp = client.post("/api/auth/login", json={"username": "wrap_ds", "password": PASSWORD})
-    _assert_wrapper(resp, {"token", "token_type", "user", "needs_takeover_confirm"})
+    _assert_wrapper(resp, {"token", "token_type", "user"})
     resp = client.post("/api/auth/logout", headers=_bearer(adm_tok))
     _assert_wrapper(resp, {"ok"})
 
@@ -576,7 +517,6 @@ def test_success_wrappers_datasets_auth_admin_exports_domain(client: TestClient,
         client.get("/api/admin/storage", headers=_bearer(adm_tok)),
         {"objects", "refs", "capacity", "cleanup_candidates", "healthy"},
     )
-    _assert_wrapper(client.get("/api/admin/objects/pending", headers=_bearer(adm_tok)), {"data", "meta"})
     _assert_wrapper(client.get("/api/admin/audit", headers=_bearer(adm_tok)), {"items", "next_cursor"})
 
 

@@ -112,7 +112,6 @@ class WindowSessionRecord:
     user_id: int
     status: str
     credential_version_at_issue: int
-    replaced_by_session_id: int | None = None
     last_seen_at: str | None = None
     expires_at: str | None = None
     revoked_at: str | None = None
@@ -146,7 +145,6 @@ USER_STATUS_DISABLED = "disabled"
 
 #: 会话状态取值唯一权威(window_sessions.status)。
 SESSION_STATUS_ACTIVE = "active"
-SESSION_STATUS_TAKEOVER_PENDING = "takeover_pending"
 SESSION_STATUS_REVOKED = "revoked"
 SESSION_STATUS_EXPIRED = "expired"
 
@@ -186,14 +184,6 @@ class LoginFailedError(AuthError):
 
     code = "AUTH-LOGIN-001"
     message_key = "ies.diag.auth.login_failed"
-
-
-class LockedError(AuthError):
-    """登录限速锁定(429)。"""
-
-    http_status = 429
-    code = "AUTH-LOCK-001"
-    message_key = "ies.diag.auth.locked"
 
 
 class UserDisabledError(AuthError):
@@ -236,32 +226,9 @@ class RegistrationDisabledError(AuthError):
     message_key = "ies.diag.auth.registration_disabled"
 
 
-class ForcePasswordChangeError(AuthError):
-    """强制改密门禁(403): 有效密码凭证 requires_change=True 时,
-    除改密/登出/本人信息外的全部业务请求被拒(C-02, AUTH-FPC-001)。"""
-
-    http_status = 403
-    code = "AUTH-FPC-001"
-    message_key = "ies.diag.auth.force_password_change"
-
-
 class BadRequestError(AuthError):
     """请求参数非法(400)。"""
 
     http_status = 400
     code = "AUTH-BAD-001"
     message_key = "ies.diag.auth.bad_request"
-
-
-class DeleteConfirmRequiredError(BadRequestError):
-    """删除账号缺少确认或确认令牌无效(400)。
-
-    误操作防护(0.2.0 B1): 删除账号会级联软删其拥有的全部项目且不可恢复,
-    必须在预览后携带签名确认令牌显式确认。错误可能原因:
-    - 未携带 confirm=true;
-    - 确认令牌缺失/过期/被篡改;
-    - 预览后目标用户拥有的项目清单发生变化(令牌与当前清单不一致)。
-    """
-
-    code = "AUTH-DEL-001"
-    message_key = "ies.diag.auth.delete_confirm_required"

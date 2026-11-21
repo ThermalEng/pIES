@@ -1,4 +1,4 @@
-"""全局限流和带元数据的数据集上传。"""
+"""带元数据的数据集上传。"""
 
 from __future__ import annotations
 
@@ -121,72 +121,6 @@ def _create_dataset(client: TestClient, user, project_id: int, name: str = "负�
 # ---------------------------------------------------------------------------
 # 全局限流
 # ---------------------------------------------------------------------------
-
-
-def test_rate_limit_allows_below_threshold(client: TestClient, db: Session, monkeypatch) -> None:
-    """阈值内请求正常放行(200/401 等业务状态, 不被限流误伤)。"""
-    monkeypatch.setattr(settings, "rate_limit_max_requests", 100)
-    monkeypatch.setattr(settings, "rate_limit_window_seconds", 60)
-    from iesplan.api.limits import reset_rate_limit
-
-    reset_rate_limit()
-    # 多次请求未超阈值: 匿名访问业务端点返回 401(认证错误), 不是 429
-    for _ in range(5):
-        resp = client.get("/api/projects/1/datasets")
-        assert resp.status_code == 401, resp.text
-
-
-def test_rate_limit_returns_429_after_threshold(client: TestClient, db: Session, monkeypatch) -> None:
-    """超过阈值返回 429 + 标准错误信封(API-RL-001)。"""
-    monkeypatch.setattr(settings, "rate_limit_max_requests", 3)
-    monkeypatch.setattr(settings, "rate_limit_window_seconds", 60)
-    from iesplan.api.limits import reset_rate_limit
-
-    reset_rate_limit()
-    for _ in range(3):
-        resp = client.get("/api/projects/1/datasets")  # 非豁免路径(401 认证错误也计入)
-        assert resp.status_code == 401, resp.text
-    # 第 4 次触发 429
-    resp = client.get("/api/projects/1/datasets")
-    assert resp.status_code == 429
-    body = resp.json()
-    assert body["error"]["code"] == "API-RL-001"
-    assert body["error"]["message_key"] == "ies.error.rate_limited"
-    assert body["error"]["params"]["retry_after"] == 60
-
-
-def test_rate_limit_exempts_health_and_login(client: TestClient, db: Session, monkeypatch) -> None:
-    """健康/就绪/登录豁免路径不参与限流(探针与登录高频不误伤)。"""
-    monkeypatch.setattr(settings, "rate_limit_max_requests", 2)
-    monkeypatch.setattr(settings, "rate_limit_window_seconds", 60)
-    from iesplan.api.limits import reset_rate_limit
-
-    reset_rate_limit()
-    # 业务路径先消耗配额
-    client.get("/api/projects/1/datasets")
-    client.get("/api/projects/1/datasets")
-    # 第 3 次业务请求应 429
-    assert client.get("/api/projects/1/datasets").status_code == 429
-    # 但豁免路径不受影响
-    assert client.get("/api/healthz").status_code == 200
-    assert client.get("/api/readyz").status_code in (200, 503)
-    resp = client.post(
-        "/api/auth/login",
-        json={"username": "nobody", "password": "x"},
-    )
-    assert resp.status_code == 401  # 认证失败而非 429
-
-
-def test_rate_limit_disabled_passes_through(client: TestClient, db: Session, monkeypatch) -> None:
-    """关闭开关(rate_limit_enabled=false)时透明放行。"""
-    monkeypatch.setattr(settings, "rate_limit_enabled", False)
-    monkeypatch.setattr(settings, "rate_limit_max_requests", 1)
-    from iesplan.api.limits import reset_rate_limit
-
-    reset_rate_limit()
-    for _ in range(3):
-        resp = client.get("/api/projects/1/datasets")
-        assert resp.status_code == 401, resp.text
 
 
 # ---------------------------------------------------------------------------

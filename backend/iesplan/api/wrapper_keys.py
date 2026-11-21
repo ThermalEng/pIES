@@ -32,19 +32,18 @@ WRAPPER_KEYS: dict[str, frozenset[str]] = {
     ),
     "unlock_task_endpoint": frozenset({"status", "task_id", "unlocked", "message"}),
     # ---- auth.py ----
-    "login": frozenset({"token", "token_type", "user", "needs_takeover_confirm"}),  # AuthResponse
+    "login": frozenset({"token", "token_type", "user"}),  # AuthResponse
     "logout": frozenset({"ok"}),
     "change_password": frozenset({"message_key", "ok"}),
     "refresh": frozenset({"expires_at", "ok"}),
     "me": frozenset({"user"}),
-    "confirm_takeover": frozenset({"ok", "user"}),
     "register": frozenset({"user"}),
     "list_users": frozenset({"users"}),
     "admin_reset_password": frozenset({"message_key", "ok"}),
     "admin_deactivate_user": frozenset({"ok"}),
     "admin_reactivate_user": frozenset({"ok"}),
     "admin_delete_user_preview": frozenset(
-        {"confirm_token", "project_count", "projects", "user_id", "username"}
+        {"project_count", "projects", "user_id", "username"}
     ),  # services.identity.preview_user_delete
     "admin_delete_user": frozenset({"ok", "deleted_projects"}),  # services.identity.delete_user
     "update_settings": frozenset({"registration_enabled"}),
@@ -63,10 +62,10 @@ WRAPPER_KEYS: dict[str, frozenset[str]] = {
     "create_sample": frozenset({"dataset_version", "quality_report"}),
     # ---- exports.py ----
     "export_excel_endpoint": frozenset(
-        {"expires_at_seconds", "file_name", "size_bytes", "token"}
+        {"object_id", "file_name", "size_bytes"}
     ),
     "export_package_endpoint": frozenset(
-        {"expires_at", "file_name", "manifest", "media_type", "object_id", "oid", "size_bytes", "token"}
+        {"file_name", "manifest", "media_type", "object_id", "oid", "size_bytes"}
     ),  # services.package.PackageExport.to_dict
     # ---- health.py ----
     "admin_health": frozenset({"components", "status"}),

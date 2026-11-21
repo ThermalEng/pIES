@@ -13,7 +13,6 @@
 
 from __future__ import annotations
 
-from typing import Any
 
 from sqlalchemy.orm import Session
 
@@ -123,22 +122,3 @@ def confirm_import_case_result(db: Session, user: UserRecord, *, proposal_id: in
         "project": project_domain.project_to_dict(result["project"]),
         "my_role": result["role"],
     }
-
-
-def create_download_token(
-    object_id: int,
-    kind: str,
-    *,
-    project_id: int,
-    user_id: int,
-    ttl_seconds: int = package_domain.DOWNLOAD_TOKEN_TTL_SECONDS,
-) -> str:
-    """签发短期单对象下载授权(纯签名, 无 DB 写, 不拥有事务)。"""
-    return package_domain.create_download_token(
-        object_id, kind, project_id=project_id, user_id=user_id, ttl_seconds=ttl_seconds
-    )
-
-
-def verify_download_token(token: str, *, expected_kind: str | None = None) -> dict[str, Any]:
-    """校验下载授权 token(纯校验, 无 DB 写, 不拥有事务)。"""
-    return package_domain.verify_download_token(token, expected_kind=expected_kind)

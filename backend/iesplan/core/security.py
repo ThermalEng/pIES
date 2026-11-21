@@ -5,14 +5,13 @@
   不兼容(其 bcrypt 后端读取 bcrypt.__about__ 失败且校验路径异常),
   故此处直接调用 bcrypt 包 API,输出同为 $2b$ 前缀的标准 bcrypt 哈希,
   接口语义与 CONTRACT 第 2 节一致(hash_password/verify_password)。
-- 密码强度:至少 8 位,含大写、小写与数字(任务要求)。
+- 密码强度:至少 6 位。
 - 会话令牌:secrets 生成;入库前用 token_hash 做 SHA-256 摘要,
   库中不存明文令牌(泄露数据库也不可冒用)。
 """
 
 from __future__ import annotations
 
-import re
 import secrets
 from typing import Final
 
@@ -21,7 +20,7 @@ import bcrypt
 from iesplan.core.idgen import sha256_hex
 
 #: 密码最低长度
-MIN_PASSWORD_LENGTH: Final[int] = 8
+MIN_PASSWORD_LENGTH: Final[int] = 6
 #: bcrypt 单次哈希成本因子
 BCRYPT_ROUNDS: Final[int] = 12
 
@@ -60,25 +59,9 @@ def verify_password(password: str, password_hash: str) -> bool:
 
 
 def check_password_strength(password: str) -> tuple[bool, str]:
-    """检查密码强度。
-
-    规则(任务约定):至少 8 位,且同时包含大写字母、小写字母与数字。
-    说明:产品规范(04 §9.2 A 表 password_weak 文案)要求"至少 {min} 个字符并包含
-    字母与数字",此处按任务要求强化为大小写字母与数字同时存在。
-
-    参数:
-        password: 待检查密码。
-    返回:
-        (ok, reason):ok 为是否通过;reason 为不通过原因的中文描述(ok 时为 "")。
-    """
+    """检查密码的最小长度。"""
     if len(password) < MIN_PASSWORD_LENGTH:
         return False, f"密码长度至少 {MIN_PASSWORD_LENGTH} 位"
-    if not re.search(r"[a-z]", password):
-        return False, "密码必须包含小写字母"
-    if not re.search(r"[A-Z]", password):
-        return False, "密码必须包含大写字母"
-    if not re.search(r"\d", password):
-        return False, "密码必须包含数字"
     return True, ""
 
 

@@ -45,7 +45,6 @@ from iesplan.identity.contracts import (
     SESSION_STATUS_ACTIVE,
     SESSION_STATUS_EXPIRED,
     SESSION_STATUS_REVOKED,
-    SESSION_STATUS_TAKEOVER_PENDING,
     USER_STATUS_ACTIVE,
     AppSettingRecord,
     AuthEventRecord,
@@ -126,7 +125,6 @@ def _row_to_session(row: WindowSession) -> WindowSessionRecord:
         user_id=row.user_id,
         status=row.status,
         credential_version_at_issue=row.credential_version_at_issue,
-        replaced_by_session_id=row.replaced_by_session_id,
         last_seen_at=_iso(row.last_seen_at),
         expires_at=_iso(row.expires_at),
         revoked_at=_iso(row.revoked_at),
@@ -479,10 +477,10 @@ def get_session_by_token_hash(db: Session, token_hash: str) -> WindowSessionReco
 def list_active_sessions(
     db: Session, user_id: int, *, exclude_session_id: int | None = None
 ) -> list[WindowSessionRecord]:
-    """用户非终态会话（active/takeover_pending），按 id 升序）。"""
+    """用户活动会话，按 id 升序。"""
     stmt = select(WindowSession).where(
         WindowSession.user_id == user_id,
-        WindowSession.status.in_((SESSION_STATUS_ACTIVE, SESSION_STATUS_TAKEOVER_PENDING)),
+        WindowSession.status == SESSION_STATUS_ACTIVE,
     )
     if exclude_session_id is not None:
         stmt = stmt.where(WindowSession.id != exclude_session_id)
@@ -499,7 +497,7 @@ def create_session(
     expires_at: str,
     status: str = SESSION_STATUS_ACTIVE,
 ) -> WindowSessionRecord:
-    """创建会话行（部分唯一冲突抛 IdentityConflictError，调用方回滚）。"""
+    """创建活动会话。"""
     now = _now()
     row = WindowSession(
         session_token_hash=token_hash,
@@ -524,7 +522,6 @@ def set_session_status(
     status: str,
     *,
     revoked_by: int | None = None,
-    replaced_by_session_id: int | None = None,
 ) -> WindowSessionRecord:
     """切换会话状态；会话缺失抛 UserNotFoundError。"""
     row = db.get(WindowSession, session_id)
@@ -535,8 +532,6 @@ def set_session_status(
         row.revoked_at = _now()
     if revoked_by is not None:
         row.revoked_by = revoked_by
-    if replaced_by_session_id is not None:
-        row.replaced_by_session_id = replaced_by_session_id
     db.flush()
     return _row_to_session(row)
 
@@ -565,7 +560,6 @@ def extend_session(db: Session, session_id: int, *, expires_at: str) -> WindowSe
 def expire_sessions(db: Session, user_id: int | None = None) -> int:
     """将已过期的非终态会话置 expired，返回数量（不提交）。"""
     stmt = select(WindowSession).where(
-        WindowSession.status.in_((SESSION_STATUS_ACTIVE, SESSION_STATUS_TAKEOVER_PENDING))
     )
     if user_id is not None:
         stmt = stmt.where(WindowSession.user_id == user_id)
@@ -783,7 +777,6 @@ class WindowSession(Base):
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
     credential_version_at_issue: Mapped[int] = mapped_column(Integer, nullable=False)
     status: Mapped[str] = mapped_column(Text, nullable=False, server_default="active")
-    replaced_by_session_id: Mapped[int | None] = mapped_column(ForeignKey("window_sessions.id"))
     ip: Mapped[str | None] = mapped_column(InetType)
     user_agent: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(
@@ -798,28 +791,10 @@ class WindowSession(Base):
 
     __table_args__ = (
         CheckConstraint(
-            "status IN ('active','takeover_pending','revoked','expired')",
+            "status IN ('active','revoked','expired')",
             name="ck_window_sessions_status",
         ),
-        CheckConstraint(
-            "replaced_by_session_id IS NULL OR replaced_by_session_id <> id",
-            name="ck_window_sessions_no_self_replace",
-        ),
         UniqueConstraint("session_token_hash", name="uq_window_sessions_token"),
-        Index(
-            "uq_window_sessions_one_active",
-            "user_id",
-            unique=True,
-            postgresql_where=sa.text("status = 'active'"),
-            sqlite_where=sa.text("status = 'active'"),
-        ),
-        Index(
-            "uq_window_sessions_one_pending",
-            "user_id",
-            unique=True,
-            postgresql_where=sa.text("status = 'takeover_pending'"),
-            sqlite_where=sa.text("status = 'takeover_pending'"),
-        ),
         Index("idx_window_sessions_user", "user_id", "status"),
     )
 
@@ -860,7 +835,7 @@ class AuthEvent(Base):
     __table_args__ = (
         CheckConstraint(
             "event_type IN ('login_success','login_failure','logout','password_change',"
-            "'credential_reset','account_disabled','session_takeover','permission_change',"
+            "'credential_reset','account_disabled','permission_change',"
             "'role_change','session_revoke','maintenance')",
             name="ck_auth_events_type",
         ),

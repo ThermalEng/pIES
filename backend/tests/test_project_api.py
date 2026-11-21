@@ -32,7 +32,6 @@ from iesplan.api import projects as projects_api  # noqa: E402
 from iesplan.application.projects.content_objects import load_content_object  # noqa: E402
 from iesplan.api.deps import get_request_db  # noqa: E402
 from iesplan.config import settings  # noqa: E402
-from iesplan.core.contracts import ProjectBaseline  # noqa: E402
 from iesplan.db import Base  # noqa: E402
 from iesplan.identity.persistence import User as _UserForDDL  # noqa: E402,F401
 from iesplan.tasks.persistence import Task as _TaskForDDL  # noqa: E402,F401
@@ -290,21 +289,7 @@ def test_project_lifecycle_flow(client: TestClient, db_session: Session) -> None
     assert resp.status_code == 200
     assert resp.json()["project"]["status"] == "active"
 
-    # 7. 删除流程(0.2.0 B4 强化确认): 未确认 → 400;
-    #    空布尔 confirm 不足以确认(须项目名或原因) → 400;
-    #    项目名不匹配 → 400; 项目名匹配 → 删除; 删除后 404
-    # (TestClient.delete 不支持 json 请求体, 用通用 request 发送)
-    resp = client.request("DELETE", f"/api/projects/{pid}", json={"confirm": False}, headers=owner_h)
-    assert resp.status_code == 400
-    resp = client.request("DELETE", f"/api/projects/{pid}", json={"confirm": True}, headers=owner_h)
-    assert resp.status_code == 400
-    resp = client.request(
-        "DELETE", f"/api/projects/{pid}", json={"confirm": True, "name": "错误项目名"}, headers=owner_h
-    )
-    assert resp.status_code == 400
-    resp = client.request(
-        "DELETE", f"/api/projects/{pid}", json={"confirm": True, "name": "园区综合能源"}, headers=owner_h
-    )
+    resp = client.delete(f"/api/projects/{pid}", headers=owner_h)
     assert resp.status_code == 204
     assert client.get(f"/api/projects/{pid}", headers=owner_h).status_code == 404
 
@@ -322,8 +307,7 @@ def test_project_lifecycle_flow(client: TestClient, db_session: Session) -> None
         assert expected in actions, f"缺少审计事件 {expected}: {actions}"
     # 删除审计含确认方式与原因(0.2.0 B4)
     deleted_log = next(row for row in rows if row.action == "project.deleted")
-    assert deleted_log.after["confirm"] == "name"
-    assert deleted_log.after["reason"] is None
+    assert deleted_log.after["status"] == "deleted"
 
 
 # ---------------------------------------------------------------------------
@@ -450,7 +434,6 @@ def test_admin_maintenance_readonly(client: TestClient, db_session: Session) -> 
     assert client.get(f"/api/projects/{pid}", headers=_h(client, admin)).status_code == 200
     resp = client.request(
         "DELETE", f"/api/projects/{pid}", headers=_h(client, admin),
-        json={"confirm": True, "name": "维护测试"},
     )
     assert resp.status_code == 204
 
@@ -701,35 +684,16 @@ def test_upsert_device_params_full_replace_and_strict(client: TestClient, db_ses
     assert revision() == rev
 
 
-def test_delete_requires_name_or_reason(client: TestClient, db_session: Session) -> None:
-    """0.2.0 B4: 删除确认强化 —— 空布尔 confirm 不足以确认, 须项目名或删除原因。"""
+def test_owner_can_delete_project_without_request_body(client: TestClient, db_session: Session) -> None:
     owner = make_user(db_session, "owner_del2")
     owner_h = _h(client, owner)
     pid = _create_project(client, owner, "删除确认项目")
-
-    # 空布尔 confirm 单独 → 400 PROJ-DEL-002
-    resp = client.request("DELETE", f"/api/projects/{pid}", json={"confirm": True}, headers=owner_h)
-    assert resp.status_code == 400
-    assert resp.json()["error"]["code"] == "PROJ-DEL-002"
-    # 项目名不匹配 → 400 PROJ-DEL-003
-    resp = client.request(
-        "DELETE", f"/api/projects/{pid}", json={"confirm": True, "name": "别的项目"}, headers=owner_h
-    )
-    assert resp.status_code == 400
-    assert resp.json()["error"]["code"] == "PROJ-DEL-003"
-    # 只提供原因 → 删除成功, 审计含 confirm=reason
-    resp = client.request(
-        "DELETE", f"/api/projects/{pid}",
-        json={"confirm": True, "reason": "误建的测试项目,需移除"}, headers=owner_h,
-    )
-    assert resp.status_code == 204
+    assert client.delete(f"/api/projects/{pid}", headers=owner_h).status_code == 204
     assert client.get(f"/api/projects/{pid}", headers=owner_h).status_code == 404
     deleted = db_session.execute(
-        select(AuditLog).where(AuditLog.action == "project.deleted").order_by(AuditLog.id.desc())
-    ).scalars().first()
-    assert deleted is not None
-    assert deleted.after["confirm"] == "reason"
-    assert deleted.after["reason"] == "误建的测试项目,需移除"
+        select(AuditLog).where(AuditLog.action == "project.deleted")
+    ).scalar_one()
+    assert deleted.after == {"status": "deleted"}
 
 
 def test_anonymous_and_xuserid_rejected(client: TestClient, db_session: Session) -> None:
@@ -882,7 +846,6 @@ def test_admin_global_view_and_lifecycle_unchanged(client: TestClient, db_sessio
     assert client.post(f"/api/projects/{pid}/unarchive", headers=admin_h).status_code == 200
     resp = client.request(
         "DELETE", f"/api/projects/{pid}", headers=admin_h,
-        json={"confirm": True, "name": "全局管理项目"},
     )
     assert resp.status_code == 204
     body = client.get("/api/projects/admin-visible", headers=admin_h).json()

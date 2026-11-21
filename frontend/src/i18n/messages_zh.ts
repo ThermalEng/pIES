@@ -199,7 +199,7 @@ export const messagesZh: Record<string, string> = {
   'ies.auth.login_ok': '登录成功,欢迎回来 {name}',
   'ies.auth.login_failed': '用户名或密码错误',
   'ies.auth.account_locked': '账户已锁定,请 {minutes} 分钟后再试',
-  'ies.auth.password_weak': '密码强度不足:至少 {min} 个字符并包含字母与数字',
+  'ies.auth.password_weak': '密码强度不足:至少 {min} 个字符',
   'ies.auth.password_reset_sent': '重置链接已发送至 {email}',
   'ies.auth.username_rule': '3-32 位小写字母、数字或下划线',
   'ies.auth.email_invalid': '邮箱格式无效',
@@ -225,10 +225,6 @@ export const messagesZh: Record<string, string> = {
   'ies.auth.password_reset': '密码已重置,请使用新密码登录',
   'ies.auth.offline': '离线状态',
   'ies.auth.offline_hint': '无法连接服务器。若服务器位于本机或局域网,请检查网络连接后重试。',
-  'ies.auth.window_takeover_title': '接管旧窗口会话',
-  'ies.auth.window_takeover_desc': '本账号在另一窗口中已有活动会话。确认后旧窗口将停止接受操作,由当前窗口接管,并签发新的窗口凭证。',
-  'ies.auth.window_takeover_confirm': '确认接管',
-  'ies.auth.window_takeover_cancel': '取消接管',
 
   // -------------------------------------------------------------------------
   // 项目
@@ -250,9 +246,7 @@ export const messagesZh: Record<string, string> = {
   'ies.project.unarchive': '取消归档',
   'ies.project.unarchive_ok': '项目已恢复',
   'ies.project.delete': '删除项目',
-  'ies.project.delete_confirm': '删除后不可恢复。请输入项目名 {name} 以确认删除:',
-  'ies.project.delete_name_label': '项目名称',
-  'ies.project.delete_name_mismatch': '输入的项目名称不匹配,无法删除',
+  'ies.project.delete_confirm': '确定删除项目 {name}？删除后不可恢复。',
   'ies.project.owner_role': '所有者',
   'ies.project.versions': '版本历史',
   'ies.project.version_publish': '发布版本',
@@ -1004,7 +998,6 @@ export const messagesZh: Record<string, string> = {
   'ies.error.duplicate_name': '同名{entity_type}已存在:{name}',
   'ies.error.no_assessment_available': '该证据包尚无评估记录,请稍后再试',
   'ies.error.no_hourly_data': '任务尚无逐时结果数据(证据包未提交或不含逐时引用)',
-  'ies.error.rate_limited': '请求过于频繁,请稍后再试',
   'ies.msg.err.generic': '操作失败:{reason}',
 
   // -------------------------------------------------------------------------
@@ -1032,7 +1025,6 @@ export const messagesZh: Record<string, string> = {
   'ies.fix.valid.data_bind': '在数据管理页绑定一份有效数据集版本',
   'ies.fix.valid.data_fix_version': '修复数据集版本质量问题或重新上传',
   'ies.fix.valid.data_fix_binding': '修复绑定指向(版本缺失或属于其他项目)',
-  'ies.fix.rate_retry': '等待片刻后重试请求',
   'ies.fix.valid.ready_check': '修复项目/草稿使计算快照可组装',
   'ies.error.data_validation_failed': '数据校验未通过,请查看诊断',
   'ies.error.export_failed_reason': '导出失败:{reason}',
@@ -1096,7 +1088,6 @@ export const messagesZh: Record<string, string> = {
   'ies.diag.auth.password_changed': '密码已修改',
   'ies.diag.auth.password_reset': '密码已重置,请使用新密码登录',
   'ies.diag.auth.session_invalid': '会话无效或已过期,请重新登录',
-  'ies.diag.auth.locked': '账号已锁定,请稍后再试',
   'ies.diag.auth.user_disabled': '账号已停用,请联系管理员',
   'ies.diag.auth.username_taken': '用户名已被占用',
   'ies.diag.auth.email_taken': '邮箱已被注册',
@@ -1105,10 +1096,7 @@ export const messagesZh: Record<string, string> = {
   'ies.diag.auth.registration_disabled': '当前系统未开放注册',
   'ies.diag.auth.required': '必填项不能为空',
   'ies.diag.auth.bad_request': '请求参数错误:{reason}',
-  'ies.diag.auth.delete_confirm_required': '删除账号会连带删除其拥有的全部项目且不可恢复,请先预览影响范围并确认删除。',
   'ies.diag.auth.role_invalid': '无效的角色',
-  'ies.diag.auth.csrf_origin_rejected': '请求来源校验未通过,请刷新页面后重试',
-  'ies.diag.admin.confirm_required': '该操作影响范围较大,请核对 {hint} 后确认执行',
 
   // -------------------------------------------------------------------------
   // 表达式引擎错误

@@ -117,9 +117,7 @@ def client(engine: Engine, db_session: Session, tmp_path: Path) -> Iterator[Test
         yield db_session
 
     app.dependency_overrides[get_request_db] = _override_request_db
-    from iesplan.api.limits import reset_rate_limit
 
-    reset_rate_limit()
     with TestClient(app, raise_server_exceptions=False) as c:
         yield c
 

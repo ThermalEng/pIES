@@ -74,19 +74,6 @@ class VersionCreateRequest(BaseModel):
     reason: str = Field(default="manual_save", max_length=500)
 
 
-class DeleteConfirmRequest(BaseModel):
-    """删除确认请求体(domain-model §项目聚合: 必须明确确认)。
-
-    0.2.0 B4 强化误操作防护: 不再接受空布尔 ``confirm: true`` 单独作为确认。
-    必须提供 ``name``(项目名精确匹配)或 ``reason``(删除原因, 非空)之一;
-    ``confirm`` 字段仅为兼容旧调用方保留, 单独为 true 不足以确认删除。
-    """
-
-    confirm: bool = False
-    name: str | None = Field(default=None, max_length=200)
-    reason: str | None = Field(default=None, max_length=1000)
-
-
 class RestoreRequest(BaseModel):
     """恢复版本请求体。"""
 
@@ -284,20 +271,10 @@ def unarchive_project_endpoint(
 @router.delete("/{project_id}", status_code=204, summary="删除项目")
 def delete_project_endpoint(
     project_id: int,
-    payload: DeleteConfirmRequest,
     db: Annotated[Session, Depends(get_request_db)],
     user: CurrentUser,
 ) -> None:
-    """删除项目(domain-model §项目聚合): 必须输入项目名或删除原因以确认误操作防护。
-
-    0.2.0 B4: 空布尔 confirm 不再足以确认; 须 name(项目名精确匹配)或
-    reason(非空删除原因)之一。
-    """
-    project_ops.delete_project(
-        db, user, project_id, confirm=payload.confirm,
-        name=payload.name, reason=payload.reason,
-    )
-
+    project_ops.delete_project(db, user, project_id)
 
 # ---------------------------------------------------------------------------
 # 项目包导入(校验提案 → 确认导入, 每次新项目身份)

@@ -18,7 +18,6 @@ import type {
   SecuritySettingsResponseDto,
   SecuritySettingsUpdateRequestDto,
   StorageStatusResponseDto,
-  UserDeleteConfirmRequestDto,
   UserDeletePreviewResponseDto,
   UserDeleteResponseDto,
   UsersListResponseDto,
@@ -101,18 +100,8 @@ export async function previewUserDelete(userId: number): Promise<UserDeletePrevi
 /**
  * 确认删除用户及其拥有的项目。
  */
-export async function deleteUser(
-  userId: number,
-  confirmToken: string,
-): Promise<{ deleted_projects: number }> {
-  const body: UserDeleteConfirmRequestDto = {
-    confirm: true,
-    confirm_token: confirmToken,
-  }
-  const res = await request<UserDeleteResponseDto>(`/auth/users/${userId}`, {
-    method: 'DELETE',
-    body,
-  })
+export async function deleteUser(userId: number): Promise<{ deleted_projects: number }> {
+  const res = await request<UserDeleteResponseDto>(`/auth/users/${userId}`, { method: 'DELETE' })
   return { deleted_projects: res.deleted_projects }
 }
 

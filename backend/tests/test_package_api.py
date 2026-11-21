@@ -16,13 +16,9 @@
 
 from __future__ import annotations
 
-import base64
-import hashlib
-import hmac
 import io
 import json
 import os
-import time
 import zipfile
 from collections.abc import Iterator
 from datetime import UTC, datetime
@@ -267,24 +263,11 @@ def _seed_evidence(
 
 
 def _download(
-    client: TestClient, url: str, token: str, headers: dict | None = None
+    client: TestClient, url: str, object_id: int, headers: dict | None = None
 ) -> tuple[int, bytes, str]:
-    """带 token 下载(下载端点要求登录, 需传授权头), 返回 (status, content, content_type)。"""
-    resp = client.get(url, params={"token": token}, headers=headers)
+    """按对象 ID 下载(下载端点要求登录, 需传授权头), 返回 (status, content, content_type)。"""
+    resp = client.get(f"{url}/{object_id}/download", headers=headers)
     return resp.status_code, resp.content, resp.headers.get("content-type", "")
-
-
-def _expired_token(object_id: int, kind: str = "package") -> str:
-    """构造已过期(exp 在过去)的签名下载授权(复刻 HMAC 签名方案)。"""
-    payload = base64.urlsafe_b64encode(
-        json.dumps(
-            {"object_id": object_id, "kind": kind, "exp": int(time.time()) - 60},
-            sort_keys=True,
-        ).encode("utf-8")
-    ).decode("ascii")
-    sig = hmac.new(settings.secret_key.encode("utf-8"), payload.encode("utf-8"),
-                   hashlib.sha256).hexdigest()
-    return f"{payload}.{sig}"
 
 
 def _tamper_package(zip_bytes: bytes) -> bytes:
@@ -327,12 +310,12 @@ def test_export_package_owner_only_with_manifest(
     resp = client.post(f"/api/projects/{pid}/exports/package", headers=_h(client, owner))
     assert resp.status_code == 200, resp.text
     body = resp.json()
-    assert body["token"]
+    assert body["object_id"]
     assert body["manifest"]["format_version"] == "1.0.0"
     assert body["file_name"].endswith(".zip")
 
     status, content, ctype = _download(
-        client, f"/api/projects/{pid}/exports/package/download", body["token"],
+        client, f"/api/projects/{pid}/exports/package", body["object_id"],
         headers=_h(client, owner),
     )
     assert status == 200
@@ -379,10 +362,10 @@ def test_owner_can_export_excel_bilingual_and_fixed_reference(
         headers=_h(client, owner),
     )
     assert resp.status_code == 200, resp.text
-    token = resp.json()["token"]
+    object_id = resp.json()["object_id"]
 
     status, content, ctype = _download(
-        client, f"/api/projects/{pid}/exports/excel/download", token, headers=_h(client, owner)
+        client, f"/api/projects/{pid}/exports/excel", object_id, headers=_h(client, owner)
     )
     assert status == 200
     assert "spreadsheetml" in ctype
@@ -447,8 +430,7 @@ def test_import_creates_new_identity_owner_and_evidence_source(
 
     resp = client.post(f"/api/projects/{pid}/exports/package", headers=_h(client, owner))
     zip_bytes = client.get(
-        f"/api/projects/{pid}/exports/package/download",
-        params={"token": resp.json()["token"]},
+        f"/api/projects/{pid}/exports/package/{resp.json()['object_id']}/download",
         headers=_h(client, owner),
     ).content
     original_evidence_count = len(
@@ -547,8 +529,7 @@ def test_import_proposal_rejects_forbidden_sections(client: TestClient, db: Sess
     pid = _create_project(client, owner)
     resp = client.post(f"/api/projects/{pid}/exports/package", headers=_h(client, owner))
     zip_bytes = client.get(
-        f"/api/projects/{pid}/exports/package/download",
-        params={"token": resp.json()["token"]},
+        f"/api/projects/{pid}/exports/package/{resp.json()['object_id']}/download",
         headers=_h(client, owner),
     ).content
     # 向清单注入禁止键
@@ -573,106 +554,41 @@ def test_import_proposal_rejects_forbidden_sections(client: TestClient, db: Sess
 # ---------------------------------------------------------------------------
 
 
-def test_download_token_expired_and_tampered(client: TestClient, db: Session) -> None:
-    """短期授权过期/伪造拒绝(下载 400)。"""
-    owner = make_user(db, "owner")
-    pid = _create_project(client, owner)
-    resp = client.post(f"/api/projects/{pid}/exports/package", headers=_h(client, owner))
-    object_id = resp.json()["object_id"]
-
-    # 过期 token(exp 在过去)→ 服务层拒绝
-    expired = _expired_token(object_id)
-    with pytest.raises(package_domain.DownloadTokenError):
-        package_domain.verify_download_token(expired, expected_kind="package")
-    status, _content, _ct = _download(
-        client, f"/api/projects/{pid}/exports/package/download", expired,
-        headers=_h(client, owner),
-    )
-    assert status == 400
-
-    # 篡改签名 → 拒绝
-    valid = resp.json()["token"]
-    tampered_token = valid[:-1] + ("0" if valid[-1] != "0" else "1")
-    with pytest.raises(package_domain.DownloadTokenError):
-        package_domain.verify_download_token(tampered_token, expected_kind="package")
-    status, _content, _ct = _download(
-        client, f"/api/projects/{pid}/exports/package/download", tampered_token,
-        headers=_h(client, owner),
-    )
-    assert status == 400
-
-    # 类型不符(excel token 用于包下载)→ 拒绝
-    excel_token = package_domain.create_download_token(
-        object_id, "excel", project_id=pid, user_id=owner.id
-    )
-    with pytest.raises(package_domain.DownloadTokenError):
-        package_domain.verify_download_token(excel_token, expected_kind="package")
-
-    # 正常 token 校验通过(5 分钟窗口内)
-    info = package_domain.verify_download_token(valid, expected_kind="package")
-    assert info["object_id"] == object_id
-    assert info["project_id"] == pid and info["user_id"] == owner.id
-    assert info["object_id"] == object_id
-
-
 def test_download_missing_blob_reports_error_before_stream_headers(client: TestClient, db: Session) -> None:
     owner = make_user(db, "stream_owner")
     pid = _create_project(client, owner)
     headers = _h(client, owner)
     exported = client.post(f"/api/projects/{pid}/exports/package", headers=headers)
     assert exported.status_code == 200, exported.text
-    token = exported.json()["token"]
-    info = package_domain.verify_download_token(token, expected_kind="package")
+    object_id = exported.json()["object_id"]
     from iesplan.storage import object_info
 
-    obj = object_info(db, info["object_id"])
+    obj = object_info(db, object_id)
     (settings.data_dir / "objects" / obj["oid"]).unlink()
-    response = client.get(f"/api/projects/{pid}/exports/package/download",
-                          params={"token": token}, headers=headers)
+    response = client.get(f"/api/projects/{pid}/exports/package/{object_id}/download", headers=headers)
     assert response.status_code == 500
     assert response.json()["error"]["code"] == "OBJ-CORRUPT-001"
 
 
 def test_download_rejects_object_not_in_project(client: TestClient, db: Session) -> None:
-    """归属校验回归(0.2.0 A3 补丁): object 不属于该 project 时下载被拒。
-
-    场景: 项目 A 导出对象 O; 攻击者(或普通用户)用「项目 B 的 URL + 自签
-    project_id=B 的 token」请求下载。签名/绑定层会通过(user_id 是自己、
-    project_id 一致), 但 object O 从未被项目 B 引用 → 归属校验拒绝。
-    """
     owner = make_user(db, "owner")
+    stranger = make_user(db, "stranger")
     pid_a = _create_project(client, owner, name="归属校验项目A")
     pid_b = _create_project(client, owner, name="归属校验项目B")
+    owner_headers = _h(client, owner)
+    response = client.post(f"/api/projects/{pid_a}/exports/package", headers=owner_headers)
+    assert response.status_code == 200, response.text
+    object_id = response.json()["object_id"]
 
-    # 项目 A 导出项目包 → 拿到 object_id + 合法 token
-    resp = client.post(f"/api/projects/{pid_a}/exports/package", headers=_h(client, owner))
-    assert resp.status_code == 200, resp.text
-    body = resp.json()
-    object_id = body["object_id"]
-    token_a = body["token"]
-
-    # 项目 A 正常下载 → 200(该 object 被项目 A 引用)
-    status, content, _ct = _download(
-        client, f"/api/projects/{pid_a}/exports/package/download", token_a,
-        headers=_h(client, owner),
-    )
-    assert status == 200, f"项目 A 下载应成功, got {status}"
-
-    # 用「项目 B 的 URL + 自签 project_id=B 的 token」请求下载项目 A 的对象 → 400
-    forged = package_domain.create_download_token(
-        object_id, "package", project_id=pid_b, user_id=owner.id
-    )
-    status, _content, _ct = _download(
-        client, f"/api/projects/{pid_b}/exports/package/download", forged,
-        headers=_h(client, owner),
-    )
-    assert status == 400, f"跨项目下载应被归属校验拒绝, got {status}"
-    # 用项目 A 的 URL + 该伪造 token(project_id 不匹配)→ 同样 400(绑定层先拦)
-    status, _content, _ct = _download(
-        client, f"/api/projects/{pid_a}/exports/package/download", forged,
-        headers=_h(client, owner),
-    )
-    assert status == 400, f"绑定层应拦截, got {status}"
+    path = f"/api/projects/{pid_a}/exports/package/{object_id}/download"
+    assert client.get(path, headers=owner_headers).content.startswith(b"PK")
+    assert client.get(path, headers=_h(client, stranger)).status_code == 403
+    assert client.get(f"/api/projects/{pid_b}/exports/package/{object_id}/download",
+                      headers=owner_headers).status_code == 404
+    assert client.get(f"/api/projects/{pid_a}/exports/excel/{object_id}/download",
+                      headers=owner_headers).status_code == 404
+    client.cookies.clear()
+    assert client.get(path).status_code == 401
 
 
 # ---------------------------------------------------------------------------
@@ -733,20 +649,9 @@ def test_admin_unlock_task(client: TestClient, db: Session) -> None:
                        current_attempt_id=attempt.id))
     db.commit()
 
-    # 0.2.0 B2: 未携带 confirm → 409(危险操作确认), 任务保持 running 不被改动
+    # 管理员直接解锁
     resp = client.post(
-        "/api/admin/unlock-task", json={"task_id": task.id}, headers=_h(client, admin)
-    )
-    assert resp.status_code == 409, resp.text
-    assert resp.json()["error"]["code"] == "ADMIN-CONFIRM-REQUIRED"
-    db.refresh(task)
-    assert task.status == "running"
-    db.refresh(attempt)
-    assert attempt.status == "running"
-
-    # 携带 confirm=true → 200, 解锁执行
-    resp = client.post(
-        "/api/admin/unlock-task", json={"task_id": task.id, "confirm": True},
+        "/api/admin/unlock-task", json={"task_id": task.id},
         headers=_h(client, admin),
     )
     assert resp.status_code == 200, resp.text
@@ -772,7 +677,7 @@ def test_admin_unlock_task(client: TestClient, db: Session) -> None:
     task.status = "completed"
     db.commit()
     resp = client.post(
-        "/api/admin/unlock-task", json={"task_id": task.id, "confirm": True},
+        "/api/admin/unlock-task", json={"task_id": task.id},
         headers=_h(client, admin),
     )
     assert resp.status_code == 409
@@ -827,8 +732,7 @@ def test_import_preserves_instance_data_source_binding(
     exported = client.post(f"/api/projects/{pid}/exports/package", headers=_h(client, owner))
     assert exported.status_code == 200, exported.text
     zip_bytes = client.get(
-        f"/api/projects/{pid}/exports/package/download",
-        params={"token": exported.json()["token"]},
+        f"/api/projects/{pid}/exports/package/{exported.json()['object_id']}/download",
         headers=_h(client, owner),
     ).content
 

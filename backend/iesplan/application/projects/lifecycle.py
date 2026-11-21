@@ -328,39 +328,9 @@ def _delete_project(
     db: Session,
     user: UserRecord,
     project_id: int,
-    confirm: bool = False,
-    name: str | None = None,
-    reason: str | None = None,
 ) -> None:
-    """删除项目(确认 → 取消排队任务 → 一致性检查 → 归档/删除，domain-model §项目聚合/§对象生命周期)。
-
-    - 误操作防护: 必须提供 ``name``(与项目名精确匹配)或 ``reason``
-      (非空删除原因)之一; 单独 ``confirm: true`` 不足以确认(参数保留仅为
-      兼容旧调用方, 不单独作为确认条件);
-    - 排队/取消中任务置为 cancelled; 存在运行中任务时阻断删除(终止运行任务由
-      任务单元负责, 本阶段以冲突提示要求先终止);
-    - 项目置 status='deleted'(软删，无回收站语义); 不可变版本与审计
-      记录保留, 对象清理由存储运维重试执行（架构宪法 §10/§12）。
-    """
+    """删除项目并先收拢尚未执行的任务。"""
     ensure_access(db, user, project_id, "manage_lifecycle")
-    project = require_project(db, project_id)
-    if not confirm:
-        raise InvalidRequestError(
-            "删除项目必须显式确认", code="PROJ-DEL-001", params={"project_id": project_id}
-        )
-    provided = (name or "").strip() or (reason or "").strip()
-    if not provided:
-        raise InvalidRequestError(
-            "删除项目须输入项目名或删除原因",
-            code="PROJ-DEL-002",
-            params={"project_id": project_id},
-        )
-    if name is not None and (name or "").strip() != project.name:
-        raise InvalidRequestError(
-            "输入的项目名与待删除项目不一致",
-            code="PROJ-DEL-003",
-            params={"project_id": project_id},
-        )
     # 取消排队/取消中的任务(删除协调；tasks 表归属 tasks 域，经 tasks 域公开门面)
     tasks_domain.cancel_pending_tasks(db, project_id)
     # 一致性检查: 运行中任务阻断删除
@@ -374,11 +344,7 @@ def _delete_project(
         project_id,
         "project.deleted",
         user.id,
-        after={
-            "status": "deleted",
-            "confirm": "name" if (name or "").strip() else "reason",
-            "reason": (reason or "").strip()[:200] or None,
-        },
+        after={"status": "deleted"},
     )
 
 
@@ -386,13 +352,10 @@ def delete_project(
     db: Session,
     user: UserRecord,
     project_id: int,
-    confirm: bool = False,
-    name: str | None = None,
-    reason: str | None = None,
 ) -> None:
     """事务型删除项目；application 层统一提交或回滚。"""
     try:
-        _delete_project(db, user, project_id, confirm=confirm, name=name, reason=reason)
+        _delete_project(db, user, project_id)
         db.commit()
     except Exception:
         db.rollback()

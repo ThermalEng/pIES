@@ -456,7 +456,7 @@ class TestComputeChainEndToEnd:
 
             task = worker_app.get_task_record(db, claim.task_id)
             assert unlock_task_case(
-                db, task_id=task.id, admin_id=task.requested_by, confirm=True,
+                db, task_id=task.id, admin_id=task.requested_by,
             ).outcome == "unlocked"
         replacement = _claim(db, task_id)
         assert replacement.lease_token != claim.lease_token

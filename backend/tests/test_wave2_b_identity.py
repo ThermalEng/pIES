@@ -80,24 +80,18 @@ def test_public_surface_preserved() -> None:
     expected = [
         "USERNAME_RE",
         "EMAIL_RE",
-        "MAX_LOGIN_FAILURES",
-        "LOCKOUT_SECONDS",
         "ROLE_ADMIN",
         "ROLE_ENGINEER",
         "AuthError",
         "AuthRequiredError",
         "SessionInvalidError",
         "LoginFailedError",
-        "LockedError",
         "UserDisabledError",
         "WeakPasswordError",
         "BadOldPasswordError",
         "SamePasswordError",
         "RegistrationDisabledError",
-        "ForcePasswordChangeError",
         "BadRequestError",
-        "DeleteConfirmRequiredError",
-        "reset_login_rate_limit",
         "utcnow",
         "as_utc",
         "KEY_REGISTRATION_ENABLED",
@@ -116,18 +110,14 @@ def test_public_surface_preserved() -> None:
         "create_user",
         "deactivate_user",
         "reactivate_user",
-        "owned_project_ids",
         "preview_user_delete",
-        "verify_delete_confirm_token",
         "delete_user",
         "change_password",
         "reset_password",
         "authenticate",
         "create_window_session",
-        "confirm_takeover",
         "get_session_by_token",
         "revoke_session",
-        "revoke_other_sessions",
         "revoke_all_user_sessions",
         "expire_sessions",
         "extend_session",
@@ -159,14 +149,14 @@ def test_create_authenticate_session_flow(db: Session) -> None:
     )
     assert user.username == "w2b_alice"
 
-    authed, error = identity_uc.authenticate(db, "w2b_alice", "Test12345")
-    assert error is None and authed is not None and authed.id == user.id
+    authed = identity_uc.authenticate(db, "w2b_alice", "Test12345")
+    assert authed is not None and authed.id == user.id
 
-    nobody, bad_error = identity_uc.authenticate(db, "w2b_alice", "wrong")
-    assert nobody is None and bad_error == "invalid_credentials"
+    nobody = identity_uc.authenticate(db, "w2b_alice", "wrong")
+    assert nobody is None
 
-    session, token, displaced = identity_uc.create_window_session(db, authed, "web")
-    assert token and displaced is False
+    session, token = identity_uc.create_window_session(db, authed)
+    assert token
     found = identity_uc.get_session_by_token(db, token)
     assert found is not None and found.id == session.id
 
@@ -198,7 +188,7 @@ def test_delete_user_audits_via_audit_facade(db: Session) -> None:
     preview = identity_uc.preview_user_delete(db, admin, victim)
     assert preview["project_count"] == 1
     result = identity_uc.delete_user(
-        db, admin, victim, confirm=True, confirm_token=preview["confirm_token"]
+        db, admin, victim
     )
     assert result == {"deleted_projects": 1}
 

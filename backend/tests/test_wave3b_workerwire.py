@@ -211,39 +211,6 @@ def test_queue_default_still_env_driven(
     assert isinstance(_get_backend(), _MemoryBackend)
 
 
-def _assert_rate_limit_memory_mode(mod_name: str, monkeypatch: pytest.MonkeyPatch) -> None:
-    """限速模块: bootstrap 传入 memory 则跳过 Redis 且不建连; 缺省走环境变量。"""
-    import importlib
-
-    mod = importlib.import_module(mod_name)
-    monkeypatch.setenv("IESPLAN_QUEUE", "redis")
-
-    class _ExplodingRedis:
-        @staticmethod
-        def from_url(*args: Any, **kwargs: Any) -> Any:
-            raise AssertionError("内存模式不应连接 Redis")
-
-    monkeypatch.setattr(mod, "_redis_module", SimpleNamespace(Redis=_ExplodingRedis))
-    monkeypatch.setattr(mod, "_REDIS_IMPORT_OK", True)
-    monkeypatch.setattr(mod, "_rate_redis_client", None)
-    try:
-        mod.configure_queue_mode("memory")
-        assert mod._rate_redis() is None
-        mod.configure_queue_mode(None)
-        assert mod._queue_mode_is_memory() is False
-    finally:
-        mod.configure_queue_mode(None)
-        mod._rate_redis_client = None
-
-
-def test_limits_queue_mode_override(monkeypatch: pytest.MonkeyPatch) -> None:
-    _assert_rate_limit_memory_mode("iesplan.api.limits", monkeypatch)
-
-
-def test_identity_queue_mode_override(monkeypatch: pytest.MonkeyPatch) -> None:
-    _assert_rate_limit_memory_mode("iesplan.identity", monkeypatch)
-
-
 # ---------------------------------------------------------------------------
 # 启动/readiness 行为: 存活独立于就绪, 缺依赖 503
 # ---------------------------------------------------------------------------

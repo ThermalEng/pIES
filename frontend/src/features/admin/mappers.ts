@@ -52,7 +52,6 @@ export function mapUserDeletePreviewDto(dto: UserDeletePreviewResponseDto): User
       name: p.name,
       status: p.status,
     })),
-    confirm_token: dto.confirm_token,
   }
 }
 

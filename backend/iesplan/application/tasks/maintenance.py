@@ -36,7 +36,6 @@ from iesplan import tasks as tasks_domain
 from iesplan.application.audits import record_unlock_audit
 from iesplan.core.diagnostics import SEVERITY_INFO
 from iesplan.storage import storage_stats as _storage_stats
-from iesplan.tasks.contracts import TaskRecord
 
 
 def queue_status() -> dict[str, Any]:
@@ -138,9 +137,9 @@ def _unlock_task(db: Session, *, task_id: int, admin_id: int) -> dict[str, Any]:
     return {"task_id": task_id, "unlocked": True, "status": "queued"}
 
 
-#: 解锁预检与执行结局: not_found/confirm_required/terminal 由 API 映射为
+#: 解锁预检与执行结局: not_found/terminal 由 API 映射为
 #: 404/409 错误, already_queued/unlocked 映射为 200 响应
-UnlockOutcome = Literal["not_found", "confirm_required", "terminal", "already_queued", "unlocked"]
+UnlockOutcome = Literal["not_found", "terminal", "already_queued", "unlocked"]
 
 
 @dataclass(frozen=True)
@@ -153,21 +152,12 @@ class UnlockDecision:
 
 
 def unlock_task_case(
-    db: Session, *, task_id: int, confirm: bool, admin_id: int
+    db: Session, *, task_id: int, admin_id: int
 ) -> UnlockDecision:
-    """管理员解锁完整用例: 存在性 → 危险确认 → 终态/已排队预检 → 解锁执行。
-
-    原 ``api/admin.py::unlock_task_endpoint`` 的业务顺序整体下收:
-    不存在的任务 → not_found(404, 优先于 confirm, 避免泄露);
-    未确认 → confirm_required(409); 终态 → terminal(409);
-    已在排队 → already_queued(200 短路, 不推进状态);
-    其余 running/cancelling 卡死任务执行解锁并提交事务。
-    """
+    """管理员解锁卡死任务并按原快照重新排队。"""
     task = tasks_domain.get_task(db, task_id)
     if task is None:
         return UnlockDecision("not_found", task_id)
-    if not confirm:
-        return UnlockDecision("confirm_required", task.id, task.status)
     if task.status in tasks_domain.TERMINAL_STATUSES:
         return UnlockDecision("terminal", task.id, task.status)
     if task.status == "queued":

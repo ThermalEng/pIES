@@ -26,7 +26,6 @@ export interface UserDeletePreview {
   username: string
   project_count: number
   projects: Array<{ id: number; name: string; status: string }>
-  confirm_token: string
 }
 
 /** 审计条目模型(与后端 entry_to_dict 一一对应)。 */

@@ -1218,7 +1218,7 @@ class TestPredictEndToEnd:
 
             task = worker_app.get_task_record(db, claim.task_id)
             assert unlock_task_case(
-                db, task_id=task.id, admin_id=task.requested_by, confirm=True,
+                db, task_id=task.id, admin_id=task.requested_by,
             ).outcome == "unlocked"
             claim = _claim(db, task.id)
         assert _run(engine, claim, chase_plane) == "completed"

@@ -29,7 +29,6 @@ export function mapAuthResponseDtoToModel(dto: AuthResponseDto): LoginResult {
     token: dto.token,
     token_type: dto.token_type,
     user: mapUserDtoToModel(dto.user),
-    needs_takeover_confirm: dto.needs_takeover_confirm,
   }
 }
 

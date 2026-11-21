@@ -57,13 +57,6 @@ def _clean_tables(engine: sa.Engine) -> Iterator[None]:
             conn.execute(table.delete())
 
 
-@pytest.fixture(autouse=True)
-def _reset_rate_limit() -> Iterator[None]:
-    identity_service.reset_login_rate_limit()
-    yield
-    identity_service.reset_login_rate_limit()
-
-
 @pytest.fixture()
 def data_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     d = tmp_path / "data"
@@ -216,7 +209,7 @@ def test_identity_session_lifecycle(db: Session) -> None:
     assert extended.expires_at == "2099-06-01T00:00:00+00:00"
 
     revoked = identity_domain.set_session_status(
-        db, created.id, "revoked", revoked_by=user.id, replaced_by_session_id=None
+        db, created.id, "revoked", revoked_by=user.id
     )
     assert revoked.status == "revoked" and revoked.revoked_by == user.id
     assert identity_domain.list_active_sessions(db, user.id) == []
@@ -229,7 +222,7 @@ def test_identity_session_lifecycle(db: Session) -> None:
         token_hash="s" * 64,
         credential_version_at_issue=0,
         expires_at="2000-01-01T00:00:00+00:00",
-        status="takeover_pending",
+        status="active",
     )
     assert identity_domain.expire_sessions(db, user.id) == 1
     assert identity_domain.get_session(db, stale.id).status == "expired"
@@ -268,68 +261,43 @@ def _seed_user(db: Session, username: str = "alice"):
 def test_service_authenticate_change_and_reset_password(db: Session) -> None:
     _seed_admin(db)
     user = _seed_user(db)
-    authed, error = identity_service.authenticate(db, "alice", _USER_PASSWORD)
-    assert error is None and authed is not None and authed.id == user.id
-    assert identity_service.authenticate(db, "alice", "wrong")[1] == "invalid_credentials"
-    assert identity_service.authenticate(db, "ghost", "whatever")[1] == "invalid_credentials"
+    authed = identity_service.authenticate(db, "alice", _USER_PASSWORD)
+    assert authed is not None and authed.id == user.id
+    assert identity_service.authenticate(db, "alice", "wrong") is None
+    assert identity_service.authenticate(db, "ghost", "whatever") is None
 
     identity_service.change_password(db, authed, _USER_PASSWORD, "NewPass12345")
-    assert identity_service.authenticate(db, "alice", "NewPass12345")[0] is not None
+    assert identity_service.authenticate(db, "alice", "NewPass12345") is not None
     with pytest.raises(identity_service.BadOldPasswordError):
         identity_service.change_password(db, authed, "bad-old", "Another12345")
 
     admin = identity_service.get_user_by_username(db, "admin")
     assert admin is not None
     identity_service.reset_password(db, admin, authed, "TmpPass12345")
-    assert identity_service.authenticate(db, "alice", "TmpPass12345")[0] is not None
-
-
-def test_service_window_session_takeover_flow(db: Session) -> None:
-    _seed_admin(db)
-    _seed_user(db)
-    authed, _ = identity_service.authenticate(db, "alice", _USER_PASSWORD)
-    assert authed is not None
-
-    s1, token1, displaced1 = identity_service.create_window_session(db, authed, "web")
-    assert displaced1 is False and s1.status == "active"
-    looked_up = identity_service.get_session_by_token(db, token1)
-    assert looked_up is not None and looked_up.id == s1.id
-
-    s2, _token2, displaced2 = identity_service.create_window_session(db, authed, "web")
-    assert displaced2 is True and s2.status == "takeover_pending"
-    assert identity_domain.get_session(db, s1.id).status == "revoked"
-
-    kept = identity_service.confirm_takeover(db, authed, s2)
-    assert kept.status == "active"
-    refreshed = identity_service.extend_session(db, kept)
-    assert refreshed is not None
-
-    assert identity_service.revoke_all_user_sessions(db, authed, revoked_by=authed.id) == 1
-    assert identity_service.get_session_by_token(db, token1) is not None  # 已撤销但仍可查
-    assert identity_domain.get_session(db, kept.id).status == "revoked"
+    assert identity_service.authenticate(db, "alice", "TmpPass12345") is not None
 
 
 def test_service_session_expiry_and_revoke_helpers(db: Session) -> None:
     _seed_admin(db)
     _seed_user(db)
-    authed, _ = identity_service.authenticate(db, "alice", _USER_PASSWORD)
+    authed = identity_service.authenticate(db, "alice", _USER_PASSWORD)
     assert authed is not None
-    session, _token, _ = identity_service.create_window_session(db, authed, "web")
+    session, _token = identity_service.create_window_session(db, authed)
 
     identity_domain.extend_session(db, session.id, expires_at="2000-01-01T00:00:00+00:00")
     assert identity_service.expire_sessions(db, authed.id) == 1
     assert identity_domain.get_session(db, session.id).status == "expired"
 
-    session2, _token2, _ = identity_service.create_window_session(db, authed, "web")
+    session2, _token2 = identity_service.create_window_session(db, authed)
     identity_service.expire_session(db, session2.id)
     assert identity_domain.get_session(db, session2.id).status == "expired"
 
-    session3, _token3, _ = identity_service.create_window_session(db, authed, "web")
+    session3, _token3 = identity_service.create_window_session(db, authed)
     identity_service.revoke_session_after_credential_change(db, session3.id, authed.id)
     revoked = identity_domain.get_session(db, session3.id)
     assert revoked.status == "revoked" and revoked.revoked_by == authed.id
 
-    session4, _token4, _ = identity_service.create_window_session(db, authed, "web")
+    session4, _token4 = identity_service.create_window_session(db, authed)
     before = identity_domain.get_session(db, session4.id).last_seen_at
     identity_service.touch_session(db, session4.id)
     assert identity_domain.get_session(db, session4.id).last_seen_at is not None
@@ -366,15 +334,14 @@ def test_service_user_admin_lifecycle(db: Session) -> None:
 
     identity_service.deactivate_user(db, admin, user)
     assert identity_service.get_user_by_id(db, user.id).status == "disabled"
-    assert identity_service.authenticate(db, "alice", _USER_PASSWORD)[1] == "invalid_credentials"
+    assert identity_service.authenticate(db, "alice", _USER_PASSWORD) is None
     identity_service.reactivate_user(db, admin, user)
     assert identity_service.get_user_by_id(db, user.id).status == "active"
 
     preview = identity_service.preview_user_delete(db, admin, user)
     assert preview["user_id"] == user.id and preview["project_count"] == 0
-    identity_service.verify_delete_confirm_token(db, user, preview["confirm_token"])
     result = identity_service.delete_user(
-        db, admin, user, confirm=True, confirm_token=preview["confirm_token"]
+        db, admin, user
     )
     assert result == {"deleted_projects": 0}
     assert identity_service.get_user_by_id(db, user.id).status == "disabled"

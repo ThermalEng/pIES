@@ -66,17 +66,17 @@ function installStub({ assessmentsByTask = {}, assessmentsStatus = 200 }) {
     }
     if (method === 'POST' && /\/projects\/\d+\/exports\/excel$/.test(text)) {
       calls.push(entry)
-      return new Response(JSON.stringify({ token: 'tok', file_name: 'report.xlsx' }), { status: 200 })
+      return new Response(JSON.stringify({ object_id: 23, file_name: 'report.xlsx' }), { status: 200 })
     }
     if (method === 'POST' && /\/projects\/\d+\/exports\/package$/.test(text)) {
       calls.push(entry)
-      return new Response(JSON.stringify({ token: 'pkt', file_name: 'project-package.zip' }), { status: 200 })
+      return new Response(JSON.stringify({ object_id: 31, file_name: 'project-package.zip' }), { status: 200 })
     }
-    if (method === 'GET' && text.includes('/exports/package/download')) {
+    if (method === 'GET' && text.includes('/exports/package/31/download')) {
       calls.push(entry)
       return new Response(new Uint8Array([80, 75, 3, 4]), { status: 200 })
     }
-    if (method === 'GET' && text.includes('/exports/excel/download')) {
+    if (method === 'GET' && text.includes('/exports/excel/23/download')) {
       calls.push(entry)
       return new Response(new Uint8Array([1, 2, 3]), { status: 200 })
     }
@@ -136,9 +136,9 @@ for (const [taskId, pkgId, assessId] of [[7, 26, 41], [8, 27, 42]]) {
     }
     return stubFetch(url, init)
   }
-  const downloadSessionId = await api.exports.excel(excelInput(taskId, pkgId))
+  const exported = await api.exports.excel(excelInput(taskId, pkgId))
   globalThis.fetch = stubFetch
-  check(`任务${taskId}正常导出(本地会话id)`, typeof downloadSessionId === 'number' && downloadSessionId > 0, String(downloadSessionId))
+  check(`任务${taskId}正常导出文件`, exported.filename === 'report.xlsx' && exported.blob instanceof Blob, exported.filename)
   check(
     `任务${taskId}评估GET路径精确`,
     calls.some((c) => c === `GET /api/projects/5/tasks/${taskId}/result/assessments`),
@@ -166,15 +166,13 @@ for (const [taskId, pkgId, assessId] of [[7, 26, 41], [8, 27, 42]]) {
   }
 }
 
-// 5. 项目包同样返回本地下载会话 id, download() 按此 id 取回文件。
+// 5. 项目包按导出对象 ID 下载。
 {
   const calls = installStub({})
-  const sessionId = await api.exports.package({ project_id: 5, include_versions: true })
-  check('项目包返回本地会话id', typeof sessionId === 'number' && sessionId > 0, String(sessionId))
-  const got = await api.exports.download(sessionId)
+  const got = await api.exports.package({ project_id: 5, include_versions: true })
   const bytes = new Uint8Array(await got.blob.arrayBuffer())
   check(
-    '会话id可下载包文件',
+    '按对象 ID 下载包文件',
     got.filename === 'project-package.zip' && bytes.length === 4 && bytes[0] === 80,
     `${got.filename}/${bytes.length}`,
   )

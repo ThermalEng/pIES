@@ -30,7 +30,6 @@ import {
   login,
   logout,
   changePassword,
-  confirmTakeover,
   register,
   getMe,
   getPublicSettings,
@@ -105,11 +104,9 @@ function check(name, cond, detail = '') {
     token: 'tok-abc-123',
     token_type: 'bearer',
     user: userDto,
-    needs_takeover_confirm: true,
   }
   const loginRes = mapAuthResponseDtoToModel(authRespDto)
   check('mapAuthResponseDtoToModel 令牌与类型', loginRes.token === 'tok-abc-123' && loginRes.token_type === 'bearer')
-  check('mapAuthResponseDtoToModel 接管标记', loginRes.needs_takeover_confirm === true)
   check('mapAuthResponseDtoToModel 强制改密标记', loginRes.user.force_password_change === false)
   check('mapAuthResponseDtoToModel 内嵌用户', loginRes.user.id === 101)
 
@@ -143,7 +140,6 @@ function check(name, cond, detail = '') {
   check('AdminUserRow 仅含后端 AdminUserOut 字段', Object.keys(adminRow).sort().join(',') === expectedAdminKeys.join(','))
 
   const previewDto = {
-    confirm_token: 'conf-del-999',
     project_count: 2,
     projects: [
       { id: 1, name: '项目一', status: 'active' },
@@ -153,7 +149,7 @@ function check(name, cond, detail = '') {
     username: 'to_be_deleted',
   }
   const preview = mapUserDeletePreviewDto(previewDto)
-  check('mapUserDeletePreviewDto 确认令牌与计数', preview.confirm_token === 'conf-del-999' && preview.project_count === 2)
+  check('mapUserDeletePreviewDto 确认令牌与计数', preview.project_count === 2)
   check('mapUserDeletePreviewDto 项目清单完整', preview.projects.length === 2 && preview.projects[0].name === '项目一')
 
   const storageDto = {
@@ -229,7 +225,6 @@ function check(name, cond, detail = '') {
         token: 'login-tok',
         token_type: 'bearer',
         user: { id: 1, username: 'admin', display_name: '管理员', role: 'admin', status: 'active', force_password_change: false, credential_version: 1, last_login_at: null },
-        needs_takeover_confirm: false,
       }), { status: 200 })
     }
     if (method === 'POST' && text.endsWith('/api/auth/logout')) {
@@ -237,14 +232,6 @@ function check(name, cond, detail = '') {
     }
     if (method === 'POST' && text.endsWith('/api/auth/change-password')) {
       return new Response(JSON.stringify({ ok: true, message_key: 'ies.diag.auth.password_changed' }), { status: 200 })
-    }
-    if (method === 'POST' && text.endsWith('/api/auth/confirm-takeover')) {
-      return new Response(JSON.stringify({
-        token: 'takeover-tok',
-        token_type: 'bearer',
-        user: { id: 1, username: 'admin', display_name: '管理员', role: 'admin', status: 'active', force_password_change: false, credential_version: 1, last_login_at: null },
-        needs_takeover_confirm: false,
-      }), { status: 200 })
     }
     if (method === 'POST' && text.endsWith('/api/auth/register')) {
       return new Response(JSON.stringify({
@@ -284,8 +271,6 @@ function check(name, cond, detail = '') {
   await changePassword({ old_password: 'secret', new_password: 'new-secret' })
   check('API changePassword 路径与请求体', calls.some((c) => c.url.endsWith('/api/auth/change-password') && c.body?.new_password === 'new-secret'))
 
-  const takeoverRes = await confirmTakeover()
-  check('API confirmTakeover 响应', takeoverRes.token === 'takeover-tok')
 
   const regRes = await register({ username: 'newbie', password: 'p' })
   check('API register 响应', regRes.id === 2 && regRes.role === 'engineer')
@@ -357,7 +342,7 @@ function check(name, cond, detail = '') {
     }
     if (method === 'POST' && text.includes('/api/auth/users/2/delete-preview')) {
       return new Response(JSON.stringify({
-        confirm_token: 'tok-del-2', project_count: 1, projects: [{ id: 8, name: 'P8', status: 'active' }], user_id: 2, username: 'user2',
+        project_count: 1, projects: [{ id: 8, name: 'P8', status: 'active' }], user_id: 2, username: 'user2',
       }), { status: 200 })
     }
     if (method === 'DELETE' && text.includes('/api/auth/users/2')) {
@@ -411,11 +396,11 @@ function check(name, cond, detail = '') {
   check('API reactivateUser 端点', calls.some((c) => c.url.includes('/users/2/reactivate')))
 
   const delPrev = await previewUserDelete(2)
-  check('API previewUserDelete 结果', delPrev.confirm_token === 'tok-del-2' && delPrev.project_count === 1)
+  check('API previewUserDelete 结果', delPrev.project_count === 1)
 
-  const delRes = await deleteUser(2, 'tok-del-2')
+  const delRes = await deleteUser(2)
   check('API deleteUser 结果与删除数', delRes.deleted_projects === 1)
-  check('API deleteUser 请求体携带 confirm 与令牌', calls.some((c) => c.method === 'DELETE' && c.body?.confirm === true && c.body?.confirm_token === 'tok-del-2'))
+  check('API deleteUser 无请求体', calls.some((c) => c.method === 'DELETE' && c.body === null))
 
   const secRead = await getSecuritySettings()
   check('API getSecuritySettings 结果', secRead.registration_enabled === false)

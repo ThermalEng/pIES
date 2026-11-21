@@ -27,8 +27,6 @@ for (const send of [request, requestBlob]) {
 
 for (const [path, status, message_key, params] of [
   ['/auth/login', 401, 'ies.diag.auth.invalid_credentials', {}],
-  ['/projects', 401, 'ies.diag.auth.session_invalid', { reason: 'takeover_pending' }],
-  ['/projects/1/export/download', 401, 'ies.diag.package.download_token_invalid', {}],
   ['/projects/1', 403, 'ies.diag.auth.forbidden', {}],
   ['/projects/1', 502, 'ies.error.internal', {}],
 ]) {

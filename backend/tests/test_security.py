@@ -34,10 +34,10 @@ class TestPasswordHash:
 
 
 class TestPasswordStrength:
-    """至少 8 位,含大小写与数字。"""
+    """至少 6 位。"""
 
     def test_strong_passwords(self):
-        for pwd in ["Abc12345", "Passw0rd!", "aB3cdefgh", "Xy9" + "z" * 10]:
+        for pwd in ["Abc12345", "Passw0rd!", "aaaaaa", "123456", "Xy9" + "z" * 10]:
             ok, reason = check_password_strength(pwd)
             assert ok is True, (pwd, reason)
 
@@ -45,27 +45,6 @@ class TestPasswordStrength:
         ok, reason = check_password_strength("Ab1c")
         assert ok is False
         assert str(MIN_PASSWORD_LENGTH) in reason
-
-    def test_missing_lowercase(self):
-        ok, _ = check_password_strength("ABC12345")
-        assert ok is False
-
-    def test_missing_uppercase(self):
-        ok, _ = check_password_strength("abc12345")
-        assert ok is False
-
-    def test_missing_digit(self):
-        ok, _ = check_password_strength("Abcdefgh")
-        assert ok is False
-
-    def test_reason_mentions_defect(self):
-        _, reason = check_password_strength("abcdefgh")
-        assert "大写" in reason
-        _, reason = check_password_strength("ABCDEFGH")
-        assert "小写" in reason
-        _, reason = check_password_strength("ABCDabcd")
-        assert "数字" in reason
-
 
 class TestSessionToken:
     def test_token_generation_and_hash(self):

@@ -48,12 +48,6 @@ def main():
     if status != 200:
         print("无法登录, 中止"); sys.exit(1)
     token = data["token"]
-    # 旧会话位移 → 新会话为 takeover_pending: 需先确认接管(domain-model §身份、权限和审计)
-    if data.get("needs_takeover_confirm"):
-        s2, d2 = call("POST", "/auth/confirm-takeover", {"token": token}, token)
-        if s2 == 200 and "token" in (d2 or {}):
-            token = d2["token"]
-            check("auth.confirm-takeover → 新 token", True)
     if data["user"].get("force_password_change"):
         call("POST", "/auth/change-password", {"old_password": "iesplan-admin-initial", "new_password": "Iesplan-Admin#2026e2e"}, token)
         status, data = call("POST", "/auth/login", {"username": "admin", "password": "Iesplan-Admin#2026e2e"})

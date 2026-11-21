@@ -3,8 +3,7 @@
 业务 API 已统一改为窗口会话认证(iesplan.api.auth, Bearer/Cookie),
 测试以 POST /api/auth/login 获取窗口凭证, 不再使用 X-User-Id 模拟头。
 
-注意: 每用户单活动窗口(重复登录会使旧凭证降级 takeover_pending),
-因此 login_headers 在同一 TestClient 实例内按用户缓存 token。
+login_headers 在同一 TestClient 实例内按用户缓存 token，以复用测试会话。
 """
 
 from __future__ import annotations
@@ -36,10 +35,7 @@ def make_user(
 
 
 def login_headers(client: TestClient, user: SimpleNamespace) -> dict[str, str]:
-    """以窗口会话登录并返回 Bearer 头(同一 client 内按用户缓存)。
-
-    缓存避免同用户重复登录触发单活动窗口接管(旧凭证立即失效)。
-    """
+    """以窗口会话登录并返回 Bearer 头(同一 client 内按用户缓存)。"""
     try:
         cache: dict[int, str] = client._auth_tokens  # type: ignore[attr-defined]
     except AttributeError:

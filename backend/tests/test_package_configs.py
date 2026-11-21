@@ -43,7 +43,6 @@ from iesplan.core.contracts import ProjectBaseline  # noqa: E402
 from iesplan.core.yamlmini import dump as yaml_dump  # noqa: E402
 from iesplan.dataset.persistence import DatasetFile  # noqa: E402
 from iesplan.db import Base  # noqa: E402
-from iesplan.identity.persistence import User  # noqa: E402  # 注册 users 表
 # 独立建表需要注册 evidence_packages.task_id 的目标，不依赖其他测试先导入。
 from iesplan.tasks.persistence import Task as _TaskForDDL  # noqa: E402,F401
 from iesplan.storage import get_object  # noqa: E402
@@ -244,10 +243,9 @@ def _export_zip(client: TestClient, user, pid: int) -> bytes:
     """导出项目包并下载字节(仅所有者)。"""
     resp = client.post(f"/api/projects/{pid}/exports/package", headers=_h(client, user))
     assert resp.status_code == 200, resp.text
-    token = resp.json()["token"]
+    object_id = resp.json()["object_id"]
     resp = client.get(
-        f"/api/projects/{pid}/exports/package/download",
-        params={"token": token},
+        f"/api/projects/{pid}/exports/package/{object_id}/download",
         headers=_h(client, user),
     )
     assert resp.status_code == 200

@@ -11,7 +11,6 @@ export interface LoginResult {
   token: string
   token_type: string
   user: User
-  needs_takeover_confirm: boolean
 }
 
 /** 登录页公开设置。 */

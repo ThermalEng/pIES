@@ -1,37 +1,4 @@
-/**
- * 登录与会话页(默认导出 LoginPage)。
- *
- * 视图状态机(均在 /login 路由内切换,不离开公开路由):
- *   login            登录表单(用户名/密码,表单原生 Enter 提交)
- *   register         自助注册(仅管理员开启注册开关后显示入口;
- *                    注册成功后回登录表单)
- *   change_password  首次登录强制改密(后端 user.force_password_change = true;
- *                    改密成功即凭证轮换,须用新密码重新登录)
- *   takeover         窗口接管确认(后端 needs_takeover_confirm = true:
- *                    旧窗口会话已被降级为 takeover_pending,确认时调用无请求体
- *                    的 confirm-takeover(身份取自 Cookie/Bearer)撤销其余会话,
- *                    当前窗口凭证即最终凭证,不轮换)
- *
- * 其他能力:
- *   - 注册开关 / SSO 入口: 登录页渲染时拉取公开设置(GET /api/auth/public-settings,
- *     无需认证); registration_enabled=true 时显示注册入口,
- *     sso_enabled=true 时显示 SSO 登录按钮(跳转 /api/auth/oidc/login)。
- *   - 会话过期:全局 401 处理器(api/client + App 注册)带 state.reason=expired
- *     跳回本页,此处展示过期提示(ies.auth.session_expired)。
- *   - 登录/改密错误:直接渲染后端诊断信封 message_key 对应文案
- *     (ies.diag.auth.*,params 插值),含登录限速锁定(429 ies.diag.auth.locked)。
- *   - 离线提示:网络层失败(status 0)或浏览器 offline 事件时显示离线徽章,
- *     并提示本机/局域网部署场景的可用性(ies.auth.offline / offline_hint)。
- *
- * 与后端契约(backend/iesplan/api/auth.py):
- *   POST /api/auth/login            → {token, user{force_password_change}, needs_takeover_confirm}
- *   POST /api/auth/change-password  → 改密后凭证版本递增,当前及旧会话全部失效
- *   POST /api/auth/confirm-takeover → 无请求体,以 Cookie/Bearer 凭证确认,
- *                    返回当前窗口凭证(不轮换)
- *   GET  /api/auth/public-settings  → {registration_enabled, sso_enabled, sso_provider_name}
- *   POST /api/auth/register         → 仅开关开启时可用(创建 engineer 账号)
- *   GET  /api/auth/oidc/login       → 302 跳转 OIDC 提供方授权页
- */
+/** 登录、注册与首次登录改密提示。 */
 
 import { useEffect, useState } from 'react'
 import type { FormEvent } from 'react'
@@ -39,10 +6,8 @@ import { useLocation, useNavigate } from 'react-router-dom'
 
 import {
   changePassword,
-  confirmTakeover,
   getPublicSettings,
   login,
-  logout,
   register,
 } from '../features/auth'
 import type { PublicAuthSettings } from '../features/auth'
@@ -53,7 +18,7 @@ import { Alert, Badge, Button, FormField, Input } from '../components/ui'
 import { BrandMark } from '../components/BrandMark'
 import { ThemeToggle } from '../components/ThemeToggle'
 
-type View = 'login' | 'register' | 'change_password' | 'takeover'
+type View = 'login' | 'register' | 'change_password'
 
 // ---------------------------------------------------------------------------
 // 辅助
@@ -115,10 +80,6 @@ export default function LoginPage() {
   const [changeError, setChangeError] = useState<string | null>(null)
   const [changeBusy, setChangeBusy] = useState(false)
 
-  // 接管确认
-  const [takeoverError, setTakeoverError] = useState<string | null>(null)
-  const [takeoverBusy, setTakeoverBusy] = useState(false)
-
   // 公开设置(注册开关 / SSO 入口; 登录页渲染前置条件, 失败不阻断登录)
   const [publicSettings, setPublicSettings] = useState<PublicAuthSettings | null>(null)
   const [settingsError, setSettingsError] = useState<string | null>(null)
@@ -165,17 +126,6 @@ export default function LoginPage() {
         setConfirmPassword('')
         setChangeError(null)
         setView('change_password')
-      } else if (res.needs_takeover_confirm) {
-        // 旧窗口已被降级为待接管:直接调用 confirm-takeover 确认(无请求体,
-        // 身份取自登录响应设置的 Cookie/Bearer),
-        // 避免无人值守/后台测试场景下停留在接管对话框造成 session 卡死循环。
-        try {
-          await confirmTakeover()
-          navigate(redirectTarget, { replace: true })
-        } catch (confirmErr) {
-          setTakeoverError(errorText(confirmErr))
-          setView('takeover')
-        }
       } else {
         navigate(redirectTarget, { replace: true })
       }
@@ -251,28 +201,6 @@ export default function LoginPage() {
     } finally {
       setChangeBusy(false)
     }
-  }
-
-  const handleConfirmTakeover = async () => {
-    setTakeoverError(null)
-    setTakeoverBusy(true)
-    try {
-      // 后端以 Cookie/Bearer 会话确认接管(无请求体,不轮换凭证)
-      await confirmTakeover()
-      navigate(redirectTarget, { replace: true })
-    } catch (err) {
-      setTakeoverError(errorText(err))
-    } finally {
-      setTakeoverBusy(false)
-    }
-  }
-
-  const handleCancelTakeover = () => {
-    // 放弃接管:撤销当前新会话并回登录表单(旧窗口保持待接管,下次登录时自动清理)
-    void logout().catch(() => {
-      /* 会话失效由 client 的 401 处理器兜底清理 */
-    })
-    setView('login')
   }
 
   const showOffline = !browserOnline || loginOffline
@@ -489,22 +417,6 @@ export default function LoginPage() {
           </form>
         ) : null}
 
-        {view === 'takeover' ? (
-          <div className="ies-login__takeover">
-            <Alert variant="warning" title={t('ies.auth.window_takeover_title')}>
-              <p>{t('ies.auth.window_takeover_desc')}</p>
-            </Alert>
-            {takeoverError ? <Alert variant="error" title={takeoverError} /> : null}
-            <div className="ies-login__actions">
-              <Button variant="primary" size="lg" loading={takeoverBusy} onClick={handleConfirmTakeover}>
-                {t('ies.auth.window_takeover_confirm')}
-              </Button>
-              <Button variant="secondary" size="lg" disabled={takeoverBusy} onClick={handleCancelTakeover}>
-                {t('ies.auth.window_takeover_cancel')}
-              </Button>
-            </div>
-          </div>
-        ) : null}
         <footer className="ies-login__footer">
           <button
             type="button"

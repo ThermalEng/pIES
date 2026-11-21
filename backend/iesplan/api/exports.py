@@ -1,24 +1,11 @@
-"""项目导出 API 路由(U15/U14, prefix /api/projects/{project_id}/exports)。
-
-认证说明: 统一使用 U01 身份单元提供的窗口会话认证
-(iesplan.api.auth.CurrentUser; 未认证 401, 权限不足 403)。
-
-路由清单(prefix /api/projects/{project_id}/exports):
-- POST /excel      生成固定模板 Excel 报告(查看者可导出)→ 短期单对象下载授权
-- GET  /excel/download?token=   下载 Excel 报告字节
-- POST /package    导出完整项目包(仅所有者)→ 短期单对象下载授权
-- GET  /package/download?token= 下载项目包 zip
-
-下载授权: 短期单对象授权(签名 token 含 object_id + 过期, 过期 5 分钟,
-application/packages create_download_token/verify_download_token)。
-"""
+"""项目导出与已认证的对象流式下载。"""
 
 from __future__ import annotations
 
 from itertools import chain
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Query, Response
+from fastapi import APIRouter, Depends, Response
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 from starlette.responses import StreamingResponse
@@ -67,23 +54,23 @@ def export_excel_endpoint(
     db: Annotated[Session, Depends(get_request_db)],
     user: CurrentUser,
 ) -> dict:
-    """生成固定模板 Excel 报告, 返回短期单对象下载授权 token(5 分钟)。"""
+    """生成固定模板 Excel 报告, 返回导出对象 ID。"""
     return packages_app.export_excel_report(
         db, user, project_id, payload.evidence_package_id, payload.assessment_id,
         lang=payload.lang,
     )
 
 
-@router.get("/excel/download", summary="下载 Excel 报告")
+@router.get("/excel/{object_id}/download", summary="下载 Excel 报告")
 def download_excel_endpoint(
     project_id: int,
+    object_id: int,
     db: Annotated[Session, Depends(get_request_db)],
     user: CurrentUser,
-    token: str = Query(..., description="短期下载授权 token"),
 ) -> Response:
-    """凭短期授权 token 下载 Excel 报告字节(校验签名/过期 + 项目与用户绑定)。"""
+    """下载当前项目的 Excel 报告。"""
     content, media_type, file_name = packages_app.load_export_download(
-        db, user, project_id, token, "excel"
+        db, user, project_id, object_id, "excel"
     )
     return _download_response(content, media_type, file_name)
 
@@ -94,20 +81,20 @@ def export_package_endpoint(
     db: Annotated[Session, Depends(get_request_db)],
     user: CurrentUser,
 ) -> dict:
-    """导出完整项目包(模型/配置/版本/数据集/历史证据, 仅所有者), 返回下载授权。"""
+    """导出完整项目包(模型/配置/版本/数据集/历史证据, 仅所有者), 返回导出对象 ID。"""
     result = packages_app.export_package(db, user, project_id)
     return result.to_dict()
 
 
-@router.get("/package/download", summary="下载项目包")
+@router.get("/package/{object_id}/download", summary="下载项目包")
 def download_package_endpoint(
     project_id: int,
+    object_id: int,
     db: Annotated[Session, Depends(get_request_db)],
     user: CurrentUser,
-    token: str = Query(..., description="短期下载授权 token"),
 ) -> Response:
-    """凭短期授权 token 下载项目包 zip(校验签名/过期 + 项目与用户绑定)。"""
+    """下载当前项目的 ZIP 文件。"""
     content, media_type, file_name = packages_app.load_export_download(
-        db, user, project_id, token, "package"
+        db, user, project_id, object_id, "package"
     )
     return _download_response(content, media_type, file_name)

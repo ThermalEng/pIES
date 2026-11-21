@@ -1,1 +1,1 @@
-export { exportExcel, exportPackage, downloadExport } from './api'
+export { exportExcel, exportPackage } from './api'

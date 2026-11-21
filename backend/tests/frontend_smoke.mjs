@@ -70,10 +70,6 @@ async function main() {
     }
   }
   check('auth.login', !!login.token && !!login.user, JSON.stringify({ role: login.user.role, fpc: login.user.force_password_change }))
-  if (login.needs_takeover_confirm) {
-    const tk = await api.auth.confirmTakeover({ token: login.token })
-    check('auth.confirmTakeover', !!tk.token)
-  }
 
   // 1.5) 管理员安全设置(注册开关持久化)
   try {

@@ -1,13 +1,11 @@
-"""身份与认证服务: 用户、凭证、窗口会话、登录限速与认证审计。
+"""身份与认证服务: 用户、凭证、会话与认证审计。
 
 依据 架构宪法 §16 安全与审计 + 领域模型 §身份、权限和审计。
 本模块是身份域的唯一写入单元:
 
 - users / credentials / window_sessions / auth_events 的写入与状态迁移均在此完成;
 - 密码只存 bcrypt 哈希, 会话令牌只存 sha256 摘要(库内无明文令牌);
-- 登录限速: 同一用户名 5 次失败锁定 15 分钟(进程内存状态);
-- 单活动窗口: 新登录使旧 active 会话撤销, 新会话以 takeover_pending
-  创建, 确认接管后当前会话保留为 active(不轮换凭证; 宪法 §16 + 领域模型 §身份、权限和审计);
+- 同一账号可创建多个独立会话。
 - 凭证变更(改密/重置)递增 users.credential_version, 使全部旧会话失效(宪法 §16 + 领域模型 §身份、权限和审计);
 - 业务错误统一抛 AppError(+ 诊断 message_key, 前缀 ies.diag.auth.*),
   响应不泄露堆栈/哈希/明文。
@@ -19,9 +17,8 @@ from __future__ import annotations
 
 import logging
 from datetime import UTC, datetime
-from typing import Any, Final
+from typing import Any
 
-from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
 from sqlalchemy.orm import Session
 
 from iesplan import audit as audit_domain
@@ -36,11 +33,9 @@ from iesplan.core.security import (
     verify_password,
 )
 from iesplan.identity.contracts import (
-    AuthEventRecord,
     BadOldPasswordError,
     BadRequestError,
     CredentialRecord,
-    DeleteConfirmRequiredError,
     SamePasswordError,
     UserRecord,
     WeakPasswordError,
@@ -57,13 +52,6 @@ logger = logging.getLogger(__name__)
 # 常量
 # ---------------------------------------------------------------------------
 
-#: 假哈希: 用户不存在/停用/无凭证时也执行一次 bcrypt 校验,
-#: 使各种失败路径耗时均匀, 避免通过响应时间枚举用户名/账号状态
-_DUMMY_PASSWORD_HASH: Final[str] = "$2b$12$P5GwAaopJcdx8Bx7CEUWOeNFfS/4KQ6wvr321HDFA.oQakKY.W9v."
-#: 删除账号确认令牌有效期(秒): 预览后须在窗口内执行删除(误操作防护窗口)
-_DELETE_CONFIRM_WINDOW_SECONDS: Final[int] = 600
-#: 删除账号确认令牌签名盐(与 OIDC state 盐分离, 独立用途)
-_DELETE_CONFIRM_SALT: Final[str] = "ies.delete-user-confirm"
 
 
 # ---------------------------------------------------------------------------
@@ -355,6 +343,7 @@ def deactivate_user(
     if current is not None and current.status == identity_domain.USER_STATUS_DISABLED:
         return
     identity_domain.set_user_status(db, user.id, identity_domain.USER_STATUS_DISABLED)
+    identity_domain.bump_credential_version(db, user.id)
     revoke_all_user_sessions(db, user, revoked_by=admin.id)
     record_auth_event(
         db,
@@ -399,15 +388,6 @@ def reactivate_user(
 # ---------------------------------------------------------------------------
 
 
-def _delete_confirm_serializer() -> URLSafeTimedSerializer:
-    """删除确认令牌签名器(与主签名密钥分离, 多 Worker 共享密钥可互认)。"""
-    return URLSafeTimedSerializer(
-        settings.secret_key,
-        salt=_DELETE_CONFIRM_SALT,
-        signer_kwargs={"key_derivation": "hmac"},
-    )
-
-
 def _owned_projects(db: Session, user_id: int) -> list:
     """该用户拥有、且尚未删除(软删)的项目记录(经 project 域 repository，分页取全)。"""
     owned = []
@@ -423,76 +403,23 @@ def _owned_projects(db: Session, user_id: int) -> list:
     return owned
 
 
-def owned_project_ids(db: Session, user: UserRecord) -> list[int]:
-    """该用户当前拥有、且尚未删除(软删)的项目 id 列表(升序)。
-
-    供删除预告与确认令牌一致性校验共用, 保证「确认删除的影响范围」
-    与「实际级联删除的范围」一致。
-    """
-    return sorted(p.id for p in _owned_projects(db, user.id))
-
-
 def preview_user_delete(
     db: Session,
     admin: UserRecord,
     user: UserRecord,
 ) -> dict:
-    """删除账号预告(管理员): 返回将受影响的项目清单与签名确认令牌。
-
-    - 不能删除自己, 不能删除系统账号(与 delete_user 同约束, 提前拦截);
-    - 返回 {user_id, username, project_count, projects, confirm_token}:
-      projects 为 [{id, name, status}...](仅该用户拥有的未删除项目);
-    - confirm_token 为签名令牌(10 分钟窗口), 绑定目标用户与预览时的
-      项目 id 清单; DELETE 时清单变化将拒绝执行, 需重新预览。
-    """
+    """返回该账号拥有的项目清单，供管理员确认删除范围。"""
     if user.id == admin.id:
         raise ForbiddenError("", params={"reason": "cannot_delete_self"})
     if user.is_system:
         raise ForbiddenError("", params={"reason": "system_account"})
     owned = sorted(_owned_projects(db, user.id), key=lambda p: p.id)
-    project_ids = [p.id for p in owned]
-    token = _delete_confirm_serializer().dumps(
-        {
-            "user_id": user.id,
-            "username": user.username,
-            "project_ids": project_ids,
-        }
-    )
     return {
         "user_id": user.id,
         "username": user.username,
         "project_count": len(owned),
         "projects": [{"id": p.id, "name": p.name, "status": p.status} for p in owned],
-        "confirm_token": token,
     }
-
-
-def verify_delete_confirm_token(db: Session, user: UserRecord, token: str) -> None:
-    """校验删除确认令牌: 签名有效 + 未过期 + 绑定目标用户 + 项目清单未变化。
-
-    任一不满足抛 DeleteConfirmRequiredError(400), 拒绝删除。
-    """
-    if not token:
-        raise DeleteConfirmRequiredError("", params={"reason": "missing_confirm", "user_id": user.id})
-    try:
-        payload = _delete_confirm_serializer().loads(token, max_age=_DELETE_CONFIRM_WINDOW_SECONDS)
-    except (BadSignature, SignatureExpired, TypeError) as exc:
-        raise DeleteConfirmRequiredError(
-            "", params={"reason": "invalid_or_expired_confirm", "user_id": user.id}
-        ) from exc
-    if not isinstance(payload, dict):
-        raise DeleteConfirmRequiredError("", params={"reason": "invalid_confirm", "user_id": user.id})
-    if payload.get("user_id") != user.id or payload.get("username") != user.username:
-        raise DeleteConfirmRequiredError("", params={"reason": "confirm_user_mismatch", "user_id": user.id})
-    preview_ids = payload.get("project_ids")
-    if not isinstance(preview_ids, list) or not all(isinstance(i, int) for i in preview_ids):
-        raise DeleteConfirmRequiredError("", params={"reason": "invalid_confirm", "user_id": user.id})
-    if sorted(preview_ids) != owned_project_ids(db, user):
-        # 预览后项目清单变化: 强制重新预览, 防止基于过期范围确认删除
-        raise DeleteConfirmRequiredError(
-            "",
-            params={"reason": "project_list_changed", "user_id": user.id},
-        )
 
 
 def delete_user(
@@ -500,31 +427,14 @@ def delete_user(
     admin: UserRecord,
     user: UserRecord,
     *,
-    confirm: bool = False,
-    confirm_token: str = "",
     ip: str | None = None,
     user_agent: str | None = None,
 ) -> dict:
-    """删除账号(管理员): 该账号拥有的项目一并删除(账号生命周期, 宪法 §16 + 领域模型 §项目聚合)。
-
-    - 不能删除自己, 不能删除系统账号;
-    - 必须显式确认(confirm=True)且携带有效的确认令牌(由 preview_user_delete
-      签发, 10 分钟窗口, 绑定目标用户与预览时的项目清单), 否则 400 ——
-      删除账号会级联软删其拥有的全部项目且不可恢复, 属于「会造成明显数据
-      破坏的误操作」;
-    - 目标用户拥有的项目全部置 status='deleted'(软删, 与项目删除一致,
-      不可变版本/审计保留, 对象清理由 U16 重试执行);
-    - 用户状态置 disabled, 全部会话撤销, 凭证撤销(不可变表只置撤销标记)。
-    返回: {"deleted_projects": N, "deleted_datasets": N}(数据集一并回收)。
-    """
+    """停用账号、撤销凭证，并删除该账号拥有的项目。"""
     if user.id == admin.id:
         raise ForbiddenError("", params={"reason": "cannot_delete_self"})
     if user.is_system:
         raise ForbiddenError("", params={"reason": "system_account"})
-    if not confirm:
-        raise DeleteConfirmRequiredError("", params={"reason": "confirm_required", "user_id": user.id})
-    verify_delete_confirm_token(db, user, confirm_token)
-
     now = utcnow()
     # 该用户拥有的项目 → 软删(级联，状态写入经 project 域 repository)
     owned = _owned_projects(db, user.id)
@@ -544,8 +454,8 @@ def delete_user(
             before=None,
             extra={"reason": "account_deleted", "account_id": user.id},
         )
-    # 账号停用 + 会话/凭证撤销
     identity_domain.set_user_status(db, user.id, identity_domain.USER_STATUS_DISABLED)
+    identity_domain.bump_credential_version(db, user.id)
     revoke_all_user_sessions(db, user, revoked_by=admin.id)
     identity_domain.revoke_credentials(db, user.id)
     record_auth_event(
@@ -667,22 +577,11 @@ def authenticate(
     ip: str | None = None,
     user_agent: str | None = None,
     device: str | None = None,
-) -> tuple[UserRecord | None, str | None]:
-    """校验用户名与密码, 返回 (user, error_code|None)。
-
-    error_code 取值:
-        - "invalid_credentials": 用户不存在 / 密码错误 / 账号停用(统一文案, 不区分);
-        - "locked": 登录限速锁定(5 次失败锁 15 分钟)。
-    成功时更新 last_login_at 并清空该用户名限速计数。
-    """
+) -> UserRecord | None:
+    """验证登录凭证并记录认证结果。"""
     username = (username or "").strip().lower()
-    if identity_domain.is_login_locked(username):
-        return None, "locked"
     user = get_user_by_username(db, username)
     if user is None:
-        # 假校验: 与真实校验耗时保持一致, 防用户名枚举(时间侧信道)
-        verify_password(password, _DUMMY_PASSWORD_HASH)
-        identity_domain.record_login_failure(username)
         record_auth_event(
             db,
             "login_failure",
@@ -691,12 +590,9 @@ def authenticate(
             detail={"reason": "user_not_found", "username": username},
         )
         db.commit()
-        return None, "invalid_credentials"
+        return None
     block_reason = identity_domain.login_block_reason(user)
     if block_reason is not None:
-        # 假校验: 同上, 防账号状态枚举(停用/系统账号与密码错误耗时一致)
-        verify_password(password, _DUMMY_PASSWORD_HASH)
-        identity_domain.record_login_failure(username)
         record_auth_event(
             db,
             "login_failure",
@@ -706,13 +602,10 @@ def authenticate(
             detail={"reason": block_reason},
         )
         db.commit()
-        return None, "invalid_credentials"
+        return None
     cred = get_active_password_credential(db, user)
     secret = identity_domain.get_active_password_secret(db, user.id)
     if cred is None or secret is None:
-        # 假校验: 无有效凭证与密码错误的耗时一致(常规 401 路径)
-        verify_password(password, _DUMMY_PASSWORD_HASH)
-        identity_domain.record_login_failure(username)
         record_auth_event(
             db,
             "login_failure",
@@ -722,9 +615,8 @@ def authenticate(
             detail={"reason": "no_credential"},
         )
         db.commit()
-        return None, "invalid_credentials"
+        return None
     if not verify_password(password, secret):
-        identity_domain.record_login_failure(username)
         record_auth_event(
             db,
             "login_failure",
@@ -734,8 +626,7 @@ def authenticate(
             detail={"reason": "bad_password"},
         )
         db.commit()
-        return None, "invalid_credentials"
-    identity_domain.clear_login_failures(username)
+        return None
     user = identity_domain.touch_login(db, user.id)
     record_auth_event(
         db,
@@ -746,141 +637,27 @@ def authenticate(
         detail={"device": device} if device else None,
     )
     db.commit()
-    return user, None
+    return user
 
 
 # ---------------------------------------------------------------------------
-# 窗口会话(单活动窗口, 宪法 §16 + 领域模型 §身份、权限和审计)
+# 会话( 宪法 §16 + 领域模型 §身份、权限和审计)
 # ---------------------------------------------------------------------------
 
 
-def create_window_session(
-    db: Session,
-    user: UserRecord,
-    device_info: str | None = None,
-    *,
-    ip: str | None = None,
-    user_agent: str | None = None,
-) -> tuple[WindowSessionRecord, str, bool]:
-    """创建窗口会话(单活动窗口, 接管确认语义 H-01; 宪法 §16 + 领域模型 §身份、权限和审计)。
-
-    流程:
-        1. 先清理该用户已过期的会话;
-        2. 撤销残留的 takeover_pending 会话(被本次登录取代; 部分唯一索引
-           每用户至多一条 pending);
-        3. 若存在 active 会话, 直接撤销(本次登录触发接管);
-        4. 触发接管时(存在被撤销的 active 或残留 pending)新会话创建为
-           takeover_pending —— 在确认接管(confirm_takeover)之前不拥有任何
-           业务权限; 否则创建为 active。
-
-    返回:
-        (session, token, old_session_displaced):
-        old_session_displaced 为 True 表示存在旧活动窗口被降级/撤销
-        (前端据此提示确认接管并重新加载最新修订)。
-    """
-    now = utcnow()
+def create_window_session(db: Session, user: UserRecord) -> tuple[WindowSessionRecord, str]:
+    """Create an independent session and persist only the token hash."""
     identity_domain.expire_sessions(db, user.id)
-    # 单活动窗口规则判定归 identity 域; 此处只执行状态写入、审计与事务
-    previous = identity_domain.list_active_sessions(db, user.id)
-    revoke_targets, active, displaced, new_status = identity_domain.plan_login_session(previous)
-    for old in revoke_targets:
-        identity_domain.set_session_status(
-            db, old.id, identity_domain.SESSION_STATUS_REVOKED, revoked_by=user.id
-        )
-    # 创建新会话: 触发接管时初始为 takeover_pending(H-01, 确认前无业务权限);
-    # 令牌原文只经返回值交调用方持有, 入库的仅为 sha256 摘要。
     token = new_session_token()
-    new_session = identity_domain.create_session(
+    session = identity_domain.create_session(
         db,
         user_id=user.id,
         token_hash=token_hash(token),
         credential_version_at_issue=user.credential_version,
-        expires_at=identity_domain.new_session_expiry(now).isoformat(),
-        status=new_status,
-    )
-    # 被撤销的残留 pending/active 会话由新会话接管(补 replaced_by 指针, 接管追溯)
-    for old in revoke_targets:
-        identity_domain.set_session_status(
-            db,
-            old.id,
-            identity_domain.SESSION_STATUS_REVOKED,
-            revoked_by=user.id,
-            replaced_by_session_id=new_session.id,
-        )
-    if displaced:
-        record_auth_event(
-            db,
-            "session_takeover",
-            user_id=user.id,
-            session_id=new_session.id,
-            ip=ip,
-            user_agent=user_agent,
-            detail={
-                "from_session_id": active.id if active is not None else None,
-                "to_session_id": new_session.id,
-                "reason": "new_login",
-            },
-        )
-    db.commit()
-    return new_session, token, displaced
-
-
-def confirm_takeover(
-    db: Session,
-    user: UserRecord,
-    current_session: WindowSessionRecord,
-    *,
-    ip: str | None = None,
-    user_agent: str | None = None,
-) -> WindowSessionRecord:
-    """确认接管(宪法 §16 + 领域模型 §身份、权限和审计): 保留当前会话并转为 active。
-
-    接管流程(领域模型 §身份、权限和审计): 新登录使旧会话撤销、新会话以 takeover_pending
-    创建(H-01: 确认前无业务权限); 用户确认接管后, 当前待接管会话直接保留
-    为 active(状态列级迁移, 不轮换凭证) —— 客户端既有 Cookie/Bearer 凭证
-    立即生效, 不再依赖响应 Set-Cookie 替换凭证, 避免"确认接管后旧 session
-    仍处于 takeover_pending"导致全部写 API 被拒。
-
-    其余 pending/active 会话(理论上至多各一条, 部分唯一索引保证)一并撤销,
-    保持单活动窗口不变量。返回保留的活动会话。
-    """
-    # 并发防御: 确认前被新登录撤销的会话不再恢复(重新读取最新状态;
-    # 可确认状态判定归 identity 域)
-    current = identity_domain.require_takeover_confirmable(
-        identity_domain.get_session(db, current_session.id)
-    )
-    others = [s for s in identity_domain.list_active_sessions(db, user.id) if s.id != current.id]
-    # 先撤销其余 pending/active 会话, 再把当前会话置为 active
-    # (状态迁移顺序避免触犯 active/pending 部分唯一索引)
-    for old in others:
-        identity_domain.set_session_status(
-            db, old.id, identity_domain.SESSION_STATUS_REVOKED, revoked_by=user.id
-        )
-    if current.status != identity_domain.SESSION_STATUS_ACTIVE:
-        current = identity_domain.set_session_status(db, current.id, identity_domain.SESSION_STATUS_ACTIVE)
-    for old in others:
-        identity_domain.set_session_status(
-            db,
-            old.id,
-            identity_domain.SESSION_STATUS_REVOKED,
-            revoked_by=user.id,
-            replaced_by_session_id=current.id,
-        )
-    record_auth_event(
-        db,
-        "session_takeover",
-        user_id=user.id,
-        session_id=current.id,
-        ip=ip,
-        user_agent=user_agent,
-        detail={
-            "from_session_id": None,
-            "to_session_id": current.id,
-            "reason": "confirm_takeover",
-        },
+        expires_at=identity_domain.new_session_expiry().isoformat(),
     )
     db.commit()
-    return current
+    return session, token
 
 
 def get_session_by_token(db: Session, token: str) -> WindowSessionRecord | None:
@@ -911,30 +688,6 @@ def revoke_session(
         detail={"reason": reason},
     )
     db.commit()
-
-
-def revoke_other_sessions(
-    db: Session,
-    user: UserRecord,
-    keep_session_id: int,
-    *,
-    revoked_by: int | None = None,
-) -> int:
-    """撤销用户除指定会话外的全部活动/待接管会话, 返回撤销数量。"""
-    rows = [s for s in identity_domain.list_active_sessions(db, user.id) if s.id != keep_session_id]
-    for s in rows:
-        identity_domain.set_session_status(
-            db, s.id, identity_domain.SESSION_STATUS_REVOKED, revoked_by=revoked_by
-        )
-    if rows:
-        record_auth_event(
-            db,
-            "session_revoke",
-            user_id=user.id,
-            detail={"revoked_session_ids": [s.id for s in rows], "reason": "revoke_others"},
-        )
-        db.commit()
-    return len(rows)
 
 
 def revoke_all_user_sessions(

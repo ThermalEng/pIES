@@ -239,13 +239,6 @@ def admin_headers(client: TestClient) -> dict[str, str]:
     )
     assert resp.status_code == 200, resp.text
     token = resp.json()["token"]
-    if resp.json().get("needs_takeover_confirm") is True:
-        resp = client.post(
-            "/api/auth/confirm-takeover", json={"token": token},
-            headers={"Authorization": f"Bearer {token}"},
-        )
-        assert resp.status_code == 200, resp.text
-        token = resp.json()["token"]
     admin = {"Authorization": f"Bearer {token}"}
     resp = client.put(
         "/api/auth/settings", json={"registration_enabled": True}, headers=admin
@@ -700,26 +693,15 @@ def test_exports_package_download_and_excel_guard(
     rev = _save_config(client, owner, pid)
     status, body = _submit_task(client, owner, pid, f"ce-{uid}-1", config_revision=rev)
     assert status == 201, body
-    # 项目包导出 200 + 包装键, 凭 token 下载 200
     resp = client.post(f"/api/projects/{pid}/exports/package", headers=owner)
     assert resp.status_code == 200, resp.text
-    assert set(resp.json()) == {
-        "expires_at",
-        "file_name",
-        "manifest",
-        "media_type",
-        "object_id",
-        "oid",
-        "size_bytes",
-        "token",
-    }
-    token = resp.json()["token"]
-    resp = client.get(f"/api/projects/{pid}/exports/package/download?token={token}")
+    assert set(resp.json()) == {"file_name", "manifest", "media_type", "object_id", "oid", "size_bytes"}
+    object_id = resp.json()["object_id"]
+    resp = client.get(f"/api/projects/{pid}/exports/package/{object_id}/download", headers=owner)
     assert resp.status_code == 200, resp.text
     assert "zip" in resp.headers["content-type"]
-    # 坏 token 400 信封
-    resp = client.get(f"/api/projects/{pid}/exports/package/download?token=bad-token")
-    _assert_envelope(resp, 400)
+    resp = client.get(f"/api/projects/{pid}/exports/package/999999999/download", headers=owner)
+    _assert_envelope(resp, 404)
     # 无证据 Excel 导出 404 信封
     resp = client.post(
         f"/api/projects/{pid}/exports/excel",

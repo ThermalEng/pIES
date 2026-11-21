@@ -49,14 +49,10 @@ export async function requestJson(
 
 /**
  * 登录获取 token(前置造数阶段使用; 被测 UI 流程不用)。
- * 若新会话为 takeover_pending(旧窗口仍在), 立即确认接管激活, 保证 token 可用。
  */
 export async function loginToken(ctx: APIRequestContext, username: string, password: string): Promise<string> {
   const res = await requestJson(ctx, 'POST', '/api/auth/login', { username, password })
   if (!res?.token) throw new Error(`login(${username}) 未返回 token`)
-  if (res.needs_takeover_confirm === true) {
-    await requestJson(ctx, 'POST', '/api/auth/confirm-takeover', { token: res.token }, res.token)
-  }
   return res.token
 }
 
@@ -118,12 +114,10 @@ export async function createProject(
   return { id: res.project.id, name: res.project.name }
 }
 
-/** 删除用户(管理员; 先预览取确认令牌, 再携带 confirm + 令牌执行删除)。 */
+/** 删除用户及其项目(管理员)。 */
 export async function deleteUser(ctx: APIRequestContext, userId: number): Promise<void> {
   const adminTok = await adminToken(ctx)
-  const preview = await requestJson(ctx, 'POST', `/api/auth/users/${userId}/delete-preview`, undefined, adminTok)
-  const confirmToken = String((preview as { confirm_token?: unknown }).confirm_token ?? '')
-  await requestJson(ctx, 'DELETE', `/api/auth/users/${userId}`, { confirm: true, confirm_token: confirmToken }, adminTok)
+  await requestJson(ctx, 'DELETE', `/api/auth/users/${userId}`, undefined, adminTok)
 }
 
 /** 删除项目(所有者或管理员)。 */

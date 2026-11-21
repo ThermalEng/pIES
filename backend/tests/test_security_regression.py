@@ -2,9 +2,8 @@
 
 覆盖本次安全修复的回归场景:
 - C-01: 对象管理 API 拒绝伪造 X-User-Id(仅接受真实窗口会话 + admin 角色);
-- C-02: 强制改密未解除前业务接口一律 403(AUTH-FPC-001), 改密后解除;
+- C-02: 首登改密提示期间也可使用已授权业务接口;
 - C-03: 模型 API 项目级权限 —— 读经项目视图/校验报告, 写经草稿语义命令, 非所有者一律 403;
-- H-01: takeover_pending 会话业务请求 401, 确认接管后转 active 可用;
 - H-05: viewer 取消任务 403;
 - H-07: ZIP Bomb 拒绝(PKG-SIZE-001)。
 
@@ -69,13 +68,12 @@ def client(db: Session) -> Iterator[TestClient]:
         yield db
 
     app.dependency_overrides[get_request_db] = _override_request_db
-    identity.reset_login_rate_limit()
     with TestClient(app, raise_server_exceptions=False) as c:
         yield c
 
 
 def _login(client: TestClient, username: str, password: str = PASSWORD) -> str:
-    """真实登录, 返回窗口凭证(不使用 login_headers 缓存, 便于重复登录/接管)。"""
+    """真实登录, 返回窗口凭证(每次调用创建独立会话)。"""
     resp = client.post("/api/auth/login", json={"username": username, "password": password})
     assert resp.status_code == 200, resp.text
     return resp.json()["token"]
@@ -133,28 +131,20 @@ def test_admin_api_rejects_forged_x_user_id(client: TestClient, db: Session) -> 
 
 
 # ---------------------------------------------------------------------------
-# C-02: 强制改密服务端门禁
+# C-02: 首登改密提示与业务接口
 # ---------------------------------------------------------------------------
 
 
-def test_force_password_change_gates_business_api(client: TestClient, db: Session) -> None:
-    """requires_change=True 时业务接口 403; 改密成功后自动解除。"""
+def test_initial_password_flag_allows_authenticated_requests(client: TestClient, db: Session) -> None:
+    """初始密码提示保留，登录会话可访问项目。"""
     identity.create_user(
         db, "fpc_user", PASSWORD, role="engineer", force_password_change=True,
         display_name="FPC 用户",
     )
     token = _login(client, "fpc_user")
 
-    # 业务接口(项目列表)→ 403 AUTH-FPC-001
-    resp = client.get("/api/projects", headers=_bearer(token))
-    assert resp.status_code == 403, resp.text
-    err = resp.json()["error"]
-    assert err["code"] == "AUTH-FPC-001"
-    assert err["message_key"] == "ies.diag.auth.force_password_change"
-
-    # 豁免接口可用: /api/auth/me
-    resp = client.get("/api/auth/me", headers=_bearer(token))
-    assert resp.status_code == 200, resp.text
+    assert client.get("/api/projects", headers=_bearer(token)).status_code == 200
+    assert client.get("/api/auth/me", headers=_bearer(token)).json()["force_password_change"] is True
 
     # 改密成功 → 全部旧会话失效 → 新密码重新登录 → 业务接口 200
     resp = client.post(
@@ -223,43 +213,6 @@ def test_model_api_non_owner_denied_and_owner_allowed(client: TestClient, db: Se
     )
     assert resp.status_code == 200, resp.text
     assert resp.json()["revision"] == 2
-
-
-# ---------------------------------------------------------------------------
-# H-01: takeover_pending 会话无业务权限, 确认接管后转 active
-# ---------------------------------------------------------------------------
-
-
-def test_pending_session_rejected_until_confirm(client: TestClient, db: Session) -> None:
-    """接管确认前新会话业务请求 401; 确认接管后签发正式凭证可用。"""
-    make_user(db, "takeover_c01")
-    token_a = _login(client, "takeover_c01")
-    assert client.get("/api/projects", headers=_bearer(token_a)).status_code == 200
-
-    # 第二窗口登录 → 新会话为 takeover_pending
-    resp = client.post(
-        "/api/auth/login", json={"username": "takeover_c01", "password": PASSWORD}
-    )
-    assert resp.status_code == 200, resp.text
-    assert resp.json()["needs_takeover_confirm"] is True
-    token_b = resp.json()["token"]
-
-    # pending 会话业务请求 → 401(前端提示接管)
-    resp = client.get("/api/projects", headers=_bearer(token_b))
-    assert resp.status_code == 401, resp.text
-    assert resp.json()["error"]["params"].get("reason") == "takeover_pending"
-
-    # 确认接管 → 当前待接管会话保留为 active(凭证不变, 立即可用)
-    resp = client.post("/api/auth/confirm-takeover", headers=_bearer(token_b))
-    assert resp.status_code == 200, resp.text
-    token_c = resp.json()["token"]
-    assert token_c == token_b
-    resp = client.get("/api/projects", headers=_bearer(token_c))
-    assert resp.status_code == 200, resp.text
-
-    # 确认后同一凭证(原 pending)即正式活动凭证, 业务请求放行
-    resp = client.get("/api/projects", headers=_bearer(token_b))
-    assert resp.status_code == 200, resp.text
 
 
 # ---------------------------------------------------------------------------
@@ -433,50 +386,3 @@ def test_zip_bomb_total_uncompressed_rejected(client: TestClient, db: Session, m
 # ---------------------------------------------------------------------------
 # C-04: 下载 token 绑定项目与用户(越权下载拒绝)
 # ---------------------------------------------------------------------------
-
-
-def test_download_token_binds_project_and_user(client: TestClient, db: Session) -> None:
-    """token 只能下载绑定项目 + 绑定用户的资源; 换项目/换用户一律拒绝。"""
-    make_user(db, "owner_a04")
-    make_user(db, "owner_b04")
-    make_user(db, "other_c04")
-    token_a = _login(client, "owner_a04")
-    token_b = _login(client, "owner_b04")
-    other_token = _login(client, "other_c04")
-    pid_a = _create_project(client, token_a, "导出项目 A")
-    pid_b = _create_project(client, token_b, "导出项目 B")
-
-    resp = client.post(f"/api/projects/{pid_a}/exports/package", headers=_bearer(token_a))
-    assert resp.status_code == 200, resp.text
-    dl_token = resp.json()["token"]
-
-    # 绑定用户下载 → 200
-    resp = client.get(
-        f"/api/projects/{pid_a}/exports/package/download",
-        params={"token": dl_token},
-        headers=_bearer(token_a),
-    )
-    assert resp.status_code == 200, resp.text
-
-    # 其他用户持同一 token → 400(用户不匹配)
-    resp = client.get(
-        f"/api/projects/{pid_a}/exports/package/download",
-        params={"token": dl_token},
-        headers=_bearer(other_token),
-    )
-    assert resp.status_code == 400, resp.text
-
-    # 同用户经 B 项目 URL → 400(项目不匹配)
-    resp = client.get(
-        f"/api/projects/{pid_b}/exports/package/download",
-        params={"token": dl_token},
-        headers=_bearer(token_a),
-    )
-    assert resp.status_code == 400, resp.text
-
-    # 匿名(无会话)→ 401(下载必须登录): 用全新 TestClient 避免既有登录 Cookie 残留
-    with TestClient(client.app, raise_server_exceptions=False) as anon:
-        resp = anon.get(
-            f"/api/projects/{pid_a}/exports/package/download", params={"token": dl_token}
-        )
-        assert resp.status_code == 401, resp.text

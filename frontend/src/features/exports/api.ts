@@ -1,72 +1,24 @@
-/**
- * 导出 feature API 客户端。
- *
- * 规范:
- * - 直接消费 ExportExcelEnvelopeDto / ExportPackageEnvelopeDto, 无兼容猜测;
- * - 接受应用层已选择的证据和评估 ID, 不编排其他 feature;
- * - downloadSessions 保留为本地下载会话句柄登记(非业务缓存)。
- */
+/** 导出与已认证的对象下载。 */
 
-import { ApiError } from '../../types'
 import { request, requestBlob } from '../../shared/http'
-import type {
-  ExportExcelEnvelopeDto,
-  ExportExcelRequestDto,
-  ExportPackageEnvelopeDto,
-} from './contracts'
-import type { DownloadSession, PackageExportInput } from './model'
+import type { PackageExportInput } from '../../types'
+import type { ExportArtifactDto, ExportExcelRequestDto } from './contracts'
 
-let downloadSeq = 0
-const downloadSessions = new Map<number, DownloadSession>()
-
-/**
- * 触发 Excel 报告导出, 登记下载会话并返回本地会话 id。
- */
-export async function exportExcel(projectId: number, body: ExportExcelRequestDto): Promise<number> {
-  const res = await request<ExportExcelEnvelopeDto>(`/projects/${projectId}/exports/excel`, {
-    method: 'POST',
-    body,
-  })
-  downloadSeq += 1
-  const id = downloadSeq
-  downloadSessions.set(id, {
-    projectId,
-    kind: 'excel',
-    token: res.token,
-    filename: res.file_name,
-  })
-  return id
-}
-
-/**
- * 触发项目包导出, 登记下载会话并返回本地会话 id。
- */
-export async function exportPackage(input: PackageExportInput): Promise<number> {
-  const projectId = input.project_id
-  const res = await request<ExportPackageEnvelopeDto>(`/projects/${projectId}/exports/package`, {
-    method: 'POST',
-  })
-  downloadSeq += 1
-  const id = downloadSeq
-  downloadSessions.set(id, {
-    projectId,
-    kind: 'package',
-    token: res.token,
-    filename: res.file_name,
-  })
-  return id
-}
-
-/**
- * 凭本地下载会话 id 获取二进制 Blob 与文件名。
- */
-export async function downloadExport(
-  downloadSessionId: number,
+async function exportFile(
+  projectId: number,
+  kind: 'excel' | 'package',
+  body?: ExportExcelRequestDto,
 ): Promise<{ blob: Blob; filename: string }> {
-  const session = downloadSessions.get(downloadSessionId)
-  if (!session) throw new ApiError(404, null, 'ies.error.route_not_found')
-  const blob = await requestBlob(`/projects/${session.projectId}/exports/${session.kind}/download`, {
-    query: { token: session.token },
-  })
-  return { blob, filename: session.filename }
+  const path = `/projects/${projectId}/exports/${kind}`
+  const artifact = await request<ExportArtifactDto>(path, { method: 'POST', body })
+  const blob = await requestBlob(`${path}/${artifact.object_id}/download`)
+  return { blob, filename: artifact.file_name }
+}
+
+export function exportExcel(projectId: number, body: ExportExcelRequestDto) {
+  return exportFile(projectId, 'excel', body)
+}
+
+export function exportPackage(input: PackageExportInput) {
+  return exportFile(input.project_id, 'package')
 }

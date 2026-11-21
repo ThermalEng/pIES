@@ -86,21 +86,15 @@ def test_assemble_worker_subsets() -> None:
 
 
 def test_assemble_configures_queue_mode_from_environment(monkeypatch) -> None:
-    """组合根是队列选型的唯一环境解释点: 装配扇出后各接收模块不再回读环境。"""
-    from iesplan import identity as identity_module
-    from iesplan.api import limits as limits_module
+    """组合根是队列选型的唯一环境解释点: 任务队列接收解析后的配置。"""
     from iesplan.tasks import queue as queue_module
 
     monkeypatch.setenv("IESPLAN_QUEUE", "memory")
     try:
         assemble_io_worker()
         assert queue_module._resolve_queue_mode() == "memory"
-        assert limits_module._queue_mode_is_memory() is True
-        assert identity_module._queue_mode_is_memory() is True
     finally:
         queue_module.configure_queue_mode(None)
-        limits_module.configure_queue_mode(None)
-        identity_module.configure_queue_mode(None)
 
 
 def test_public_facades_register_domain_metadata() -> None:

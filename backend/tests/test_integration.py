@@ -121,11 +121,7 @@ def client(engine: Engine, db_session: Session, tmp_path: Path) -> Iterator[Test
 
 
 def _h(client: TestClient, user_id: int) -> dict[str, str]:
-    """业务端点认证头: 以窗口会话登录(同一 client 内按用户缓存)。
-
-    每用户单活动窗口: 重复登录会使旧凭证降级为 takeover_pending,
-    因此与 _login 共享缓存, 同一用户在整个测试中只登录一次。
-    """
+    """以窗口会话登录，并复用 _login 为同一 client 缓存的认证头。"""
     db: Session = client._test_db  # type: ignore[attr-defined]
     cache: dict[int, str] = client._auth_tokens  # type: ignore[attr-defined]
     token = cache.get(user_id)
@@ -159,7 +155,7 @@ def _seed_admin(db: Session) -> int:
 
 
 def _login(client: TestClient, username: str, password: str) -> dict[str, Any]:
-    """登录并返回 {token, user}(同时写入 _h 缓存, 保持单活动窗口)。"""
+    """登录并返回 {token, user}(同时写入 _h 缓存)。"""
     resp = client.post("/api/auth/login", json={"username": username, "password": password})
     assert resp.status_code == 200, resp.text
     body = resp.json()
@@ -804,23 +800,7 @@ def test_project_semantics(client: TestClient, db: Session) -> None:
     resp = client.post(f"/api/projects/{pid}/unarchive", headers=_h(client, eng_id))
     assert resp.status_code == 200
 
-    # 删除必须显式确认(0.2.0 B4): 未确认 → 400; 空布尔 confirm 不足以确认 → 400;
-    # 项目名匹配 → 204
-    resp = client.request(
-        "DELETE", f"/api/projects/{pid}", json={"confirm": False}, headers=_h(client, eng_id)
-    )
-    assert resp.status_code == 400
-    assert resp.json()["error"]["code"] == "PROJ-DEL-001"
-    resp = client.request(
-        "DELETE", f"/api/projects/{pid}", json={"confirm": True}, headers=_h(client, eng_id)
-    )
-    assert resp.status_code == 400
-    assert resp.json()["error"]["code"] == "PROJ-DEL-002"
-    resp = client.request(
-        "DELETE", f"/api/projects/{pid}",
-        json={"confirm": True, "name": "集成测试项目"}, headers=_h(client, eng_id),
-    )
-    assert resp.status_code == 204
+    assert client.delete(f"/api/projects/{pid}", headers=_h(client, eng_id)).status_code == 204
 
     # 版本语义: 创建版本 → 版本列表 → 恢复(不倒写历史)
     pid2 = _create_project(client, eng_id, name="版本语义项目")
@@ -945,7 +925,7 @@ def test_permission_gates(client: TestClient, db: Session) -> None:
     assert body["liveness"]["ok"] is True and body["readiness"]["db"] is True
     assert "queue" in body and "storage" in body and "metrics" in body
     # 存储 health provider 的抽样校验节（独立聚合，见 manual/developer-guide/zh-CN/modules/storage.md §失败语义）
-    assert "verify" in body["storage"] and "checked" in body["storage"]["verify"]
+    assert body["storage"]["capacity"]["free_bytes"] >= 0
 
     # 管理端审计：项目创建事件可查询（见 manual/developer-guide/zh-CN/ARCHITECTURE_CONSTITUTION.md §16 安全与审计； manual/developer-guide/zh-CN/domain-model.md §身份、权限和审计）
     resp = client.get(

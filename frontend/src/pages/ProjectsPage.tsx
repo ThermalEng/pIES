@@ -94,9 +94,6 @@ export default function ProjectsPage() {
 
   // 项目包导入对话框(打开即全新流程; 确认成功后刷新列表)
   const [importOpen, setImportOpen] = useState(false)
-  // 0.2.0 B4 删除确认强化: 须输入项目名精确匹配(替代旧空布尔 confirm)
-  const [deleteName, setDeleteName] = useState('')
-  const [deleteNameError, setDeleteNameError] = useState<string | null>(null)
 
   /** 请求序号:丢弃过期响应(切换筛选/并发刷新时)。 */
   const seqRef = useRef(0)
@@ -203,22 +200,14 @@ export default function ProjectsPage() {
   const handleDeleteConfirm = async () => {
     const target = deleteTarget
     if (!target) return
-    // 0.2.0 B4 误操作防护: 前端要求输入项目名(与 deleteTarget.name 精确匹配)
-    // 才可删除; 与后端 name 校验一致, 双重防误删
-    if (deleteName.trim() !== target.name) {
-      setDeleteNameError(t('ies.project.delete_name_mismatch'))
-      return
-    }
     const ok = await runOp(
       'delete',
       target,
-      () => deleteProject(target.id, target.name),
+      () => deleteProject(target.id),
       'ies.project.delete_ok',
     )
     if (ok) {
       setDeleteTarget(null)
-      setDeleteName('')
-      setDeleteNameError(null)
     }
   }
 
@@ -466,8 +455,6 @@ export default function ProjectsPage() {
                         loading={rowBusy && busy?.op === 'delete'}
                         onClick={() => {
                           setDeleteTarget(project)
-                          setDeleteName('')
-                          setDeleteNameError(null)
                         }}
                       >
                         {t('ies.project.delete')}
@@ -603,21 +590,6 @@ export default function ProjectsPage() {
         <Alert variant="error">
           {t('ies.project.delete_confirm', { name: deleteTarget?.name ?? '' })}
         </Alert>
-        <FormField label={t('ies.project.delete_name_label')} htmlFor="pp-delete-name" error={deleteNameError}>
-          <Input
-            id="pp-delete-name"
-            value={deleteName}
-            placeholder={deleteTarget?.name ?? ''}
-            invalid={!!deleteNameError}
-            onChange={(event) => {
-              setDeleteName(event.target.value)
-              setDeleteNameError(null)
-            }}
-            onKeyDown={(event) => {
-              if (event.key === 'Enter' && !busy?.op) void handleDeleteConfirm()
-            }}
-          />
-        </FormField>
       </Dialog>
 
       {/* 项目包导入(确认成功后刷新列表, 结果只决定对话框 done.refresh 展示;

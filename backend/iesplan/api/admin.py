@@ -18,7 +18,7 @@ admin_maintenance_actions(domain-model §快照任务结果/对象生命周期 +
 W5-admin 收尾: 本层不再直接导入 ORM 与组织 DB 写, 诊断取数与解锁
 事务(含提交)全部经 application.tasks.maintenance 用例, 审计查询
 经 application.audits 门面。解锁端点一次转交 unlock_task_case 完整
-用例(存在性/确认/状态规则归用例), 本层只留请求 DTO 与错误/响应映射。
+用例(存在性/状态规则归用例), 本层只留请求 DTO 与错误/响应映射。
 """
 
 from __future__ import annotations
@@ -81,14 +81,7 @@ def diagnostics_endpoint(
 
 
 class UnlockTaskRequest(BaseModel):
-    """管理员解锁任务请求体。
-
-    confirm: 危险操作二次确认(布尔)。解锁会把 running 任务推回 queued,
-    可能造成 Worker 竞态/重复计算, 因此须显式确认才执行(0.2.0 B2)。
-    """
-
     task_id: int
-    confirm: bool = False
 
 
 @router.post("/unlock-task", summary="管理员解锁任务")
@@ -104,22 +97,14 @@ def unlock_task_endpoint(
     (audit_log + admin_maintenance_actions)。
 
     本端点只做请求 DTO 与错误/响应映射: 一次转交完整用例
-    ``unlock_task_case``(存在性 → 确认 → 状态规则 → 解锁执行归用例)。
+    ``unlock_task_case``(存在性 → 状态规则 → 解锁执行归用例)。
     """
     decision = unlock_task_case(
-        db, task_id=payload.task_id, confirm=payload.confirm, admin_id=admin.id
+        db, task_id=payload.task_id, admin_id=admin.id
     )
     if decision.outcome == "not_found":
         raise NotFoundError(
             "任务不存在", params={"task_id": payload.task_id},
-            location={"object_type": "task", "object_id": payload.task_id},
-        )
-    if decision.outcome == "confirm_required":
-        raise ConflictError(
-            "解锁为危险维护操作, 须携带 confirm=true 确认后执行",
-            code="ADMIN-CONFIRM-REQUIRED",
-            message_key="ies.diag.admin.confirm_required",
-            params={"hint": "解锁会把 running 任务推回 queued, 确认后重新提交"},
             location={"object_type": "task", "object_id": payload.task_id},
         )
     if decision.outcome == "terminal":

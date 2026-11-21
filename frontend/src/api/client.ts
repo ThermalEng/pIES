@@ -22,7 +22,6 @@ import {
 } from '../features/results'
 import {
   exportPackage,
-  downloadExport,
 } from '../features/exports'
 import { exportTaskReport } from '../application/exportTaskReport'
 
@@ -30,13 +29,10 @@ import { exportTaskReport } from '../application/exportTaskReport'
 
 export interface ExportsApi {
   /**
-   * Excel 结果报告导出: 返回本地下载会话 id(一次下载引用, 非持久化报告)。
-   * 项目包是完整项目现场导出, 不是报告, 同样只返回本地下载会话 id。
+   * 导出报告或项目包，返回下载字节和文件名。
    */
-  excel(input: ExcelExportInput): Promise<number>
-  package(input: PackageExportInput): Promise<number>
-  /** 按本地下载会话 id 取 Blob 与建议文件名并下载。 */
-  download(downloadSessionId: number): Promise<{ blob: Blob; filename: string }>
+  excel(input: ExcelExportInput): Promise<{ blob: Blob; filename: string }>
+  package(input: PackageExportInput): Promise<{ blob: Blob; filename: string }>
 }
 
 export const api = {
@@ -67,7 +63,6 @@ export const api = {
   exports: {
     excel: exportTaskReport,
     package: exportPackage,
-    download: downloadExport,
   } satisfies ExportsApi,
 }
 

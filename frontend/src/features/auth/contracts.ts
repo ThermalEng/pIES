@@ -7,7 +7,6 @@
  *   POST /api/auth/change-password  修改密码 → {ok: true, message_key: string}
  *   POST /api/auth/refresh          会话续期 → {ok: true, expires_at: string}
  *   GET  /api/auth/me               当前用户 → UserOut
- *   POST /api/auth/confirm-takeover 确认接管 → AuthResponse
  *   POST /api/auth/register         自助注册 → UserOut
  *   GET  /api/auth/public-settings  公开设置(无需认证) → PublicSettings
  */
@@ -36,7 +35,6 @@ export interface AuthResponseDto {
   token: string
   token_type: string
   user: UserOutDto
-  needs_takeover_confirm: boolean
 }
 
 /** 登出响应 DTO(POST /api/auth/logout)。 */
@@ -57,7 +55,6 @@ export interface ChangePasswordResponseDto {
 }
 
 /** 确认接管响应 DTO(AuthResponse)。 */
-export type ConfirmTakeoverResponseDto = AuthResponseDto
 
 /** 自助注册请求体(POST /api/auth/register)。 */
 export interface RegisterRequestDto {

@@ -130,26 +130,12 @@ class UsersListResponse(BaseModel):
     users: list[AdminUserOut]
 
 
-class UserDeleteConfirmRequest(BaseModel):
-    """删除账号确认请求体(0.2.0 B1 误操作防护)。
-
-    删除账号会级联软删其拥有的全部项目且不可恢复, 必须显式确认:
-    - confirm 必须为 True, 否则 400;
-    - confirm_token 由 POST /users/{id}/delete-preview 签发, 绑定目标用户与
-      预览时的项目清单; 缺失/过期/清单变化均拒绝执行(需重新预览)。
-    """
-
-    confirm: bool = False
-    confirm_token: str = ""
-
-
 class AuthResponse(BaseModel):
-    """登录/接管响应: 窗口凭证 + 用户信息。"""
+    """登录响应: 窗口凭证 + 用户信息。"""
 
     token: str
     token_type: str = "bearer"
     user: UserOut
-    needs_takeover_confirm: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -195,7 +181,7 @@ def get_auth_context(request: Request, db: DbSession) -> AuthContext:
     last_seen_at 刷新全部经 ``resolve_auth_context`` 完整用例。
     """
     token = _extract_token(request)
-    user, session = identity.resolve_auth_context(db, token=token, path=request.url.path)
+    user, session = identity.resolve_auth_context(db, token=token)
     return AuthContext(db=db, user=user, session=session)
 
 
@@ -256,23 +242,15 @@ def login(
     response: Response,
     db: DbSession,
 ) -> AuthResponse:
-    """登录: 校验密码 + 登录限速, 创建单活动窗口会话。
-
-    若该账号已有活动窗口, 旧窗口被撤销、新会话以 takeover_pending 创建
-    (确认接管前无业务权限), 响应 needs_takeover_confirm=True,
-    前端提示确认接管(domain-model §身份权限审计)。
-
-    本端点只做传输适配: 一次转交 ``login_case`` 完整用例(返回身份展示
-    视图), Cookie 写入与响应组装归本层。
-    """
+    """登录并签发会话。"""
     ip = _client_ip(request)
     ua = request.headers.get("user-agent")
-    view, token, displaced = identity.login_case(
+    view, token = identity.login_case(
         db, username=req.username, password=req.password, device=req.device,
         ip=ip, user_agent=ua,
     )
     _set_session_cookie(response, request, token)
-    return AuthResponse(token=token, user=_user_out(view), needs_takeover_confirm=displaced)
+    return AuthResponse(token=token, user=_user_out(view))
 
 
 @router.post("/logout", summary="登出(撤销当前窗口会话)")
@@ -326,32 +304,6 @@ def me(ctx: AuthCtx) -> UserOut:
     本层只做纯 DTO 映射。
     """
     return _user_out(identity.get_user_view_case(ctx.db, user_id=ctx.user.id))
-
-
-@router.post("/confirm-takeover", response_model=AuthResponse, summary="确认接管")
-def confirm_takeover(
-    request: Request,
-    response: Response,
-    ctx: AuthCtx,
-) -> AuthResponse:
-    """确认接管(domain-model §身份权限审计): 当前待接管会话直接转为 active。
-
-    不轮换凭证: 客户端既有 Cookie/Bearer 凭证即为最终凭证, 确认后立即
-    拥有业务权限(其余 pending/active 会话被撤销)。返回当前窗口凭证。
-
-    本端点一次转交 ``confirm_takeover_case`` 完整用例(确认 → 展示视图),
-    凭证提取/Cookie 写入归本层。
-    """
-    token = _extract_token(request) or ""
-    view = identity.confirm_takeover_case(
-        ctx.db,
-        user=ctx.user,
-        session=ctx.session,
-        ip=_client_ip(request),
-        user_agent=request.headers.get("user-agent"),
-    )
-    _set_session_cookie(response, request, token)
-    return AuthResponse(token=token, user=_user_out(view), needs_takeover_confirm=False)
 
 
 @router.post("/register", response_model=UserOut, summary="自助注册(默认关闭, 仅工程师)")
@@ -462,49 +414,25 @@ def admin_reactivate_user(
 
 @router.post(
     "/users/{user_id}/delete-preview",
-    summary="删除账号预告(管理员): 返回将受影响项目清单 + 确认令牌",
+    summary="删除账号预告(管理员): 返回将受影响项目清单",
 )
 def admin_delete_user_preview(
     user_id: int, request: Request, db: DbSession, admin: CurrentAdmin
 ) -> dict:
-    """删除账号预告(管理员, 0.2.0 B1 误操作防护)。
-
-    返回该账号拥有的项目清单(名称/id/数量)并签发签名确认令牌(10 分钟窗口),
-    供管理员确认影响范围后再执行 DELETE /users/{user_id}。执行删除必须携带
-    confirm=true + 该令牌; 预览后清单变化则拒绝执行(需重新预览)。
-
-    管理员身份由依赖链确权(CurrentAdmin), 体内不再二次校验;
-    本端点一次转交 ``preview_user_delete_case`` 完整用例(目标预检 → 预览)。
-    """
     return identity.preview_user_delete_case(db, admin=admin, target_id=user_id)
 
 
-@router.delete("/users/{user_id}", summary="删除账号(管理员, 需确认+预告, 级联删除其项目)")
+@router.delete("/users/{user_id}", summary="删除账号(管理员, 级联删除其项目)")
 def admin_delete_user(
     user_id: int,
     request: Request,
     db: DbSession,
     admin: CurrentAdmin,
-    payload: UserDeleteConfirmRequest | None = None,
 ) -> dict:
-    """删除账号(管理员): 该账号拥有的项目一并删除(0.2.0 B1 误操作防护)。
-
-    - 必须携带 {"confirm": true, "confirm_token": "<preview 签发>"} 显式确认,
-      否则 400(删除账号会级联软删其拥有的全部项目且不可恢复);
-    - confirm_token 由 POST /users/{id}/delete-preview 预览签发, 绑定目标用户
-      与预览时的项目清单; 缺失/过期/篡改/清单变化均拒绝执行;
-    - 不能删除自己 / 系统账号;
-    - 目标账号置 disabled, 全部会话/凭证撤销, 其拥有的项目全部软删。
-
-    管理员身份由依赖链确权(CurrentAdmin), 体内不再二次校验;
-    本端点一次转交 ``delete_user_case`` 完整用例(目标预检 → 确认 → 级联删除)。
-    """
     result = identity.delete_user_case(
         db,
         admin=admin,
         target_id=user_id,
-        confirm=bool(payload and payload.confirm),
-        confirm_token=(payload.confirm_token if payload else ""),
         ip=_client_ip(request),
         user_agent=request.headers.get("user-agent"),
     )

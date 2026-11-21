@@ -4,7 +4,7 @@
  * 能力(复用既有 API 与消息键):
  *   - 用户列表 + 停用/重新启用 + 删除账号
  *     (删除账号会级联删除该账号拥有的全部项目且不可恢复, 采用「预告→确认」两步:
- *      先 preview 返回将受影响项目清单 + 确认令牌, 确认时携带令牌执行删除);
+ *      先 preview 返回将受影响项目清单, 确认时携带令牌执行删除);
  *   - 重置密码: 管理员为用户签发临时密码(强制改密), 目标用户全部会话失效。
  */
 
@@ -63,7 +63,7 @@ export default function AdminUsersPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  /** 请求删除预告(0.2.0 B1): 返回将受影响项目清单 + 确认令牌, 展示在确认对话框。 */
+  /** 请求删除预告(0.2.0 B1): 返回将受影响项目清单, 展示在确认对话框。 */
   const handlePreviewDeleteUser = async (user: AdminUserRow) => {
     setDeleteTarget(user)
     setDeleteError(null)
@@ -86,7 +86,7 @@ export default function AdminUsersPage() {
     setUsersError(null)
     setUsersNotice(null)
     try {
-      const result = await deleteUser(deleteTarget.id, deletePreview.confirm_token)
+      const result = await deleteUser(deleteTarget.id)
       setUsersNotice(t('ies.admin.user_deleted', { username: deleteTarget.username, count: result.deleted_projects }))
       setDeleteTarget(null)
       setDeletePreview(null)
@@ -349,7 +349,7 @@ export default function AdminUsersPage() {
         ) : null}
       </Dialog>
 
-      {/* 删除账号确认(0.2.0 B1 误操作防护): 先预告影响范围, 再携带确认令牌删除 */}
+      {/* 删除账号确认：先展示受影响项目 */}
       <Dialog
         open={deleteTarget !== null}
         onClose={handleCancelDelete}

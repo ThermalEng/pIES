@@ -276,14 +276,10 @@ def _resolve_queue_mode() -> str:
 
 
 def _configure_queue_mode(mode: str) -> None:
-    """把队列模式扇出给各接收模块(backend 实现选择只归组合根)。"""
-    from iesplan import identity as identity_module
-    from iesplan.api import limits as limits_module
+    """配置任务队列模式。"""
     from iesplan.tasks import queue as queue_module
 
     queue_module.configure_queue_mode(mode)
-    limits_module.configure_queue_mode(mode)
-    identity_module.configure_queue_mode(mode)
 
 
 def collect_trigger_statements() -> tuple[str, ...]:
@@ -346,7 +342,7 @@ def _assemble(
     """
     from iesplan import db as db_module
 
-    # 0. 队列/限速后端选型(组合根唯一环境解释点): 一次解析部署环境,
+    # 0. 队列后端选型(组合根唯一环境解释点): 一次解析部署环境,
     #    扇出给各接收模块; 业务模块只接收传入配置, 不再自行解释环境选型。
     _configure_queue_mode(_resolve_queue_mode())
     # 1. 存储适配能力(公开句柄)

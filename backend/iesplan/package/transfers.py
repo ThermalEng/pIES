@@ -26,16 +26,11 @@ HMAC 下载授权与格式常量。财务/规划配置读经 configuration 域�
 
 from __future__ import annotations
 
-import base64
-import hashlib
-import hmac
 import io
 import json
 import zipfile
-from datetime import UTC, datetime
 from typing import Any
 
-from iesplan.config import settings
 from iesplan.core.diagnostics import SEVERITY_ERROR
 from iesplan.core.errors import AppError
 
@@ -49,8 +44,6 @@ PACKAGE_FORMAT_VERSION = "1.0.0"
 PACKAGE_MEDIA_TYPE = "application/zip"
 #: Excel 报告媒体类型
 EXCEL_MEDIA_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-#: 下载授权有效期(秒, 短期单对象授权, 默认 5 分钟)
-DOWNLOAD_TOKEN_TTL_SECONDS = 300
 #: 包内禁止出现的清单键(账号/权限/会话/全局配置/密钥不得随包导出，见 domain-model §对象生命周期)
 FORBIDDEN_MANIFEST_KEYS: frozenset[str] = frozenset(
     {"accounts", "permissions", "sessions", "global_config", "secrets"}
@@ -93,15 +86,6 @@ class ImportValidationError(AppError):
         )
 
 
-class DownloadTokenError(AppError):
-    """下载授权无效/过期(HTTP 400)。"""
-
-    code = "EXPORT-TOKEN-001"
-    http_status = 400
-    severity = SEVERITY_ERROR
-    message_key = "ies.diag.export.token_invalid"
-
-
 class PackageSizeError(AppError):
     """项目包超限(上传字节/条目数/单条目解压大小/总解压大小, HTTP 413)。
 
@@ -137,80 +121,8 @@ MAX_PACKAGE_ENTRY_BYTES: int = 512 * 1024 * 1024
 MAX_PACKAGE_TOTAL_BYTES: int = 4 * 1024 * 1024 * 1024
 
 
-def _token_sign(payload: str) -> str:
-    """HMAC-SHA256 签名(密钥取 settings.secret_key)。"""
-    return hmac.new(settings.secret_key.encode("utf-8"), payload.encode("utf-8"), hashlib.sha256).hexdigest()
-
-
-def create_download_token(
-    object_id: int,
-    kind: str,
-    *,
-    project_id: int,
-    user_id: int,
-    ttl_seconds: int = DOWNLOAD_TOKEN_TTL_SECONDS,
-) -> str:
-    """签发短期单对象下载授权 token(绑定项目与签发用户，架构宪法 §16)。
-
-    token = base64url(payload) + "." + hmac 签名; payload 含 object_id/kind/
-    project_id/user_id/exp, 缺省 5 分钟过期。下载时必须验证 token 绑定的项目
-    与当前会话用户一致, 防止跨项目对象下载。
-    """
-    exp = int(datetime.now(UTC).timestamp()) + max(int(ttl_seconds), 1)
-    payload = base64.urlsafe_b64encode(
-        json.dumps(
-            {
-                "object_id": int(object_id),
-                "kind": str(kind),
-                "project_id": int(project_id),
-                "user_id": int(user_id),
-                "exp": exp,
-            },
-            sort_keys=True,
-        ).encode("utf-8")
-    ).decode("ascii")
-    return f"{payload}.{_token_sign(payload)}"
-
-
-def verify_download_token(token: str, *, expected_kind: str | None = None) -> dict[str, Any]:
-    """校验下载授权 token: 格式/签名/过期, 返回 {object_id, kind, project_id, user_id}。
-
-    签名比较使用 hmac.compare_digest(常量时间, 防时序侧信道);
-    签名不符/格式非法/已过期一律抛 DownloadTokenError。
-    """
-    if not isinstance(token, str) or "." not in token:
-        raise DownloadTokenError("", params={"reason": "bad_token"})
-    payload, sig = token.rsplit(".", 1)
-    if not hmac.compare_digest(_token_sign(payload), sig):
-        raise DownloadTokenError("", params={"reason": "bad_signature"})
-    try:
-        data = json.loads(base64.urlsafe_b64decode(payload.encode("ascii")))
-    except (ValueError, UnicodeDecodeError) as exc:
-        raise DownloadTokenError("", params={"reason": "bad_payload"}) from exc
-    if not isinstance(data, dict) or "object_id" not in data or "exp" not in data:
-        raise DownloadTokenError("", params={"reason": "bad_payload"})
-    if int(data["exp"]) < int(datetime.now(UTC).timestamp()):
-        raise DownloadTokenError("", params={"reason": "expired"})
-    if expected_kind is not None and data.get("kind") != expected_kind:
-        raise DownloadTokenError("", params={"reason": "kind_mismatch", "expected": expected_kind})
-    # 旧版(未绑定项目/用户)token 一律视为无效
-    if data.get("project_id") is None or data.get("user_id") is None:
-        raise DownloadTokenError("", params={"reason": "bad_payload"})
-    return {
-        "object_id": int(data["object_id"]),
-        "kind": data.get("kind"),
-        "project_id": int(data["project_id"]),
-        "user_id": int(data["user_id"]),
-    }
-
-
-# ---------------------------------------------------------------------------
-# 项目包导出(架构宪法 §12、domain-model §对象生命周期)
-# ---------------------------------------------------------------------------
-
-
 class PackageExport:
-    """项目包导出结果(对象记录 + 下载授权 + 清单)。"""
+    """项目包导出结果（对象与清单）。"""
 
     __slots__ = (
         "object_id",
@@ -219,8 +131,6 @@ class PackageExport:
         "media_type",
         "file_name",
         "manifest",
-        "token",
-        "expires_at",
     )
 
     def __init__(
@@ -232,8 +142,6 @@ class PackageExport:
         media_type: str,
         file_name: str,
         manifest: dict,
-        token: str,
-        expires_at: datetime,
     ) -> None:
         self.object_id = object_id
         self.oid = oid
@@ -241,8 +149,6 @@ class PackageExport:
         self.media_type = media_type
         self.file_name = file_name
         self.manifest = manifest
-        self.token = token
-        self.expires_at = expires_at
 
     def to_dict(self) -> dict[str, Any]:
         """API 序列化(不含包内容)。"""
@@ -252,8 +158,6 @@ class PackageExport:
             "size_bytes": self.size_bytes,
             "media_type": self.media_type,
             "file_name": self.file_name,
-            "token": self.token,
-            "expires_at": self.expires_at.isoformat() if self.expires_at else None,
             "manifest": self.manifest,
         }
 
@@ -446,12 +350,8 @@ def parse_evidence_content(raw: bytes | None) -> dict | None:
 
 __all__ = [
     "ImportValidationError",
-    "DownloadTokenError",
     "PackageExport",
     "PACKAGE_FORMAT_VERSION",
-    "DOWNLOAD_TOKEN_TTL_SECONDS",
-    "create_download_token",
-    "verify_download_token",
     "parse_package",
     "parse_evidence_content",
     "bound_dataset_ids",

@@ -117,7 +117,7 @@ def test_archive_unarchive_delete_flow(engine: Engine, db_session: Session) -> N
     assert {p["name"] for p in visible} == {"W2A 生命周期"}
     assert lifecycle_uc.list_visible_projects(db_session, owner, status="archived") == []
 
-    lifecycle_uc.delete_project(db_session, owner, pid, confirm=True, name="W2A 生命周期")
+    lifecycle_uc.delete_project(db_session, owner, pid)
     with _new_session(engine) as fresh:
         assert lifecycle_uc.list_visible_projects(fresh, owner) == []
         with pytest.raises(NotFoundError):

@@ -16,12 +16,8 @@ from __future__ import annotations
 
 import ipaddress
 import logging
-import os
 import re
 import secrets
-import threading
-import time
-from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, Final
@@ -37,7 +33,6 @@ from iesplan.identity.contracts import (
     SESSION_STATUS_ACTIVE,
     SESSION_STATUS_EXPIRED,
     SESSION_STATUS_REVOKED,
-    SESSION_STATUS_TAKEOVER_PENDING,
     USERNAME_RE,
     USER_STATUS_ACTIVE,
     USER_STATUS_DISABLED,
@@ -48,11 +43,8 @@ from iesplan.identity.contracts import (
     BadOldPasswordError,
     BadRequestError,
     CredentialRecord,
-    DeleteConfirmRequiredError,
     ExternalAuthError,
-    ForcePasswordChangeError,
     IdentityConflictError,
-    LockedError,
     LoginFailedError,
     RegistrationDisabledError,
     RoleRecord,
@@ -132,14 +124,9 @@ __all__ = [
     "BadOldPasswordError",
     "BadRequestError",
     "CredentialRecord",
-    "DeleteConfirmRequiredError",
     "ExternalAuthError",
-    "ForcePasswordChangeError",
     "IdentityConflictError",
-    "LOCKOUT_SECONDS",
-    "LockedError",
     "LoginFailedError",
-    "MAX_LOGIN_FAILURES",
     "OidcClient",
     "ROLE_ADMIN",
     "ROLE_ENGINEER",
@@ -148,7 +135,6 @@ __all__ = [
     "SESSION_STATUS_ACTIVE",
     "SESSION_STATUS_EXPIRED",
     "SESSION_STATUS_REVOKED",
-    "SESSION_STATUS_TAKEOVER_PENDING",
     "SamePasswordError",
     "SessionInvalidError",
     "USER_STATUS_ACTIVE",
@@ -168,7 +154,6 @@ __all__ = [
     "bump_credential_version",
     "callback_url",
     "clean_ip",
-    "clear_login_failures",
     "create_session",
     "create_user",
     "ensure_role",
@@ -188,18 +173,13 @@ __all__ = [
     "get_user_by_username",
     "grant_role",
     "heartbeat_session",
-    "is_login_locked",
     "is_oidc_enabled",
     "list_active_sessions",
     "list_users",
     "login_block_reason",
     "new_session_expiry",
-    "plan_login_session",
     "provision_user",
     "record_auth_event",
-    "record_login_failure",
-    "require_takeover_confirmable",
-    "reset_login_rate_limit",
     "revoke_credentials",
     "revoke_role",
     "roles_by_user",
@@ -547,191 +527,6 @@ def validate_new_password(password: str) -> tuple[bool, str]:
 
 
 # ---------------------------------------------------------------------------
-# 登录限速(进程内存; 唯一权威, 应用层认证编排经此复用)
-#
-# 局限说明(H-03): 内存限速为单进程状态 —— 多 Uvicorn Worker 下失败计数被
-# 分散到各进程, 进程重启后锁定状态丢失。生产多 Worker 部署应使用 Redis 原子
-# 计数(见下方 _rate_redis); Redis 不可用(依赖缺失/连接失败/运行期错误)时
-# 自动降级为内存限速并记 warning 日志, 不阻断登录功能。
-# ---------------------------------------------------------------------------
-
-try:
-    import redis as _redis_module
-
-    _REDIS_IMPORT_OK = True
-except Exception:  # pragma: no cover - 环境缺 redis 依赖时降级内存限速
-    _redis_module = None  # type: ignore[assignment]
-    _REDIS_IMPORT_OK = False
-
-#: Redis 登录限速键前缀
-_RATE_KEY_PREFIX = "iesplan:ratelimit:login"
-#: 惰性初始化的 Redis 客户端(单例; 连接失败置 None 后不再重试, 保持内存降级)
-_rate_redis_client: Any = None
-
-#: 登录限速: 同一用户名最大连续失败次数
-MAX_LOGIN_FAILURES: Final[int] = 5
-#: 锁定时长(秒): 达到失败上限后锁定 15 分钟
-LOCKOUT_SECONDS: Final[int] = 15 * 60
-
-#: bootstrap 传入的队列模式覆盖(None = 未配置, 回退环境变量默认行为)。
-#: 后端实现选择只归 bootstrap; 本模块只接收传入配置, 不自行解释环境选型。
-_queue_mode_override: str | None = None
-
-
-def configure_queue_mode(mode: str | None) -> None:
-    """接收 bootstrap 传入的队列模式(memory 时限速直接走进程内存)。
-
-    由 bootstrap 在装配期调用; 默认行为不变(未配置时仍读 IESPLAN_QUEUE)。
-    """
-    global _queue_mode_override, _rate_redis_client
-    _queue_mode_override = mode.lower() if isinstance(mode, str) else None
-    _rate_redis_client = None
-
-
-def _queue_mode_is_memory() -> bool:
-    """队列是否为内存模式: bootstrap 传入配置优先, 否则环境变量(默认 auto)。"""
-    if _queue_mode_override is not None:
-        return _queue_mode_override == "memory"
-    return os.environ.get("IESPLAN_QUEUE", "auto").lower() == "memory"
-
-
-def _rate_redis() -> Any | None:
-    """尝试获取 Redis 客户端用于跨 Worker 限速; 不可用返回 None(降级内存)。
-
-    内存队列模式(测试/单机)时直接跳过 Redis, 保持进程内限速,
-    避免测试环境共享 Redis 键造成跨测试/跨进程状态污染;
-    超时/连接失败/运行期错误一律捕获, 由调用方回退内存限速。
-    """
-    global _rate_redis_client
-    if _queue_mode_is_memory():
-        return None
-    if _rate_redis_client is not None:
-        return _rate_redis_client
-    if not _REDIS_IMPORT_OK:
-        return None
-    try:
-        client = _redis_module.Redis.from_url(
-            settings.redis_url,
-            decode_responses=True,
-            socket_connect_timeout=1.0,
-            socket_timeout=2.0,
-        )
-        client.ping()  # 探测连接, 失败抛异常
-        _rate_redis_client = client
-        logger.warning("登录限速使用 Redis 后端(跨 Worker 共享)")
-    except Exception:  # noqa: BLE001 - 降级内存限速, 不阻断登录
-        logger.warning("Redis 不可用, 登录限速降级为进程内存(单进程有效)")
-        _rate_redis_client = None
-    return _rate_redis_client
-
-
-def _rate_key(username: str) -> str:
-    """Redis 限速键(用户名小写化; TTL 即锁定期, INCR 幂等)。"""
-    return f"{_RATE_KEY_PREFIX}:{(username or '').strip().lower()}"
-
-
-def _redis_is_locked(username: str) -> bool:
-    """Redis 限速判定: 计数达到上限即锁定(键 TTL 过期后自动解除)。"""
-    r = _rate_redis()
-    if r is None:
-        return False
-    try:
-        count = r.get(_rate_key(username))
-        return count is not None and int(count) >= MAX_LOGIN_FAILURES
-    except Exception:  # noqa: BLE001 - 运行期错误降级内存
-        return False
-
-
-def _redis_record_failure(username: str) -> None:
-    """Redis 记录一次失败: INCR 计数, 键 TTL = 锁定时长(滑动重置)。"""
-    r = _rate_redis()
-    if r is None:
-        return
-    try:
-        r.incr(_rate_key(username))
-        r.expire(_rate_key(username), LOCKOUT_SECONDS)
-    except Exception:  # noqa: BLE001 - 运行期错误降级内存
-        pass
-
-
-def _redis_clear(username: str) -> None:
-    """登录成功后清除 Redis 限速键。"""
-    r = _rate_redis()
-    if r is None:
-        return
-    try:
-        r.delete(_rate_key(username))
-    except Exception:  # noqa: BLE001
-        pass
-
-
-_LOGIN_FAILURES: dict[str, list[float]] = {}
-_LOGIN_LOCKED_UNTIL: dict[str, float] = {}
-_RATE_LOCK = threading.RLock()
-
-
-def is_login_locked(username: str) -> bool:
-    """是否处于锁定期(Redis 优先, 降级内存); 锁定时间已过则顺带清理状态。"""
-    if _redis_is_locked(username):
-        return True
-    until = _LOGIN_LOCKED_UNTIL.get(username)
-    if until is None:
-        return False
-    if time.monotonic() < until:
-        return True
-    with _RATE_LOCK:
-        _LOGIN_LOCKED_UNTIL.pop(username, None)
-        _LOGIN_FAILURES.pop(username, None)
-    return False
-
-
-def record_login_failure(username: str) -> None:
-    """记录一次登录失败(Redis 优先, 降级内存);
-    时间窗(锁定时长)内累计达到上限则触发锁定。"""
-    _redis_record_failure(username)
-    with _RATE_LOCK:
-        if is_login_locked(username):
-            return
-        now = time.monotonic()
-        window = [t for t in _LOGIN_FAILURES.get(username, []) if now - t < LOCKOUT_SECONDS]
-        window.append(now)
-        if len(window) >= MAX_LOGIN_FAILURES:
-            _LOGIN_LOCKED_UNTIL[username] = now + LOCKOUT_SECONDS
-            _LOGIN_FAILURES.pop(username, None)
-        else:
-            _LOGIN_FAILURES[username] = window
-
-
-def clear_login_failures(username: str) -> None:
-    """登录成功后清除该用户名限速状态(Redis + 内存)。"""
-    _redis_clear(username)
-    with _RATE_LOCK:
-        _LOGIN_FAILURES.pop(username, None)
-        _LOGIN_LOCKED_UNTIL.pop(username, None)
-
-
-def reset_login_rate_limit(username: str | None = None) -> None:
-    """清空登录限速状态(测试与运维恢复用; Redis 键一并清除)。
-
-    参数:
-        username: 为空时清空全部用户名; 否则只清指定用户名。
-    """
-    r = _rate_redis()
-    if r is not None and username is not None:
-        try:
-            r.delete(_rate_key(username))
-        except Exception:  # noqa: BLE001
-            pass
-    with _RATE_LOCK:
-        if username is None:
-            _LOGIN_FAILURES.clear()
-            _LOGIN_LOCKED_UNTIL.clear()
-        else:
-            _LOGIN_FAILURES.pop(username, None)
-            _LOGIN_LOCKED_UNTIL.pop(username, None)
-
-
-# ---------------------------------------------------------------------------
 # 会话与账号状态规则(唯一权威; 应用层编排经此判定, 状态写入与事务归调用方)
 # ---------------------------------------------------------------------------
 
@@ -751,37 +546,3 @@ def login_block_reason(user: UserRecord) -> str | None:
     if user.is_system:
         return "system_account"
     return None
-
-
-def plan_login_session(
-    previous: Sequence[WindowSessionRecord],
-) -> tuple[list[WindowSessionRecord], WindowSessionRecord | None, bool, str]:
-    """单活动窗口规则(宪法 §16 + 领域模型 §身份、权限和审计)。
-
-    残留的 takeover_pending 会话(更早接管流程遗留; 部分唯一索引每用户至多
-    一条 pending)与既有 active 会话一并撤销 —— 新会话以 takeover_pending
-    创建, 避免同时存在两条 pending 触发唯一索引冲突(部分唯一索引每用户
-    至多一条 active)。
-
-    返回 (待撤销会话, 被取代的 active 会话或 None, 是否触发接管, 新会话初始状态)。
-    本函数只做纯判定, 不写库: 状态写入、审计与事务由调用方(如应用用例)完成。
-    """
-    pending = [s for s in previous if s.status == SESSION_STATUS_TAKEOVER_PENDING]
-    active = next((s for s in previous if s.status == SESSION_STATUS_ACTIVE), None)
-    targets = [*pending] + ([active] if active is not None else [])
-    displaced = bool(targets)
-    new_status = SESSION_STATUS_TAKEOVER_PENDING if displaced else SESSION_STATUS_ACTIVE
-    return targets, active, displaced, new_status
-
-
-def require_takeover_confirmable(session: WindowSessionRecord | None) -> WindowSessionRecord:
-    """接管确认前置规则: 会话须为 takeover_pending/active, 否则抛 SessionInvalidError。
-
-    并发防御的一部分: 调用方须传入重读后的最新行(确认前被新登录撤销的会话不再恢复)。
-    """
-    if session is None or session.status not in (
-        SESSION_STATUS_TAKEOVER_PENDING,
-        SESSION_STATUS_ACTIVE,
-    ):
-        raise SessionInvalidError()
-    return session

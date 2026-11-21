@@ -55,17 +55,6 @@ export async function changePassword(input: ChangePasswordRequestDto): Promise<v
 }
 
 /**
- * 确认接管: 将当前待接管会话转为 active。
- */
-export async function confirmTakeover(): Promise<LoginResult> {
-  const res = await request<AuthResponseDto>('/auth/confirm-takeover', {
-    method: 'POST',
-  })
-  setSession()
-  return mapAuthResponseDtoToModel(res)
-}
-
-/**
  * 自助注册(注册开关开启时可用)。
  */
 export async function register(input: RegisterRequestDto): Promise<User> {

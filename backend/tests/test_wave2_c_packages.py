@@ -204,7 +204,7 @@ def test_export_package_usecase_commits(
 
     result = packages_uc.export_package(db, user, pid)
     assert result.manifest["format_version"] == "1.0.0"
-    assert result.token
+    assert result.object_id > 0
 
     # 事务提交证明: 新会话可读出包对象
     with _fresh_db(engine) as fresh:
@@ -622,12 +622,3 @@ def test_export_excel_consumes_frozen_monthly_demand_with_units_and_ids(
     assert "需量 0" in summary
     overview = "\n".join(str(c.value) for row in wb["报告总览"] for c in row)
     assert "计算任务 / Task ID" in overview
-
-
-
-def test_download_token_helpers_match_old() -> None:
-    token = packages_uc.create_download_token(7, "package", project_id=3, user_id=5)
-    parsed = packages_uc.verify_download_token(token, expected_kind="package")
-    assert parsed == {"object_id": 7, "kind": "package", "project_id": 3, "user_id": 5}
-    old_parsed = package_domain.verify_download_token(token, expected_kind="package")
-    assert old_parsed == parsed

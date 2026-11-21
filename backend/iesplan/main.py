@@ -126,25 +126,12 @@ def _build_health_router() -> APIRouter:
     return router
 
 
-def _setup_middleware(app: FastAPI) -> None:
-    """注册资源使用边界中间件(0.2.0 A4): 全局限流(按 IP)。
-
-    只限流高成本端点与合理全局阈值; 健康/就绪探针与登录接口豁免
-    (登录已有用户名级限速)。关闭开关时透明放行。
-    """
-    from iesplan.api.limits import RateLimitMiddleware
-
-    app.add_middleware(RateLimitMiddleware)
-
-
 def _setup_cors(app: FastAPI) -> None:
     """配置 CORS: 允许同域/本地开发来源携带凭据访问。
 
     来源列表可用环境变量 IESPLAN_CORS_ORIGINS (逗号分隔) 覆盖。
-    CSRF 中间件信任同一来源清单(iesplan.api.csrf.cors_origin_list),
-    保证「允许跨域携带凭据的来源」与「CSRF 校验信任的来源」一致。
     """
-    from iesplan.api.csrf import cors_origin_list
+    from iesplan.api.cors import cors_origin_list
 
     app.add_middleware(
         CORSMiddleware,
@@ -294,11 +281,7 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
     _setup_cors(application)
-    _setup_middleware(application)
-    # CSRF 防护: Cookie 会话状态变更请求的双源校验(切片 A2)
-    from iesplan.api.csrf import CSRFOriginGuardMiddleware, build_trusted_origins
 
-    application.add_middleware(CSRFOriginGuardMiddleware, trusted_origins=build_trusted_origins())
     # 挂载 API 路由: 健康检查 + 全部业务路由
     application.include_router(_build_health_router())
     _register_business_routers(application)

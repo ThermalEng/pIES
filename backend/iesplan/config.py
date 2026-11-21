@@ -38,7 +38,6 @@ DEFAULT_DEPLOY_CONFIG_FILE = Path(__file__).resolve().parent.parent / "deploy" /
 _ALLOWED_DEPLOY_SECTIONS: dict[str, frozenset[str]] = {
     "worker": frozenset({"compute_slots", "io_slots"}),
     "session": frozenset({"ttl_minutes"}),
-    "rate_limit": frozenset({"enabled", "window_seconds", "max_requests", "exempt_paths"}),
     "solver": frozenset({
         "max_timeout_seconds",
         "max_memory_mib",
@@ -55,10 +54,6 @@ _APP_TOML_MAP: tuple[tuple[str, str, str], ...] = (
     ("compute_slots", "worker", "compute_slots"),
     ("io_slots", "worker", "io_slots"),
     ("session_ttl_minutes", "session", "ttl_minutes"),
-    ("rate_limit_enabled", "rate_limit", "enabled"),
-    ("rate_limit_window_seconds", "rate_limit", "window_seconds"),
-    ("rate_limit_max_requests", "rate_limit", "max_requests"),
-    ("rate_limit_exempt_paths", "rate_limit", "exempt_paths"),
     ("solver_max_timeout_seconds", "solver", "max_timeout_seconds"),
     ("solver_max_memory_mib", "solver", "max_memory_mib"),
     ("solver_max_cpu_cores", "solver", "max_cpu_cores"),
@@ -149,14 +144,6 @@ class Settings(BaseSettings):
     io_slots: int = Field(exclude=True, gt=0)
     #: 会话 TTL(分钟)
     session_ttl_minutes: int = Field(exclude=True, gt=0)
-    #: 全局限流开关
-    rate_limit_enabled: bool = Field(exclude=True)
-    #: 全局限流窗口(秒); 单 IP 在窗口内超过上限即 429
-    rate_limit_window_seconds: int = Field(exclude=True, gt=0)
-    #: 全局限流每 IP 请求上限(窗口内)
-    rate_limit_max_requests: int = Field(exclude=True, gt=0)
-    #: 全局限流豁免路径(逗号分隔)
-    rate_limit_exempt_paths: str = Field(exclude=True)
     #: 求解单次超时上限(秒)：策略上限，非单次计算默认请求
     solver_max_timeout_seconds: int = Field(exclude=True, gt=0)
     #: 求解内存允许上限(MiB)：策略上限，非硬件保证

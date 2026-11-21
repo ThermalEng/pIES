@@ -19,12 +19,6 @@ io_slots = 2
 # 会话 TTL（分钟）
 ttl_minutes = 480
 
-[rate_limit]
-enabled = true
-window_seconds = 60
-max_requests = 1000
-exempt_paths = "/api/healthz,/api/readyz,/api/auth/login"
-
 [solver]
 # 单次求解上限 48 小时（秒）
 max_timeout_seconds = 172800

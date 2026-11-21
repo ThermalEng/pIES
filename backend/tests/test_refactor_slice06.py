@@ -105,13 +105,13 @@ def test_project_delete_flow_through_tasks_domain(db: Session) -> None:
     db.commit()  # 用例拥有事务: 先提交测试前置行, 阻断回滚才不波及前置数据
 
     with pytest.raises(ConflictError):
-        projects_uc.delete_project(db, user, project.id, confirm=True, name="slice6-del")
+        projects_uc.delete_project(db, user, project.id)
     # 阻断时整体回滚(原子删除, 无半状态残留): 排队与运行中任务均保持原状态
     assert tasks_domain.get_task(db, queued).status == "queued"
     assert tasks_domain.get_task(db, running).status == "running"
 
     tasks_domain.set_task_status(db, running, "failed")
-    projects_uc.delete_project(db, user, project.id, confirm=True, name="slice6-del")
+    projects_uc.delete_project(db, user, project.id)
     assert project_domain.get_project(db, project.id) is None  # 软删后不可见
 
 

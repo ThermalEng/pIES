@@ -28,7 +28,7 @@ import { applyScheme, listVersions } from '../features/project-versions'
 import { getProject } from '../features/projects'
 import { downloadBlob } from '../shared/http'
 import { exportTaskReport, isNoAssessmentError } from '../application/exportTaskReport'
-import { exportPackage as createPackageExport, downloadExport } from '../features/exports'
+import { exportPackage as createPackageExport } from '../features/exports'
 import { getResult, listAssessments, assess, select, readHourly, FinancialRelations, FinancialTransactions, FinancialComparison } from '../features/results'
 import type { HourlySeriesMeta } from '../features/results'
 import { translate, translateError, useI18n } from '../i18n'
@@ -791,8 +791,7 @@ export default function ResultsPage() {
         include_diagnostics: true,
         lang: exportLang,
       }
-      const downloadSessionId = await exportTaskReport(input)
-      const { blob, filename } = await downloadExport(downloadSessionId)
+      const { blob, filename } = await exportTaskReport(input)
       downloadBlob(blob, filename)
       setExportOk(true)
     } catch (err) {
@@ -811,8 +810,7 @@ export default function ResultsPage() {
     setExportOk(false)
     setExportBusy('package')
     try {
-      const downloadSessionId = await createPackageExport({ project_id: projectId, include_versions: true })
-      const { blob, filename } = await downloadExport(downloadSessionId)
+      const { blob, filename } = await createPackageExport({ project_id: projectId, include_versions: true })
       downloadBlob(blob, filename)
       setExportOk(true)
     } catch (err) {

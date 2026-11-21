@@ -110,7 +110,7 @@ async function downloadPackage(
   api: APIRequestContext, pid: number, token: string, dest: string,
 ): Promise<void> {
   const exported = await requestJson(api, 'POST', `/api/projects/${pid}/exports/package`, undefined, token)
-  const res = await api.fetch(`${APP}/api/projects/${pid}/exports/package/download?token=${exported.token}`, {
+  const res = await api.fetch(`${APP}/api/projects/${pid}/exports/package/${exported.object_id}/download`, {
     headers: { Authorization: `Bearer ${token}` },
   })
   if (!res.ok()) throw new Error(`download package -> ${res.status()}`)

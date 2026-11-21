@@ -24,13 +24,11 @@ from iesplan import project as project_domain
 from iesplan.application.identity.service import (
     as_utc,
     authenticate,
-    confirm_takeover,
     create_user,
     create_window_session,
     deactivate_user,
     delete_user,
     expire_session,
-    get_active_password_credential,
     get_session_by_token,
     get_user_by_id,
     list_users,
@@ -49,8 +47,6 @@ from iesplan.core.errors import NotFoundError
 from iesplan.identity import ExternalAuthError
 from iesplan.identity.contracts import (
     AuthRequiredError,
-    ForcePasswordChangeError,
-    LockedError,
     LoginFailedError,
     RegistrationDisabledError,
     SessionInvalidError,
@@ -60,13 +56,10 @@ from iesplan.identity.contracts import (
 
 __all__ = [
     "ExternalAuthError",
-    "FPC_ALLOWED_PATHS",
-    "PENDING_ALLOWED_PATHS",
     "OidcCallbackResult",
     "UserWithProjectCount",
     "begin_oidc_login",
     "complete_oidc_login",
-    "confirm_takeover_case",
     "deactivate_user_case",
     "delete_user_case",
     "get_public_auth_settings",
@@ -85,17 +78,6 @@ __all__ = [
     "resolve_auth_context",
     "update_security_settings",
 ]
-
-
-#: 强制改密门禁(C-02)豁免路径: 仅允许改密/登出/本人信息
-FPC_ALLOWED_PATHS: frozenset[str] = frozenset(
-    {"/api/auth/change-password", "/api/auth/logout", "/api/auth/me"}
-)
-#: 待接管(pending)会话允许的路径(H-01): 确认接管 + 强制改密门禁豁免路径
-#: (避免强制改密用户被 pending 状态卡死: 可先改密或登出, 再重新登录)
-PENDING_ALLOWED_PATHS: frozenset[str] = frozenset(
-    FPC_ALLOWED_PATHS | {"/api/auth/confirm-takeover"}
-)
 
 
 def is_oidc_enabled() -> bool:
@@ -168,19 +150,17 @@ def complete_oidc_login(
     state: str,
     ip: str | None = None,
     user_agent: str | None = None,
-) -> tuple[UserRecord, str, bool]:
+) -> tuple[UserRecord, str]:
     """OIDC 回调主路径: 校验 state → 交换令牌 → 账号绑定(JIT)→ 签发窗口会话。
 
     失败抛 ExternalAuthError(调用方记录 login_failure 审计后回登录页)。
-    返回 (user, token, displaced), displaced 为 True 表示存在旧活动窗口
-    被取代(前端据此提示确认接管)。
     """
     payload = identity_domain.verify_state(state)
     claims = identity_domain.exchange_code(code, payload["verifier"])
     user = identity_domain.provision_user(db, claims, ip=ip, user_agent=user_agent)
     db.flush()
-    _session, token, displaced = create_window_session(db, user, "oidc", ip=ip, user_agent=user_agent)
-    return user, token, displaced
+    _session, token = create_window_session(db, user)
+    return user, token
 
 
 def record_oidc_login_failure(
@@ -201,30 +181,16 @@ def record_oidc_login_failure(
 
 
 def resolve_auth_context(
-    db: Session, *, token: str | None, path: str
+    db: Session, *, token: str | None
 ) -> tuple[UserRecord, WindowSessionRecord]:
-    """凭证解析后的身份业务校验: 哈希匹配 + 状态 + 未过期 + 凭证版本一致 + 用户有效。
-
-    安全门禁(校验失败抛对应异常):
-    - H-01: takeover_pending 会话仅允许确认接管/改密/登出/本人信息路径,
-      其余业务请求一律 401(SessionInvalidError, params.reason=takeover_pending);
-    - C-02: 有效密码凭证 requires_change=True 时, 除改密/登出/本人信息外
-      全部业务请求返回 403(AUTH-FPC-001, 强制改密未解除前无业务权限)。
-
-    任一次校验通过都会顺带刷新 last_seen_at(会话活跃时间)。
-    凭证原文提取(HTTP 头/Cookie)归 API, 本用例只收已提取的 token 与请求路径。
-    """
+    """解析会话并检查账号、有效期及凭证版本。"""
     if not token:
         raise AuthRequiredError()
     session = get_session_by_token(db, token)
     if session is None:
         raise SessionInvalidError()
     now = utcnow()
-    if session.status == "takeover_pending":
-        # H-01: 接管确认前新会话不拥有业务权限; 仅放行接管/改密/登出/本人信息
-        if path not in PENDING_ALLOWED_PATHS:
-            raise SessionInvalidError(params={"reason": "takeover_pending"})
-    elif session.status != "active":
+    if session.status != "active":
         raise SessionInvalidError()
     expires_at = as_utc(session.expires_at)
     if expires_at is not None and expires_at < now:
@@ -238,12 +204,6 @@ def resolve_auth_context(
         # 凭证已轮换(改密/重置): 旧会话立即失效(domain-model §身份权限审计 凭证失效机制)
         revoke_session_after_credential_change(db, session.id, user.id)
         raise SessionInvalidError()
-    # C-02: 强制改密门禁(服务端统一执行, 不依赖前端配合)
-    cred = get_active_password_credential(db, user)
-    if cred is not None and cred.requires_change and path not in FPC_ALLOWED_PATHS:
-        raise ForcePasswordChangeError(
-            params={"hint": "首次登录请先修改初始密码, 未改密前仅可使用改密/登出/本人信息接口"}
-        )
     touch_session(db, session.id)
     return user, session
 
@@ -256,27 +216,13 @@ def login_case(
     device: str | None = None,
     ip: str | None = None,
     user_agent: str | None = None,
-) -> tuple[UserView, str, bool]:
-    """登录完整用例: 密码校验 + 登录限速 → 创建单活动窗口会话。
-
-    若该账号已有活动窗口, 旧窗口被撤销、新会话以 takeover_pending 创建
-    (确认接管前无业务权限), displaced=True(前端提示确认接管)。
-    失败按 error_code 映射为 LockedError/LoginFailedError(语义与原路由一致)。
-    返回 (view, token, displaced), view 为身份展示视图(用例内一次组装,
-    API 只做纯 DTO 映射); Cookie 写入与响应组装归 API。
-    """
-    user, error_code = authenticate(
-        db, username, password, ip=ip, user_agent=user_agent, device=device
-    )
-    if error_code is not None:
-        if error_code == "locked":
-            raise LockedError()
+) -> tuple[UserView, str]:
+    """验证密码并签发独立会话。"""
+    user = authenticate(db, username, password, ip=ip, user_agent=user_agent, device=device)
+    if user is None:
         raise LoginFailedError()
-    assert user is not None
-    _session, token, displaced = create_window_session(
-        db, user, device, ip=ip, user_agent=user_agent
-    )
-    return user_view(db, user), token, displaced
+    _session, token = create_window_session(db, user)
+    return user_view(db, user), token
 
 
 def register_case(
@@ -332,23 +278,6 @@ def list_users_case(db: Session) -> list[UserWithProjectCount]:
         UserWithProjectCount(view=view, project_count=counts.get(user.id, 0))
         for user, view in zip(users, views, strict=True)
     ]
-
-
-def confirm_takeover_case(
-    db: Session,
-    *,
-    user: UserRecord,
-    session: WindowSessionRecord,
-    ip: str | None = None,
-    user_agent: str | None = None,
-) -> UserView:
-    """确认接管完整用例: 当前待接管会话转 active(不轮换凭证) → 身份展示视图。
-
-    用例内一次组装视图, API 只做传输映射(凭证提取/Cookie 写入归 API,
-    不二次查询身份状态)。
-    """
-    confirm_takeover(db, user, session, ip=ip, user_agent=user_agent)
-    return user_view(db, user)
 
 
 def get_user_view_case(db: Session, *, user_id: int) -> UserView:
@@ -407,7 +336,7 @@ def reactivate_user_case(
 def preview_user_delete_case(
     db: Session, *, admin: UserRecord, target_id: int
 ) -> dict:
-    """删除账号预告完整用例: 目标预检 → 受影响项目清单 + 签名确认令牌。"""
+    """删除账号预告完整用例: 目标预检 → 受影响项目清单。"""
     target = _require_target(db, target_id)
     return preview_user_delete(db, admin, target)
 
@@ -417,20 +346,15 @@ def delete_user_case(
     *,
     admin: UserRecord,
     target_id: int,
-    confirm: bool = False,
-    confirm_token: str = "",
     ip: str | None = None,
     user_agent: str | None = None,
 ) -> dict:
-    """删除账号完整用例: 目标预检 → 确认+令牌校验 → 级联软删其项目。
+    """删除账号完整用例: 目标预检 → 级联软删其项目。
 
     目标拥有的项目一并软删(不可恢复); 不能删除自己/系统账号。
     """
     target = _require_target(db, target_id)
-    return delete_user(
-        db, admin, target,
-        confirm=confirm, confirm_token=confirm_token, ip=ip, user_agent=user_agent,
-    )
+    return delete_user(db, admin, target, ip=ip, user_agent=user_agent)
 
 
 def get_security_settings(db: Session) -> dict:
@@ -462,7 +386,7 @@ def oidc_callback_case(
     if not is_oidc_enabled():
         raise NotFoundError("", params={"object_type": "auth_provider"})
     try:
-        _, token, _ = complete_oidc_login(db, code=code, state=state, ip=ip, user_agent=user_agent)
+        _, token = complete_oidc_login(db, code=code, state=state, ip=ip, user_agent=user_agent)
     except ExternalAuthError as exc:
         record_oidc_login_failure(
             db, reason=exc.params.get("reason", "oidc_failed"), ip=ip, user_agent=user_agent

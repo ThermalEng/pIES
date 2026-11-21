@@ -1223,7 +1223,6 @@ export interface UserDeletePreview {
   /** 该账号拥有且未删除的项目(名称/id/状态)。 */
   projects: Array<{ id: EntityId; name: string; status: string }>
   /** 执行 DELETE 必须携带的签名确认令牌(10 分钟窗口, 绑定清单)。 */
-  confirm_token: string
 }
 
 export interface AdminUserListParams {

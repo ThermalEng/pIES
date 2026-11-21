@@ -1,5 +1,5 @@
 // QA-E2E-01 场景 1-3(13.3):
-//   1. 登录、首登强制改密、退出、会话失效(新窗口接管)
+//   1. 登录、首登强制改密、退出、同账号多会话
 //   2. 创建项目并浏览全部工作台页面(模型/数据/配置/校验/任务/结果/导出)
 //   3. 建模: 添加热泵/电池/电网/负荷, 真实端口合法连接 + 错误连接诊断
 //
@@ -39,7 +39,7 @@ test.describe('场景 1: 认证与会话 @basic', () => {
     await context.close()
   })
 
-  test('登录、强制改密、退出、新窗口会话失效', async ({ browser }) => {
+  test('登录、改密、退出与同账号多会话', async ({ browser }) => {
     // 独立用户(API 造数, 与被测 UI 隔离); forceChange 使首登强制改密
     const username = uniqueName('es-auth')
     const password = strongPassword('Init')
@@ -84,32 +84,19 @@ test.describe('场景 1: 认证与会话 @basic', () => {
     await page.goto('/settings')
     await expect(page).toHaveURL(/\/login/)
 
-    // 1d. 会话失效: 同一用户第二个窗口登录 → 原窗口会话被撤销
-    // 注: 两个窗口必须使用独立 context(独立 cookie jar), 否则同 context
-    // 的 Set-Cookie 会覆盖旧窗口凭证, 无法复现会话失效
-    const context2: BrowserContext = await browser.newContext()
-    const page2: Page = await context2.newPage()
-    await loginViaUI(page2, username, newPassword)
-    await expect(page2).toHaveURL(/\/$/)
-
-    // 原窗口(已退出, localStorage 无会话标记)重新登录成功但保持退出前状态;
-    // 换一种真实用户路径: 原窗口重新登录后, 新窗口的登录(同用户)会撤销其会话,
-    // 原窗口页面内操作(非整页导航)触发 401 → 全局处理器带 reason=expired 跳登录
-    await page.goto('/') // 未登录 → 跳 login
+    // 在两个独立 Cookie 容器中并发登录。
+    await page.goto("/")
     await expect(page).toHaveURL(/\/login/)
-    await loginViaUI(page, username, newPassword)
-    await expect(page).toHaveURL(/\/$/)
-    // 此时 page2 的会话已因 page 重新登录被撤销? 不: 后登录者(同凭证)撤销前者——
-    // page2 已登录, page 重新登录会撤销 page2 会话并让自己成为 pending,
-    // 前端 LoginPage 自动 confirm-takeover, page 会话激活、page2 被撤销
-    // 因此 page2 页面内刷新列表(点击不同筛选按钮触发请求) → 401 → 跳登录页(带过期提示)
-    await page2.bringToFront()
-    await page2.getByRole('button', { name: /进行中|Active/i }).click()
-    await expect(page2).toHaveURL(/\/login/)
-    await expect(page2.getByText(/登录已过期|session has expired/i)).toBeVisible()
-
-    // 新窗口正常使用(登录无接管卡死)
-    await expect(page.getByRole('button', { name: /退出登录|Logout/i })).toBeVisible()
+    const context2 = await browser.newContext()
+    const page2 = await context2.newPage()
+    await Promise.all([
+      loginViaUI(page, username, newPassword),
+      loginViaUI(page2, username, newPassword),
+    ])
+    for (const activePage of [page, page2]) {
+      await activePage.reload()
+      await expect(activePage.getByRole('button', { name: /退出登录|Logout/i })).toBeVisible()
+    }
     await context2.close()
 
     // Monitor from before the first interaction, not after the tested actions.

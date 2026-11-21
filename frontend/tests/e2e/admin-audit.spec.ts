@@ -173,7 +173,7 @@ test.describe('审计日志只读查看', () => {
     await requestJson(apiCtx.request, 'POST', `/api/projects/${pid}/versions/${v1Id}/restore`, {}, ownerToken)
     // 导出 + 导入(导入者为另一账号, 审计操作者应为导入者)。
     const exported = await requestJson(apiCtx.request, 'POST', `/api/projects/${pid}/exports/package`, undefined, ownerToken)
-    const dl = await apiCtx.request.fetch(`${APP}/api/projects/${pid}/exports/package/download?token=${exported.token}`, {
+    const dl = await apiCtx.request.fetch(`${APP}/api/projects/${pid}/exports/package/${exported.object_id}/download`, {
       headers: { Authorization: `Bearer ${ownerToken}` },
     })
     if (!dl.ok()) throw new Error(`download package -> ${dl.status()}`)

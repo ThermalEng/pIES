@@ -9,7 +9,7 @@ from __future__ import annotations
 import io
 import json
 import zipfile
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from typing import Any
 
 from openpyxl import Workbook
@@ -76,12 +76,10 @@ from iesplan.finance import (
 )
 from iesplan.identity.contracts import UserRecord
 from iesplan.package import (
-    DOWNLOAD_TOKEN_TTL_SECONDS,
     PACKAGE_FORMAT_VERSION,
     PACKAGE_MEDIA_TYPE,
     ImportValidationError,
     PackageExport,
-    create_download_token,
 )
 from iesplan.package import (
     bound_dataset_ids as _bound_dataset_ids,
@@ -608,8 +606,6 @@ def export_package(db: Session, user: UserRecord, project_id: int) -> PackageExp
     )
     # ObjectHandle → 元数据 dict(公开门面统一形状)
     obj_info = object_info(db, obj.id)
-    # 不再写 data_dir/packages 非托管副本(无引用/配额/校验/清理协议，架构宪法 §10);
-    # 对象存储是包的唯一事实源, 下载经短期授权 token 走公开读取门面。
 
     _audit_entry(
         db,
@@ -621,8 +617,6 @@ def export_package(db: Session, user: UserRecord, project_id: int) -> PackageExp
         result={"kind": "package", "package_object_id": obj.id, "size_bytes": obj.size_bytes},
         extra={"file_name": f"project-package-{project.id}.zip"},
     )
-    expires_at = datetime.now(UTC) + timedelta(seconds=DOWNLOAD_TOKEN_TTL_SECONDS)
-    token = create_download_token(obj.id, "package", project_id=project.id, user_id=user.id)
     return PackageExport(
         object_id=obj.id,
         oid=obj_info["oid"],
@@ -630,8 +624,6 @@ def export_package(db: Session, user: UserRecord, project_id: int) -> PackageExp
         media_type=obj_info["media_type"],
         file_name=f"project-package-{project.id}.zip",
         manifest=manifest,
-        token=token,
-        expires_at=expires_at,
     )
 
 

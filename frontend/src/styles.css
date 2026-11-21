@@ -1493,11 +1493,6 @@ button {
   color: var(--ies-color-text-secondary);
 }
 
-.ies-login__takeover {
-  display: flex;
-  flex-direction: column;
-  gap: var(--ies-space-4);
-}
 
 .ies-login__actions {
   display: flex;

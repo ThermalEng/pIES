@@ -89,7 +89,6 @@ def client(session: Session, data_dir) -> Iterator[TestClient]:
         yield session
 
     app.dependency_overrides[get_request_db] = _override_request_db
-    identity.reset_login_rate_limit()
     with TestClient(app, raise_server_exceptions=False) as c:
         yield c
 

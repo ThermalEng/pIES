@@ -189,7 +189,7 @@ export const messagesEn: Record<string, string> = {
   'ies.auth.login_ok': 'Signed in successfully. Welcome back, {name}.',
   'ies.auth.login_failed': 'Incorrect username or password.',
   'ies.auth.account_locked': 'Account locked. Try again in {minutes} minutes.',
-  'ies.auth.password_weak': 'Password too weak: at least {min} characters with letters and digits.',
+  'ies.auth.password_weak': 'Password too weak: at least {min} characters.',
   'ies.auth.password_reset_sent': 'A reset link has been sent to {email}.',
   'ies.auth.username_rule': '3-32 lowercase letters, digits or underscores',
   'ies.auth.email_invalid': 'Invalid email address',
@@ -215,10 +215,6 @@ export const messagesEn: Record<string, string> = {
   'ies.auth.password_reset': 'Password has been reset. Sign in with the new password.',
   'ies.auth.offline': 'Offline',
   'ies.auth.offline_hint': 'Cannot reach the server. If the server runs on this machine or your local network, check the connection and retry.',
-  'ies.auth.window_takeover_title': 'Take over the previous window',
-  'ies.auth.window_takeover_desc': 'This account has an active session in another window. Confirming stops that window and hands control to this one; a fresh window credential will be issued.',
-  'ies.auth.window_takeover_confirm': 'Confirm takeover',
-  'ies.auth.window_takeover_cancel': 'Cancel takeover',
 
   // -------------------------------------------------------------------------
   // Project
@@ -240,9 +236,7 @@ export const messagesEn: Record<string, string> = {
   'ies.project.unarchive': 'Unarchive',
   'ies.project.unarchive_ok': 'Project restored',
   'ies.project.delete': 'Delete project',
-  'ies.project.delete_confirm': 'This cannot be undone. Type the project name {name} to confirm deletion:',
-  'ies.project.delete_name_label': 'Project name',
-  'ies.project.delete_name_mismatch': 'Entered name does not match. Deletion blocked.',
+  'ies.project.delete_confirm': 'Delete the project {name}? This cannot be undone.',
   'ies.project.owner_role': 'Owner',
   'ies.project.versions': 'Version history',
   'ies.project.version_publish': 'Publish version',
@@ -994,7 +988,6 @@ export const messagesEn: Record<string, string> = {
   'ies.error.duplicate_name': 'A {entity_type} with the same name already exists: {name}',
   'ies.error.no_assessment_available': 'No assessment record exists for this evidence package yet; please retry.',
   'ies.error.no_hourly_data': 'No hourly result data for this task (evidence package not submitted or without hourly refs).',
-  'ies.error.rate_limited': 'Too many requests. Please retry later.',
   'ies.msg.err.generic': 'Operation failed: {reason}',
 
   // -------------------------------------------------------------------------
@@ -1022,7 +1015,6 @@ export const messagesEn: Record<string, string> = {
   'ies.fix.valid.data_bind': 'Bind a valid dataset version on the data management page.',
   'ies.fix.valid.data_fix_version': 'Fix blocking quality issues or re-upload the version.',
   'ies.fix.valid.data_fix_binding': 'Repair the binding (version is missing or from another project).',
-  'ies.fix.rate_retry': 'Wait a moment and retry the request.',
   'ies.fix.valid.ready_check': 'Repair project/draft so the calc snapshot can be assembled.',
   'ies.error.data_validation_failed': 'Data validation failed; see diagnostics.',
   'ies.error.export_failed_reason': 'Export failed: {reason}',
@@ -1086,7 +1078,6 @@ export const messagesEn: Record<string, string> = {
   'ies.diag.auth.password_changed': 'Password changed',
   'ies.diag.auth.password_reset': 'Password has been reset. Sign in with the new password.',
   'ies.diag.auth.session_invalid': 'Invalid or expired session. Please sign in again.',
-  'ies.diag.auth.locked': 'Account locked. Try again later.',
   'ies.diag.auth.user_disabled': 'Account disabled. Contact the administrator.',
   'ies.diag.auth.username_taken': 'Username is already taken',
   'ies.diag.auth.email_taken': 'Email is already registered',
@@ -1095,10 +1086,7 @@ export const messagesEn: Record<string, string> = {
   'ies.diag.auth.registration_disabled': 'Registration is not available on this system',
   'ies.diag.auth.required': 'This field is required',
   'ies.diag.auth.bad_request': 'Invalid request: {reason}',
-  'ies.diag.auth.delete_confirm_required': 'Deleting an account permanently deletes all projects it owns. Preview the affected scope and confirm deletion first.',
   'ies.diag.auth.role_invalid': 'Invalid role',
-  'ies.diag.auth.csrf_origin_rejected': 'Request origin verification failed. Refresh the page and try again.',
-  'ies.diag.admin.confirm_required': 'This operation has a broad impact. Review the affected scope and confirm to proceed.',
 
   // -------------------------------------------------------------------------
   // Expression engine errors

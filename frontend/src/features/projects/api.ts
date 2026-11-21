@@ -65,9 +65,9 @@ export async function unarchiveProject(id: number): Promise<Project> {
   return projectFromMutation(body)
 }
 
-/** 删除项目(0.2.0 B4 误操作防护: 须携带精确匹配的项目名)。 */
-export async function deleteProject(id: number, name: string): Promise<void> {
-  await request<void>(`/projects/${id}`, { method: 'DELETE', body: { confirm: true, name } })
+/** 删除项目。 */
+export async function deleteProject(id: number): Promise<void> {
+  await request<void>(`/projects/${id}`, { method: 'DELETE' })
 }
 
 // ---------------------------------------------------------------------------

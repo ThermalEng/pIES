@@ -48,7 +48,7 @@
 
 `ObjectHandle` 至少包含对象 ID、大小和媒体类型。其他公开输出包括 owner 引用和对明确中断操作的恢复结果。
 
-返回 handle 不等于授予最终用户下载权限；授权和短期下载能力由 application/API 负责。
+返回 handle 不等于授予最终用户下载权限；下载由 application/API 校验会话、项目权限和对象引用。
 
 ## 写入与引用流程
 

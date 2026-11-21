@@ -178,17 +178,13 @@ async function responseError(res: Response): Promise<ApiError> {
  * - 后端认证失败均带诊断信封(message_key);仅当明确表示会话无效
  *   (session_invalid 或 Cookie 到期后的 required)或响应不可识别时,
  *   清除本地会话并跳登录页。
- * - takeover_pending 属于"旧窗口被降级/新会话待确认"中间态(H-01),
- *   不应立即清空会话/跳登录页(避免循环登录);由调用方在确认接管后恢复。
  * - 登录请求自身的 401 不触发跳转(页面内展示错误)。
  */
 function handleUnauthorized(path: string, envelope: ApiErrorBody | null): ApiError {
   const isLoginPath = path.startsWith('/auth/login')
   const sessionInvalid = envelope?.message_key === 'ies.diag.auth.session_invalid'
   const sessionMissing = envelope?.message_key === 'ies.diag.auth.required'
-  const takeoverPending =
-    sessionInvalid && (envelope?.params as { reason?: string } | undefined)?.reason === 'takeover_pending'
-  if (!isLoginPath && !takeoverPending && (sessionInvalid || sessionMissing || !envelope)) {
+  if (!isLoginPath && (sessionInvalid || sessionMissing || !envelope)) {
     notifyUnauthorized()
   }
   return new ApiError(401, envelope, envelope ? undefined : 'ies.diag.auth.session_invalid')
