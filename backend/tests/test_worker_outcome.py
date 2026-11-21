@@ -30,12 +30,18 @@ os.environ.setdefault("IESPLAN_QUEUE", "memory")
 import pytest  # noqa: E402
 from sqlalchemy import create_engine, select  # noqa: E402
 from sqlalchemy.engine import Engine  # noqa: E402
+from sqlalchemy.exc import OperationalError  # noqa: E402
 from sqlalchemy.orm import Session, sessionmaker  # noqa: E402
 from sqlalchemy.pool import StaticPool  # noqa: E402
 from worker_testkit import setup_environment  # noqa: E402
 
 from iesplan.application import worker as worker_app  # noqa: E402
-from iesplan.core.diagnostics import TASK_SOLVE_FAILED  # noqa: E402
+from iesplan.application.worker import transactions  # noqa: E402
+from iesplan.core.diagnostics import (  # noqa: E402
+    TASK_DATA_SNAPSHOT_MISSING,
+    TASK_RESOURCE_EXHAUSTED,
+    TASK_SOLVE_FAILED,
+)
 from iesplan.db import Base  # noqa: E402
 from iesplan.tasks.persistence import Task, TaskAttempt, TaskDiagnostic, TaskLease  # noqa: E402
 from iesplan.results import (  # noqa: E402
@@ -472,6 +478,43 @@ class TestWorkerExecutionGuards:
         view = _task_view(db, task.id)
         assert view is not None and view.status == "running", view
 
+    @pytest.mark.parametrize(("failure", "command", "diagnostic"), [
+        (runner.SnapshotInputError("original diagnostic"), "fail_attempt", TASK_DATA_SNAPSHOT_MISSING),
+        (worker_app.ComputationUnavailableError("original diagnostic", reason="provider"),
+         "fail_attempt", TASK_SOLVE_FAILED),
+        (ValueError("original diagnostic"), "fail_attempt", TASK_SOLVE_FAILED),
+        (MemoryError("original diagnostic"), "fail_resource_attempt", TASK_RESOURCE_EXHAUSTED),
+        (runner.ResourceExhaustedError("original diagnostic"), "fail_resource_attempt", TASK_RESOURCE_EXHAUSTED),
+    ])
+    def test_failure_keeps_original_diagnostic_after_disconnect(
+        self, db, env, factory, monkeypatch, failure, command, diagnostic,
+    ):
+        task = _add_task(db, env, "report")
+        claim = _claim_task(db, task.id)
+        original = getattr(worker_app, command)
+        attempts = 0
+
+        def fail_dispatch(_ctx):
+            raise failure
+
+        def write_failure(*args, **kwargs):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise OperationalError("UPDATE", None, OSError("connection lost"),
+                                       connection_invalidated=True)
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(runner, "dispatch", fail_dispatch)
+        monkeypatch.setattr(worker_app, command, write_failure)
+        monkeypatch.setattr(transactions, "sleep", lambda _delay: None)
+        assert runner.run_task(factory, claim) == "failed"
+        assert attempts == 2
+        recorded = [entry for entry in _task_diagnostics(db, task.id) if entry.code == diagnostic]
+        assert recorded
+        assert all("original diagnostic" in entry.message for entry in recorded)
+        assert worker_app.slot_available(db, "io")
+
     def test_cancel_signal_closes_run_as_cancelled(self, db: Session, env: dict[str, Any], factory):
         """取消信号 + cancelling 状态下执行: 收拢为 cancelled。"""
         task = _add_task(db, env, "report")
@@ -489,15 +532,28 @@ class TestWorkerExecutionGuards:
         assert queue.get_cancel(task.id) is None  # 取消信号已清除
 
     def test_uncommitted_cancel_signal_cannot_leave_running_attempt(
-        self, db: Session, env: dict[str, Any], factory,
+        self, db: Session, env: dict[str, Any], factory, monkeypatch,
     ):
-        """模拟缓存信号抢跑/失配：不能报告已取消却留 running 与槽位。"""
+        """取消信号抢跑且查询时断连，恢复后按权威状态收拢。"""
         task = _add_task(db, env, "report")
         claim = _claim_task(db, task.id)
         queue.set_cancel(task.id, "early-cancel")
         db.commit()  # 权威任务并未进入 cancelling
+        original = worker_app.get_task_record
+        reads = 0
 
+        def read_task(*args, **kwargs):
+            nonlocal reads
+            reads += 1
+            if reads == 2:  # 首次从取消竞态中读取权威状态。
+                raise OperationalError("SELECT", None, OSError("connection lost"),
+                                       connection_invalidated=True)
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(worker_app, "get_task_record", read_task)
+        monkeypatch.setattr(transactions, "sleep", lambda _delay: None)
         assert runner.run_task(factory, claim, worker_id="cw-early") == "failed"
+        assert reads > 2
         db.expire_all()
         assert db.get(Task, task.id).status == "failed"
         attempt = db.get(TaskAttempt, claim.attempt_id)

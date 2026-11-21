@@ -558,9 +558,8 @@ def extend_session(db: Session, session_id: int, *, expires_at: str) -> WindowSe
 
 
 def expire_sessions(db: Session, user_id: int | None = None) -> int:
-    """将已过期的非终态会话置 expired，返回数量（不提交）。"""
-    stmt = select(WindowSession).where(
-    )
+    """将已过期的活动会话置 expired，返回数量（不提交）。"""
+    stmt = select(WindowSession).where(WindowSession.status == SESSION_STATUS_ACTIVE)
     if user_id is not None:
         stmt = stmt.where(WindowSession.user_id == user_id)
     now = _now()

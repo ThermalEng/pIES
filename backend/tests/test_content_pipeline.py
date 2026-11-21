@@ -32,6 +32,7 @@ from iesplan.core.content import (
 )
 from iesplan.db import Base
 from iesplan.storage import ObjectCorruptError, get_object_content, put_content
+from iesplan.storage.contracts import ObjectWriteError
 
 
 @pytest.mark.parametrize("ending", ["\n", "\r\n", "\r"])
@@ -108,8 +109,10 @@ def test_storage_content_outlives_session_and_failed_write_publishes_nothing(tmp
         yield b"partial"
         raise OSError("actual write source failure")
 
-    with Session(engine) as db, pytest.raises(OSError, match="actual write"):
+    with Session(engine) as db, pytest.raises(ObjectWriteError) as failure:
         put_content(db, GeneratedContent(interrupted), "application/octet-stream", "test")
+    assert isinstance(failure.value.__cause__, OSError)
+    assert str(failure.value.__cause__) == "actual write source failure"
     assert set((tmp_path / "objects").iterdir()) == before
     assert not list((tmp_path / "objects/tmp").iterdir())
     # Exercise the real read error, not an integrity/size precheck.

@@ -625,11 +625,11 @@ def run_task(
         return _handle_failure(factory, ctx, claim, exc)
     except (MemoryError, ResourceExhaustedError) as exc:
         try:
-            with factory() as db:
-                worker_app.fail_resource_attempt(
-                    db, claim, cause=type(exc).__name__ + (f": {exc}" if str(exc) else ""),
-                    resources=worker_app.observe_local_resources().to_dict(),
-                )
+            worker_app.run_worker_transaction(
+                factory, worker_app.fail_resource_attempt, claim,
+                cause=type(exc).__name__ + (f": {exc}" if str(exc) else ""),
+                resources=worker_app.observe_local_resources().to_dict(),
+            )
         except worker_app.LeaseRejectedError:
             return "lease_rejected"
         return "failed"
@@ -668,8 +668,9 @@ def _handle_cancel(
         except AppError as exc:
             # 只有权威终态才可认定取消/完成竞态已落定；不得看到 Redis
             # 信号便返回 cancelled 而遗留 running attempt 与占用的槽位。
-            with factory() as db:
-                latest = worker_app.get_task_record(db, task.id)
+            latest = worker_app.run_worker_transaction(
+                factory, worker_app.get_task_record, task.id,
+            )
             if latest is not None and latest.status in (
                 "completed", "failed", "cancelled", "timed_out",
             ):
@@ -709,24 +710,23 @@ def _handle_failure(
         # 确定性失败落 failed + TASK-SOLVE-001, 保留原始原因(含 reason),
         # 不得包成"内部错误", 更不得误判为 lease_rejected。
         try:
-            with factory() as db:
-                worker_app.fail_attempt(
-                    db, claim, code=TASK_SOLVE_FAILED,
-                    message=f"{exc} (reason={exc.reason})",
-                    level=SEVERITY_ERROR,
-                    model_source=exc.model_source,
-                    stack_trace=traceback.format_exc(limit=10),
-                )
+            worker_app.run_worker_transaction(
+                factory, worker_app.fail_attempt, claim, code=TASK_SOLVE_FAILED,
+                message=f"{exc} (reason={exc.reason})",
+                level=SEVERITY_ERROR,
+                model_source=exc.model_source,
+                stack_trace=traceback.format_exc(limit=10),
+            )
         except worker_app.LeaseRejectedError:
             return "lease_rejected"
         return "failed"
     if isinstance(exc, SnapshotInputError):
         try:
-            with factory() as db:
-                worker_app.fail_attempt(
-                    db, claim, code=exc.code, message=str(exc), level=exc.severity,
-                    outcome="insufficient_evidence",
-                )
+            worker_app.run_worker_transaction(
+                factory, worker_app.fail_attempt, claim,
+                code=exc.code, message=str(exc), level=exc.severity,
+                outcome="insufficient_evidence",
+            )
         except worker_app.LeaseRejectedError:
             return "lease_rejected"
         return "failed"
@@ -736,11 +736,10 @@ def _handle_failure(
     # 包络; 原始原因保留在 message 中。
     code = exc.code if isinstance(exc, AppError) else TASK_SOLVE_FAILED
     try:
-        with factory() as db:
-            worker_app.fail_attempt(
-                db, claim, code=code, message=str(exc),
-                stack_trace=traceback.format_exc(limit=10),
-            )
+        worker_app.run_worker_transaction(
+            factory, worker_app.fail_attempt, claim, code=code, message=str(exc),
+            stack_trace=traceback.format_exc(limit=10),
+        )
     except worker_app.LeaseRejectedError:
         return "lease_rejected"
     return "failed"

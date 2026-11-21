@@ -10,8 +10,7 @@ assembly_fixture)与应用内模块导入, 不得计为 0.11 独立 HTTP 契约�
 集成门禁, 禁止形状漂移。与独立契约套件完全同义的简单包装键断言已移至
 test_http_contract.py, 此处仅保留独有覆盖。覆盖:
 
-1. test_error_envelope_shape_all_error_paths: 全库代表性错误路径(422/400/403
-   CSRF/429/404/500/403 权限/401/业务错误), 每个非 2xx 响应必须为标准信封
+1. test_error_envelope_shape_all_error_paths: 全库代表性错误路径(422/400/404/500/403 权限/401/业务错误), 每个非 2xx 响应必须为标准信封
    {"error": {code, message_key, severity, blocking, params, location,
    fix_hint_key, ref_ids}} 8 字段且字段集精确(不多不少)。
 2. test_success_wrapper_*: 锁定各域成功响应顶层包装键(命名键现状, 用户决策
@@ -488,8 +487,7 @@ def test_success_wrappers_datasets_auth_admin_exports_domain(client: TestClient,
     差异记录:
     - auth 登录实际返回 {"token", "token_type", "user"}
       (AuthResponse 模型), 非任务书假设的 {"ok", ...}; 登出为 {"ok"}。
-    - objects 域两版形状并存: /api/admin/storage 为 7 键单一 StorageStatusDto;
-      /api/admin/objects/pending 等列表端点为 {"data", "meta"}。两者分别锁定。
+    - /api/admin/storage 直接返回存储容量、对象和引用的状态视图。
     """
     user = make_user(db, "wrap_ds")
     admin = make_user(db, "wrap_adm", role="admin")

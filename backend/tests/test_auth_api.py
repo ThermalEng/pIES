@@ -22,7 +22,7 @@ from iesplan.api.auth import router as auth_router
 from iesplan.api.deps import get_request_db
 from iesplan.application import identity
 from iesplan.db import Base
-from iesplan.identity.persistence import AuthEvent, User, WindowSession
+from iesplan.identity.persistence import AuthEvent, User, WindowSession, expire_sessions
 from iesplan.main import create_app
 
 ADMIN_PASSWORD = "Admin12345"
@@ -304,6 +304,38 @@ def test_expired_session_rejected(client: TestClient, db_session: Session) -> No
     assert resp.json()["error"]["message_key"] == "ies.diag.auth.session_invalid"
     db_session.refresh(session)
     assert session.status == "expired"
+
+
+def test_expire_sessions_preserves_terminal_history(
+    client: TestClient, db_session: Session,
+) -> None:
+    seed_engineer(db_session)
+    sessions = {}
+    for status in ("active", "revoked", "expired"):
+        response = login(client, "alice", USER_PASSWORD)
+        assert response.status_code == 200
+        token_hash = identity.token_hash(response.json()["token"])
+        sessions[status] = db_session.scalars(select(WindowSession).where(
+            WindowSession.session_token_hash == token_hash,
+        )).one()
+    deadline = datetime(2020, 1, 1, tzinfo=UTC)
+    historical_timestamp = datetime(2020, 1, 2, tzinfo=UTC)
+    for status, session in sessions.items():
+        session.expires_at = deadline
+        if status != "active":
+            session.status = status
+            session.revoked_at = historical_timestamp
+    db_session.commit()
+
+    assert expire_sessions(db_session) == 1
+    assert sessions["active"].status == "expired"
+    assert expire_sessions(db_session) == 0
+    assert expire_sessions(db_session) == 0
+    for status in ("revoked", "expired"):
+        session = sessions[status]
+        db_session.refresh(session)
+        assert session.status == status
+        assert identity.as_utc(session.revoked_at) == historical_timestamp
 
 
 def test_missing_or_invalid_token_rejected(client: TestClient, db_session: Session) -> None:

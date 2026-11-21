@@ -4,13 +4,13 @@
  * 覆盖:
  * 1. features/auth mappers 与 api:
  *    - mapUserDtoToModel 消费真实 UserOutDto, 严格断言仅含后端支持字段, 不含虚构默认值;
- *    - mapAuthResponseDtoToModel 映射登录/接管结果, 准确透传 User 及布尔标记;
+ *    - mapAuthResponseDtoToModel 映射登录结果, 准确透传 User 及布尔标记;
  *    - mapPublicSettingsDtoToModel 映射公开设置;
- *    - login, logout, changePassword, confirmTakeover, register, getMe, getPublicSettings;
+ *    - login, logout, changePassword, register, getMe, getPublicSettings;
  *    - 失败 HTTP 原样透传 ApiError, 登录失败不设会话, 登出失败不清除会话。
  * 2. features/admin mappers 与 api:
  *    - mapAdminUserDtoToModel 映射管理员用户列表项(严格对齐 UserOut + project_count);
- *    - mapUserDeletePreviewDto 映射删除预告清单与确认令牌, 直接消费必需字段;
+ *    - mapUserDeletePreviewDto 映射受影响项目清单和项目数;
  *    - mapStorageStatusDto 映射存储对象用量(objects.total_bytes 作为使用量展示);
  *    - mapAdminHealthDto 映射服务健康及存活/就绪检查, 包含 ok/degraded 真实状态;
  *    - mapAuditEntryDto 映射审计条目(参数与元数据);
@@ -149,7 +149,7 @@ function check(name, cond, detail = '') {
     username: 'to_be_deleted',
   }
   const preview = mapUserDeletePreviewDto(previewDto)
-  check('mapUserDeletePreviewDto 确认令牌与计数', preview.project_count === 2)
+  check('mapUserDeletePreviewDto 项目计数', preview.project_count === 2)
   check('mapUserDeletePreviewDto 项目清单完整', preview.projects.length === 2 && preview.projects[0].name === '项目一')
 
   const storageDto = {

@@ -72,7 +72,7 @@ ExecutionReceipt + 原始输出，提交执行阶段检查点后清理临时区
 
 控制进程负责领取任务、发布心跳和监督任务进程。计算 Worker 在入口检查 HiGHS 版本和自检，任务进程重新装配连接和 provider。
 
-心跳缺失不改变任务的领取状态和槽位。控制面短时不可用时，求解继续执行。数据库恢复后，当前尝试使用原 token 提交。任务进程异常退出时，监督进程记录退出码及阶段，并收拢尝试与槽位。明确的 OOM 或 Python MemoryError 记录为资源耗尽。整机停止后遗留的运行任务由管理员解锁。
+心跳缺失不改变任务的领取状态和槽位。控制面短时不可用时，求解继续执行。阶段交接在写盘前探测数据库，断连时退避重试并限频告警。数据库恢复后，当前尝试使用原 token 发布检查点、结果或原始失败诊断。任务进程异常退出时，监督进程记录退出码及阶段，并收拢尝试与槽位。明确的 OOM 或 Python MemoryError 记录为资源耗尽。整机停止后遗留的运行任务由管理员解锁。
 
 进度detail的worker_resources承载最近阶段的可选部署资源事实：source、scope、memory_limit/swap_limit（status为limited、unlimited或unknown，bytes仅有限时有值）、memory_current_bytes、memory_peak_bytes、swap_current_bytes和oom_kill_count。当前实现的scope为worker_cgroup；共享观测不是单任务资源预留，生命周期峰值不是单次attempt峰值。观测缺失不影响计算。诊断记录失败阶段、资源证据与恢复方式；资源调整后手动重试复用已提交检查点，未保存的阶段仍需重做，不承诺恢复求解器搜索树。
 

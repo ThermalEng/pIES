@@ -1,7 +1,7 @@
 """运维健康只读探针(application/health.py, W4-health)。
 
 api/health.py 的取数门面: 存活 ping、任务/项目按状态计数、用户总数、
-队列状态、存储用量与抽样校验, 全部只读透传领域/存储公开门面。
+队列状态、存储容量与对象元数据均由领域或存储公开门面读取。
 本层不导入 iesplan.models.*、不提交事务, 不新增校验/hash/回退。
 
 ``health_view`` 是运维健康端点的唯一完整 handler: 原 api/health.py 本地

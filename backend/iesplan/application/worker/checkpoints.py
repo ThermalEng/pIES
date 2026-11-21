@@ -55,7 +55,7 @@ def _publish(
     db: Session, claim: Claim, number: int, stage: str, data: dict,
     groups: Mapping[str, Mapping[str, Mapping[str, object]]],
 ) -> int:
-    # 大文件写盘不占用租约行锁；发布引用前才确认当前写入资格。
+    # 调用方先探测数据库再写大文件；发布引用时才锁定租约行。
     _lock(db, claim)
     task = tasks.get_task(db, claim.task_id)
     document = {

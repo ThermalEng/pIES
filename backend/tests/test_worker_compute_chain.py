@@ -318,41 +318,64 @@ def _plane_with_stub_runtime(plane, status: str):
 
 class TestComputeChainEndToEnd:
     def test_compute_completes_after_database_disconnect_during_output_handoff(
-        self, client, db, engine, plane, monkeypatch,
+        self, client, db, engine, plane, tmp_path, monkeypatch, caplog,
     ):
+        from sqlalchemy import event
         from sqlalchemy.exc import OperationalError
 
-        from iesplan.application.worker import checkpoints, transactions
+        from iesplan.application.worker import transactions
 
         task_id = _submit_calc_task(client, db, dict(_CONFIG_BODY), dict(PLANNING_BODY))
         claim = _claim(db, task_id)
         clock = 0
-        native_seal = checkpoints.seal_output_objects
+        delays = []
+        objects_before_outage = None
 
-        def publish_outputs(*args, **kwargs):
-            if clock < 121 and not kwargs.get("actor_id"):
+        def disk_objects():
+            return {path.name for path in (tmp_path / "objects").iterdir() if path.is_file()}
+
+        def unavailable(_conn, _cursor, statement, _params, _context, _many):
+            if objects_before_outage is not None and clock < 121:
                 raise OperationalError(
-                    "INSERT", None, OSError("database disconnected"),
+                    statement, None, OSError("database disconnected"),
                     connection_invalidated=True,
                 )
-            return native_seal(*args, **kwargs)
 
         def advance(seconds):
             nonlocal clock
+            assert disk_objects() == objects_before_outage
+            delays.append(seconds)
             clock += seconds
 
-        with monkeypatch.context() as patch:
-            patch.setattr(transactions, "sleep", advance)
-            original_run = type(plane.runtime).run
+        original_run = type(plane.runtime).run
 
-            def run_with_outage(*args, **kwargs):
-                # Enter the outage during the actual execution, before its output handoff.
-                patch.setattr(checkpoints, "seal_output_objects", publish_outputs)
-                return original_run(*args, **kwargs)
+        def run_with_outage(runtime, *args, handoff, **kwargs):
+            def unavailable_during_handoff(receipt, outputs):
+                nonlocal objects_before_outage
+                objects_before_outage = disk_objects()
+                sealed_outputs = handoff(receipt, outputs)
+                # One physical file per solver output plus the execution checkpoint.
+                assert len(disk_objects() - objects_before_outage) == len(outputs) + 1
+                return sealed_outputs
 
-            patch.setattr(type(plane.runtime), "run", run_with_outage)
+            return original_run(runtime, *args, handoff=unavailable_during_handoff, **kwargs)
+
+        monkeypatch.setattr(transactions, "sleep", advance)
+        monkeypatch.setattr(transactions, "monotonic", lambda: clock)
+        monkeypatch.setattr(type(plane.runtime), "run", run_with_outage)
+        event.listen(engine, "before_cursor_execute", unavailable)
+        try:
             assert _run(engine, claim, plane) == "completed"
-        assert clock == 121
+        finally:
+            event.remove(engine, "before_cursor_execute", unavailable)
+
+        assert 121 <= clock < 126
+        assert delays[:4] == [1, 2, 4, 5]
+        assert all(delay == 5 for delay in delays[4:])
+        assert sum(
+            record.name == transactions.__name__ and record.levelname == "WARNING"
+            for record in caplog.records
+        ) == 2
         db.expire_all()
         assert db.get(Task, task_id).attempt_count == 1
         assert db.get(TaskAttempt, claim.attempt_id).status == "succeeded"

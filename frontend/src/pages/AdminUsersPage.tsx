@@ -4,7 +4,7 @@
  * 能力(复用既有 API 与消息键):
  *   - 用户列表 + 停用/重新启用 + 删除账号
  *     (删除账号会级联删除该账号拥有的全部项目且不可恢复, 采用「预告→确认」两步:
- *      先 preview 返回将受影响项目清单, 确认时携带令牌执行删除);
+ *      先显示受影响项目，管理员在弹窗确认后执行删除);
  *   - 重置密码: 管理员为用户签发临时密码(强制改密), 目标用户全部会话失效。
  */
 
@@ -30,7 +30,7 @@ export default function AdminUsersPage() {
   const [usersBusy, setUsersBusy] = useState(false)
   const [usersNotice, setUsersNotice] = useState<string | null>(null)
 
-  // 删除账号预告(0.2.0 B1): 选中目标后先预览影响范围, 确认后携带令牌删除
+  // 预览受影响项目，供删除确认弹窗展示
   const [deletePreview, setDeletePreview] = useState<UserDeletePreview | null>(null)
   const [deleteTarget, setDeleteTarget] = useState<AdminUserRow | null>(null)
   const [deleteError, setDeleteError] = useState<string | null>(null)

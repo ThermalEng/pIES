@@ -173,7 +173,7 @@ class AuthRequiredError(AuthError):
 
 
 class SessionInvalidError(AuthError):
-    """窗口凭证无效(未找到/过期/已撤销/待接管/凭证版本不匹配)。"""
+    """窗口凭证无效(未找到/过期/已撤销/凭证版本不匹配)。"""
 
     code = "AUTH-SESS-001"
     message_key = "ies.diag.auth.session_invalid"

@@ -3,7 +3,7 @@
 - 环境层（``IESPLAN_`` 前缀环境变量）：配置文件路径、秘密、容器编排
   信息（数据库/缓存/对象目录/对外地址/进程角色/认证/调试开关）。
 - 部署文件层（TOML，唯一权威）：API 与各 Worker 的非秘密应用运行参数
-  （并发槽、会话、存储阈值、限流、配额、求解策略上限、计算表单初值）。
+  （并发槽、会话空闲期限、求解策略上限、计算表单初值）。
   默认值只在 ``backend/deploy/pies.toml`` 维护，程序内不复制第二份；
   部署者以挂载文件覆盖（``IESPLAN_DEPLOY_CONFIG_FILE`` 指向挂载路径）。
 
@@ -187,12 +187,12 @@ class Settings(BaseSettings):
         """启动校验(C-04): 签名密钥仍为默认开发值时记录 warning 日志。
 
         不阻断开发环境启动; 生产部署必须通过 IESPLAN_SECRET_KEY 覆盖,
-        否则下载授权等 HMAC 签名可被伪造(详见 README 安全部署说明)。
+        否则 OIDC state 等签名可被伪造(详见 README 安全部署说明)。
         """
         if self.secret_key == DEFAULT_DEV_SECRET_KEY:
             logger.warning(
                 "IESPLAN_SECRET_KEY 仍为默认开发值(%r), 生产环境必须设置强随机密钥, "
-                "否则 HMAC 下载授权等签名可被伪造",
+                "否则 OIDC state 等签名可被伪造",
                 DEFAULT_DEV_SECRET_KEY,
             )
         return self

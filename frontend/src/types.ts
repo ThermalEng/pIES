@@ -1215,14 +1215,13 @@ export interface AdminUserRow extends User {
   project_count: number
 }
 
-/** 删除账号预告(0.2.0 B1 误操作防护): 将受影响项目清单 + 签名确认令牌。 */
+/** 删除账号前展示的受影响项目清单。 */
 export interface UserDeletePreview {
   user_id: EntityId
   username: string
   project_count: number
   /** 该账号拥有且未删除的项目(名称/id/状态)。 */
   projects: Array<{ id: EntityId; name: string; status: string }>
-  /** 执行 DELETE 必须携带的签名确认令牌(10 分钟窗口, 绑定清单)。 */
 }
 
 export interface AdminUserListParams {

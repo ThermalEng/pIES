@@ -435,7 +435,6 @@ def delete_user(
         raise ForbiddenError("", params={"reason": "cannot_delete_self"})
     if user.is_system:
         raise ForbiddenError("", params={"reason": "system_account"})
-    now = utcnow()
     # 该用户拥有的项目 → 软删(级联，状态写入经 project 域 repository)
     owned = _owned_projects(db, user.id)
     deleted_projects = 0
@@ -565,7 +564,7 @@ def reset_password(
 
 
 # ---------------------------------------------------------------------------
-# 认证(登录 + 限速)
+# 登录认证
 # ---------------------------------------------------------------------------
 
 
@@ -654,7 +653,7 @@ def create_window_session(db: Session, user: UserRecord) -> tuple[WindowSessionR
         user_id=user.id,
         token_hash=token_hash(token),
         credential_version_at_issue=user.credential_version,
-        expires_at=identity_domain.new_session_expiry().isoformat(),
+        expires_at=identity_domain.new_session_expiry(utcnow()).isoformat(),
     )
     db.commit()
     return session, token
