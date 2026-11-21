@@ -1,95 +1,18 @@
 # 持久化
 
-> 文档状态：生效蓝图；代码边界：各领域 `persistence`/`tables` 与 migrations
+> 代码边界：各领域模块的 `persistence.py` / `tables.py` 与 `backend/iesplan/migrations/`；上位规范：[架构宪法](../ARCHITECTURE_CONSTITUTION.md)
 
-## 作用
+持久化层负责将领域状态可靠落库，并通过数据库约束保护数据唯一性、引用完整性与不可变性。每张数据库表和 Repository 属于唯一领域所有者，禁止作为跨模块共享表模型直接查询。
 
-持久化层把领域事实可靠地保存到数据库，并用约束保护唯一性、引用、状态转换和不可变性。它是领域模块的适配器，不是跨模块共享数据模型。
+## 所有权与事务边界
 
-每张表的真相只归其领域 `persistence`/`tables` 所有；开发者不能把所有表视为可从任意模块直接查询的公共接口。
+- **表归属隔离**：每个领域仅访问自身表与 Repository（如身份归 `identity`，快照与任务归 `tasks`，证据索引归 `results`，对象引用归 `storage`）；跨领域视图数据在 `application` 层调用多个领域公开接口组装，禁止在 API 或其他领域直接跨表联查对方 ORM。
+- **不可变保护**：已发布的项目版本、数据版本、配置修订、计算快照、执行证据与审计日志由数据库约束及触发器禁止原地更新或覆盖。
+- **Repository 职责与事务规则**：Repository 负责 ORM 与领域契约映射、唯一键冲突处理（`upsert` 或局部 `savepoint`）与数据库异常分类；禁止在 Repository 内返回懒加载 ORM 对象图或执行全局 `commit`/`rollback`（完整事务生命周期只归 `application` 用例拥有）。
+- **大对象分离**：二进制文件与大结果体不存入数据库业务表，统一写入 `storage` 并在数据库保留 `ObjectId` 及引用记录。
 
-## 所有权与边界
+## 数据库变更与迁移规范
 
-每张表和 repository 都必须有唯一领域所有者。例如身份事实属于 identity，用于计算的快照和任务事实属于 tasks，证据索引属于 results，对象元数据与引用属于 storage。
-
-模型与算法目录至少区分条目、不可变发布、用户安装引用和共享申请。设备发布保存对象 ID、统一 schema、稳定设备 ID、revision 和来源，不保存独立设备语义版本；算法插件发布另存精确语义版本。`CatalogInstallation` 对 `(user_id, publication_id)` 唯一，不能保存内容副本；`ShareRequest` 绑定精确发布，审核后不能替换申请内容。运行环境是可重建的缓存，不作为权威表事实。
-
-repository 负责：
-
-- 领域需要的查询和持久化命令；
-- ORM 与领域 contract/read model 的映射；
-- flush、savepoint、锁和数据库错误分类；
-- 依赖数据库才能保证的约束。
-
-repository 不负责 HTTP DTO、权限、跨领域编排和顶层 commit/rollback。其他模块不能导入其 ORM 或拼跨领域查询。
-
-## 输入与输出
-
-| 输入 | 进入条件 | 输出 |
-|---|---|---|
-| 领域实体/持久化命令 | 已通过领域校验 | 新 revision、实体 contract 或写入回执 |
-| 查询条件 | 使用领域 ID 与稳定语义 | read model、实体或明确不存在 |
-| 当前事务/session | 由 application 用例拥有 | flush 后的事务内状态 |
-| migration | 版本、前置条件和回滚策略明确 | 可验证的新 schema 版本 |
-
-repository 不向调用方返回懒加载 ORM 图；输出必须在 repository 生命周期之外仍有明确含义。
-
-## 写入思路
-
-```text
-application 开启事务
-    ↓
-领域规则生成持久化命令
-    ↓
-repository 写入 / flush / 必要时 savepoint
-    ↓ 数据库约束验证
-repository 返回领域结果
-    ↓
-application 协调其他模块并最终 commit 或 rollback
-```
-
-唯一键竞争优先使用 upsert 或局部 savepoint。下层捕获约束错误时只回滚局部操作，不能调用全局 rollback 破坏调用方已经完成的其他步骤。
-
-## 查询思路
-
-模块内部查询返回领域实体或 read model。跨领域页面需要组合数据时，由 application query 调用多个公开 repository/read model，再形成应用结果；不能让 API 写一条跨所有表的 ORM 查询作为新的隐式领域层。
-
-大型字节不存入普通业务表，由 storage 管理；数据库只保存对象 ID、owner 引用和必要索引。
-
-## 修改 schema
-
-1. 确定变更所属领域和产品版本影响；
-2. 更新领域 contract 和 repository 语义；
-3. 设计版本化 migration、数据转换和失败回滚；
-4. 尽可能用外键、唯一、检查约束和 trigger 保护不变量；
-5. 在真实 PostgreSQL Docker 环境验证升级、重复执行和回滚；
-6. 更新备份恢复、快照或导入格式的迁移说明；
-7. 禁止以运行时 `create_all` 代替正式 migration。
-
-## 失败语义
-
-- 唯一冲突：映射为领域冲突或幂等已有结果；
-- 外键/状态约束失败：视为领域或并发冲突，不返回伪成功；
-- 数据库不可用：事务失败并影响 readiness；
-- 乐观锁 revision 不匹配：返回当前 revision，不静默覆盖；
-- migration 前置条件不满足：停止升级并保留可恢复状态；
-- ORM 映射意外失败：记录追踪，不能返回半填充实体。
-
-## 必须遵循的规范
-
-- application 是 commit/rollback 所有者；
-- ORM 只在领域持久化边界内传播；
-- 跨领域访问通过公开 repository/read model/application query；
-- 不可变证据、审计和已发布版本由数据库约束防止更新；
-- 时间戳、Decimal、ID 和枚举遵循公共 contract；
-- schema 和数据迁移都具有明确版本，不依赖开发者手工 SQL。
-
-## 完成标准
-
-- repository 的正常、未找到、唯一冲突和并发冲突有测试；
-- 关键不变量同时有领域测试和 PostgreSQL 约束测试；
-- migration 可从支持的上一版本升级，并能在失败后安全恢复；
-- API、Worker 和其他模块不直接导入领域 ORM；
-- 业务删除及对象引用解绑成对执行；孤儿对象由存储清理用例处理。
-
-阅读代码时先确认表和 repository 的领域所有者，再从公开 repository 行为进入 ORM；`models/` 的物理位置不能替代所有权判断。数据库测试必须在 Docker 的 PostgreSQL 环境运行。
+1. Schema 调整须归属明确领域并编写版本化 Alembic 迁移脚本，禁止在生产或运行时以 `create_all` 替代正式迁移。
+2. 唯一性、外键关联、状态枚举与不可变性优先通过数据库约束与触发器保障。
+3. 所有 Repository 与迁移测试必须在真实 PostgreSQL Docker 容器中验证升级、幂等重放、外键约束及并发冲突场景。

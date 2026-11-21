@@ -1,148 +1,38 @@
 # 求解运行时
 
-> 文档状态：生效目标蓝图；目标代码边界：`backend/iesplan/computation/runtime/`。
+> 代码边界：`backend/iesplan/computation/runtime/`；交接格式：[Solver Bundle](../formats/solver-bundle.md)
 
-## 作用
+`SolverRuntime` 负责在受控隔离环境中校验并执行 Solver Bundle 声明的结构化命令，采集原始输出、进程状态与资源统计，生成不可变的 `ExecutionReceipt`。
 
-SolverRuntime 在受控环境中执行 Solver Bundle 声明的一个命令，并生成可审计回执。它把进程隔离、资源限制、取消和文件边界集中在一个通用执行层，使生成器不需要自行管理 subprocess，Worker 也不需要理解每种 solver 的命令参数。
+## 职责与边界
 
-## 边界
+- **负责**：Bundle manifest、相对路径与命令策略校验；`ExecutorProvider` 发现与受信任 `executable` 解析；独立工作目录建立、分块输入写入与受控命令执行；取消、超时与管理员撤销（fencing）响应及进程组回收；声明输出检查、日志限长与 `ExecutionReceipt` 签发。
+- **不负责**：解析装配 YAML 或设备语义、构造数学模型、选择求解器、隐式重试、解释数学最优性或裁决任务终态。
 
-模块负责：
-
-- Solver Bundle 的 schema、路径和命令策略校验；
-- ExecutorProvider protocol、受信任 executable 解析和能力检查；
-- 隔离工作目录、最小权限、资源上限与网络策略；
-- 单进程启动、取消、超时和终止；
-- stdout/stderr、退出状态、资源统计和声明输出采集；
-- 不可变 `ExecutionReceipt`。
-
-模块不负责装配 YAML、设备/方程解析、数学问题构造、求解器选择、隐式重试、业务状态映射、财务分析和任务最终状态裁决。
-
-## 输入
-
-| 输入 | 进入条件 |
-|---|---|
-| Solver Bundle | schema、manifest、规范路径和声明输入完整 |
-| ExecutorProvider | 精确版本已由组合根装配，支持所声明 executable |
-| AttemptContext | attempt ID、租约 fencing、取消信号、证据目标明确 |
-| DeploymentPolicy | 由统一部署配置装配的 executable/environment allowlist 和硬资源上限；上限可部署时调整，不是单次计算的默认请求 |
-
-运行时不接受命令字符串、裸参数 dict 或 Python 函数路径。Worker 只能提交完整 Bundle。
-
-## 输出
-
-成功或失败都尽量形成 ExecutionReceipt，记录：
-
-- 实际使用的 Bundle、executor 和 executable 版本；
-- 开始/结束时间、退出码、信号和终止原因；
-- 请求与实际施加的 CPU、内存、时间、文件和网络策略；
-- stdout、stderr 和声明输出；
-- 清单、策略、取消、超时、OOM 和执行错误状态。
-
-如果进程尚未启动即因 manifest 或策略失败，仍生成“未执行”回执；只有无法建立可信证据时才向 Worker 返回内部基础设施故障。
-
-## 执行流程
+## 执行与隔离流水线
 
 ```text
-接收 Bundle
-  ↓ schema / manifest / path 校验
-  ↓ executor + executable + policy 校验
-建立隔离工作目录并写入 Bundle 输入
-  ↓
-以参数数组启动一个受控命令
-  ↓ 响应取消、超时和进程退出
-终止并等待进程
-  ↓
-核对输出边界并封存日志
-  ↓
-签发 ExecutionReceipt
+接收 Solver Bundle + AttemptContext
+  ↓ schema / manifest / 路径越界校验
+  ↓ ExecutorProvider allowlist 与部署策略校验
+创建独立工作目录并按块写入 Bundle 输入
+  ↓ 以参数数组启动受控进程（禁止 shell）
+监控超时 / 用户取消 / 租约 fencing 信号
+  ↓ 等待回收完整进程组
+核对声明输出与限长采集 stdout/stderr
+  ↓ 签发 ExecutionReceipt 并持久化阶段输出后清理临时目录
 ```
 
-任何执行前校验失败都不得启动进程。进程退出后先封存原始证据，再由 ResultAdapter 解释业务状态。
+- **执行前阻断**：任何 manifest、路径或策略校验失败均不启动外部进程，直接返回拒收状态回执（`input_rejected` / `policy_rejected`）。
+- **分块资产交接**：遵循[Bundle 分块内容协议](../formats/solver-bundle.md#分块内容与生命周期)，输入按块流式写入隔离目录，输出经持久化接收接口提交执行检查点并确认成功后再清理临时目录；接收失败时保留未交付产物并明确报错。
 
-运行时支持调用方提供的通用产物接收接口：输出边界采集和回执签发后，将回执与声明输出交付该接口；接收确认后才能清理临时区并返回。接收方由application协调storage实现，运行时不持有数据库会话、对象凭证或业务状态规则。接收失败明确上报并保留本次尚未交付的临时产物，不能将它们冒充已提交检查点；该临时区仍归运行时管理，不对外返回主机路径。
+## 命令与安全规则
 
-### 分块输入与原始输出
+- **无 Shell 执行**：`executable` 必须命中部署 allowlist 中的受信任 ID，`arguments` 以字符串参数数组逐项传递给操作系统进程 API，禁止 `sh -c`、管道、重定向与命令替换。
+- **路径与网络隔离**：工作目录及声明输入/输出约束在隔离目录内；默认 `network: false`，运行身份无业务数据库、对象存储凭证与宿主机代码区权限；每次尝试使用独立工作目录，进程组完全收拢后才交接输出。
 
-内容与释放时点遵守[Bundle分块内容协议](../formats/solver-bundle.md#分块内容与生命周期)，不分块读取后再次join。
+## 取消、超时、资源与输出边界
 
-运行时按块复制输入到隔离目录，不先把Bundle全部内容物化到内存。运行时只收集 manifest 声明的文件，以文件元数据记载回执大小，按块交给对象存储。
-
-持久化接收方提交执行检查点后，返回可独立读取的持久化内容映射，运行时才清理临时区；恢复与首次执行使用相同的结果适配入口。独立调用没有接收方时，返回内容由 `RuntimeOutputs` 管理生命周期，调用方保留该集合直到读取完成，并用其上下文管理器或 `close()` 释放。两种调用使用相同内容协议，不构成另一种字节包执行模式；不得返回依附于已清理目录的内容，也不得让调用方管理宿主机路径。
-
-## ExecutorProvider
-
-ExecutorProvider 把稳定 `executable` ID 映射到部署允许的实际运行方式。descriptor 至少声明：
-
-- executor ID/版本和支持的平台能力；
-- executable ID/版本及镜像或二进制的受控解析规则；
-- 允许的参数模式、环境变量和媒体类型；
-- 可实施的 CPU、内存、超时、文件、进程和网络隔离；
-- 取消与强制终止语义；
-- readiness 自检和版本证明。
-
-实际绝对路径、容器 runtime 细节和凭证留在 provider 配置中，不写入 Bundle 或任务结果。
-
-## 命令安全
-
-- executable 必须是 allowlist 中的稳定 ID；
-- arguments 逐项传给进程 API，不经过 shell；
-- 禁止 `sh -c`、管道、重定向、替换、通配和响应文件逃逸；
-- 工作目录和所有输入/输出路径必须位于隔离根内；
-- 禁止符号链接、设备文件、socket 和未声明文件；
-- 环境从空白基线建立，只注入 allowlist 字段；
-- `network: false` 为默认，普通 solver provider 必须完全断网；
-- 运行身份无业务数据库、对象存储和宿主机工作区权限。
-
-即使 Bundle 来自已注册生成器，运行时仍必须独立校验，不能把 provider 信任替代输入验证。
-
-## 取消、超时和租约
-
-Worker 拥有任务和 attempt 生命周期；runtime 只执行传入上下文：
-
-1. 收到取消、管理员撤销或运行超时后，先发受控终止；
-2. 在固定宽限期后强制终止整个进程组；
-3. 等待进程回收并封存当前输出；
-4. 回执标记取消、超时或 fencing，不把迟到退出当成功；
-5. 是否重试由 Worker 创建新 attempt 决定。
-
-每次尝试使用独立工作目录，进程组完全收拢后才交接输出。
-
-## 声明输出
-
-内置执行器按生成器给出的一组参数启动求解器。运行时只收集声明路径，检查必需文件是否出现，并记录实际进程退出事实。输出在工作目录中按块读取，交接完成后回收工作目录。
-
-## 增加 ExecutorProvider
-
-1. 定义稳定 executor ID、版本、平台能力和威胁模型；
-2. 定义 executable 解析、参数/environment allowlist 和资源限制；
-3. 实现隔离启动、取消、强制终止和进程回收；
-4. 按清单交接声明的输入与输出文件；
-5. 用 fake solver 覆盖成功、非零、超时、取消、OOM 和异常输出；
-6. 在 Docker 环境验证实际 solver 版本和隔离能力；
-7. 通过组合根原子注册，失败时实例不承接计算任务。
-
-## 失败语义
-
-| 问题 | runtime 状态 |
-|---|---|
-| Bundle schema、manifest 或输入声明错误 | input_rejected，未执行 |
-| executable 或参数不在 allowlist | policy_rejected，未执行 |
-| 无法建立隔离或资源限制 | 向 Worker 返回基础设施错误，不签发伪回执/未执行 |
-| 超时/取消/OOM | 对应终止状态，保存回执 |
-| 非零退出或信号崩溃 | process_failed，保存日志与已有输出 |
-| 非停止执行的输出缺失、越界或超限 | output_protocol_failed |
-
-不得因一个 executor 失败而自动使用宿主机进程或另一个 solver。
-
-## 完成标准
-
-- runtime 单独测试不需要设备目录、装配器和数据库；
-- 所有执行前拒绝路径均证明进程没有启动；
-- 超时、取消和异常退出后无孤儿进程和可写残留；
-- Bundle 外路径、shell 注入、环境泄漏和未声明网络被拒绝；
-- 回执足以重建“运行了什么、使用什么限制、产生什么文件”；
-- 新 generator 或 solver 不要求修改 runtime 核心分支。
-
-代码阅读从 Bundle/ExecutionReceipt contract 和策略校验器开始，再读 executor protocol、隔离实现、进程生命周期和输出封存；真实 solver 只在 Docker 集成测试中调用。
+- **中止与回收**：收到取消、超时或管理员撤销（fencing）信号时先发送受控终止信号，宽限后强制终止完整进程组并回收子进程；取消、超时、OOM 与进程崩溃分别记录对应的回执终止状态，迟到退出不改写为成功。
+- **声明输出交接**：按清单交接 manifest `outputs` 声明的相对路径文件，在工作目录中按块读取并交给对象存储；正常退出却缺少 `required: true` 输出时判为 `output_protocol_failed`，进程退出码为 `0` 不直接等同于数学求解有解。
+- **本地开发与测试**：可通过 `ExecutorProvider` 契约隔离测试安全拒收、进程中止与输出采集；真实求解器集成测试在 Docker 容器环境执行。
