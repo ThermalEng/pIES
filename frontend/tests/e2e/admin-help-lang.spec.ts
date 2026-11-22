@@ -218,14 +218,36 @@ test.describe('场景 10: 语言切换', () => {
     await expect(page.getByText(/Projects/i).first()).toBeVisible()
     await expect(page.getByRole('button', { name: /New project/i }).first()).toBeVisible()
 
-    // 10b. 帮助中心(界面 en, 但 manifest 只有 zh-CN): 应提示可用语言, 不静默回退
+    // 10b. 帮助中心(界面 en, manifest 已发布 en-US): 应展示英文三个一级入口与英文正文
     await page.getByRole('navigation', { name: /Projects/i }).getByText('Help Center').click()
     await expect(page).toHaveURL(/\/help\/?$/)
-    // 缺失翻译提示明确显示可用语言(ies.help.locale_missing)
-    await expect(page.getByText(/可用语言|available languages/i).first()).toBeVisible({ timeout: 10_000 })
-    // 不出现空内容冒充英文版(目录不存在时无 tree)
-    await expect(page.getByText('User Guide').first()).not.toBeVisible()
-    await expect(page.getByText('Developer Guide').first()).not.toBeVisible()
+    await expect(page.getByText('User Guide').first()).toBeVisible({ timeout: 10_000 })
+    await expect(page.getByText('Developer Guide').first()).toBeVisible()
+    await expect(page.getByText('Changelog').first()).toBeVisible()
+
+    // 打开英文系统架构蓝图, 核对 URL、标题、代码块与表格渲染
+    await page.getByText('System Architecture Blueprint').first().click()
+    await expect(page).toHaveURL(/\/help\/en-US\/architecture$/i)
+    const content = page.locator('.ies-help__content')
+    await expect(content.locator('.ies-help__title').first()).toHaveText('System Architecture Blueprint')
+    const codeBlock = content.locator('pre.ies-help__code').filter({ hasText: 'GeneratorProvider' }).first()
+    await expect(codeBlock).toBeVisible()
+    const table = content.locator('table.ies-help__table').filter({
+      has: page.getByRole('cell', { name: 'DeviceDescriptor', exact: true }),
+    })
+    await expect(table).toBeVisible()
+
+    // 刷新仍保持英文章节
+    await page.reload()
+    await expect(page).toHaveURL(/\/help\/en-US\/architecture$/i)
+    await expect(content.locator('.ies-help__title').first()).toHaveText('System Architecture Blueprint')
+
+    // 英文 Assembly YAML 管道符章节渲染无阻塞
+    await page.locator('#help-nav a[href="/help/en-US/assembly-yaml"]').click()
+    await expect(page).toHaveURL(/\/help\/en-US\/assembly-yaml$/i)
+    await expect(page.locator('.ies-help__markdown')).toContainText('purchase|sale')
+    await expect(page.locator('table.ies-help__table').first()).toBeVisible()
+    await expect(page.locator('pre.ies-help__code').first()).toBeVisible()
 
     session.assertNoErrors()
     await context.close()

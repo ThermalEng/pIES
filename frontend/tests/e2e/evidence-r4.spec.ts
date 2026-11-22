@@ -153,8 +153,9 @@ test.describe('R4: 证据收集失败可见', () => {
     failDetail = false
     await page.getByRole('button', { name: '重试', exact: true }).first().click({ timeout: 30_000 })
     await expect(page.getByText(entryText)).toBeVisible({ timeout: 60_000 })
-    // 证据身份先于主结果/曲线发布；等本轮真实读取完成，再开启下一阶段
-    // 故障注入，避免把前一页面尚在途的 /result 曲线目录读取也拦成 500。
+    // 证据身份先于主结果/曲线发布；切至工程与曲线等待本轮真实读取完成，
+    // 再开启下一阶段故障注入，避免把前一页面尚在途的 /result 曲线读取拦成 500。
+    await page.getByRole('tab', { name: '工程与曲线' }).click()
     await expect(page.locator('.ies-chart').first()).toBeVisible({ timeout: 60_000 })
     expect(writePosts).toEqual([])
 
@@ -168,6 +169,7 @@ test.describe('R4: 证据收集失败可见', () => {
     failResult = false
     await page.getByRole('button', { name: '重试', exact: true }).first().click({ timeout: 30_000 })
     await expect(page.getByText(entryText)).toBeVisible({ timeout: 60_000 })
+    await page.getByRole('tab', { name: '工程与曲线' }).click()
     await expect(page.locator('.ies-chart').first()).toBeVisible({ timeout: 60_000 })
     expect(writePosts).toEqual([])
 

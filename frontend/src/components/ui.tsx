@@ -13,6 +13,7 @@ import { useEffect, useId, useRef } from 'react'
 import type {
   ButtonHTMLAttributes,
   InputHTMLAttributes,
+  KeyboardEvent as ReactKeyboardEvent,
   ReactNode,
   RefObject,
   SelectHTMLAttributes,
@@ -673,5 +674,155 @@ export function Dialog({ open, onClose, title, children, footer, size = 'md', in
       </div>
     </div>,
     document.body,
+  )
+}
+
+// ---------------------------------------------------------------------------
+// 页签(Tabs)与分页(Pagination)
+// ---------------------------------------------------------------------------
+
+export interface TabItem<T extends string = string> {
+  id: T
+  label: string
+  badge?: string | number
+  alert?: boolean
+}
+
+export interface TabsProps<T extends string = string> {
+  items: readonly TabItem<T>[]
+  activeId: T
+  onChange: (id: T) => void
+  ariaLabel: string
+  idPrefix?: string
+  className?: string
+}
+
+/** Accessible tab strip supporting Left/Right/Home/End keyboard navigation. */
+export function Tabs<T extends string = string>({
+  items,
+  activeId,
+  onChange,
+  ariaLabel,
+  idPrefix,
+  className,
+}: TabsProps<T>) {
+  const autoPrefix = useId()
+  const prefix = idPrefix ?? autoPrefix
+  const tabRefs = useRef<Array<HTMLButtonElement | null>>([])
+
+  const onKeyDown = (index: number, event: ReactKeyboardEvent<HTMLButtonElement>) => {
+    if (items.length <= 1) return
+    let target: number | null = null
+    if (event.key === 'ArrowRight') target = (index + 1) % items.length
+    else if (event.key === 'ArrowLeft') target = (index - 1 + items.length) % items.length
+    else if (event.key === 'Home') target = 0
+    else if (event.key === 'End') target = items.length - 1
+    if (target === null) return
+    event.preventDefault()
+    tabRefs.current[target]?.focus()
+    onChange(items[target].id)
+  }
+
+  return (
+    <div className={`ies-tabs ${className ?? ''}`.trim()} role="tablist" aria-label={ariaLabel}>
+      {items.map((item, index) => {
+        const active = item.id === activeId
+        return (
+          <button
+            key={item.id}
+            ref={(el) => {
+              tabRefs.current[index] = el
+            }}
+            type="button"
+            role="tab"
+            id={`${prefix}-tab-${item.id}`}
+            aria-selected={active}
+            aria-controls={`${prefix}-panel-${item.id}`}
+            tabIndex={active ? 0 : -1}
+            className={`ies-tabs__tab${active ? ' ies-tabs__tab--active' : ''}`}
+            onClick={() => onChange(item.id)}
+            onKeyDown={(e) => onKeyDown(index, e)}
+          >
+            <span>{item.label}</span>
+            {item.badge !== undefined ? <span className="ies-tabs__badge">{item.badge}</span> : null}
+            {item.alert ? <span className="ies-tabs__dot" aria-hidden="true" /> : null}
+          </button>
+        )
+      })}
+    </div>
+  )
+}
+
+export interface PaginationProps {
+  page: number
+  pageSize: number
+  total: number
+  onPageChange: (nextPage: number) => void
+  onPageSizeChange?: (nextPageSize: number) => void
+  pageSizeOptions?: readonly number[]
+  ariaLabel?: string
+}
+
+/** Standard list pagination bar with page size selector and Previous/Next controls. */
+export function Pagination({
+  page,
+  pageSize,
+  total,
+  onPageChange,
+  onPageSizeChange,
+  pageSizeOptions = [12, 24, 50, 100],
+  ariaLabel,
+}: PaginationProps) {
+  const { t } = useI18n()
+  if (total <= 0) return null
+  const safeSize = Math.max(1, pageSize)
+  const totalPages = Math.max(1, Math.ceil(total / safeSize))
+  const safePage = Math.min(Math.max(1, page), totalPages)
+  const minOption = pageSizeOptions.length > 0 ? Math.min(...pageSizeOptions) : safeSize
+
+  return (
+    <nav className="ies-pagination" aria-label={ariaLabel ?? t('ies.pagination.label')}>
+      <span className="ies-pagination__info">
+        {t('ies.pagination.summary', { page: safePage, totalPages, total })}
+      </span>
+      <div className="ies-pagination__controls">
+        {onPageSizeChange && pageSizeOptions.length > 0 && total > minOption ? (
+          <label className="ies-pagination__size">
+            <span>{t('ies.pagination.page_size')}</span>
+            <Select
+              aria-label={t('ies.pagination.page_size')}
+              value={String(safeSize)}
+              onChange={(e) => onPageSizeChange(Number(e.target.value))}
+            >
+              {pageSizeOptions.map((opt) => (
+                <option key={opt} value={opt}>
+                  {opt}
+                </option>
+              ))}
+            </Select>
+          </label>
+        ) : null}
+        {totalPages > 1 ? (
+          <>
+            <Button
+              variant="secondary"
+              size="sm"
+              disabled={safePage <= 1}
+              onClick={() => onPageChange(safePage - 1)}
+            >
+              {t('ies.pagination.prev')}
+            </Button>
+            <Button
+              variant="secondary"
+              size="sm"
+              disabled={safePage >= totalPages}
+              onClick={() => onPageChange(safePage + 1)}
+            >
+              {t('ies.pagination.next')}
+            </Button>
+          </>
+        ) : null}
+      </div>
+    </nav>
   )
 }

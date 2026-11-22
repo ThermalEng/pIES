@@ -400,7 +400,7 @@ test.describe('0.15 外部数据 CSV: data_repeat step 文件公开消费链', (
     const page2: Page = await context2.newPage()
     const session2 = await createSession(page2, username, password)
     await page2.goto(`/projects/${pid}/results`)
-    await expect(page2.getByRole('button', { name: /导出 Excel/i }).first()).toBeEnabled({ timeout: 60_000 })
+    await expect(page2.getByRole('tab', { name: '总览' })).toBeVisible({ timeout: 60_000 })
 
     // 结果摘要: 任务编号可见, 且“数据版本”解析为 GUI 上传的数据集版本。
     const summaryCard = page2.locator('section.ies-card', { hasText: '结果摘要' }).first()
@@ -419,22 +419,27 @@ test.describe('0.15 外部数据 CSV: data_repeat step 文件公开消费链', (
     await expect(planCells.nth(2)).toHaveText('rated_heat_kw')
     await expect(planCells.nth(3)).toHaveText(/^50(\.0+)? kW$/)
 
-    // 封存卡: 年度运营分量逐行与 HTTP oracle 同源, 且首行电费为手算值。
+    // 封存卡: 总览可见封存评价核心，切到「财务与现金流」→ 二级「运营年度分量」核对逐行同源。
     const sealedCard = page2.locator('section.ies-card').filter({
       has: page2.getByRole('heading', { name: /评价现金流\(封存\)|Sealed evaluation/i }),
     })
     await expect(sealedCard).toBeVisible({ timeout: 30_000 })
-    const annualTable = sealedCard.locator(
-      'xpath=.//h3[contains(normalize-space(.), "运营年度分量")]/following-sibling::table[1]',
-    )
-    await expect(annualTable).toBeVisible()
+    await page2.getByRole('tab', { name: '财务与现金流' }).click()
+    await page2.locator('section.ies-card').filter({
+      has: page2.getByRole('heading', { name: '运营年度分量', exact: true }),
+    }).getByRole('button', { name: /查看明细数据/ }).click()
+    const annualTable = page2.getByRole('table', { name: '运营年度分量', exact: true })
+    await expect(annualTable).toBeVisible({ timeout: 30_000 })
     const rowCount = await annualTable.locator('tbody tr').count()
-    const annualRows: Array<{ label: string; value: string }> = []
+    const annualRows: Array<{ label: string; cols: string[] }> = []
     for (let i = 0; i < rowCount; i += 1) {
       const tds = annualTable.locator('tbody tr').nth(i).locator('td')
+      const cellCount = await tds.count()
+      const cols: string[] = []
+      for (let c = 1; c < cellCount; c += 1) cols.push(norm(await tds.nth(c).textContent()))
       annualRows.push({
         label: norm(await tds.nth(0).textContent()),
-        value: norm(await tds.nth(1).textContent()),
+        cols,
       })
     }
     type SealedAnnual = {
@@ -449,12 +454,17 @@ test.describe('0.15 外部数据 CSV: data_repeat step 文件公开消费链', (
     expect(annualRows.map((r) => r.label)).toEqual(
       (fin.annual_operation as SealedAnnual[]).map((a, i) => `第${i + 1}年(t=${a.financial_year})`),
     )
-    expect(annualRows.map((r) => r.value)).toEqual(
-      (fin.annual_operation as SealedAnnual[]).map(
-        (a) => `${a.energy_net} − ${a.variable_om} − ${a.fixed_om} − ${a.maintenance} − ${a.demand_charge} = ${a.net} ${fin.currency}`,
-      ),
+    expect(annualRows.map((r) => r.cols)).toEqual(
+      (fin.annual_operation as SealedAnnual[]).map((a) => [
+        a.energy_net,
+        a.variable_om,
+        a.fixed_om,
+        a.maintenance,
+        a.demand_charge,
+        a.net,
+      ]),
     )
-    expectClose(Number(annualRows[0].value.split('−')[0].trim()), ENERGY_NET_CNY, 0.5)
+    expectClose(Number(annualRows[0].cols[0]), ENERGY_NET_CNY, 0.5)
 
     session2.assertNoErrors()
     await apiCtx.close()

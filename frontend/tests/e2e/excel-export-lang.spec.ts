@@ -165,8 +165,9 @@ test.describe('R8: Excel 导出语言', () => {
     const page = await context.newPage()
     await createSession(page, userName, password)
 
-    // 结果页: 默认中文导出。
+    // 结果页: 默认中文导出(位于「评估与导出」Tab)。
     await page.goto(`/projects/${pid}/results`)
+    await page.getByRole('tab', { name: /评估与导出/ }).click()
     await expect(page.getByRole('button', { name: /导出 Excel/i }).first()).toBeEnabled({ timeout: 60_000 })
     const posts = watchExcelPosts(page)
     const zhBuf = await exportAndRead(page, /导出 Excel/i)

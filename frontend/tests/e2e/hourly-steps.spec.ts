@@ -212,7 +212,8 @@ test.describe('R5/R6: 计算步序列闭环', () => {
     const page = await context.newPage()
     await createSession(page, userName, password)
     await page.goto(`/projects/${pid}/results`)
-    await expect(page.getByRole('button', { name: /导出 Excel/i }).first()).toBeEnabled({ timeout: 60_000 })
+    await expect(page.getByRole('tab', { name: '工程与曲线' })).toBeVisible({ timeout: 60_000 })
+    await page.getByRole('tab', { name: '工程与曲线' }).click()
 
     const card = page.locator('.ies-section', { hasText: '计算步曲线' }).first()
     const picker = page.getByLabel('证据包状态')
@@ -262,6 +263,14 @@ test.describe('R5/R6: 计算步序列闭环', () => {
     await card.getByRole('button', { name: '上一窗口', exact: true }).click()
     await expect(card.getByText(/当前窗口 0–/)).toBeVisible()
     await expect(card.getByRole('button', { name: '上一窗口', exact: true })).toBeDisabled()
+
+    // 验证二级「步序列数据表」展示及返回「工程与曲线」
+    await card.getByRole('button', { name: '查看步序列数据表', exact: true }).click()
+    const stepTable = page.getByRole('table', { name: '计算步原始数据表', exact: true })
+    await expect(stepTable).toBeVisible({ timeout: 30_000 })
+    await expect(stepTable.locator('tbody tr').first().locator('td').first()).toHaveText('0')
+    await page.getByRole('button', { name: /返回工程与曲线/ }).click()
+    await expect(card).toBeVisible({ timeout: 30_000 })
 
     // --- 任务切换(同一证据选择器): 第二任务为真实求解的 metrics-only --------
     // 切换断言: 任务身份更新、旧曲线不残留、缺席有明确说明, 切回按同一

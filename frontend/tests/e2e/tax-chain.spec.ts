@@ -246,11 +246,11 @@ async function openResults(page: Page): Promise<void> {
   await expect(page).toHaveURL(/\/results/)
 }
 
-/** 结果页读税额节实际展示(按公开中文标题定位)。 */
+/** 结果页通过「过程与税务」「财务与现金流」Tab 与二级分页明细表核对封存税务事实。 */
 async function captureTaxCard(page: Page): Promise<{
-  vatRows: Array<{ label: string; value: string }>
+  vatRows: Array<{ label: string; cols: string[] }>
   refundRows: Array<{ label: string; value: string }>
-  incomeRows: Array<{ label: string; value: string }>
+  incomeRows: Array<{ label: string; cols: string[] }>
   flowRows: Array<{ label: string; value: string }>
   npv: string
 }> {
@@ -258,32 +258,80 @@ async function captureTaxCard(page: Page): Promise<{
     has: page.getByRole('heading', { name: /评价现金流\(封存\)|Sealed evaluation/i }),
   })
   await expect(card).toBeVisible({ timeout: 30_000 })
-  const block = (heading: string) =>
-    card.locator(`xpath=.//h3[contains(normalize-space(.), "${heading}")]/following-sibling::table[1]`)
-  const rowsOf = async (scope: ReturnType<typeof block>) => {
-    const count = await scope.locator('tbody tr').count()
-    const rows: Array<{ label: string; value: string }> = []
-    for (let i = 0; i < count; i += 1) {
-      const tds = scope.locator('tbody tr').nth(i).locator('td')
-      rows.push({ label: norm(await tds.nth(0).textContent()), value: norm(await tds.nth(1).textContent()) })
-    }
-    return rows
-  }
   const metricsDl = card.locator(
     'xpath=.//h3[contains(normalize-space(.), "指标(封存)")]/following-sibling::dl[1]',
   )
   const npv = norm(
     await metricsDl.locator('xpath=./dt[normalize-space()="NPV"]/following-sibling::dd[1]').textContent(),
   )
-  return {
-    // 标题按公开中文标签前缀定位(实际标题带补充说明, 如
-    // "增值税(按月, 实缴/确认/到账/结转)")。
-    vatRows: await rowsOf(block('增值税(按月')),
-    refundRows: await rowsOf(block('退款计划')),
-    incomeRows: await rowsOf(block('所得税(按年')),
-    flowRows: await rowsOf(block('完整税后现金流')),
-    npv,
+
+  const readMultiRows = async (table: ReturnType<Page['locator']>) => {
+    await expect(table).toBeVisible({ timeout: 30_000 })
+    const count = await table.locator('tbody tr').count()
+    const rows: Array<{ label: string; cols: string[] }> = []
+    for (let i = 0; i < count; i += 1) {
+      const tds = table.locator('tbody tr').nth(i).locator('td')
+      const cellCount = await tds.count()
+      const cols: string[] = []
+      for (let c = 1; c < cellCount; c += 1) cols.push(norm(await tds.nth(c).textContent()))
+      rows.push({ label: norm(await tds.nth(0).textContent()), cols })
+    }
+    return rows
   }
+  const readPairRows = async (table: ReturnType<Page['locator']>) => {
+    await expect(table).toBeVisible({ timeout: 30_000 })
+    const count = await table.locator('tbody tr').count()
+    const rows: Array<{ label: string; value: string }> = []
+    for (let i = 0; i < count; i += 1) {
+      const tds = table.locator('tbody tr').nth(i).locator('td')
+      rows.push({ label: norm(await tds.nth(0).textContent()), value: norm(await tds.nth(1).textContent()) })
+    }
+    return rows
+  }
+
+  // 进入「过程与税务」Tab: 检查增值税图表 -> 二级页分页收集全部 36 个月及退款计划
+  await page.getByRole('tab', { name: '过程与税务' }).click()
+  const vatCard = page.locator('section.ies-card').filter({
+    has: page.getByRole('heading', { name: '增值税与退款计划', exact: true }),
+  })
+  await expect(vatCard.locator('.ies-chart svg')).toBeVisible({ timeout: 30_000 })
+  await vatCard.getByRole('button', { name: /查看明细数据/ }).click()
+
+  // 验证真实分页（36 个月 > 默认 20/页 → 先读第 1 页再翻第 2 页）
+  const vatTable = page.getByRole('table', { name: /增值税/ })
+  const vatPage1 = await readMultiRows(vatTable)
+  expect(vatPage1.length).toBe(20)
+  await page.getByRole('navigation', { name: '表格分页导航' }).getByRole('button', { name: '下一页' }).click()
+  const vatPage2 = await readMultiRows(vatTable)
+  expect(vatPage2.length).toBe(16)
+  const vatRows = [...vatPage1, ...vatPage2].map((r) => ({
+    label: `${r.label} / ${r.cols[0]}`,
+    cols: r.cols.slice(1),
+  }))
+
+  await page.getByRole('tab', { name: /退款计划/ }).click()
+  const refundRows = await readPairRows(page.getByRole('table', { name: /退款计划/ }))
+  await page.getByRole('button', { name: /返回过程与税务/ }).click()
+
+  // 进入所得税/折旧二级页读取年度所得税 rows
+  const incomeCard = page.locator('section.ies-card').filter({
+    has: page.getByRole('heading', { name: '所得税、计税折旧、亏损与派生税费', exact: true }),
+  })
+  await expect(incomeCard.locator('.ies-chart svg').first()).toBeVisible({ timeout: 30_000 })
+  await incomeCard.getByRole('button', { name: /查看明细数据/ }).click()
+  const incomeRows = await readMultiRows(page.getByRole('table', { name: /所得税/ }))
+  await page.getByRole('button', { name: /返回过程与税务/ }).click()
+
+  // 进入「财务与现金流」Tab -> 逐年现金流二级页读取完整税后 CF[0..E]
+  await page.getByRole('tab', { name: '财务与现金流' }).click()
+  const cfCard = page.locator('section.ies-card').filter({
+    has: page.getByRole('heading', { name: /逐年现金流 CF\[0\.\.E\]/ }),
+  })
+  await cfCard.getByRole('button', { name: /查看明细数据/ }).click()
+  const flowRows = await readPairRows(page.getByRole('table', { name: /完整税后现金流/ }))
+  await page.getByRole('button', { name: /返回财务与现金流/ }).click()
+
+  return { vatRows, refundRows, incomeRows, flowRows, npv }
 }
 
 /** 税后 CF 交叉勾稽: CF[t] = -付款 + 经营净额 - 月实缴 + 到账退款 - 所得税(同源恒等)。
@@ -638,8 +686,7 @@ test.describe('D3: 税务主链(财务页→提交→求解→税额→评估→
     expect(taxCard.flowRows.length).toBe(4)
     const pageCarry30 = taxCard.vatRows.find((r) => r.label.includes('m=30'))
     const oracleCarry30 = fin.tax_cash.vat.find((r) => r.month === 30)
-    expect(pageCarry30?.value).toContain(String(oracleCarry30?.carry))
-    expect(pageCarry30?.value).toContain(fin.currency)
+    expect(pageCarry30?.cols).toContain(String(oracleCarry30?.carry))
     const pageRefundPost = taxCard.refundRows.find((r) => r.label.includes('m=20'))
     expect(pageRefundPost?.label).toMatch(/期后应收|receivable/i)
     const pageRefundIn = taxCard.refundRows.find((r) => r.label.includes('m=14'))
@@ -647,6 +694,7 @@ test.describe('D3: 税务主链(财务页→提交→求解→税额→评估→
     expect(taxCard.npv).toContain(fin.evaluation.npv)
 
     // 系统评估(结果页显式重评估) → 导出页下载 Excel。
+    await page.getByRole('tab', { name: /评估与导出/ }).click()
     const historyCard = page.locator('section.ies-card').filter({
       has: page.getByRole('heading', { name: '评估历史', exact: true }),
     })
@@ -735,30 +783,32 @@ test.describe('D3: 税务主链(财务页→提交→求解→税额→评估→
     await page.getByRole('navigation', { name: /工作台|Workspace/i }).getByText('任务中心').click({ timeout: 30_000 })
     await page.locator('.ies-table__row').first().click({ timeout: 30_000 })
 
-    // 结果页切换证据包：任务1显示维护 100，任务2显示 200。
+    // 结果页切换证据包：进入「财务与现金流」运营年度分量二级表，任务1显示维护 100，任务2显示 200。
     await openResults(page)
     const selector = page.getByLabel('证据包状态', { exact: true })
     await expect(selector).toBeVisible({ timeout: 30_000 })
     expect(await selector.locator('option').count()).toBe(2)
+    await page.getByRole('tab', { name: '财务与现金流' }).click()
+    await page.locator('section.ies-card').filter({
+      has: page.getByRole('heading', { name: '运营年度分量', exact: true }),
+    }).getByRole('button', { name: /查看明细数据/ }).click()
     const annualTable = async (): Promise<string[]> => {
-      const card = page.locator('section.ies-card').filter({
-        has: page.getByRole('heading', { name: /评价现金流\(封存\)|Sealed evaluation/i }),
-      })
-      const table = card.locator('xpath=.//h3[contains(normalize-space(.), "运营年度分量")]/following-sibling::table[1]')
+      const table = page.getByRole('table', { name: '运营年度分量', exact: true })
       const count = await table.locator('tbody tr').count()
       const values: string[] = []
       for (let i = 0; i < count; i += 1) {
-        values.push(norm(await table.locator('tbody tr').nth(i).locator('td').nth(1).textContent()))
+        // 第 5 列(下标 4)为维护支出
+        values.push(norm(await table.locator('tbody tr').nth(i).locator('td').nth(4).textContent()))
       }
       return values
     }
     await selector.selectOption({ index: 0 })
-    await expect.poll(async () => (await annualTable()).join('|'), { timeout: 30_000 }).toContain(`− ${finBefore.annual_operation[0].maintenance} − ${finBefore.annual_operation[0].demand_charge} =`)
+    await expect.poll(async () => (await annualTable()).join('|'), { timeout: 30_000 }).toContain(String(finBefore.annual_operation[0].maintenance))
     await selector.selectOption({ index: 1 })
-    await expect.poll(async () => (await annualTable()).join('|'), { timeout: 30_000 }).toContain(`− ${finSecond.annual_operation[0].maintenance} − ${finSecond.annual_operation[0].demand_charge} =`)
+    await expect.poll(async () => (await annualTable()).join('|'), { timeout: 30_000 }).toContain(String(finSecond.annual_operation[0].maintenance))
     // 切回任务1：旧结果不变（与切换前封存逐项一致）。
     await selector.selectOption({ index: 0 })
-    await expect.poll(async () => (await annualTable()).join('|'), { timeout: 30_000 }).toContain(`− ${finBefore.annual_operation[0].maintenance} − ${finBefore.annual_operation[0].demand_charge} =`)
+    await expect.poll(async () => (await annualTable()).join('|'), { timeout: 30_000 }).toContain(String(finBefore.annual_operation[0].maintenance))
     const finAfter = await fetchSealed(page, pid, task1)
     expect(finAfter).toEqual(finBefore)
 
@@ -927,14 +977,17 @@ test.describe('D3: 税务主链(财务页→提交→求解→税额→评估→
       fin.annual_net_flows.reduce((sum, cf, year) => sum + Number(cf) / Math.pow(1.08, year), 0),
       1e-9, 1e-3)
 
-    // Verify visible rows in ResultsPage, including the typed source identity.
-    const card = page.locator('section.ies-card').filter({
-      has: page.getByRole('heading', { name: /评价现金流\(封存\)|Sealed evaluation/i }),
-    })
-    await expect(card.locator('tr').filter({ hasText: 'replacement_recovery / CF[t=3]' }))
+    // Verify visible rows in ResultsPage across tabs & Level-2 depreciation sub-tab, including the typed source identity.
+    await page.getByRole('tab', { name: '财务与现金流' }).click()
+    await expect(page.locator('tr').filter({ hasText: 'replacement_recovery / CF[t=3]' }))
       .toContainText(receipt.amount + ' ' + fin.currency)
+    await page.getByRole('tab', { name: '过程与税务' }).click()
+    await page.locator('section.ies-card').filter({
+      has: page.getByRole('heading', { name: '所得税、计税折旧、亏损与派生税费', exact: true }),
+    }).getByRole('button', { name: /查看明细数据/ }).click()
+    await page.getByRole('tab', { name: /计税折旧/ }).click()
     for (const row of replacementDepreciation) {
-      await expect(card.locator('tr').filter({
+      await expect(page.locator('tr').filter({
         hasText: 'maintenance_expense_net: y=2, #1 / y=' + row.year,
       })).toContainText(row.amount + ' ' + fin.currency)
     }

@@ -121,6 +121,7 @@ test.describe('R7: 导出先评估再导出', () => {
     await openResults(page)
 
     // 先用现有 UI 显式重新评估(这是唯一的 assessment POST 来源)。
+    await page.getByRole('tab', { name: /评估与导出/ }).click()
     const historyCard = page.locator('section.ies-card').filter({
       has: page.getByRole('heading', { name: '评估历史', exact: true }),
     })
@@ -221,6 +222,7 @@ test.describe('R7: 导出先评估再导出', () => {
     expect(posts.filter((p) => p.url.includes('/result/assess'))).toEqual([])
     await context.unrouteAll({ behavior: 'wait' })
     await page.reload()
+    await page.getByRole('tab', { name: /评估与导出/ }).click()
     await expect(page.locator('.ies-assess-item')).toHaveCount(1, { timeout: 30_000 })
 
     // 定向注入的两次 500 按真实任务 id 精确计数。

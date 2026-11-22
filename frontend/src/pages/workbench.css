@@ -673,3 +673,206 @@
 .ies-section {
   margin-bottom: var(--ies-space-4);
 }
+
+/* 结果页紧凑摘要网格(保持 dt/dd 直接子元素) */
+.ies-kv--compact {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto minmax(0, 1fr);
+  gap: var(--ies-space-2) var(--ies-space-4);
+  align-items: baseline;
+}
+
+@media (max-width: 760px) {
+  .ies-kv--compact {
+    grid-template-columns: auto 1fr;
+  }
+}
+
+/* 核心 KPI 指标卡格 */
+.ies-kpi-grid {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: var(--ies-space-3);
+  margin: var(--ies-space-3) 0;
+}
+
+@media (max-width: 1280px) {
+  .ies-kpi-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 720px) {
+  .ies-kpi-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+.ies-kpi {
+  padding: var(--ies-space-3);
+  border: 1px solid var(--ies-color-border);
+  border-radius: var(--ies-radius-md);
+  background: var(--ies-color-surface-2);
+}
+
+.ies-kpi__label {
+  font-size: var(--ies-fs-xs);
+  color: var(--ies-color-text-secondary);
+}
+
+.ies-kpi__value {
+  margin-top: 2px;
+  font-size: var(--ies-fs-md);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: var(--ies-color-text);
+  word-break: break-word;
+}
+
+/* 结果页工具栏、二级页导航与图表网格 */
+.ies-result-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--ies-space-3);
+  margin-bottom: var(--ies-space-3);
+}
+
+.ies-result-toolbar__filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--ies-space-2);
+}
+
+.ies-result-toolbar__filters .ies-select,
+.ies-result-toolbar__filters .ies-input {
+  width: auto;
+  min-width: 150px;
+}
+
+.ies-result-detail__bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--ies-space-3);
+  padding: var(--ies-space-3) var(--ies-space-4);
+  margin-bottom: var(--ies-space-4);
+  border: 1px solid var(--ies-color-border);
+  border-radius: var(--ies-radius-lg);
+  background: var(--ies-color-surface);
+}
+
+.ies-result-detail__nav {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--ies-space-3);
+}
+
+.ies-result-detail__crumb {
+  font-size: var(--ies-fs-sm);
+  color: var(--ies-color-text-secondary);
+}
+
+.ies-result-detail__title {
+  font-size: var(--ies-fs-md);
+  font-weight: 700;
+  color: var(--ies-color-text);
+}
+
+.ies-chart-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--ies-space-4);
+}
+
+@media (max-width: 1100px) {
+  .ies-chart-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* 扩展 SVG 图表样式(零线/柱形/可切换图例/交互读数条) */
+.ies-chart__zero {
+  stroke: var(--ies-color-border-strong);
+  stroke-width: 1.25;
+}
+
+.ies-chart__bar {
+  transition: opacity var(--ies-transition);
+}
+
+.ies-chart__hover-band {
+  fill: transparent;
+  cursor: pointer;
+}
+
+.ies-chart__hover-band:hover,
+.ies-chart__hover-band:focus-visible,
+.ies-chart__hover-band--active {
+  fill: color-mix(in srgb, var(--ies-primary) 8%, transparent);
+}
+
+.ies-chart__legend-btn {
+  border: 1px solid var(--ies-color-border);
+  border-radius: var(--ies-radius-full);
+  padding: 2px var(--ies-space-2);
+  background: var(--ies-color-surface);
+  color: var(--ies-color-text-secondary);
+  cursor: pointer;
+  transition: opacity var(--ies-transition), border-color var(--ies-transition);
+}
+
+.ies-chart__legend-btn:hover {
+  border-color: var(--ies-primary);
+  color: var(--ies-color-text);
+}
+
+.ies-chart__legend-btn--hidden {
+  opacity: 0.45;
+  text-decoration: line-through;
+}
+
+.ies-chart__legend-reset {
+  border: 0;
+  background: transparent;
+  color: var(--ies-primary);
+  font-size: var(--ies-fs-xs);
+  cursor: pointer;
+  padding: 2px var(--ies-space-1);
+}
+
+.ies-chart__readout {
+  margin-top: var(--ies-space-2);
+  padding: var(--ies-space-2) var(--ies-space-3);
+  border-radius: var(--ies-radius-md);
+  background: var(--ies-color-surface-2);
+  border: 1px solid var(--ies-color-border);
+  font-size: var(--ies-fs-xs);
+  color: var(--ies-color-text-secondary);
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--ies-space-2) var(--ies-space-4);
+  font-variant-numeric: tabular-nums;
+}
+
+.ies-chart__readout-cat {
+  font-weight: 700;
+  color: var(--ies-color-text);
+}
+
+.ies-chart__readout-item {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--ies-space-1);
+}
+
+.ies-formula-text {
+  font-family: var(--ies-font-mono);
+  font-size: var(--ies-fs-xs);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}

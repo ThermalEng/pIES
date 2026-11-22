@@ -16,6 +16,7 @@
   - [文件格式标准](developer-guide/zh-CN/file-formats.md)
     - [设备模型 YAML](developer-guide/zh-CN/formats/device-model-yaml.md)
     - [设备数据 CSV](developer-guide/zh-CN/formats/device-data-csv.md)
+    - [价格序列 CSV](developer-guide/zh-CN/formats/price-series-csv.md)
     - [装配 YAML](developer-guide/zh-CN/formats/assembly-yaml.md)
     - [网络边界与系统方程](developer-guide/zh-CN/formats/network-relations.md)
     - [财务 YAML](developer-guide/zh-CN/formats/finance-yaml.md)

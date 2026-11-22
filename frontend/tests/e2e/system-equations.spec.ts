@@ -87,6 +87,7 @@ test('N3 system document survives editing and feeds same-solve curves and export
     expect(detail.task.status).toBe('completed')
   }).toPass({ timeout: 420_000, intervals: [5000] })
   await page.goto(`/projects/${pid}/results`)
+  await page.getByRole('tab', { name: '工程与曲线' }).click()
   await expect(page.getByText('系统 hp1.electricity_in', { exact: true })).toBeVisible({ timeout: 60_000 })
   await expect(page.getByText('hp1.electricity_in', { exact: true })).toBeVisible()
   await page.screenshot({ path: `${process.env.E2E_OUTPUT_DIR}/n3-distinct-series.png`, fullPage: true })
@@ -112,6 +113,7 @@ test('N3 system document survives editing and feeds same-solve curves and export
   expect(systemValues.length).toBe(8760)
   expect(systemValues).toEqual(await readAll(device.series_id))
 
+  await page.getByRole('tab', { name: /评估与导出/ }).click()
   const [excel] = await Promise.all([page.waitForEvent('download'),
     page.getByRole('button', { name: /导出 Excel/i }).click()])
   expect(await excel.failure()).toBeNull()
@@ -128,6 +130,7 @@ test('N3 system document survives editing and feeds same-solve curves and export
   await page.getByRole('button', { name: '保存系统方程', exact: true }).click()
   await expect(page.getByText('系统方程草稿已保存', { exact: true })).toBeVisible()
   await page.goto(`/projects/${pid}/results`)
+  await page.getByRole('tab', { name: /评估与导出/ }).click()
   const [pkg] = await Promise.all([page.waitForEvent('download'),
     page.getByRole('button', { name: /导出完整项目包/ }).click()])
   expect(await pkg.failure()).toBeNull()

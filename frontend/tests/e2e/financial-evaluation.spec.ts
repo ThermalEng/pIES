@@ -176,16 +176,16 @@ interface SealedCardSnapshot {
   irrStatus: string
   staticPayback: string
   dynamicPayback: string
-  annualRows: Array<{ label: string; value: string }>
-  cfRows: Array<{ label: string; value: string }>
+  annualRows: Array<{ label: string; cols: string[] }>
+  cfRows: Array<{ label: string; cols: string[] }>
 }
 
 /**
- * 结果页会话内读取封存卡实际展示文本(按公开中文标签定位):
- * 概览口径、四指标与状态、运营年度分量表、逐年现金流表。
- * 读取值随后与同任务 HTTP 封存 oracle 对账, 不依赖页面内部状态。
+ * 结果页读取封存财务事实(总览核心卡 + 财务与现金流一级图表 + 二级明细表):
+ * 校验 Tab 分区、一级 SVG 图表可视化与二级分页明细表同源。
  */
 async function captureSealedCard(page: Page): Promise<SealedCardSnapshot> {
+  await page.getByRole('tab', { name: '总览' }).click()
   const card = page.locator('section.ies-card').filter({
     has: page.getByRole('heading', { name: /评价现金流\(封存\)|Sealed evaluation/i }),
   })
@@ -201,14 +201,20 @@ async function captureSealedCard(page: Page): Promise<SealedCardSnapshot> {
         .locator(`xpath=./dt[normalize-space()="${label}"]/following-sibling::dd[1]`)
         .textContent(),
     )
-  const rowsOf = async (scope: Locator) => {
-    const count = await scope.locator('tbody tr').count()
-    const rows: Array<{ label: string; value: string }> = []
+  const readMultiRows = async (table: Locator) => {
+    await expect(table).toBeVisible({ timeout: 30_000 })
+    const count = await table.locator('tbody tr').count()
+    const rows: Array<{ label: string; cols: string[] }> = []
     for (let i = 0; i < count; i += 1) {
-      const tds = scope.locator('tbody tr').nth(i).locator('td')
+      const tds = table.locator('tbody tr').nth(i).locator('td')
+      const cellCount = await tds.count()
+      const cols: string[] = []
+      for (let c = 1; c < cellCount; c += 1) {
+        cols.push(norm(await tds.nth(c).textContent()))
+      }
       rows.push({
         label: norm(await tds.nth(0).textContent()),
-        value: norm(await tds.nth(1).textContent()),
+        cols,
       })
     }
     return rows
@@ -227,15 +233,41 @@ async function captureSealedCard(page: Page): Promise<SealedCardSnapshot> {
     header[label] = await dd(headerDl, label)
   }
   const metricsDl = block('指标(封存)', 'dl')
+  const npv = await dd(metricsDl, 'NPV')
+  const irr = await dd(metricsDl, '项目投资 IRR')
+  const irrStatus = await dd(metricsDl, 'IRR 计算状态')
+  const staticPayback = await dd(metricsDl, '静态回收期')
+  const dynamicPayback = await dd(metricsDl, '动态回收期')
+
+  // 切到「财务与现金流」Tab: 校验一级图表渲染，再分别下钻二级明细表并返回
+  await page.getByRole('tab', { name: '财务与现金流' }).click()
+  const cfCard = page.locator('section.ies-card').filter({
+    has: page.getByRole('heading', { name: /逐年现金流 CF\[0\.\.E\]/ }),
+  })
+  await expect(cfCard.locator('.ies-chart svg')).toBeVisible({ timeout: 30_000 })
+  await cfCard.getByRole('button', { name: /查看明细数据/ }).click()
+  const cfRows = await readMultiRows(page.getByRole('table', { name: /逐年现金流 CF\[0\.\.E\]/ }))
+  await page.getByRole('button', { name: /返回财务与现金流/ }).click()
+
+  const opCard = page.locator('section.ies-card').filter({
+    has: page.getByRole('heading', { name: '运营年度分量', exact: true }),
+  })
+  await expect(opCard.locator('.ies-chart svg')).toBeVisible({ timeout: 30_000 })
+  await opCard.getByRole('button', { name: /查看明细数据/ }).click()
+  const annualRows = await readMultiRows(page.getByRole('table', { name: '运营年度分量', exact: true }))
+  await page.getByRole('button', { name: /返回财务与现金流/ }).click()
+
+  await page.getByRole('tab', { name: '总览' }).click()
+
   return {
     header,
-    npv: await dd(metricsDl, 'NPV'),
-    irr: await dd(metricsDl, '项目投资 IRR'),
-    irrStatus: await dd(metricsDl, 'IRR 计算状态'),
-    staticPayback: await dd(metricsDl, '静态回收期'),
-    dynamicPayback: await dd(metricsDl, '动态回收期'),
-    annualRows: await rowsOf(block('运营年度分量', 'table')),
-    cfRows: await rowsOf(block('逐年现金流', 'table')),
+    npv,
+    irr,
+    irrStatus,
+    staticPayback,
+    dynamicPayback,
+    annualRows,
+    cfRows,
   }
 }
 
@@ -260,18 +292,19 @@ function expectSealedCardMatches(snapshot: SealedCardSnapshot, fin: SealedEvalua
   expect(snapshot.annualRows.map((r) => r.label)).toEqual(
     fin.annual_operation.map((a, i) => `第${i + 1}年(t=${a.financial_year})`),
   )
-  expect(snapshot.annualRows.map((r) => r.value)).toEqual(
-    fin.annual_operation.map(
-      (a) =>
-        `${a.energy_net} − ${a.variable_om} − ${a.fixed_om} − ${a.maintenance} − ${a.demand_charge} = ${a.net} ${fin.currency}`,
-    ),
+  expect(snapshot.annualRows.map((r) => r.cols)).toEqual(
+    fin.annual_operation.map((a) => [
+      a.energy_net,
+      a.variable_om,
+      a.fixed_om,
+      a.maintenance,
+      a.demand_charge,
+      a.net,
+    ]),
   )
   expect(snapshot.cfRows.map((r) => r.label)).toEqual(ev.rows.map((r) => `CF[t=${r.year}]`))
-  expect(snapshot.cfRows.map((r) => r.value)).toEqual(
-    ev.rows.map(
-      (r) =>
-        `${r.net} / ${r.discounted} / ${r.cumulative} / ${r.cumulative_discounted} ${fin.currency}`,
-    ),
+  expect(snapshot.cfRows.map((r) => r.cols)).toEqual(
+    ev.rows.map((r) => [r.net, r.discounted, r.cumulative, r.cumulative_discounted]),
   )
 }
 
@@ -412,7 +445,9 @@ test.describe('T3: K1N2 财务评价确认/求解/结果/导出', () => {
     await expect(page.getByText(/t=K\+j/).first()).toBeVisible()
     // 会话内读取封存卡实际展示(与 HTTP oracle 的对账在其后完成)。
     const snapshot = await captureSealedCard(page)
+    await page.getByRole('tab', { name: '过程与税务' }).click()
     await expect(page.getByText(/未绑定需量计量点|No demand meter was bound/i)).toBeVisible()
+    await page.getByRole('tab', { name: '总览' }).click()
 
     // 同任务冻结输入、实际规划容量与年度金额分别取不同封存来源对账；
     // 手算系数来自创建的财务画像: hp1 upfront_capex=2800 CNY/kW。
@@ -483,6 +518,7 @@ test.describe('T3: K1N2 财务评价确认/求解/结果/导出', () => {
     expect(inputsAfter.inputs.snapshot.evaluation.maintenance_expenses).toEqual(frozenExpenses)
 
     // 结果页已有系统评估; 显式重评估后再导出, 不重复求解全期模型。
+    await page.getByRole('tab', { name: /评估与导出/ }).click()
     const historyCard = page.locator('section.ies-card').filter({
       has: page.getByRole('heading', { name: '评估历史', exact: true }),
     })

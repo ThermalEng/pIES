@@ -1,8 +1,9 @@
-# pIES 开发者指南
+# pIES 开发者指南 / Developer Guide
 
-当前发布语言：
+当前发布语言 / Published languages：
 
 - [简体中文](zh-CN/README.md)
+- [English](en-US/README.md)
 
 开发者指南是后续设计与开发的长期蓝图，说明系统应保持的边界、公共契约、扩展方式与质量不变量；它不记录版本计划、实施切片或当前完成状态。
 

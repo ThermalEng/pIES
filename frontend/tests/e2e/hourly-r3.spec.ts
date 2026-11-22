@@ -144,8 +144,14 @@ test.describe('R3: 曲线读取失败可见', () => {
     })
     const session = await createSession(page, userName, password)
     await page.goto(`/projects/${pid}/results`)
-    await expect(page.getByRole('button', { name: /导出 Excel/i }).first()).toBeEnabled({ timeout: 60_000 })
+    await expect(page.getByRole('tab', { name: '工程与曲线' })).toBeVisible({ timeout: 60_000 })
+    // 财务摘要保留: 先核对总览/财务与现金流中封存财务关键值原样可见。
+    await expect(page.getByText('评价现金流(封存)').first()).toBeVisible()
+    await expect(page.getByText(totalLine).first()).toBeVisible()
+    await page.getByRole('tab', { name: '财务与现金流' }).click()
+    await expect(page.getByText(payLine).first()).toBeVisible()
 
+    await page.getByRole('tab', { name: '工程与曲线' }).click()
     const card = page.locator('.ies-section', { hasText: '计算步曲线' }).first()
     await expect(card).toBeVisible({ timeout: 60_000 })
     // 失败可见: 真实错误 + 重试说明, 无曲线、无缩水图例。
@@ -155,10 +161,6 @@ test.describe('R3: 曲线读取失败可见', () => {
     expect(await card.locator('.ies-chart__legend-item').count()).toBe(0)
     const retryBtn = card.getByRole('button', { name: '重试', exact: true })
     await expect(retryBtn).toBeVisible()
-    // 财务摘要保留: 封存财务卡标题与已封存关键值原样可见, 主结果无全局错误。
-    await expect(page.getByText('评价现金流(封存)').first()).toBeVisible()
-    await expect(page.getByText(totalLine).first()).toBeVisible()
-    await expect(page.getByText(payLine).first()).toBeVisible()
     expect(writePosts).toEqual([])
 
     // 解除拦截后点击重试: 真实恢复, 图例与 API 身份一致, 仍无写请求。
@@ -176,6 +178,7 @@ test.describe('R3: 曲线读取失败可见', () => {
     expect(note).toContain(`共 ${Math.min(1000, refs[0].rows)} 个数据点`)
     expect(note).toContain(`全周期 ${refs[0].rows} 步`)
     // 重试后封存财务关键值仍原样保留。
+    await page.getByRole('tab', { name: '财务与现金流' }).click()
     await expect(page.getByText(totalLine).first()).toBeVisible()
     await expect(page.getByText(payLine).first()).toBeVisible()
     expect(writePosts).toEqual([])
@@ -310,19 +313,19 @@ test.describe('R3: 曲线读取失败可见', () => {
     const session = await createSession(page, userName, password)
     try {
       await page.goto(`/projects/${pid}/results`)
-      await expect(page.getByRole('button', { name: /导出 Excel/i }).first()).toBeEnabled({ timeout: 60_000 })
+      await expect(page.getByRole('tab', { name: '总览' })).toBeVisible({ timeout: 60_000 })
 
       // 等至少一个真实曲线请求进入闸门(响应仍被挂起, 未释放)。
       await expect.poll(async () => entered.length, { timeout: 30_000 }).toBeGreaterThan(0)
 
-      // 挂起期间: 曲线处加载中、无图表; 封存财务与规划解变量已显示。
-      // 旧代码(主结果状态位于曲线 await 之后)在此会因规划解未发布而失败。
+      // 挂起期间: 总览封存财务与规划解变量已立即显示; 切至工程与曲线 Tab 见加载态且无图表。
+      await expect(page.getByText(totalLine).first()).toBeVisible({ timeout: 30_000 })
+      await expect(page.getByText('hp1_cap').first()).toBeVisible({ timeout: 30_000 })
+      await page.getByRole('tab', { name: '工程与曲线' }).click()
       const card = page.locator('.ies-section', { hasText: '计算步曲线' }).first()
       await expect(card).toBeVisible({ timeout: 60_000 })
       await expect(card.getByText(/正在读取计算步曲线/)).toBeVisible({ timeout: 30_000 })
       expect(await card.locator('.ies-chart').count()).toBe(0)
-      await expect(page.getByText(totalLine).first()).toBeVisible({ timeout: 30_000 })
-      await expect(page.getByText('hp1_cap').first()).toBeVisible({ timeout: 30_000 })
       // A slow first page must not fan out all the other series. Leaving the
       // result page aborts it, and unrelated real pages remain usable.
       expect(entered).toHaveLength(1)
@@ -347,7 +350,8 @@ test.describe('R3: 曲线读取失败可见', () => {
     // Re-enter via the workspace, with no re-solve. All actual series recover.
     await page.getByRole('navigation', { name: /工作台|Workspace/i })
       .getByText('结果分析', { exact: true }).click()
-    await expect(page).toHaveURL(new RegExp(`/projects/${pid}/results$`))
+    await expect(page).toHaveURL(new RegExp(`/projects/${pid}/results`))
+    await page.getByRole('tab', { name: '工程与曲线' }).click()
     const card = page.locator('.ies-section', { hasText: '计算步曲线' }).first()
     await expect(async () => {
       const items = await card.locator('.ies-chart__legend-item').allInnerTexts()
@@ -411,6 +415,7 @@ test.describe('R3: 曲线读取失败可见', () => {
     await expect(viewResults).toBeVisible({ timeout: 10_000 })
     await viewResults.click({ timeout: 30_000 })
     await expect(page).toHaveURL(/\/results/)
+    await page.getByRole('tab', { name: '工程与曲线' }).click()
 
     // 曲线缺席有明确说明: 无错误、无图表、无重试按钮。
     const card = page.locator('.ies-section', { hasText: '计算步曲线' }).first()

@@ -92,41 +92,72 @@ check('en 同章节 id 一致', md.pageIdFromPath('developer-guide/en-US/contrac
 check('zh-CN 可用', md.resolveLocale(['zh-CN'], 'zh-CN') === 'zh-CN')
 check('zh 前缀匹配 zh-CN', md.resolveLocale(['zh-CN'], 'zh') === 'zh-CN')
 check('en 缺失返回 null', md.resolveLocale(['zh-CN'], 'en') === null)
+check('en-US 可用', md.resolveLocale(['zh-CN', 'en-US'], 'en-US') === 'en-US')
+check('en 前缀匹配 en-US', md.resolveLocale(['zh-CN', 'en-US'], 'en') === 'en-US')
+check('未发布语言 fr 返回 null', md.resolveLocale(['zh-CN', 'en-US'], 'fr') === null)
 
 // ---- manifest 结构(构建期生成物) ----
 try {
   const manifest = JSON.parse(readFileSync('public/help/manifest.json', 'utf8'))
-  check('manifest 语言登记', Array.isArray(manifest.locales) && manifest.locales.includes('zh-CN'))
+  check(
+    'manifest 语言登记 (zh-CN + en-US)',
+    Array.isArray(manifest.locales) &&
+      manifest.locales.includes('zh-CN') &&
+      manifest.locales.includes('en-US'),
+  )
   check('manifest 产品版本为三段式', /^\d+\.\d+\.\d+$/.test(manifest.appVersion))
-  check('manifest 三个一级文档入口', (() => {
+  check('manifest 中文三个一级文档入口', (() => {
     const t = manifest.trees['zh-CN']
     return (
+      Array.isArray(t) &&
       t.length === 3 &&
       t[0].title === '使用者指南' &&
       t[1].title === '开发者指南' &&
       t[2].title === '更新日志'
     )
   })())
-  check('manifest 章节正文非空', (() => {
-    const ids = Object.keys(manifest.pages).filter((k) => k.startsWith('zh-CN/'))
-    return ids.length >= 36 && ids.every((k) => manifest.pages[k].content.length > 0)
+  check('manifest 英文三个一级文档入口', (() => {
+    const t = manifest.trees['en-US']
+    return (
+      Array.isArray(t) &&
+      t.length === 3 &&
+      t[0].title === 'User Guide' &&
+      t[1].title === 'Developer Guide' &&
+      t[2].title === 'Changelog'
+    )
+  })())
+  const flattenIds = (nodes) => {
+    const flat = []
+    const walk = (items) => {
+      for (const n of items) {
+        flat.push(md.pageIdFromPath(n.path))
+        if (n.children.length) walk(n.children)
+      }
+    }
+    walk(nodes)
+    return flat
+  }
+  const zhIds = flattenIds(manifest.trees['zh-CN'])
+  const enIds = flattenIds(manifest.trees['en-US'])
+  check(
+    '中英文目录同构且含全部章节 (含 price-series-csv)',
+    zhIds.length === 50 &&
+      enIds.length === 50 &&
+      zhIds.includes('price-series-csv') &&
+      zhIds.join(',') === enIds.join(','),
+    `zh=${zhIds.length}, en=${enIds.length}`,
+  )
+  check('manifest 中英文章节正文均非空', (() => {
+    return (
+      zhIds.every((id) => manifest.pages[`zh-CN/${id}`]?.content.length > 0) &&
+      enIds.every((id) => manifest.pages[`en-US/${id}`]?.content.length > 0)
+    )
   })())
   const pages = Object.values(manifest.pages)
   check('全部已发布帮助正文均可解析且不生成空段落', pages.every((page) => {
     const parsed = md.splitBlocks(page.content)
     return parsed.length > 0 && parsed.every((block) => block.type !== 'p' || block.raw.trim())
   }), `${pages.length} 篇`)
-  check('manifest 深链接 id 集合 = 目录展平', (() => {
-    const flat = []
-    const walk = (nodes) => {
-      for (const n of nodes) {
-        flat.push(md.pageIdFromPath(n.path))
-        if (n.children.length) walk(n.children)
-      }
-    }
-    walk(manifest.trees['zh-CN'])
-    return flat.every((id) => manifest.pages[`zh-CN/${id}`])
-  })())
 } catch (err) {
   failures++
   console.log(`[FAIL] manifest 生成物缺失或损坏: ${err.message}`)

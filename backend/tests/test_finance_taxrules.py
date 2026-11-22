@@ -512,23 +512,25 @@ def test_submission_gate_passes_empty_rules() -> None:
 # ---------------------------------------------------------------------------
 
 
-_MANUAL_PATH = Path("/manual/developer-guide/zh-CN/formats/finance-yaml.md")
+_ZH_MANUAL_PATH = Path("/manual/developer-guide/zh-CN/formats/finance-yaml.md")
+_EN_MANUAL_PATH = Path("/manual/developer-guide/en-US/formats/finance-yaml.md")
 
 
-def _manual_yaml_blocks() -> list[str]:
-    assert _MANUAL_PATH.is_file(), "正式手册缺失：测试命令须把当前工作树 manual 只读挂载到 /manual，不降门禁"
-    text = _MANUAL_PATH.read_text(encoding="utf-8")
+def _manual_yaml_blocks(manual_path: Path) -> list[str]:
+    assert manual_path.is_file(), f"正式手册缺失（{manual_path}）：测试命令须把当前工作树 manual 只读挂载到 /manual，不降门禁"
+    text = manual_path.read_text(encoding="utf-8")
     return [part.split("```", 1)[0] for part in text.split("```yaml")[1:]]
 
 
-def test_manual_examples_parse_and_merge() -> None:
+@pytest.mark.parametrize("manual_path", [_ZH_MANUAL_PATH, _EN_MANUAL_PATH], ids=["zh-CN", "en-US"])
+def test_manual_examples_parse_and_merge(manual_path: Path) -> None:
     """正式 finance-yaml.md 的 Profile 基座＋税则节＋逐项维护覆盖直读合并。
 
     覆盖侧 deductible_maintenance 仅 items（mode 继承），拒收即回归。
     """
     from iesplan.core.yamlmini import load as yaml_load
 
-    blocks = _manual_yaml_blocks()
+    blocks = _manual_yaml_blocks(manual_path)
     profile_block = next(b for b in blocks if "schema: ies.finance-profile" in b)
     tax_block = next(b for b in blocks if b.lstrip().startswith("taxes:") and "main_pool" in b)
     maint_block = next(

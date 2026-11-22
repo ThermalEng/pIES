@@ -2220,3 +2220,109 @@ button {
 .ies-custom-revision { border: 1px solid var(--ies-success); background: var(--ies-success-subtle); border-radius: 6px; padding: 10px 12px; }
 .ies-custom-revision h3 { margin: 0 0 4px; font-size: 14px; }
 .ies-custom-revision p { margin: 0; font-size: 13px; }
+
+/* ---------------------------------------------------------------------------
+ * 页签(Tabs)与分页(Pagination)
+ * ------------------------------------------------------------------------- */
+
+.ies-tabs {
+  display: flex;
+  align-items: center;
+  gap: var(--ies-space-1);
+  border-bottom: 1px solid var(--ies-color-border);
+  overflow-x: auto;
+  margin-bottom: var(--ies-space-4);
+}
+
+.ies-tabs__tab {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--ies-space-2);
+  padding: var(--ies-space-2) var(--ies-space-4);
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: var(--ies-color-text-secondary);
+  font-size: var(--ies-fs-sm);
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: color var(--ies-transition), border-color var(--ies-transition), background var(--ies-transition);
+}
+
+.ies-tabs__tab:hover {
+  color: var(--ies-color-text);
+  background: var(--ies-color-surface-2);
+}
+
+.ies-tabs__tab--active {
+  color: var(--ies-primary);
+  border-bottom-color: var(--ies-primary);
+  font-weight: 600;
+}
+
+.ies-tabs__badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  padding: 0 6px;
+  border-radius: var(--ies-radius-full);
+  background: var(--ies-neutral-subtle);
+  color: var(--ies-neutral-text);
+  font-size: 0.6875rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.ies-tabs__tab--active .ies-tabs__badge {
+  background: var(--ies-primary-subtle);
+  color: var(--ies-primary);
+}
+
+.ies-tabs__dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--ies-danger);
+  flex: none;
+}
+
+.ies-pagination {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--ies-space-3);
+  margin-top: var(--ies-space-3);
+  padding-top: var(--ies-space-3);
+  border-top: 1px solid var(--ies-color-border);
+  font-size: var(--ies-fs-xs);
+  color: var(--ies-color-text-secondary);
+}
+
+.ies-pagination__info {
+  font-variant-numeric: tabular-nums;
+}
+
+.ies-pagination__controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--ies-space-2);
+}
+
+.ies-pagination__size {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--ies-space-2);
+  color: var(--ies-color-text-secondary);
+}
+
+.ies-pagination__size .ies-select {
+  width: auto;
+  min-width: 72px;
+  padding: 2px var(--ies-space-2);
+  font-size: var(--ies-fs-xs);
+}
