@@ -90,62 +90,63 @@
     <text x="14" y="22" class="sans stage-label">STAGE 01 · MULTI-ENERGY TOPOLOGY &amp; 8760h</text>
 
     <!-- Animated Edges inside Stage 1 -->
-    <path d="M 116 86 C 142 86, 146 86, 172 86" class="flow-elec"/>
-    <path d="M 116 96 C 145 96, 142 152, 172 152" class="flow-elec"/>
-    <path d="M 284 86 C 304 86, 304 120, 286 120 C 266 120, 266 118, 172 184" class="flow-cool" opacity="0.55"/>
-    <path d="M 228 176 L 228 202" class="flow-heat"/>
-    <path d="M 284 152 C 308 152, 308 220, 284 220" class="flow-heat"/>
+    <path d="M 116 86 C 140 86, 144 86, 168 86" class="flow-elec"/>
+    <path d="M 116 96 C 143 96, 140 152, 168 152" class="flow-elec"/>
+    <path d="M 168 152 C 140 152, 140 218, 168 218" class="flow-elec"/>
+    <path d="M 286 152 C 306 152, 306 218, 286 218" class="flow-elec"/>
 
-    <!-- Node: Grid1 -->
+    <!-- Node: grid -->
     <g transform="translate(16, 56)">
       <rect x="0" y="0" width="100" height="58" rx="8" fill="#ffffff" stroke="#596f87" stroke-width="1.6"/>
-      <text x="10" y="19" class="sans node-title">grid1</text>
+      <text x="10" y="19" class="sans node-title">grid</text>
       <rect x="62" y="7" width="30" height="15" rx="3" fill="#eef1f5"/>
       <text x="67" y="17.5" class="sans" style="font-size:9px;font-weight:600;fill:#4a5460;">存量</text>
-      <text x="10" y="35" class="sans node-meta">电网连接 · 800 kW</text>
-      <text x="10" y="49" class="mono" style="font-size:9px;fill:#0e5cad;">electricity_import</text>
+      <text x="10" y="35" class="sans node-meta">电网连接 · 20 MW</text>
+      <text x="10" y="49" class="mono" style="font-size:9px;fill:#0e5cad;">import / export</text>
       <circle cx="100" cy="30" r="4" fill="#0e5cad"/>
     </g>
 
-    <!-- Node: Load1 -->
-    <g transform="translate(172, 56)">
-      <rect x="0" y="0" width="112" height="56" rx="8" fill="#ffffff" stroke="#0e5cad" stroke-width="1.6"/>
-      <text x="10" y="19" class="sans node-title">load1</text>
-      <rect x="74" y="7" width="30" height="15" rx="3" fill="#e6effa"/>
-      <text x="79" y="17.5" class="sans" style="font-size:9px;font-weight:600;fill:#0e5cad;">新增</text>
-      <text x="10" y="35" class="sans node-meta">电负荷 · 200 kW</text>
-      <text x="10" y="48" class="mono" style="font-size:9px;fill:#5f6a77;">step: 0..8759</text>
+    <!-- Node: eload -->
+    <g transform="translate(168, 56)">
+      <rect x="0" y="0" width="118" height="56" rx="8" fill="#ffffff" stroke="#596f87" stroke-width="1.6"/>
+      <text x="10" y="19" class="sans node-title">eload</text>
+      <rect x="80" y="7" width="30" height="15" rx="3" fill="#eef1f5"/>
+      <text x="85" y="17.5" class="sans" style="font-size:9px;font-weight:600;fill:#4a5460;">存量</text>
+      <text x="10" y="35" class="sans node-meta">厂区电负荷 · 30m</text>
+      <text x="10" y="48" class="mono" style="font-size:9px;fill:#5f6a77;">438,288 steps</text>
       <circle cx="0" cy="30" r="4" fill="#0e5cad"/>
     </g>
 
-    <!-- Node: hp1 / hp2 -->
-    <g transform="translate(172, 126)">
-      <rect x="0" y="0" width="112" height="54" rx="8" fill="#ffffff" stroke="#0e5cad" stroke-width="1.6"/>
-      <text x="10" y="18" class="sans node-title">hp1 / hp2</text>
-      <rect x="74" y="6" width="30" height="15" rx="3" fill="#e6effa"/>
-      <text x="79" y="16.5" class="sans" style="font-size:9px;font-weight:600;fill:#0e5cad;">规划</text>
-      <text x="10" y="33" class="sans node-meta">热泵 · 50 / 200 kW</text>
-      <text x="10" y="46" class="mono" style="font-size:9px;fill:#c2410c;">COP 3.5 · heat_out</text>
+    <!-- Node: pv_existing / pv_new -->
+    <g transform="translate(168, 126)">
+      <rect x="0" y="0" width="118" height="54" rx="8" fill="#ffffff" stroke="#0e5cad" stroke-width="1.6"/>
+      <text x="10" y="18" class="sans node-title">pv_existing</text>
+      <rect x="80" y="6" width="30" height="15" rx="3" fill="#e6effa"/>
+      <text x="84" y="16.5" class="sans" style="font-size:9px;font-weight:600;fill:#0e5cad;">+新增</text>
+      <text x="10" y="33" class="sans node-meta">光伏 · 3,125 kW</text>
+      <text x="10" y="46" class="mono" style="font-size:9px;fill:#0e5cad;">power-curve-ac</text>
       <circle cx="0" cy="26" r="4" fill="#0e5cad"/>
-      <circle cx="112" cy="26" r="4" fill="#c2410c"/>
+      <circle cx="118" cy="26" r="4" fill="#0e5cad"/>
     </g>
 
-    <!-- Node: Heatload -->
-    <g transform="translate(172, 194)">
-      <rect x="0" y="0" width="112" height="50" rx="8" fill="#ffffff" stroke="#c2410c" stroke-width="1.5"/>
-      <text x="10" y="18" class="sans node-title">heatload</text>
-      <text x="10" y="33" class="sans node-meta">园区热负荷 · CSV 绑定</text>
-      <text x="10" y="44" class="mono" style="font-size:9px;fill:#5f6a77;">CC-BY-4.0 · UTC+08</text>
-      <circle cx="0" cy="26" r="4" fill="#c2410c"/>
+    <!-- Node: battery -->
+    <g transform="translate(168, 194)">
+      <rect x="0" y="0" width="118" height="50" rx="8" fill="#ffffff" stroke="#0891b2" stroke-width="1.6"/>
+      <text x="10" y="18" class="sans node-title">battery</text>
+      <rect x="80" y="6" width="30" height="15" rx="3" fill="#e6effa"/>
+      <text x="85" y="16.5" class="sans" style="font-size:9px;font-weight:600;fill:#0e5cad;">新增</text>
+      <text x="10" y="33" class="sans node-meta">5,000 kWh / 2.5 MW</text>
+      <text x="10" y="44" class="mono" style="font-size:9px;fill:#0891b2;">η 0.90 / 0.98 · 双向</text>
+      <circle cx="0" cy="26" r="4" fill="#0891b2"/>
     </g>
 
     <!-- CSV Pill -->
     <g transform="translate(16, 134)">
       <rect x="0" y="0" width="124" height="110" rx="8" fill="#f8fafc" stroke="#cbd5e1" stroke-dasharray="4 3"/>
       <text x="10" y="20" class="sans node-title" style="font-size:11px;">时序数据 &amp; 量纲门禁</text>
-      <text x="10" y="38" class="mono" style="font-size:9.5px;fill:#17632a;">✓ 365d × 24h = 8760</text>
-      <text x="10" y="54" class="mono" style="font-size:9.5px;fill:#17632a;">✓ 量纲兼容校验通过</text>
-      <text x="10" y="70" class="mono" style="font-size:9.5px;fill:#17632a;">✓ 单向接口无自环</text>
+      <text x="10" y="38" class="mono" style="font-size:9.5px;fill:#17632a;">✓ 14 组 30min CSV</text>
+      <text x="10" y="54" class="mono" style="font-size:9.5px;fill:#17632a;">✓ 438,288 步调度</text>
+      <text x="10" y="70" class="mono" style="font-size:9.5px;fill:#17632a;">✓ 量纲/接口闭合通过</text>
       <rect x="10" y="82" width="104" height="18" rx="4" fill="#e6f4ea"/>
       <text x="18" y="94.5" class="sans" style="font-size:9.5px;font-weight:700;fill:#17632a;">ValidatedAssembly</text>
     </g>
@@ -166,9 +167,9 @@
     <!-- Declarative Equations Snippet -->
     <g transform="translate(16, 48)">
       <rect x="0" y="0" width="254" height="72" rx="8" fill="#101720"/>
-      <text x="12" y="19" class="mono" style="font-size:10px;fill:#8fc6ff;">sense: minimize</text>
-      <text x="12" y="35" class="mono" style="font-size:9.5px;fill:#e9eef5;">hp1__upfront_capex + hp2__upfront_capex</text>
-      <text x="12" y="50" class="mono" style="font-size:9.5px;fill:#72d6e9;">+ system_equations &amp; step_relation</text>
+      <text x="12" y="19" class="mono" style="font-size:10px;fill:#8fc6ff;">sense: maximize</text>
+      <text x="12" y="35" class="mono" style="font-size:9.5px;fill:#e9eef5;">system.after_tax_npv (E=26a, r=6.3%)</text>
+      <text x="12" y="50" class="mono" style="font-size:9.5px;fill:#72d6e9;">+ allocation system_equations</text>
       <text x="12" y="64" class="mono" style="font-size:9px;fill:#88d9a1;">→ GeneratorProvider → Solver Bundle</text>
     </g>
 
@@ -186,7 +187,7 @@
       <rect x="14" y="55" width="224" height="8" rx="4" fill="url(#primary-grad)" class="solver-bar"/>
 
       <text x="14" y="82" class="mono" style="font-size:10px;fill:#1f2630;">✓ 已证明全局最优 (Proven Optimal)</text>
-      <text x="14" y="99" class="mono" style="font-size:10px;fill:#0e5cad;">hp1_cap=50.0 kW · hp2_cap=200.0 kW</text>
+      <text x="14" y="99" class="mono" style="font-size:10px;fill:#0e5cad;">Obj = -135,502,702 CNY · 14 Datasets</text>
     </g>
   </g>
 
@@ -205,16 +206,16 @@
     <!-- Tax & Finance Rules Block -->
     <g transform="translate(16, 48)">
       <rect x="0" y="0" width="270" height="58" rx="8" fill="#f8fafc" stroke="#cbd5e1"/>
-      <text x="12" y="20" class="sans node-title" style="font-size:11.5px;">嵌入式税务与两部制电价同次优化</text>
-      <text x="12" y="37" class="sans node-meta">VAT 留抵 · 计税折旧 · 所得税 · 自然月最大需量</text>
+      <text x="12" y="20" class="sans node-title" style="font-size:11.5px;">分月分时电价与两部制需量同次求解</text>
+      <text x="12" y="37" class="sans node-meta">12 月分时电价 · 月需量 33 CNY/kW · 建设期 K=1</text>
       <text x="12" y="51" class="mono" style="font-size:9px;fill:#0b4f97;">EffectiveFinanceConfig (Frozen Snapshot)</text>
     </g>
 
     <!-- Mini Cashflow Animated Chart -->
     <g transform="translate(16, 118)">
       <rect x="0" y="0" width="270" height="82" rx="8" fill="#ffffff" stroke="#e2e8f0"/>
-      <text x="12" y="18" class="sans node-title" style="font-size:11px;">封存财务与现金流证据</text>
-      <text x="164" y="18" class="mono" style="font-size:10px;font-weight:700;fill:#17632a;">707,000 CNY</text>
+      <text x="12" y="18" class="sans node-title" style="font-size:11px;">封存财务与多年评价明细</text>
+      <text x="150" y="18" class="mono" style="font-size:10px;font-weight:700;fill:#0e5cad;">E=26a (K=1, N=25)</text>
       <!-- Tiny bars + line -->
       <line x1="14" y1="66" x2="256" y2="66" stroke="#cbd5e1"/>
       <rect x="28" y="42" width="12" height="24" rx="2" fill="#b3261e" opacity="0.85"/>
@@ -235,8 +236,8 @@
     <!-- Revision & Export Badges -->
     <g transform="translate(16, 212)">
       <rect x="0" y="0" width="130" height="34" rx="6" fill="#e6effa" stroke="#bfdbfe"/>
-      <text x="11" y="15" class="sans" style="font-size:10px;font-weight:700;fill:#0e5cad;">方案回写演进</text>
-      <text x="11" y="28" class="mono" style="font-size:9px;fill:#0b4f97;">v1 → v2 Immutable</text>
+      <text x="11" y="15" class="sans" style="font-size:10px;font-weight:700;fill:#0e5cad;">版本演进与封存</text>
+      <text x="11" y="28" class="mono" style="font-size:9px;fill:#0b4f97;">v1 → v8 Immutable</text>
 
       <rect x="140" y="0" width="130" height="34" rx="6" fill="#e6f4ea" stroke="#bbf7d0"/>
       <text x="151" y="15" class="sans" style="font-size:10px;font-weight:700;fill:#17632a;">同源报告交付</text>

@@ -36,33 +36,33 @@
 
 ## 🎬 真实系统全流程动态演示
 
-以下动态演示与界面截图全部由 **Docker Chromium Playwright 真实交互测试** 运行真实双热泵园区算例（内置 **HiGHS 1.7.2 MILP** 全局优化至 `Gap 0.0%`）直接录制生成：
+以下动态演示与界面截图全部来自真实浏览器 E2E 测验中的 **园区综合能源规划项目**（电网 `20 MW` + 光伏 `3,125 kW` + 储能 `5,000 kWh / 2,500 kW` + 14 组 30 分钟负荷/光伏/分月电价 CSV，内置 **HiGHS 1.7.2 MILP** 全局优化至 `Gap 0.0%`）：
 
 <p align="center">
-  <img src="frontend/src/assets/brand/pies-workbench-tour.gif" alt="pIES 真实操作工作流动态演示：系统建模 → 8760h 数据校验 → 规划配置 → 成本与电价绑定 → 结果分析（浅色/深色主题）" width="90%" />
+  <img src="frontend/src/assets/brand/pies-workbench-tour.gif" alt="pIES 真实操作工作流动态演示：自定义设备模板 → 14 组 30min 时序数据绑定 → 拓扑与储能参数 → 系统方程与优化目标 → E=26 年求解总览 → 438,288 步出力曲线" width="90%" />
 </p>
 
-### 实景界面速览（浅色 / 深色双主题 & 响应式布局）
+### 实景界面速览（建模 · 规划 · 求解 · 时序曲线）
 
 <table>
   <tr>
     <td width="50%" align="center">
-      <img src="frontend/src/assets/brand/showcase-canvas.png" alt="系统建模画布：电/热/冷/气多载能端口校验与存量/新增混装" width="100%" /><br />
-      <sub><strong>1. 声明式多能网络画布</strong> — 端口载能色标、方向校验与 <code>existing</code> / <code>new</code> 设备混装</sub>
+      <img src="frontend/src/assets/brand/showcase-canvas.png" alt="系统建模画布：电网、电负荷、光伏与电池储能拓扑及右侧参数抽屉" width="100%" /><br />
+      <sub><strong>1. 声明式多能网络画布与参数抽屉</strong> — <code>grid</code>（20 MW）、<code>pv_existing</code>（3.125 MW）、<code>battery</code>（5,000 kWh / 2,500 kW）连接与存量/新增混装</sub>
     </td>
     <td width="50%" align="center">
-      <img src="frontend/src/assets/brand/showcase-planning.png" alt="规划配置：受限声明式目标函数与设备决策变量上下界" width="100%" /><br />
-      <sub><strong>2. 规划目标与决策变量</strong> — 精确十进制边界、结构化表单与完整 YAML 视图无损互转</sub>
+      <img src="frontend/src/assets/brand/showcase-planning.png" alt="规划配置：系统技术方程 system_equations YAML 与最大化税后 NPV 目标" width="100%" /><br />
+      <sub><strong>2. 系统技术方程与规划目标</strong> — 显式声明 <code>system_equations: allocation</code> 分配规则与 <code>maximize system.after_tax_npv</code> 优化目标</sub>
     </td>
   </tr>
   <tr>
     <td width="50%" align="center">
-      <img src="frontend/src/assets/brand/showcase-results-light.png" alt="结果分析总览（浅色主题）：HiGHS 证明最优 Gap 0.0% 与四维有效性结论" width="100%" /><br />
-      <sub><strong>3. 不可变求解证据与四维结论</strong> — 物理可行性、最优性、财务与可靠性独立评估</sub>
+      <img src="frontend/src/assets/brand/showcase-results-light.png" alt="结果分析总览：14 组数据绑定、已证明最优 Gap 0.0% 与 E=26 年评价参数" width="100%" /><br />
+      <sub><strong>3. 不可变求解证据与长周期评价</strong> — 14 组 30min 数据同次优化，<code>E=26 (K=1, N=25)</code> 收敛至 <code>Gap 0.0%</code> 与最优性认证</sub>
     </td>
     <td width="50%" align="center">
-      <img src="frontend/src/assets/brand/showcase-results-dark.png" alt="结果分析与现金流图表（深色主题）：封存现金流柱折组合图与建设决策" width="100%" /><br />
-      <sub><strong>4. 原生 SVG 现金流图与深色主题</strong> — 建设决策、规划规模（<code>50 kW</code> / <code>200 kW</code>）与回写入口</sub>
+      <img src="frontend/src/assets/brand/showcase-results-dark.png" alt="工程与曲线：438,288 步全周期调度窗口 0–999 多设备出力与储能充放波形" width="100%" /><br />
+      <sub><strong>4. 438,288 步高分辨率调度曲线</strong> — 原始步长不抽稀窗口浏览（<code>step 0–999</code>），直观观测光伏峰值、电网交互与储能协同波形</sub>
     </td>
   </tr>
 </table>
