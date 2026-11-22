@@ -62,6 +62,11 @@ test('F3 exact sealed baseline -> comparison document -> frozen differences and 
   expect(comparison.baseline_net_flows).toEqual(baseline.fin.annual_net_flows)
   comparison.evaluation_net_flows.forEach(value => expect(Number(value)).toBeCloseTo(0, 4))
   expect(Number(candidate.fin.evaluation.npv)).toBeCloseTo(0, 4)
+  await page.getByRole('tab', { name: /财务与现金流|Financials & Cash Flows/i }).click()
+  const comparisonCard = page.locator('section.ies-card').filter({
+    has: page.getByRole('heading', { name: /冻结基准与评价口径|Frozen baseline and evaluation scope/i }),
+  })
+  await comparisonCard.getByRole('button', { name: /查看明细数据|View data table/i }).click()
   const table = page.getByRole('table', { name: /冻结基准与评价口径|Frozen baseline and evaluation scope/ })
   await expect(table).toBeVisible()
   await expect(table).toContainText(candidate.fin.annual_net_flows[0])

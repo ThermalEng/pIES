@@ -88,7 +88,13 @@ export function ResultDetailView({
     setVatPool('all')
     setIncomeSubTab('income')
     setIncomeRule('all')
-  }, [detail, fin, hourly?.start])
+  }, [detail, fin])
+
+  useEffect(() => {
+    if (detail === 'hourly') {
+      setPage(1)
+    }
+  }, [detail, hourly?.start])
 
   useEffect(() => {
     setPage(1)

@@ -390,6 +390,14 @@ test.describe('D3 natural-month demand GUI → task → export', () => {
         expect(Number(row.charge)).toBe(0)
       }
     }
+    // Open Process & Tax -> Monthly demand bill detail table and switch page size to 24
+    // so all 24 calendar-month demand rows (+ 1 header row = 25) render together.
+    await page.getByRole('tab', { name: /过程与税务|Process & Tax/i }).click()
+    const demandCard = page.locator('section.ies-card').filter({
+      has: page.getByRole('heading', { name: /自然月需量账单|Calendar-month demand bills/i }),
+    })
+    await demandCard.getByRole('button', { name: /查看明细数据|View data table/i }).click()
+    await page.locator('.ies-pagination__size select').selectOption('24')
     // Locate the real sealed monthly-bill table by its bound meter identity,
     // rather than assuming an i18n header label (the actual column is “峰值”).
     const demandTable = page.getByRole('table').filter({
@@ -403,6 +411,10 @@ test.describe('D3 natural-month demand GUI → task → export', () => {
     }
     expect(fin.annual_operation[0].demand_charge).toBeTruthy()
     expect(Number(fin.annual_operation[0].demand_charge)).toBeGreaterThan(0)
+
+    // Return to Results tabs and open Assessments & Export for Reassess / Export Excel.
+    await page.getByRole('button', { name: /返回过程与税务|Back to Process & Tax/i }).click()
+    await page.getByRole('tab', { name: /评估与导出|Assessments & Export/i }).click()
 
     // Excel requires an existing immutable system assessment of this exact
     // evidence; perform it in the real Results dialog (no implicit bypass).

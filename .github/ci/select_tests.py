@@ -603,7 +603,7 @@ def pick(changed: list[str], full: bool = False) -> dict[str, str]:
             frontend.add(HELP_LOGIC)
         elif path.endswith("/formats/finance-yaml.md") and path.startswith("manual/"):
             backend.update((SMOKE_BACKEND, "test_finance_taxrules.py"))
-        elif path.startswith(("manual/", "docs/")) or path in ("README.md", "LICENSE", "AGENTS.md", "CLAUDE.md", ".gitignore", ".dockerignore"):
+        elif path.startswith(("manual/", "docs/")) or path in ("README.md", "README.en.md", "LICENSE", "AGENTS.md", "CLAUDE.md", ".gitignore", ".dockerignore"):
             pass  # documentation-only changes do not require an app build
         else:
             # New executable top-level area: require a full run rather than falsely green CI.
@@ -855,6 +855,10 @@ def self_test() -> None:
     assert "tests/test_task_draft_load.py" in pick(["backend/tests/test_task_draft_load.py"])["backend_tests"]
     assert pick(["docs/reviews/notes.md"])["backend_run"] == "false"
     assert pick(["docs/reviews/notes.md"])["browser_run"] == "false"
+    en_readme_only = pick(["README.en.md"])
+    assert en_readme_only["backend_run"] == "false"
+    assert en_readme_only["browser_run"] == "false"
+    assert en_readme_only["frontend_run"] == "false"
     assert pick(["frontend/tests/e2e/device-yaml-extension.spec.ts"])["special_device"] == "true"
     assert len(pick(["frontend/src/features/new-subsystem/Feature.tsx"])["browser_specs"].split()) > 40
     assert len(pick(["backend/iesplan/new_module/file.py"])["backend_tests"].split()) > 80

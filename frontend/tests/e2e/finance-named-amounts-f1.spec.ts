@@ -168,6 +168,11 @@ test('F1 document -> form -> same-solve named facts -> exact Excel and frozen hi
   expect(Number(items.find(item => item.item_id === 'materials')!.raw)).toBeCloseTo(120, 6)
   expect(Number(items.find(item => item.item_id === 'service')!.raw)).toBeCloseTo(312, 6)
   expect(Number(fin.annual_operation[0].fixed_om)).toBeCloseTo(432, 6)
+  await page.getByRole('tab', { name: /过程与税务|Process & Tax/i }).click()
+  const relationsCard = page.locator('section.ies-card').filter({
+    has: page.getByRole('heading', { name: /命名成本明细与命名金额|Named cost items & amounts/i }),
+  })
+  await relationsCard.getByRole('button', { name: /查看明细数据|View data table/i }).click()
   const costTable = page.getByRole('table', { name: /命名成本明细|Named cost items/ })
   for (const item of items) {
     const row = costTable.locator('tbody tr').filter({ hasText: `${item.finance_type} / ${item.component} / ${item.item_id}` }).filter({ hasText: item.unit })

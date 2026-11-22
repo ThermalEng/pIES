@@ -181,12 +181,32 @@ test('F2 documents -> same-solve payment/asset/tax facts -> Excel and frozen his
   for (const [year, expected] of [[1, 224], [2, 219.1], [3, 244.1]]) {
     expect(Number(fin.tax_cash.income.find(row => row.year === year)!.assessed)).toBeCloseTo(expected, 6)
   }
+  await page.getByRole('tab', { name: /过程与税务|Process & Tax/i }).click()
+  const txCard = page.locator('section.ies-card').filter({
+    has: page.getByRole('heading', { name: /具名收付与资产账面值|Cash movements & assets/i }),
+  })
+  await txCard.getByRole('button', { name: /查看明细数据|View data table/i }).click()
   const movementTable = page.getByRole('table', { name: /具名收付|Cash movements/ })
   await expect(movementTable.locator('tr', { hasText: 'purchase / financial_year=0' })).toContainText(purchase.gross)
   const assetTable = page.getByRole('table', { name: /资产及账面值|Assets and book values/ })
   await expect(assetTable).toContainText(fin.assets[0].basis)
+  await page.getByRole('button', { name: /返回过程与税务|Back to Process & Tax/i }).click()
+
+  const incomeCard = page.locator('section.ies-card').filter({
+    has: page.getByRole('heading', { name: /所得税、计税折旧、亏损与派生税费|Income tax, depreciation, losses & derived taxes/i }),
+  })
+  await incomeCard.getByRole('button', { name: /查看明细数据|View data table/i }).click()
+  await page.getByRole('tab', { name: /派生税费|Derived taxes/ }).click()
+  await page.locator('.ies-pagination__size select').selectOption('50')
   const derivedTable = page.getByRole('table', { name: /派生税费|Derived taxes/ })
   await expect(derivedTable).toContainText('38')
+  await page.getByRole('button', { name: /返回过程与税务|Back to Process & Tax/i }).click()
+
+  const vatCard = page.locator('section.ies-card').filter({
+    has: page.getByRole('heading', { name: /增值税与退款计划|VAT & refund schedule/i }),
+  })
+  await vatCard.getByRole('button', { name: /查看明细数据|View data table/i }).click()
+  await page.getByRole('tab', { name: /规则级增值税确认|Rule VAT recognition/ }).click()
   await expect(page.getByRole('table', { name: /规则级增值税确认|Rule-level VAT/ })).toBeVisible()
   await page.screenshot({ path: testInfo.outputPath('f2-frozen-transactions.png'), fullPage: true })
 
