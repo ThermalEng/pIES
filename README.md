@@ -1,120 +1,184 @@
-# pIES — 综合能源系统规划决策平台
+<div align="center">
+  <img src="frontend/src/assets/brand/logo-lockup.svg" alt="pIES Logo" width="210" />
 
-<p align="center">
-  <strong>面向低碳园区与建筑的现代化多能互补规划、运行仿真与经济决策平台</strong><br>
-  <em>以透明物理机理连接多能网络，用严密运筹优化赋能工程经济决策。</em>
-</p>
+  <h1>pIES — 综合能源系统规划与工程决策平台</h1>
 
-<p align="center">
-  <img src="https://img.shields.io/badge/License-MPL--2.0-blue.svg" alt="License: MPL-2.0">
-  <img src="https://img.shields.io/badge/Docker-Ready-2496ED?logo=docker&logoColor=white" alt="Docker Ready">
-  <img src="https://img.shields.io/badge/Backend-Python%203.12-3776AB?logo=python&logoColor=white" alt="Python 3.12">
-  <img src="https://img.shields.io/badge/Frontend-React%20%7C%20TypeScript-61DAFB?logo=react&logoColor=black" alt="React & TS">
-  <img src="https://img.shields.io/badge/Solver-HiGHS-green.svg" alt="Solver: HiGHS">
-  <a href="manual/changelog/README.md#当前版本状态"><img src="https://img.shields.io/badge/Milestone-0.14.5%20(Complete)-green.svg" alt="开发里程碑 0.14.5 已完成"></a>
-</p>
+  <p>
+    <strong>面向低碳园区与建筑的多能互补拓扑建模、8760 小时联合优化与嵌入式工程财务决策平台</strong><br />
+    <em>透明物理机理 · 声明式约束建模 · HiGHS 混合整数规划 · 同源不可变财务与报告交付</em>
+  </p>
+
+  <p>
+    <a href="LICENSE"><img src="https://img.shields.io/badge/License-MPL--2.0-0e5cad.svg?style=flat-square" alt="License: MPL-2.0" /></a>
+    <img src="https://img.shields.io/badge/Docker-Compose%20Ready-2496ED?style=flat-square&logo=docker&logoColor=white" alt="Docker Ready" />
+    <img src="https://img.shields.io/badge/Backend-Python%203.12%20%7C%20FastAPI-3776AB?style=flat-square&logo=python&logoColor=white" alt="Python 3.12 FastAPI" />
+    <img src="https://img.shields.io/badge/Frontend-React%2018%20%7C%20TypeScript-0891b2?style=flat-square&logo=react&logoColor=white" alt="React 18 TypeScript" />
+    <img src="https://img.shields.io/badge/Solver-HiGHS%201.7.2%20MILP-1e7d32?style=flat-square" alt="Solver: HiGHS 1.7.2" />
+    <img src="https://img.shields.io/badge/E2E-Playwright%20Chromium-2ead33?style=flat-square&logo=playwright&logoColor=white" alt="Playwright E2E" />
+    <a href="manual/changelog/README.md#当前版本状态"><img src="https://img.shields.io/badge/Milestone-0.14.5%20Complete-1e7d32?style=flat-square" alt="开发里程碑 0.14.5 已完成" /></a>
+  </p>
+
+  <p>
+    <a href="#-真实系统全流程动态演示">实景演示</a> ·
+    <a href="#-为什么选择-pies给能源规划工程师">工程能力</a> ·
+    <a href="#%EF%B8%8F-架构美学与开放扩展给开发者与研究者">技术架构</a> ·
+    <a href="#-3-步快速上手docker">快速部署</a> ·
+    <a href="#-统一文档与规范入口">正式文档</a>
+  </p>
+
+  <br />
+
+  <img src="frontend/src/assets/brand/pies-hero-flow.svg" alt="pIES 多能网络拓扑、HiGHS 联合求解与嵌入式财务评价动画架构图" width="100%" />
+</div>
 
 ---
 
-## 💡 为什么选择 pIES？
+## 🎬 真实系统全流程动态演示
 
-在“双碳”目标与能源转型背景下，园区和建筑的能源系统正从传统的单一供能走向源网荷储多能互补。然而，现有的规划工具往往面临**“商业软件黑盒不透明、开源工具缺乏工程闭环、手工 Excel 难以处理复杂时序多能耦合”**的痛点。
+以下动态演示与界面截图全部由 **Docker Chromium Playwright 真实交互测试** 运行真实双热泵园区算例（内置 **HiGHS 1.7.2 MILP** 全局优化至 `Gap 0.0%`）直接录制生成：
 
-pIES（**Plan for Integrated Energy Systems**）专为解决这些矛盾而设计，提供从**图形化建模、多源时序数据绑定、数学规划求解、全生命周期工程财务评价到方案回写演进**的一体化完整闭环。
+<p align="center">
+  <img src="frontend/src/assets/brand/pies-workbench-tour.gif" alt="pIES 真实操作工作流动态演示：系统建模 → 8760h 数据校验 → 规划配置 → 成本与电价绑定 → 结果分析（浅色/深色主题）" width="90%" />
+</p>
+
+### 实景界面速览（浅色 / 深色双主题 & 响应式布局）
+
+<table>
+  <tr>
+    <td width="50%" align="center">
+      <img src="frontend/src/assets/brand/showcase-canvas.png" alt="系统建模画布：电/热/冷/气多载能端口校验与存量/新增混装" width="100%" /><br />
+      <sub><strong>1. 声明式多能网络画布</strong> — 端口载能色标、方向校验与 <code>existing</code> / <code>new</code> 设备混装</sub>
+    </td>
+    <td width="50%" align="center">
+      <img src="frontend/src/assets/brand/showcase-planning.png" alt="规划配置：受限声明式目标函数与设备决策变量上下界" width="100%" /><br />
+      <sub><strong>2. 规划目标与决策变量</strong> — 精确十进制边界、结构化表单与完整 YAML 视图无损互转</sub>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" align="center">
+      <img src="frontend/src/assets/brand/showcase-results-light.png" alt="结果分析总览（浅色主题）：HiGHS 证明最优 Gap 0.0% 与四维有效性结论" width="100%" /><br />
+      <sub><strong>3. 不可变求解证据与四维结论</strong> — 物理可行性、最优性、财务与可靠性独立评估</sub>
+    </td>
+    <td width="50%" align="center">
+      <img src="frontend/src/assets/brand/showcase-results-dark.png" alt="结果分析与现金流图表（深色主题）：封存现金流柱折组合图与建设决策" width="100%" /><br />
+      <sub><strong>4. 原生 SVG 现金流图与深色主题</strong> — 建设决策、规划规模（<code>50 kW</code> / <code>200 kW</code>）与回写入口</sub>
+    </td>
+  </tr>
+</table>
+
+---
+
+## 💡 为什么选择 pIES？（给能源规划工程师）
+
+园区与建筑综合能源系统正从单一供能走向“源网荷储”多能互补，但规划团队往往受困于**商业软件黑盒不可审计**或**手工 Excel 难以统筹 8760 小时耦合调度与税务现金流**。pIES 以同一份透明物理与财务事实贯通全业务链：
+
+| 对比维度 | 传统商业黑盒 / 手工 Excel 拼表 | pIES 一体化闭环方案 |
+| :--- | :--- | :--- |
+| **多能拓扑与量纲** | 电、热、冷专业割裂建模，单位换算易遗漏 | 统一电/热/冷/气端口拓扑，后端装配门禁强制校验量纲、方向与接口闭合 |
+| **容量与调度耦合** | 典型日估算或先定容量后模拟，难以发现峰谷套利极限 | 8760h（或 15/30/60 min 分辨率）连续步调度与设备容量 **HiGHS MILP** 同次联合求解 |
+| **电价与税务口径** | 静态平均电价、手工外挂折旧与退税表，易与调度脱节 | 地区 `FinanceProfile` + 项目覆盖生成不可变财务快照；两部制自然月最大需量、VAT 抵扣池、计税折旧直接参与规划求解 |
+| **证据追溯与交付** | 改完模型覆盖原表，界面数值与上报 Excel 常有出入 | `CalcSnapshot` 不可变封存；页面、规划解回写与双语 Excel 报告严格消费同一份证据包 |
+
+### 核心工程能力
+
+1. **高保真多能设备与混合装配**：内置光伏（`pv`）、电化学储能（`battery`）、热泵（`heat_pump`）、燃气锅炉（`gas_boiler`）、电制冷机（`electric_chiller`）、电网连接（`grid_connection`）及多类负荷模型；支持项目内自定义模板（[模型与算法](manual/developer-guide/zh-CN/customization-center.md)）与存量/新增混合配置。
+2. **8760h 时序数据集与质量诊断**：支持标准化 365 天非闰年 CSV 上传与内置园区样例数据一键生成，提供逐行结构诊断与固定 UTC 偏移检查。
+3. **全周期工程财务与四维评价**：支持建设期分期付款（`payments`）、运营期大修换新（`maintenance_expenses`）、静态/动态回收期、NPV、FIRR 分类状态及[基准差额对比](manual/user-guide/zh-CN/results-and-exports.md)，严格区分税务与含税口径边界（详见[概念、单位与当前限制](manual/user-guide/zh-CN/concepts-and-limits.md)）。
+4. **Git 级版本演进与离线项目包**：规划解可一键回写生成不可变新版本（`Revision`），并支持完整项目打包（`.zip`）导出及带冲突提案的离线导入。
+
+---
+
+## 🛠️ 架构美学与开放扩展（给开发者与研究者）
+
+pIES 在设计上追求**开放优先于效率、正确性优先于兼容、边界公开可验证**，前后端均采用严格的依赖方向分层与静态架构门禁约束：
 
 ```mermaid
-flowchart LR
-    A["1. 图形化拓扑<br/><sub>拖拽构建电热冷网</sub>"] --> B["2. 数据与电价<br/><sub>8760h 负荷与分时</sub>"]
-    B --> C["3. 运筹联合优化<br/><sub>设备容量 + 时序调度</sub>"]
-    C --> D["4. 财务与评价<br/><sub>全周期动态现金流</sub>"]
-    D --> E["5. 方案回写演进<br/><sub>派生不可变新版本</sub>"]
-    E --> F["6. 导出与交付<br/><sub>同源 Excel / 报告</sub>"]
+flowchart TB
+    subgraph FE["Frontend · React 18 + TypeScript (@xyflow/react + 原生 SVG 图表)"]
+        direction LR
+        Pages["app / pages<br/><sub>路由装配 · 工作台上下文</sub>"] --> Features["features/*<br/><sub>contracts · model · mappers · api</sub>"] --> Shared["shared / components<br/><sub>HTTP · i18n · 设计令牌</sub>"]
+    end
+
+    subgraph BE["Backend · Python 3.12 + FastAPI + Worker"]
+        direction LR
+        API["api / worker<br/><sub>HTTP 传输 · 租约执行</sub>"] --> App["application<br/><sub>跨模块用例与事务边界</sub>"] --> Domain["domain modules<br/><sub>devices · modeling · assembly<br/>computation · finance · analysis</sub>"] --> Core["core<br/><sub>无状态量纲 · 诊断 · 契约</sub>"]
+    end
+
+    subgraph Pipe["Computation 3-Stage Boundary"]
+        direction LR
+        Art["ValidatedAssemblyArtifact<br/>+ EffectiveFinanceConfig"] --> Gen["GeneratorProvider<br/><sub>单位换算 · Solver Bundle</sub>"] --> Run["SolverRuntime<br/><sub>隔离执行 HiGHS 1.7.2</sub>"] --> Adp["ResultAdapter<br/><sub>封存 ComputeResult</sub>"]
+    end
+
+    FE -- "OpenAPI / snake_case DTO + 乐观锁 revision" --> API
+    Domain -. "强制校验" .-> Pipe
 ```
 
----
-
-## 🚀 核心优势与技术特色
-
-### 1. 物理机理清晰，打破多能系统壁垒
-- **统一设备—端口—连接边拓扑**：电、热、冷、气多载能流在同一个直观画布上清晰呈现，消除了各专业割裂计算的技术盲区；
-- **高保真设备机理**：支持光伏（PV）、电化学储能（Battery）、空气源/地源热泵（HeatPump，变 COP 响应）、燃气锅炉（Boiler）、离心/吸收式冷机（Chiller）及电网双向计量等基础设备模型；
-- **严格量纲系统与边界保护**：物理量纲与单位自动校验推导，杜绝单位混淆引发的计算错误。
-
-### 2. 8760 小时时序调度与装机容量联合优化
-- **告别粗放的“指标估算”**：不仅优化设备该买多大容量，而且直接基于全年 8760 小时（或典型分辨率连续 step）运行调度模拟，同步算清每小时的最优出力与充放电轨迹；
-- **现代高性能求解核心**：内置高性能线性与混合整数规划求解器 HiGHS，无须昂贵商业求解器许可证，兼具毫秒级响应与全局最优保障；
-- **精细化分时计费**：原生支持尖、峰、平、谷四段时序电价及两部制计费，精准挖掘储能峰谷套利与负荷削峰填谷潜力。
-
-### 3. 工程经济学标准的动态财务评价
-- **明确的项目投资口径**：评价时间、付款安排与费用归属由项目显式确认；当前税务能力限制见[财务评价和 IRR](manual/user-guide/zh-CN/concepts-and-limits.md#财务评价和-irr)，含税价格不代表税后结论；
-- **全生命周期现金流折现**：覆盖明确建设期安排与完整运营年限，统一计算净现值（NPV）、内部收益率（FIRR）、静态与动态投资回收期；
-- **清晰的费用二分法**：严格界定**固定运维费**（容量年费 + 特定年份大修换新清单）与**使用运维费**（随发电/耗电量逐年真实归集），杜绝模糊费用与暗箱均摊；
-- **同源真实导出**：页面图表与导出的 Excel 明细表源自同一份不可变计算证据，保证上报材料绝对一致。
-
-### 4. Git 级的版本演进与可靠数据流转
-- **方案一键采纳与回写**：计算得出的推荐装机容量可一键采纳回写，自动派生出清晰可追溯的不可变新版本（Revision），原设计与历史证据永不丢失；
-- **项目包免锁死导入导出**：支持项目全量打包（`.zip`）导出与离线导入，便于团队协同、方案交付与归档审计；
-- **高可靠分布式底座**：基于 Worker 租约、不可变快照（Snapshot）和 Fencing Token，杜绝计算长时任务并发脏写。
+- **声明式约束与方程扩展**：通过 `system_equations`、`step_relation`（跨步储能/爬坡/蓄热耦合）和 `amount_relation`（财务分量与目标约束）表达复杂工艺与规则，无需修改通用调度或求解运行时。
+- **零信任猜测边界**：后端统一校验设备 YAML、装配 YAML、财务 JSON 与计算配置；前端只维护展示状态与未提交草稿，409 并发冲突与 422 字段级诊断均保留现场输入。
+- **开箱即用的自动化质量门禁**：
+  - 后端 [test_architecture_gates.py](backend/tests/test_architecture_gates.py)：通过纯 Python AST 静态扫描强制锁死 `core`、领域层、`application`、`api` 与 `worker` 间的所有跨层穿透；
+  - 前端 27 组纯逻辑单元测试（[frontend/tests/](frontend/tests/)）+ 全套 **Docker Chromium Playwright E2E** 真实业务回归（[frontend/tests/e2e/](frontend/tests/e2e/)）。
 
 ---
 
-## 🎯 典型应用场景
+## ⚡ 3 步快速上手（Docker）
 
-* **低碳 / 零碳工业园区顶层规划**：源网荷储多能互补系统拓扑设计、自发自用比例评估、容量配置与碳减排路径规划；
-* **工商业分布式光储项目可行性研究**：结合企业分时电价与负荷曲线，精确测算最佳光储配比、IRR 及动态投资回收期；
-* **区域集中供热供冷协同优化**：热泵、电制冷、燃气锅炉与储热系统的多能协同运行策略与运行成本最小化；
-* **企业节能改造与多能源替代比选**：电能替代、余热回收利用方案的投资回收与能效提升多方案横向对比；
-* **高校与科研院所实验台**：开放的声明式架构，便于快速验证自研设备方程、规划算法与新型控制策略。
+项目采用完整容器化编排（`web` + `backend` + `io_worker` + `compute_worker` + `postgres` + `redis`），宿主机无需安装 Python、Node 或 HiGHS 依赖。
 
----
+### 1. 一键构建并启动全套服务
 
-## ⚡ 3 步快速上手
-
-系统采用完整的 Docker 容器化编排，无需在宿主机配置复杂的 Python/Node 环境。
-
-### 步骤 1：启动服务
 ```bash
-# 克隆代码并一键启动
-git clone https://github.com/your-repo/pIES.git
+git clone https://github.com/ThermalEng/pIES.git
 cd pIES
 docker compose up -d --build
 ```
 
-### 步骤 2：登录平台
-在浏览器中访问：`http://localhost:8080`
-- **默认管理员账号**：`admin`
-- **初始密码**：由环境变量 `IESPLAN_DEFAULT_ADMIN_PASSWORD` 指定（首次登录系统将强制要求修改密码）。
+服务就绪后（可通过 `curl http://localhost:8080/api/readyz` 确认数据库、存储与设备/求解器注册表状态）：
+- **Web 控制台**：`http://localhost:8080`
+- **内置离线帮助中心**：`http://localhost:8080/help/`（前端构建期直接从 `manual/` 生成，后端不可用时仍可静态阅读）
 
-### 步骤 3：体验内置样例
-系统开箱即用，内置了标准的**绿色园区多能互补综合能源系统（Campus Sample）**。登录后即可直观体验：
-1. **查看画布**：浏览光伏、热泵、冷机与负荷管网的拓扑连接与物理参数；
-2. **提交计算**：一键发起基于 8760 小时时序的规划求解任务；
-3. **查看与导出**：观察求解出的推荐设备容量、全周期逐年净现金流明细表与动态财务指标，并导出标准 Excel 报告。
+### 2. 登录与体验内置园区算例
 
-> **生产部署提示**：生产环境上线前，必须修改默认管理员密码、数据库密码及 `IESPLAN_SECRET_KEY`，并在反向代理层配置 HTTPS。详见 [部署与运行指南](manual/developer-guide/zh-CN/deployment.md)。
+- 默认种子管理员账号为 `admin`，初始密码由环境变量 `IESPLAN_DEFAULT_ADMIN_PASSWORD` 指定（首次登录强制要求修改密码）。
+- 建议使用普通规划账号创建项目，依次体验：**拖拽搭建多能拓扑 → 生成内置 8760h 样例数据 → 引用财务画像并绑定成本/电价 → 运行全项目校验 → 提交 HiGHS 规划任务 → 查看封存结果与导出双语 Excel**。
+
+### 3. 运行测试与架构门禁（均在 Docker 内）
+
+```bash
+# 后端架构门禁与单元测试
+docker compose exec backend pytest tests/test_architecture_gates.py
+
+# 前端构建与逻辑单元测试
+docker build --target build -f frontend/Dockerfile -t pies-fe-check . && \
+  docker run --rm pies-fe-check node scripts/run-logic-tests.mjs
+
+# 真实浏览器 Playwright E2E 验收
+docker compose --profile e2e up -d --build e2e
+```
+
+> [!CAUTION]
+> **生产安全提示**：上线前必须更换默认管理员密码、数据库凭证与 `IESPLAN_SECRET_KEY`，并在反向代理层配置 HTTPS。完整配置项与 Worker 隔离参数见 [部署与运行指南](manual/developer-guide/zh-CN/deployment.md)。
 
 ---
 
-## 📚 统一文档体系
+## 📚 统一文档与规范入口
 
-README 是项目的快速导览入口，详细技术规范与使用指南以 `manual/` 目录为权威正文来源：
+本仓库以 [`manual/`](manual/README.md) 作为唯一长期正式正文来源（网页“帮助中心”同步托管该目录）：
 
-| 导航入口 | 适合对象 | 内容概述 |
+| 正式入口 | 面向读者 | 核心内容 |
 | :--- | :--- | :--- |
-| 📖 **[使用者指南](manual/user-guide/README.md)** | 规划咨询师、设计工程师、普通用户 | 从账户登录、画布拖拽、数据上传、参数设定到结果导出的一步步图文操作手册。 |
-| 🛠️ **[开发者指南](manual/developer-guide/README.md)** | 架构师、二次开发者、算法研究员 | 架构宪法、领域模型、设备 YAML 格式契约、计算引擎协议与外部 Provider 扩展规范。 |
-| ⏱️ **[更新日志与 Roadmap](manual/changelog/README.md)** | 关注项目进度的用户与贡献者 | 倒序记录的正式发布事实、历史里程碑与清晰的未来功能规划清单。 |
+| 📖 **[使用者指南](manual/user-guide/README.md)**（[中文](manual/user-guide/zh-CN/README.md) \| [EN](manual/user-guide/en-US/README.md)） | 能源规划师、工程咨询师、管理员 | 登录会话、画布建模、CSV 数据准备、财务/规划配置、任务排查与 Excel 导出 |
+| 🛠️ **[开发者指南](manual/developer-guide/README.md)**（[中文](manual/developer-guide/zh-CN/README.md) \| [EN](manual/developer-guide/en-US/README.md)） | 架构师、二次开发者、算法研究员 | [架构宪法](manual/developer-guide/zh-CN/ARCHITECTURE_CONSTITUTION.md)、[系统蓝图](manual/developer-guide/zh-CN/architecture.md)、[文件格式契约](manual/developer-guide/zh-CN/file-formats.md)、[前端规范](manual/developer-guide/zh-CN/frontend.md) 与 [部署指南](manual/developer-guide/zh-CN/deployment.md) |
+| ⏱️ **[更新日志与 Roadmap](manual/changelog/README.md)**（[中文 Roadmap](manual/changelog/roadmap.md) \| [EN Changelog](manual/changelog/en-US/README.md) \| [EN Roadmap](manual/changelog/en-US/roadmap.md)） | 关注演进进度的用户与贡献者 | 按时间倒序记录已验收事实与下一阶段计划 |
+| 🔍 **[审查证据与历史归档](docs/README.md)**（[Reviews](docs/reviews/) \| [Archive](docs/archive/README.md)） | 审计人员与历史溯源 | 带基线日期的架构/安全审查快照与已替代历史材料（非现行规范） |
 
 ---
 
-## 🗺️ 开发进度与路线图
+## 🗺️ 开发状态与开源许可
 
-`0.14.5` 开发里程碑已完成；下一目标 `0.15.0` 统一开展 Provider 扩展与工程全流程验收。当前状态见[更新日志](manual/changelog/README.md)，后续顺序和退出标准以 [Roadmap](manual/changelog/roadmap.md) 为准。
+- **当前进度**：产品元数据版本 `0.1.0`（[pyproject.toml](backend/pyproject.toml)），开发里程碑 **`0.14.5`** 已完成；下一目标 **`0.15.0`** 聚焦 Provider 扩展与工程全流程验收，详见 [更新日志](manual/changelog/README.md) 与 [Roadmap](manual/changelog/roadmap.md)。
+- **开源协议**：本项目基于 **[Mozilla Public License 2.0 (MPL-2.0)](LICENSE)** 开源发布。
 
----
-
-## 📄 开源许可证
-
-本项目采用 **[Mozilla Public License 2.0 (MPL-2.0)](LICENSE)** 开源协议。
-
-Copyright © 2026 pIES Contributors.
+<p align="center">
+  <sub>Copyright © 2026 pIES Contributors · Built for transparent, auditable Integrated Energy System planning.</sub>
+</p>

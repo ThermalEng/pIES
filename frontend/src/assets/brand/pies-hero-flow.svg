@@ -1,0 +1,246 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1080 340" role="img" aria-labelledby="hero-title hero-desc">
+  <title id="hero-title">pIES — Integrated Energy System Planning &amp; Decision Pipeline</title>
+  <desc id="hero-desc">Animated architecture diagram illustrating multi-energy topology assembly, HiGHS 1.7.2 MILP optimization, tax-aware financial evaluation, and immutable revision export.</desc>
+
+  <defs>
+    <linearGradient id="bg-grad" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#f4f8fc"/>
+      <stop offset="50%" stop-color="#f8fafc"/>
+      <stop offset="100%" stop-color="#eef5fb"/>
+    </linearGradient>
+    <linearGradient id="primary-grad" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#0e5cad"/>
+      <stop offset="100%" stop-color="#0891b2"/>
+    </linearGradient>
+    <linearGradient id="success-grad" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#1e7d32"/>
+      <stop offset="100%" stop-color="#0d9488"/>
+    </linearGradient>
+    <pattern id="dot-grid" width="24" height="24" patternUnits="userSpaceOnUse">
+      <circle cx="2" cy="2" r="1.1" fill="#cbd5e1" opacity="0.65"/>
+    </pattern>
+    <filter id="card-shadow" x="-6%" y="-6%" width="112%" height="118%">
+      <feDropShadow dx="0" dy="3" stdDeviation="6" flood-color="#0f172a" flood-opacity="0.07"/>
+    </filter>
+    <style>
+      .sans { font-family: system-ui, -apple-system, 'Segoe UI', 'Noto Sans SC', 'PingFang SC', sans-serif; }
+      .mono { font-family: ui-monospace, 'SFMono-Regular', 'JetBrains Mono', Consolas, monospace; }
+      .stage-label { font-size: 11px; font-weight: 700; letter-spacing: 0.06em; fill: #0e5cad; }
+      .card-title { font-size: 13.5px; font-weight: 700; fill: #1f2630; }
+      .card-sub { font-size: 11px; fill: #525c69; }
+      .node-title { font-size: 12px; font-weight: 700; fill: #1f2630; }
+      .node-meta { font-size: 10px; fill: #5f6a77; }
+      .bus-pill { font-size: 10px; font-weight: 600; }
+      .flow-elec { stroke: #0e5cad; stroke-width: 2.2; fill: none; stroke-dasharray: 6 5; animation: flowDash 1.4s linear infinite; }
+      .flow-heat { stroke: #c2410c; stroke-width: 2.2; fill: none; stroke-dasharray: 6 5; animation: flowDash 1.4s linear infinite; }
+      .flow-cool { stroke: #0891b2; stroke-width: 2; fill: none; stroke-dasharray: 5 5; animation: flowDash 1.8s linear infinite; }
+      .flow-data { stroke: #0e5cad; stroke-width: 2; fill: none; stroke-dasharray: 6 5; animation: flowDash 1.6s linear infinite; }
+      .flow-fin { stroke: #1e7d32; stroke-width: 2; fill: none; stroke-dasharray: 6 5; animation: flowDash 1.6s linear infinite; }
+      .pulse-dot { animation: pulseNode 2.2s ease-in-out infinite; }
+      .solver-bar { animation: solverFill 3.6s ease-in-out infinite; }
+      @keyframes flowDash {
+        from { stroke-dashoffset: 22; }
+        to { stroke-dashoffset: 0; }
+      }
+      @keyframes pulseNode {
+        0%, 100% { opacity: 1; }
+        50% { opacity: 0.35; }
+      }
+      @keyframes solverFill {
+        0% { width: 42px; }
+        55% { width: 224px; }
+        100% { width: 224px; }
+      }
+    </style>
+  </defs>
+
+  <!-- Canvas Background -->
+  <rect x="0" y="0" width="1080" height="340" rx="16" fill="url(#bg-grad)"/>
+  <rect x="0" y="0" width="1080" height="340" rx="16" fill="url(#dot-grid)"/>
+  <rect x="1" y="1" width="1078" height="338" rx="15" fill="none" stroke="#d8dde4" stroke-width="1.2"/>
+
+  <!-- Top Carrier Legend Strip -->
+  <g transform="translate(24, 16)">
+    <text x="0" y="12" class="sans card-title" style="font-size:13px;">pIES 声明式多能互补优化与工程财务决策闭环</text>
+    <g transform="translate(658, 0)">
+      <rect x="0" y="0" width="76" height="20" rx="10" fill="#e6effa" stroke="#bfdbfe"/>
+      <circle cx="11" cy="10" r="3.5" fill="#0e5cad"/>
+      <text x="20" y="13.5" class="sans bus-pill" fill="#0e5cad">电力 Elec</text>
+
+      <rect x="84" y="0" width="76" height="20" rx="10" fill="#fff1eb" stroke="#fed7aa"/>
+      <circle cx="95" cy="10" r="3.5" fill="#c2410c"/>
+      <text x="104" y="13.5" class="sans bus-pill" fill="#c2410c">热力 Heat</text>
+
+      <rect x="168" y="0" width="76" height="20" rx="10" fill="#e4f5f8" stroke="#a5f3fc"/>
+      <circle cx="179" cy="10" r="3.5" fill="#0891b2"/>
+      <text x="188" y="13.5" class="sans bus-pill" fill="#0891b2">冷能 Cool</text>
+
+      <rect x="252" y="0" width="76" height="20" rx="10" fill="#fff4d6" stroke="#fde68a"/>
+      <circle cx="263" cy="10" r="3.5" fill="#8a5a00"/>
+      <text x="272" y="13.5" class="sans bus-pill" fill="#8a5a00">燃气 Gas</text>
+    </g>
+  </g>
+
+  <!-- ==================== STAGE 1: MULTI-ENERGY TOPOLOGY ==================== -->
+  <g transform="translate(24, 52)">
+    <rect x="0" y="0" width="352" height="262" rx="12" fill="#ffffff" stroke="#d8dde4" filter="url(#card-shadow)"/>
+    <rect x="0" y="0" width="352" height="36" rx="12" fill="#f8fafc"/>
+    <rect x="0" y="24" width="352" height="12" fill="#f8fafc"/>
+    <line x1="0" y1="36" x2="352" y2="36" stroke="#e2e8f0"/>
+    <text x="14" y="22" class="sans stage-label">STAGE 01 · MULTI-ENERGY TOPOLOGY &amp; 8760h</text>
+
+    <!-- Animated Edges inside Stage 1 -->
+    <path d="M 116 86 C 142 86, 146 86, 172 86" class="flow-elec"/>
+    <path d="M 116 96 C 145 96, 142 152, 172 152" class="flow-elec"/>
+    <path d="M 284 86 C 304 86, 304 120, 286 120 C 266 120, 266 118, 172 184" class="flow-cool" opacity="0.55"/>
+    <path d="M 228 176 L 228 202" class="flow-heat"/>
+    <path d="M 284 152 C 308 152, 308 220, 284 220" class="flow-heat"/>
+
+    <!-- Node: Grid1 -->
+    <g transform="translate(16, 56)">
+      <rect x="0" y="0" width="100" height="58" rx="8" fill="#ffffff" stroke="#596f87" stroke-width="1.6"/>
+      <text x="10" y="19" class="sans node-title">grid1</text>
+      <rect x="62" y="7" width="30" height="15" rx="3" fill="#eef1f5"/>
+      <text x="67" y="17.5" class="sans" style="font-size:9px;font-weight:600;fill:#4a5460;">存量</text>
+      <text x="10" y="35" class="sans node-meta">电网连接 · 800 kW</text>
+      <text x="10" y="49" class="mono" style="font-size:9px;fill:#0e5cad;">electricity_import</text>
+      <circle cx="100" cy="30" r="4" fill="#0e5cad"/>
+    </g>
+
+    <!-- Node: Load1 -->
+    <g transform="translate(172, 56)">
+      <rect x="0" y="0" width="112" height="56" rx="8" fill="#ffffff" stroke="#0e5cad" stroke-width="1.6"/>
+      <text x="10" y="19" class="sans node-title">load1</text>
+      <rect x="74" y="7" width="30" height="15" rx="3" fill="#e6effa"/>
+      <text x="79" y="17.5" class="sans" style="font-size:9px;font-weight:600;fill:#0e5cad;">新增</text>
+      <text x="10" y="35" class="sans node-meta">电负荷 · 200 kW</text>
+      <text x="10" y="48" class="mono" style="font-size:9px;fill:#5f6a77;">step: 0..8759</text>
+      <circle cx="0" cy="30" r="4" fill="#0e5cad"/>
+    </g>
+
+    <!-- Node: hp1 / hp2 -->
+    <g transform="translate(172, 126)">
+      <rect x="0" y="0" width="112" height="54" rx="8" fill="#ffffff" stroke="#0e5cad" stroke-width="1.6"/>
+      <text x="10" y="18" class="sans node-title">hp1 / hp2</text>
+      <rect x="74" y="6" width="30" height="15" rx="3" fill="#e6effa"/>
+      <text x="79" y="16.5" class="sans" style="font-size:9px;font-weight:600;fill:#0e5cad;">规划</text>
+      <text x="10" y="33" class="sans node-meta">热泵 · 50 / 200 kW</text>
+      <text x="10" y="46" class="mono" style="font-size:9px;fill:#c2410c;">COP 3.5 · heat_out</text>
+      <circle cx="0" cy="26" r="4" fill="#0e5cad"/>
+      <circle cx="112" cy="26" r="4" fill="#c2410c"/>
+    </g>
+
+    <!-- Node: Heatload -->
+    <g transform="translate(172, 194)">
+      <rect x="0" y="0" width="112" height="50" rx="8" fill="#ffffff" stroke="#c2410c" stroke-width="1.5"/>
+      <text x="10" y="18" class="sans node-title">heatload</text>
+      <text x="10" y="33" class="sans node-meta">园区热负荷 · CSV 绑定</text>
+      <text x="10" y="44" class="mono" style="font-size:9px;fill:#5f6a77;">CC-BY-4.0 · UTC+08</text>
+      <circle cx="0" cy="26" r="4" fill="#c2410c"/>
+    </g>
+
+    <!-- CSV Pill -->
+    <g transform="translate(16, 134)">
+      <rect x="0" y="0" width="124" height="110" rx="8" fill="#f8fafc" stroke="#cbd5e1" stroke-dasharray="4 3"/>
+      <text x="10" y="20" class="sans node-title" style="font-size:11px;">时序数据 &amp; 量纲门禁</text>
+      <text x="10" y="38" class="mono" style="font-size:9.5px;fill:#17632a;">✓ 365d × 24h = 8760</text>
+      <text x="10" y="54" class="mono" style="font-size:9.5px;fill:#17632a;">✓ 量纲兼容校验通过</text>
+      <text x="10" y="70" class="mono" style="font-size:9.5px;fill:#17632a;">✓ 单向接口无自环</text>
+      <rect x="10" y="82" width="104" height="18" rx="4" fill="#e6f4ea"/>
+      <text x="18" y="94.5" class="sans" style="font-size:9.5px;font-weight:700;fill:#17632a;">ValidatedAssembly</text>
+    </g>
+  </g>
+
+  <!-- Connector Stage 1 -> Stage 2 -->
+  <path d="M 376 183 L 414 183" class="flow-data"/>
+  <polygon points="412,178 421,183 412,188" fill="#0e5cad"/>
+
+  <!-- ==================== STAGE 2: SOLVER & COMPILER ==================== -->
+  <g transform="translate(422, 52)">
+    <rect x="0" y="0" width="286" height="262" rx="12" fill="#ffffff" stroke="#d8dde4" filter="url(#card-shadow)"/>
+    <rect x="0" y="0" width="286" height="36" rx="12" fill="#f8fafc"/>
+    <rect x="0" y="24" width="286" height="12" fill="#f8fafc"/>
+    <line x1="0" y1="36" x2="286" y2="36" stroke="#e2e8f0"/>
+    <text x="14" y="22" class="sans stage-label">STAGE 02 · GENERATOR &amp; HiGHS MILP</text>
+
+    <!-- Declarative Equations Snippet -->
+    <g transform="translate(16, 48)">
+      <rect x="0" y="0" width="254" height="72" rx="8" fill="#101720"/>
+      <text x="12" y="19" class="mono" style="font-size:10px;fill:#8fc6ff;">sense: minimize</text>
+      <text x="12" y="35" class="mono" style="font-size:9.5px;fill:#e9eef5;">hp1__upfront_capex + hp2__upfront_capex</text>
+      <text x="12" y="50" class="mono" style="font-size:9.5px;fill:#72d6e9;">+ system_equations &amp; step_relation</text>
+      <text x="12" y="64" class="mono" style="font-size:9px;fill:#88d9a1;">→ GeneratorProvider → Solver Bundle</text>
+    </g>
+
+    <!-- HiGHS Solver Execution Box -->
+    <g transform="translate(16, 132)">
+      <rect x="0" y="0" width="254" height="114" rx="8" fill="#f8fafc" stroke="#cbd5e1"/>
+      <circle cx="18" cy="20" r="5" fill="#1e7d32" class="pulse-dot"/>
+      <text x="30" y="24" class="sans card-title" style="font-size:12px;">ies.solver.highs@1.7.2</text>
+      <rect x="184" y="10" width="58" height="18" rx="9" fill="#e6f4ea"/>
+      <text x="192" y="22.5" class="mono" style="font-size:9.5px;font-weight:700;fill:#17632a;">Gap 0.0%</text>
+
+      <text x="14" y="45" class="sans node-meta">Worker 隔离执行 · 不可变 CalcSnapshot</text>
+      <!-- Animated Progress Bar -->
+      <rect x="14" y="55" width="226" height="8" rx="4" fill="#e2e8f0"/>
+      <rect x="14" y="55" width="224" height="8" rx="4" fill="url(#primary-grad)" class="solver-bar"/>
+
+      <text x="14" y="82" class="mono" style="font-size:10px;fill:#1f2630;">✓ 已证明全局最优 (Proven Optimal)</text>
+      <text x="14" y="99" class="mono" style="font-size:10px;fill:#0e5cad;">hp1_cap=50.0 kW · hp2_cap=200.0 kW</text>
+    </g>
+  </g>
+
+  <!-- Connector Stage 2 -> Stage 3 -->
+  <path d="M 708 183 L 746 183" class="flow-fin"/>
+  <polygon points="744,178 753,183 744,188" fill="#1e7d32"/>
+
+  <!-- ==================== STAGE 3: FINANCE & REVISION ==================== -->
+  <g transform="translate(754, 52)">
+    <rect x="0" y="0" width="302" height="262" rx="12" fill="#ffffff" stroke="#d8dde4" filter="url(#card-shadow)"/>
+    <rect x="0" y="0" width="302" height="36" rx="12" fill="#f8fafc"/>
+    <rect x="0" y="24" width="302" height="12" fill="#f8fafc"/>
+    <line x1="0" y1="36" x2="302" y2="36" stroke="#e2e8f0"/>
+    <text x="14" y="22" class="sans stage-label" style="fill:#1e7d32;">STAGE 03 · SEALED FINANCE &amp; REVISION</text>
+
+    <!-- Tax & Finance Rules Block -->
+    <g transform="translate(16, 48)">
+      <rect x="0" y="0" width="270" height="58" rx="8" fill="#f8fafc" stroke="#cbd5e1"/>
+      <text x="12" y="20" class="sans node-title" style="font-size:11.5px;">嵌入式税务与两部制电价同次优化</text>
+      <text x="12" y="37" class="sans node-meta">VAT 留抵 · 计税折旧 · 所得税 · 自然月最大需量</text>
+      <text x="12" y="51" class="mono" style="font-size:9px;fill:#0b4f97;">EffectiveFinanceConfig (Frozen Snapshot)</text>
+    </g>
+
+    <!-- Mini Cashflow Animated Chart -->
+    <g transform="translate(16, 118)">
+      <rect x="0" y="0" width="270" height="82" rx="8" fill="#ffffff" stroke="#e2e8f0"/>
+      <text x="12" y="18" class="sans node-title" style="font-size:11px;">封存财务与现金流证据</text>
+      <text x="164" y="18" class="mono" style="font-size:10px;font-weight:700;fill:#17632a;">707,000 CNY</text>
+      <!-- Tiny bars + line -->
+      <line x1="14" y1="66" x2="256" y2="66" stroke="#cbd5e1"/>
+      <rect x="28" y="42" width="12" height="24" rx="2" fill="#b3261e" opacity="0.85"/>
+      <rect x="44" y="46" width="12" height="20" rx="2" fill="#0891b2" opacity="0.85"/>
+      <rect x="92" y="36" width="12" height="30" rx="2" fill="#1e7d32" opacity="0.85"/>
+      <rect x="108" y="39" width="12" height="27" rx="2" fill="#0e5cad" opacity="0.85"/>
+      <rect x="156" y="30" width="12" height="36" rx="2" fill="#1e7d32" opacity="0.9"/>
+      <rect x="172" y="34" width="12" height="32" rx="2" fill="#0e5cad" opacity="0.9"/>
+      <rect x="220" y="25" width="12" height="41" rx="2" fill="#1e7d32"/>
+      <rect x="236" y="31" width="12" height="35" rx="2" fill="#0e5cad"/>
+      <polyline points="38,54 102,45 166,34 230,26" fill="none" stroke="#8a5a00" stroke-width="2" stroke-dasharray="4 3"/>
+      <circle cx="38" cy="54" r="2.5" fill="#8a5a00"/>
+      <circle cx="102" cy="45" r="2.5" fill="#8a5a00"/>
+      <circle cx="166" cy="34" r="2.5" fill="#8a5a00"/>
+      <circle cx="230" cy="26" r="2.5" fill="#8a5a00"/>
+    </g>
+
+    <!-- Revision & Export Badges -->
+    <g transform="translate(16, 212)">
+      <rect x="0" y="0" width="130" height="34" rx="6" fill="#e6effa" stroke="#bfdbfe"/>
+      <text x="11" y="15" class="sans" style="font-size:10px;font-weight:700;fill:#0e5cad;">方案回写演进</text>
+      <text x="11" y="28" class="mono" style="font-size:9px;fill:#0b4f97;">v1 → v2 Immutable</text>
+
+      <rect x="140" y="0" width="130" height="34" rx="6" fill="#e6f4ea" stroke="#bbf7d0"/>
+      <text x="151" y="15" class="sans" style="font-size:10px;font-weight:700;fill:#17632a;">同源报告交付</text>
+      <text x="151" y="28" class="mono" style="font-size:9px;fill:#17632a;">Excel · Project .zip</text>
+    </g>
+  </g>
+</svg>
