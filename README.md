@@ -14,8 +14,7 @@
     <img src="https://img.shields.io/badge/Backend-Python%203.12%20%7C%20FastAPI-3776AB?style=flat-square&logo=python&logoColor=white" alt="Python 3.12 FastAPI" />
     <img src="https://img.shields.io/badge/Frontend-React%2018%20%7C%20TypeScript-0891b2?style=flat-square&logo=react&logoColor=white" alt="React 18 TypeScript" />
     <img src="https://img.shields.io/badge/Solver-HiGHS%201.7.2%20MILP-1e7d32?style=flat-square" alt="Solver: HiGHS 1.7.2" />
-    <img src="https://img.shields.io/badge/E2E-Playwright%20Chromium-2ead33?style=flat-square&logo=playwright&logoColor=white" alt="Playwright E2E" />
-    <a href="manual/changelog/README.md#当前版本状态"><img src="https://img.shields.io/badge/Milestone-0.14.5%20Complete-1e7d32?style=flat-square" alt="开发里程碑 0.14.5 已完成" /></a>
+    <a href="manual/changelog/README.md#当前版本状态"><img src="https://img.shields.io/badge/Release-v1.0.0-1e7d32?style=flat-square" alt="版本 1.0.0 已发布" /></a>
   </p>
 
   <p>
@@ -36,7 +35,7 @@
 
 ## 🎬 真实系统全流程动态演示
 
-以下动态演示与界面截图全部来自真实浏览器 E2E 测验中的 **园区综合能源规划项目**（电网 `20 MW` + 光伏 `3,125 kW` + 储能 `5,000 kWh / 2,500 kW` + 14 组 30 分钟负荷/光伏/分月电价 CSV，内置 **HiGHS 1.7.2 MILP** 全局优化至 `Gap 0.0%`）：
+以下动态演示与界面截图全部来自 **园区综合能源规划项目** 实测算例（电网 `20 MW` + 光伏 `3,125 kW` + 储能 `5,000 kWh / 2,500 kW` + 14 组 30 分钟负荷/光伏/分月电价 CSV，内置 **HiGHS 1.7.2 MILP** 全局优化至 `Gap 0.0%`）：
 
 <p align="center">
   <img src="frontend/src/assets/brand/pies-workbench-tour.gif" alt="pIES 真实操作工作流动态演示：自定义设备模板 → 14 组 30min 时序数据绑定 → 拓扑与储能参数 → 系统方程与优化目标 → E=26 年求解总览 → 438,288 步出力曲线" width="90%" />
@@ -120,7 +119,7 @@ flowchart TB
 - **零信任猜测边界**：后端统一校验设备 YAML、装配 YAML、财务 JSON 与计算配置；前端只维护展示状态与未提交草稿，409 并发冲突与 422 字段级诊断均保留现场输入。
 - **开箱即用的自动化质量门禁**：
   - 后端 [test_architecture_gates.py](backend/tests/test_architecture_gates.py)：通过纯 Python AST 静态扫描强制锁死 `core`、领域层、`application`、`api` 与 `worker` 间的所有跨层穿透；
-  - 前端 27 组纯逻辑单元测试（[frontend/tests/](frontend/tests/)）+ 全套 **Docker Chromium Playwright E2E** 真实业务回归（[frontend/tests/e2e/](frontend/tests/e2e/)）。
+  - 前端 27 组纯逻辑单元测试（[frontend/tests/](frontend/tests/)）与帮助中心静态清单构建校验。
 
 ---
 
@@ -154,9 +153,6 @@ docker compose exec backend pytest tests/test_architecture_gates.py
 # 前端构建与逻辑单元测试
 docker build --target build -f frontend/Dockerfile -t pies-fe-check . && \
   docker run --rm pies-fe-check node scripts/run-logic-tests.mjs
-
-# 真实浏览器 Playwright E2E 验收
-docker compose --profile e2e up -d --build e2e
 ```
 
 > [!CAUTION]
@@ -178,7 +174,7 @@ docker compose --profile e2e up -d --build e2e
 
 ## 🗺️ 开发状态与开源许可
 
-- **当前进度**：产品元数据版本 `0.1.0`（[pyproject.toml](backend/pyproject.toml)），开发里程碑 **`0.14.5`** 已完成；下一目标 **`0.15.0`** 聚焦 Provider 扩展与工程全流程验收，详见 [更新日志](manual/changelog/README.md) 与 [Roadmap](manual/changelog/roadmap.md)。
+- **当前版本**：正式发布版本 **`1.0.0`**（[pyproject.toml](backend/pyproject.toml)）；下一演进目标 **`1.1.0`** 聚焦非传统求解器与大规模长周期求解加速，详见 [更新日志](manual/changelog/README.md) 与 [Roadmap](manual/changelog/roadmap.md)。
 - **开源协议**：本项目基于 **[Mozilla Public License 2.0 (MPL-2.0)](LICENSE)** 开源发布。
 
 <p align="center">

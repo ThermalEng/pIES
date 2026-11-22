@@ -6,16 +6,22 @@ This page records only implemented and accepted changes in reverse chronological
 
 | Scope | Current Status |
 |---|---|
-| Official product version (`backend/pyproject.toml`) | `0.1.0` |
-| Latest completed development milestone | `0.14.5` (exit audited and merged to mainline on 2026-10-22) |
-| General modeling & computation upgrade | P1–P3 delivered, standalone P5 phase closed; engineering acceptance unified under `0.15.0` |
-| Next development target | `0.15.0` (Provider extensions and end-to-end engineering acceptance, incomplete) |
+| Official product version (`backend/pyproject.toml`) | `1.0.0` |
+| Latest released version | `1.0.0` (officially packaged and released on 2026-11-22 after full-workflow testing) |
+| General modeling & computation upgrade | Declarative device/system equations, monthly TOU prices, monthly peak demand, embedded tax modeling, and 5-tab interactive visualizations delivered in `1.0.0` |
+| Next development target | `1.1.0` (Non-traditional solvers and large-scale long-horizon acceleration) |
 | Limited pilot release version | `1.0.0` |
 | First general public release version | `2.0.0` |
 
-> `0.2.0` through `0.14.5` have completed development (`0.6.5` pre-assembly contracts closed on 2026-09-11). Because formal release publication has not been executed yet, these records remain under `Unreleased`, and product metadata, container images, and Git tags remain at `0.1.0`. Official release MUST update the single version source, built artifacts, and tags together.
+> The authoritative product version source (`backend/pyproject.toml`), Help Center build manifest, and release tag have been bumped to **`1.0.0`** for formal packaging and publication on 2026-11-22. Starting from `1.1.0`, development prioritizes non-traditional solvers to accelerate large-scale, long-horizon optimization workloads.
 
-## Unreleased
+## `1.0.0` — 2026-11-22 — Official 1.0.0 Release and Full-Workflow Engineering Closure
+
+### 2026-11-22 — Official `1.0.0` Release Packaging
+
+- Bumped the single authoritative product version in `backend/pyproject.toml` (propagating automatically to API `__version__`, package exporter metadata, and the Help Center build manifest) to **`1.0.0`**, packaging the validated full-workflow system for pilot release.
+- Given observed solve-time bottlenecks of traditional branch-and-bound MILP solvers on large-scale long-horizon cases, inserted **`1.1.0` — Non-Traditional Solvers and Large-Scale Long-Horizon Acceleration** immediately after `1.0.0` in the [Roadmap](roadmap.md), shifting subsequent `1.x` milestones cleanly to `1.2.0`–`1.7.0`.
+- Below is the reverse-chronological archive of all implemented and verified capabilities delivered through `1.0.0`:
 
 ### 2026-11-22 — Results Page Tabbed Views, Level-1 Charts, and Paginated Detail Tables
 
