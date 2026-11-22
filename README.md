@@ -173,7 +173,6 @@ docker compose --profile e2e up -d --build e2e
 | 📖 **[使用者指南](manual/user-guide/README.md)**（[中文](manual/user-guide/zh-CN/README.md) \| [EN](manual/user-guide/en-US/README.md)） | 登录会话、画布建模、CSV 数据准备、财务/规划配置、任务排查与 Excel 导出操作手册 |
 | 🛠️ **[开发者指南](manual/developer-guide/README.md)**（[中文](manual/developer-guide/zh-CN/README.md) \| [EN](manual/developer-guide/en-US/README.md)） | [架构宪法](manual/developer-guide/zh-CN/ARCHITECTURE_CONSTITUTION.md)、[系统蓝图](manual/developer-guide/zh-CN/architecture.md)、[文件格式契约](manual/developer-guide/zh-CN/file-formats.md)、[前端规范](manual/developer-guide/zh-CN/frontend.md) 与 [部署指南](manual/developer-guide/zh-CN/deployment.md) |
 | ⏱️ **[更新日志与 Roadmap](manual/changelog/README.md)**（[中文 Roadmap](manual/changelog/roadmap.md) \| [EN Changelog](manual/changelog/en-US/README.md) \| [EN Roadmap](manual/changelog/en-US/roadmap.md)） | 按时间倒序记录的已验收版本事实与下一阶段演进计划 |
-| 🔍 **[审查证据与历史归档](docs/README.md)**（[Reviews](docs/reviews/) \| [Archive](docs/archive/README.md)） | 带基线日期的架构/安全审查快照与已替代历史材料（非现行规范） |
 
 ---
 
