@@ -18,6 +18,7 @@
   </p>
 
   <p>
+    <strong>简体中文</strong> · <a href="README.en.md">English</a> &nbsp;|&nbsp;
     <a href="#-真实系统全流程动态演示">实景演示</a> ·
     <a href="#-为什么选择-pies">核心价值</a> ·
     <a href="#-核心工程特性">工程特性</a> ·
