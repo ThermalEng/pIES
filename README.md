@@ -20,8 +20,9 @@
 
   <p>
     <a href="#-真实系统全流程动态演示">实景演示</a> ·
-    <a href="#-为什么选择-pies给能源规划工程师">工程能力</a> ·
-    <a href="#%EF%B8%8F-架构美学与开放扩展给开发者与研究者">技术架构</a> ·
+    <a href="#-为什么选择-pies">核心价值</a> ·
+    <a href="#-核心工程特性">工程特性</a> ·
+    <a href="#%EF%B8%8F-声明式内核与开放架构">开放架构</a> ·
     <a href="#-3-步快速上手docker">快速部署</a> ·
     <a href="#-统一文档与规范入口">正式文档</a>
   </p>
@@ -68,9 +69,9 @@
 
 ---
 
-## 💡 为什么选择 pIES？（给能源规划工程师）
+## 💡 为什么选择 pIES？
 
-园区与建筑综合能源系统正从单一供能走向“源网荷储”多能互补，但规划团队往往受困于**商业软件黑盒不可审计**或**手工 Excel 难以统筹 8760 小时耦合调度与税务现金流**。pIES 以同一份透明物理与财务事实贯通全业务链：
+园区与建筑综合能源系统正从单一供能走向“源网荷储”多能互补，但规划团队与研究人员常常面临两难：**商业软件黑盒不可审计，手工 Excel 又难以统筹 8760 小时耦合调度与税务现金流**。pIES 以同一套透明的物理模型与财务事实，把图形化建模、数学规划与经济评价连成可追溯的完整闭环：
 
 | 对比维度 | 传统商业黑盒 / 手工 Excel 拼表 | pIES 一体化闭环方案 |
 | :--- | :--- | :--- |
@@ -79,7 +80,9 @@
 | **电价与税务口径** | 静态平均电价、手工外挂折旧与退税表，易与调度脱节 | 地区 `FinanceProfile` + 项目覆盖生成不可变财务快照；两部制自然月最大需量、VAT 抵扣池、计税折旧直接参与规划求解 |
 | **证据追溯与交付** | 改完模型覆盖原表，界面数值与上报 Excel 常有出入 | `CalcSnapshot` 不可变封存；页面、规划解回写与双语 Excel 报告严格消费同一份证据包 |
 
-### 核心工程能力
+---
+
+## 🚀 核心工程特性
 
 1. **高保真多能设备与混合装配**：内置光伏（`pv`）、电化学储能（`battery`）、热泵（`heat_pump`）、燃气锅炉（`gas_boiler`）、电制冷机（`electric_chiller`）、电网连接（`grid_connection`）及多类负荷模型；支持项目内自定义模板（[模型与算法](manual/developer-guide/zh-CN/customization-center.md)）与存量/新增混合配置。
 2. **8760h 时序数据集与质量诊断**：支持标准化 365 天非闰年 CSV 上传与内置园区样例数据一键生成，提供逐行结构诊断与固定 UTC 偏移检查。
@@ -88,9 +91,9 @@
 
 ---
 
-## 🛠️ 架构美学与开放扩展（给开发者与研究者）
+## 🛠️ 声明式内核与开放架构
 
-pIES 在设计上追求**开放优先于效率、正确性优先于兼容、边界公开可验证**，前后端均采用严格的依赖方向分层与静态架构门禁约束：
+pIES 从底座设计上追求**开放优先于效率、正确性优先于兼容、边界公开可验证**，无论是扩展新的设备方程与求解算法，还是长期维护与二次集成，都能在清晰的静态边界内演进：
 
 ```mermaid
 flowchart TB
@@ -165,12 +168,12 @@ docker compose --profile e2e up -d --build e2e
 
 本仓库以 [`manual/`](manual/README.md) 作为唯一长期正式正文来源（网页“帮助中心”同步托管该目录）：
 
-| 正式入口 | 面向读者 | 核心内容 |
-| :--- | :--- | :--- |
-| 📖 **[使用者指南](manual/user-guide/README.md)**（[中文](manual/user-guide/zh-CN/README.md) \| [EN](manual/user-guide/en-US/README.md)） | 能源规划师、工程咨询师、管理员 | 登录会话、画布建模、CSV 数据准备、财务/规划配置、任务排查与 Excel 导出 |
-| 🛠️ **[开发者指南](manual/developer-guide/README.md)**（[中文](manual/developer-guide/zh-CN/README.md) \| [EN](manual/developer-guide/en-US/README.md)） | 架构师、二次开发者、算法研究员 | [架构宪法](manual/developer-guide/zh-CN/ARCHITECTURE_CONSTITUTION.md)、[系统蓝图](manual/developer-guide/zh-CN/architecture.md)、[文件格式契约](manual/developer-guide/zh-CN/file-formats.md)、[前端规范](manual/developer-guide/zh-CN/frontend.md) 与 [部署指南](manual/developer-guide/zh-CN/deployment.md) |
-| ⏱️ **[更新日志与 Roadmap](manual/changelog/README.md)**（[中文 Roadmap](manual/changelog/roadmap.md) \| [EN Changelog](manual/changelog/en-US/README.md) \| [EN Roadmap](manual/changelog/en-US/roadmap.md)） | 关注演进进度的用户与贡献者 | 按时间倒序记录已验收事实与下一阶段计划 |
-| 🔍 **[审查证据与历史归档](docs/README.md)**（[Reviews](docs/reviews/) \| [Archive](docs/archive/README.md)） | 审计人员与历史溯源 | 带基线日期的架构/安全审查快照与已替代历史材料（非现行规范） |
+| 文档入口 | 核心内容 |
+| :--- | :--- |
+| 📖 **[使用者指南](manual/user-guide/README.md)**（[中文](manual/user-guide/zh-CN/README.md) \| [EN](manual/user-guide/en-US/README.md)） | 登录会话、画布建模、CSV 数据准备、财务/规划配置、任务排查与 Excel 导出操作手册 |
+| 🛠️ **[开发者指南](manual/developer-guide/README.md)**（[中文](manual/developer-guide/zh-CN/README.md) \| [EN](manual/developer-guide/en-US/README.md)） | [架构宪法](manual/developer-guide/zh-CN/ARCHITECTURE_CONSTITUTION.md)、[系统蓝图](manual/developer-guide/zh-CN/architecture.md)、[文件格式契约](manual/developer-guide/zh-CN/file-formats.md)、[前端规范](manual/developer-guide/zh-CN/frontend.md) 与 [部署指南](manual/developer-guide/zh-CN/deployment.md) |
+| ⏱️ **[更新日志与 Roadmap](manual/changelog/README.md)**（[中文 Roadmap](manual/changelog/roadmap.md) \| [EN Changelog](manual/changelog/en-US/README.md) \| [EN Roadmap](manual/changelog/en-US/roadmap.md)） | 按时间倒序记录的已验收版本事实与下一阶段演进计划 |
+| 🔍 **[审查证据与历史归档](docs/README.md)**（[Reviews](docs/reviews/) \| [Archive](docs/archive/README.md)） | 带基线日期的架构/安全审查快照与已替代历史材料（非现行规范） |
 
 ---
 
