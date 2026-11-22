@@ -254,6 +254,7 @@ export default function App() {
           <Route path="/" element={<ProjectListPage />} />
           {/* 自定义: 用户模型模板管理(一级菜单) */}
           <Route path="/custom" element={<CustomizationPage />} />
+          <Route path="/customization" element={<Navigate to="/custom" replace />} />
           <Route path="/projects/:id/*" element={<WorkbenchPage />} />
           <Route
             path="/admin/users"
@@ -277,6 +278,7 @@ export default function App() {
           <Route path="/help" element={<HelpPage />} />
           <Route path="/help/:lang" element={<HelpPage />} />
           <Route path="/help/:lang/:pageId" element={<HelpPage />} />
+          <Route path="*" element={<NotFoundPage />} />
         </Route>
         <Route path="*" element={<NotFoundPage />} />
       </Routes>

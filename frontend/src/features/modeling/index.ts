@@ -20,12 +20,18 @@ export {
   validateCandidate,
   validateModel,
 } from './api'
+export * from './components'
+export * from './hooks'
+export * from './form'
 export {
   connectionName,
   connFromDraft,
   deviceFromDraft,
   deviceTypeFromServer,
   deviceTypeListFromServer,
+  diagFromServer,
+  diagnosticsFromError,
+  formValuesToInputsOrErrors,
   modelSectionFromView,
   buildYamlSkeleton,
   isValidDeviceId,

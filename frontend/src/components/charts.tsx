@@ -12,8 +12,8 @@
 
 import { useEffect, useMemo, useState } from 'react'
 
-const W = 720
-const PAD = { top: 12, right: 16, bottom: 30, left: 62 }
+const W = 880
+const PAD = { top: 14, right: 20, bottom: 32, left: 66 }
 
 export interface LineSeries {
   key: string
@@ -173,7 +173,9 @@ function toPolylineSegments(
 
 function formatAxisValue(v: number): string {
   const abs = Math.abs(v)
-  if (abs >= 10000 || (abs > 0 && abs < 0.01)) return v.toExponential(1).replace('e+', 'e')
+  if (abs >= 1e9 || (abs > 0 && abs < 0.01)) return v.toExponential(1).replace('e+', 'e')
+  if (abs >= 1e6) return `${Number((v / 1e6).toFixed(2))}M`
+  if (abs >= 1e4) return `${Number((v / 1e3).toFixed(1))}k`
   return String(Math.round(v * 100) / 100)
 }
 
@@ -429,11 +431,20 @@ export function ComboChart({
   const innerW = W - PAD.left - PAD.right
   const innerH = height - PAD.top - PAD.bottom
   const slotW = innerW / count
+  const slotX = (cIdx: number) => PAD.left + cIdx * slotW
   const centerX = (i: number) => PAD.left + (i + 0.5) * slotW
   const y = (v: number) => PAD.top + ((yMax - v) / (yMax - yMin)) * innerH
   const zeroY = y(Math.min(Math.max(0, yMin), yMax))
-  const groupW = Math.min(slotW * 0.76, Math.max(12, bars.length * 22))
-  const barW = bars.length > 0 ? Math.max(3, groupW / bars.length - 2) : 0
+  const seriesCount = bars.length
+  const barGap = 2
+  const groupW = slotW * 0.76
+  const barW =
+    seriesCount > 0
+      ? Math.min(32, Math.max(3, (groupW - barGap * (seriesCount - 1)) / seriesCount))
+      : 0
+  const actualGroupW =
+    seriesCount > 0 ? seriesCount * barW + Math.max(0, seriesCount - 1) * barGap : 0
+  const groupStart = (cIdx: number) => slotX(cIdx) + (slotW - actualGroupW) / 2
 
   return (
     <figure className="ies-chart" onMouseLeave={() => setActiveIdx(null)}>
@@ -505,7 +516,7 @@ export function ComboChart({
             const yVal = y(v)
             const rectY = Math.min(yVal, zeroY)
             const rectH = Math.max(1.5, Math.abs(zeroY - yVal))
-            const startX = centerX(idx) - (bars.length * (barW + 2) - 2) / 2 + bIdx * (barW + 2)
+            const startX = groupStart(idx) + bIdx * (barW + barGap)
             const fill =
               v < 0 && s.negativeColor
                 ? s.negativeColor

@@ -288,7 +288,7 @@ export default function EconomicBindingsPage() {
   if (loadError) return <Alert variant="error">{loadError}</Alert>
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--ies-space-4)' }}>
+    <div className="ies-stack">
       <div className="ies-page-header">
         <div>
           <h1 className="ies-page-title">{pt('ies.bindings.title')}</h1>
@@ -324,7 +324,7 @@ export default function EconomicBindingsPage() {
         </Card>
       )}
 
-      <fieldset disabled={busy !== null} style={{ border: 0, margin: 0, padding: 0, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 'var(--ies-space-4)' }}>
+      <fieldset disabled={busy !== null} className="ies-fieldset-reset">
         <Card title={pt('ies.bindings.cost_title')}>
           <p>{pt('ies.bindings.cost_help')}</p>
           {costs.map((cost) => {
@@ -332,30 +332,38 @@ export default function EconomicBindingsPage() {
             const spec = deviceSpec(cost.instance)
             const driverNames = declaredDrivers(catalog, cost.financeType)
             return (
-              <div key={cost.instance} style={{ borderTop: '1px solid var(--ies-color-border)', marginTop: 'var(--ies-space-3)', paddingTop: 'var(--ies-space-3)' }}>
-                <h3>{cost.instance} <small>({device?.device_type}, {device?.kind})</small></h3>
-                <FormField label={pt('ies.bindings.cost_mode')} htmlFor={'binding-mode-' + cost.instance} required>
-                  <Select id={'binding-mode-' + cost.instance} value={cost.mode}
-                    onChange={(e) => updateCost(cost.instance, { mode: e.target.value as CostRow['mode'] })}>
-                    <option value="">{pt('ies.bindings.choose')}</option>
-                    <option value="none">{pt('ies.bindings.none')}</option>
-                    <option value="costed">{pt('ies.bindings.costed')}</option>
-                  </Select>
-                </FormField>
-                {cost.mode === 'costed' && <>
-                  <FormField label={pt('ies.bindings.finance_type')} htmlFor={'binding-finance-' + cost.instance} required>
-                    <Select id={'binding-finance-' + cost.instance} value={cost.financeType}
-                      onChange={(e) => updateCost(cost.instance, { financeType: e.target.value })}>
+              <div key={cost.instance} className="ies-item-divider">
+                <h3 className="ies-section-subtitle">
+                  {cost.instance} <span className="ies-text-note">({device?.device_type}, {device?.kind})</span>
+                </h3>
+                <div className="ies-form-grid--compact">
+                  <FormField label={pt('ies.bindings.cost_mode')} htmlFor={'binding-mode-' + cost.instance} required>
+                    <Select id={'binding-mode-' + cost.instance} value={cost.mode}
+                      onChange={(e) => updateCost(cost.instance, { mode: e.target.value as CostRow['mode'] })}>
                       <option value="">{pt('ies.bindings.choose')}</option>
-                      {cost.financeType && !Object.hasOwn(catalog?.financeTypes ?? {}, cost.financeType) &&
-                        <option value={cost.financeType}>{cost.financeType}</option>}
-                      {Object.keys(catalog?.financeTypes ?? {}).sort().map((name) => <option key={name} value={name}>{name}</option>)}
+                      <option value="none">{pt('ies.bindings.none')}</option>
+                      <option value="costed">{pt('ies.bindings.costed')}</option>
                     </Select>
                   </FormField>
-                  <p>{pt('ies.bindings.available_drivers', { names: driverNames.join(', ') || '—' })}</p>
+                  {cost.mode === 'costed' && (
+                    <FormField label={pt('ies.bindings.finance_type')} htmlFor={'binding-finance-' + cost.instance} required>
+                      <Select id={'binding-finance-' + cost.instance} value={cost.financeType}
+                        onChange={(e) => updateCost(cost.instance, { financeType: e.target.value })}>
+                        <option value="">{pt('ies.bindings.choose')}</option>
+                        {cost.financeType && !Object.hasOwn(catalog?.financeTypes ?? {}, cost.financeType) &&
+                          <option value={cost.financeType}>{cost.financeType}</option>}
+                        {Object.keys(catalog?.financeTypes ?? {}).sort().map((name) => <option key={name} value={name}>{name}</option>)}
+                      </Select>
+                    </FormField>
+                  )}
+                </div>
+                {cost.mode === 'costed' && <>
+                  <p className="ies-text-note" style={{ marginBottom: 'var(--ies-space-2)' }}>
+                    {pt('ies.bindings.available_drivers', { names: driverNames.join(', ') || '—' })}
+                  </p>
                   {cost.drivers.map((row) => (
-                    <div key={row.id} style={{ borderTop: '1px dashed var(--ies-color-border)', paddingTop: 'var(--ies-space-2)' }}>
-                      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: 'var(--ies-space-2)' }}>
+                    <div key={row.id} className="ies-item-divider--dashed">
+                      <div className="ies-form-grid--compact">
                         <FormField label={pt('ies.bindings.driver_name')} htmlFor={'binding-driver-' + row.id} required>
                           <Input id={'binding-driver-' + row.id} list={'binding-driver-choices-' + cost.instance} value={row.name}
                             onChange={(e) => updateDriver(cost.instance, row.id, { name: e.target.value })} />
@@ -381,13 +389,17 @@ export default function EconomicBindingsPage() {
                           </Select>
                         </FormField>}
                       </div>
-                      <Button size="sm" variant="secondary" onClick={() => updateCost(cost.instance, { drivers: cost.drivers.filter((d) => d.id !== row.id) })}>{pt('ies.bindings.remove_driver')}</Button>
+                      <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 'var(--ies-space-1)' }}>
+                        <Button size="sm" variant="secondary" onClick={() => updateCost(cost.instance, { drivers: cost.drivers.filter((d) => d.id !== row.id) })}>{pt('ies.bindings.remove_driver')}</Button>
+                      </div>
                     </div>
                   ))}
                   <datalist id={'binding-driver-choices-' + cost.instance}>{driverNames.map((n) => <option key={n} value={n} />)}</datalist>
                   <datalist id={'binding-props-' + cost.instance}>{Object.keys(spec?.parameters ?? {}).map((n) => <option key={n} value={n} />)}</datalist>
                   <datalist id={'binding-ports-' + cost.instance}>{(spec?.ports ?? []).map((p) => <option key={p.name} value={p.name} />)}</datalist>
-                  <Button variant="secondary" size="sm" onClick={() => updateCost(cost.instance, { drivers: [...cost.drivers, { id: newId(), name: '', source: '', target: '', aggregation: '' }] })}>{pt('ies.bindings.add_driver')}</Button>
+                  <div style={{ marginTop: 'var(--ies-space-2)' }}>
+                    <Button variant="secondary" size="sm" onClick={() => updateCost(cost.instance, { drivers: [...cost.drivers, { id: newId(), name: '', source: '', target: '', aggregation: '' }] })}>{pt('ies.bindings.add_driver')}</Button>
+                  </div>
                 </>}
               </div>
             )
@@ -399,8 +411,8 @@ export default function EconomicBindingsPage() {
           {tariffs.map((row) => {
             const spec = deviceSpec(row.instance)
             return (
-              <div key={row.id} style={{ borderTop: '1px solid var(--ies-color-border)', marginTop: 'var(--ies-space-3)', paddingTop: 'var(--ies-space-3)' }}>
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(175px, 1fr))', gap: 'var(--ies-space-2)' }}>
+              <div key={row.id} className="ies-item-divider">
+                <div className="ies-form-grid--compact">
                   <FormField label={pt('ies.bindings.binding_id')} htmlFor={'tariff-id-' + row.id} required>
                     <Input id={'tariff-id-' + row.id} value={row.bindingId} onChange={(e) => updateTariff(row.id, { bindingId: e.target.value })} />
                   </FormField>
@@ -432,7 +444,9 @@ export default function EconomicBindingsPage() {
                   </FormField>
                 </div>
                 <datalist id={'tariff-ports-' + row.id}>{(spec?.ports ?? []).filter((p) => p.direction === 'in' || p.direction === 'out').map((p) => <option key={p.name} value={p.name} />)}</datalist>
-                <Button size="sm" variant="secondary" onClick={() => setTariffs((all) => all.filter((v) => v.id !== row.id))}>{pt('ies.bindings.remove')}</Button>
+                <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 'var(--ies-space-1)' }}>
+                  <Button size="sm" variant="secondary" onClick={() => setTariffs((all) => all.filter((v) => v.id !== row.id))}>{pt('ies.bindings.remove')}</Button>
+                </div>
               </div>
             )
           })}
@@ -450,8 +464,8 @@ export default function EconomicBindingsPage() {
             // assembly remains authoritative for power dimension and nonnegativity.
             const ports = (spec?.ports ?? []).filter((p) => p.direction === 'out' && p.energy_carrier === 'electricity')
             return (
-              <div key={row.id} style={{ borderTop: '1px solid var(--ies-color-border)', marginTop: 'var(--ies-space-3)', paddingTop: 'var(--ies-space-3)' }}>
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(175px, 1fr))', gap: 'var(--ies-space-2)' }}>
+              <div key={row.id} className="ies-item-divider">
+                <div className="ies-form-grid--compact">
                   <FormField label={pt('ies.bindings.demand_id')} htmlFor={'demand-id-' + row.id} required>
                     <Input id={'demand-id-' + row.id} value={row.billingId} onChange={(e) => updateDemand(row.id, { billingId: e.target.value })} />
                   </FormField>
@@ -479,7 +493,9 @@ export default function EconomicBindingsPage() {
                   </FormField>
                 </div>
                 {row.instance && ports.length === 0 && <p>{pt('ies.bindings.demand_no_ports')}</p>}
-                <Button size="sm" variant="secondary" onClick={() => setDemands((all) => all.filter((v) => v.id !== row.id))}>{pt('ies.bindings.remove')}</Button>
+                <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 'var(--ies-space-1)' }}>
+                  <Button size="sm" variant="secondary" onClick={() => setDemands((all) => all.filter((v) => v.id !== row.id))}>{pt('ies.bindings.remove')}</Button>
+                </div>
               </div>
             )
           })}

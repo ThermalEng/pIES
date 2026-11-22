@@ -25,17 +25,16 @@ import {
   TemplateInputsForm,
   TemplateListPanel,
   YamlEditorPanel,
-} from '../../features/modeling/components'
-import {
+  buildYamlSkeleton,
+  formValuesToInputsOrErrors,
+  isValidDeviceId,
   useCandidateSave,
   useTemplateDocument,
   useTemplateForm,
   useTemplates,
   useYamlForm,
-} from '../../features/modeling/hooks'
-import { buildYamlSkeleton, formValuesToInputsOrErrors, isValidDeviceId } from '../../features/modeling/mappers'
-import type { FormFieldValue } from '../../features/modeling/form'
-import type { CandidateModel } from '../../features/modeling/model'
+} from '../../features/modeling'
+import type { CandidateModel, FormFieldValue } from '../../features/modeling'
 import '../../features/modeling/modeling.css'
 
 type CreateTab = 'template' | 'yaml'

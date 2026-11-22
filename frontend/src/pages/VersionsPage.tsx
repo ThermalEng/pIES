@@ -8,8 +8,7 @@
  * - 恢复入口在版本详情内(确认影响后执行); 结果应用与包导入见各自页面。
  */
 
-import { VersionHistoryPanel } from '../features/project-versions/components/VersionHistoryPanel'
-import { useProjectVersions } from '../features/project-versions/hooks/useProjectVersions'
+import { useProjectVersions, VersionHistoryPanel } from '../features/project-versions'
 import { useWorkbench } from './workbench'
 
 /** 版本历史页(默认导出, 供 WorkbenchPage 路由挂载)。 */

@@ -1423,7 +1423,7 @@ button {
   padding: var(--ies-space-8) var(--ies-space-6);
   background: var(--ies-color-surface);
   border: 1px solid var(--ies-color-border);
-  border-radius: 14px;
+  border-radius: var(--ies-radius-lg);
   box-shadow: var(--ies-shadow-lg);
 }
 
@@ -1451,7 +1451,7 @@ button {
 
 .ies-login__wordmark {
   color: var(--ies-color-text);
-  font-size: 1.55rem;
+  font-size: var(--ies-fs-2xl);
   font-weight: 750;
   letter-spacing: 0.025em;
 }
@@ -1507,7 +1507,7 @@ button {
   gap: 6px;
   padding: 6px 10px;
   border: 1px solid transparent;
-  border-radius: 999px;
+  border-radius: var(--ies-radius-full);
   background: transparent;
   color: var(--ies-color-text-muted);
   font-size: var(--ies-fs-xs);
@@ -1587,6 +1587,7 @@ button {
 .ies-projects__name {
   font-weight: 600;
   color: var(--ies-color-text);
+  min-width: 140px;
 }
 
 .ies-projects__desc {
@@ -1611,7 +1612,20 @@ button {
   display: flex;
   align-items: center;
   gap: var(--ies-space-1);
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
+  white-space: nowrap;
+}
+
+.ies-projects__actions .ies-btn--danger {
+  background: transparent;
+  color: var(--ies-danger-text);
+  border-color: var(--ies-color-border-strong);
+}
+
+.ies-projects__actions .ies-btn--danger:hover:not(:disabled) {
+  background: var(--ies-danger-subtle);
+  border-color: var(--ies-danger);
+  color: var(--ies-danger-text);
 }
 
 /* 查看者行的权限原因(可见文字,非仅 tooltip) */
@@ -2199,27 +2213,27 @@ button {
 .ies-custom-page { max-width: 960px; margin: 0 auto; padding: 24px 16px; }
 .ies-page-title-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .ies-custom-list { display: flex; flex-direction: column; gap: 12px; margin-top: 16px; }
-.ies-custom-card { border: 1px solid var(--ies-color-border); border-radius: 8px; padding: 14px 16px; background: var(--ies-color-surface); }
+.ies-custom-card { border: 1px solid var(--ies-color-border); border-radius: var(--ies-radius-lg); padding: 14px 16px; background: var(--ies-color-surface); }
 .ies-custom-card__head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .ies-custom-card__name { font-weight: 600; border: none; background: none; cursor: pointer; color: inherit; text-align: left; }
-.ies-custom-card__meta { display: flex; gap: 16px; flex-wrap: wrap; margin-top: 6px; color: var(--ies-color-text-secondary); font-size: 13px; }
-.ies-custom-card__revisions { margin-top: 8px; display: flex; gap: 6px; align-items: center; font-size: 13px; }
-.ies-custom-card__rev { border: 1px solid var(--ies-color-border); border-radius: 4px; padding: 2px 8px; color: var(--ies-color-text); background: none; cursor: pointer; }
+.ies-custom-card__meta { display: flex; gap: 16px; flex-wrap: wrap; margin-top: 6px; color: var(--ies-color-text-secondary); font-size: var(--ies-fs-sm); }
+.ies-custom-card__revisions { margin-top: 8px; display: flex; gap: 6px; align-items: center; font-size: var(--ies-fs-sm); }
+.ies-custom-card__rev { border: 1px solid var(--ies-color-border); border-radius: var(--ies-radius-sm); padding: 2px 8px; color: var(--ies-color-text); background: none; cursor: pointer; }
 .ies-custom-card__actions { margin-top: 10px; display: flex; gap: 8px; }
 .ies-custom-empty { color: var(--ies-color-text-secondary); padding: 24px 0; }
 .ies-custom-editor { display: flex; flex-direction: column; gap: 12px; margin-top: 16px; }
 .ies-custom-editor__head { display: flex; align-items: center; gap: 12px; }
-.ies-custom-editor__yaml { font-family: ui-monospace, 'SFMono-Regular', Consolas, monospace; font-size: 13px; line-height: 1.5; }
-.ies-custom-warn { color: var(--ies-danger); font-size: 13px; }
+.ies-custom-editor__yaml { font-family: ui-monospace, 'SFMono-Regular', Consolas, monospace; font-size: var(--ies-fs-sm); line-height: 1.5; }
+.ies-custom-warn { color: var(--ies-danger); font-size: var(--ies-fs-sm); }
 .ies-custom-editor__actions { display: flex; gap: 8px; }
 .ies-custom-diagnostics { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
-.ies-custom-diagnostics__item { border-left: 3px solid var(--ies-danger); background: var(--ies-danger-subtle); padding: 8px 10px; font-size: 13px; border-radius: 0 4px 4px 0; }
+.ies-custom-diagnostics__item { border-left: 3px solid var(--ies-danger); background: var(--ies-danger-subtle); padding: 8px 10px; font-size: var(--ies-fs-sm); border-radius: 0 var(--ies-radius-sm) var(--ies-radius-sm) 0; }
 .ies-custom-diagnostics__code { font-weight: 600; margin-right: 8px; font-family: ui-monospace, monospace; }
-.ies-custom-diagnostics__field { display: block; color: var(--ies-color-text-secondary); margin-top: 2px; font-family: ui-monospace, monospace; font-size: 12px; }
-.ies-custom-diagnostics__expected { display: block; color: var(--ies-color-text-secondary); margin-top: 2px; font-size: 12px; }
-.ies-custom-revision { border: 1px solid var(--ies-success); background: var(--ies-success-subtle); border-radius: 6px; padding: 10px 12px; }
-.ies-custom-revision h3 { margin: 0 0 4px; font-size: 14px; }
-.ies-custom-revision p { margin: 0; font-size: 13px; }
+.ies-custom-diagnostics__field { display: block; color: var(--ies-color-text-secondary); margin-top: 2px; font-family: ui-monospace, monospace; font-size: var(--ies-fs-xs); }
+.ies-custom-diagnostics__expected { display: block; color: var(--ies-color-text-secondary); margin-top: 2px; font-size: var(--ies-fs-xs); }
+.ies-custom-revision { border: 1px solid var(--ies-success); background: var(--ies-success-subtle); border-radius: var(--ies-radius-md); padding: 10px 12px; }
+.ies-custom-revision h3 { margin: 0 0 4px; font-size: var(--ies-fs-md); }
+.ies-custom-revision p { margin: 0; font-size: var(--ies-fs-sm); }
 
 /* ---------------------------------------------------------------------------
  * 页签(Tabs)与分页(Pagination)
@@ -2325,4 +2339,106 @@ button {
   min-width: 72px;
   padding: 2px var(--ies-space-2);
   font-size: var(--ies-fs-xs);
+}
+
+/* ---------------------------------------------------------------------------
+ * 通用布局与排版工具类
+ * ------------------------------------------------------------------------- */
+
+.ies-stack {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ies-space-4);
+}
+
+.ies-stack--sm {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ies-space-3);
+}
+
+.ies-form-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: var(--ies-space-1) var(--ies-space-4);
+  align-items: start;
+}
+
+.ies-form-grid--compact {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: var(--ies-space-3);
+  align-items: start;
+}
+
+.ies-form-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--ies-space-2);
+}
+
+.ies-inline-field {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--ies-space-2);
+  font-size: var(--ies-fs-sm);
+  color: var(--ies-color-text-secondary);
+}
+
+.ies-inline-field .ies-input {
+  width: 110px;
+}
+
+.ies-link-button {
+  border: 0;
+  background: transparent;
+  color: var(--ies-primary);
+  font-size: var(--ies-fs-xs);
+  padding: 0;
+  cursor: pointer;
+  text-decoration: underline;
+}
+
+.ies-link-button:hover {
+  color: var(--ies-primary-hover);
+}
+
+.ies-fieldset-reset {
+  border: 0;
+  margin: 0;
+  padding: 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--ies-space-4);
+}
+
+.ies-item-divider {
+  border-top: 1px solid var(--ies-color-border);
+  padding-top: var(--ies-space-3);
+  margin-top: var(--ies-space-3);
+}
+
+.ies-item-divider--dashed {
+  border-top: 1px dashed var(--ies-color-border);
+  padding-top: var(--ies-space-2);
+  margin-top: var(--ies-space-2);
+}
+
+.ies-section-subtitle {
+  font-size: var(--ies-fs-sm);
+  font-weight: 700;
+  color: var(--ies-color-text);
+  margin: 0 0 var(--ies-space-2);
+}
+
+.ies-text-note {
+  font-size: var(--ies-fs-xs);
+  color: var(--ies-color-text-secondary);
+}
+
+.ies-text-secondary {
+  font-size: var(--ies-fs-sm);
+  color: var(--ies-color-text-secondary);
 }

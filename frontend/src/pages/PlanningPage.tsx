@@ -7,8 +7,14 @@ import { useEffect, useRef, useState } from 'react'
 import { useParams } from 'react-router-dom'
 
 import { Alert, Button, Card, EmptyState, FormField, Input, Select, Spinner, Textarea } from '../components/ui'
-import { getPlanningConfig, savePlanningConfig } from '../features/config'
-import { EMPTY_PLANNING, planningDraftToYaml, planningFromYaml, planningToYaml } from '../features/config/planningDocument'
+import {
+  EMPTY_PLANNING,
+  getPlanningConfig,
+  planningDraftToYaml,
+  planningFromYaml,
+  planningToYaml,
+  savePlanningConfig,
+} from '../features/config'
 import type { PlanningConfigBody, PlanningConstraintDto, PlanningVariableDto } from '../features/config'
 import { getModel } from '../features/modeling'
 import { errorMessage } from '../i18n'
@@ -290,7 +296,7 @@ export default function PlanningPage() {
   if (loadError) return <div className="ies-page-placeholder"><Alert variant="error">{loadError}</Alert></div>
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--ies-space-4)' }}>
+    <div className="ies-stack">
       <div className="ies-page-header">
         <div>
           <h1 className="ies-page-title">{pt('ies.planning.title')}</h1>
@@ -319,10 +325,7 @@ export default function PlanningPage() {
       )}
 
       {/* A saved/reloaded revision replaces the entire form. Prevent edits in flight. */}
-      <fieldset
-        disabled={saving || reloading}
-        style={{ border: 0, margin: 0, padding: 0, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 'var(--ies-space-4)' }}
-      >
+      <fieldset disabled={saving || reloading} className="ies-fieldset-reset">
       {view === 'document' ? (
         <Card title={pt('ies.planning.document_tab')}>
           <FormField label={pt('ies.planning.document_label')} htmlFor="planning-yaml"
@@ -350,21 +353,21 @@ export default function PlanningPage() {
       <Card title={pt('ies.planning.variables')}>
         <p>{pt('ies.planning.variables_help')}</p>
         {variables.map((row, index) => (
-          <div key={row.id} style={{ borderTop: '1px solid var(--ies-color-border)', paddingTop: 'var(--ies-space-3)', marginTop: 'var(--ies-space-3)' }}>
-            <div className="ies-flex" style={{ justifyContent: 'space-between' }}>
+          <div key={row.id} className="ies-item-divider">
+            <div className="ies-flex ies-flex--between" style={{ marginBottom: 'var(--ies-space-2)' }}>
               <strong>{pt('ies.planning.variable_number', { number: index + 1 })}</strong>
               <Button size="sm" variant="secondary" onClick={() => setVariables((current) => current.filter((x) => x.id !== row.id))}>
                 {pt('ies.planning.remove')}
               </Button>
             </div>
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))', gap: 'var(--ies-space-3)' }}>
+            <div className="ies-form-grid--compact">
               <FormField label={pt('ies.planning.name')} htmlFor={'planning-var-name-' + row.id} required>
                 <Input id={'planning-var-name-' + row.id} value={row.name} onChange={(e) => updateVariable(row.id, { name: e.target.value })} />
               </FormField>
               <FormField label={pt('ies.planning.device_ref')} htmlFor={'planning-var-device-' + row.id} required>
                 {devicesError ? (
                   <div>
-                    <span className="ies-form-message" style={{ color: 'var(--ies-color-error)', display: 'block', marginBottom: 'var(--ies-space-1)' }}>
+                    <span className="ies-form-message ies-form-message--error" style={{ display: 'block', marginBottom: 'var(--ies-space-1)' }}>
                       {devicesError}
                     </span>
                     <Input
@@ -395,7 +398,6 @@ export default function PlanningPage() {
                       <button
                         type="button"
                         className="ies-link-button"
-                        style={{ fontSize: 'var(--ies-font-size-xs)' }}
                         onClick={() => updateVariable(row.id, { manual: true })}
                       >
                         手动输入引用
@@ -415,7 +417,6 @@ export default function PlanningPage() {
                         <button
                           type="button"
                           className="ies-link-button"
-                          style={{ fontSize: 'var(--ies-font-size-xs)' }}
                           onClick={() => updateVariable(row.id, { manual: false })}
                         >
                           从设备列表选择
@@ -450,14 +451,14 @@ export default function PlanningPage() {
       <Card title={pt('ies.planning.constraints')}>
         <p>{pt('ies.planning.constraints_help')}</p>
         {constraints.map((row, index) => (
-          <div key={row.id} style={{ borderTop: '1px solid var(--ies-color-border)', paddingTop: 'var(--ies-space-3)', marginTop: 'var(--ies-space-3)' }}>
-            <div className="ies-flex" style={{ justifyContent: 'space-between' }}>
+          <div key={row.id} className="ies-item-divider">
+            <div className="ies-flex ies-flex--between" style={{ marginBottom: 'var(--ies-space-2)' }}>
               <strong>{pt('ies.planning.constraint_number', { number: index + 1 })}</strong>
               <Button size="sm" variant="secondary" onClick={() => setConstraints((current) => current.filter((x) => x.id !== row.id))}>
                 {pt('ies.planning.remove')}
               </Button>
             </div>
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))', gap: 'var(--ies-space-3)' }}>
+            <div className="ies-form-grid--compact">
               <FormField label={pt('ies.planning.name')} htmlFor={'planning-con-name-' + row.id} required>
                 <Input id={'planning-con-name-' + row.id} value={row.name} onChange={(e) => updateConstraint(row.id, { name: e.target.value })} />
               </FormField>

@@ -292,7 +292,7 @@ export default function ConfigPage(props: ConfigPageProps) {
   }
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--ies-space-4)' }}>
+    <div className="ies-stack">
       <div className="ies-page-header">
         <div>
           <h1 className="ies-page-title">{t('ies.config.title')}</h1>
@@ -319,47 +319,49 @@ export default function ConfigPage(props: ConfigPageProps) {
       ) : null}
 
       <Card title={t('ies.config.title')}>
-        <FormField label={t('ies.config.mode')} htmlFor="calc-mode" required error={fieldErrors.mode}>
-          <Input id="calc-mode" value={mode} onChange={(e) => setMode(e.target.value)} placeholder="planning" invalid={!!fieldErrors.mode} />
-        </FormField>
-        <FormField label={t('ies.config.generator')} htmlFor="calc-generator" required error={fieldErrors.generator} hint={t('ies.config.hint_refs')}>
-          <Input
-            id="calc-generator"
-            value={generator}
-            onChange={(e) => setGenerator(e.target.value)}
-            placeholder="ies.generator.highs_milp@1.0.0"
-            invalid={!!fieldErrors.generator}
-          />
-        </FormField>
-        <FormField label={t('ies.config.solver')} htmlFor="calc-solver" required error={fieldErrors.solver} hint={t('ies.config.hint_refs')}>
-          <Input
-            id="calc-solver"
-            value={solver}
-            onChange={(e) => setSolver(e.target.value)}
-            placeholder="ies.solver.highs@1.7.2"
-            invalid={!!fieldErrors.solver}
-          />
-        </FormField>
-        <FormField label={t('ies.config.precision')} htmlFor="calc-precision" required error={fieldErrors.precision}>
-          <Select id="calc-precision" value={precision} onChange={(e) => setPrecision(e.target.value as '' | 'low' | 'medium' | 'high')} invalid={!!fieldErrors.precision}>
-            <option value="">—</option>
-            <option value="low">low</option>
-            <option value="medium">medium</option>
-            <option value="high">high</option>
-          </Select>
-        </FormField>
-        <FormField label={t('ies.config.time_limit')} htmlFor="calc-time-limit" required error={fieldErrors.time_limit_seconds}>
-          <Input
-            id="calc-time-limit"
-            value={timeLimit}
-            onChange={(e) => setTimeLimit(e.target.value)}
-            inputMode="numeric"
-            invalid={!!fieldErrors.time_limit_seconds}
-          />
-        </FormField>
-        <FormField label={t('ies.config.seed_optional')} htmlFor="calc-seed" error={fieldErrors.seed}>
-          <Input id="calc-seed" value={seed} onChange={(e) => setSeed(e.target.value)} inputMode="numeric" invalid={!!fieldErrors.seed} />
-        </FormField>
+        <div className="ies-form-grid">
+          <FormField label={t('ies.config.mode')} htmlFor="calc-mode" required error={fieldErrors.mode}>
+            <Input id="calc-mode" value={mode} onChange={(e) => setMode(e.target.value)} placeholder="planning" invalid={!!fieldErrors.mode} />
+          </FormField>
+          <FormField label={t('ies.config.generator')} htmlFor="calc-generator" required error={fieldErrors.generator} hint={t('ies.config.hint_refs')}>
+            <Input
+              id="calc-generator"
+              value={generator}
+              onChange={(e) => setGenerator(e.target.value)}
+              placeholder="ies.generator.highs_milp@1.0.0"
+              invalid={!!fieldErrors.generator}
+            />
+          </FormField>
+          <FormField label={t('ies.config.solver')} htmlFor="calc-solver" required error={fieldErrors.solver} hint={t('ies.config.hint_refs')}>
+            <Input
+              id="calc-solver"
+              value={solver}
+              onChange={(e) => setSolver(e.target.value)}
+              placeholder="ies.solver.highs@1.7.2"
+              invalid={!!fieldErrors.solver}
+            />
+          </FormField>
+          <FormField label={t('ies.config.precision')} htmlFor="calc-precision" required error={fieldErrors.precision}>
+            <Select id="calc-precision" value={precision} onChange={(e) => setPrecision(e.target.value as '' | 'low' | 'medium' | 'high')} invalid={!!fieldErrors.precision}>
+              <option value="">—</option>
+              <option value="low">low</option>
+              <option value="medium">medium</option>
+              <option value="high">high</option>
+            </Select>
+          </FormField>
+          <FormField label={t('ies.config.time_limit')} htmlFor="calc-time-limit" required error={fieldErrors.time_limit_seconds}>
+            <Input
+              id="calc-time-limit"
+              value={timeLimit}
+              onChange={(e) => setTimeLimit(e.target.value)}
+              inputMode="numeric"
+              invalid={!!fieldErrors.time_limit_seconds}
+            />
+          </FormField>
+          <FormField label={t('ies.config.seed_optional')} htmlFor="calc-seed" error={fieldErrors.seed}>
+            <Input id="calc-seed" value={seed} onChange={(e) => setSeed(e.target.value)} inputMode="numeric" invalid={!!fieldErrors.seed} />
+          </FormField>
+        </div>
         <FormField label={t('ies.config.outputs')} htmlFor="calc-outputs" required error={fieldErrors.outputs}>
           <Textarea id="calc-outputs" value={outputsText} onChange={(e) => setOutputsText(e.target.value)} rows={3} invalid={!!fieldErrors.outputs} />
         </FormField>

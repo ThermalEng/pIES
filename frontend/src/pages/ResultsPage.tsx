@@ -817,7 +817,7 @@ export default function ResultsPage() {
             </dd>
             <dt>{t('ies.common.status')}</dt>
             <dd>
-              <div className="ies-flex" style={{ flexWrap: 'wrap', gap: 'var(--ies-space-2)' }}>
+              <div className="ies-form-row">
                 <TaskStatusBadge status={selectedEntry.status} />
                 <Badge
                   variant={evidenceBadgeVariant}
@@ -955,7 +955,7 @@ export default function ResultsPage() {
                   <Card
                     title={t('ies.result.fin_sealed_title')}
                     actions={
-                      <div className="ies-flex" style={{ gap: 'var(--ies-space-2)' }}>
+                      <div className="ies-form-row">
                         <Button variant="secondary" size="sm" onClick={() => handleTabChange('financial')}>
                           {t('ies.result.open_financial_tab')}
                         </Button>
@@ -969,7 +969,7 @@ export default function ResultsPage() {
                     <SealedFinancialCore fin={finEval} />
                     {overviewCfChart && overviewCfChart.categories.length > 0 ? (
                       <div style={{ marginTop: 'var(--ies-space-4)' }}>
-                        <h3 style={{ fontSize: 'var(--ies-fs-sm)', fontWeight: 700, marginBottom: 'var(--ies-space-2)' }}>
+                        <h3 className="ies-section-subtitle">
                           {t('ies.result.fin_overview_chart_title')}
                         </h3>
                         <ComboChart
@@ -1000,9 +1000,9 @@ export default function ResultsPage() {
                 {!resultError && finEval ? (
                   <Card title={t('ies.result.fin_construction_units')} className="ies-section">
                     {finEval.construction_units.length === 0 ? (
-                      <p>{t('ies.result.fin_construction_none')}</p>
+                      <p className="ies-text-secondary">{t('ies.result.fin_construction_none')}</p>
                     ) : (
-                      <div style={{ overflowX: 'auto' }}>
+                      <div className="ies-table-wrap">
                         <table className="ies-metric-table" aria-label={t('ies.result.fin_construction_units')}>
                           <thead>
                             <tr>
@@ -1070,7 +1070,7 @@ export default function ResultsPage() {
                             ))}
                           </TBody>
                         </Table>
-                        <p style={{ fontSize: 'var(--ies-fs-xs)', color: 'var(--ies-color-text-secondary)' }}>
+                        <p className="ies-text-note">
                           {t('ies.result.plan_solution_refs', {
                             solution: planSolution.solution_id,
                             task: planSolution.refs.task_id,
@@ -1185,7 +1185,7 @@ export default function ResultsPage() {
                   }
                   className="ies-section"
                 >
-                  <p style={{ fontSize: 'var(--ies-fs-xs)', color: 'var(--ies-color-text-secondary)', marginBottom: 'var(--ies-space-3)' }}>
+                  <p className="ies-text-note" style={{ marginBottom: 'var(--ies-space-3)' }}>
                     {t('ies.result.assessment_history_note')}
                   </p>
                   {assessments.length === 0 ? (
@@ -1271,7 +1271,7 @@ export default function ResultsPage() {
                       {t('ies.result.export_package_btn')}
                     </Button>
                     {!isOwner ? (
-                      <span style={{ fontSize: 'var(--ies-fs-xs)', color: 'var(--ies-color-text-secondary)' }}>
+                      <span className="ies-text-note">
                         {t('ies.result.export_package_owner_only')}
                       </span>
                     ) : null}
@@ -1365,7 +1365,7 @@ export default function ResultsPage() {
               {t('ies.result.apply_scheme_source')}:{' '}
               {snapSources?.projectVersion ?? `id:${planSolution.refs.project_version_id}`}
             </p>
-            <p style={{ fontSize: 'var(--ies-fs-xs)', color: 'var(--ies-color-text-secondary)' }}>
+            <p className="ies-text-note">
               {schemeRevLoading
                 ? t('ies.result.apply_scheme_revision_loading')
                 : t('ies.result.apply_scheme_revision', { revision: schemeRevision ?? '—' })}
@@ -1375,7 +1375,7 @@ export default function ResultsPage() {
                 <Alert variant="error">{schemeRevisionError}</Alert>
               </div>
             ) : null}
-            <p style={{ fontSize: 'var(--ies-fs-xs)', color: 'var(--ies-color-text-secondary)' }}>
+            <p className="ies-text-note">
               {t('ies.result.plan_solution_refs', {
                 solution: planSolution.solution_id,
                 task: planSolution.refs.task_id,

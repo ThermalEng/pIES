@@ -156,11 +156,11 @@ export function SealedFinancialCore({ fin }: { fin: FinancialEvaluationBlock }) 
           {fin.price_basis} / {t('ies.result.fin_base_year')}: {fin.base_year}
         </dd>
       </dl>
-      <p style={{ fontSize: 'var(--ies-fs-sm)', color: 'var(--ies-color-text-secondary)', marginTop: 'var(--ies-space-2)' }}>
+      <p className="ies-text-secondary" style={{ marginTop: 'var(--ies-space-2)' }}>
         {t('ies.result.fin_axis_note')}
       </p>
       <div style={{ marginTop: 'var(--ies-space-3)' }}>
-        <h3 style={{ fontSize: 'var(--ies-fs-sm)', fontWeight: 700, marginBottom: 'var(--ies-space-2)' }}>
+        <h3 className="ies-section-subtitle">
           {t('ies.result.fin_metrics')}
         </h3>
         <dl className="ies-kv">

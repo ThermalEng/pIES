@@ -18,6 +18,8 @@ import { useEffect, useState } from 'react'
 import { useParams } from 'react-router-dom'
 
 import {
+  DemandRateEditor,
+  MonthlyDailyPriceEditor,
   deleteFinanceOverrides,
   getEffectiveFinance,
   getFinanceOverrides,
@@ -33,8 +35,6 @@ import { Alert, Button, Card, FormField, Select, Spinner, Textarea } from '../co
 import { translateError, useI18n } from '../i18n'
 import { pt } from '../i18n/pageMessages'
 import { ApiError } from '../types'
-import DemandRateEditor from '../features/finance/components/DemandRateEditor'
-import MonthlyDailyPriceEditor from '../features/finance/components/MonthlyDailyPriceEditor'
 
 export interface FinancePageProps {
   projectId?: number

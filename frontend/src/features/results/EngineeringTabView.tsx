@@ -4,7 +4,7 @@
 
 import { LineChart } from '../../components/charts'
 import type { LineSeries } from '../../components/charts'
-import { Alert, Button, Card, EmptyState } from '../../components/ui'
+import { Alert, Button, Card, EmptyState, Input } from '../../components/ui'
 import { useI18n } from '../../i18n'
 import type { Currency, MetricValue } from '../../types'
 import type { ResultDetail } from './chartMappers'
@@ -135,7 +135,7 @@ export function EngineeringTabView({
             }
             className="ies-section"
           >
-            <p style={{ fontSize: 'var(--ies-fs-xs)', color: 'var(--ies-color-text-secondary)', marginBottom: 'var(--ies-space-2)' }}>
+            <p className="ies-text-note" style={{ marginBottom: 'var(--ies-space-2)' }}>
               {t('ies.result.hourly_note', {
                 n: hourlyPointCount,
                 start: hourly?.start ?? 0,
@@ -157,9 +157,9 @@ export function EngineeringTabView({
                 >
                   {t('ies.result.hourly_next')}
                 </Button>
-                <label>
-                  {t('ies.result.hourly_start')}
-                  <input
+                <label className="ies-inline-field">
+                  <span>{t('ies.result.hourly_start')}</span>
+                  <Input
                     type="number"
                     min={0}
                     max={hourly.totalRows - 1}
@@ -203,7 +203,7 @@ export function EngineeringTabView({
             {hourlyError ? (
               <>
                 <Alert variant="error">{hourlyError}</Alert>
-                <p style={{ fontSize: 'var(--ies-fs-sm)', color: 'var(--ies-color-text-secondary)', marginTop: 'var(--ies-space-2)' }}>
+                <p className="ies-text-secondary" style={{ marginTop: 'var(--ies-space-2)' }}>
                   {t('ies.result.hourly_failed')}
                 </p>
                 <div style={{ marginTop: 'var(--ies-space-2)' }}>
@@ -213,11 +213,11 @@ export function EngineeringTabView({
                 </div>
               </>
             ) : hourlyAbsent || (hourly && !hourlyLoading) ? (
-              <p style={{ fontSize: 'var(--ies-fs-sm)', color: 'var(--ies-color-text-secondary)' }}>
+              <p className="ies-text-secondary">
                 {t('ies.result.hourly_absent')}
               </p>
             ) : (
-              <p style={{ fontSize: 'var(--ies-fs-sm)', color: 'var(--ies-color-text-secondary)' }}>
+              <p className="ies-text-secondary">
                 {t('ies.result.hourly_loading')}
               </p>
             )}
@@ -229,7 +229,7 @@ export function EngineeringTabView({
         <Card title={t('ies.result.eng_card')} className="ies-section">
           {balanceMetrics.length > 0 ? (
             <div style={{ marginBottom: 'var(--ies-space-3)' }}>
-              <h3 style={{ fontSize: 'var(--ies-fs-sm)', fontWeight: 700, marginBottom: 'var(--ies-space-2)' }}>
+              <h3 className="ies-section-subtitle">
                 {t('ies.result.energy_balance_table')}
               </h3>
               <MetricTable metrics={balanceMetrics} currency={currency} />
@@ -238,7 +238,7 @@ export function EngineeringTabView({
           <div className="ies-grid ies-grid--cols-3">
             {capacityMetrics.length > 0 ? (
               <div className="ies-section">
-                <h3 style={{ fontSize: 'var(--ies-fs-sm)', fontWeight: 700, marginBottom: 'var(--ies-space-2)' }}>
+                <h3 className="ies-section-subtitle">
                   {t('ies.result.device_capacity')}
                 </h3>
                 <MetricTable metrics={capacityMetrics} currency={currency} />
@@ -246,7 +246,7 @@ export function EngineeringTabView({
             ) : null}
             {peakMetrics.length > 0 ? (
               <div className="ies-section">
-                <h3 style={{ fontSize: 'var(--ies-fs-sm)', fontWeight: 700, marginBottom: 'var(--ies-space-2)' }}>
+                <h3 className="ies-section-subtitle">
                   {t('ies.result.peak')}
                 </h3>
                 <MetricTable metrics={peakMetrics} currency={currency} />
@@ -254,7 +254,7 @@ export function EngineeringTabView({
             ) : null}
             {gridMetrics.length > 0 ? (
               <div className="ies-section">
-                <h3 style={{ fontSize: 'var(--ies-fs-sm)', fontWeight: 700, marginBottom: 'var(--ies-space-2)' }}>
+                <h3 className="ies-section-subtitle">
                   {t('ies.result.grid_purchase_sale')}
                 </h3>
                 <MetricTable metrics={gridMetrics} currency={currency} />
@@ -263,7 +263,7 @@ export function EngineeringTabView({
           </div>
           {demandMetrics.length > 0 ? (
             <div>
-              <h3 style={{ fontSize: 'var(--ies-fs-sm)', fontWeight: 700, marginBottom: 'var(--ies-space-2)' }}>
+              <h3 className="ies-section-subtitle">
                 {t('ies.result.demand_charge')}
               </h3>
               <MetricTable metrics={demandMetrics} currency={currency} />
@@ -293,7 +293,7 @@ export function EngineeringTabView({
       {hasRel ? (
         <Card title={t('ies.result.dimension_reliability')} className="ies-section">
           <MetricTable metrics={relMetrics} currency={currency} />
-          <p style={{ fontSize: 'var(--ies-fs-xs)', color: 'var(--ies-color-text-secondary)', marginTop: 'var(--ies-space-2)' }}>
+          <p className="ies-text-note" style={{ marginTop: 'var(--ies-space-2)' }}>
             {t('ies.result.rel_note')}
           </p>
         </Card>

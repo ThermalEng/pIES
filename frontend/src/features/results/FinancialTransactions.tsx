@@ -107,8 +107,8 @@ export function FinancialTransactions({
     <>
       {enabled.has('movements') ? (
         <section style={{ marginTop: 'var(--ies-space-3)' }}>
-          <h3>{t('ies.result.fin_movements')}</h3>
-          <p>{t('ies.result.fin_movements_note')}</p>
+          <h3 className="ies-section-subtitle">{t('ies.result.fin_movements')}</h3>
+          <p className="ies-text-note" style={{ marginBottom: 'var(--ies-space-2)' }}>{t('ies.result.fin_movements_note')}</p>
           {paginated && fin.cash_movements.length > 0 ? (
             <div className="ies-result-toolbar" style={{ marginTop: 'var(--ies-space-2)' }}>
               <div className="ies-result-toolbar__filters">
@@ -123,10 +123,10 @@ export function FinancialTransactions({
             </div>
           ) : null}
           {fin.cash_movements.length === 0 ? (
-            <p>{none}</p>
+            <p className="ies-text-secondary">{none}</p>
           ) : (
             <>
-              <div style={{ overflowX: 'auto' }}>
+              <div className="ies-table-wrap">
                 <table className="ies-metric-table" aria-label={t('ies.result.fin_movements')}>
                   <thead>
                     <tr>
@@ -182,13 +182,13 @@ export function FinancialTransactions({
       ) : null}
       {enabled.has('assets') ? (
         <section style={{ marginTop: 'var(--ies-space-3)' }}>
-          <h3>{t('ies.result.fin_assets')}</h3>
-          <p>{t('ies.result.fin_assets_note')}</p>
+          <h3 className="ies-section-subtitle">{t('ies.result.fin_assets')}</h3>
+          <p className="ies-text-note" style={{ marginBottom: 'var(--ies-space-2)' }}>{t('ies.result.fin_assets_note')}</p>
           {fin.assets.length === 0 ? (
-            <p>{none}</p>
+            <p className="ies-text-secondary">{none}</p>
           ) : (
             <>
-              <div style={{ overflowX: 'auto' }}>
+              <div className="ies-table-wrap">
                 <table className="ies-metric-table" aria-label={t('ies.result.fin_assets')}>
                   <thead>
                     <tr>
@@ -230,8 +230,8 @@ export function FinancialTransactions({
       ) : null}
       {enabled.has('vat_rules') ? (
         <section style={{ marginTop: 'var(--ies-space-3)' }}>
-          <h3>{t('ies.result.fin_tax_vat_rules')}</h3>
-          <p>{t('ies.result.fin_tax_vat_rules_note')}</p>
+          <h3 className="ies-section-subtitle">{t('ies.result.fin_tax_vat_rules')}</h3>
+          <p className="ies-text-note" style={{ marginBottom: 'var(--ies-space-2)' }}>{t('ies.result.fin_tax_vat_rules_note')}</p>
           {paginated && vatRuleNames.length > 1 ? (
             <div className="ies-result-toolbar" style={{ marginTop: 'var(--ies-space-2)' }}>
               <div className="ies-result-toolbar__filters">
@@ -249,10 +249,10 @@ export function FinancialTransactions({
             </div>
           ) : null}
           {fin.tax_cash.vat_rules.length === 0 ? (
-            <p>{none}</p>
+            <p className="ies-text-secondary">{none}</p>
           ) : (
             <>
-              <div style={{ overflowX: 'auto' }}>
+              <div className="ies-table-wrap">
                 <table className="ies-metric-table" aria-label={t('ies.result.fin_tax_vat_rules')}>
                   <thead>
                     <tr>
@@ -294,8 +294,8 @@ export function FinancialTransactions({
       ) : null}
       {enabled.has('derived') ? (
         <section style={{ marginTop: 'var(--ies-space-3)' }}>
-          <h3>{t('ies.result.fin_tax_derived')}</h3>
-          <p>{t('ies.result.fin_tax_derived_note')}</p>
+          <h3 className="ies-section-subtitle">{t('ies.result.fin_tax_derived')}</h3>
+          <p className="ies-text-note" style={{ marginBottom: 'var(--ies-space-2)' }}>{t('ies.result.fin_tax_derived_note')}</p>
           {paginated && derivedRuleNames.length > 1 ? (
             <div className="ies-result-toolbar" style={{ marginTop: 'var(--ies-space-2)' }}>
               <div className="ies-result-toolbar__filters">
@@ -313,10 +313,10 @@ export function FinancialTransactions({
             </div>
           ) : null}
           {fin.tax_cash.derived.length === 0 ? (
-            <p>{none}</p>
+            <p className="ies-text-secondary">{none}</p>
           ) : (
             <>
-              <div style={{ overflowX: 'auto' }}>
+              <div className="ies-table-wrap">
                 <table className="ies-metric-table" aria-label={t('ies.result.fin_tax_derived')}>
                   <thead>
                     <tr>

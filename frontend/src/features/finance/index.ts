@@ -2,6 +2,8 @@
  * 财务配置 feature 公开入口(页面组合真正需要的请求与纯映射)。
  */
 
+export { default as DemandRateEditor } from './components/DemandRateEditor'
+export { default as MonthlyDailyPriceEditor } from './components/MonthlyDailyPriceEditor'
 export {
   deleteFinanceOverrides,
   getEffectiveFinance,

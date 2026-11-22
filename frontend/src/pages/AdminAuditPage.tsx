@@ -6,7 +6,7 @@
  */
 
 import { useI18n } from '../i18n'
-import { AdminAuditPanel } from '../features/admin-audit/components/AdminAuditPanel'
+import { AdminAuditPanel } from '../features/admin-audit'
 
 export default function AdminAuditPage() {
   const { t } = useI18n()

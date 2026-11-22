@@ -96,8 +96,8 @@ export function FinancialRelations({
     <>
       {showCostItems ? (
         <section style={{ marginTop: 'var(--ies-space-3)' }}>
-          <h3>{t('ies.result.fin_cost_items')}</h3>
-          <p>{t('ies.result.fin_relations_note')}</p>
+          <h3 className="ies-section-subtitle">{t('ies.result.fin_cost_items')}</h3>
+          <p className="ies-text-note" style={{ marginBottom: 'var(--ies-space-2)' }}>{t('ies.result.fin_relations_note')}</p>
           {paginated && costItems.length > 0 ? (
             <div className="ies-result-toolbar" style={{ marginTop: 'var(--ies-space-2)' }}>
               <div className="ies-result-toolbar__filters">
@@ -122,10 +122,10 @@ export function FinancialRelations({
             </div>
           ) : null}
           {costItems.length === 0 ? (
-            <p>{t('ies.result.fin_cost_items_none')}</p>
+            <p className="ies-text-secondary">{t('ies.result.fin_cost_items_none')}</p>
           ) : (
             <>
-              <div style={{ overflowX: 'auto' }}>
+              <div className="ies-table-wrap">
                 <table className="ies-metric-table" aria-label={t('ies.result.fin_cost_items')}>
                   <thead>
                     <tr>
@@ -175,7 +175,7 @@ export function FinancialRelations({
       ) : null}
       {showAmounts ? (
         <section style={{ marginTop: 'var(--ies-space-3)' }}>
-          <h3>{t('ies.result.fin_amounts')}</h3>
+          <h3 className="ies-section-subtitle">{t('ies.result.fin_amounts')}</h3>
           {paginated && amounts.length > 0 ? (
             <div className="ies-result-toolbar" style={{ marginTop: 'var(--ies-space-2)' }}>
               <div className="ies-result-toolbar__filters">
@@ -200,10 +200,10 @@ export function FinancialRelations({
             </div>
           ) : null}
           {amounts.length === 0 ? (
-            <p>{t('ies.result.fin_amounts_none')}</p>
+            <p className="ies-text-secondary">{t('ies.result.fin_amounts_none')}</p>
           ) : (
             <>
-              <div style={{ overflowX: 'auto' }}>
+              <div className="ies-table-wrap">
                 <table className="ies-metric-table" aria-label={t('ies.result.fin_amounts')}>
                   <thead>
                     <tr>

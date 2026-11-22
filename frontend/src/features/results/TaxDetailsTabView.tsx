@@ -100,7 +100,7 @@ export function TaxDetailsTabView({
         title={t('ies.result.fin_demand_monthly')}
         actions={
           fin.monthly_demand.length > 0 ? (
-            <div className="ies-flex" style={{ gap: 'var(--ies-space-2)' }}>
+            <div className="ies-form-row">
               {demandChart.billingIds.length > 1 ? (
                 <Select
                   aria-label={t('ies.result.filter_binding')}
@@ -121,14 +121,14 @@ export function TaxDetailsTabView({
         className="ies-section"
       >
         {fin.monthly_demand.length === 0 ? (
-          <p style={{ fontSize: 'var(--ies-fs-sm)', color: 'var(--ies-color-text-secondary)' }}>
+          <p className="ies-text-secondary">
             {t('ies.result.fin_demand_unbound')}
           </p>
         ) : (
           <>
             <div className="ies-chart-grid">
               <div>
-                <h3 style={{ fontSize: 'var(--ies-fs-sm)', fontWeight: 700, marginBottom: 'var(--ies-space-2)' }}>
+                <h3 className="ies-section-subtitle">
                   {t('ies.result.demand_peak_chart')}
                 </h3>
                 <CategoryLineChart
@@ -145,7 +145,7 @@ export function TaxDetailsTabView({
                 />
               </div>
               <div>
-                <h3 style={{ fontSize: 'var(--ies-fs-sm)', fontWeight: 700, marginBottom: 'var(--ies-space-2)' }}>
+                <h3 className="ies-section-subtitle">
                   {t('ies.result.demand_charge_chart')}
                 </h3>
                 <BarChart
@@ -161,7 +161,7 @@ export function TaxDetailsTabView({
                 />
               </div>
             </div>
-            <p style={{ fontSize: 'var(--ies-fs-xs)', color: 'var(--ies-color-text-secondary)', marginTop: 'var(--ies-space-2)' }}>
+            <p className="ies-text-note" style={{ marginTop: 'var(--ies-space-2)' }}>
               {t('ies.result.fin_demand_zero_note')}
             </p>
           </>
@@ -172,7 +172,7 @@ export function TaxDetailsTabView({
       <Card
         title={t('ies.result.tax_vat_card')}
         actions={
-          <div className="ies-flex" style={{ gap: 'var(--ies-space-2)' }}>
+          <div className="ies-form-row">
             {vatChart.pools.length > 1 ? (
               <Select
                 aria-label={t('ies.result.filter_pool')}
@@ -191,7 +191,7 @@ export function TaxDetailsTabView({
         }
         className="ies-section"
       >
-        <div className="ies-flex" style={{ flexWrap: 'wrap', gap: 'var(--ies-space-2)', marginBottom: 'var(--ies-space-3)' }}>
+        <div className="ies-form-row" style={{ marginBottom: 'var(--ies-space-3)' }}>
           <Badge variant="neutral" label={`${t('ies.result.tax_vat_pool_tab')}: ${fin.tax_cash.vat.length}`} />
           <Badge variant="neutral" label={t('ies.result.fin_tax_rule_count', { count: fin.tax_cash.vat_rules.length })} />
           <Badge variant="neutral" label={t('ies.result.fin_tax_refund_count', { count: fin.tax_cash.refunds.length })} />
@@ -207,7 +207,7 @@ export function TaxDetailsTabView({
             hoverHint={t('ies.result.chart_hover_hint')}
           />
         ) : (
-          <p style={{ fontSize: 'var(--ies-fs-sm)', color: 'var(--ies-color-text-secondary)' }}>
+          <p className="ies-text-secondary">
             {t('ies.result.fin_tax_none')}
           </p>
         )}
@@ -217,7 +217,7 @@ export function TaxDetailsTabView({
       <Card
         title={t('ies.result.tax_income_card')}
         actions={
-          <div className="ies-flex" style={{ gap: 'var(--ies-space-2)' }}>
+          <div className="ies-form-row">
             {incomeChart.rules.length > 1 ? (
               <Select
                 aria-label={t('ies.result.filter_rule')}
@@ -236,7 +236,7 @@ export function TaxDetailsTabView({
         }
         className="ies-section"
       >
-        <div className="ies-flex" style={{ flexWrap: 'wrap', gap: 'var(--ies-space-2)', marginBottom: 'var(--ies-space-3)' }}>
+        <div className="ies-form-row" style={{ marginBottom: 'var(--ies-space-3)' }}>
           <Badge variant="neutral" label={`${t('ies.result.tax_income_tab')}: ${fin.tax_cash.income.length}`} />
           <Badge variant="neutral" label={`${t('ies.result.tax_depreciation_tab')}: ${fin.tax_cash.depreciation.length}`} />
           <Badge variant="neutral" label={t('ies.result.fin_tax_loss_count', { count: fin.tax_cash.loss_balances.length })} />
@@ -244,7 +244,7 @@ export function TaxDetailsTabView({
         </div>
         <div className="ies-chart-grid">
           <div>
-            <h3 style={{ fontSize: 'var(--ies-fs-sm)', fontWeight: 700, marginBottom: 'var(--ies-space-2)' }}>
+            <h3 className="ies-section-subtitle">
               {t('ies.result.fin_tax_income')}
             </h3>
             {incomeChart.categories.length > 0 ? (
@@ -257,13 +257,13 @@ export function TaxDetailsTabView({
                 hoverHint={t('ies.result.chart_hover_hint')}
               />
             ) : (
-              <p style={{ fontSize: 'var(--ies-fs-sm)', color: 'var(--ies-color-text-secondary)' }}>
+              <p className="ies-text-secondary">
                 {t('ies.result.fin_tax_none')}
               </p>
             )}
           </div>
           <div>
-            <h3 style={{ fontSize: 'var(--ies-fs-sm)', fontWeight: 700, marginBottom: 'var(--ies-space-2)' }}>
+            <h3 className="ies-section-subtitle">
               {t('ies.result.fin_tax_depreciation')}
             </h3>
             {depChart.categories.length > 0 ? (
@@ -276,11 +276,11 @@ export function TaxDetailsTabView({
                 hoverHint={t('ies.result.chart_hover_hint')}
               />
             ) : (
-              <p style={{ fontSize: 'var(--ies-fs-sm)', color: 'var(--ies-color-text-secondary)' }}>
+              <p className="ies-text-secondary">
                 {t('ies.result.fin_tax_none')}
               </p>
             )}
-            <p style={{ fontSize: 'var(--ies-fs-xs)', color: 'var(--ies-color-text-secondary)', marginTop: 'var(--ies-space-2)' }}>
+            <p className="ies-text-note" style={{ marginTop: 'var(--ies-space-2)' }}>
               {t('ies.result.fin_tax_depreciation_note')}
             </p>
           </div>
@@ -297,22 +297,22 @@ export function TaxDetailsTabView({
         }
         className="ies-section"
       >
-        <p style={{ fontSize: 'var(--ies-fs-xs)', color: 'var(--ies-color-text-secondary)', marginBottom: 'var(--ies-space-3)' }}>
+        <p className="ies-text-note" style={{ marginBottom: 'var(--ies-space-3)' }}>
           {t('ies.result.fin_relations_note')}
         </p>
         {costGroups.length === 0 && amountGroups.length === 0 ? (
-          <p style={{ fontSize: 'var(--ies-fs-sm)', color: 'var(--ies-color-text-secondary)' }}>
+          <p className="ies-text-secondary">
             {t('ies.result.fin_cost_items_none')}
           </p>
         ) : (
           <div className="ies-chart-grid">
             {costGroups.map((grp) => (
               <div key={`cost-${grp.unit}`}>
-                <h3 style={{ fontSize: 'var(--ies-fs-sm)', fontWeight: 700, marginBottom: 'var(--ies-space-2)' }}>
+                <h3 className="ies-section-subtitle">
                   {t('ies.result.fin_cost_items')} ({grp.unit})
                 </h3>
                 {grp.truncated ? (
-                  <p style={{ fontSize: 'var(--ies-fs-xs)', color: 'var(--ies-color-text-secondary)', marginBottom: 'var(--ies-space-2)' }}>
+                  <p className="ies-text-note" style={{ marginBottom: 'var(--ies-space-2)' }}>
                     {t('ies.result.preview_capped_note', { shown: grp.categories.length, total: grp.totalCount })}
                   </p>
                 ) : null}
@@ -328,7 +328,7 @@ export function TaxDetailsTabView({
             ))}
             {amountGroups.map((grp) => (
               <div key={`amt-${grp.axis}-${grp.unit}`}>
-                <h3 style={{ fontSize: 'var(--ies-fs-sm)', fontWeight: 700, marginBottom: 'var(--ies-space-2)' }}>
+                <h3 className="ies-section-subtitle">
                   {t('ies.result.fin_amounts')} ({grp.axis} · {grp.unit})
                 </h3>
                 {grp.axis === 'scalar' ? (
@@ -367,16 +367,16 @@ export function TaxDetailsTabView({
         }
         className="ies-section"
       >
-        <div className="ies-flex" style={{ flexWrap: 'wrap', gap: 'var(--ies-space-2)', marginBottom: 'var(--ies-space-2)' }}>
+        <div className="ies-form-row" style={{ marginBottom: 'var(--ies-space-2)' }}>
           <Badge variant="neutral" label={t('ies.result.fin_movement_count', { count: fin.cash_movements.length })} />
           <Badge variant="neutral" label={t('ies.result.fin_asset_count', { count: fin.assets.length })} />
         </div>
-        <p style={{ fontSize: 'var(--ies-fs-xs)', color: 'var(--ies-color-text-secondary)', marginBottom: 'var(--ies-space-3)' }}>
+        <p className="ies-text-note" style={{ marginBottom: 'var(--ies-space-3)' }}>
           {t('ies.result.fin_movements_note')}
         </p>
         {assetChart.categories.length > 0 ? (
           <>
-            <h3 style={{ fontSize: 'var(--ies-fs-sm)', fontWeight: 700, marginBottom: 'var(--ies-space-2)' }}>
+            <h3 className="ies-section-subtitle">
               {t('ies.result.fin_assets')}
             </h3>
             <CategoryLineChart
@@ -388,12 +388,12 @@ export function TaxDetailsTabView({
               showAllLabel={t('ies.result.show_all_series')}
               hoverHint={t('ies.result.chart_hover_hint')}
             />
-            <p style={{ fontSize: 'var(--ies-fs-xs)', color: 'var(--ies-color-text-secondary)', marginTop: 'var(--ies-space-2)' }}>
+            <p className="ies-text-note" style={{ marginTop: 'var(--ies-space-2)' }}>
               {t('ies.result.fin_assets_note')}
             </p>
           </>
         ) : fin.cash_movements.length === 0 ? (
-          <p style={{ fontSize: 'var(--ies-fs-sm)', color: 'var(--ies-color-text-secondary)' }}>
+          <p className="ies-text-secondary">
             {t('ies.result.fin_tax_none')}
           </p>
         ) : null}

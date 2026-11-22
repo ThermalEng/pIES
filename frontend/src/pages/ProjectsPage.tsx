@@ -22,6 +22,7 @@ import {
   listProjects,
   unarchiveProject,
 } from '../features/projects'
+import { ImportProposalDialog } from '../features/project-import'
 import { listTasks } from '../features/tasks'
 import { translateError, useI18n } from '../i18n'
 import { formatDateTime, formatRelativeTime } from '../lib/format'
@@ -47,7 +48,6 @@ import {
 } from '../components/ui'
 import { ApiError } from '../types'
 import type { BaselineResolution, Currency, Project, ProjectListParams, Task } from '../types'
-import { ImportProposalDialog } from '../features/project-import/components/ImportProposalDialog'
 
 type StatusFilter = 'all' | 'active' | 'archived'
 type RowOp = 'archive' | 'unarchive' | 'delete'
@@ -293,14 +293,14 @@ export default function ProjectsPage() {
       <div className="ies-page-header">
         <h1 className="ies-page-title">{t('ies.nav.projects')}</h1>
         {isAdmin === false ? (
-          <>
+          <div className="ies-flex">
             <Button variant="primary" icon="plus" onClick={() => setCreateOpen(true)}>
               {t('ies.project.new')}
             </Button>
             <Button variant="secondary" icon="upload" onClick={() => setImportOpen(true)}>
               {t('ies.import.open_button')}
             </Button>
-          </>
+          </div>
         ) : null}
       </div>
 
@@ -422,7 +422,7 @@ export default function ProjectsPage() {
                   </TD>
                   <TD>
                     <div className="ies-projects__actions" onClick={stopRow}>
-                      <Button size="sm" variant="ghost" onClick={() => openProject(project)}>
+                      <Button size="sm" variant="secondary" onClick={() => openProject(project)}>
                         {t('ies.project.open')}
                       </Button>
                       {archived ? (

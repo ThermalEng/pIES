@@ -151,7 +151,7 @@ export function FinancialTabView({
           <Card title={t('ies.result.fin_payments_and_net')} className="ies-section">
             <div className="ies-grid ies-grid--cols-2">
               <div>
-                <h3 style={{ fontSize: 'var(--ies-fs-sm)', fontWeight: 700, marginBottom: 'var(--ies-space-2)' }}>
+                <h3 className="ies-section-subtitle">
                   {t('ies.result.fin_payments')}
                 </h3>
                 {fin.payments_applied.length > 0 ? (
@@ -168,13 +168,13 @@ export function FinancialTabView({
                     </tbody>
                   </table>
                 ) : (
-                  <p style={{ fontSize: 'var(--ies-fs-sm)', color: 'var(--ies-color-text-secondary)' }}>
+                  <p className="ies-text-secondary">
                     {t('ies.result.fin_tax_none')}
                   </p>
                 )}
               </div>
               <div>
-                <h3 style={{ fontSize: 'var(--ies-fs-sm)', fontWeight: 700, marginBottom: 'var(--ies-space-2)' }}>
+                <h3 className="ies-section-subtitle">
                   {t('ies.result.fin_net_cashflows')}
                 </h3>
                 {fin.net_cashflows.length > 0 ? (
@@ -193,7 +193,7 @@ export function FinancialTabView({
                     </tbody>
                   </table>
                 ) : (
-                  <p style={{ fontSize: 'var(--ies-fs-sm)', color: 'var(--ies-color-text-secondary)' }}>
+                  <p className="ies-text-secondary">
                     {t('ies.result.fin_net_none')}
                   </p>
                 )}
@@ -216,15 +216,15 @@ export function FinancialTabView({
             }
             className="ies-section"
           >
-            <p style={{ fontSize: 'var(--ies-fs-sm)', marginBottom: 'var(--ies-space-2)' }}>
+            <p className="ies-text-secondary" style={{ marginBottom: 'var(--ies-space-2)' }}>
               {fin.comparison.mode}
             </p>
             {fin.comparison.mode !== 'absolute' ? (
               <>
-                <p style={{ fontSize: 'var(--ies-fs-xs)', color: 'var(--ies-color-text-secondary)' }}>
+                <p className="ies-text-note">
                   {fin.comparison.comparability.service_basis}
                 </p>
-                <p style={{ fontSize: 'var(--ies-fs-xs)', color: 'var(--ies-color-text-secondary)', marginBottom: 'var(--ies-space-3)' }}>
+                <p className="ies-text-note" style={{ marginBottom: 'var(--ies-space-3)' }}>
                   {fin.comparison.comparability.differences}
                 </p>
                 {cmpChart && cmpChart.categories.length > 0 ? (
@@ -267,7 +267,7 @@ export function FinancialTabView({
           />
           {cashflowMetrics.length > 0 ? (
             <div style={{ marginTop: 'var(--ies-space-3)' }}>
-              <h3 style={{ fontSize: 'var(--ies-fs-sm)', fontWeight: 700, marginBottom: 'var(--ies-space-2)' }}>
+              <h3 className="ies-section-subtitle">
                 {t('ies.result.cashflow')}
               </h3>
               <MetricTable metrics={cashflowMetrics} currency={currency} />

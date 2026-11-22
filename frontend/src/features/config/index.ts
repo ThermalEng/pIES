@@ -4,4 +4,5 @@
 
 export { getCalcConfig, getDeploymentDefaults, saveCalcConfig, getPlanningConfig, savePlanningConfig } from './api'
 export { configFromServer, deploymentDefaultsFromServer } from './mappers'
+export { EMPTY_PLANNING, planningDraftToYaml, planningFromYaml, planningToYaml } from './planningDocument'
 export type { ConfigEnvelopeDto, DeploymentDefaultsDto, PlanningConfigBody, PlanningConfigEnvelopeDto, PlanningConstraintDto, PlanningVariableDto } from './contracts'

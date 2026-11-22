@@ -138,7 +138,11 @@
 @media (max-width: 960px) {
   .wb {
     flex-direction: column;
-    margin: calc(var(--ies-space-6) * -1) 0 0;
+    margin: calc(var(--ies-space-6) * -1);
+  }
+
+  .wb-header {
+    position: static;
   }
 
   .wb-sidebar {
@@ -218,8 +222,9 @@
 
 .ies-kv {
   display: grid;
-  grid-template-columns: auto 1fr;
-  gap: var(--ies-space-1) var(--ies-space-4);
+  grid-template-columns: minmax(110px, max-content) 1fr;
+  gap: var(--ies-space-2) var(--ies-space-5);
+  align-items: baseline;
   font-size: var(--ies-fs-sm);
 }
 
@@ -648,10 +653,21 @@
   font-size: var(--ies-fs-sm);
 }
 
+.ies-metric-table th {
+  padding: var(--ies-space-2) var(--ies-space-3);
+  text-align: left;
+  font-weight: 600;
+  color: var(--ies-color-text-secondary);
+  background: var(--ies-color-surface-2);
+  border-bottom: 1px solid var(--ies-color-border-strong);
+  white-space: nowrap;
+}
+
 .ies-metric-table td {
   padding: var(--ies-space-2) var(--ies-space-3);
   border-bottom: 1px solid var(--ies-color-border);
   vertical-align: middle;
+  font-variant-numeric: tabular-nums;
 }
 
 .ies-metric-table td:first-child {

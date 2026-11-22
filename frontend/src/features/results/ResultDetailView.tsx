@@ -9,6 +9,7 @@ import {
   Button,
   Card,
   EmptyState,
+  Input,
   Pagination,
   Select,
   Tabs,
@@ -176,7 +177,7 @@ export function ResultDetailView({
       <>
         {renderHeader(t('ies.result.count_items', { count: hourlyIndices.length }))}
         <Card title={detailTitle} className="ies-section">
-          <p style={{ fontSize: 'var(--ies-fs-xs)', color: 'var(--ies-color-text-secondary)', marginBottom: 'var(--ies-space-2)' }}>
+          <p className="ies-text-note" style={{ marginBottom: 'var(--ies-space-2)' }}>
             {t('ies.result.hourly_note', {
               n: hourlyIndices.length,
               start: hourly.start,
@@ -197,9 +198,9 @@ export function ResultDetailView({
             >
               {t('ies.result.hourly_next')}
             </Button>
-            <label>
-              {t('ies.result.hourly_start')}
-              <input
+            <label className="ies-inline-field">
+              <span>{t('ies.result.hourly_start')}</span>
+              <Input
                 type="number"
                 min={0}
                 max={hourly.totalRows - 1}
@@ -221,7 +222,7 @@ export function ResultDetailView({
               {t('ies.result.hourly_go')}
             </Button>
           </div>
-          <div style={{ overflowX: 'auto' }}>
+          <div className="ies-table-wrap">
             <table className="ies-metric-table" aria-label={detailTitle}>
               <thead>
                 <tr>
@@ -292,10 +293,10 @@ export function ResultDetailView({
         {renderHeader(t('ies.result.count_items', { count: totalCount }))}
         {fin.evaluation.rows.length > 0 ? (
           <Card title={t('ies.result.fin_cf_table')} className="ies-section">
-            <p style={{ fontSize: 'var(--ies-fs-xs)', color: 'var(--ies-color-text-secondary)', marginBottom: 'var(--ies-space-2)' }}>
+            <p className="ies-text-note" style={{ marginBottom: 'var(--ies-space-2)' }}>
               {t('ies.result.fin_axis_note')}
             </p>
-            <div style={{ overflowX: 'auto' }}>
+            <div className="ies-table-wrap">
               <table className="ies-metric-table" aria-label={t('ies.result.fin_cf_table')}>
                 <thead>
                   <tr>
@@ -334,7 +335,7 @@ export function ResultDetailView({
         ) : null}
         {fin.annual_net_flows.length > 0 ? (
           <Card title={t('ies.result.fin_tax_flows')} className="ies-section">
-            <div style={{ overflowX: 'auto' }}>
+            <div className="ies-table-wrap">
               <table className="ies-metric-table" aria-label={t('ies.result.fin_tax_flows')}>
                 <thead>
                   <tr>
@@ -382,7 +383,7 @@ export function ResultDetailView({
             <EmptyState icon="info" title={t('ies.result.fin_tax_none')} />
           ) : (
             <>
-              <div style={{ overflowX: 'auto' }}>
+              <div className="ies-table-wrap">
                 <table className="ies-metric-table" aria-label={t('ies.result.fin_yearly')}>
                   <thead>
                     <tr>
@@ -449,7 +450,7 @@ export function ResultDetailView({
         {renderHeader(t('ies.result.count_items', { count: filteredDemand.length }))}
         <Card title={t('ies.result.fin_demand_monthly')} className="ies-section">
           {fin.monthly_demand.length === 0 ? (
-            <p>{t('ies.result.fin_demand_unbound')}</p>
+            <p className="ies-text-secondary">{t('ies.result.fin_demand_unbound')}</p>
           ) : (
             <>
               <div className="ies-result-toolbar">
@@ -480,7 +481,7 @@ export function ResultDetailView({
                   ) : null}
                 </div>
               </div>
-              <div style={{ overflowX: 'auto' }}>
+              <div className="ies-table-wrap">
                 <table className="ies-metric-table" aria-label={t('ies.result.fin_demand_monthly')}>
                   <thead>
                     <tr>
@@ -519,7 +520,7 @@ export function ResultDetailView({
                 }}
                 pageSizeOptions={[12, 20, 24, 50, 100]}
               />
-              <p style={{ fontSize: 'var(--ies-fs-xs)', color: 'var(--ies-color-text-secondary)', marginTop: 'var(--ies-space-2)' }}>
+              <p className="ies-text-note" style={{ marginTop: 'var(--ies-space-2)' }}>
                 {t('ies.result.fin_demand_zero_note')}
               </p>
             </>
@@ -574,7 +575,7 @@ export function ResultDetailView({
               ) : null}
               {filteredVat.length > 0 ? (
                 <>
-                  <div style={{ overflowX: 'auto' }}>
+                  <div className="ies-table-wrap">
                     <table className="ies-metric-table" aria-label={t('ies.result.fin_tax_vat')}>
                       <thead>
                         <tr>
@@ -615,7 +616,7 @@ export function ResultDetailView({
                   />
                 </>
               ) : (
-                <p style={{ fontSize: 'var(--ies-fs-sm)', color: 'var(--ies-color-text-secondary)' }}>
+                <p className="ies-text-secondary">
                   {t('ies.result.fin_tax_none')}
                 </p>
               )}
@@ -629,7 +630,7 @@ export function ResultDetailView({
           {vatSubTab === 'refunds' ? (
             fin.tax_cash.refunds.length > 0 ? (
               <>
-                <div style={{ overflowX: 'auto' }}>
+                <div className="ies-table-wrap">
                   <table className="ies-metric-table" aria-label={t('ies.result.fin_tax_refunds')}>
                     <tbody>
                       {refundSlice.items.map((row, index) => (
@@ -658,7 +659,7 @@ export function ResultDetailView({
                 />
               </>
             ) : (
-              <p style={{ fontSize: 'var(--ies-fs-sm)', color: 'var(--ies-color-text-secondary)' }}>
+              <p className="ies-text-secondary">
                 {t('ies.result.fin_tax_none')}
               </p>
             )
@@ -718,7 +719,7 @@ export function ResultDetailView({
               ) : null}
               {filteredIncome.length > 0 ? (
                 <>
-                  <div style={{ overflowX: 'auto' }}>
+                  <div className="ies-table-wrap">
                     <table className="ies-metric-table" aria-label={t('ies.result.fin_tax_income')}>
                       <thead>
                         <tr>
@@ -761,7 +762,7 @@ export function ResultDetailView({
                   />
                 </>
               ) : (
-                <p style={{ fontSize: 'var(--ies-fs-sm)', color: 'var(--ies-color-text-secondary)' }}>
+                <p className="ies-text-secondary">
                   {t('ies.result.fin_tax_none')}
                 </p>
               )}
@@ -772,7 +773,7 @@ export function ResultDetailView({
             <>
               {fin.tax_cash.depreciation.length > 0 ? (
                 <>
-                  <div style={{ overflowX: 'auto' }}>
+                  <div className="ies-table-wrap">
                     <table className="ies-metric-table" aria-label={t('ies.result.fin_tax_depreciation')}>
                       <tbody>
                         {depSlice.items.map((row, index) => (
@@ -805,11 +806,11 @@ export function ResultDetailView({
                   />
                 </>
               ) : (
-                <p style={{ fontSize: 'var(--ies-fs-sm)', color: 'var(--ies-color-text-secondary)' }}>
+                <p className="ies-text-secondary">
                   {t('ies.result.fin_tax_none')}
                 </p>
               )}
-              <p style={{ fontSize: 'var(--ies-fs-xs)', color: 'var(--ies-color-text-secondary)', marginTop: 'var(--ies-space-2)' }}>
+              <p className="ies-text-note" style={{ marginTop: 'var(--ies-space-2)' }}>
                 {t('ies.result.fin_tax_depreciation_note')}
               </p>
             </>
@@ -818,7 +819,7 @@ export function ResultDetailView({
           {incomeSubTab === 'losses' ? (
             fin.tax_cash.loss_balances.length > 0 ? (
               <>
-                <div style={{ overflowX: 'auto' }}>
+                <div className="ies-table-wrap">
                   <table className="ies-metric-table" aria-label={t('ies.result.fin_tax_balances')}>
                     <tbody>
                       {lossSlice.items.map((row, index) => (
@@ -846,7 +847,7 @@ export function ResultDetailView({
                 />
               </>
             ) : (
-              <p style={{ fontSize: 'var(--ies-fs-sm)', color: 'var(--ies-color-text-secondary)' }}>
+              <p className="ies-text-secondary">
                 {t('ies.result.fin_tax_none')}
               </p>
             )
