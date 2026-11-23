@@ -25,7 +25,8 @@
    - 网络边界与 `system_equations` 见[网络边界与系统方程](formats/network-relations.md)；
    - 命名成本明细、金额、收付、资产与派生税见[命名金额、支付与资产](formats/finance-relations.md)；
    - 评价对比与冻结基准输入见[公共契约](contracts.md#评价范围与冻结基准)；
-   - 求解声明、序列与财务事实映射见[Solver Bundle](formats/solver-bundle.md)。
+   - 求解声明、序列与财务事实映射见[Solver Bundle](formats/solver-bundle.md)；
+   - 通用前置启发式缩域、两级漏斗热启动与最优性界校验见[计算生成与求解](modules/engines.md#通用前置启发式加速与两级漏斗协同)。
 4. 规范变更时先更新权威正文，再核对引用处的链接和描述是否一致。
 
 ## 归档机制

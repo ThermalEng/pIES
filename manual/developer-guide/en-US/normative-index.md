@@ -25,7 +25,8 @@ This page defines the role and sole authoritative owner of each document categor
    - Network boundaries and `system_equations`: [Network Boundaries and System Equations](formats/network-relations.md);
    - Named cost items, amounts, cash movements, assets, and derived taxes: [Named Amounts, Payments, and Assets](formats/finance-relations.md);
    - Evaluation comparison and frozen baseline inputs: [Public Contracts](contracts.md#evaluation-scope-and-frozen-baseline);
-   - Solver declarations, series, and financial fact mappings: [Solver Bundle](formats/solver-bundle.md).
+   - Solver declarations, series, and financial fact mappings: [Solver Bundle](formats/solver-bundle.md);
+   - Universal heuristic presolve narrowing, two-stage funnel warm-start, and optimality bound verification: [Computation Generation and Solving](modules/engines.md#universal-heuristic-presolve-acceleration-and-two-stage-funnel-coordination).
 4. When a rule changes, update its authoritative text first, then check links and summaries at all referencing sites.
 
 ## Archival Mechanism
