@@ -169,13 +169,20 @@ def test_campus_generate_full_bundle() -> None:
         "input/problem.mps",
         "input/parameters.json",
         "input/parameters.jsonl",
+        "input/acceleration.json",
     ]
     assert [e["media_type"] for e in manifest.inputs] == [
         "application/mps",
         "application/json",
         "application/x-ndjson",
+        "application/json",
     ]
-    assert set(bundle.files) == {"input/problem.mps", "input/parameters.json", "input/parameters.jsonl"}
+    assert set(bundle.files) == {
+        "input/problem.mps",
+        "input/parameters.json",
+        "input/parameters.jsonl",
+        "input/acceleration.json",
+    }
     command = manifest.command
     assert command["executor"] == EXECUTOR_REF
     assert command["executable"] == SOLVER_REF
@@ -187,6 +194,10 @@ def test_campus_generate_full_bundle() -> None:
         "600",
         "--random_seed",
         "0",
+        "--acceleration_mode",
+        "on_demand_mutex",
+        "--acceleration_file",
+        "input/acceleration.json",
     ]
     assert command["working_directory"] == "."
     # 求解 600 秒原样传入；PROCESS_IO_GRACE_SECONDS = 600 仅作启停/读写宽限。
@@ -235,7 +246,8 @@ def test_generate_is_byte_deterministic_and_writes_nothing(
     assert content_bytes(export_bundle_files(first)) == content_bytes(export_bundle_files(second))
     meta = json.loads(materialized_file(first, "input/parameters.json").decode("utf-8"))
     assert meta["seed"] == 7
-    assert first.manifest.command["arguments"][-1] == "7"
+    args = list(first.manifest.command["arguments"])
+    assert args[args.index("--random_seed") + 1] == "7"
     monkeypatch.chdir(tmp_path)
     _resolved_generate()
     assert list(tmp_path.iterdir()) == []

@@ -55,6 +55,7 @@ def test_options_schema_allows_optional_acceleration_and_rejects_invalid() -> No
     assert accel_schema["type"] == "object"
     assert accel_schema["additionalProperties"] is False
     assert list(accel_schema["properties"]["mode"]["enum"]) == ["off", "on_demand_mutex"]
+    assert accel_schema["properties"]["mode"]["default"] == "on_demand_mutex"
 
     registry = build_registry((HIGHS_MILP_PROVIDER,))
     for valid in (
@@ -99,8 +100,8 @@ def test_generate_preserves_bytes_when_acceleration_off_and_appends_flag_when_en
 
     bytes_empty = content_bytes(export_bundle_files(b_empty))
     assert content_bytes(export_bundle_files(b_omitted)) == bytes_empty
-    assert content_bytes(export_bundle_files(b_off)) == bytes_empty
-    assert list(b_empty.manifest.command["arguments"]) == [
+    assert content_bytes(export_bundle_files(b_on)) == bytes_empty
+    assert list(b_off.manifest.command["arguments"]) == [
         "input/problem.mps",
         "--solution_file",
         "output/solution.sol",
@@ -123,9 +124,11 @@ def test_generate_preserves_bytes_when_acceleration_off_and_appends_flag_when_en
         "--acceleration_file",
         "input/acceleration.json",
     ]
-    bytes_on = content_bytes(export_bundle_files(b_on))
+    bytes_off = content_bytes(export_bundle_files(b_off))
+    assert "input/acceleration.json" not in bytes_off
+    assert "input/acceleration.json" in bytes_empty
     for path in ("input/problem.mps", "input/parameters.json", "input/parameters.jsonl"):
-        assert bytes_on[path] == bytes_empty[path]
+        assert bytes_empty[path] == bytes_off[path]
 
 
 def test_default_original_domain_omits_solver_diagnostics() -> None:

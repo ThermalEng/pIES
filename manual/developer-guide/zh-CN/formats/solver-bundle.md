@@ -73,7 +73,7 @@ Bundle 内输入与输出文件统一采用可重复按块读取的只读内容�
 
 - **命令安全**：`command` 禁止 Shell 字符串与命令行拼接（禁止 `sh -c`、管道、重定向、通配符、`..` 路径逃逸）；`executable` 须命中部署 allowlist，`network` 默认为 `false`。
 - **执行回执（`ExecutionReceipt`）**：运行时无论成功或失败均记录 Bundle、尝试、执行器/求解器版本、起止时间、退出码或信号、施加的资源限制及采集到的 `stdout`/`stderr`/声明输出；进程退出码为 `0` 仅代表进程协议结束，数学最优性与可行解由 `ResultAdapter` 解释声明输出判定。
-- **求解器内建加速与结构元数据交接**：通过[计算配置](calculation-config.md)的 `options` 启用结构加速时，Bundle 在同一隔离工作目录内随原始模型一并交接经生成器核验的结构元数据；受控 `executable` 在基于 `time_limit_seconds` 的统一时间预算内执行并在截止前保全已核查可行解，`ResultAdapter` 按无损最优与原模型容差核查结果裁决 `solved` 与 `feasible`（详见[计算生成与求解](../modules/engines.md#求解器内建结构加速)）。关闭时直接按原模型求解；全程禁止 Shell 串联与跨 Bundle 改写装配边界。
+- **求解器内建加速与结构元数据交接**：内置 `ies.generator.highs_milp@1.0.0` 默认开启 `on_demand_mutex` 结构加速（可通过 [CalculationConfig](calculation-config.md) `options.acceleration.mode = "off"` 显式关闭）；开启时 Bundle 在同一隔离工作目录内随原始模型一并交接经生成器核验的结构元数据，受控 `executable` 在基于 `time_limit_seconds` 的统一时间预算内执行并在截止前保全已核查可行解，`ResultAdapter` 按无损最优与原模型容差核查结果裁决 `solved` 与 `feasible`（详见[计算生成与求解](../modules/engines.md#求解器内建结构加速)）。显式关闭时直接按原模型求解；全程禁止 Shell 串联与跨 Bundle 改写装配边界。
 
 ## 内置配套参数记录
 

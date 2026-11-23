@@ -68,7 +68,7 @@
 
 ### 求解加速结构元数据导出
 
-生成器保持纯内存确定性编译边界（禁止在 `generate` 内启动求解或搜索进程）。当 `CalculationConfig.options` 启用求解器内建结构加速时，生成器随 Bundle 导出经编译期核验的结构元数据，供求解执行器在不破坏原模型列序映射与约束完整性的前提下执行结构加速与原模型容差核查（详见[计算生成与求解](engines.md#求解器内建结构加速)）。
+生成器保持纯内存确定性编译边界（禁止在 `generate` 内启动求解或搜索进程）。当 `CalculationConfig.options` 启用求解器内建结构加速时（内置 `ies.generator.highs_milp@1.0.0` 默认开启 `"on_demand_mutex"`，可显式设 `"off"` 关闭），生成器随 Bundle 导出经编译期核验的结构元数据，供求解执行器在不破坏原模型列序映射与约束完整性的前提下执行结构加速与原模型容差核查（详见[计算生成与求解](engines.md#求解器内建结构加速)）。
 
 ### 生成阶段协作停止
 
@@ -79,7 +79,7 @@
 | 协议项 | 约束与语义 |
 |---|---|
 | 配套组件 | 求解器 `ies.solver.highs@1.7.2`、执行器 `ies.executor.local_process@1.0.0`、适配器 `ies.result-adapter.highs@1.0.0` |
-| 计算支持 | `mode: planning`、`precision: medium`、`options: {}`、`outputs` 支持 `solution` 与 `metrics`；`seed` 为 `null` 时固定取 `0` |
+| 计算支持 | `mode: planning`、`precision: medium`、`options.acceleration.mode` 默认 `"on_demand_mutex"`（可设 `"off"` 关闭）、`outputs` 支持 `solution` 与 `metrics`；`seed` 为 `null` 时固定取 `0` |
 | 数学表达 | 仿射关系、有限非负界下的 `x * y = 0` 精确 Big-M 互斥、一阶状态 `[t]`/`[t-1]`、建设激活与财务税务分段关系（不支持变量乘变量的双线性关系） |
 | 单位与坐标 | 物理量换算至 SI 内部计算，金额保持冻结财务币种；目标常数以 `objective_offset` 单独传递 |
 | 产物与超时期 | 按列分块流式生成 `input/problem.mps`，配合 `input/parameters.json` 与 `input/parameters.jsonl`；用户请求 `time_limit_seconds` 原样传给 HiGHS `--time_limit`，外层进程监督宽限固定为 `+600` 秒用于启停、读模与解写出（整体仍受部署 `max_timeout_seconds` 约束） |

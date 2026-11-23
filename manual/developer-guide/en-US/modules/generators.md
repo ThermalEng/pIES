@@ -68,7 +68,7 @@ Pre-solve bound propagation proves finite bounds required for exact discrete/pie
 
 ### Structural Metadata Export for Solver Acceleration
 
-Generators preserve pure in-memory deterministic compilation boundaries (never launching solver or search processes inside `generate`). When solver-embedded structural acceleration is enabled via `CalculationConfig.options`, the generator exports verified structural metadata inside the Bundle so the solver executable can apply structural acceleration and verify original-model tolerances without breaking original column mappings or constraint fidelity (see [Computation Generation and Solving](engines.md#solver-embedded-structural-acceleration)).
+Generators preserve pure in-memory deterministic compilation boundaries (never launching solver or search processes inside `generate`). When solver-embedded structural acceleration is active via `CalculationConfig.options` (enabled by default as `"on_demand_mutex"` in built-in `ies.generator.highs_milp@1.0.0`, opt-out via `"off"`), the generator exports verified structural metadata inside the Bundle so the solver executable can apply structural acceleration and verify original-model tolerances without breaking original column mappings or constraint fidelity (see [Computation Generation and Solving](engines.md#solver-embedded-structural-acceleration)).
 
 ### Cooperative Cancellation During Generation
 
@@ -79,7 +79,7 @@ Standard generation entry points retain pure input signatures; Providers support
 | Protocol Aspect | Constraints and Semantics |
 |---|---|
 | Companion stack | Solver `ies.solver.highs@1.7.2`, executor `ies.executor.local_process@1.0.0`, adapter `ies.result-adapter.highs@1.0.0` |
-| Computation support | `mode: planning`, `precision: medium`, `options: {}`, `outputs` supporting `solution` and `metrics`; `seed` `null` fixes `0` |
+| Computation support | `mode: planning`, `precision: medium`, `options.acceleration.mode` defaulting to `"on_demand_mutex"` (`"off"` to opt out), `outputs` supporting `solution` and `metrics`; `seed` `null` fixes `0` |
 | Math expressiveness | Affine relations, exact Big-M complementarity `x * y = 0` under finite non-negative bounds, first-order `[t]`/`[t-1]` states, construction activation, and piecewise financial/tax rules (variable-times-variable bilinearity unsupported) |
 | Units and coordinates | Physical quantities convert to internal SI; monetary values preserve the frozen finance currency; objective constants pass separately via `objective_offset` |
 | Artifacts and timeouts | Streams `input/problem.mps` column-wise in chunks alongside `input/parameters.json` and `input/parameters.jsonl`; passes user `time_limit_seconds` verbatim to HiGHS `--time_limit` while adding fixed `+600` s outer process supervision grace for startup, model reading, and solution writing (bounded by deployment `max_timeout_seconds`) |

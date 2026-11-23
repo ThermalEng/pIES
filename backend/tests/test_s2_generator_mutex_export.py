@@ -397,13 +397,20 @@ def test_bundle_bytes_identical_when_off_and_mps_parameters_identical_when_on() 
 
     bytes_empty = content_bytes(export_bundle_files(b_empty))
     assert content_bytes(export_bundle_files(b_omitted)) == bytes_empty
-    assert content_bytes(export_bundle_files(b_off)) == bytes_empty
-    assert ACCELERATION_PATH not in bytes_empty
-    assert "--acceleration_mode" not in b_empty.manifest.command["arguments"]
-    assert "--acceleration_file" not in b_empty.manifest.command["arguments"]
-
     bytes_on_1 = content_bytes(export_bundle_files(b_on_1))
     bytes_on_2 = content_bytes(export_bundle_files(b_on_2))
-    assert bytes_on_1 == bytes_on_2
+    assert bytes_empty == bytes_on_1 == bytes_on_2
+    assert ACCELERATION_PATH in bytes_empty
+    assert list(b_empty.manifest.command["arguments"])[-4:] == [
+        "--acceleration_mode",
+        "on_demand_mutex",
+        "--acceleration_file",
+        ACCELERATION_PATH,
+    ]
+
+    bytes_off = content_bytes(export_bundle_files(b_off))
+    assert ACCELERATION_PATH not in bytes_off
+    assert "--acceleration_mode" not in b_off.manifest.command["arguments"]
+    assert "--acceleration_file" not in b_off.manifest.command["arguments"]
     for path in ("input/problem.mps", "input/parameters.json", "input/parameters.jsonl"):
-        assert bytes_on_1[path] == bytes_empty[path]
+        assert bytes_on_1[path] == bytes_off[path]

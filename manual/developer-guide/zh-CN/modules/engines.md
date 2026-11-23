@@ -40,7 +40,7 @@ ComputeResult ←── ResultAdapter ←── ExecutionReceipt + 原始输出
 
 面向大规模长周期规划算例，结构加速作为求解执行器的内建能力提供，通过冻结的 [CalculationConfig](../formats/calculation-config.md) `options` 控制开关与参数，不改变[计算生成](generators.md) → Solver Bundle → [求解运行时](solver-runtime.md) → `ResultAdapter` 的三段式隔离边界；非 HiGHS 求解路线继续沿既有 `GeneratorProvider`、`ExecutorProvider` 与 `ResultAdapterProvider` 公开契约扩展。
 
-- **配置与隔离契约**：加速开关与策略随 `CalcSnapshot` 冻结并受公开 `options_schema` 约束；关闭时严格直通原始模型求解，开启时保持全部执行均处于同一隔离运行时约束内。
+- **配置与隔离契约**：加速开关与策略随 `CalcSnapshot` 冻结并受公开 `options_schema` 约束；内置 `ies.generator.highs_milp@1.0.0` 默认开启无损结构加速（`acceleration.mode: "on_demand_mutex"`），显式设 `"off"` 时严格直通原始模型求解，开启时保持全部执行均处于同一隔离运行时约束内。
 - **合法结构松弛与原模型权威性**：[生成器](generators.md#求解加速结构元数据导出)仅随 Bundle 导出经编译期证明可安全松弛的独立辅助结构元数据，不越界启动求解；求解执行器可在迭代过程中对上述已证明结构暂时省略约束，但原始模型不可变且始终是最终可行性、列映射与状态证明的唯一权威依据（无法证明结构安全时必须退回原始求解路径），最终交付方案必须在完整全周期原模型上满足物理守恒、自然月需量、储能连续性与税务约束。
 - **时限、保解与状态诚实性**：全阶段严格遵守总时间预算不超限续发，并在预算耗尽前保全已核查通过的最佳合法可行解；`ResultAdapter` 仅在无损等价或合法松弛达容差最优且通过原模型约束核查时签发 `solved`，凡时限提前停止或任何搜索域受限的求解统一发布 `feasible` 且未经认证的原域全局 `best_bound` 与 `relative_gap` 置 `null`。
 

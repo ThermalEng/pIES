@@ -6,8 +6,9 @@
 DB/网络/对象存储/环境变量/用户目录，不读取随机全局状态。
 
 能力范围见 ``DESCRIPTOR``：mode=planning、precision=medium、
-solver=``ies.solver.highs@1.7.2``、支持可选 ``acceleration.mode`` options、输出 solution/metrics、
-constant tariff；数学能力即 ``build_project_model`` 现有 lowerer 明确
+solver=``ies.solver.highs@1.7.2``、默认启用 ``acceleration.mode="on_demand_mutex"``
+（可通过 ``"off"`` 显式关闭）、输出 solution/metrics、constant tariff；
+数学能力即 ``build_project_model`` 现有 lowerer 明确
 支持的部分，超出即明确拒绝，不近似、不回退。
 
 冻结评价确认为必需输入，NPV、VAT、所得税、亏损结转及维护金额
@@ -70,6 +71,7 @@ PROBLEM_PATH = "input/problem.mps"
 PARAMETERS_PATH = "input/parameters.json"
 SOLUTION_PATH = "output/solution.sol"
 SOLUTION_MEDIA_TYPE = "text/plain"
+DEFAULT_ACCELERATION_MODE = "on_demand_mutex"
 
 _OPTIONS_SCHEMA: dict[str, Any] = {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -81,6 +83,7 @@ _OPTIONS_SCHEMA: dict[str, Any] = {
                 "mode": {
                     "type": "string",
                     "enum": ["off", "on_demand_mutex"],
+                    "default": DEFAULT_ACCELERATION_MODE,
                 },
             },
             "additionalProperties": False,
@@ -230,7 +233,12 @@ class HighsMilpProvider:
             )),
         }
         acceleration = config.options.get("acceleration")
-        if isinstance(acceleration, Mapping) and acceleration.get("mode") == "on_demand_mutex":
+        accel_mode = (
+            acceleration.get("mode", DEFAULT_ACCELERATION_MODE)
+            if isinstance(acceleration, Mapping)
+            else DEFAULT_ACCELERATION_MODE
+        )
+        if accel_mode == "on_demand_mutex":
             self._check_stop(stop)
             inputs.append({"path": ACCELERATION_PATH, "media_type": "application/json"})
             files[ACCELERATION_PATH] = MemoryContent(acceleration_bytes(model, sources))
