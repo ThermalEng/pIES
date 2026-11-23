@@ -41,7 +41,7 @@ ComputeResult ←── ResultAdapter ←── ExecutionReceipt + 原始输出
 面向大规模长周期规划算例，结构加速作为求解执行器的内建能力提供，通过冻结的 [CalculationConfig](../formats/calculation-config.md) `options` 控制开关与参数，不改变[计算生成](generators.md) → Solver Bundle → [求解运行时](solver-runtime.md) → `ResultAdapter` 的三段式隔离边界；非 HiGHS 求解路线继续沿既有 `GeneratorProvider`、`ExecutorProvider` 与 `ResultAdapterProvider` 公开契约扩展。
 
 - **配置与隔离契约**：加速开关与策略随 `CalcSnapshot` 冻结并受公开 `options_schema` 约束；关闭时严格直通原始模型求解，开启时保持全部执行均处于同一隔离运行时约束内。
-- **元数据与原模型不变量**：[生成器](generators.md#求解加速结构元数据导出)仅随 Bundle 导出可安全用于结构加速的静态元数据，不越界启动求解；求解执行器必须在全周期完整约束与原列映射语义内工作，不得以局部窗口替代正式模型的物理守恒、自然月需量、储能连续性与税务关系。
+- **合法结构松弛与原模型权威性**：[生成器](generators.md#求解加速结构元数据导出)仅随 Bundle 导出经编译期证明可安全松弛的独立辅助结构元数据，不越界启动求解；求解执行器可在迭代过程中对上述已证明结构暂时省略约束，但原始模型不可变且始终是最终可行性、列映射与状态证明的唯一权威依据（无法证明结构安全时必须退回原始求解路径），最终交付方案必须在完整全周期原模型上满足物理守恒、自然月需量、储能连续性与税务约束。
 - **时限、保解与状态诚实性**：全阶段严格遵守总时间预算不超限续发，并在预算耗尽前保全已核查通过的最佳合法可行解；`ResultAdapter` 仅在无损等价或合法松弛达容差最优且通过原模型约束核查时签发 `solved`，凡时限提前停止或任何搜索域受限的求解统一发布 `feasible` 且未经认证的原域全局 `best_bound` 与 `relative_gap` 置 `null`。
 
 ## 统一结果模型与适配器契约
@@ -55,7 +55,7 @@ ComputeResult ←── ResultAdapter ←── ExecutionReceipt + 原始输出
 
 - **注册与调用**：扩展适配器实现公开描述符与 `adapt(bundle, receipt, outputs)`，通过独立注册表按精确引用解析。
 - **状态与可行解判定（`ies.result-adapter.highs@1.0.0`）**：
-  - `kOptimal` 映射 `solved`；正常 `kTimeLimit` 有完整可行解时映射 `feasible`，无可行解时映射 `not_solved`；`kInfeasible` / `kUnbounded` 映射同名状态；`kUnboundedOrInfeasible` 映射 `not_solved`；监督强制超时、取消、OOM 或进程错误保持原执行状态，不读取残留输出升级为成功。
+  - 适配器须综合求解器状态、实际求解域及原模型验证证明共同判定 `math_status`：仅在无损原域或合法松弛达 `kOptimal` 且原模型核查通过时映射 `solved`；搜索域受限时即便 `kOptimal` 亦映射 `feasible` 且未经认证的原域全局界与 Gap 置 `null`；正常 `kTimeLimit` 有完整可行解时映射 `feasible`，无可行解时映射 `not_solved`；`kInfeasible` / `kUnbounded` 映射同名状态；`kUnboundedOrInfeasible` 映射 `not_solved`；监督强制超时、取消、OOM 或进程错误保持原执行状态，不读取残留输出升级为成功。
   - 启用连续需量上包络且求解未证明严格最小时，适配器在发布解前核对月峰值紧度，发现虚高时拒绝发布失真财务账单并按终止情形映射为 `not_solved` 或 `numeric_failure`。
 - **同次主解恢复**：`solved` 与 `feasible` 使用同一主解按列位置映射恢复规划变量、财务分量、设备/系统步序列、财务事实（`outputs.financial_facts`）与构模来源映射（`outputs.model_sources`），执行目标偏移还原与唯一反向物理单位换算。
 
@@ -63,7 +63,7 @@ ComputeResult ←── ResultAdapter ←── ExecutionReceipt + 原始输出
 
 适配器正常解释求解状态后发布 `outputs.solver_summary`，包含 `termination_reason`（`optimal` / `time_limit` / `infeasible` / `unbounded` / `not_solved`）、`math_status`、`has_feasible_solution`、`objective_value`、`objective_unit`、`best_bound` 与 `relative_gap`：
 
-- `objective_value` 与 `best_bound` 使用同一业务单位与偏移量；`relative_gap` 保留求解器原生相对间隙（MIP 在容差内最优仍保留真实间隙，已最优 LP 在无 MIP 统计时界取目标值、Gap 为 `0`；未知值保持 `null`）。
+- `objective_value` 与 `best_bound` 使用同一业务单位与偏移量；`relative_gap` 保留求解器原生相对间隙（MIP 在容差内最优仍保留真实间隙，已最优 LP 在无 MIP 统计时界取目标值、Gap 为 `0`；搜索域受限或未知时，未经认证的原域全局 `best_bound` 与 `relative_gap` 保持 `null`）。
 - 公开结果视图直接投影该封存摘要：`completed + feasible` 在任务层对应 `restricted_results`（可查看方案与同次财务评价，但明确未证明最优）；`completed + not_solved` 对应 `insufficient_evidence`。
 
 ### 统一求解步序列
