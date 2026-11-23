@@ -5,9 +5,10 @@
 真实求解、写声明 solution 文件。不是通用脚本执行器：除 ``--version``
 与 ``--self-test DIR`` 外，只接受位置固定的七参数 ``[MPS,
 --solution_file, SOL, --time_limit, 秒, --random_seed, 种子]`` 及可选
-尾部结构化参数 ``--acceleration_mode off|on_demand_mutex`` 与
-``--threads N``，其他形状一律拒绝。只依赖标准库与精确固定的 highspy，
-不导入 iesplan，不读环境变量，不访问网络/DB/对象存储。
+尾部结构化参数 ``--acceleration_mode off|on_demand_mutex``、
+``--acceleration_file PATH`` 与 ``--threads N``，其他形状一律拒绝。
+只依赖标准库与精确固定的 highspy，不导入 iesplan，不读环境变量，
+不访问网络/DB/对象存储。
 
 solution 文件格式 ``HIGHS_SOLUTION_V1``（ResultAdapter 按此解析）： ::
 
@@ -29,8 +30,10 @@ solution 文件格式 ``HIGHS_SOLUTION_V1``（ResultAdapter 按此解析）： :
 
 from __future__ import annotations
 
+import json
 import math
 import os
+import resource
 import sys
 import tempfile
 import time
@@ -124,6 +127,10 @@ def _cmd_version() -> int:
 
 _SOLVE_DOMAINS = ("original", "valid_relaxation", "restricted")
 _ACCELERATION_MODES = ("off", "on_demand_mutex")
+_ACCELERATION_SCHEMA = "ies.solver-acceleration"
+_ACCELERATION_SCHEMA_VERSION = "1.0.0"
+_MUTEX_CONFLICT_TOLERANCE = 1e-7
+_DEFAULT_MAX_MUTEX_ROUNDS = 5
 _DEFAULT_MIN_SOLVE_GUARD_SECONDS = 0.05
 _DEFAULT_IO_MARGIN_SECONDS = 0.05
 
@@ -143,6 +150,7 @@ def verify_primal_against_lp(
     *,
     feasibility_tolerance: float = 1e-7,
     integrality_tolerance: float = 1e-6,
+    original_mutex_overrides: Mapping[str, object] | None = None,
 ) -> bool:
     """Verify ``primals`` satisfies all variable bounds, integrality, and row bounds of ``lp``."""
     import highspy
@@ -155,23 +163,37 @@ def verify_primal_against_lp(
     if not all(math.isfinite(v) for v in xs):
         return False
 
+    col_overrides: Mapping[int, tuple[float, float, bool]] = (
+        original_mutex_overrides.get("cols", {}) if original_mutex_overrides else {}
+    )
+    row_overrides: Mapping[int, tuple[float, float]] = (
+        original_mutex_overrides.get("rows", {}) if original_mutex_overrides else {}
+    )
+    for col in col_overrides:
+        if col < 0 or col >= num_col:
+            raise ValueError(f"mutex 列覆盖索引越界: {col!r}")
+    for r in row_overrides:
+        if r < 0 or r >= num_row:
+            raise ValueError(f"mutex 行覆盖索引越界: {r!r}")
+
     col_lowers = lp.col_lower_
     col_uppers = lp.col_upper_
+    integrality = lp.integrality_
+    has_integrality = len(integrality) == num_col
     for col in range(num_col):
         val = xs[col]
-        lo = float(col_lowers[col])
-        hi = float(col_uppers[col])
+        if col in col_overrides:
+            lo, hi, is_int = col_overrides[col]
+        else:
+            lo = float(col_lowers[col])
+            hi = float(col_uppers[col])
+            is_int = has_integrality and integrality[col] == highspy.HighsVarType.kInteger
         if lo > -math.inf and val < lo - feasibility_tolerance:
             return False
         if hi < math.inf and val > hi + feasibility_tolerance:
             return False
-
-    integrality = lp.integrality_
-    if len(integrality) == num_col:
-        for col in range(num_col):
-            if integrality[col] == highspy.HighsVarType.kInteger:
-                if abs(xs[col] - round(xs[col])) > integrality_tolerance:
-                    return False
+        if is_int and abs(val - round(val)) > integrality_tolerance:
+            return False
 
     if num_row == 0:
         return True
@@ -223,8 +245,11 @@ def verify_primal_against_lp(
         act = row_sum[r] + row_comp[r]
         if not math.isfinite(act):
             return False
-        lo = float(row_lowers[r])
-        hi = float(row_uppers[r])
+        if r in row_overrides:
+            lo, hi = row_overrides[r]
+        else:
+            lo = float(row_lowers[r])
+            hi = float(row_uppers[r])
         if lo > -math.inf and act < lo - feasibility_tolerance:
             return False
         if hi < math.inf and act > hi + feasibility_tolerance:
@@ -453,6 +478,7 @@ class VerifiedIncumbentSlot:
         solve_domain: str = "original",
         original_model_verified: bool = True,
         original_lp=None,
+        original_mutex_overrides: Mapping[str, object] | None = None,
         subdomain_status: str | None = None,
         subdomain_best_bound: float | None = None,
         subdomain_relative_gap: float | None = None,
@@ -467,7 +493,11 @@ class VerifiedIncumbentSlot:
         compact_primals = array("d", (float(v) for v in primals))
         if not all(math.isfinite(v) for v in compact_primals):
             raise ValueError("主解向量包含非有限数值")
-        if original_lp is not None and not verify_primal_against_lp(original_lp, compact_primals):
+        if original_lp is not None and not verify_primal_against_lp(
+            original_lp,
+            compact_primals,
+            original_mutex_overrides=original_mutex_overrides,
+        ):
             return False
         if not self.is_better(obj):
             return False
@@ -509,6 +539,7 @@ class VerifiedIncumbentSlot:
         *,
         original_model_verified: bool,
         original_lp=None,
+        original_mutex_overrides: Mapping[str, object] | None = None,
         solve_domain: str = "original",
         subdomain_status: str | None = None,
         subdomain_best_bound: float | None = None,
@@ -531,6 +562,7 @@ class VerifiedIncumbentSlot:
             solve_domain=solve_domain,
             original_model_verified=True,
             original_lp=ref_lp,
+            original_mutex_overrides=original_mutex_overrides,
             subdomain_status=subdomain_status,
             subdomain_best_bound=subdomain_best_bound,
             subdomain_relative_gap=subdomain_relative_gap,
@@ -599,6 +631,483 @@ def _solve_model(
     return handle, handle.getModelStatus()
 
 
+def _is_strict_int(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _check_highs_ok(status, action: str) -> None:
+    import highspy
+
+    if status not in (highspy.HighsStatus.kOk, highspy.HighsStatus.kWarning):
+        raise RuntimeError(f"HiGHS {action} 失败 (status={status})")
+
+
+def _max_rss_kib() -> int:
+    return int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
+
+
+def _load_acceleration_metadata(
+    path: str,
+    *,
+    expected_num_col: int,
+    expected_num_row: int,
+) -> tuple[tuple[int, int, int, int, int], ...]:
+    """Load and validate ``input/acceleration.json`` technical mutex metadata."""
+    with open(path, encoding="utf-8") as stream:
+        doc = json.load(stream)
+    if not isinstance(doc, Mapping):
+        raise ValueError("acceleration 元数据顶层须为 JSON 对象")
+    if doc.get("schema") != _ACCELERATION_SCHEMA:
+        raise ValueError(f"非法 acceleration schema: {doc.get('schema')!r}")
+    if doc.get("schema_version") != _ACCELERATION_SCHEMA_VERSION:
+        raise ValueError(f"非法 acceleration schema_version: {doc.get('schema_version')!r}")
+    num_columns = doc.get("num_columns")
+    num_rows = doc.get("num_rows")
+    if not _is_strict_int(num_columns) or num_columns != expected_num_col:
+        raise ValueError(
+            f"acceleration num_columns={num_columns!r} 与模型列数 {expected_num_col} 不一致"
+        )
+    if not _is_strict_int(num_rows) or num_rows != expected_num_row:
+        raise ValueError(
+            f"acceleration num_rows={num_rows!r} 与模型行数 {expected_num_row} 不一致"
+        )
+    raw_pairs = doc.get("technical_mutex_pairs")
+    if not isinstance(raw_pairs, list):
+        raise ValueError("acceleration technical_mutex_pairs 须为列表")
+
+    pairs: list[tuple[int, int, int, int, int]] = []
+    seen_bins: set[int] = set()
+    for idx, entry in enumerate(raw_pairs):
+        if not isinstance(entry, (list, tuple)) or len(entry) != 5:
+            raise ValueError(f"technical_mutex_pairs[{idx}] 须为 5 元组")
+        if not all(_is_strict_int(v) for v in entry):
+            raise ValueError(f"technical_mutex_pairs[{idx}] 元素须为整数")
+        bin_col, x_col, y_col, row_x, row_y = (int(v) for v in entry)
+        if not (
+            0 <= bin_col < expected_num_col
+            and 0 <= x_col < expected_num_col
+            and 0 <= y_col < expected_num_col
+        ):
+            raise ValueError(f"technical_mutex_pairs[{idx}] 列索引越界")
+        if not (0 <= row_x < expected_num_row and 0 <= row_y < expected_num_row):
+            raise ValueError(f"technical_mutex_pairs[{idx}] 行索引越界")
+        if len({bin_col, x_col, y_col}) != 3 or row_x == row_y:
+            raise ValueError(f"technical_mutex_pairs[{idx}] 存在重复列或行索引")
+        if bin_col in seen_bins:
+            raise ValueError(f"technical_mutex_pairs 存在重复 bin_col={bin_col}")
+        seen_bins.add(bin_col)
+        pairs.append((bin_col, x_col, y_col, row_x, row_y))
+    return tuple(pairs)
+
+
+def _validate_and_snapshot_mutex_pairs(
+    lp,
+    pairs: Sequence[tuple[int, int, int, int, int]],
+) -> dict[int, tuple[float, float]] | None:
+    """Validate binary/zero-cost invariants on loaded LP and snapshot compact row bounds."""
+    import highspy
+
+    num_col = int(lp.num_col_)
+    integrality = lp.integrality_
+    if len(integrality) != num_col:
+        return None
+    col_lower = lp.col_lower_
+    col_upper = lp.col_upper_
+    col_cost = lp.col_cost_
+    row_lower = lp.row_lower_
+    row_upper = lp.row_upper_
+    row_bounds: dict[int, tuple[float, float]] = {}
+    for bin_col, _x_col, _y_col, row_x, row_y in pairs:
+        if integrality[bin_col] != highspy.HighsVarType.kInteger:
+            return None
+        if float(col_lower[bin_col]) != 0.0 or float(col_upper[bin_col]) != 1.0:
+            return None
+        if float(col_cost[bin_col]) != 0.0:
+            return None
+        row_bounds[row_x] = (float(row_lower[row_x]), float(row_upper[row_x]))
+        row_bounds[row_y] = (float(row_lower[row_y]), float(row_upper[row_y]))
+    return row_bounds
+
+
+def _relax_mutex_pairs_in_place(
+    handle,
+    pairs: Sequence[tuple[int, int, int, int, int]],
+    row_bounds: Mapping[int, tuple[float, float]],
+) -> None:
+    import highspy
+
+    n = len(pairs)
+    if n == 0:
+        return
+    bin_cols = [p[0] for p in pairs]
+    _check_highs_ok(
+        handle.changeColsIntegrality(n, bin_cols, [highspy.HighsVarType.kContinuous] * n),
+        "changeColsIntegrality(relax)",
+    )
+    zeros = [0.0] * n
+    _check_highs_ok(
+        handle.changeColsBounds(n, bin_cols, zeros, zeros),
+        "changeColsBounds(relax)",
+    )
+    ch_row = handle.changeRowBounds
+    inf = math.inf
+    for _bin_col, _x_col, _y_col, row_x, row_y in pairs:
+        _check_highs_ok(ch_row(row_x, row_bounds[row_x][0], inf), "changeRowBounds(relax row_x)")
+        _check_highs_ok(ch_row(row_y, row_bounds[row_y][0], inf), "changeRowBounds(relax row_y)")
+
+
+def _restore_mutex_pairs_in_place(
+    handle,
+    pairs: Sequence[tuple[int, int, int, int, int]],
+    indices: Sequence[int],
+    row_bounds: Mapping[int, tuple[float, float]],
+) -> None:
+    import highspy
+
+    n = len(indices)
+    if n == 0:
+        return
+    bin_cols = [pairs[idx][0] for idx in indices]
+    _check_highs_ok(
+        handle.changeColsIntegrality(n, bin_cols, [highspy.HighsVarType.kInteger] * n),
+        "changeColsIntegrality(restore)",
+    )
+    _check_highs_ok(
+        handle.changeColsBounds(n, bin_cols, [0.0] * n, [1.0] * n),
+        "changeColsBounds(restore)",
+    )
+    ch_row = handle.changeRowBounds
+    for idx in indices:
+        _bin_col, _x_col, _y_col, row_x, row_y = pairs[idx]
+        lo_x, hi_x = row_bounds[row_x]
+        lo_y, hi_y = row_bounds[row_y]
+        _check_highs_ok(ch_row(row_x, lo_x, hi_x), "changeRowBounds(restore row_x)")
+        _check_highs_ok(ch_row(row_y, lo_y, hi_y), "changeRowBounds(restore row_y)")
+
+
+def _build_relaxed_overrides(
+    pairs: Sequence[tuple[int, int, int, int, int]],
+    relaxed_indices: Sequence[int],
+    row_bounds: Mapping[int, tuple[float, float]],
+) -> dict[str, object]:
+    cols: dict[int, tuple[float, float, bool]] = {}
+    rows: dict[int, tuple[float, float]] = {}
+    for idx in relaxed_indices:
+        bin_col, _x_col, _y_col, row_x, row_y = pairs[idx]
+        cols[bin_col] = (0.0, 1.0, True)
+        rows[row_x] = row_bounds[row_x]
+        rows[row_y] = row_bounds[row_y]
+    return {"cols": cols, "rows": rows}
+
+
+def _reconstruct_mutex_primals(
+    primals: Sequence[float],
+    pairs: Sequence[tuple[int, int, int, int, int]],
+    relaxed_indices: Sequence[int],
+    tol: float,
+) -> array:
+    reconstructed = array("d", (float(v) for v in primals))
+    for idx in relaxed_indices:
+        bin_col, x_col, _y_col, _row_x, _row_y = pairs[idx]
+        reconstructed[bin_col] = 1.0 if reconstructed[x_col] > tol else 0.0
+    return reconstructed
+
+
+def _run_original_fallback(
+    handle,
+    sol_path: str,
+    deadline: float,
+    acceleration_mode: str,
+    pairs: Sequence[tuple[int, int, int, int, int]],
+    relaxed_indices: Sequence[int],
+    row_bounds: Mapping[int, tuple[float, float]],
+    slot: VerifiedIncumbentSlot,
+    *,
+    round_count: int,
+    min_guard: float,
+    io_margin: float,
+    reason: str | None = None,
+):
+    import highspy
+
+    _restore_mutex_pairs_in_place(handle, pairs, relaxed_indices, row_bounds)
+    restored_total = len(pairs)
+    fallback_budget = remaining_solve_budget(deadline, min_guard=min_guard, io_margin=io_margin)
+    if fallback_budget is None:
+        status_parts = f"requested={acceleration_mode},applied=none,reason=budget_exhausted"
+        if reason is not None:
+            status_parts = f"{status_parts},trigger={reason}"
+        _log_stage(
+            "acceleration",
+            "fallback",
+            status=f"{status_parts},rounds={round_count},restored={restored_total}",
+        )
+        if slot.incumbent is None:
+            _atomic_write_solution_v1(
+                sol_path,
+                model_status=highspy.HighsModelStatus.kTimeLimit,
+                feasible=False,
+                objective=None,
+                best_bound=None,
+                relative_gap=None,
+                primals=(),
+                solve_domain="valid_relaxation",
+                original_model_verified=True,
+            )
+        return highspy.HighsModelStatus.kTimeLimit
+
+    status_parts = f"requested={acceleration_mode},applied=none"
+    if reason is not None:
+        status_parts = f"{status_parts},reason={reason}"
+    _log_stage(
+        "acceleration",
+        "fallback",
+        status=f"{status_parts},rounds={round_count},restored={restored_total}",
+    )
+    _set_highs_option(handle, "time_limit", fallback_budget)
+    with _timed_stage("run"):
+        if handle.run() == highspy.HighsStatus.kError:
+            raise RuntimeError("HiGHS 原模型回退求解执行错误")
+    fallback_status = handle.getModelStatus()
+    slot.record_from_handle(
+        handle,
+        fallback_status,
+        original_model_verified=True,
+        original_lp=handle.getLp(),
+        solve_domain="original",
+        sol_path=sol_path,
+    )
+    if slot.incumbent is None:
+        _write_solution(handle, fallback_status, sol_path)
+    return fallback_status
+
+
+def _run_on_demand_mutex_recovery(
+    handle,
+    sol_path: str,
+    deadline: float,
+    acceleration_mode: str,
+    pairs: Sequence[tuple[int, int, int, int, int]],
+    row_bounds: Mapping[int, tuple[float, float]],
+    slot: VerifiedIncumbentSlot,
+    *,
+    min_guard: float,
+    io_margin: float,
+    max_rounds: int,
+):
+    import highspy
+
+    total_pairs = len(pairs)
+    relaxed_indices = list(range(total_pairs))
+    restored_count = 0
+    prev_conflicts: int | None = None
+    last_status = highspy.HighsModelStatus.kTimeLimit
+    tol = _MUTEX_CONFLICT_TOLERANCE
+
+    _relax_mutex_pairs_in_place(handle, pairs, row_bounds)
+
+    for round_idx in range(max_rounds):
+        solve_budget = remaining_solve_budget(deadline, min_guard=min_guard, io_margin=io_margin)
+        if solve_budget is None:
+            _log_stage("run", "skipped", status="budget_exhausted")
+            break
+        _set_highs_option(handle, "time_limit", solve_budget)
+        round_started = time.monotonic()
+        if handle.run() == highspy.HighsStatus.kError:
+            raise RuntimeError("HiGHS 求解执行错误")
+        round_elapsed = time.monotonic() - round_started
+        model_status = handle.getModelStatus()
+        last_status = model_status
+
+        if model_status in (
+            highspy.HighsModelStatus.kInfeasible,
+            highspy.HighsModelStatus.kUnbounded,
+            highspy.HighsModelStatus.kUnboundedOrInfeasible,
+        ):
+            _log_stage(
+                "mutex_round",
+                "end",
+                elapsed_seconds=round_elapsed,
+                status=f"round={round_idx},conflicts=0,added=0,rss_kib={_max_rss_kib()}",
+            )
+            _write_solution(
+                handle,
+                model_status,
+                sol_path,
+                solve_domain="valid_relaxation",
+                original_model_verified=True,
+            )
+            return last_status
+
+        feasible, objective, best_bound, gap, primals = _extract_solution_data(handle, model_status)
+        if not feasible:
+            _log_stage(
+                "mutex_round",
+                "end",
+                elapsed_seconds=round_elapsed,
+                status=f"round={round_idx},conflicts=0,added=0,rss_kib={_max_rss_kib()}",
+            )
+            break
+
+        conflicting = [
+            idx
+            for idx in relaxed_indices
+            if float(primals[pairs[idx][1]]) > tol and float(primals[pairs[idx][2]]) > tol
+        ]
+        conflicts = len(conflicting)
+
+        if conflicts == 0:
+            _log_stage(
+                "mutex_round",
+                "end",
+                elapsed_seconds=round_elapsed,
+                status=f"round={round_idx},conflicts=0,added=0,rss_kib={_max_rss_kib()}",
+            )
+            reconstructed = _reconstruct_mutex_primals(primals, pairs, relaxed_indices, tol)
+            relaxed_overrides = _build_relaxed_overrides(pairs, relaxed_indices, row_bounds)
+            lp_snapshot = handle.getLp()
+            verified = verify_primal_against_lp(
+                lp_snapshot,
+                reconstructed,
+                original_mutex_overrides=relaxed_overrides,
+            )
+            is_pure_lp = not any(
+                t == highspy.HighsVarType.kInteger for t in lp_snapshot.integrality_
+            )
+            del lp_snapshot
+
+            if not verified and is_pure_lp:
+                refine_budget = remaining_solve_budget(
+                    deadline, min_guard=min_guard, io_margin=io_margin
+                )
+                if refine_budget is not None:
+                    _set_highs_option(handle, "solver", "simplex")
+                    try:
+                        _set_highs_option(handle, "time_limit", refine_budget)
+                        if handle.run() == highspy.HighsStatus.kError:
+                            raise RuntimeError("HiGHS Simplex 精修执行错误")
+                    finally:
+                        _set_highs_option(handle, "solver", "choose")
+                    model_status = handle.getModelStatus()
+                    last_status = model_status
+                    feasible, objective, best_bound, gap, primals = _extract_solution_data(
+                        handle, model_status
+                    )
+                    if feasible:
+                        conflicting = [
+                            idx
+                            for idx in relaxed_indices
+                            if float(primals[pairs[idx][1]]) > tol
+                            and float(primals[pairs[idx][2]]) > tol
+                        ]
+                        conflicts = len(conflicting)
+                        if conflicts == 0:
+                            reconstructed = _reconstruct_mutex_primals(
+                                primals, pairs, relaxed_indices, tol
+                            )
+                            lp_snapshot = handle.getLp()
+                            verified = verify_primal_against_lp(
+                                lp_snapshot,
+                                reconstructed,
+                                original_mutex_overrides=relaxed_overrides,
+                            )
+                            del lp_snapshot
+
+            if conflicts == 0 and verified:
+                assert objective is not None
+                slot.record(
+                    objective_value=objective,
+                    primals=reconstructed,
+                    model_status=model_status,
+                    best_bound=best_bound,
+                    relative_gap=gap,
+                    solve_domain="valid_relaxation",
+                    original_model_verified=True,
+                    sol_path=sol_path,
+                )
+                _log_stage(
+                    "acceleration",
+                    "applied",
+                    status=(
+                        f"requested={acceleration_mode},applied=on_demand_mutex,"
+                        f"pairs={total_pairs},rounds={round_idx + 1},restored={restored_count}"
+                    ),
+                )
+                return last_status
+
+            return _run_original_fallback(
+                handle,
+                sol_path,
+                deadline,
+                acceleration_mode,
+                pairs,
+                relaxed_indices,
+                row_bounds,
+                slot,
+                round_count=round_idx + 1,
+                min_guard=min_guard,
+                io_margin=io_margin,
+                reason="verification_failed",
+            )
+
+        next_restored = restored_count + conflicts
+        bailout = (
+            (round_idx + 1 >= max_rounds)
+            or (round_idx >= 2 and prev_conflicts is not None and conflicts >= prev_conflicts)
+            or (total_pairs >= 100 and next_restored * 2 > total_pairs)
+            or (remaining_solve_budget(deadline, min_guard=min_guard, io_margin=io_margin) is None)
+        )
+        if bailout:
+            _log_stage(
+                "mutex_round",
+                "end",
+                elapsed_seconds=round_elapsed,
+                status=(
+                    f"round={round_idx},conflicts={conflicts},"
+                    f"added={len(relaxed_indices)},rss_kib={_max_rss_kib()}"
+                ),
+            )
+            return _run_original_fallback(
+                handle,
+                sol_path,
+                deadline,
+                acceleration_mode,
+                pairs,
+                relaxed_indices,
+                row_bounds,
+                slot,
+                round_count=round_idx + 1,
+                min_guard=min_guard,
+                io_margin=io_margin,
+            )
+
+        _restore_mutex_pairs_in_place(handle, pairs, conflicting, row_bounds)
+        conflicting_set = set(conflicting)
+        relaxed_indices = [idx for idx in relaxed_indices if idx not in conflicting_set]
+        restored_count += conflicts
+        prev_conflicts = conflicts
+        _log_stage(
+            "mutex_round",
+            "end",
+            elapsed_seconds=round_elapsed,
+            status=f"round={round_idx},conflicts={conflicts},added={conflicts},rss_kib={_max_rss_kib()}",
+        )
+
+    if slot.incumbent is None:
+        _atomic_write_solution_v1(
+            sol_path,
+            model_status=last_status,
+            feasible=False,
+            objective=None,
+            best_bound=None,
+            relative_gap=None,
+            primals=(),
+            solve_domain="valid_relaxation",
+            original_model_verified=True,
+        )
+    return last_status
+
+
 def _run_accelerated_solve(
     mps_path: str,
     sol_path: str,
@@ -606,9 +1115,11 @@ def _run_accelerated_solve(
     seed: int,
     *,
     acceleration_mode: str,
+    acceleration_file: str | None = None,
     threads: int | None = None,
     min_guard: float = _DEFAULT_MIN_SOLVE_GUARD_SECONDS,
     io_margin: float = _DEFAULT_IO_MARGIN_SECONDS,
+    max_rounds: int = _DEFAULT_MAX_MUTEX_ROUNDS,
     stages: Sequence[Callable] | None = None,
 ) -> tuple[object, object, VerifiedIncumbentSlot]:
     """正式加速求解路径：统一单调截止时钟 + 原模型独立核查 + 单槽位原子保解。"""
@@ -616,18 +1127,46 @@ def _run_accelerated_solve(
 
     if acceleration_mode not in _ACCELERATION_MODES or acceleration_mode == "off":
         raise ValueError(f"非法加速模式: {acceleration_mode!r}")
+    if max_rounds <= 0:
+        raise ValueError(f"max_rounds 须为正整数: {max_rounds!r}")
     deadline = time.monotonic() + time_limit
     handle = highspy.Highs()
     with _timed_stage("read_model"):
         if handle.readModel(mps_path) != highspy.HighsStatus.kOk:
             raise RuntimeError(f"MPS 读取失败: {mps_path!r}")
-    original_lp = handle.getLp()
-    slot = VerifiedIncumbentSlot(sense=original_lp.sense_, sol_path=sol_path)
+    sense_status, obj_sense = handle.getObjectiveSense()
+    if sense_status != highspy.HighsStatus.kOk:
+        raise RuntimeError(f"HiGHS 无法读取目标方向 (status={sense_status})")
+    slot = VerifiedIncumbentSlot(sense=obj_sense, sol_path=sol_path)
     _set_highs_option(handle, "random_seed", seed)
     if threads is not None:
         _set_highs_option(handle, "threads", threads)
 
     if stages is None:
+        if acceleration_file is not None:
+            lp = handle.getLp()
+            pairs = _load_acceleration_metadata(
+                acceleration_file,
+                expected_num_col=int(lp.num_col_),
+                expected_num_row=int(lp.num_row_),
+            )
+            row_bounds = _validate_and_snapshot_mutex_pairs(lp, pairs) if pairs else None
+            del lp
+            if pairs and row_bounds is not None:
+                last_status = _run_on_demand_mutex_recovery(
+                    handle,
+                    sol_path,
+                    deadline,
+                    acceleration_mode,
+                    pairs,
+                    row_bounds,
+                    slot,
+                    min_guard=min_guard,
+                    io_margin=io_margin,
+                    max_rounds=max_rounds,
+                )
+                return handle, last_status, slot
+
         _log_stage("acceleration", "fallback", status=f"requested={acceleration_mode},applied=none")
 
         def _default_stage(cur_handle, _budget: float):
@@ -665,7 +1204,7 @@ def _run_accelerated_solve(
             handle,
             stage_status,
             original_model_verified=True,
-            original_lp=original_lp,
+            original_lp=handle.getLp(),
             solve_domain=stage_domain,
             subdomain_status=subdomain_status,
             subdomain_best_bound=subdomain_best_bound,
@@ -845,7 +1384,7 @@ def _solution_text(
     )
 
 
-def _parse_solve_args(args: list[str]) -> tuple[str, str, float, int, str, int | None]:
+def _parse_solve_args(args: list[str]) -> tuple[str, str, float, int, str, str | None, int | None]:
     if len(args) < 7 or (len(args) - 7) % 2 != 0:
         raise ValueError(f"求解参数须为七项基础参数加可选成对选项，得到 {len(args)} 项")
     mps_path, flag1, sol_path, flag2, limit_text, flag3, seed_text = args[:7]
@@ -865,6 +1404,7 @@ def _parse_solve_args(args: list[str]) -> tuple[str, str, float, int, str, int |
         raise ValueError("arguments[6] 须为非负整数")
 
     acceleration_mode = "off"
+    acceleration_file: str | None = None
     threads: int | None = None
     seen: set[str] = set()
     for idx in range(7, len(args), 2):
@@ -876,6 +1416,9 @@ def _parse_solve_args(args: list[str]) -> tuple[str, str, float, int, str, int |
             if value not in _ACCELERATION_MODES:
                 raise ValueError(f"--acceleration_mode 须为 off 或 on_demand_mutex，得到 {value!r}")
             acceleration_mode = value
+        elif flag == "--acceleration_file":
+            _check_relative_path(value, "--acceleration_file")
+            acceleration_file = value
         elif flag == "--threads":
             if not value.isascii() or not value.isdigit():
                 raise ValueError(f"--threads 须为正整数，得到 {value!r}")
@@ -884,12 +1427,20 @@ def _parse_solve_args(args: list[str]) -> tuple[str, str, float, int, str, int |
                 raise ValueError(f"--threads 须为正整数，得到 {value!r}")
         else:
             raise ValueError(f"未知选项: {flag!r}")
-    return mps_path, sol_path, time_limit, seed, acceleration_mode, threads
+    return mps_path, sol_path, time_limit, seed, acceleration_mode, acceleration_file, threads
 
 
 def _cmd_solve(args: list[str]) -> int:
     try:
-        mps_path, sol_path, time_limit, seed, acceleration_mode, threads = _parse_solve_args(args)
+        (
+            mps_path,
+            sol_path,
+            time_limit,
+            seed,
+            acceleration_mode,
+            acceleration_file,
+            threads,
+        ) = _parse_solve_args(args)
     except ValueError as exc:
         return _fail(str(exc))
     try:
@@ -909,6 +1460,7 @@ def _cmd_solve(args: list[str]) -> int:
                 time_limit,
                 seed,
                 acceleration_mode=acceleration_mode,
+                acceleration_file=acceleration_file,
                 threads=threads,
             )
     except Exception as exc:  # 求解链基础设施失败，不伪造输出

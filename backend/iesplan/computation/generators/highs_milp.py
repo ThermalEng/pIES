@@ -24,6 +24,10 @@ from typing import Any
 
 from iesplan.assembly.contracts import ValidatedAssemblyArtifact
 from iesplan.computation.errors import ComputationUnavailableError
+from iesplan.computation.generators.acceleration import (
+    ACCELERATION_PATH,
+    acceleration_bytes,
+)
 from iesplan.computation.generators.descriptor import GeneratorDescriptor
 from iesplan.computation.generators.mps import iter_mps_chunks
 from iesplan.computation.generators.parameters import RECORDS_PATH, parameter_chunks
@@ -212,16 +216,33 @@ class HighsMilpProvider:
             "--random_seed",
             str(seed),
         ]
+        inputs = [
+            {"path": PROBLEM_PATH, "media_type": "application/mps"},
+            {"path": PARAMETERS_PATH, "media_type": "application/json"},
+            {"path": RECORDS_PATH, "media_type": "application/x-ndjson"},
+        ]
+        files: dict[str, Any] = {
+            PROBLEM_PATH: mps_content,
+            PARAMETERS_PATH: MemoryContent(metadata),
+            RECORDS_PATH: GeneratedContent(partial(
+                parameter_chunks, model, unit_map, components, series, facts, sources,
+                epigraphs=tuple(epigraphs), stop=stop,
+            )),
+        }
         acceleration = config.options.get("acceleration")
         if isinstance(acceleration, Mapping) and acceleration.get("mode") == "on_demand_mutex":
-            arguments.extend(["--acceleration_mode", "on_demand_mutex"])
+            self._check_stop(stop)
+            inputs.append({"path": ACCELERATION_PATH, "media_type": "application/json"})
+            files[ACCELERATION_PATH] = MemoryContent(acceleration_bytes(model, sources))
+            arguments.extend([
+                "--acceleration_mode",
+                "on_demand_mutex",
+                "--acceleration_file",
+                ACCELERATION_PATH,
+            ])
         manifest = SolverBundleManifest(
             bundle={"generator": self.ref, "solver": SOLVER_REF},
-            inputs=[
-                {"path": PROBLEM_PATH, "media_type": "application/mps"},
-                {"path": PARAMETERS_PATH, "media_type": "application/json"},
-                {"path": RECORDS_PATH, "media_type": "application/x-ndjson"},
-            ],
+            inputs=inputs,
             command={
                 "executor": EXECUTOR_REF,
                 "executable": SOLVER_REF,
@@ -243,14 +264,7 @@ class HighsMilpProvider:
         )
         return SolverBundle(
             manifest=manifest,
-            files={
-                PROBLEM_PATH: mps_content,
-                PARAMETERS_PATH: MemoryContent(metadata),
-                RECORDS_PATH: GeneratedContent(partial(
-                    parameter_chunks, model, unit_map, components, series, facts, sources,
-                    epigraphs=tuple(epigraphs), stop=stop,
-                )),
-            },
+            files=files,
         )
 
     def generate_with_stop(

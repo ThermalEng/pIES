@@ -120,6 +120,8 @@ def test_generate_preserves_bytes_when_acceleration_off_and_appends_flag_when_en
         "7",
         "--acceleration_mode",
         "on_demand_mutex",
+        "--acceleration_file",
+        "input/acceleration.json",
     ]
     bytes_on = content_bytes(export_bundle_files(b_on))
     for path in ("input/problem.mps", "input/parameters.json", "input/parameters.jsonl"):
