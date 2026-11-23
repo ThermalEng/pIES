@@ -352,15 +352,13 @@ def test_end_to_end_campus_bundle() -> None:
     assert [(r["stage"], r["event"]) for r in stage_records] == [
         ("read_model", "start"),
         ("read_model", "end"),
-        ("run", "start"),
-        ("run", "end"),
-        ("solution_write", "start"),
-        ("solution_write", "end"),
+        ("mutex_round", "end"),
+        ("acceleration", "applied"),
     ]
+    assert stage_records[1]["status"] == "ok"
+    assert "applied=on_demand_mutex" in stage_records[3]["status"]
     assert all(
-        r["status"] == "ok"
-        and math.isfinite(float(r["elapsed_seconds"]))
-        and float(r["elapsed_seconds"]) >= 0.0
+        math.isfinite(float(r["elapsed_seconds"])) and float(r["elapsed_seconds"]) >= 0.0
         for r in stage_records
         if r["event"] == "end"
     )

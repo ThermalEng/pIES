@@ -472,6 +472,7 @@ def test_bundle_aggregate_requires_exact_manifest_files_match() -> None:
         "input/problem.mps",
         "input/parameters.json",
         "input/parameters.jsonl",
+        "input/acceleration.json",
     }
     assert exported["bundle.yaml"].endswith(b"\n")
     assert "output/" not in exported
