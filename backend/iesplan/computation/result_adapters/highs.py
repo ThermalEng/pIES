@@ -215,8 +215,10 @@ def _resolve_math_status(
     original_model_verified: bool,
 ) -> tuple[str, str]:
     """Derive ComputeResult math_status and termination_reason from status, domain, and verification."""
-    if solve_domain != "original" and has_feasible and not original_model_verified:
+    if has_feasible and not original_model_verified:
         _fail(f"{solve_domain} 存在可行解但未通过原模型验证")
+    if not original_model_verified and status == _STATUS_SOLVED:
+        return "numeric_failure", "not_solved"
     if solve_domain == "restricted":
         if has_feasible:
             if status == _STATUS_SOLVED:
@@ -386,7 +388,7 @@ class HighsResultAdapter:
             key in solution
             for key in ("subdomain_status", "subdomain_best_bound", "subdomain_relative_gap")
         )
-        if solve_domain != "original" or has_subdomain:
+        if solve_domain != "original" or not solution["original_model_verified"] or has_subdomain:
             diagnostics: dict[str, Any] = {
                 "solve_domain": solve_domain,
                 "original_model_verified": solution["original_model_verified"],

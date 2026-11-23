@@ -897,7 +897,9 @@ def _run_original_fallback(
         sol_path=sol_path,
     )
     if slot.incumbent is None:
-        _write_solution(handle, fallback_status, sol_path)
+        _write_unrecorded_terminal_solution(
+            handle, fallback_status, sol_path, solve_domain="original"
+        )
     return fallback_status
 
 
@@ -1111,11 +1113,7 @@ def _run_on_demand_mutex_recovery(
         model_status = handle.getModelStatus()
         last_status = model_status
 
-        if model_status in (
-            highspy.HighsModelStatus.kInfeasible,
-            highspy.HighsModelStatus.kUnbounded,
-            highspy.HighsModelStatus.kUnboundedOrInfeasible,
-        ):
+        if model_status == highspy.HighsModelStatus.kInfeasible:
             _log_stage(
                 "mutex_round",
                 "end",
@@ -1130,6 +1128,34 @@ def _run_on_demand_mutex_recovery(
                 original_model_verified=True,
             )
             return last_status
+
+        if model_status in (
+            highspy.HighsModelStatus.kUnbounded,
+            highspy.HighsModelStatus.kUnboundedOrInfeasible,
+        ):
+            _log_stage(
+                "mutex_round",
+                "end",
+                elapsed_seconds=round_elapsed,
+                status=(
+                    f"round={round_idx},conflicts=0,"
+                    f"added={len(relaxed_indices)},rss_kib={_max_rss_kib()}"
+                ),
+            )
+            return _run_original_fallback(
+                handle,
+                sol_path,
+                deadline,
+                acceleration_mode,
+                pairs,
+                relaxed_indices,
+                row_bounds,
+                slot,
+                round_count=round_idx + 1,
+                min_guard=min_guard,
+                io_margin=io_margin,
+                reason="relaxation_unbounded",
+            )
 
         feasible, objective, best_bound, gap, primals = _extract_solution_data(handle, model_status)
         if not feasible:
@@ -1409,6 +1435,7 @@ def _run_accelerated_solve(
         stage_list = stages
 
     last_status = highspy.HighsModelStatus.kTimeLimit
+    last_domain = "original"
     for stage_fn in stage_list:
         solve_budget = remaining_solve_budget(deadline, min_guard=min_guard, io_margin=io_margin)
         if solve_budget is None:
@@ -1429,6 +1456,7 @@ def _run_accelerated_solve(
             subdomain_best_bound = None
             subdomain_relative_gap = None
         last_status = stage_status
+        last_domain = stage_domain
         slot.record_from_handle(
             handle,
             stage_status,
@@ -1442,8 +1470,44 @@ def _run_accelerated_solve(
         )
 
     if slot.incumbent is None:
-        _write_solution(handle, last_status, sol_path)
+        _write_unrecorded_terminal_solution(
+            handle, last_status, sol_path, solve_domain=last_domain
+        )
     return handle, last_status, slot
+
+
+def _write_unrecorded_terminal_solution(
+    handle,
+    model_status,
+    sol_path: str,
+    *,
+    solve_domain: str = "original",
+) -> None:
+    """Safely write terminal solution when no candidate entered ``VerifiedIncumbentSlot``."""
+    feasible, _objective, _best_bound, _gap, _primals = _extract_solution_data(
+        handle, model_status
+    )
+    if feasible:
+        with _timed_stage("solution_write"):
+            _atomic_write_solution_v1(
+                sol_path,
+                model_status=model_status,
+                feasible=False,
+                objective=None,
+                best_bound=None,
+                relative_gap=None,
+                primals=(),
+                solve_domain=solve_domain,
+                original_model_verified=False,
+            )
+    else:
+        _write_solution(
+            handle,
+            model_status,
+            sol_path,
+            solve_domain=solve_domain,
+            original_model_verified=True,
+        )
 
 
 def _write_solution(

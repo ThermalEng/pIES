@@ -321,3 +321,26 @@ def test_restricted_without_feasible_solution_maps_not_solved() -> None:
     infeas_res = _adapt(None, _receipt(), infeas_raw)
     assert infeas_res.math_status == "not_solved"
     assert infeas_res.outputs["solver_summary"]["termination_reason"] == "not_solved"
+
+    # Unverified feasible solution rejected on original domain too; unverified empty primal fails cleanly
+    orig_unverified_feasible = _with_headers(
+        SHIM_OPTIMAL, {"solve_domain": "original", "original_model_verified": "false"}
+    )
+    with pytest.raises(ComputationUnavailableError) as exc_info:
+        _adapt(None, _receipt(), orig_unverified_feasible)
+    assert exc_info.value.reason == "result-protocol-failure"
+
+    unverified_empty_opt = _with_headers(
+        SHIM_INFEASIBLE.replace("kInfeasible", "kOptimal"),
+        {"solve_domain": "original", "original_model_verified": "false"},
+    )
+    res_num_fail = _adapt(None, _receipt(), unverified_empty_opt)
+    assert res_num_fail.math_status == "numeric_failure"
+    assert res_num_fail.outputs["solver_summary"]["solver_diagnostics"]["original_model_verified"] is False
+
+    unverified_empty_tl = _with_headers(
+        V1_TIME_LIMIT, {"solve_domain": "original", "original_model_verified": "false"}
+    )
+    res_tl_fail = _adapt(None, _receipt(), unverified_empty_tl)
+    assert res_tl_fail.math_status == "not_solved"
+    assert res_tl_fail.outputs["solver_summary"]["termination_reason"] == "time_limit"

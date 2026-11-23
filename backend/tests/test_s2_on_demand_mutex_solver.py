@@ -1127,3 +1127,164 @@ def test_degenerate_lp_conflict_tiebreak_minimize_and_maximize(
         h_orig.setOptionValue("output_flag", False)
         assert h_orig.readModel(str(mps_path)) == highspy.HighsStatus.kOk
         assert mod.verify_primal_against_lp(h_orig.getLp(), slot.incumbent.primals)
+
+
+def test_verification_failure_never_publishes_unverified_primals(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """原模型校验失败时，回退与加速出口均不得泄露未校验主解或伪造 solved/feasible。"""
+    mod = _load_solver_module()
+    model, pair_names = _build_chain_mutex_model([(1.0, 2.0)], cap=5.0, demand=3.0)
+    mps_path, accel_path, mps_bytes, _ = _write_mps_and_accel(tmp_path, model, pair_names)
+    bundle_files = fixture_files(
+        {
+            PROBLEM_PATH: mps_bytes,
+            PARAMETERS_PATH: _parameters(unit_map={}),
+        }
+    )
+
+    monkeypatch.setattr(mod, "verify_primal_against_lp", lambda *args, **kwargs: False)
+
+    # 1. Fallback path after relaxation verification failure
+    sol_fb = tmp_path / "unverified_fb.sol"
+    _, st_fb, slot_fb = mod._run_accelerated_solve(
+        str(mps_path),
+        str(sol_fb),
+        20.0,
+        0,
+        acceleration_mode="on_demand_mutex",
+        acceleration_file=str(accel_path),
+    )
+    assert st_fb == highspy.HighsModelStatus.kOptimal
+    assert slot_fb.incumbent is None
+    raw_fb = sol_fb.read_bytes()
+    facts_fb = _parse_solution(raw_fb.decode("utf-8"))
+    assert facts_fb["has_feasible_solution"] == "false"
+    assert facts_fb["original_model_verified"] == "false"
+    assert facts_fb["objective_value"] == "none"
+    assert facts_fb["primals"] == []
+
+    res_fb = _adapt(bundle_files, _receipt(), raw_fb)
+    assert res_fb.execution_status == "completed"
+    assert res_fb.math_status == "numeric_failure"
+    assert res_fb.outputs["solver_summary"]["has_feasible_solution"] is False
+    assert res_fb.outputs["solver_summary"]["objective_value"] is None
+    assert res_fb.outputs["solver_summary"]["solver_diagnostics"]["original_model_verified"] is False
+
+    # 2. Direct accelerated stage path (acceleration_file=None) when verification rejects incumbent
+    sol_direct = tmp_path / "unverified_direct.sol"
+    _, st_direct, slot_direct = mod._run_accelerated_solve(
+        str(mps_path),
+        str(sol_direct),
+        20.0,
+        0,
+        acceleration_mode="on_demand_mutex",
+        acceleration_file=None,
+    )
+    assert st_direct == highspy.HighsModelStatus.kOptimal
+    assert slot_direct.incumbent is None
+    raw_direct = sol_direct.read_bytes()
+    facts_direct = _parse_solution(raw_direct.decode("utf-8"))
+    assert facts_direct["has_feasible_solution"] == "false"
+    assert facts_direct["original_model_verified"] == "false"
+    assert facts_direct["primals"] == []
+
+    res_direct = _adapt(bundle_files, _receipt(), raw_direct)
+    assert res_direct.execution_status == "completed"
+    assert res_direct.math_status == "numeric_failure"
+
+
+def test_unbounded_relaxation_falls_back_to_bounded_original_milp(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    """合法松弛因去掉互斥上界而无界时，同句柄恢复互斥并回退原 MILP 求得有界最优解。"""
+    mod = _load_solver_module()
+    v_x = LinearVariable(name="x", lower=0.0, upper=None, kind="continuous")
+    v_y = LinearVariable(name="y", lower=0.0, upper=None, kind="continuous")
+    v_z = LinearVariable(name="m__mutex", lower=0.0, upper=1.0, kind="binary")
+    row_x = LinearConstraint(
+        name="r_x",
+        expression=LinearExpression(terms=((("x", 0), 1.0), (("m__mutex", 0), -5.0))),
+        sense="le",
+        rhs=0.0,
+    )
+    row_y = LinearConstraint(
+        name="r_y",
+        expression=LinearExpression(terms=((("y", 0), 1.0), (("m__mutex", 0), 5.0))),
+        sense="le",
+        rhs=5.0,
+    )
+    model = LinearModel(
+        variables=(v_x, v_y, v_z),
+        constraints=(row_x, row_y),
+        objective=LinearExpression(terms=((("x", 0), -1.0),)),
+        sense="minimize",
+    )
+    mps_path, accel_path, mps_bytes, pairs = _write_mps_and_accel(
+        tmp_path,
+        model,
+        [("m__mutex", "x", "y", "r_x", "r_y")],
+        mps_name="unb_rel.mps",
+        accel_name="unb_rel.json",
+    )
+
+    # Confirm relaxed problem alone is genuinely unbounded
+    h_chk = highspy.Highs()
+    h_chk.setOptionValue("output_flag", False)
+    assert h_chk.readModel(str(mps_path)) == highspy.HighsStatus.kOk
+    rb_chk = mod._validate_and_snapshot_mutex_pairs(h_chk.getLp(), pairs)
+    assert rb_chk is not None
+    mod._relax_mutex_pairs_in_place(h_chk, pairs, rb_chk)
+    assert h_chk.run() == highspy.HighsStatus.kOk
+    assert h_chk.getModelStatus() in (
+        highspy.HighsModelStatus.kUnbounded,
+        highspy.HighsModelStatus.kUnboundedOrInfeasible,
+    )
+
+    read_calls = 0
+    real_highs = highspy.Highs
+
+    class _ReadSpy:
+        def __init__(self) -> None:
+            self._inner = real_highs()
+
+        def readModel(self, path: str):
+            nonlocal read_calls
+            read_calls += 1
+            return self._inner.readModel(path)
+
+        def __getattr__(self, name: str):
+            return getattr(self._inner, name)
+
+    monkeypatch.setattr(highspy, "Highs", _ReadSpy)
+    capsys.readouterr()
+    sol_path = tmp_path / "unb_fallback.sol"
+    _, status, slot = mod._run_accelerated_solve(
+        str(mps_path),
+        str(sol_path),
+        20.0,
+        0,
+        acceleration_mode="on_demand_mutex",
+        acceleration_file=str(accel_path),
+    )
+    assert read_calls == 1
+    assert status == highspy.HighsModelStatus.kOptimal
+    assert slot.incumbent is not None
+    assert slot.incumbent.solve_domain == "original"
+    assert slot.incumbent.objective_value == pytest.approx(-5.0)
+    stderr = capsys.readouterr().err
+    assert "reason=relaxation_unbounded" in stderr
+
+    bundle_files = fixture_files(
+        {
+            PROBLEM_PATH: mps_bytes,
+            PARAMETERS_PATH: _parameters(unit_map={}, offset=0.0),
+        }
+    )
+    res = _adapt(bundle_files, _receipt(), sol_path.read_bytes())
+    assert res.execution_status == "completed"
+    assert res.math_status == "solved"
+    assert res.outputs["solution"]["objective_value"] == pytest.approx(-5.0)
