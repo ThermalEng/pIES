@@ -18,6 +18,7 @@ from __future__ import annotations
 import importlib.machinery
 import importlib.util
 import json
+import math
 import subprocess
 import sys
 from collections.abc import Sequence
@@ -913,11 +914,14 @@ def test_metadata_validation_fallback_infeasible_and_simplex_refine(
     verify_calls = 0
     orig_verify = mod.verify_primal_against_lp
     solver_options_seen: list[object] = []
+    presolve_options_seen: list[object] = []
     real_set_opt = mod._set_highs_option
 
     def _spy_set_opt(handle, key, value):
         if key == "solver":
             solver_options_seen.append(value)
+        elif key == "presolve":
+            presolve_options_seen.append(value)
         return real_set_opt(handle, key, value)
 
     def _fail_first_verify(*args, **kwargs):
@@ -941,6 +945,54 @@ def test_metadata_validation_fallback_infeasible_and_simplex_refine(
     assert st_ref == highspy.HighsModelStatus.kOptimal
     assert verify_calls == 2
     assert solver_options_seen == ["simplex", "choose"]
+    assert presolve_options_seen == ["off", "choose"]
     assert slot_ref.incumbent is not None
     assert slot_ref.incumbent.objective_value == pytest.approx(3.0)
     assert slot_ref.incumbent.solve_domain == "valid_relaxation"
+
+
+def test_verify_primal_against_lp_scale_aware_si_joule_tolerance() -> None:
+    """高量级 SI 焦耳等式与变量边界允许 0.5-ULP 舍入残差，同时拒绝真实违背与单位尺度超差。"""
+    mod = _load_solver_module()
+
+    def _build_lp(rowwise: bool):
+        lp = highspy.HighsLp()
+        lp.num_col_ = 4
+        lp.num_row_ = 2
+        lp.col_lower_ = [0.0, 0.0, 0.0, 0.0]
+        lp.col_upper_ = [1e5, 1.5e9, 1.5e9, 10.0]
+        lp.row_lower_ = [0.0, 1.0]
+        lp.row_upper_ = [0.0, 1.0]
+        lp.a_matrix_.format_ = (
+            highspy.MatrixFormat.kRowwise if rowwise else highspy.MatrixFormat.kColwise
+        )
+        if rowwise:
+            lp.a_matrix_.start_ = [0, 3, 4]
+            lp.a_matrix_.index_ = [0, 1, 2, 3]
+            lp.a_matrix_.value_ = [-3420.0, -1.0, 1.0, 1.0]
+        else:
+            lp.a_matrix_.start_ = [0, 1, 2, 3, 4]
+            lp.a_matrix_.index_ = [0, 0, 0, 1]
+            lp.a_matrix_.value_ = [-3420.0, -1.0, 1.0, 1.0]
+        return lp
+
+    # Mirror campus_5y_bat_on SI Joule magnitudes where exact math.fsum
+    # residual is float64 0.5 ULP (2**-23 > 1e-7)
+    charge = 41267.90403340236
+    prev_energy = 1154863768.2057638
+    next_energy = 1296000000.0
+    half_ulp = 2.0**-23
+    assert abs(math.fsum((-3420.0 * charge, -prev_energy, next_energy)) - half_ulp) == 0.0
+
+    for rowwise in (False, True):
+        lp = _build_lp(rowwise)
+        # 1. Accept 0.5-ULP row residual on ~1.296e9 row and 0.5-ULP rounding on 1.5e9 col bound
+        assert mod.verify_primal_against_lp(lp, [charge, prev_energy, next_energy, 1.0])
+        assert mod.verify_primal_against_lp(lp, [0.0, 1.5e9 + half_ulp, 1.5e9 + half_ulp, 1.0])
+        # 2. Reject genuine violation (~1e-2) on high-magnitude row and column bound
+        assert not mod.verify_primal_against_lp(lp, [charge, prev_energy, next_energy + 1e-2, 1.0])
+        assert not mod.verify_primal_against_lp(lp, [0.0, 1.5e9 + 1e-2, 1.5e9 + 1e-2, 1.0])
+        # 3. Reject 2e-7 violation on unit-scale row
+        assert not mod.verify_primal_against_lp(
+            lp, [charge, prev_energy, next_energy, 1.0 + 2e-7]
+        )

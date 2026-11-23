@@ -149,6 +149,7 @@ def verify_primal_against_lp(
     primals: Sequence[float],
     *,
     feasibility_tolerance: float = 1e-7,
+    relative_tolerance: float = 1e-12,
     integrality_tolerance: float = 1e-6,
     original_mutex_overrides: Mapping[str, object] | None = None,
 ) -> bool:
@@ -188,9 +189,9 @@ def verify_primal_against_lp(
             lo = float(col_lowers[col])
             hi = float(col_uppers[col])
             is_int = has_integrality and integrality[col] == highspy.HighsVarType.kInteger
-        if lo > -math.inf and val < lo - feasibility_tolerance:
+        if lo > -math.inf and val < lo - (feasibility_tolerance + relative_tolerance * abs(lo)):
             return False
-        if hi < math.inf and val > hi + feasibility_tolerance:
+        if hi < math.inf and val > hi + (feasibility_tolerance + relative_tolerance * abs(hi)):
             return False
         if is_int and abs(val - round(val)) > integrality_tolerance:
             return False
@@ -205,6 +206,7 @@ def verify_primal_against_lp(
     values = matrix.value_
     row_sum = array("d", [0.0]) * num_row
     row_comp = array("d", [0.0]) * num_row
+    row_abs = array("d", [0.0]) * num_row
 
     if matrix.format_ == highspy.MatrixFormat.kColwise:
         for col in range(num_col):
@@ -220,6 +222,7 @@ def verify_primal_against_lp(
             for pos in range(begin, end):
                 r = int(indices[pos])
                 term = float(values[pos]) * x_val
+                row_abs[r] += abs(term)
                 s = row_sum[r]
                 t = s + term
                 if abs(s) >= abs(term):
@@ -233,9 +236,11 @@ def verify_primal_against_lp(
             end = (
                 int(p_end[r])
                 if len(p_end) > r
-                else (int(starts[r + 1]) if r + 1 < len(starts) else len(indices))
+                else (int(starts[r + 1]) if r + 1 < len(indices) else len(indices))
             )
-            row_sum[r] = math.fsum(float(values[pos]) * xs[int(indices[pos])] for pos in range(begin, end))
+            row_terms = [float(values[pos]) * xs[int(indices[pos])] for pos in range(begin, end)]
+            row_sum[r] = math.fsum(row_terms)
+            row_abs[r] = math.fsum(abs(term) for term in row_terms)
     else:
         raise ValueError(f"未知 HiGHS 矩阵存储格式: {matrix.format_!r}")
 
@@ -250,9 +255,14 @@ def verify_primal_against_lp(
         else:
             lo = float(row_lowers[r])
             hi = float(row_uppers[r])
-        if lo > -math.inf and act < lo - feasibility_tolerance:
+        row_scale = row_abs[r]
+        if lo > -math.inf and act < lo - (
+            feasibility_tolerance + relative_tolerance * max(row_scale, abs(lo))
+        ):
             return False
-        if hi < math.inf and act > hi + feasibility_tolerance:
+        if hi < math.inf and act > hi + (
+            feasibility_tolerance + relative_tolerance * max(row_scale, abs(hi))
+        ):
             return False
     return True
 
@@ -981,6 +991,12 @@ def _run_on_demand_mutex_recovery(
                     deadline, min_guard=min_guard, io_margin=io_margin
                 )
                 if refine_budget is not None:
+                    basis = handle.getBasis()
+                    has_basis = bool(getattr(basis, "valid", False))
+                    _check_highs_ok(handle.clearSolver(), "clearSolver(refine)")
+                    if has_basis:
+                        _check_highs_ok(handle.setBasis(basis), "setBasis(refine)")
+                        _set_highs_option(handle, "presolve", "off")
                     _set_highs_option(handle, "solver", "simplex")
                     try:
                         _set_highs_option(handle, "time_limit", refine_budget)
@@ -988,6 +1004,8 @@ def _run_on_demand_mutex_recovery(
                             raise RuntimeError("HiGHS Simplex 精修执行错误")
                     finally:
                         _set_highs_option(handle, "solver", "choose")
+                        if has_basis:
+                            _set_highs_option(handle, "presolve", "choose")
                     model_status = handle.getModelStatus()
                     last_status = model_status
                     feasible, objective, best_bound, gap, primals = _extract_solution_data(
