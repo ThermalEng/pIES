@@ -38,32 +38,31 @@ Task execution automatically picks its path from the selected predictor descript
 
 ## Universal Heuristic Presolve Acceleration and Two-Stage Funnel Coordination
 
-For large-scale, long-horizon planning models (e.g., 25-year 30-minute horizons spanning `438,288` steps), optional heuristic presolve plugins focus on **rapidly obtaining a high-quality engineering optimum that satisfies full-horizon physics and finance rules** (rather than spending multiples of the runtime proving a theoretical global dual bound over overly wide initial bounds). Built around a pluggable `HeuristicProvider` contract with a single built-in default engine for Phase 1, it narrows high-value search regions for downstream exact solvers while preserving the three-stage boundary across [Computation Generators](generators.md) and [Solver Runtime](solver-runtime.md).
+For large-scale, long-horizon planning models (e.g., 25-year 30-minute horizons spanning `438,288` steps), optional heuristic presolve plugins focus on **rapidly finding a high-quality, best known engineering-feasible solution that satisfies full-horizon physical, operational, and financial constraints within finite compute budgets** rather than spending multiples of runtime proving theoretical global optimality over overly wide initial bounds. Built around a pluggable `HeuristicProvider` contract with a single Phase 1 default engine, it guides downstream exact solvers while preserving the three-stage isolation across [Computation Generators](generators.md) and [Solver Runtime](solver-runtime.md).
 
-### Pluggable Protocol, Single-Read Memory API, and Same-Format Adaptation
+### Pluggable Protocol, Single-Read Memory API, and Phase 1 Scope
 
-1. **Lightweight pluggable protocol, single default engine**: The platform fixes the outer execution harness (model loading, column-map preservation, unified monotonic-clock deadline control, and infeasibility fallback) while abstracting search cores as replaceable `HeuristicProvider` implementations frozen by `<ID>@<version>`. Phase 1 ships a single structure-aware default engine without heavy external evolutionary libraries or dynamic user-package loading.
+1. **Lightweight pluggable protocol, single default engine**: The platform owns the fixed outer execution harness (model loading, column-map preservation, unified monotonic-clock deadline control, original-model residual verification, and expansion/fallback handling) while abstracting search cores as replaceable `HeuristicProvider` implementations frozen by `<ID>@<version>`. Phase 1 ships a single structure-aware default engine without heavy external evolutionary frameworks or dynamic code loading.
 2. **In-memory API first for in-process backends; same-format derived models across processes**:
    - For in-process solver bindings (such as built-in HiGHS), prefer loading the read-only model **once into memory** and applying bound tightening, zero-capacity fixing, and discrete-repair warm-starts directly via solver APIs (`changeColsBounds` / `setSolution`), avoiding 100-second-scale duplicate MPS serialization and disk parsing overhead;
-   - For cross-process or multi-format backends, follow a same-format-in, same-format-narrowed-model-out contract where each format adapter declares supported problem classes (LP, MILP, QP/SOCP, NLP/MINLP) and fidelity-preserving transformations.
-3. **Cross-class acceleration mechanisms**: Every pIES formulation shares a **"low-dimensional upper-level planning decisions (`planning.variables`, `planning.construction_units`) coupled with high-dimensional operational and tax time-step variables"** structure:
+   - For cross-process or multi-format backends, follow a same-format-in, same-format-narrowed-model-out contract where each format adapter declares supported problem classes and fidelity-preserving transformations.
+3. **Phase 1 focus on `MILP` (and `LP`)**: Every pIES formulation shares a **"low-dimensional upper-level planning decisions (`planning.variables`, `planning.construction_units`) coupled with high-dimensional operational and tax time-step variables"** structure. While the contract stays open to future problem classes, `1.1.0` Phase 1 capability declarations and acceptance explicitly focus on **MILP (plus pure LP)** without making `QP/SOCP` or `NLP/MINLP` an acceptance burden for Phase 1:
 
-| Problem Class | Dominant Bottleneck | Engineering Acceleration Mechanism |
+| Problem Class | Phase 1 Status | Dominant Bottleneck and Acceleration Mechanism |
 |---|---|---|
-| Pure LP | Slow factorization or iteration on million-row sparse matrices | Fixes zero-capacity redundant devices so downstream presolve eliminates entire device-step blocks; seeds primal hint when supported |
-| MILP (Primary) | No feasible primal within budget, massive pseudo-fractional complementarity binaries, loose Big-M | Tightens upper-level capacity bounds and propagates tighter Big-M via `{property_ref: ...}`; pairs discrete fixing with LP repair for rapid feasible incumbents |
-| QP / SOCP | Cone coupling across long horizons inflates barrier decomposition cost | Eliminates inactive candidate cones via zero-capacity fixing and seeds an interior warm-start center |
-| NLP / MINLP | Non-convexity, loose McCormick envelopes, extreme sensitivity to `x_0` | Compresses relaxation envelopes via tightened box bounds and stabilizes local/global convergence from feasible incumbents |
+| MILP | **Phase 1 primary** | Slow or missing feasible primals, massive pseudo-fractional complementarity binaries, loose Big-M; narrows upper bounds and tightens Big-M via `{property_ref: ...}`, paired with discrete fixing and full-model repair |
+| Pure LP | **Phase 1 supported** | Slow factorization or iteration on million-row sparse matrices; fixes zero-capacity redundant devices so downstream presolve eliminates entire device-step blocks and seeds a primal hint |
+| QP / SOCP / NLP / MINLP | Reserved (outside Phase 1 acceptance) | Future adapters reuse the same upper-level narrowing and candidate incumbent channels |
 
 ### Full-Horizon Preservation and Column-Mapping Invariance
 
-- **Full-horizon fidelity in exact execution**: Representative-day and extreme-aware temporal surrogates are used solely inside the heuristic stage to select narrowing boxes; the model solved by the downstream exact solver **MUST retain complete full-horizon time-step constraints, calendar-month peak demand, inter-step storage continuity, and all tax rules**, guaranteeing 100% physical conservation and exact same-solve financial consistency.
+- **Full-horizon fidelity in exact execution**: Representative-day and extreme-aware temporal surrogates are used solely inside the heuristic stage to select narrowing boxes; the model solved by the downstream exact solver **MUST retain complete full-horizon time-step constraints, calendar-month peak demand, inter-step storage continuity, and all tax rules**, ensuring all specified constraints are satisfied within numerical tolerances across the full horizon alongside exact same-solve financial consistency.
 - **In-place column identity preservation**: Tightening bounds, updating Big-M coefficients, or fixing redundant devices to `0` SHOULD modify bounds in place within the original column space so downstream presolve eliminates redundant blocks automatically while `ResultAdapter` continues restoring step series and `financial_facts` along `parameters.jsonl` indices; any adapter that removes columns MUST reconstruct the full original column vector before handoff to `ResultAdapter`.
 - **Metadata bridging**: Generic solver formats (such as raw MPS) do not natively carry `{property_ref: ...}`, Gregorian month boundaries, or construction-unit links; [generators](generators.md#upper-level-planning-structure-export-for-presolve-narrowing) export those structured mappings inside the Bundle.
 
-### Config Freezing, Unified Monotonic Deadline, and Two-Stage Pipeline
+### Config Freezing, Unified Monotonic Deadline, and Lightweight Quality Control
 
-- **Reuse `CalculationConfig.options` with one monotonic deadline**: Heuristic toggles and parameters freeze inside `CalculationConfig.options` (validated strictly via `GeneratorDescriptor.options_schema` inside `CalcSnapshot`). When disabled, execution runs unmodified; when enabled, a single `time.monotonic()` deadline accounts for model reading, surrogate narrowing, repair warm-starting, and exact solving inside the remaining budget—never granting full budgets separately per stage.
+- **Reuse `CalculationConfig.options` with one monotonic deadline**: Heuristic toggles and parameters freeze inside `CalculationConfig.options` (validated strictly via `GeneratorDescriptor.options_schema` inside `CalcSnapshot`). When disabled, execution runs unmodified; when enabled, a single `time.monotonic()` deadline accounts for model reading, surrogate narrowing, repair warm-starting, original-model residual verification, and exact solving inside the remaining budget—never granting separate full budgets per stage.
 
 ```text
 [When enabled] Frozen options + unified deadline = now + time_limit_seconds
@@ -72,23 +71,35 @@ For large-scale, long-horizon planning models (e.g., 25-year 30-minute horizons 
 Tighten capacity bounds [L_tight, U_tight], fix zero-capacity units, shrink Big-M in place (column map intact)
   ↓ Stage 2: Structure-Aware Fix-and-Repair / Optional Relaxation Repair
 Construct discrete/capacity candidates → solve full-model LP repair or local repair to fill continuous steps → inject incumbent
-  ↓ Narrowed-domain exact solve within remaining monotonic budget
-  ├─ Feasible primal passes original-model residual checks → publish engineering optimum directly (no full-space rerun!)
-  └─ Subdomain unexpectedly infeasible → widen bounds or restore original bounds within remaining budget
+  ↓ Narrowed-domain solve & lightweight quality control within remaining monotonic budget
+  ├─ High-quality feasible primal inside subdomain → verify original-model tolerances & deliver best known engineering-feasible solution
+  ├─ Best candidate clearly hits empirical narrowed boundary (budget allowing) → attempt local expansion along active boundary
+  ├─ Subdomain infeasible or slow to find feasible → attempt wider box or fall back to original domain
+  └─ Budget exhausted with valid feasible solution → publish best known engineering-feasible solution immediately
 ```
 
 1. **Stage 1 — Extreme-Aware Surrogate Narrowing**: Partitions the horizon by calendar month and deterministically samples (under `CalculationConfig.seed`) peak load days, multi-day sustained energy-deficit segments (capturing long-duration storage sizing drivers), high price-spread days, and representative windows. Solves the compact isomorphic surrogate to lock high-value capacity boxes `[L_tight, U_tight]` and fix uneconomic units to `0` directly in the exact model.
-2. **Stage 2 — Structure-Aware `Fix-and-Repair / Fix-and-Optimize`**: Inside the narrowed box, supplies construction/switching decisions via structure-aware rules or sub-models and leverages native solver LP repair (e.g., `setSolution` discrete repair or fixed-integer sub-LP/MILP) to populate inter-step storage `SOC`, ramping, and tax schedules accurately; any local `O(T)` rounding scan serves only as a candidate generator and MUST pass original-model bound, row, and integrality residual checks before publication.
+2. **Stage 2 — Structure-Aware `Fix-and-Repair / Fix-and-Optimize`**: Inside the narrowed box, supplies construction/switching decisions via structure-aware rules or sub-models and leverages native solver repair (e.g., `setSolution` discrete LP/MIP repair or fixed-integer sub-LP/MILP) to populate inter-step storage `SOC`, ramping, and tax schedules accurately; any local `O(T)` rounding scan acts solely as a candidate generator without promising closed-form completion of all continuous steps, and candidate primals MUST pass full-model repair and residual checks.
 
-### Engineering-First Delivery and Honest Status Reporting
+| Trigger Condition | Handling Strategy |
+|---|---|
+| High-quality feasible solution found inside subdomain | Deliver the best known engineering-feasible solution directly without mandatory expansion or full-space rerun |
+| Best candidate clearly hugs an empirical narrowed boundary | When remaining budget permits, attempt targeted local expansion along the active bound to avoid leaving large gains behind |
+| Subdomain infeasible or fails to find feasible promptly | Attempt bound expansion or fall back to the read-only original domain |
+| Total budget exhausted with a valid feasible solution | Publish the best known engineering-feasible solution immediately |
 
-1. **Publish narrowed-domain engineering optima directly without full-space re-solve**: Once a feasible primal inside `[L_tight, U_tight]` satisfies tolerance and original-model residual checks, publish the full engineering solution, step series, and same-solve financial evaluation directly—never re-running the unrestricted full space solely to certify a theoretical global dual bound.
-2. **Fallback widening only upon subdomain infeasibility**: Empirical subdomain infeasibility triggers automatic bound widening or original-domain fallback within remaining budget; if budget exhausts without a verified primal, publish `not_solved` rather than misreporting `infeasible`.
-3. **Honest optimality status disclosure**: Never present a subdomain dual bound as an unrestricted global bound over `[L, U]`. When no global original-domain dual bound was computed, publish the result transparently as `feasible` (`restricted_results`) or leave unrestricted `best_bound` and `relative_gap` as `null` in `outputs.solver_summary` while disclosing heuristic narrowing—reserving `solved` strictly for provably equivalent bounds or unrestricted-domain tolerance stops; all GUI inspection, financial evaluation, and export workflows remain fully usable.
+### Engineering-First Delivery, Original-Model Verification, and Status Honesty
 
-### Incremental Rollout and Docker Benchmark Gates (`S0 -> S3`)
+1. **Empirical narrowing MUST publish as `feasible` AND set original-domain bounds to `null`**: Any valid solution produced under empirical narrowing (e.g., narrowing `0..10 MW` to `3..5 MW`) **MUST publish as `math_status: feasible`** (`restricted_results` at task level)—**even if the solver reports `kOptimal` inside the subdomain, it MUST NOT map to global `solved`**—**and** both uncertified original-domain `best_bound` and `relative_gap` **MUST be `null`** (never presenting a subdomain dual bound as global).
+2. **Separate subdomain diagnostics**: Preserve subdomain termination status (e.g., `subdomain_status`), subdomain bound/`subdomain_relative_gap`, applied narrowed bounds, and `HeuristicProvider` ref in separate diagnostic fields of `outputs.solver_summary`; GUI inspection, same-solve financial evaluation, and exports remain fully functional under `feasible`. Only provably equivalent algebraic bounds or unrestricted-domain tolerance stops publish as `solved`.
+3. **Incremental original-model constraint verification**: Before publishing any heuristically narrowed or repaired solution, verify feasibility against the **pre-narrowing original mathematical relations (including original Big-M constraints, variable bounds, row constraints, integrality, and objective)** so all specified constraints hold within numerical tolerances. In-process executors SHOULD retain compact original constraints or bound/coefficient modification deltas in memory to avoid re-parsing large MPS files.
 
-- **`S0` HiGHS baseline profiling → `S1` minimal provider & budget contract → `S2` first Fix-and-Repair engine → `S3` Docker shared-budget switch benchmarks**: Profile native HiGHS options first to isolate infeasibility vs. gap-closing bottlenecks, wire `options` and in-memory bound/incumbent interfaces, implement the first structure-aware repair and extreme-aware narrowing engine, and gate further extensions (full-horizon LP relaxation, ALNS, or evolutionary search) strictly on end-to-end Docker benchmarks measuring total runtime, peak RSS, time-to-first-feasible, and objective quality under identical total budgets.
+### Incremental Rollout and Docker Verification Gates (`S0 -> S3`)
+
+- **`S0` HiGHS baseline profiling**: Benchmark native `highspy 1.7.2` presolve, heuristics, and solver options to separate model-read time, infeasibility bottlenecks, and gap-closing bottlenecks.
+- **`S1` minimal contract and `setSolution` verification loop**: Wire frozen `CalculationConfig.options`, monotonic deadline control, and `HeuristicProvider` contracts, explicitly testing partial integer incumbent acceptance, LP/MIP repair success, repair failure on infeasible discrete seeds, and timeout behavior on the pinned `highspy 1.7.2` runtime.
+- **`S2` first structure-aware Fix-and-Repair engine**: Deliver `Extreme-Aware` narrowing and `Fix-and-Repair`, in-memory bound updates, and incremental original-model residual verification while guaranteeing identical behavior when disabled.
+- **`S3` Docker shared-budget toggle benchmarks**: Compare presolve on vs. off in Docker across total wall-clock time, peak RSS, time-to-first-feasible, **best feasible objective value under identical time budgets**, and original-domain gap (where available), gating full-horizon LP relaxation, ALNS, or evolutionary extensions on proven net gains.
 
 ## Unified Result Model and Adapter Contract
 
