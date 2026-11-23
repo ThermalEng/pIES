@@ -130,6 +130,9 @@ _ACCELERATION_MODES = ("off", "on_demand_mutex")
 _ACCELERATION_SCHEMA = "ies.solver-acceleration"
 _ACCELERATION_SCHEMA_VERSION = "1.0.0"
 _MUTEX_CONFLICT_TOLERANCE = 1e-7
+_IPM_LP_MIN_COLS = 10_000
+_TIEBREAK_MAX_REL_GAP = 1e-6
+_SIMPLEX_STRATEGY_PRIMAL = 4
 _DEFAULT_MAX_MUTEX_ROUNDS = 5
 _DEFAULT_MIN_SOLVE_GUARD_SECONDS = 0.05
 _DEFAULT_IO_MARGIN_SECONDS = 0.05
@@ -142,6 +145,12 @@ def _set_highs_option(handle, key: str, value) -> None:
     status = handle.setOptionValue(key, value)
     if status != highspy.HighsStatus.kOk:
         raise RuntimeError(f"HiGHS 无法应用选项 {key}={value!r} (status={status})")
+
+
+def _set_highs_time_limit(handle, budget_seconds: float, *, cumulative: bool = True) -> None:
+    """Set HiGHS ``time_limit`` (cumulative ``getRunTime()`` for LP, per-call for MIP)."""
+    elapsed = float(handle.getRunTime()) if (cumulative and hasattr(handle, "getRunTime")) else 0.0
+    _set_highs_option(handle, "time_limit", elapsed + budget_seconds)
 
 
 def verify_primal_against_lp(
@@ -874,7 +883,7 @@ def _run_original_fallback(
         "fallback",
         status=f"{status_parts},rounds={round_count},restored={restored_total}",
     )
-    _set_highs_option(handle, "time_limit", fallback_budget)
+    _set_highs_time_limit(handle, fallback_budget, cumulative=False)
     with _timed_stage("run"):
         if handle.run() == highspy.HighsStatus.kError:
             raise RuntimeError("HiGHS 原模型回退求解执行错误")
@@ -890,6 +899,165 @@ def _run_original_fallback(
     if slot.incumbent is None:
         _write_solution(handle, fallback_status, sol_path)
     return fallback_status
+
+
+def _resolve_degenerate_lp_conflicts(
+    handle,
+    pairs: Sequence[tuple[int, int, int, int, int]],
+    relaxed_indices: Sequence[int],
+    conf_before: Sequence[int],
+    row_bounds: Mapping[int, tuple[float, float]],
+    *,
+    sense: str,
+    z_star: float,
+    deadline: float,
+    min_guard: float,
+    io_margin: float,
+    tol: float,
+    sol_path: str,
+    slot: VerifiedIncumbentSlot,
+    round_idx: int,
+    round_elapsed: float,
+    acceleration_mode: str,
+    restored_count: int,
+):
+    """Break zero-cost degenerate optimal LP conflicts with warm Primal Simplex."""
+    import highspy
+
+    basis = handle.getBasis()
+    if not bool(getattr(basis, "valid", False)):
+        return None
+    tiebreak_budget = remaining_solve_budget(deadline, min_guard=min_guard, io_margin=io_margin)
+    if tiebreak_budget is None:
+        return None
+
+    lp = handle.getLp()
+    num_col = int(lp.num_col_)
+    orig_cost = list(lp.col_cost_)
+    orig_offset = float(lp.offset_)
+    del lp
+    nz_cost_cols = [c for c, val in enumerate(orig_cost) if val != 0.0]
+    max_abs_cost = max((abs(orig_cost[c]) for c in nz_cost_cols), default=0.0)
+    eps = max(1e-10, min(1e-8, 1e-6 * max_abs_cost)) if max_abs_cost > 0.0 else 1e-8
+    sign = 1.0 if sense == "minimize" else -1.0
+
+    tie_cols: list[int] = []
+    seen_cols: set[int] = set()
+    for idx in relaxed_indices:
+        for col in (pairs[idx][1], pairs[idx][2]):
+            if col not in seen_cols:
+                seen_cols.add(col)
+                tie_cols.append(col)
+    if not tie_cols:
+        return None
+    tie_costs = [orig_cost[c] + sign * eps for c in tie_cols]
+    orig_tie_costs = [orig_cost[c] for c in tie_cols]
+
+    opt_status, raw_strategy = handle.getOptionValue("simplex_strategy")
+    orig_strategy = int(raw_strategy) if opt_status == highspy.HighsStatus.kOk else 1
+    dual_tol_status, raw_dual_tol = handle.getOptionValue("dual_feasibility_tolerance")
+    orig_dual_tol = float(raw_dual_tol) if dual_tol_status == highspy.HighsStatus.kOk else 1e-7
+    tie_dual_tol = min(orig_dual_tol, max(1e-10, 0.05 * eps))
+
+    primals: list[float] | None = None
+    tie_started = time.monotonic()
+    try:
+        _check_highs_ok(
+            handle.changeColsCost(len(tie_cols), tie_cols, tie_costs),
+            "changeColsCost(tiebreak)",
+        )
+        _set_highs_option(handle, "presolve", "off")
+        _set_highs_option(handle, "solver", "simplex")
+        _set_highs_option(handle, "simplex_strategy", _SIMPLEX_STRATEGY_PRIMAL)
+        _set_highs_option(handle, "dual_feasibility_tolerance", tie_dual_tol)
+        _set_highs_time_limit(handle, tiebreak_budget)
+        if handle.run() == highspy.HighsStatus.kError:
+            raise RuntimeError("HiGHS Primal Simplex 消退化精修错误")
+        sol = handle.getSolution()
+        if sol.value_valid and len(sol.col_value) == num_col:
+            primals = list(sol.col_value)
+    finally:
+        _check_highs_ok(
+            handle.changeColsCost(len(tie_cols), tie_cols, orig_tie_costs),
+            "changeColsCost(restore)",
+        )
+        _set_highs_option(handle, "dual_feasibility_tolerance", orig_dual_tol)
+        _set_highs_option(handle, "simplex_strategy", orig_strategy)
+        _set_highs_option(handle, "solver", "choose")
+        _set_highs_option(handle, "presolve", "choose")
+    tie_elapsed = time.monotonic() - tie_started
+
+    if primals is None:
+        _log_stage(
+            "mutex_tiebreak",
+            "end",
+            elapsed_seconds=tie_elapsed,
+            status=f"conflicts_before={len(conf_before)},conflicts_after={len(conf_before)},rel_gap=none",
+        )
+        return None
+
+    true_obj = orig_offset + math.fsum(orig_cost[c] * primals[c] for c in nz_cost_cols)
+    if sense == "minimize":
+        rel_gap = max(0.0, true_obj - z_star) / max(1.0, abs(true_obj))
+        dual_bound = min(z_star, true_obj)
+    else:
+        rel_gap = max(0.0, z_star - true_obj) / max(1.0, abs(true_obj))
+        dual_bound = max(z_star, true_obj)
+
+    conf_after = [
+        idx
+        for idx in relaxed_indices
+        if float(primals[pairs[idx][1]]) > tol and float(primals[pairs[idx][2]]) > tol
+    ]
+    _log_stage(
+        "mutex_tiebreak",
+        "end",
+        elapsed_seconds=tie_elapsed,
+        status=f"conflicts_before={len(conf_before)},conflicts_after={len(conf_after)},rel_gap={rel_gap:.3e}",
+    )
+
+    if rel_gap > _TIEBREAK_MAX_REL_GAP:
+        return None
+    if len(conf_after) == 0:
+        reconstructed = _reconstruct_mutex_primals(primals, pairs, relaxed_indices, tol)
+        relaxed_overrides = _build_relaxed_overrides(pairs, relaxed_indices, row_bounds)
+        lp_snapshot = handle.getLp()
+        verified = verify_primal_against_lp(
+            lp_snapshot,
+            reconstructed,
+            original_mutex_overrides=relaxed_overrides,
+        )
+        del lp_snapshot
+        if verified:
+            _log_stage(
+                "mutex_round",
+                "end",
+                elapsed_seconds=round_elapsed,
+                status=f"round={round_idx},conflicts=0,added=0,rss_kib={_max_rss_kib()}",
+            )
+            slot.record(
+                objective_value=true_obj,
+                primals=reconstructed,
+                model_status=highspy.HighsModelStatus.kOptimal,
+                best_bound=dual_bound,
+                relative_gap=rel_gap,
+                solve_domain="valid_relaxation",
+                original_model_verified=True,
+                sol_path=sol_path,
+            )
+            _log_stage(
+                "acceleration",
+                "applied",
+                status=(
+                    f"requested={acceleration_mode},applied=on_demand_mutex,"
+                    f"pairs={len(pairs)},rounds={round_idx + 1},restored={restored_count}"
+                ),
+            )
+            return ("resolved", highspy.HighsModelStatus.kOptimal)
+        return None
+    if len(conf_after) < len(conf_before):
+        return ("reduced", conf_after)
+    return None
 
 
 def _run_on_demand_mutex_recovery(
@@ -915,16 +1083,30 @@ def _run_on_demand_mutex_recovery(
     tol = _MUTEX_CONFLICT_TOLERANCE
 
     _relax_mutex_pairs_in_place(handle, pairs, row_bounds)
+    lp_meta = handle.getLp()
+    num_col = int(lp_meta.num_col_)
+    has_non_mutex_int = any(t == highspy.HighsVarType.kInteger for t in lp_meta.integrality_)
+    del lp_meta
 
     for round_idx in range(max_rounds):
         solve_budget = remaining_solve_budget(deadline, min_guard=min_guard, io_margin=io_margin)
         if solve_budget is None:
             _log_stage("run", "skipped", status="budget_exhausted")
             break
-        _set_highs_option(handle, "time_limit", solve_budget)
+        is_pure_lp_round = restored_count == 0 and not has_non_mutex_int
+        use_ipm = is_pure_lp_round and num_col >= _IPM_LP_MIN_COLS
+        _set_highs_time_limit(handle, solve_budget, cumulative=is_pure_lp_round)
         round_started = time.monotonic()
-        if handle.run() == highspy.HighsStatus.kError:
-            raise RuntimeError("HiGHS 求解执行错误")
+        if use_ipm:
+            _set_highs_option(handle, "solver", "ipm")
+            try:
+                if handle.run() == highspy.HighsStatus.kError:
+                    raise RuntimeError("HiGHS 求解执行错误")
+            finally:
+                _set_highs_option(handle, "solver", "choose")
+        else:
+            if handle.run() == highspy.HighsStatus.kError:
+                raise RuntimeError("HiGHS 求解执行错误")
         round_elapsed = time.monotonic() - round_started
         model_status = handle.getModelStatus()
         last_status = model_status
@@ -966,6 +1148,35 @@ def _run_on_demand_mutex_recovery(
         ]
         conflicts = len(conflicting)
 
+        if conflicts > 0 and is_pure_lp_round and model_status == highspy.HighsModelStatus.kOptimal:
+            assert objective is not None
+            tie_outcome = _resolve_degenerate_lp_conflicts(
+                handle,
+                pairs,
+                relaxed_indices,
+                conflicting,
+                row_bounds,
+                sense=slot.sense,
+                z_star=float(objective),
+                deadline=deadline,
+                min_guard=min_guard,
+                io_margin=io_margin,
+                tol=tol,
+                sol_path=sol_path,
+                slot=slot,
+                round_idx=round_idx,
+                round_elapsed=round_elapsed,
+                acceleration_mode=acceleration_mode,
+                restored_count=restored_count,
+            )
+            if tie_outcome is not None:
+                outcome_kind, outcome_payload = tie_outcome
+                if outcome_kind == "resolved":
+                    return outcome_payload
+                if outcome_kind == "reduced":
+                    conflicting = outcome_payload
+                    conflicts = len(conflicting)
+
         if conflicts == 0:
             _log_stage(
                 "mutex_round",
@@ -999,7 +1210,7 @@ def _run_on_demand_mutex_recovery(
                         _set_highs_option(handle, "presolve", "off")
                     _set_highs_option(handle, "solver", "simplex")
                     try:
-                        _set_highs_option(handle, "time_limit", refine_budget)
+                        _set_highs_time_limit(handle, refine_budget)
                         if handle.run() == highspy.HighsStatus.kError:
                             raise RuntimeError("HiGHS Simplex 精修执行错误")
                     finally:

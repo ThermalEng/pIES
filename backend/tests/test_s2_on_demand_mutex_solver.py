@@ -996,3 +996,134 @@ def test_verify_primal_against_lp_scale_aware_si_joule_tolerance() -> None:
         assert not mod.verify_primal_against_lp(
             lp, [charge, prev_energy, next_energy, 1.0 + 2e-7]
         )
+
+
+def test_set_highs_time_limit_accounts_cumulative_runtime() -> None:
+    """_set_highs_time_limit 对 LP 计入累计 getRunTime()，对 MIP 按单次预算设 time_limit。"""
+    mod = _load_solver_module()
+    applied: list[tuple[str, float]] = []
+
+    class _FakeHandle:
+        def getRunTime(self) -> float:
+            return 25.5
+
+        def setOptionValue(self, key: str, value):
+            applied.append((key, float(value)))
+            return highspy.HighsStatus.kOk
+
+    mod._set_highs_time_limit(_FakeHandle(), 34.5)
+    mod._set_highs_time_limit(_FakeHandle(), 34.5, cumulative=False)
+    assert applied == [
+        ("time_limit", pytest.approx(60.0)),
+        ("time_limit", pytest.approx(34.5)),
+    ]
+
+
+def test_degenerate_lp_conflict_tiebreak_minimize_and_maximize(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    """零成本退化最优面双正冲突通过热启动 Primal Simplex 消解（minimize/maximize），不篡改原目标与选项。"""
+    mod = _load_solver_module()
+
+    for sense in ("minimize", "maximize"):
+        sign = 1.0 if sense == "minimize" else -1.0
+        # Variables: x_0, y_0 in [0, 5] (zero cost, cyclic x_0 - y_0 == 0), flow in [2, 5] (cost 3.0)
+        v_x = LinearVariable(name="x_0", lower=0.0, upper=5.0, kind="continuous")
+        v_y = LinearVariable(name="y_0", lower=0.0, upper=5.0, kind="continuous")
+        v_f = LinearVariable(name="flow", lower=2.0, upper=5.0, kind="continuous")
+        symbols = {
+            "x_0": ("var", 0.0, 5.0, "continuous"),
+            "y_0": ("var", 0.0, 5.0, "continuous"),
+        }
+        lowered = lower_mutex("m_0", ("x_0", 0), ("y_0", 0), symbols)
+        b_var = lowered.variables[0]
+        row_x, row_y = lowered.constraints
+        eq_cycle = LinearConstraint(
+            name="cycle",
+            expression=LinearExpression(terms=((("x_0", 0), 1.0), (("y_0", 0), -1.0))),
+            sense="eq",
+            rhs=0.0,
+        )
+        model = LinearModel(
+            variables=(v_x, v_y, v_f, b_var),
+            constraints=(eq_cycle, row_x, row_y),
+            objective=LinearExpression(terms=((("flow", 0), 3.0),)),
+            sense=sense,
+        )
+        mps_path, accel_path, _, pairs = _write_mps_and_accel(
+            tmp_path,
+            model,
+            [(b_var.name, "x_0", "y_0", row_x.name, row_y.name)],
+            mps_name=f"deg_{sense}.mps",
+            accel_name=f"deg_{sense}.json",
+        )
+        h = highspy.Highs()
+        h.setOptionValue("output_flag", False)
+        assert h.readModel(str(mps_path)) == highspy.HighsStatus.kOk
+        lp0 = h.getLp()
+        row_bounds = mod._validate_and_snapshot_mutex_pairs(lp0, pairs)
+        assert row_bounds is not None
+        del lp0
+        mod._relax_mutex_pairs_in_place(h, pairs, row_bounds)
+
+        # Force optimal basis with degenerate double-positive x_0=5, y_0=5, then restore zero costs
+        _, x_col, y_col, _, _ = pairs[0]
+        assert h.changeColsCost(2, [x_col, y_col], [-sign * 1e-5, -sign * 1e-5]) == highspy.HighsStatus.kOk
+        assert h.run() == highspy.HighsStatus.kOk
+        assert h.changeColsCost(2, [x_col, y_col], [0.0, 0.0]) == highspy.HighsStatus.kOk
+        h.setOptionValue("presolve", "off")
+        assert h.run() == highspy.HighsStatus.kOk
+        h.setOptionValue("presolve", "choose")
+        p0 = list(h.getSolution().col_value)
+        assert p0[x_col] > 1.0 and p0[y_col] > 1.0
+        z_star = float(h.getObjectiveValue())
+
+        sol_path = tmp_path / f"deg_{sense}.sol"
+        slot = mod.VerifiedIncumbentSlot(sense=sense, sol_path=str(sol_path))
+        capsys.readouterr()
+        outcome = mod._resolve_degenerate_lp_conflicts(
+            h,
+            pairs,
+            [0],
+            [0],
+            row_bounds,
+            sense=sense,
+            z_star=z_star,
+            deadline=mod.time.monotonic() + 30.0,
+            min_guard=0.05,
+            io_margin=0.05,
+            tol=1e-7,
+            sol_path=str(sol_path),
+            slot=slot,
+            round_idx=0,
+            round_elapsed=0.01,
+            acceleration_mode="on_demand_mutex",
+            restored_count=0,
+        )
+        assert outcome is not None
+        assert outcome[0] == "resolved"
+        assert outcome[1] == highspy.HighsModelStatus.kOptimal
+        assert slot.incumbent is not None
+        assert slot.incumbent.original_model_verified is True
+        assert slot.incumbent.solve_domain == "valid_relaxation"
+        assert slot.incumbent.objective_value == pytest.approx(z_star)
+        assert slot.incumbent.primals[x_col] <= 1e-7 or slot.incumbent.primals[y_col] <= 1e-7
+
+        # Verify original costs & options restored
+        lp_after = h.getLp()
+        assert float(lp_after.col_cost_[x_col]) == 0.0
+        assert float(lp_after.col_cost_[y_col]) == 0.0
+        assert h.getOptionValue("solver")[1] == "choose"
+        assert h.getOptionValue("presolve")[1] == "choose"
+        stderr = capsys.readouterr().err
+        assert "stage=mutex_tiebreak event=end status=conflicts_before=1,conflicts_after=0," in stderr
+        assert (
+            "stage=acceleration event=applied "
+            "status=requested=on_demand_mutex,applied=on_demand_mutex,pairs=1,rounds=1,restored=0"
+        ) in stderr
+
+        h_orig = highspy.Highs()
+        h_orig.setOptionValue("output_flag", False)
+        assert h_orig.readModel(str(mps_path)) == highspy.HighsStatus.kOk
+        assert mod.verify_primal_against_lp(h_orig.getLp(), slot.incumbent.primals)
