@@ -79,6 +79,7 @@ _STATUS_INFEASIBLE = "HighsModelStatus.kInfeasible"
 _STATUS_UNBOUNDED = "HighsModelStatus.kUnbounded"
 _STATUS_UNBOUNDED_OR_INFEASIBLE = "HighsModelStatus.kUnboundedOrInfeasible"
 _STATUS_TIME_LIMIT = "HighsModelStatus.kTimeLimit"
+_SOLVE_DOMAINS = frozenset(("original", "valid_relaxation", "restricted"))
 _KNOWN_STATUSES = frozenset(
     _STATUS_PREFIX + name
     for name in (
@@ -163,6 +164,16 @@ def _read_solution(lines: Iterator[str]) -> dict[str, Any]:
         _fail(f"primal 个数 {len(primals)} 与 num_columns {num_columns} 不一致")
     if facts["has_feasible_solution"] not in ("true", "false"):
         _fail("has_feasible_solution 须为true或false")
+    solve_domain = facts.get("solve_domain", "original")
+    if solve_domain not in _SOLVE_DOMAINS:
+        _fail(f"未知 solve_domain: {solve_domain!r}")
+    if "original_model_verified" in facts:
+        raw_verified = facts["original_model_verified"]
+        if raw_verified not in ("true", "false"):
+            _fail("original_model_verified 须为true或false")
+        original_model_verified = raw_verified == "true"
+    else:
+        original_model_verified = solve_domain == "original"
 
     def number(key: str) -> float | None:
         if facts[key] == "none":
@@ -175,14 +186,76 @@ def _read_solution(lines: Iterator[str]) -> dict[str, Any]:
             _fail(f"{key} 非有限")
         return value
 
-    return {
+    parsed: dict[str, Any] = {
         "model_status": facts["model_status"],
         "has_feasible_solution": facts["has_feasible_solution"] == "true",
         "objective": number("objective_value"),
         "best_bound": number("best_bound"),
         "relative_gap": number("relative_gap"),
         "primals": primals,
+        "solve_domain": solve_domain,
+        "original_model_verified": original_model_verified,
     }
+    if "subdomain_status" in facts:
+        raw_sub_status = facts["subdomain_status"]
+        if not raw_sub_status:
+            _fail("subdomain_status 不能为空")
+        parsed["subdomain_status"] = None if raw_sub_status == "none" else raw_sub_status
+    if "subdomain_best_bound" in facts:
+        parsed["subdomain_best_bound"] = number("subdomain_best_bound")
+    if "subdomain_relative_gap" in facts:
+        parsed["subdomain_relative_gap"] = number("subdomain_relative_gap")
+    return parsed
+
+
+def _resolve_math_status(
+    status: str,
+    has_feasible: bool,
+    solve_domain: str,
+    original_model_verified: bool,
+) -> tuple[str, str]:
+    """Derive ComputeResult math_status and termination_reason from status, domain, and verification."""
+    if solve_domain != "original" and has_feasible and not original_model_verified:
+        _fail(f"{solve_domain} 存在可行解但未通过原模型验证")
+    if solve_domain == "restricted":
+        if has_feasible:
+            if status == _STATUS_SOLVED:
+                return "feasible", "optimal"
+            if status == _STATUS_TIME_LIMIT:
+                return "feasible", "time_limit"
+            if status in (
+                _STATUS_INFEASIBLE,
+                _STATUS_UNBOUNDED,
+                _STATUS_UNBOUNDED_OR_INFEASIBLE,
+                "HighsModelStatus.kObjectiveBound",
+                "HighsModelStatus.kObjectiveTarget",
+                "HighsModelStatus.kIterationLimit",
+                "HighsModelStatus.kSolutionLimit",
+                "HighsModelStatus.kInterrupt",
+            ):
+                return "feasible", "not_solved"
+            _fail(f"数学状态不可发布: {status!r}")
+        if status == _STATUS_TIME_LIMIT:
+            return "not_solved", "time_limit"
+        if status in (_STATUS_INFEASIBLE, _STATUS_UNBOUNDED, _STATUS_UNBOUNDED_OR_INFEASIBLE):
+            return "not_solved", "not_solved"
+        if status == _STATUS_SOLVED:
+            return "feasible", "optimal"
+        _fail(f"数学状态不可发布: {status!r}")
+
+    if status == _STATUS_SOLVED:
+        return "solved", "optimal"
+    if status == _STATUS_TIME_LIMIT:
+        return ("feasible" if has_feasible else "not_solved"), "time_limit"
+    if status == _STATUS_INFEASIBLE:
+        return "infeasible", "infeasible"
+    if status == _STATUS_UNBOUNDED:
+        if solve_domain == "valid_relaxation":
+            return "not_solved", "not_solved"
+        return "unbounded", "unbounded"
+    if status == _STATUS_UNBOUNDED_OR_INFEASIBLE:
+        return "not_solved", "not_solved"
+    _fail(f"数学状态不可发布: {status!r}")
 
 
 def _parameters(bundle: SolverBundle) -> dict[str, Any]:
@@ -278,18 +351,13 @@ class HighsResultAdapter:
             _fail(f"声明输出缺失: {_SOLUTION_PATH}")
         solution = _parse_solution(solution_raw)
         status = solution["model_status"]
-        if status == _STATUS_SOLVED:
-            math_status, reason = "solved", "optimal"
-        elif status == _STATUS_TIME_LIMIT:
-            math_status = "feasible" if solution["has_feasible_solution"] else "not_solved"
-            reason = "time_limit"
-        elif status in (_STATUS_INFEASIBLE, _STATUS_UNBOUNDED):
-            math_status = "infeasible" if status == _STATUS_INFEASIBLE else "unbounded"
-            reason = math_status
-        elif status == _STATUS_UNBOUNDED_OR_INFEASIBLE:
-            math_status, reason = "not_solved", "not_solved"
-        else:
-            _fail(f"数学状态不可发布: {status!r}")
+        solve_domain = solution["solve_domain"]
+        math_status, reason = _resolve_math_status(
+            status,
+            solution["has_feasible_solution"],
+            solve_domain,
+            solution["original_model_verified"],
+        )
 
         def objective_value(value: float | None) -> float | None:
             if value is None:
@@ -305,15 +373,31 @@ class HighsResultAdapter:
                 _fail("目标发布值非有限")
             return total
 
-        summary = {
+        summary: dict[str, Any] = {
             "termination_reason": reason,
             "math_status": math_status,
             "has_feasible_solution": solution["has_feasible_solution"],
             "objective_value": objective_value(solution["objective"]),
             "objective_unit": params["objective_unit"],
-            "best_bound": objective_value(solution["best_bound"]),
-            "relative_gap": solution["relative_gap"],
+            "best_bound": None if solve_domain == "restricted" else objective_value(solution["best_bound"]),
+            "relative_gap": None if solve_domain == "restricted" else solution["relative_gap"],
         }
+        has_subdomain = any(
+            key in solution
+            for key in ("subdomain_status", "subdomain_best_bound", "subdomain_relative_gap")
+        )
+        if solve_domain != "original" or has_subdomain:
+            diagnostics: dict[str, Any] = {
+                "solve_domain": solve_domain,
+                "original_model_verified": solution["original_model_verified"],
+            }
+            if "subdomain_status" in solution:
+                diagnostics["subdomain_status"] = solution["subdomain_status"]
+            if "subdomain_best_bound" in solution:
+                diagnostics["subdomain_best_bound"] = objective_value(solution["subdomain_best_bound"])
+            if "subdomain_relative_gap" in solution:
+                diagnostics["subdomain_relative_gap"] = solution["subdomain_relative_gap"]
+            summary["solver_diagnostics"] = diagnostics
         if math_status not in ("solved", "feasible"):
             return ComputeResult(
                 bundle_id=receipt.bundle_id,

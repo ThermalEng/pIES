@@ -4,9 +4,10 @@
 把生成器声明的七项求解参数映射到 highspy 精确版本：真实读 MPS、
 真实求解、写声明 solution 文件。不是通用脚本执行器：除 ``--version``
 与 ``--self-test DIR`` 外，只接受位置固定的七参数 ``[MPS,
---solution_file, SOL, --time_limit, 秒, --random_seed, 种子]``，其他
-形状一律拒绝。只依赖标准库与精确固定的 highspy，不导入 iesplan，
-不读环境变量，不访问网络/DB/对象存储。
+--solution_file, SOL, --time_limit, 秒, --random_seed, 种子]`` 及可选
+尾部结构化参数 ``--acceleration_mode off|on_demand_mutex`` 与
+``--threads N``，其他形状一律拒绝。只依赖标准库与精确固定的 highspy，
+不导入 iesplan，不读环境变量，不访问网络/DB/对象存储。
 
 solution 文件格式 ``HIGHS_SOLUTION_V1``（ResultAdapter 按此解析）： ::
 
@@ -28,11 +29,13 @@ solution 文件格式 ``HIGHS_SOLUTION_V1``（ResultAdapter 按此解析）： :
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
+from contextlib import contextmanager
 import math
 import os
 import sys
+import tempfile
 import time
-from contextlib import contextmanager
 
 #: 自检在给定目录内使用的输入/声明输出文件名（固定约定）。
 SELF_TEST_MPS = "self-test.mps"
@@ -118,31 +121,351 @@ def _cmd_version() -> int:
     return 0
 
 
-def _solve_model(mps_path: str, time_limit: float, seed: int):
-    """读 MPS 并真实求解，返回 ``(h, model_status)``；失败抛异常。"""
+_SOLVE_DOMAINS = ("original", "valid_relaxation", "restricted")
+_ACCELERATION_MODES = ("off", "on_demand_mutex")
+
+
+def remaining_solve_budget(
+    deadline: float,
+    *,
+    min_guard: float,
+    io_margin: float,
+) -> float | None:
+    """Return remaining solve budget before ``deadline - io_margin``, or ``None`` if exhausted."""
+    if not (math.isfinite(deadline) and math.isfinite(min_guard) and math.isfinite(io_margin)):
+        raise ValueError("deadline, min_guard and io_margin must be finite")
+    if min_guard < 0 or io_margin < 0:
+        raise ValueError("min_guard and io_margin must be non-negative")
+    remaining = deadline - time.monotonic()
+    if remaining <= min_guard + io_margin:
+        return None
+    return remaining - io_margin
+
+
+def _clamp_zero(lower: float, upper: float) -> float:
+    if math.isnan(lower) or math.isnan(upper) or lower > upper:
+        raise ValueError(f"非法变量上下界: [{lower!r}, {upper!r}]")
+    value = min(max(0.0, lower), upper)
+    if not math.isfinite(value):
+        raise ValueError(f"有限占位值非有限: {value!r} (bounds=[{lower!r}, {upper!r}])")
+    return value
+
+
+def build_partial_warm_start(handle, discrete_values: Mapping[int, float]) -> list[float]:
+    """Build full finite warm-start vector clamping unspecified columns to ``[lower, upper]``."""
+    lp = handle.getLp()
+    num_col = int(lp.num_col_)
+    for col, raw in discrete_values.items():
+        if not isinstance(col, int) or isinstance(col, bool) or col < 0 or col >= num_col:
+            raise ValueError(f"热启动列索引越界: {col!r}")
+        if isinstance(raw, bool):
+            raise ValueError(f"热启动列 {col} 数值不可为 bool")
+        val = float(raw)
+        if not math.isfinite(val):
+            raise ValueError(f"热启动列 {col} 非有限数值: {raw!r}")
+
+    lowers = lp.col_lower_
+    uppers = lp.col_upper_
+    col_values: list[float] = []
+    for col in range(num_col):
+        if col in discrete_values:
+            val = float(discrete_values[col])
+        else:
+            val = _clamp_zero(float(lowers[col]), float(uppers[col]))
+        assert math.isfinite(val)
+        col_values.append(val)
+    return col_values
+
+
+def inject_warm_start(handle, col_values: Sequence[float]):
+    """Validate column length and finiteness before calling ``handle.setSolution``."""
     import highspy
 
+    num_col = int(handle.getNumCol())
+    if len(col_values) != num_col:
+        raise ValueError(f"热启动列数 {len(col_values)} 与模型列数 {num_col} 不一致")
+    validated: list[float] = []
+    for idx, raw in enumerate(col_values):
+        if isinstance(raw, bool):
+            raise ValueError(f"热启动列 {idx} 数值不可为 bool")
+        val = float(raw)
+        if not math.isfinite(val):
+            raise ValueError(f"热启动列 {idx} 非有限数值: {raw!r}")
+        validated.append(val)
+    solution = highspy.HighsSolution()
+    solution.col_value = validated
+    solution.value_valid = True
+    return handle.setSolution(solution)
+
+
+def _atomic_write_text(sol_path: str, content: str) -> None:
+    """Atomically write ``content`` via same-directory temp file and ``os.replace``."""
+    parent = os.path.dirname(sol_path) or "."
+    base = os.path.basename(sol_path)
+    tmp_path: str | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=parent,
+            prefix=f".{base}.",
+            suffix=".tmp",
+            delete=False,
+        ) as stream:
+            tmp_path = stream.name
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(tmp_path, sol_path)
+    except BaseException:
+        if tmp_path is not None:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+        raise
+
+
+class VerifiedIncumbent:
+    """Immutable snapshot of an original-model-verified feasible primal."""
+
+    __slots__ = (
+        "model_status",
+        "objective_value",
+        "best_bound",
+        "relative_gap",
+        "primals",
+        "solve_domain",
+        "original_model_verified",
+        "subdomain_status",
+        "subdomain_best_bound",
+        "subdomain_relative_gap",
+    )
+
+    def __init__(
+        self,
+        *,
+        model_status: str,
+        objective_value: float,
+        best_bound: float | None,
+        relative_gap: float | None,
+        primals: tuple[float, ...],
+        solve_domain: str = "original",
+        original_model_verified: bool = True,
+        subdomain_status: str | None = None,
+        subdomain_best_bound: float | None = None,
+        subdomain_relative_gap: float | None = None,
+    ) -> None:
+        self.model_status = model_status
+        self.objective_value = objective_value
+        self.best_bound = best_bound
+        self.relative_gap = relative_gap
+        self.primals = primals
+        self.solve_domain = solve_domain
+        self.original_model_verified = original_model_verified
+        self.subdomain_status = subdomain_status
+        self.subdomain_best_bound = subdomain_best_bound
+        self.subdomain_relative_gap = subdomain_relative_gap
+
+
+class VerifiedIncumbentSlot:
+    """Single-slot incumbent tracker with atomic persistence to ``sol_path``."""
+
+    def __init__(self, *, sense: object = "minimize", sol_path: str | None = None) -> None:
+        sense_name = str(sense)
+        if sense_name in ("minimize", "ObjSense.kMinimize"):
+            self.sense = "minimize"
+        elif sense_name in ("maximize", "ObjSense.kMaximize"):
+            self.sense = "maximize"
+        else:
+            raise ValueError(f"未知优化方向: {sense!r}")
+        self.sol_path = sol_path
+        self.incumbent: VerifiedIncumbent | None = None
+
+    def is_better(self, objective_value: float) -> bool:
+        obj = float(objective_value)
+        if not math.isfinite(obj):
+            raise ValueError(f"目标值非有限: {objective_value!r}")
+        if self.incumbent is None:
+            return True
+        if self.sense == "minimize":
+            return obj < self.incumbent.objective_value
+        return obj > self.incumbent.objective_value
+
+    def record(
+        self,
+        *,
+        objective_value: float,
+        primals: Sequence[float],
+        model_status: object = "HighsModelStatus.kTimeLimit",
+        best_bound: float | None = None,
+        relative_gap: float | None = None,
+        solve_domain: str = "original",
+        original_model_verified: bool = True,
+        subdomain_status: str | None = None,
+        subdomain_best_bound: float | None = None,
+        subdomain_relative_gap: float | None = None,
+        sol_path: str | None = None,
+    ) -> bool:
+        """Record a strictly better verified primal and atomically persist ``sol_path``."""
+        if not original_model_verified:
+            return False
+        obj = float(objective_value)
+        if not math.isfinite(obj):
+            raise ValueError(f"目标值非有限: {objective_value!r}")
+        validated_primals = tuple(float(v) for v in primals)
+        if not all(math.isfinite(v) for v in validated_primals):
+            raise ValueError("主解向量包含非有限数值")
+        if not self.is_better(obj):
+            return False
+        candidate = VerifiedIncumbent(
+            model_status=str(model_status),
+            objective_value=obj,
+            best_bound=best_bound,
+            relative_gap=relative_gap,
+            primals=validated_primals,
+            solve_domain=solve_domain,
+            original_model_verified=True,
+            subdomain_status=subdomain_status,
+            subdomain_best_bound=subdomain_best_bound,
+            subdomain_relative_gap=subdomain_relative_gap,
+        )
+        content = _format_solution_v1(
+            model_status=candidate.model_status,
+            feasible=True,
+            objective=candidate.objective_value,
+            best_bound=candidate.best_bound,
+            relative_gap=candidate.relative_gap,
+            primals=candidate.primals,
+            solve_domain=candidate.solve_domain,
+            original_model_verified=candidate.original_model_verified,
+            subdomain_status=candidate.subdomain_status,
+            subdomain_best_bound=candidate.subdomain_best_bound,
+            subdomain_relative_gap=candidate.subdomain_relative_gap,
+        )
+        target_path = sol_path if sol_path is not None else self.sol_path
+        if target_path is not None:
+            _atomic_write_text(target_path, content)
+        self.incumbent = candidate
+        return True
+
+    def record_from_handle(
+        self,
+        handle,
+        model_status,
+        *,
+        original_model_verified: bool,
+        solve_domain: str = "original",
+        subdomain_status: str | None = None,
+        subdomain_best_bound: float | None = None,
+        subdomain_relative_gap: float | None = None,
+        sol_path: str | None = None,
+    ) -> bool:
+        """Extract feasible solution from ``handle`` and record if verified and strictly better."""
+        if not original_model_verified:
+            return False
+        feasible, objective, best_bound, gap, primals = _extract_solution_data(handle, model_status)
+        if not feasible or objective is None:
+            return False
+        return self.record(
+            objective_value=objective,
+            primals=primals,
+            model_status=model_status,
+            best_bound=best_bound,
+            relative_gap=gap,
+            solve_domain=solve_domain,
+            original_model_verified=True,
+            subdomain_status=subdomain_status,
+            subdomain_best_bound=subdomain_best_bound,
+            subdomain_relative_gap=subdomain_relative_gap,
+            sol_path=sol_path,
+        )
+
+    def to_solution_text(self) -> str:
+        if self.incumbent is None:
+            raise RuntimeError("尚未记录已核查可行解")
+        inc = self.incumbent
+        return _format_solution_v1(
+            model_status=inc.model_status,
+            feasible=True,
+            objective=inc.objective_value,
+            best_bound=inc.best_bound,
+            relative_gap=inc.relative_gap,
+            primals=inc.primals,
+            solve_domain=inc.solve_domain,
+            original_model_verified=inc.original_model_verified,
+            subdomain_status=inc.subdomain_status,
+            subdomain_best_bound=inc.subdomain_best_bound,
+            subdomain_relative_gap=inc.subdomain_relative_gap,
+        )
+
+
+def _solve_model(
+    mps_path: str,
+    time_limit: float,
+    seed: int,
+    *,
+    acceleration_mode: str = "off",
+    threads: int | None = None,
+):
+    """读 MPS 并真实求解，返回 ``(h, model_status)``；失败抛异常。
+
+    S1 阶段 ``on_demand_mutex`` 在无已验证互斥元数据时干净回退原路径；
+    ``time_limit`` 始终在 ``readModel()`` 之后写入。
+    """
+    import highspy
+
+    if acceleration_mode not in _ACCELERATION_MODES:
+        raise ValueError(f"非法 acceleration_mode: {acceleration_mode!r}")
     handle = highspy.Highs()
     with _timed_stage("read_model"):
         if handle.readModel(mps_path) != highspy.HighsStatus.kOk:
             raise RuntimeError(f"MPS 读取失败: {mps_path!r}")
     handle.setOptionValue("time_limit", time_limit)
     handle.setOptionValue("random_seed", seed)
+    if threads is not None:
+        handle.setOptionValue("threads", threads)
     with _timed_stage("run"):
         if handle.run() == highspy.HighsStatus.kError:
             raise RuntimeError("HiGHS 求解执行错误")
     return handle, handle.getModelStatus()
 
 
-def _write_solution(handle, model_status, sol_path: str) -> None:
-    """生成 ``HIGHS_SOLUTION_V1`` 内容并写出声明文件；失败抛异常。"""
+def _write_solution(
+    handle,
+    model_status,
+    sol_path: str,
+    *,
+    solve_domain: str = "original",
+    original_model_verified: bool = True,
+    subdomain_status: str | None = None,
+    subdomain_best_bound: float | None = None,
+    subdomain_relative_gap: float | None = None,
+) -> None:
+    """生成 ``HIGHS_SOLUTION_V1`` 内容并原子写出声明文件；失败抛异常。"""
     with _timed_stage("solution_write"):
-        content = _solution_text(handle, model_status)
-        with open(sol_path, "w", encoding="utf-8") as stream:
-            stream.write(content)
+        if (
+            solve_domain == "original"
+            and original_model_verified
+            and subdomain_status is None
+            and subdomain_best_bound is None
+            and subdomain_relative_gap is None
+        ):
+            content = _solution_text(handle, model_status)
+        else:
+            content = _solution_text(
+                handle,
+                model_status,
+                solve_domain=solve_domain,
+                original_model_verified=original_model_verified,
+                subdomain_status=subdomain_status,
+                subdomain_best_bound=subdomain_best_bound,
+                subdomain_relative_gap=subdomain_relative_gap,
+            )
+        _atomic_write_text(sol_path, content)
 
 
-def _solution_text(handle, model_status) -> str:
+def _extract_solution_data(handle, model_status):
     import highspy
 
     solution = handle.getSolution()
@@ -162,9 +485,33 @@ def _solution_text(handle, model_status) -> str:
         # nonzero gap within its configured optimality tolerance.
         best_bound, gap = objective, 0.0
     primals = solution.col_value if feasible else []
+    return feasible, objective, best_bound, gap, primals
+
+
+def _format_solution_v1(
+    *,
+    model_status: object,
+    feasible: bool,
+    objective: float | None,
+    best_bound: float | None,
+    relative_gap: float | None,
+    primals: Sequence[float],
+    solve_domain: str = "original",
+    original_model_verified: bool = True,
+    subdomain_status: str | None = None,
+    subdomain_best_bound: float | None = None,
+    subdomain_relative_gap: float | None = None,
+) -> str:
+    if solve_domain not in _SOLVE_DOMAINS:
+        raise ValueError(f"非法 solve_domain: {solve_domain!r}")
 
     def number(value):
-        return "none" if value is None else repr(float(value))
+        if value is None:
+            return "none"
+        num = float(value)
+        if not math.isfinite(num):
+            raise ValueError(f"非有限解数值: {value!r}")
+        return repr(num)
 
     lines = [
         "HIGHS_SOLUTION_V1",
@@ -172,37 +519,104 @@ def _solution_text(handle, model_status) -> str:
         f"has_feasible_solution: {str(bool(feasible)).lower()}",
         f"objective_value: {number(objective)}",
         f"best_bound: {number(best_bound)}",
-        f"relative_gap: {number(gap)}",
+        f"relative_gap: {number(relative_gap)}",
         f"num_columns: {len(primals)}",
-        "primal:",
     ]
+    if solve_domain != "original" or not original_model_verified:
+        lines.append(f"solve_domain: {solve_domain}")
+        lines.append(f"original_model_verified: {str(bool(original_model_verified)).lower()}")
+    if subdomain_status is not None:
+        lines.append(f"subdomain_status: {subdomain_status}")
+    if subdomain_best_bound is not None:
+        lines.append(f"subdomain_best_bound: {number(subdomain_best_bound)}")
+    if subdomain_relative_gap is not None:
+        lines.append(f"subdomain_relative_gap: {number(subdomain_relative_gap)}")
+    lines.append("primal:")
     lines.extend(f"{index}: {value!r}" for index, value in enumerate(primals))
     return "\n".join(lines) + "\n"
 
 
+def _solution_text(
+    handle,
+    model_status,
+    *,
+    solve_domain: str = "original",
+    original_model_verified: bool = True,
+    subdomain_status: str | None = None,
+    subdomain_best_bound: float | None = None,
+    subdomain_relative_gap: float | None = None,
+) -> str:
+    feasible, objective, best_bound, gap, primals = _extract_solution_data(handle, model_status)
+    return _format_solution_v1(
+        model_status=model_status,
+        feasible=feasible,
+        objective=objective,
+        best_bound=best_bound,
+        relative_gap=gap,
+        primals=primals,
+        solve_domain=solve_domain,
+        original_model_verified=original_model_verified,
+        subdomain_status=subdomain_status,
+        subdomain_best_bound=subdomain_best_bound,
+        subdomain_relative_gap=subdomain_relative_gap,
+    )
+
+
+def _parse_solve_args(args: list[str]) -> tuple[str, str, float, int, str, int | None]:
+    if len(args) < 7 or (len(args) - 7) % 2 != 0:
+        raise ValueError(f"求解参数须为七项基础参数加可选成对选项，得到 {len(args)} 项")
+    mps_path, flag1, sol_path, flag2, limit_text, flag3, seed_text = args[:7]
+    _check_relative_path(mps_path, "arguments[0]")
+    if flag1 != "--solution_file":
+        raise ValueError("arguments[1] 须为 --solution_file")
+    _check_relative_path(sol_path, "arguments[2]")
+    if flag2 != "--time_limit":
+        raise ValueError("arguments[3] 须为 --time_limit")
+    time_limit = float(limit_text)
+    if not (math.isfinite(time_limit) and time_limit > 0):
+        raise ValueError("arguments[4] 须为正有限秒数")
+    if flag3 != "--random_seed":
+        raise ValueError("arguments[5] 须为 --random_seed")
+    seed = int(seed_text, 10)
+    if seed < 0:
+        raise ValueError("arguments[6] 须为非负整数")
+
+    acceleration_mode = "off"
+    threads: int | None = None
+    seen: set[str] = set()
+    for idx in range(7, len(args), 2):
+        flag, value = args[idx], args[idx + 1]
+        if flag in seen:
+            raise ValueError(f"重复选项: {flag!r}")
+        seen.add(flag)
+        if flag == "--acceleration_mode":
+            if value not in _ACCELERATION_MODES:
+                raise ValueError(f"--acceleration_mode 须为 off 或 on_demand_mutex，得到 {value!r}")
+            acceleration_mode = value
+        elif flag == "--threads":
+            if not value.isascii() or not value.isdigit():
+                raise ValueError(f"--threads 须为正整数，得到 {value!r}")
+            threads = int(value, 10)
+            if threads <= 0:
+                raise ValueError(f"--threads 须为正整数，得到 {value!r}")
+        else:
+            raise ValueError(f"未知选项: {flag!r}")
+    return mps_path, sol_path, time_limit, seed, acceleration_mode, threads
+
+
 def _cmd_solve(args: list[str]) -> int:
-    if len(args) != 7:
-        return _fail(f"求解参数须恰为七项，得到 {len(args)} 项")
-    mps_path, flag1, sol_path, flag2, limit_text, flag3, seed_text = args
     try:
-        _check_relative_path(mps_path, "arguments[0]")
-        if flag1 != "--solution_file":
-            raise ValueError("arguments[1] 须为 --solution_file")
-        _check_relative_path(sol_path, "arguments[2]")
-        if flag2 != "--time_limit":
-            raise ValueError("arguments[3] 须为 --time_limit")
-        time_limit = float(limit_text)
-        if not (math.isfinite(time_limit) and time_limit > 0):
-            raise ValueError("arguments[4] 须为正有限秒数")
-        if flag3 != "--random_seed":
-            raise ValueError("arguments[5] 须为 --random_seed")
-        seed = int(seed_text, 10)
-        if seed < 0:
-            raise ValueError("arguments[6] 须为非负整数")
+        mps_path, sol_path, time_limit, seed, acceleration_mode, threads = _parse_solve_args(args)
     except ValueError as exc:
         return _fail(str(exc))
     try:
-        handle, model_status = _solve_model(mps_path, time_limit, seed)
+        handle, model_status = _solve_model(
+            mps_path,
+            time_limit,
+            seed,
+            acceleration_mode=acceleration_mode,
+            threads=threads,
+        )
         _write_solution(handle, model_status, sol_path)
     except Exception as exc:  # 求解链基础设施失败，不伪造输出
         return _fail(f"求解失败: {exc}")

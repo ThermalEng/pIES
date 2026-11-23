@@ -6,7 +6,7 @@
 DB/网络/对象存储/环境变量/用户目录，不读取随机全局状态。
 
 能力范围见 ``DESCRIPTOR``：mode=planning、precision=medium、
-solver=``ies.solver.highs@1.7.2``、空 options、输出 solution/metrics、
+solver=``ies.solver.highs@1.7.2``、支持可选 ``acceleration.mode`` options、输出 solution/metrics、
 constant tariff；数学能力即 ``build_project_model`` 现有 lowerer 明确
 支持的部分，超出即明确拒绝，不近似、不回退。
 
@@ -67,17 +67,28 @@ PARAMETERS_PATH = "input/parameters.json"
 SOLUTION_PATH = "output/solution.sol"
 SOLUTION_MEDIA_TYPE = "text/plain"
 
-_EMPTY_OPTIONS_SCHEMA: dict[str, Any] = {
+_OPTIONS_SCHEMA: dict[str, Any] = {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "type": "object",
-    "properties": {},
+    "properties": {
+        "acceleration": {
+            "type": "object",
+            "properties": {
+                "mode": {
+                    "type": "string",
+                    "enum": ["off", "on_demand_mutex"],
+                },
+            },
+            "additionalProperties": False,
+        },
+    },
     "additionalProperties": False,
 }
 
 DESCRIPTOR = GeneratorDescriptor(
     generator_id=GENERATOR_ID,
     version=GENERATOR_VERSION,
-    options_schema=dict(_EMPTY_OPTIONS_SCHEMA),
+    options_schema=dict(_OPTIONS_SCHEMA),
     outputs=SUPPORTED_OUTPUTS,
     assembly_schema_version=ASSEMBLY_SCHEMA_VERSION,
     modes=("planning",),
@@ -192,6 +203,18 @@ class HighsMilpProvider:
             len(model.columns),
         )
         self._check_stop(stop)
+        arguments = [
+            PROBLEM_PATH,
+            "--solution_file",
+            SOLUTION_PATH,
+            "--time_limit",
+            str(config.time_limit_seconds),
+            "--random_seed",
+            str(seed),
+        ]
+        acceleration = config.options.get("acceleration")
+        if isinstance(acceleration, Mapping) and acceleration.get("mode") == "on_demand_mutex":
+            arguments.extend(["--acceleration_mode", "on_demand_mutex"])
         manifest = SolverBundleManifest(
             bundle={"generator": self.ref, "solver": SOLVER_REF},
             inputs=[
@@ -202,15 +225,7 @@ class HighsMilpProvider:
             command={
                 "executor": EXECUTOR_REF,
                 "executable": SOLVER_REF,
-                "arguments": [
-                    PROBLEM_PATH,
-                    "--solution_file",
-                    SOLUTION_PATH,
-                    "--time_limit",
-                    str(config.time_limit_seconds),
-                    "--random_seed",
-                    str(seed),
-                ],
+                "arguments": arguments,
                 "working_directory": ".",
                 "timeout_seconds": config.time_limit_seconds + PROCESS_IO_GRACE_SECONDS,
                 "network": False,
