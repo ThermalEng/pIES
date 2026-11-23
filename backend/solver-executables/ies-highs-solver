@@ -29,13 +29,14 @@ solution 文件格式 ``HIGHS_SOLUTION_V1``（ResultAdapter 按此解析）： :
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
-from contextlib import contextmanager
 import math
 import os
 import sys
 import tempfile
 import time
+from array import array
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 
 #: 自检在给定目录内使用的输入/声明输出文件名（固定约定）。
 SELF_TEST_MPS = "self-test.mps"
@@ -123,6 +124,112 @@ def _cmd_version() -> int:
 
 _SOLVE_DOMAINS = ("original", "valid_relaxation", "restricted")
 _ACCELERATION_MODES = ("off", "on_demand_mutex")
+_DEFAULT_MIN_SOLVE_GUARD_SECONDS = 0.05
+_DEFAULT_IO_MARGIN_SECONDS = 0.05
+
+
+def _set_highs_option(handle, key: str, value) -> None:
+    """Apply a HiGHS option and raise immediately if HiGHS rejects it."""
+    import highspy
+
+    status = handle.setOptionValue(key, value)
+    if status != highspy.HighsStatus.kOk:
+        raise RuntimeError(f"HiGHS 无法应用选项 {key}={value!r} (status={status})")
+
+
+def verify_primal_against_lp(
+    lp,
+    primals: Sequence[float],
+    *,
+    feasibility_tolerance: float = 1e-7,
+    integrality_tolerance: float = 1e-6,
+) -> bool:
+    """Verify ``primals`` satisfies all variable bounds, integrality, and row bounds of ``lp``."""
+    import highspy
+
+    num_col = int(lp.num_col_)
+    num_row = int(lp.num_row_)
+    if len(primals) != num_col:
+        return False
+    xs = [float(v) for v in primals]
+    if not all(math.isfinite(v) for v in xs):
+        return False
+
+    col_lowers = lp.col_lower_
+    col_uppers = lp.col_upper_
+    for col in range(num_col):
+        val = xs[col]
+        lo = float(col_lowers[col])
+        hi = float(col_uppers[col])
+        if lo > -math.inf and val < lo - feasibility_tolerance:
+            return False
+        if hi < math.inf and val > hi + feasibility_tolerance:
+            return False
+
+    integrality = lp.integrality_
+    if len(integrality) == num_col:
+        for col in range(num_col):
+            if integrality[col] == highspy.HighsVarType.kInteger:
+                if abs(xs[col] - round(xs[col])) > integrality_tolerance:
+                    return False
+
+    if num_row == 0:
+        return True
+
+    matrix = lp.a_matrix_
+    starts = matrix.start_
+    p_end = matrix.p_end_
+    indices = matrix.index_
+    values = matrix.value_
+    row_sum = array("d", [0.0]) * num_row
+    row_comp = array("d", [0.0]) * num_row
+
+    if matrix.format_ == highspy.MatrixFormat.kColwise:
+        for col in range(num_col):
+            x_val = xs[col]
+            if x_val == 0.0:
+                continue
+            begin = int(starts[col])
+            end = (
+                int(p_end[col])
+                if len(p_end) > col
+                else (int(starts[col + 1]) if col + 1 < len(starts) else len(indices))
+            )
+            for pos in range(begin, end):
+                r = int(indices[pos])
+                term = float(values[pos]) * x_val
+                s = row_sum[r]
+                t = s + term
+                if abs(s) >= abs(term):
+                    row_comp[r] += (s - t) + term
+                else:
+                    row_comp[r] += (term - t) + s
+                row_sum[r] = t
+    elif matrix.format_ == highspy.MatrixFormat.kRowwise:
+        for r in range(num_row):
+            begin = int(starts[r])
+            end = (
+                int(p_end[r])
+                if len(p_end) > r
+                else (int(starts[r + 1]) if r + 1 < len(starts) else len(indices))
+            )
+            row_sum[r] = math.fsum(float(values[pos]) * xs[int(indices[pos])] for pos in range(begin, end))
+    else:
+        raise ValueError(f"未知 HiGHS 矩阵存储格式: {matrix.format_!r}")
+
+    row_lowers = lp.row_lower_
+    row_uppers = lp.row_upper_
+    for r in range(num_row):
+        act = row_sum[r] + row_comp[r]
+        if not math.isfinite(act):
+            return False
+        lo = float(row_lowers[r])
+        hi = float(row_uppers[r])
+        if lo > -math.inf and act < lo - feasibility_tolerance:
+            return False
+        if hi < math.inf and act > hi + feasibility_tolerance:
+            return False
+    return True
 
 
 def remaining_solve_budget(
@@ -198,8 +305,8 @@ def inject_warm_start(handle, col_values: Sequence[float]):
     return handle.setSolution(solution)
 
 
-def _atomic_write_text(sol_path: str, content: str) -> None:
-    """Atomically write ``content`` via same-directory temp file and ``os.replace``."""
+def _atomic_write_lines(sol_path: str, lines: Iterator[str]) -> None:
+    """Atomically write ``lines`` via same-directory temp file and ``os.replace``."""
     parent = os.path.dirname(sol_path) or "."
     base = os.path.basename(sol_path)
     tmp_path: str | None = None
@@ -213,7 +320,8 @@ def _atomic_write_text(sol_path: str, content: str) -> None:
             delete=False,
         ) as stream:
             tmp_path = stream.name
-            stream.write(content)
+            for line in lines:
+                stream.write(line)
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(tmp_path, sol_path)
@@ -224,6 +332,44 @@ def _atomic_write_text(sol_path: str, content: str) -> None:
             except OSError:
                 pass
         raise
+
+
+def _atomic_write_text(sol_path: str, content: str) -> None:
+    """Atomically write ``content`` via same-directory temp file and ``os.replace``."""
+    _atomic_write_lines(sol_path, iter((content,)))
+
+
+def _atomic_write_solution_v1(
+    sol_path: str,
+    *,
+    model_status: object,
+    feasible: bool,
+    objective: float | None,
+    best_bound: float | None,
+    relative_gap: float | None,
+    primals: Sequence[float],
+    solve_domain: str = "original",
+    original_model_verified: bool = True,
+    subdomain_status: str | None = None,
+    subdomain_best_bound: float | None = None,
+    subdomain_relative_gap: float | None = None,
+) -> None:
+    _atomic_write_lines(
+        sol_path,
+        _iter_solution_v1_lines(
+            model_status=model_status,
+            feasible=feasible,
+            objective=objective,
+            best_bound=best_bound,
+            relative_gap=relative_gap,
+            primals=primals,
+            solve_domain=solve_domain,
+            original_model_verified=original_model_verified,
+            subdomain_status=subdomain_status,
+            subdomain_best_bound=subdomain_best_bound,
+            subdomain_relative_gap=subdomain_relative_gap,
+        ),
+    )
 
 
 class VerifiedIncumbent:
@@ -249,7 +395,7 @@ class VerifiedIncumbent:
         objective_value: float,
         best_bound: float | None,
         relative_gap: float | None,
-        primals: tuple[float, ...],
+        primals: array | Sequence[float],
         solve_domain: str = "original",
         original_model_verified: bool = True,
         subdomain_status: str | None = None,
@@ -260,7 +406,11 @@ class VerifiedIncumbent:
         self.objective_value = objective_value
         self.best_bound = best_bound
         self.relative_gap = relative_gap
-        self.primals = primals
+        self.primals = (
+            primals
+            if isinstance(primals, array) and primals.typecode == "d"
+            else array("d", primals)
+        )
         self.solve_domain = solve_domain
         self.original_model_verified = original_model_verified
         self.subdomain_status = subdomain_status
@@ -269,7 +419,7 @@ class VerifiedIncumbent:
 
 
 class VerifiedIncumbentSlot:
-    """Single-slot incumbent tracker with atomic persistence to ``sol_path``."""
+    """Single-slot incumbent tracker with atomic streaming persistence to ``sol_path``."""
 
     def __init__(self, *, sense: object = "minimize", sol_path: str | None = None) -> None:
         sense_name = str(sense)
@@ -302,20 +452,23 @@ class VerifiedIncumbentSlot:
         relative_gap: float | None = None,
         solve_domain: str = "original",
         original_model_verified: bool = True,
+        original_lp=None,
         subdomain_status: str | None = None,
         subdomain_best_bound: float | None = None,
         subdomain_relative_gap: float | None = None,
         sol_path: str | None = None,
     ) -> bool:
-        """Record a strictly better verified primal and atomically persist ``sol_path``."""
+        """Verify against ``original_lp`` (if provided) and atomically persist strictly better primals."""
         if not original_model_verified:
             return False
         obj = float(objective_value)
         if not math.isfinite(obj):
             raise ValueError(f"目标值非有限: {objective_value!r}")
-        validated_primals = tuple(float(v) for v in primals)
-        if not all(math.isfinite(v) for v in validated_primals):
+        compact_primals = array("d", (float(v) for v in primals))
+        if not all(math.isfinite(v) for v in compact_primals):
             raise ValueError("主解向量包含非有限数值")
+        if original_lp is not None and not verify_primal_against_lp(original_lp, compact_primals):
+            return False
         if not self.is_better(obj):
             return False
         candidate = VerifiedIncumbent(
@@ -323,29 +476,29 @@ class VerifiedIncumbentSlot:
             objective_value=obj,
             best_bound=best_bound,
             relative_gap=relative_gap,
-            primals=validated_primals,
+            primals=compact_primals,
             solve_domain=solve_domain,
             original_model_verified=True,
             subdomain_status=subdomain_status,
             subdomain_best_bound=subdomain_best_bound,
             subdomain_relative_gap=subdomain_relative_gap,
         )
-        content = _format_solution_v1(
-            model_status=candidate.model_status,
-            feasible=True,
-            objective=candidate.objective_value,
-            best_bound=candidate.best_bound,
-            relative_gap=candidate.relative_gap,
-            primals=candidate.primals,
-            solve_domain=candidate.solve_domain,
-            original_model_verified=candidate.original_model_verified,
-            subdomain_status=candidate.subdomain_status,
-            subdomain_best_bound=candidate.subdomain_best_bound,
-            subdomain_relative_gap=candidate.subdomain_relative_gap,
-        )
         target_path = sol_path if sol_path is not None else self.sol_path
         if target_path is not None:
-            _atomic_write_text(target_path, content)
+            _atomic_write_solution_v1(
+                target_path,
+                model_status=candidate.model_status,
+                feasible=True,
+                objective=candidate.objective_value,
+                best_bound=candidate.best_bound,
+                relative_gap=candidate.relative_gap,
+                primals=candidate.primals,
+                solve_domain=candidate.solve_domain,
+                original_model_verified=candidate.original_model_verified,
+                subdomain_status=candidate.subdomain_status,
+                subdomain_best_bound=candidate.subdomain_best_bound,
+                subdomain_relative_gap=candidate.subdomain_relative_gap,
+            )
         self.incumbent = candidate
         return True
 
@@ -355,18 +508,20 @@ class VerifiedIncumbentSlot:
         model_status,
         *,
         original_model_verified: bool,
+        original_lp=None,
         solve_domain: str = "original",
         subdomain_status: str | None = None,
         subdomain_best_bound: float | None = None,
         subdomain_relative_gap: float | None = None,
         sol_path: str | None = None,
     ) -> bool:
-        """Extract feasible solution from ``handle`` and record if verified and strictly better."""
+        """Extract feasible solution from ``handle`` and verify against original LP before recording."""
         if not original_model_verified:
             return False
         feasible, objective, best_bound, gap, primals = _extract_solution_data(handle, model_status)
         if not feasible or objective is None:
             return False
+        ref_lp = original_lp if original_lp is not None else handle.getLp()
         return self.record(
             objective_value=objective,
             primals=primals,
@@ -375,6 +530,7 @@ class VerifiedIncumbentSlot:
             relative_gap=gap,
             solve_domain=solve_domain,
             original_model_verified=True,
+            original_lp=ref_lp,
             subdomain_status=subdomain_status,
             subdomain_best_bound=subdomain_best_bound,
             subdomain_relative_gap=subdomain_relative_gap,
@@ -407,28 +563,119 @@ def _solve_model(
     *,
     acceleration_mode: str = "off",
     threads: int | None = None,
+    min_guard: float = _DEFAULT_MIN_SOLVE_GUARD_SECONDS,
+    io_margin: float = _DEFAULT_IO_MARGIN_SECONDS,
 ):
     """读 MPS 并真实求解，返回 ``(h, model_status)``；失败抛异常。
 
-    S1 阶段 ``on_demand_mutex`` 在无已验证互斥元数据时干净回退原路径；
-    ``time_limit`` 始终在 ``readModel()`` 之后写入。
+    ``off`` 路径保持历史语义不变；启用加速模式时在 ``readModel()`` 前记录单调
+    截止时钟，读模后按实际剩余预算设置 ``time_limit``（耗尽则返回 ``kTimeLimit``
+    而不启动 ``run()``）。
     """
     import highspy
 
     if acceleration_mode not in _ACCELERATION_MODES:
         raise ValueError(f"非法 acceleration_mode: {acceleration_mode!r}")
+    deadline = time.monotonic() + time_limit if acceleration_mode != "off" else None
     handle = highspy.Highs()
     with _timed_stage("read_model"):
         if handle.readModel(mps_path) != highspy.HighsStatus.kOk:
             raise RuntimeError(f"MPS 读取失败: {mps_path!r}")
-    handle.setOptionValue("time_limit", time_limit)
-    handle.setOptionValue("random_seed", seed)
+    _set_highs_option(handle, "random_seed", seed)
     if threads is not None:
-        handle.setOptionValue("threads", threads)
+        _set_highs_option(handle, "threads", threads)
+    if deadline is not None:
+        _log_stage("acceleration", "fallback", status=f"requested={acceleration_mode},applied=none")
+        effective_limit = remaining_solve_budget(deadline, min_guard=min_guard, io_margin=io_margin)
+        if effective_limit is None:
+            _log_stage("run", "skipped", status="budget_exhausted")
+            return handle, highspy.HighsModelStatus.kTimeLimit
+    else:
+        effective_limit = time_limit
+    _set_highs_option(handle, "time_limit", effective_limit)
     with _timed_stage("run"):
         if handle.run() == highspy.HighsStatus.kError:
             raise RuntimeError("HiGHS 求解执行错误")
     return handle, handle.getModelStatus()
+
+
+def _run_accelerated_solve(
+    mps_path: str,
+    sol_path: str,
+    time_limit: float,
+    seed: int,
+    *,
+    acceleration_mode: str,
+    threads: int | None = None,
+    min_guard: float = _DEFAULT_MIN_SOLVE_GUARD_SECONDS,
+    io_margin: float = _DEFAULT_IO_MARGIN_SECONDS,
+    stages: Sequence[Callable] | None = None,
+) -> tuple[object, object, VerifiedIncumbentSlot]:
+    """正式加速求解路径：统一单调截止时钟 + 原模型独立核查 + 单槽位原子保解。"""
+    import highspy
+
+    if acceleration_mode not in _ACCELERATION_MODES or acceleration_mode == "off":
+        raise ValueError(f"非法加速模式: {acceleration_mode!r}")
+    deadline = time.monotonic() + time_limit
+    handle = highspy.Highs()
+    with _timed_stage("read_model"):
+        if handle.readModel(mps_path) != highspy.HighsStatus.kOk:
+            raise RuntimeError(f"MPS 读取失败: {mps_path!r}")
+    original_lp = handle.getLp()
+    slot = VerifiedIncumbentSlot(sense=original_lp.sense_, sol_path=sol_path)
+    _set_highs_option(handle, "random_seed", seed)
+    if threads is not None:
+        _set_highs_option(handle, "threads", threads)
+
+    if stages is None:
+        _log_stage("acceleration", "fallback", status=f"requested={acceleration_mode},applied=none")
+
+        def _default_stage(cur_handle, _budget: float):
+            with _timed_stage("run"):
+                if cur_handle.run() == highspy.HighsStatus.kError:
+                    raise RuntimeError("HiGHS 求解执行错误")
+            return cur_handle.getModelStatus(), "original"
+
+        stage_list: Sequence[Callable] = (_default_stage,)
+    else:
+        stage_list = stages
+
+    last_status = highspy.HighsModelStatus.kTimeLimit
+    for stage_fn in stage_list:
+        solve_budget = remaining_solve_budget(deadline, min_guard=min_guard, io_margin=io_margin)
+        if solve_budget is None:
+            _log_stage("run", "skipped", status="budget_exhausted")
+            break
+        _set_highs_option(handle, "time_limit", solve_budget)
+        stage_result = stage_fn(handle, solve_budget)
+        if isinstance(stage_result, tuple):
+            stage_status = stage_result[0]
+            stage_domain = stage_result[1]
+            subdomain_status = stage_result[2] if len(stage_result) > 2 else None
+            subdomain_best_bound = stage_result[3] if len(stage_result) > 3 else None
+            subdomain_relative_gap = stage_result[4] if len(stage_result) > 4 else None
+        else:
+            stage_status = stage_result
+            stage_domain = "original"
+            subdomain_status = None
+            subdomain_best_bound = None
+            subdomain_relative_gap = None
+        last_status = stage_status
+        slot.record_from_handle(
+            handle,
+            stage_status,
+            original_model_verified=True,
+            original_lp=original_lp,
+            solve_domain=stage_domain,
+            subdomain_status=subdomain_status,
+            subdomain_best_bound=subdomain_best_bound,
+            subdomain_relative_gap=subdomain_relative_gap,
+            sol_path=sol_path,
+        )
+
+    if slot.incumbent is None:
+        _write_solution(handle, last_status, sol_path)
+    return handle, last_status, slot
 
 
 def _write_solution(
@@ -451,18 +698,25 @@ def _write_solution(
             and subdomain_best_bound is None
             and subdomain_relative_gap is None
         ):
-            content = _solution_text(handle, model_status)
+            _atomic_write_text(sol_path, _solution_text(handle, model_status))
         else:
-            content = _solution_text(
-                handle,
-                model_status,
+            feasible, objective, best_bound, gap, primals = _extract_solution_data(
+                handle, model_status
+            )
+            _atomic_write_solution_v1(
+                sol_path,
+                model_status=model_status,
+                feasible=feasible,
+                objective=objective,
+                best_bound=best_bound,
+                relative_gap=gap,
+                primals=primals,
                 solve_domain=solve_domain,
                 original_model_verified=original_model_verified,
                 subdomain_status=subdomain_status,
                 subdomain_best_bound=subdomain_best_bound,
                 subdomain_relative_gap=subdomain_relative_gap,
             )
-        _atomic_write_text(sol_path, content)
 
 
 def _extract_solution_data(handle, model_status):
@@ -488,6 +742,52 @@ def _extract_solution_data(handle, model_status):
     return feasible, objective, best_bound, gap, primals
 
 
+def _iter_solution_v1_lines(
+    *,
+    model_status: object,
+    feasible: bool,
+    objective: float | None,
+    best_bound: float | None,
+    relative_gap: float | None,
+    primals: Sequence[float],
+    solve_domain: str = "original",
+    original_model_verified: bool = True,
+    subdomain_status: str | None = None,
+    subdomain_best_bound: float | None = None,
+    subdomain_relative_gap: float | None = None,
+) -> Iterator[str]:
+    if solve_domain not in _SOLVE_DOMAINS:
+        raise ValueError(f"非法 solve_domain: {solve_domain!r}")
+
+    def number(value):
+        if value is None:
+            return "none"
+        num = float(value)
+        if not math.isfinite(num):
+            raise ValueError(f"非有限解数值: {value!r}")
+        return repr(num)
+
+    yield "HIGHS_SOLUTION_V1\n"
+    yield f"model_status: {model_status}\n"
+    yield f"has_feasible_solution: {str(bool(feasible)).lower()}\n"
+    yield f"objective_value: {number(objective)}\n"
+    yield f"best_bound: {number(best_bound)}\n"
+    yield f"relative_gap: {number(relative_gap)}\n"
+    yield f"num_columns: {len(primals)}\n"
+    if solve_domain != "original" or not original_model_verified:
+        yield f"solve_domain: {solve_domain}\n"
+        yield f"original_model_verified: {str(bool(original_model_verified)).lower()}\n"
+    if subdomain_status is not None:
+        yield f"subdomain_status: {subdomain_status}\n"
+    if subdomain_best_bound is not None:
+        yield f"subdomain_best_bound: {number(subdomain_best_bound)}\n"
+    if subdomain_relative_gap is not None:
+        yield f"subdomain_relative_gap: {number(subdomain_relative_gap)}\n"
+    yield "primal:\n"
+    for index, value in enumerate(primals):
+        yield f"{index}: {value!r}\n"
+
+
 def _format_solution_v1(
     *,
     model_status: object,
@@ -502,38 +802,21 @@ def _format_solution_v1(
     subdomain_best_bound: float | None = None,
     subdomain_relative_gap: float | None = None,
 ) -> str:
-    if solve_domain not in _SOLVE_DOMAINS:
-        raise ValueError(f"非法 solve_domain: {solve_domain!r}")
-
-    def number(value):
-        if value is None:
-            return "none"
-        num = float(value)
-        if not math.isfinite(num):
-            raise ValueError(f"非有限解数值: {value!r}")
-        return repr(num)
-
-    lines = [
-        "HIGHS_SOLUTION_V1",
-        f"model_status: {model_status}",
-        f"has_feasible_solution: {str(bool(feasible)).lower()}",
-        f"objective_value: {number(objective)}",
-        f"best_bound: {number(best_bound)}",
-        f"relative_gap: {number(relative_gap)}",
-        f"num_columns: {len(primals)}",
-    ]
-    if solve_domain != "original" or not original_model_verified:
-        lines.append(f"solve_domain: {solve_domain}")
-        lines.append(f"original_model_verified: {str(bool(original_model_verified)).lower()}")
-    if subdomain_status is not None:
-        lines.append(f"subdomain_status: {subdomain_status}")
-    if subdomain_best_bound is not None:
-        lines.append(f"subdomain_best_bound: {number(subdomain_best_bound)}")
-    if subdomain_relative_gap is not None:
-        lines.append(f"subdomain_relative_gap: {number(subdomain_relative_gap)}")
-    lines.append("primal:")
-    lines.extend(f"{index}: {value!r}" for index, value in enumerate(primals))
-    return "\n".join(lines) + "\n"
+    return "".join(
+        _iter_solution_v1_lines(
+            model_status=model_status,
+            feasible=feasible,
+            objective=objective,
+            best_bound=best_bound,
+            relative_gap=relative_gap,
+            primals=primals,
+            solve_domain=solve_domain,
+            original_model_verified=original_model_verified,
+            subdomain_status=subdomain_status,
+            subdomain_best_bound=subdomain_best_bound,
+            subdomain_relative_gap=subdomain_relative_gap,
+        )
+    )
 
 
 def _solution_text(
@@ -610,14 +893,24 @@ def _cmd_solve(args: list[str]) -> int:
     except ValueError as exc:
         return _fail(str(exc))
     try:
-        handle, model_status = _solve_model(
-            mps_path,
-            time_limit,
-            seed,
-            acceleration_mode=acceleration_mode,
-            threads=threads,
-        )
-        _write_solution(handle, model_status, sol_path)
+        if acceleration_mode == "off":
+            handle, model_status = _solve_model(
+                mps_path,
+                time_limit,
+                seed,
+                acceleration_mode=acceleration_mode,
+                threads=threads,
+            )
+            _write_solution(handle, model_status, sol_path)
+        else:
+            _run_accelerated_solve(
+                mps_path,
+                sol_path,
+                time_limit,
+                seed,
+                acceleration_mode=acceleration_mode,
+                threads=threads,
+            )
     except Exception as exc:  # 求解链基础设施失败，不伪造输出
         return _fail(f"求解失败: {exc}")
     return 0
