@@ -47,6 +47,24 @@ if TYPE_CHECKING:
 CALCULATION_CONFIG_SCHEMA = "ies.calculation-config"
 CALCULATION_CONFIG_VERSION = "1.0.0"
 
+#: 公开 CalculationConfig 14 字段权威顺序。
+CALCULATION_CONFIG_FIELDS = (
+    "schema",
+    "schema_version",
+    "mode",
+    "predictions",
+    "generator",
+    "solver",
+    "algorithm",
+    "evaluator",
+    "precision",
+    "convergence",
+    "time_limit_seconds",
+    "options",
+    "seed",
+    "outputs",
+)
+
 #: 求解包 schema(生产者 GeneratorProvider, 消费者执行层)。
 SOLVER_BUNDLE_SCHEMA = "ies.solver-bundle"
 SOLVER_BUNDLE_VERSION = "1.0.0"
@@ -261,14 +279,16 @@ class ResultAdapter(Protocol):
 
 @dataclass(frozen=True, slots=True)
 class CalculationConfig:
-    """公开计算配置(进入业务事实前已校验字头的求解选项)。
+    """公开计算配置(14 字段契约，进入业务事实前已校验字头与模式互斥规则)。
 
     固定一次计算的全部选择: ``mode``、``predictions``（预测目标/算法/
-    参数列表，可空列表，不接受 None）、``generator`` / ``solver`` 精确
-    引用（``<稳定ID>@<语义化版本>``）、``precision``（low|medium|high）、
-    ``convergence``（阶段二收敛，可空）、``time_limit_seconds``、
-    ``options``（对象，可空对象，不接受 None）、随机种子与输出请求。
-    同一字段只有一种形态；嵌套非有限浮点当场拒绝。
+    参数列表，可空列表，不接受 None）、互斥的计算组合（分步模式：
+    ``generator`` + ``solver`` 精确引用且 ``algorithm=None``；一体化模式：
+    ``algorithm`` 精确引用且 ``generator=None``、``solver=None``）、
+    ``evaluator``（按需选择的评价器精确引用或 None）、``precision``
+    （low|medium|high）、``convergence``（阶段二收敛，可空）、
+    ``time_limit_seconds``、``options``（对象，可空对象，不接受 None）、
+    随机种子与输出请求。同一字段只有一种形态；嵌套非有限浮点当场拒绝。
     计算按项目基线完整连续序列进行，本配置不含离散化字段，也不含规划
     目标/变量/约束、设备参数、财务配置、资源或装配内容。多个
     data_predict 时收敛是否必填由后续 application 结合 artifact 判断，
@@ -279,8 +299,10 @@ class CalculationConfig:
     schema_version: str = CALCULATION_CONFIG_VERSION
     mode: str = ""
     predictions: tuple[Mapping[str, object], ...] = ()
-    generator: str = ""
-    solver: str = ""
+    generator: str | None = None
+    solver: str | None = None
+    algorithm: str | None = None
+    evaluator: str | None = None
     precision: str = ""
     convergence: Mapping[str, object] | None = None
     time_limit_seconds: int = 0
@@ -295,8 +317,23 @@ class CalculationConfig:
             raise ValueError(f"计算配置版本非法: {self.schema_version!r}")
         if not isinstance(self.mode, str) or not self.mode:
             raise ValueError(f"mode 须为非空字符串: {self.mode!r}")
-        check_provider_ref(self.generator, "generator")
-        check_provider_ref(self.solver, "solver")
+        if self.generator is not None:
+            check_provider_ref(self.generator, "generator")
+        if self.solver is not None:
+            check_provider_ref(self.solver, "solver")
+        if self.algorithm is not None:
+            check_provider_ref(self.algorithm, "algorithm")
+        if self.evaluator is not None:
+            check_provider_ref(self.evaluator, "evaluator")
+        if self.algorithm is not None:
+            if self.generator is not None or self.solver is not None:
+                raise ValueError(
+                    "一体化算法模式(algorithm 非空)下 generator 与 solver 必须为 None"
+                )
+        elif self.generator is None or self.solver is None:
+            raise ValueError(
+                "分步算法模式下 generator 与 solver 必须同时提供精确引用（不能为 None）"
+            )
         if self.precision not in ("low", "medium", "high"):
             raise ValueError(f"precision 须为 low|medium|high: {self.precision!r}")
         object.__setattr__(self, "predictions", _freeze_predictions(self.predictions))
@@ -337,6 +374,8 @@ class CalculationConfig:
             "predictions": [_thaw_entry(entry) for entry in self.predictions],
             "generator": self.generator,
             "solver": self.solver,
+            "algorithm": self.algorithm,
+            "evaluator": self.evaluator,
             "precision": self.precision,
             "convergence": (
                 dict(thaw_json_value(self.convergence))

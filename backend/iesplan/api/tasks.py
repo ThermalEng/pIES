@@ -111,6 +111,9 @@ def create_task_endpoint(
     predictor_registry = (
         getattr(bootstrap, "predictor_registry", None) if bootstrap is not None else None
     )
+    algorithm_registry = (
+        getattr(bootstrap, "algorithm_registry", None) if bootstrap is not None else None
+    )
     result = tasks_app.submit_task_case(
         db, user, project_id, payload.task_type,
         config=payload.config,
@@ -118,6 +121,7 @@ def create_task_endpoint(
         parent_task_id=payload.parent_task_id,
         generator_registry=generator_registry,
         predictor_registry=predictor_registry,
+        algorithm_registry=algorithm_registry,
         evaluation=payload.evaluation,
     )
     if result["replayed"]:

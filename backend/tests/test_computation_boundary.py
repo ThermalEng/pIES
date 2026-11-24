@@ -435,6 +435,8 @@ def test_config_schema_word_checked() -> None:
         "predictions": [],
         "generator": _GENERATOR,
         "solver": _SOLVER,
+        "algorithm": None,
+        "evaluator": None,
         "precision": "medium",
         "convergence": None,
         "time_limit_seconds": 600,

@@ -25,6 +25,10 @@ from iesplan.api.auth import router as auth_router
 from iesplan.api.config import config_router
 from iesplan.api.deps import get_request_db
 from iesplan.application import identity
+from iesplan.computation import (
+    AlgorithmDescriptor,
+    build_algorithm_registry,
+)
 from iesplan.computation.generators import HIGHS_MILP_PROVIDER, build_registry
 from iesplan.computation.generators.descriptor import GeneratorDescriptor
 from iesplan.db import Base
@@ -112,7 +116,7 @@ def client(db: Session) -> Iterator[TestClient]:
 
 
 def _valid_payload() -> dict[str, Any]:
-    """合法 12 字段 CalculationConfig(已发布契约形态)。"""
+    """合法 14 字段 CalculationConfig(已发布契约形态)。"""
     return {
         "schema": "ies.calculation-config",
         "schema_version": "1.0.0",
@@ -120,6 +124,8 @@ def _valid_payload() -> dict[str, Any]:
         "predictions": [],
         "generator": "ies.generator.highs_milp@1.0.0",
         "solver": "ies.solver.highs@1.7.2",
+        "algorithm": None,
+        "evaluator": None,
         "precision": "medium",
         "convergence": None,
         "time_limit_seconds": 600,
@@ -350,3 +356,89 @@ def test_builtin_precision_is_descriptor_driven(client: TestClient, db: Session)
     assert resp.status_code == 422, resp.text
     assert resp.json()["error"]["location"]["field"] == "precision"
     assert resp.json()["error"]["params"]["supported"] == "medium"
+
+
+class _SyntheticUnifiedAlgorithm:
+    """只有公开 AlgorithmDescriptor 的合成一体化算法。"""
+
+    def __init__(self) -> None:
+        self.descriptor = AlgorithmDescriptor(
+            algorithm_id="test.algorithm.unified",
+            version="1.0.0",
+            modes=("planning", "search"),
+            precisions=("low", "high"),
+            outputs=("solution", "metrics"),
+            evaluators=("ies.result-adapter.highs@1.0.0",),
+            parameters_schema={
+                "type": "object",
+                "properties": {"max_steps": {"type": "integer", "minimum": 1}},
+                "additionalProperties": False,
+            },
+        )
+
+    @property
+    def ref(self) -> str:
+        return self.descriptor.ref
+
+    def available(self) -> bool:
+        return True
+
+
+def test_save_unified_algorithm_mode_roundtrip_and_checks(
+    client: TestClient, db: Session,
+) -> None:
+    """一体化算法模式校验互斥字段、mode/evaluator/options 并完整持久化 14 字段。"""
+    project = seed_project(db)
+    algo = _SyntheticUnifiedAlgorithm()
+    client.app.state.bootstrap_context.algorithm_registry = build_algorithm_registry((algo,))
+    unified_body = {
+        **_valid_payload(),
+        "generator": None,
+        "solver": None,
+        "algorithm": algo.ref,
+        "evaluator": "ies.result-adapter.highs@1.0.0",
+        "mode": "search",
+        "precision": "high",
+        "options": {"max_steps": 25},
+        "outputs": ["solution", "metrics"],
+    }
+    # 互斥冲突拒绝
+    conflict = {**unified_body, "generator": "ies.generator.highs_milp@1.0.0"}
+    resp = client.put(
+        f"/api/projects/{project.id}/config",
+        json={"calculation_config": conflict, "expected_revision": None},
+    )
+    assert resp.status_code == 422, resp.text
+    assert resp.json()["error"]["code"] == "CONFIG-VAL-001"
+
+    # mode/evaluator/options 能力门禁
+    for field, invalid, key in (
+        ("mode", "other", "ies.config.unsupported_mode"),
+        ("evaluator", "other.evaluator@1.0.0", "ies.config.unsupported_evaluator"),
+        ("algorithm", "test.algorithm.missing@1.0.0", "ies.config.unsupported_algorithm"),
+    ):
+        resp = client.put(
+            f"/api/projects/{project.id}/config",
+            json={"calculation_config": {**unified_body, field: invalid}, "expected_revision": None},
+        )
+        assert resp.status_code == 422, (field, resp.text)
+        err = resp.json()["error"]
+        assert err["message_key"] == key
+        assert err["location"]["field"] == field
+
+    bad_opts = client.put(
+        f"/api/projects/{project.id}/config",
+        json={"calculation_config": {**unified_body, "options": {"max_steps": 0}}, "expected_revision": None},
+    )
+    assert bad_opts.status_code == 422, bad_opts.text
+    assert bad_opts.json()["error"]["location"]["field"] == "options"
+
+    saved = client.put(
+        f"/api/projects/{project.id}/config",
+        json={"calculation_config": unified_body, "expected_revision": None},
+    )
+    assert saved.status_code == 200, saved.text
+    assert saved.json()["calculation_config"] == unified_body
+    loaded = client.get(f"/api/projects/{project.id}/config")
+    assert loaded.status_code == 200
+    assert loaded.json()["calculation_config"] == unified_body

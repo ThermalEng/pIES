@@ -288,6 +288,8 @@ def test_non_owner_cannot_cancel_or_retry_task(client: TestClient, db: Session) 
             "predictions": [],
             "generator": "ies.generator.highs_milp@1.0.0",
             "solver": "ies.solver.highs@1.7.2",
+            "algorithm": None,
+            "evaluator": None,
             "precision": "medium",
             "convergence": None,
             "time_limit_seconds": 600,

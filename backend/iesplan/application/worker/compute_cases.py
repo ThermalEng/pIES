@@ -46,6 +46,7 @@ from iesplan import configuration as configuration_domain
 from iesplan.application.worker.lease_cases import Claim
 from iesplan.assembly import ValidatedAssemblyArtifact, ValidationReceipt
 from iesplan.computation import (
+    CALCULATION_CONFIG_FIELDS,
     AttemptContext,
     CalculationConfig,
     ComputationUnavailableError,
@@ -120,20 +121,7 @@ class ComputeExecutionPlane:
 
 #: 快照计算配置正文恢复的显式字段（task_params/config_ref 等提交
 #: 绑定键不进入 CalculationConfig，不在白名单的键直接丢弃而非猜测）。
-_CONFIG_FIELDS = (
-    "schema",
-    "schema_version",
-    "mode",
-    "predictions",
-    "generator",
-    "solver",
-    "precision",
-    "convergence",
-    "time_limit_seconds",
-    "options",
-    "seed",
-    "outputs",
-)
+_CONFIG_FIELDS = CALCULATION_CONFIG_FIELDS
 
 
 def _receipt_from_frozen(data: Mapping[str, Any]) -> ValidationReceipt:

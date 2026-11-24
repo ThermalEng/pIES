@@ -304,6 +304,8 @@ export default function TasksPage() {
       mode: body.mode,
       generator: body.generator,
       solver: body.solver,
+      algorithm: body.algorithm,
+      evaluator: body.evaluator,
       precision: body.precision,
     }
   }, [config])
@@ -1255,10 +1257,25 @@ export default function TasksPage() {
             <dl className="ies-kv">
               <dt>{t('ies.config.mode')}</dt>
               <dd>{calcSummary?.mode || '—'}</dd>
-              <dt>{t('ies.config.generator')}</dt>
-              <dd>{calcSummary?.generator || '—'}</dd>
-              <dt>{t('ies.config.solver')}</dt>
-              <dd>{calcSummary?.solver || '—'}</dd>
+              {calcSummary?.algorithm ? (
+                <>
+                  <dt>{t('ies.config.algorithm')}</dt>
+                  <dd>{calcSummary.algorithm}</dd>
+                </>
+              ) : (
+                <>
+                  <dt>{t('ies.config.generator')}</dt>
+                  <dd>{calcSummary?.generator || '—'}</dd>
+                  <dt>{t('ies.config.solver')}</dt>
+                  <dd>{calcSummary?.solver || '—'}</dd>
+                </>
+              )}
+              {calcSummary?.evaluator ? (
+                <>
+                  <dt>{t('ies.config.evaluator')}</dt>
+                  <dd>{calcSummary.evaluator}</dd>
+                </>
+              ) : null}
               <dt>{t('ies.config.precision')}</dt>
               <dd>{calcSummary?.precision || '—'}</dd>
             </dl>

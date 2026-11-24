@@ -77,6 +77,7 @@ def main():
     payload = {
         "schema": "ies.calculation-config", "schema_version": "1.0.0", "mode": "planning",
         "predictions": [], "generator": "ies.generator.highs_milp@3.4.0", "solver": "ies.solver.highs@1.7.2",
+        "algorithm": None, "evaluator": None,
         "precision": "medium", "convergence": None, "time_limit_seconds": 600,
         "options": {}, "seed": None, "outputs": ["solution"],
     }

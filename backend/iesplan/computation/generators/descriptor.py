@@ -11,35 +11,12 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
-from jsonschema import Draft202012Validator
-from jsonschema.exceptions import SchemaError
-
+from iesplan.computation.config import validate_options_schema
 from iesplan.computation.protocols import (
     check_provider_ref,
     freeze_json_value,
     thaw_json_value,
 )
-
-def _check_options_schema(schema: object) -> Mapping[str, object]:
-    """校验 options_schema 为完整 Draft 2020-12 JSON Schema 对象。
-
-    根 schema 必须描述 object，且 ``additionalProperties`` 必须显式为
-    ``false``（未知字段拒绝）；旧 properties 片段、空 ``{}`` 与非法
-    schema 一律拒绝。返回冻结后的 schema 映射。
-    """
-    if not isinstance(schema, Mapping):
-        raise TypeError(
-            f"options_schema 须为完整 JSON Schema 对象，得到 {type(schema).__name__}"
-        )
-    if schema.get("type") != "object":
-        raise ValueError("options_schema 根 schema 必须描述 object")
-    if schema.get("additionalProperties") is not False:
-        raise ValueError("options_schema 必须显式声明 additionalProperties: false")
-    try:
-        Draft202012Validator.check_schema(dict(schema))
-    except SchemaError as exc:
-        raise ValueError(f"options_schema 自身非法: {exc}") from exc
-    return freeze_json_value(dict(schema))
 
 
 def _check_assembly_schema_version(value: object) -> str:
@@ -128,7 +105,7 @@ class GeneratorDescriptor:
         check_provider_ref(self.result_adapter, "result_adapter")
         if not isinstance(self.deterministic, bool):
             raise TypeError("deterministic 须为布尔值")
-        object.__setattr__(self, "options_schema", _check_options_schema(self.options_schema))
+        object.__setattr__(self, "options_schema", validate_options_schema(self.options_schema))
         resource_limits = self.resource_limits
         if not isinstance(resource_limits, Mapping):
             raise TypeError("resource_limits 须为 Mapping")
