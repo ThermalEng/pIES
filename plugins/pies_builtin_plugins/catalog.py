@@ -24,7 +24,7 @@ as isolated ephemeral containers (`--network=none --read-only --cap-drop=ALL`):
 3. ``ies.solver.highs@1.7.2`` (`kind="solver"`):
    - `/work/in/bundle/`: read-only `ies.solver-bundle@1.0.0` directory (direct handoff
      from Stage 2 `/work/out/bundle/` without re-packing)
-   - optional `/work/in/request.json`: `{"threads": int}`
+   - optional `/work/in/request.json`: `{"parameters": {"threads": int}}`
    - `/work/out/solution.sol`: `HIGHS_SOLUTION_V1` text produced by `/usr/local/bin/ies-highs-solver`
    - `/work/out/solver_meta.json`: structured process timing/exit metadata
 
@@ -32,10 +32,10 @@ as isolated ephemeral containers (`--network=none --read-only --cap-drop=ALL`):
    - `/work/in/bundle/`: read-only `ies.solver-bundle@1.0.0` directory
    - `/work/in/outputs/` (or `/work/in/solution.*` / `/work/in/bundle/output/solution.*`):
      raw solver output directory handed off directly from Stage 3 `/work/out/`
-   - `/work/in/receipt.json` (or `request.json["receipt"]` + `/work/in/outputs/solver_meta.json`)
-   - `/work/in/request.json` (or split `finance.json` + `evaluation.json`):
-     frozen `finance`, `evaluation`, `profile_id`, `bundle_id`, `receipt_id`,
-     `assembly_id`, `calculation_config_id`, `attempt_id`
+   - `/work/in/receipt.json` (or `/work/in/outputs/receipt.json` or `request.json["receipt"]`):
+     required real `ExecutionReceipt` JSON (never fabricated)
+   - `/work/in/request.json` (or split `finance.json`/`effective_finance.yaml` + `evaluation.json`):
+     optional frozen `finance` and `evaluation` for same-run financial evaluation
    - `/work/out/result.json`: `ies.compute-result@1.0.0` (`ComputeResultPayload`) whose
      `outputs` preserves `solver_summary`, `solution`, `series`, `system_series`,
      `financial_facts`, `model_sources`, `metrics`, plus same-run `financial_evaluation`

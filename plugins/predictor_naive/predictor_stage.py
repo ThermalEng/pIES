@@ -39,7 +39,6 @@ def predict(ctx: StageContext) -> None:
         target_type = str(target["target_type"])
         history_object_id = str(target.get("history_object_id") or "")
         parameters = dict(target.get("parameters") or ctx.parameters or {})
-        NAIVE_PREDICTOR.validate_parameters(parameters)
 
         if "history" in target and target["history"] is not None:
             history = tuple(float(v) for v in target["history"])

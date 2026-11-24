@@ -10,12 +10,13 @@ from typing import Any
 from iesplan.computation.bundle import manifest_to_yaml_bytes
 from iesplan.computation.generators.highs_milp import HIGHS_MILP_PROVIDER
 from iesplan.computation.protocols import CalculationConfig
-from iesplan.finance import EffectiveFinanceConfig, EvaluationInput, effective_from_yaml
+from iesplan.finance import EffectiveFinanceConfig, EvaluationInput
 from iesplan.modeling import contribution_from_dict
 from pies_sdk import StageContext, load_safe_yaml, read_json_file
 
 from pies_builtin_plugins.stage_io import (
     artifact_from_frozen,
+    effective_finance_from_frozen,
     materialized_from_frozen,
     stream_content_to_file,
 )
@@ -50,11 +51,14 @@ def _load_stage_inputs(work_in: Path) -> tuple[
         raise KeyError("generator /work/in missing 'materialized' in request.json or sequences.json")
 
     if "finance" in req:
-        finance = EffectiveFinanceConfig.from_dict(req["finance"])
+        finance = effective_finance_from_frozen(req["finance"])
     elif (work_in / "finance.json").is_file():
-        finance = EffectiveFinanceConfig.from_dict(read_json_file(work_in / "finance.json"))
+        finance = effective_finance_from_frozen(read_json_file(work_in / "finance.json"))
     elif (work_in / "effective_finance.yaml").is_file():
-        finance = effective_from_yaml((work_in / "effective_finance.yaml").read_text(encoding="utf-8"))
+        parsed_finance = load_safe_yaml(
+            (work_in / "effective_finance.yaml").read_text(encoding="utf-8")
+        )
+        finance = effective_finance_from_frozen(parsed_finance)
     else:
         raise KeyError(
             "generator /work/in missing 'finance' in request.json, "
@@ -123,7 +127,4 @@ def generate(ctx: StageContext) -> None:
     for rel_path in sorted(bundle.files):
         stream_content_to_file(bundle.files[rel_path], bundle_dir / rel_path)
 
-    yaml_bytes = manifest_to_yaml_bytes(bundle.manifest)
-    # Ensure emitted bundle.yaml complies with safe-YAML reader without re-checking input payloads.
-    load_safe_yaml(yaml_bytes.decode("utf-8"))
-    (bundle_dir / "bundle.yaml").write_bytes(yaml_bytes)
+    (bundle_dir / "bundle.yaml").write_bytes(manifest_to_yaml_bytes(bundle.manifest))

@@ -21,9 +21,11 @@ from iesplan.computation import (
     CalculationConfig,
     DeploymentPolicy,
     ExecutableReadiness,
+    ExecutionReceipt,
     ExecutorDescriptor,
     LocalExecutable,
     LocalProcessProvider,
+    MaterializedSeries,
     MaterializedSet,
     SolverRuntime,
     build_executor_registry,
@@ -39,6 +41,7 @@ from iesplan.finance import EvaluationInput, effective_from_yaml
 from iesplan.modeling import build_math_contribution, contribution_to_dict
 from pies_sdk import (
     read_compute_result,
+    read_json_file,
     read_prediction_output,
     validate_solver_bundle_dir,
     validate_stage_outputs,
@@ -49,6 +52,7 @@ from pies_sdk.runner import run_plugin
 from pies_builtin_plugins.stage_io import (
     build_financial_evaluation_payload,
     build_hourly_series_payload,
+    effective_finance_from_frozen,
 )
 
 PLUGINS_ROOT = Path(__file__).resolve().parent.parent
@@ -160,6 +164,57 @@ def _evaluation_to_dict(ev: EvaluationInput) -> dict[str, Any]:
     }
 
 
+def _stage_receipt(
+    *,
+    receipt_id: str,
+    bundle_id: str,
+    assembly_id: str,
+    config_id: str,
+    attempt_id: str,
+    solver_out: Path,
+) -> dict[str, Any]:
+    meta = read_json_file(solver_out / "solver_meta.json")
+    sol_size = (solver_out / "solution.sol").stat().st_size
+    return ExecutionReceipt(
+        receipt_id=receipt_id,
+        bundle_id=bundle_id,
+        assembly_id=assembly_id,
+        calculation_config_id=config_id,
+        attempt_id=attempt_id,
+        generator_ref=GENERATOR_REF,
+        solver_ref=SOLVER_REF,
+        executor_ref=EXECUTOR_REF,
+        executable_ref=HIGHS_EXECUTABLE_REF,
+        result_adapter_ref=HIGHS_ADAPTER.ref,
+        status="succeeded",
+        exit_code=int(meta["exit_code"]),
+        termination_reason="exited",
+        started_at=str(meta["started_at"]),
+        ended_at=str(meta["ended_at"]),
+        stdout=str(meta["stdout"]),
+        stderr=str(meta["stderr"]),
+        outputs=(
+            {
+                "path": "output/solution.sol",
+                "media_type": "text/plain",
+                "size_bytes": sol_size,
+                "required": True,
+            },
+        ),
+    ).to_dict()
+
+
+def test_effective_finance_from_frozen_roundtrip() -> None:
+    """Trusted finance reconstruction preserves all EffectiveFinanceConfig fields identically."""
+    finance = effective_from_yaml(
+        (IESPLAN_SAMPLES / "finance" / "campus.effective-finance.yaml").read_text(
+            encoding="utf-8"
+        )
+    )
+    restored = effective_finance_from_frozen(finance.to_dict())
+    assert restored.to_dict() == finance.to_dict()
+
+
 def test_campus_full_pipeline_equivalence(tmp_path: Path) -> None:
     """Full campus MILP: generator -> solver -> evaluator matches in-process iesplan."""
     artifact, models, resources, finance, evaluation = _load_campus_inputs()
@@ -223,35 +278,34 @@ def test_campus_full_pipeline_equivalence(tmp_path: Path) -> None:
         actual_bytes = (gen_out / "bundle" / rel_path).read_bytes()
         assert actual_bytes == read_content(content), f"Bundle mismatch in {rel_path}"
 
-    # Stage 3: solver_highs consuming Stage 2 /work/out/bundle via symlink handoff
+    # Stage 3: solver_highs consuming Stage 2 /work/out/bundle and parameters.threads
     solver_in = tmp_path / "solver_in"
     solver_out = tmp_path / "solver_out"
     solver_in.mkdir()
     (solver_in / "bundle").symlink_to(gen_out / "bundle")
+    write_json_file(solver_in / "request.json", {"parameters": {"threads": 2}})
     run_plugin(
         manifest_path=PLUGINS_ROOT / "solver_highs" / "plugin.yaml",
         work_in=solver_in,
         work_out=solver_out,
     )
     validate_stage_outputs("solver", solver_out)
+    solver_meta = read_json_file(solver_out / "solver_meta.json")
+    assert solver_meta["arguments"][-2:] == ["--threads", "2"]
     assert (solver_out / "solution.sol").read_bytes() == read_content(
         direct_outputs["output/solution.sol"]
     )
 
-    # Stage 4: evaluator_highs consuming bundle + solver /work/out + frozen finance/evaluation
+    # Stage 4: evaluator_highs consuming bundle + solver /work/out + real ExecutionReceipt
     eval_in = tmp_path / "eval_in"
     eval_out = tmp_path / "eval_out"
     eval_in.mkdir()
     (eval_in / "bundle").symlink_to(gen_out / "bundle")
     (eval_in / "outputs").symlink_to(solver_out)
+    write_json_file(eval_in / "receipt.json", direct_receipt.to_dict())
     write_json_file(
         eval_in / "request.json",
         {
-            "bundle_id": direct_attempt.bundle_id,
-            "receipt_id": "rcpt-stage-eq-1",
-            "assembly_id": direct_attempt.assembly_id,
-            "calculation_config_id": direct_attempt.calculation_config_id,
-            "attempt_id": direct_attempt.attempt_id,
             "finance": finance.to_dict(),
             "evaluation": _evaluation_to_dict(evaluation),
         },
@@ -266,6 +320,8 @@ def test_campus_full_pipeline_equivalence(tmp_path: Path) -> None:
 
     assert stage_result.execution_status == direct_result.execution_status == "completed"
     assert stage_result.math_status == direct_result.math_status == "solved"
+    assert stage_result.bundle_id == direct_receipt.bundle_id
+    assert stage_result.receipt_id == direct_receipt.receipt_id
     assert stage_result.outputs["solution"]["objective_value"] == pytest.approx(850_051.6, abs=1e-5)
 
     direct_outputs_thawed = dict(thaw_json_value(direct_result.outputs))
@@ -344,8 +400,6 @@ def test_four_stage_pipeline_with_predictor_equivalence(tmp_path: Path) -> None:
     )
     assert len(predicted_targets) == 1
     pred_target = predicted_targets[0]
-
-    from iesplan.computation import MaterializedSeries
 
     direct_mat = MaterializedSet(
         operation_years=base_mat.operation_years,
@@ -446,13 +500,19 @@ def test_four_stage_pipeline_with_predictor_equivalence(tmp_path: Path) -> None:
     (eval_in / "bundle").symlink_to(gen_out / "bundle")
     (eval_in / "outputs").symlink_to(solver_out)
     write_json_file(
+        eval_in / "receipt.json",
+        _stage_receipt(
+            receipt_id="pred-rcpt-1",
+            bundle_id="pred-bnd-1",
+            assembly_id="campus_demo",
+            config_id="cfg-pred-1",
+            attempt_id="att-pred-1",
+            solver_out=solver_out,
+        ),
+    )
+    write_json_file(
         eval_in / "request.json",
         {
-            "bundle_id": "pred-bnd-1",
-            "receipt_id": "pred-rcpt-1",
-            "assembly_id": "campus_demo",
-            "calculation_config_id": "cfg-pred-1",
-            "attempt_id": "att-pred-1",
             "finance": finance.to_dict(),
             "evaluation": _evaluation_to_dict(evaluation),
         },
@@ -470,8 +530,8 @@ def test_four_stage_pipeline_with_predictor_equivalence(tmp_path: Path) -> None:
     assert "hourly_series" in result.outputs
 
 
-def test_infeasible_model_pipeline_reports_infeasible(tmp_path: Path) -> None:
-    """Infeasible model passes Stage 3 cleanly and Stage 4 maps kInfeasible without evaluation."""
+def test_infeasible_model_pipeline_reports_infeasible_and_requires_receipt(tmp_path: Path) -> None:
+    """Infeasible model passes Stage 3 cleanly and Stage 4 maps kInfeasible; missing receipt fails."""
     source_text = (IESPLAN_SAMPLES / "valid" / "campus.assembly.yaml").read_text(encoding="utf-8")
     anchor = '      expression: "import_meter__period_energy_purchase <= 900000 CNY"\n'
     pin_line = (
@@ -532,14 +592,27 @@ def test_infeasible_model_pipeline_reports_infeasible(tmp_path: Path) -> None:
     write_json_file(
         eval_in / "request.json",
         {
-            "bundle_id": "inf-bnd-1",
-            "receipt_id": "inf-rcpt-1",
-            "assembly_id": "campus_demo",
-            "calculation_config_id": "cfg-inf-1",
-            "attempt_id": "att-inf-1",
             "finance": finance.to_dict(),
             "evaluation": _evaluation_to_dict(evaluation),
         },
+    )
+    with pytest.raises(KeyError, match="ExecutionReceipt"):
+        run_plugin(
+            manifest_path=PLUGINS_ROOT / "evaluator_highs" / "plugin.yaml",
+            work_in=eval_in,
+            work_out=eval_out,
+        )
+
+    write_json_file(
+        eval_in / "receipt.json",
+        _stage_receipt(
+            receipt_id="inf-rcpt-1",
+            bundle_id="inf-bnd-1",
+            assembly_id="campus_demo",
+            config_id="cfg-inf-1",
+            attempt_id="att-inf-1",
+            solver_out=solver_out,
+        ),
     )
     run_plugin(
         manifest_path=PLUGINS_ROOT / "evaluator_highs" / "plugin.yaml",
