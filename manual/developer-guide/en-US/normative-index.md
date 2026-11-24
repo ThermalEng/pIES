@@ -26,7 +26,10 @@ This page defines the role and sole authoritative owner of each document categor
    - Named cost items, amounts, cash movements, assets, and derived taxes: [Named Amounts, Payments, and Assets](formats/finance-relations.md);
    - Evaluation comparison and frozen baseline inputs: [Public Contracts](contracts.md#evaluation-scope-and-frozen-baseline);
    - Solver declarations, series, and financial fact mappings: [Solver Bundle](formats/solver-bundle.md);
-   - Solver-embedded structural acceleration, original-model tolerance verification, and status boundaries: [Computation Generation and Solving](modules/engines.md#solver-embedded-structural-acceleration).
+   - Solver-embedded structural acceleration, original-model tolerance verification, and status boundaries: [Computation Generation and Solving](modules/engines.md#solver-embedded-structural-acceleration);
+   - Algorithm plugin packages, five-stage I/O conventions, and container execution contract: [Algorithm Plugin Package](formats/algorithm-plugin-package.md);
+   - Ephemeral container orchestration, fixed `job_runner` operations, and threading/recovery boundaries: [Deployment and Operations](deployment.md) and [Worker](modules/worker.md);
+   - Model library, plugin installation, and dual-mode open market boundaries: [Models and Algorithms](customization-center.md).
 4. When a rule changes, update its authoritative text first, then check links and summaries at all referencing sites.
 
 ## Archival Mechanism

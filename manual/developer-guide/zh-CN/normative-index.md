@@ -26,7 +26,10 @@
    - 命名成本明细、金额、收付、资产与派生税见[命名金额、支付与资产](formats/finance-relations.md)；
    - 评价对比与冻结基准输入见[公共契约](contracts.md#评价范围与冻结基准)；
    - 求解声明、序列与财务事实映射见[Solver Bundle](formats/solver-bundle.md)；
-   - 求解器内建结构加速、原模型容差核查与状态边界见[计算生成与求解](modules/engines.md#求解器内建结构加速)。
+   - 求解器内建结构加速、原模型容差核查与状态边界见[计算生成与求解](modules/engines.md#求解器内建结构加速)；
+   - 算法插件包、五类环节输入输出及容器执行契约见[算法插件包](formats/algorithm-plugin-package.md)；
+   - 临时计算容器编排、`job_runner` 固定业务接口与线程/恢复边界见[部署与运行](deployment.md)与[Worker](modules/worker.md)；
+   - 模型库、插件安装与开放市场双模式边界见[模型与算法](customization-center.md)。
 4. 规范变更时先更新权威正文，再核对引用处的链接和描述是否一致。
 
 ## 归档机制

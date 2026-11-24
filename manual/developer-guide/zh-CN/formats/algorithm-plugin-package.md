@@ -14,6 +14,16 @@
 | `evaluator` | 结果适配与后期财务评价环节 | 消费 `Bundle`、原始解与冻结财务/评价基准，输出 `ComputeResult` 与财务评价事实 |
 | `algorithm` | 极简一体化算法 | 跳过组装与求解拆分，单入口函数直接消费冻结计算输入包并输出标准结果 |
 
+### 五类环节标准输入输出文件与组合规则
+
+| `kind` | `/work/in` 标准输入 | `/work/out` 标准输出 | 组合兼容规则 |
+|---|---|---|---|
+| `predictor` | `/work/in/request.json` 与历史序列 | `/work/out/prediction.json` 与训练产物 | 可前置衔接 `generator` 或一体化 `algorithm` |
+| `generator` | `/work/in/` 冻结装配、序列、财务与计算配置 | `/work/out/bundle/` 标准 `Solver Bundle` | 必须与选定 `solver` 契约及媒体类型兼容 |
+| `solver` | `/work/in/bundle/`（只读 `Solver Bundle`） | `/work/out/solution.*` 声明输出 | 由选定 `generator` 声明兼容并在提交闸门核对 |
+| `evaluator` | `/work/in/bundle/`、原始解、回执与冻结财务/基准 | `/work/out/result.json`（`ComputeResult` 与财务评价事实） | 消费配套 `Bundle` 声明与回执，按公共结果契约输出 |
+| `algorithm` | `/work/in/` 标准化冻结计算输入包 | `/work/out/result.json`（标准结果文件） | 替代 `generator + solver` 拆分，可衔接默认 `evaluator` 或直接输出标准结果 |
+
 ## ZIP 目录布局（简单优先、兼容复杂包）
 
 归档根目录不得嵌套额外顶层目录，只允许普通文件和目录（禁止符号链接、硬链接、绝对路径、`..` 路径逃逸、大小写碰撞与加密条目）。
@@ -131,6 +141,7 @@ iteration:
   - `/work/in`（只读挂载）：承载标准化冻结输入包（JSON/分块文件流）及参数/种子配置；
   - `/work/out`（可写挂载）：承载声明输出产物、结构化日志与可选 `/work/out/iterations.jsonl`。
 - **结果边界与外部校验**：
-  - 容器算完、超时或取消后立即销毁；声明输出进入 pIES 结果模型前必须严格通过公开结果契约校验，仅接受有限数值与受控诊断；
+  - 容器算完、超时或取消后立即销毁；声明输出进入 pIES 结果模型前必须严格通过公开结果契约校验（结构、字段类型、有限数值与引用匹配），**平台不对任何插件的数学最优性或财务计算正确性背书**（计算正确性责任归插件作者与选用者）；
   - 外部市场下载与离线导入入口一次性校验压缩安全与内容 `sha256`；入库后 pIES 内部不存储、不重算、不比对 SHA-256；
   - 修改入口、Schema、单位或算法语义须提升 `MAJOR`；向后兼容新增提升 `MINOR`；缺陷修复提升 `PATCH`；已发布同版本不可静默覆盖。
+  - `2.0.0` 正式发布前遵循单一当前契约，不建设多版本兼容矩阵；若插件声明的 `compatibility` 与当前 pIES 版本不兼容，安装与任务提交闸门必须明确报错提示，绝不静默失效。

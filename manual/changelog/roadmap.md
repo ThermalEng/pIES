@@ -28,10 +28,13 @@ Roadmap 记录尚未交付的功能规划、版本顺序与退出标准。已通
 
 ### `1.1.5` — 临时计算容器流水线、统一插件契约与后端资源调度收敛
 
-- 依据 `ADR-0016` 将原常驻 `io_worker` 与轻量异步任务调度收敛进 `backend`（编辑态快速校验继续保持同步），新增极薄白名单代理服务 `job_runner` 唯一受控持有宿主机 Docker Socket，常驻服务收敛为 `web`、`backend`、`job_runner`、`postgres`、`redis` 五个容器；
+- 依据 `ADR-0016` 将原常驻 `io_worker` 与轻量异步任务调度收敛进 `backend`（内部按独立线程/子进程划分 HTTP 请求、后台调度、大文件 IO 与镜像构建并分别限流，编辑态快速校验继续保持同步），新增容器编排代理 `job_runner` 暴露固定五个业务操作契约（`build_plugin`、`start_stage`、`inspect_stage`、`stop_stage`、`cleanup_stage`），常驻服务收敛为 `web`、`backend`、`job_runner`、`postgres`、`redis` 五个容器；
 - 确立简洁且统一的 `ies.algorithm-plugin@1.0.0`（`plugin.yaml` + `/work/in → /work/out`）契约，覆盖 `predictor`、`generator`、`solver`、`evaluator` 与极简一体化 `algorithm` 五类种类、高级可选扩展段及内部循环算法专用接口；
-- 将预测、组装器（HiGHS MILP）、求解器（HiGHS 1.7.2）、结果适配与后期财务计算/评价重构为由 `backend` 经 `job_runner` 按步骤拉起、算完即毁的断网临时计算容器，官方内置算法统一封装为不可变计算镜像接入；
-- 退出标准：通过冷启动、阶段检查点恢复、取消/超时/OOM 回收、`1.1.0` 大规模规划基准与全量 Playwright 回归，无功能与性能退化。
+- 实施与验收顺序：
+  - `S1` 独立计算契约与最小 SDK：定稿五类环节输入输出契约，开发脱离完整后端的独立参考插件并通过四类运行时模块化门禁（独立构建、独立执行、可替换性、依赖隔离）；
+  - `S2` `job_runner` 与容器生命周期：跑通固定五项业务接口、资源限额、取消/超时/OOM、先落盘输出再清理作业目录，以及重启后基于 `Attempt`/`Fencing Token`/检查点的容器收拢防重入；
+  - `S3` 迁移官方计算链：将内置预测、组装（HiGHS MILP）、求解（HiGHS 1.7.2）、适配与后期财务评价封装为不可变计算镜像并迁移至临时容器流水线，保持业务数学规则不变且环节间直读共享目录避免多余序列化或磁盘拷贝；
+  - `S4` `1.1.5` 整体验收与切换：完成冷启动、完整工程算例、财务对账、检查点恢复、模块替换门禁、对照 `1.1.0` 实测基准验证性能与内存峰值无明显退化，以及全量 Playwright 回归；验收全部通过后再移除旧常驻 `io_worker`/`compute_worker` 与旧执行路径。
 
 ### `1.2.0` — 开放模型与算法插件生态与 pIES Market
 

@@ -14,6 +14,15 @@ pIES separates "declarative business content" from "executable computation capab
 
 Official executable Providers are discovered, dependency-checked, and atomically published exclusively by the composition root at process startup; runtime hot-reloading and cross-module global registries are not supported.
 
+## Boundary Split and Runtime Modularity Gates
+
+- **Containerize at file handoffs and immutable compute nodes**: Containers wrap only compute nodes requiring isolation, resource governance, or replaceability; equation parsing, unit conversion, assembly validation, and pure math helpers remain reusable Python libraries without artificial container-to-container RPC.
+- **Four runtime modularity gates**:
+  1. **Independent build**: Computation plugins build and self-test completely detached from the full backend application;
+  2. **Independent execution**: Plugins run solely against the public SDK and canonical `/work/in` inputs to emit valid outputs;
+  3. **Replaceability**: Swapping any contract-compliant plugin requires zero changes to `backend` orchestration, API routes, or unrelated domain modules;
+  4. **Dependency isolation**: The SDK and computation images MUST NOT depend on databases, ORMs, Redis, or backend internal services, verified by running a standalone reference plugin authored solely against public SDK documentation without touching main-app business logic.
+
 ## Device Content Integration
 
 Device descriptors originate solely from [Device Model YAML](formats/device-model-yaml.md), defining only time-invariant technical `properties`, five classes of time-series `interfaces`, and restricted declarative `equations`.

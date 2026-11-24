@@ -14,6 +14,16 @@ The Algorithm Plugin Package defines the unified packaging and runtime contract 
 | `evaluator` | Result adaptation & post-solve evaluation | Consumes the `Bundle`, raw solution, and frozen finance/evaluation baseline to emit `ComputeResult` and financial evaluation facts |
 | `algorithm` | Minimal unified single-step algorithm | Skips generator/solver split; a single entry function consumes the standard frozen input package and outputs canonical results |
 
+### Standard Input/Output Layout and Composition Rules
+
+| `kind` | `/work/in` Standard Inputs | `/work/out` Standard Outputs | Composition Compatibility Rules |
+|---|---|---|---|
+| `predictor` | `/work/in/request.json` and historical series | `/work/out/prediction.json` and training artifact | Precedes `generator` or unified `algorithm` |
+| `generator` | `/work/in/` frozen assembly, series, finance, and calc config | `/work/out/bundle/` standard `Solver Bundle` | MUST match the selected `solver` contract and media types |
+| `solver` | `/work/in/bundle/` (read-only `Solver Bundle`) | `/work/out/solution.*` declared outputs | Declared compatible by the chosen `generator` and verified at submission |
+| `evaluator` | `/work/in/bundle/`, raw solution, receipt, and frozen finance/baseline | `/work/out/result.json` (`ComputeResult` and financial evaluation facts) | Consumes paired `Bundle` declarations and receipt under the public result contract |
+| `algorithm` | `/work/in/` standardized frozen computation input package | `/work/out/result.json` (canonical result file) | Replaces the `generator + solver` split; feeds the default `evaluator` or emits canonical results directly |
+
 ## ZIP Directory Layout (Simplicity First, Complex Packages Supported)
 
 The archive root MUST NOT contain an extra wrapper directory and accepts regular files and directories only (symlinks, hardlinks, absolute paths, `..` traversal, case collisions, and encrypted entries are prohibited).
@@ -131,6 +141,7 @@ iteration:
   - `/work/in` (read-only mount): Standardized frozen input package (JSON / chunked streams), parameters, and seed;
   - `/work/out` (read-write mount): Declared output artifacts, bounded logs, and optional `/work/out/iterations.jsonl`.
 - **Result boundary & external verification**:
-  - Containers are destroyed immediately upon completion, timeout, or cancellation; declared outputs MUST pass strict public result-contract validation before entering pIES result models, allowing finite numeric values and controlled diagnostics only;
+  - Containers are destroyed immediately upon completion, timeout, or cancellation; declared outputs MUST pass strict public result-contract validation (structure, field types, finite numeric values, and reference consistency) before entering pIES result models, and **the platform does not endorse or certify the mathematical optimality or financial correctness of third-party plugins** (correctness responsibility rests with plugin authors and selectors);
   - Archive safety and `sha256` digests are verified once at the external market download or offline import boundary; once ingested, pIES never stores, recomputes, or compares SHA-256 internally;
   - Changing entry points, schemas, units, or algorithm semantics MUST bump `MAJOR`; backward-compatible additions bump `MINOR`; bug fixes bump `PATCH`. Released versions MUST NOT be overwritten silently.
+  - Prior to `2.0.0`, pIES maintains a single current contract without multi-version compatibility matrices; when a plugin's declared `compatibility` does not match the running pIES version, install and submission gates MUST fail with an explicit diagnostic rather than failing silently.

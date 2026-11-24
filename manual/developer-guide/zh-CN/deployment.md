@@ -25,8 +25,8 @@ docker compose up -d --build
 默认 Web 入口为 `http://localhost:8080`。常驻服务精简收敛为五个核心容器：
 
 - `web`：静态前端站点及帮助中心（`nginx`）；
-- `backend`：统一控制面进程——承担同步 HTTP API、权限与事务、编辑态快速校验、IO 编排及异步计算资源调度（不挂载 Docker Socket）；
-- `job_runner`：极薄白名单容器代理服务——无公网端口、无数据库/Redis 凭证、不挂载业务 `./data` 对象库，是唯一受控持有宿主机 `/var/run/docker.sock` 的服务，仅负责按白名单构建不可变插件镜像及拉起/销毁临时断网计算容器；
+- `backend`：统一控制面进程——承担同步 HTTP API、权限与事务、编辑态快速校验、IO 编排及异步计算资源调度（内部按独立线程/子进程划分 HTTP 请求与长时调度/大文件 IO/镜像构建，并分别限流，确保请求线程不卡死）；
+- `job_runner`：容器编排代理服务——仅暴露五个固定业务操作契约（`build_plugin`、`start_stage`、`inspect_stage`、`stop_stage`、`cleanup_stage`），负责按统一契约构建插件镜像及拉起/回收临时断网计算容器；
 - `postgres` / `redis`：权威关系数据库与可重建任务队列/进度状态。
 
 **任务并发配置**：实际计算并发由部署配置 `[worker]` 中的槽位上限与宿主机容器资源共同控制；各计算步骤均以独立临时断网容器运行，算完即毁，不再部署独立的常驻 `compute_worker` 与 `io_worker` 守护进程。
@@ -55,9 +55,10 @@ docker compose up -d --build
 
 ## 临时计算容器隔离与资源观测
 
-- **全步骤断网容器隔离**：内置与第三方计算步骤（`predictor`、`generator`、`solver`、`evaluator` 及一体化 `algorithm`）均由 `backend` 通过 `job_runner` 拉起独立一次性容器执行：默认 `--network=none`、`--read-only`、`--cap-drop=ALL`、非 root 身份运行，无数据库/Redis/对象存储凭证与宿主机代码目录权限；仅按步骤只读挂载 `/work/in` 冻结输入与可写挂载 `/work/out` 声明输出，任务完成、超时或取消后立即销毁容器。
-- **构建与运行分离**：安装含额外依赖的插件时，由 `job_runner` 经独立构建流程基于官方基础镜像生成不可变计算镜像，运行期严禁联网或动态下载依赖。
-- **Docker Socket 最小权限边界**：`backend` 与所有临时计算容器均严禁直接挂载宿主机 `/var/run/docker.sock`，仅极薄白名单代理 `job_runner` 受控访问容器引擎。
+- **按文件交接与不可变节点划分容器**：只在需要计算隔离、资源控制或第三方可替换的计算环节（`predictor`、`generator`、`solver`、`evaluator` 及一体化 `algorithm`）建立临时容器边界；设备方程解析、单位换算、装配校验与纯函数库保持为可复用 Python 库，不盲目拆成容器间调用。
+- **全步骤断网容器隔离**：计算环节由 `backend` 经 `job_runner` 固定业务接口拉起独立一次性容器执行：默认 `--network=none`、`--read-only`、`--cap-drop=ALL`、非 root 身份运行，无数据库/Redis/对象存储凭证与宿主机代码目录权限；仅按步骤只读挂载 `/work/in` 冻结输入与可写挂载 `/work/out` 声明输出，任务完成、超时或取消后先采集状态与输出并持久化，再调用 `cleanup_stage` 清理作业目录。
+- **构建与运行分离**：安装含额外依赖的插件时，由 `job_runner` 的 `build_plugin` 流程基于官方基础镜像生成不可变计算镜像，运行期严禁联网或动态下载依赖。
+- **固定业务级容器接口**：`backend` 与所有临时计算容器均不直接挂载宿主机 `/var/run/docker.sock`，容器编排统一收口于 `job_runner` 固定五个业务操作契约，不透传通用 Docker 参数或任意宿主机路径。
 - **资源限额与 cgroup v2 观测**：系统不设定统一的固定内存上限，部署者依据宿主承载力配置容器限额与部署策略。临时计算容器通过 cgroup v2 实施并观测 CPU、内存/交换空间上限、生命周期峰值及 OOM 事件，并在任务详情展示；无法读取时记为未知，不阻断运行。确认发生 OOM 或 `MemoryError` 时任务按资源耗尽失败并释放槽位，不自动在相同资源下重试或擅自修改模型/精度掩盖问题。
 
 ## 生产安全基线

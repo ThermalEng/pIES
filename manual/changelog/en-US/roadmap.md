@@ -28,10 +28,13 @@ Third-Party Attack Surface & Public Boundaries (0.2–0.4)
 
 ### `1.1.5` — Ephemeral Container Computation Pipeline, Unified Plugin Contract, and Backend Orchestration Convergence
 
-- Per `ADR-0016`, converge the former persistent `io_worker` and lightweight task scheduling into `backend` (keeping edit-time fast validations synchronous), introduce a thin allowlisted proxy `job_runner` as the sole controlled holder of the host Docker socket, and consolidate persistent services to five containers (`web`, `backend`, `job_runner`, `postgres`, `redis`);
+- Per `ADR-0016`, converge the former persistent `io_worker` and lightweight task scheduling into `backend` (isolating HTTP request threads from background scheduling, large-file I/O, and image builds with separate concurrency caps while keeping edit-time checks synchronous), introduce the `job_runner` proxy exposing five fixed business operations (`build_plugin`, `start_stage`, `inspect_stage`, `stop_stage`, `cleanup_stage`), and consolidate persistent services to five containers (`web`, `backend`, `job_runner`, `postgres`, `redis`);
 - Establish the concise unified `ies.algorithm-plugin@1.0.0` (`plugin.yaml` + `/work/in → /work/out`) contract covering `predictor`, `generator`, `solver`, `evaluator`, and single-step `algorithm`, alongside optional advanced extensions and a dedicated internal-loop interface;
-- Refactor prediction, assembly generation (HiGHS MILP), solving (HiGHS 1.7.2), result adaptation, and post-solve financial evaluation into per-step network-disabled ephemeral containers launched and torn down by `backend` via `job_runner`, packaging built-in algorithms into immutable computation images;
-- Exit criteria: cold-start verification, stage checkpoint recovery, cancellation/timeout/OOM reclamation, `1.1.0` large-scale planning benchmarks, and full Playwright regressions pass with zero functional or performance regression.
+- Implementation and acceptance sequence:
+  - `S1` Standalone computation contract & minimal SDK: Finalize five-stage I/O contracts and verify a backend-independent reference plugin passing all four runtime modularity gates (independent build, independent execution, replaceability, dependency isolation);
+  - `S2` `job_runner` & container lifecycle: Verify the five fixed business operations, resource caps, cancellation/timeout/OOM handling, persist-before-cleanup handoff, and restart reconciliation via `Attempt`/`Fencing Token`/checkpoints without re-launching active stages;
+  - `S3` Official pipeline migration: Package built-in prediction, generation (HiGHS MILP), solving (HiGHS 1.7.2), adaptation, and post-solve financial evaluation into immutable images on the ephemeral container pipeline, preserving business math rules and reading shared stage directories directly without extra serialization or disk copies;
+  - `S4` `1.1.5` acceptance & cutover: Pass cold-start checks, full engineering cases, financial reconciliation, checkpoint recovery, module replaceability gates, performance/peak-memory benchmarks against `1.1.0` baselines, and full Playwright regressions before removing legacy persistent Workers and execution paths.
 
 ### `1.2.0` — Open Model & Algorithm Plugin Ecosystem and pIES Market
 
