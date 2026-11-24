@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 import docker
+import yaml
 from docker.errors import APIError, DockerException, ImageNotFound
 from docker.types import Mount
 
@@ -89,18 +90,20 @@ def render_plugin_dockerfile(
     base_image: str,
     plugin_id: str,
     version: str,
-    has_requirements: bool,
+    requirements_rel: str | None,
+    runtime_user: str = "10001:10001",
 ) -> str:
     """Render the controlled official Dockerfile template atop ``pies-plugin-base``."""
     lines = [
         f"FROM {base_image}",
+        "USER root",
         "WORKDIR /plugin",
     ]
-    if has_requirements:
+    if requirements_rel:
         lines.extend(
             [
-                "COPY requirements.txt /plugin/requirements.txt",
-                "RUN pip install --no-cache-dir -r /plugin/requirements.txt",
+                f"COPY {requirements_rel} /plugin/{requirements_rel}",
+                f"RUN pip install --no-cache-dir -r /plugin/{requirements_rel}",
             ]
         )
     lines.extend(
@@ -108,11 +111,55 @@ def render_plugin_dockerfile(
             "COPY . /plugin",
             "RUN chmod -R a+rX /plugin",
             "ENV PYTHONPATH=/plugin",
-            f'LABEL pies.managed="true" pies.plugin_id="{plugin_id}" pies.plugin_version="{version}"',
+            (
+                'LABEL pies.managed="true" '
+                f'pies.plugin_id="{plugin_id}" '
+                f'pies.plugin_version="{version}"'
+            ),
+            f"USER {runtime_user}",
             'ENTRYPOINT ["python", "-m", "pies_sdk.runner"]',
         ]
     )
     return "\n".join(lines) + "\n"
+
+
+def _resolve_plugin_requirements_rel(source_dir: Path, request: BuildPluginRequest) -> str | None:
+    """Resolve optional requirements file path from request override or ``plugin.yaml``."""
+    if not request.install_requirements:
+        return None
+
+    raw_rel = request.requirements_rel
+    if raw_rel is None:
+        manifest_path = source_dir / "plugin.yaml"
+        try:
+            manifest = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, yaml.YAMLError) as exc:
+            raise BadRequestError(f"failed to read plugin.yaml: {exc}") from exc
+        if isinstance(manifest, dict):
+            runtime = manifest.get("runtime")
+            if isinstance(runtime, dict):
+                req_val = runtime.get("requirements")
+                if req_val is None:
+                    return None
+                if not isinstance(req_val, str) or not req_val:
+                    raise BadRequestError("runtime.requirements in plugin.yaml must be a non-empty string")
+                raw_rel = req_val
+
+    if raw_rel is None:
+        return None
+    if any(ch.isspace() for ch in raw_rel):
+        raise BadRequestError(f"requirements_rel must not contain whitespace: {raw_rel!r}")
+    try:
+        norm_rel, req_path = resolve_relative_subpath(
+            source_dir,
+            raw_rel,
+            field_name="requirements_rel",
+        )
+    except UnsafePathError as exc:
+        raise BadRequestError(str(exc)) from exc
+    if req_path.is_symlink() or not req_path.is_file():
+        raise BadRequestError(f"declared requirements file missing: {norm_rel}")
+    return norm_rel
 
 
 def _build_plugin_tar_context(source_dir: Path, dockerfile_content: str) -> io.BytesIO:
@@ -401,12 +448,13 @@ class DockerJobRunnerService:
         if not (source_dir / "plugin.yaml").is_file():
             raise BadRequestError(f"plugin.yaml missing in plugin source directory: {request.source_rel}")
 
-        has_requirements = request.install_requirements and (source_dir / "requirements.txt").is_file()
+        requirements_rel = _resolve_plugin_requirements_rel(source_dir, request)
         dockerfile_content = render_plugin_dockerfile(
             base_image=self.settings.plugin_base_image,
             plugin_id=request.plugin_id,
             version=request.version,
-            has_requirements=has_requirements,
+            requirements_rel=requirements_rel,
+            runtime_user=self.settings.container_user,
         )
         tar_ctx = _build_plugin_tar_context(source_dir, dockerfile_content)
         image_tag = f"{self.settings.plugin_image_prefix}/{request.plugin_id}:{request.version}"
@@ -448,6 +496,18 @@ class DockerJobRunnerService:
         with lock:
             existing = self._find_container_by_attempt_stage(request.attempt_id, request.stage_id)
             if existing is not None:
+                try:
+                    existing.reload()
+                except DockerException as exc:
+                    raise DockerUnavailableError(f"docker inspect failed: {exc}") from exc
+                existing_state = (existing.attrs or {}).get("State") or {}
+                if existing_state.get("Status") == "created":
+                    try:
+                        existing.start()
+                    except DockerException as exc:
+                        raise DockerUnavailableError(
+                            f"failed to start existing created stage container: {exc}"
+                        ) from exc
                 return self._build_inspect_response(existing, reused=True)
 
             stage_execution_id = request.stage_execution_id or f"{request.attempt_id}--{request.stage_id}"
@@ -471,8 +531,10 @@ class DockerJobRunnerService:
             # Ephemeral containers run as a non-root user and must be able to write /work/out.
             os.chmod(out_dir, 0o777)
 
-            pids_limit = request.pids_limit or self.settings.default_pids_limit
-            tmpfs_mb = request.tmpfs_size_mb or self.settings.default_tmpfs_size_mb
+            nano_cpus = int(request.cpu_cores * 1_000_000_000)
+            if nano_cpus < 1_000_000:
+                raise BadRequestError("cpu_cores must be at least 0.001")
+            mem_spec = f"{request.memory_mb}m"
 
             run_kwargs: dict[str, Any] = {
                 "image": request.image,
@@ -497,8 +559,11 @@ class DockerJobRunnerService:
                         read_only=False,
                     ),
                 ],
-                "tmpfs": {"/tmp": f"rw,nosuid,nodev,size={tmpfs_mb}m"},
-                "pids_limit": pids_limit,
+                "tmpfs": {"/tmp": f"rw,nosuid,nodev,size={request.tmpfs_size_mb}m"},
+                "nano_cpus": nano_cpus,
+                "mem_limit": mem_spec,
+                "memswap_limit": mem_spec,
+                "pids_limit": request.pids_limit,
                 "environment": {"HOME": "/tmp", "PYTHONUNBUFFERED": "1", **request.environment},
                 "labels": {
                     LABEL_MANAGED: "true",
@@ -511,12 +576,6 @@ class DockerJobRunnerService:
             }
             if request.command is not None:
                 run_kwargs["command"] = request.command
-            if request.cpu_cores is not None:
-                run_kwargs["nano_cpus"] = int(request.cpu_cores * 1_000_000_000)
-            if request.memory_mb is not None:
-                mem_spec = f"{request.memory_mb}m"
-                run_kwargs["mem_limit"] = mem_spec
-                run_kwargs["memswap_limit"] = mem_spec
 
             client = self._get_client()
             try:
@@ -595,7 +654,7 @@ class DockerJobRunnerService:
         stage_execution_id: str,
         *,
         reason: StopReason = "cancelled",
-        grace_seconds: int | None = None,
+        grace_seconds: int,
     ) -> StageInspectResponse:
         """Terminate a running stage container immediately WITHOUT deleting container or /work/out."""
         container = self._find_container_by_execution_id(stage_execution_id)
@@ -624,12 +683,11 @@ class DockerJobRunnerService:
             )
             save_stats_snapshot(workspace_dir, pre_resources)
             self._write_stop_reason(workspace_dir, reason)
-            timeout = self.settings.stop_grace_seconds if grace_seconds is None else grace_seconds
             try:
-                if timeout == 0:
+                if grace_seconds == 0:
                     container.kill()
                 else:
-                    container.stop(timeout=timeout)
+                    container.stop(timeout=grace_seconds)
             except DockerException as exc:
                 raise DockerUnavailableError(f"docker stop failed: {exc}") from exc
 

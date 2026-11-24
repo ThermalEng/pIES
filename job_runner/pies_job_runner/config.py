@@ -1,4 +1,9 @@
-"""Configuration settings for job_runner loaded from PIES_JOB_RUNNER_* environment variables."""
+"""Configuration settings for job_runner loaded from PIES_JOB_RUNNER_* environment variables.
+
+Runtime resource limits and stop grace policy are NOT defaulted here; ``backend``
+resolves them from the authoritative TOML deployment configuration and passes them
+explicitly on each stage request.
+"""
 
 from __future__ import annotations
 
@@ -9,7 +14,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class JobRunnerSettings(BaseSettings):
-    """Runtime settings for the job_runner proxy service.
+    """Orchestration-only settings for the job_runner proxy service.
 
     Contract notes for ``backend`` orchestrator integration:
         - ``stage_root`` (``PIES_JOB_RUNNER_STAGE_ROOT``): Container-local path to the
@@ -25,6 +30,9 @@ class JobRunnerSettings(BaseSettings):
           image for ``build_plugin`` (default ``pies-plugin-base:latest``).
         - ``plugin_image_prefix`` (``PIES_JOB_RUNNER_PLUGIN_IMAGE_PREFIX``): Tag prefix
           for built plugin images (default ``pies-plugin``).
+        - ``container_user`` (``PIES_JOB_RUNNER_CONTAINER_USER``): Non-root UID:GID
+          used for ephemeral containers and plugin image runtime (default ``10001:10001``,
+          matching ``pies`` in ``pies-plugin-base``).
     """
 
     model_config = SettingsConfigDict(
@@ -39,7 +47,4 @@ class JobRunnerSettings(BaseSettings):
     plugin_image_prefix: str = Field(default="pies-plugin")
     docker_host: str | None = Field(default=None)
     cgroup_root: Path = Field(default=Path("/sys/fs/cgroup"))
-    container_user: str = Field(default="65534:65534")
-    default_pids_limit: int = Field(default=64, ge=1)
-    default_tmpfs_size_mb: int = Field(default=256, ge=1)
-    stop_grace_seconds: int = Field(default=5, ge=0, le=300)
+    container_user: str = Field(default="10001:10001")

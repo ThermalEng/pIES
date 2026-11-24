@@ -99,14 +99,13 @@ def create_app(
     @app.post("/v1/stages/{stage_execution_id}/stop", response_model=StageInspectResponse)
     def stop_stage(
         stage_execution_id: str,
+        payload: StopStageRequest,
         svc: ServiceDep,
-        payload: StopStageRequest | None = None,
     ) -> StageInspectResponse:
-        req = payload or StopStageRequest()
         return svc.stop_stage(
             stage_execution_id,
-            reason=req.reason,
-            grace_seconds=req.grace_seconds,
+            reason=payload.reason,
+            grace_seconds=payload.grace_seconds,
         )
 
     @app.post("/v1/stages/{stage_execution_id}/cleanup", response_model=CleanupStageResponse)

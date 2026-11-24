@@ -59,12 +59,19 @@ class _FakeContainer:
         }
         self._stats_payload = stats_payload or {}
         self.client = _FakeClientRef(self._stats_payload)
+        self.start_calls = 0
         self.stopped = False
         self.killed = False
         self.removed = False
 
     def reload(self) -> None:
         self.status = self.attrs["State"]["Status"]
+
+    def start(self) -> None:
+        self.start_calls += 1
+        self.attrs["State"]["Status"] = "running"
+        self.attrs["State"]["Running"] = True
+        self.status = "running"
 
     def stats(self, stream: bool = False) -> dict[str, Any]:
         return self._stats_payload
@@ -144,7 +151,7 @@ class _FakeDockerAPI:
     def build(self, **kwargs: Any):
         raw_tar = kwargs["fileobj"].read()
         self.build_calls.append({"kwargs": kwargs, "tar_bytes": raw_tar})
-        yield {"stream": "Step 1/4 : FROM pies-plugin-base:latest\n"}
+        yield {"stream": "Step 1/6 : FROM pies-plugin-base:latest\n"}
         yield {"stream": "Successfully built fake123\n"}
 
 
@@ -213,7 +220,7 @@ def test_healthz_and_readyz(tmp_path: Path) -> None:
     assert client_down.get("/readyz").status_code == 503
 
 
-def test_build_plugin_uses_controlled_template_and_rejects_traversal(tmp_path: Path) -> None:
+def test_build_plugin_uses_controlled_template_and_declared_requirements(tmp_path: Path) -> None:
     client, fake_docker, settings = _make_client(tmp_path)
 
     # Path traversal rejected
@@ -223,12 +230,19 @@ def test_build_plugin_uses_controlled_template_and_rejects_traversal(tmp_path: P
     )
     assert resp_bad.status_code == 400
 
-    # Valid plugin source with decoy Dockerfile and requirements.txt
+    # Valid plugin source with decoy Dockerfile and declared runtime.requirements path
     src_dir = settings.plugin_source_root / "acme.algo" / "1.0.0"
-    src_dir.mkdir(parents=True)
-    (src_dir / "plugin.yaml").write_text("schema: ies.algorithm-plugin\n", encoding="utf-8")
-    (src_dir / "main.py").write_text("def solve(): pass\n", encoding="utf-8")
-    (src_dir / "requirements.txt").write_text("numpy>=1.26\n", encoding="utf-8")
+    (src_dir / "deps").mkdir(parents=True)
+    (src_dir / "plugin.yaml").write_text(
+        "schema: ies.algorithm-plugin\n"
+        "runtime:\n"
+        "  language: python\n"
+        "  python: '3.12'\n"
+        "  requirements: deps/requirements.txt\n",
+        encoding="utf-8",
+    )
+    (src_dir / "main.py").write_text("def solve(ctx): pass\n", encoding="utf-8")
+    (src_dir / "deps" / "requirements.txt").write_text("numpy>=1.26\n", encoding="utf-8")
     (src_dir / "Dockerfile").write_text("FROM evil:latest\nRUN curl evil.com\n", encoding="utf-8")
 
     resp_ok = client.post(
@@ -249,17 +263,44 @@ def test_build_plugin_uses_controlled_template_and_rejects_traversal(tmp_path: P
             base_image="pies-plugin-base:latest",
             plugin_id="acme.algo",
             version="1.0.0",
-            has_requirements=True,
+            requirements_rel="deps/requirements.txt",
+            runtime_user="10001:10001",
         )
+        assert "USER root" in df_text
+        assert "USER 10001:10001" in df_text
         assert "FROM evil:latest" not in df_text
-        assert "COPY requirements.txt /plugin/requirements.txt" in df_text
+        assert "COPY deps/requirements.txt /plugin/deps/requirements.txt" in df_text
+
+    # Escaping runtime.requirements in plugin.yaml is rejected
+    (src_dir / "plugin.yaml").write_text(
+        "schema: ies.algorithm-plugin\nruntime:\n  requirements: ../secret.txt\n",
+        encoding="utf-8",
+    )
+    resp_escape = client.post(
+        "/v1/plugins/build",
+        json={"plugin_id": "acme.algo", "version": "1.0.0", "source_rel": "acme.algo/1.0.0"},
+    )
+    assert resp_escape.status_code == 400
 
 
-def test_start_stage_enforces_isolation_and_idempotency(tmp_path: Path) -> None:
+def test_start_stage_requires_limits_enforces_isolation_and_idempotency(tmp_path: Path) -> None:
     client, fake_docker, settings = _make_client(tmp_path)
     stage_in = settings.stage_root / "exec-1" / "in"
     stage_in.mkdir(parents=True)
     (stage_in / "request.json").write_text("{}", encoding="utf-8")
+
+    # Missing resource limits must be rejected (no silent unlimited containers)
+    incomplete = client.post(
+        "/v1/stages/start",
+        json={
+            "attempt_id": "att-1",
+            "stage_id": "execution",
+            "stage_execution_id": "exec-1",
+            "fencing_token": "fence-1",
+            "image": "pies-plugin/acme.algo:1.0.0",
+        },
+    )
+    assert incomplete.status_code == 422
 
     payload = {
         "attempt_id": "att-1",
@@ -270,6 +311,7 @@ def test_start_stage_enforces_isolation_and_idempotency(tmp_path: Path) -> None:
         "cpu_cores": 2.0,
         "memory_mb": 512,
         "pids_limit": 32,
+        "tmpfs_size_mb": 128,
     }
     first = client.post("/v1/stages/start", json=payload)
     assert first.status_code == 200
@@ -280,12 +322,12 @@ def test_start_stage_enforces_isolation_and_idempotency(tmp_path: Path) -> None:
     assert run_kwargs["network_mode"] == "none"
     assert run_kwargs["read_only"] is True
     assert run_kwargs["cap_drop"] == ["ALL"]
-    assert run_kwargs["user"] == "65534:65534"
+    assert run_kwargs["user"] == "10001:10001"
     assert run_kwargs["nano_cpus"] == 2_000_000_000
     assert run_kwargs["mem_limit"] == "512m"
     assert run_kwargs["memswap_limit"] == "512m"
     assert run_kwargs["pids_limit"] == 32
-    assert run_kwargs["tmpfs"] == {"/tmp": "rw,nosuid,nodev,size=256m"}
+    assert run_kwargs["tmpfs"] == {"/tmp": "rw,nosuid,nodev,size=128m"}
     assert run_kwargs["labels"] == {
         LABEL_MANAGED: "true",
         LABEL_ATTEMPT_ID: "att-1",
@@ -301,6 +343,76 @@ def test_start_stage_enforces_isolation_and_idempotency(tmp_path: Path) -> None:
     assert second.json()["reused"] is True
     assert second.json()["stage_execution_id"] == "exec-1"
     assert len(fake_docker.containers.run_calls) == 1
+
+
+def test_start_stage_resumes_created_container_without_restarting_exited(tmp_path: Path) -> None:
+    client, fake_docker, settings = _make_client(tmp_path)
+    (settings.stage_root / "exec-created" / "in").mkdir(parents=True)
+
+    created_container = _FakeContainer(
+        container_id="cid-created-001",
+        name="pies-stage-exec-created",
+        image="pies-plugin/acme:1.0.0",
+        labels={
+            LABEL_MANAGED: "true",
+            LABEL_ATTEMPT_ID: "att-created",
+            LABEL_STAGE_ID: "solver",
+            LABEL_STAGE_EXECUTION_ID: "exec-created",
+            LABEL_FENCING_TOKEN: "fence-created",
+            LABEL_WORKSPACE_REL: "exec-created",
+        },
+        state={
+            "Status": "created",
+            "Running": False,
+            "ExitCode": 0,
+            "OOMKilled": False,
+            "StartedAt": "0001-01-01T00:00:00Z",
+            "FinishedAt": "0001-01-01T00:00:00Z",
+        },
+    )
+    fake_docker.containers.containers.append(created_container)
+
+    resumed = client.post(
+        "/v1/stages/start",
+        json={
+            "attempt_id": "att-created",
+            "stage_id": "solver",
+            "stage_execution_id": "exec-created",
+            "fencing_token": "fence-created",
+            "image": "pies-plugin/acme:1.0.0",
+            "cpu_cores": 1.0,
+            "memory_mb": 256,
+            "pids_limit": 32,
+            "tmpfs_size_mb": 64,
+        },
+    )
+    assert resumed.status_code == 200
+    assert resumed.json()["reused"] is True
+    assert resumed.json()["running"] is True
+    assert resumed.json()["status"] == "running"
+    assert created_container.start_calls == 1
+
+    # Once exited, calling start_stage again must NOT restart it
+    created_container.attrs["State"]["Status"] = "exited"
+    created_container.attrs["State"]["Running"] = False
+    exited_retry = client.post(
+        "/v1/stages/start",
+        json={
+            "attempt_id": "att-created",
+            "stage_id": "solver",
+            "stage_execution_id": "exec-created",
+            "fencing_token": "fence-created",
+            "image": "pies-plugin/acme:1.0.0",
+            "cpu_cores": 1.0,
+            "memory_mb": 256,
+            "pids_limit": 32,
+            "tmpfs_size_mb": 64,
+        },
+    )
+    assert exited_retry.status_code == 200
+    assert exited_retry.json()["reused"] is True
+    assert exited_retry.json()["running"] is False
+    assert created_container.start_calls == 1
 
 
 def test_cgroup_v2_observation_and_unknown_fallback(tmp_path: Path) -> None:
@@ -354,8 +466,16 @@ def test_cgroup_v2_observation_and_unknown_fallback(tmp_path: Path) -> None:
         "tail": [{"iteration": 2, "value": 0.01}, "partial-line"],
     }
 
-    # Unreadable cgroup files are reported as unknown without blocking
+    # Missing memory.peak must remain unknown even when memory.current is readable
     (cg_dir / "memory.peak").unlink()
+    (settings.stage_root / "exec-cg" / ".job_runner_stats.json").unlink(missing_ok=True)
+    resp_no_peak = client.get("/v1/stages/exec-cg")
+    assert resp_no_peak.status_code == 200
+    res_np = resp_no_peak.json()["resources"]
+    assert res_np["memory_current_bytes"] == {"status": "known", "value": 1048576}
+    assert res_np["memory_peak_bytes"] == {"status": "unknown", "value": None}
+
+    # Unreadable cgroup files are reported as unknown without blocking
     (cg_dir / "memory.current").unlink()
     (cg_dir / "cpu.stat").unlink()
     (settings.stage_root / "exec-cg" / ".job_runner_stats.json").unlink(missing_ok=True)
@@ -379,6 +499,10 @@ def test_stop_preserves_container_and_outputs_before_cleanup(tmp_path: Path) -> 
             "stage_execution_id": "exec-stop",
             "fencing_token": "fence-stop",
             "image": "pies-plugin/acme:1.0.0",
+            "cpu_cores": 1.0,
+            "memory_mb": 256,
+            "pids_limit": 32,
+            "tmpfs_size_mb": 64,
         },
     )
     assert start_resp.status_code == 200
@@ -390,7 +514,10 @@ def test_stop_preserves_container_and_outputs_before_cleanup(tmp_path: Path) -> 
     assert premature.status_code == 409
 
     # Stop terminates container WITHOUT deleting container or /work/out
-    stopped = client.post("/v1/stages/exec-stop/stop", json={"reason": "timed_out"})
+    stopped = client.post(
+        "/v1/stages/exec-stop/stop",
+        json={"reason": "timed_out", "grace_seconds": 3},
+    )
     assert stopped.status_code == 200
     assert stopped.json()["termination_reason"] == "timed_out"
     assert stopped.json()["output_files"] == ["solution.json"]

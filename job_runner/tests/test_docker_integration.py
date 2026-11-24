@@ -64,7 +64,6 @@ def docker_harness() -> Iterator[tuple[TestClient, JobRunnerSettings, docker.Doc
         plugin_source_root=plugin_root,
         plugin_base_image=base_tag,
         plugin_image_prefix=f"pies-plugin-test-{run_id}",
-        stop_grace_seconds=1,
     )
     docker_client = docker.from_env()
     service = DockerJobRunnerService(settings, client=docker_client)
@@ -73,11 +72,17 @@ def docker_harness() -> Iterator[tuple[TestClient, JobRunnerSettings, docker.Doc
 
     created_images: list[str] = []
     try:
-        # Build a minimal ephemeral base image atop python:3.12-slim representing pies-plugin-base
+        # Build a non-root base image matching sdk/Dockerfile.base (USER pies UID/GID 10001)
         tar_buf = io.BytesIO()
         df = (
             b"FROM python:3.12-slim\n"
             b"COPY pies_sdk /usr/local/lib/python3.12/site-packages/pies_sdk\n"
+            b"RUN groupadd --gid 10001 pies \\\n"
+            b"    && useradd --uid 10001 --gid 10001 --create-home --shell /usr/sbin/nologin pies \\\n"
+            b"    && mkdir -p /work/in /work/out /app \\\n"
+            b"    && chown -R pies:pies /app /work\n"
+            b"USER pies\n"
+            b'CMD ["python", "-m", "pies_sdk.runner"]\n'
         )
         runner_py = (
             b"import pathlib\n"
@@ -135,13 +140,19 @@ def test_real_docker_build_plugin_and_run_isolated_stage(docker_harness) -> None
     assert client.get("/healthz").status_code == 200
     assert client.get("/readyz").status_code == 200
 
-    # 1. Stage a plugin with a decoy Dockerfile that must be ignored
+    # 1. Stage a plugin with a decoy Dockerfile and declared runtime.requirements path
     src_dir = settings.plugin_source_root / "acme.algo" / "1.0.0"
-    src_dir.mkdir(parents=True)
+    (src_dir / "deps").mkdir(parents=True)
     (src_dir / "plugin.yaml").write_text(
-        "schema: ies.algorithm-plugin\nschema_version: '1.0.0'\n",
+        "schema: ies.algorithm-plugin\n"
+        "schema_version: '1.0.0'\n"
+        "runtime:\n"
+        "  language: python\n"
+        "  python: '3.12'\n"
+        "  requirements: deps/requirements.txt\n",
         encoding="utf-8",
     )
+    (src_dir / "deps" / "requirements.txt").write_text("# no external pypi packages\n", encoding="utf-8")
     (src_dir / "Dockerfile").write_text("FROM nonexistent-invalid-base:999\n", encoding="utf-8")
     (src_dir / "main.py").write_text(
         "import json, os, pathlib, socket\n"
@@ -187,7 +198,7 @@ def test_real_docker_build_plugin_and_run_isolated_stage(docker_harness) -> None
             "plugin_id": "acme.algo",
             "version": "1.0.0",
             "source_rel": "acme.algo/1.0.0",
-            "install_requirements": False,
+            "install_requirements": True,
         },
     )
     assert build_resp.status_code == 200, build_resp.text
@@ -210,6 +221,7 @@ def test_real_docker_build_plugin_and_run_isolated_stage(docker_harness) -> None
             "cpu_cores": 1.0,
             "memory_mb": 128,
             "pids_limit": 32,
+            "tmpfs_size_mb": 64,
         },
     )
     assert start_resp.status_code == 200, start_resp.text
@@ -223,7 +235,7 @@ def test_real_docker_build_plugin_and_run_isolated_stage(docker_harness) -> None
     assert hc["NanoCpus"] == 1_000_000_000
     assert hc["Memory"] == 128 * 1024 * 1024
     assert hc["PidsLimit"] == 32
-    assert container.attrs["Config"]["User"] == "65534:65534"
+    assert container.attrs["Config"]["User"] == "10001:10001"
 
     done = _wait_until_exited(client, exec_id)
     assert done["exit_code"] == 0, container.logs().decode("utf-8", errors="replace")
@@ -238,7 +250,7 @@ def test_real_docker_build_plugin_and_run_isolated_stage(docker_harness) -> None
 
     result = json.loads((settings.stage_root / exec_id / "out" / "result.json").read_text(encoding="utf-8"))
     assert result == {
-        "uid": 65534,
+        "uid": 10001,
         "net_blocked": True,
         "ro_root": True,
         "ro_in": True,
@@ -272,7 +284,10 @@ def test_real_docker_idempotent_start_reconciliation_stop_and_cleanup(docker_har
             "pathlib.Path('/work/out/iterations.jsonl').write_text('{\"iteration\":1}\\n'); "
             "time.sleep(60)",
         ],
+        "cpu_cores": 1.0,
         "memory_mb": 64,
+        "pids_limit": 32,
+        "tmpfs_size_mb": 64,
     }
     first = client.post("/v1/stages/start", json=start_payload)
     assert first.status_code == 200, first.text
@@ -338,10 +353,17 @@ def test_real_docker_timeout_stop_and_oom_detection(docker_harness) -> None:
             "fencing_token": "fence-to",
             "image": "python:3.12-slim",
             "command": ["python", "-c", "import time; time.sleep(60)"],
+            "cpu_cores": 1.0,
+            "memory_mb": 64,
+            "pids_limit": 32,
+            "tmpfs_size_mb": 64,
         },
     )
     assert r_to.status_code == 200
-    stopped = client.post(f"/v1/stages/{exec_to}/stop", json={"reason": "timed_out", "grace_seconds": 0})
+    stopped = client.post(
+        f"/v1/stages/{exec_to}/stop",
+        json={"reason": "timed_out", "grace_seconds": 0},
+    )
     assert stopped.status_code == 200
     assert stopped.json()["termination_reason"] == "timed_out"
     assert client.post(f"/v1/stages/{exec_to}/cleanup", json={}).status_code == 200
@@ -358,7 +380,10 @@ def test_real_docker_timeout_stop_and_oom_detection(docker_harness) -> None:
             "fencing_token": "fence-oom",
             "image": "python:3.12-slim",
             "command": ["python", "-c", "buf = bytearray(96 * 1024 * 1024); buf[:] = b'x' * len(buf)"],
+            "cpu_cores": 1.0,
             "memory_mb": 16,
+            "pids_limit": 32,
+            "tmpfs_size_mb": 64,
         },
     )
     assert r_oom.status_code == 200, r_oom.text

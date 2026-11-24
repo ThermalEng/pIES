@@ -227,7 +227,6 @@ def collect_stage_resources(
             cg_stats.get("memory_peak_bytes"),
             live_stats.get("memory_peak_bytes"),
             snapshot.get("memory_peak_bytes"),
-            mem_cur_val,
         )
         if isinstance(v, int) and v >= 0
     ]

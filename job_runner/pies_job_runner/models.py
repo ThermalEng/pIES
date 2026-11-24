@@ -38,6 +38,7 @@ class BuildPluginRequest(_StrictModel):
     plugin_id: str
     version: str
     source_rel: str = Field(min_length=1, max_length=256)
+    requirements_rel: str | None = Field(default=None, min_length=1, max_length=256)
     install_requirements: bool = True
 
     @field_validator("plugin_id")
@@ -72,10 +73,10 @@ class StartStageRequest(_StrictModel):
     workspace_rel: str | None = None
     command: list[str] | None = None
     environment: dict[str, str] = Field(default_factory=dict)
-    cpu_cores: float | None = Field(default=None, gt=0)
-    memory_mb: int | None = Field(default=None, gt=0)
-    pids_limit: int | None = Field(default=None, gt=0)
-    tmpfs_size_mb: int | None = Field(default=None, gt=0)
+    cpu_cores: float = Field(gt=0)
+    memory_mb: int = Field(gt=0)
+    pids_limit: int = Field(gt=0)
+    tmpfs_size_mb: int = Field(gt=0)
 
     @field_validator("attempt_id", "stage_id", "fencing_token")
     @classmethod
@@ -161,7 +162,7 @@ class StageListResponse(_StrictModel):
 
 class StopStageRequest(_StrictModel):
     reason: StopReason = "cancelled"
-    grace_seconds: int | None = Field(default=None, ge=0, le=300)
+    grace_seconds: int = Field(ge=0, le=300)
 
 
 class CleanupStageRequest(_StrictModel):
