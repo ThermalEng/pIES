@@ -45,6 +45,7 @@ from iesplan.core.diagnostics import (
 from iesplan.core.errors import AppError
 from iesplan.worker import executors
 from iesplan.worker.executors import (
+    ControlPlaneDetached,
     EngineRunError,
     LeaseFenced,
     ResourceExhaustedError,
@@ -132,6 +133,7 @@ def _predict_round(
         publish_combined_checkpoint=worker_app.publish_prediction_checkpoint_with_artifacts,
         previous=previous,
         stop=_stop_probe(ctx),
+        detach=ctx.detach_event,
         on_stage_resources=ctx.update_stage_resources,
     )
     ctx.prediction_artifacts[1] = artifacts
@@ -163,6 +165,7 @@ def _predict_selected_round(
         entries=entries,
         previous=previous,
         stop=_stop_probe(ctx),
+        detach=ctx.detach_event,
         on_stage_resources=ctx.update_stage_resources,
     )
     ctx.prediction_artifacts[number] = artifacts
@@ -187,6 +190,7 @@ def _solve_round(
             session_factory=ctx.session_factory,
             save_checkpoint=worker_app.save_bundle_checkpoint,
             stop=_stop_probe(ctx),
+            detach=ctx.detach_event,
             on_stage_resources=ctx.update_stage_resources,
         )
         saved = worker_app.run_worker_transaction(
@@ -204,18 +208,25 @@ def _solve_round(
     else:
         receipt, collected, solution_refs = worker_app.execute_saved_bundle(
             plane=plane, bundle=bundle, attempt=attempt, claim=ctx.claim, number=number,
-            generated_id=generated_id, session_factory=ctx.session_factory, stop=_stop_probe(ctx),
+            generated_id=generated_id, session_factory=ctx.session_factory,
+            stop=_stop_probe(ctx), detach=ctx.detach_event,
         )
     ctx.update_stage_resources(receipt.resource_usage)
     _raise_for_receipt_status(receipt)
     ctx.progress(85.0, "execute", {"receipt_status": receipt.status})
-    evaluated = worker_app.adapt_result(
-        plane, bundle, receipt, collected,
-        claim=ctx.claim, number=number, finance=finance, snapshot=snapshot,
-        session_factory=ctx.session_factory,
-        save_checkpoint=worker_app.save_evaluation_checkpoint,
-        stop=_stop_probe(ctx),
+    evaluated = worker_app.run_worker_transaction(
+        ctx.session_factory, worker_app.load_evaluation_checkpoint,
+        ctx.claim, number,
     )
+    if evaluated is None:
+        evaluated = worker_app.adapt_result(
+            plane, bundle, receipt, collected,
+            claim=ctx.claim, number=number, finance=finance, snapshot=snapshot,
+            session_factory=ctx.session_factory,
+            save_checkpoint=worker_app.save_evaluation_checkpoint,
+            stop=_stop_probe(ctx),
+            detach=ctx.detach_event,
+        )
     ctx.update_stage_resources(evaluated.resources)
     result = evaluated.result
     outcome = worker_app.business_outcome_for(result)
@@ -280,7 +291,7 @@ def _execute_compute(ctx: RunContext) -> tuple[dict, dict]:
             "计算执行面未装配，计算任务不可执行", reason="compute-plane-missing")
     artifact, models, materialized, finance, config, evaluation = worker_app.run_worker_transaction(
         ctx.session_factory, worker_app.load_compute_inputs,
-        task.project_id, snapshot,
+        task.project_id, snapshot, materialize_series=False,
     )
     ctx.checkpoint("materialize")
     ctx.progress(10.0, "materialize", None)
@@ -315,19 +326,25 @@ def _execute_compute(ctx: RunContext) -> tuple[dict, dict]:
     completed = worker_app.complete_materialized(materialized, predicted_series)
     attempt = worker_app.build_attempt_context(task, ctx.claim, snapshot)
     if config.algorithm is not None:
-        evaluated = worker_app.run_algorithm_stage(
-            plane=plane,
-            attempt=attempt,
-            claim=ctx.claim,
-            snapshot=snapshot,
-            artifact=artifact,
-            materialized=completed,
-            finance=finance,
-            config=config,
-            session_factory=ctx.session_factory,
-            save_checkpoint=worker_app.save_algorithm_checkpoint,
-            stop=_stop_probe(ctx),
+        evaluated = worker_app.run_worker_transaction(
+            ctx.session_factory, worker_app.load_algorithm_checkpoint,
+            ctx.claim,
         )
+        if evaluated is None:
+            evaluated = worker_app.run_algorithm_stage(
+                plane=plane,
+                attempt=attempt,
+                claim=ctx.claim,
+                snapshot=snapshot,
+                artifact=artifact,
+                materialized=completed,
+                finance=finance,
+                config=config,
+                session_factory=ctx.session_factory,
+                save_checkpoint=worker_app.save_algorithm_checkpoint,
+                stop=_stop_probe(ctx),
+                detach=ctx.detach_event,
+            )
         ctx.update_stage_resources(evaluated.resources)
         result = evaluated.result
         outcome = worker_app.business_outcome_for(result)
@@ -567,6 +584,7 @@ def run_task(
     worker_id: str = "",
     stop_event: Any = None,
     cancel_event: Any = None,
+    detach_event: Any = None,
     compute: Any = None,
 ) -> str:
     """执行已领取的任务并落终态(带 fencing 提交/失败/取消收拢)。
@@ -624,8 +642,8 @@ def run_task(
 
     ctx = RunContext(
         task=task, claim=claim, session_factory=factory, worker_id=worker_id,
-        stop_event=stop_event, cancel_event=cancel_event, snapshot=snapshot,
-        progress_fn=_report_progress, compute=compute,
+        stop_event=stop_event, cancel_event=cancel_event, detach_event=detach_event,
+        snapshot=snapshot, progress_fn=_report_progress, compute=compute,
     )
     try:
         ctx.checkpoint("start")
@@ -646,6 +664,13 @@ def run_task(
             ),
         )
         return "completed"
+    except ControlPlaneDetached:
+        logger.info(
+            "控制面关闭分离，保留活跃尝试与容器待重启接管: task=%s attempt=%s",
+            task.id,
+            claim.attempt_id,
+        )
+        return "detached"
     except LeaseFenced:
         logger.warning("租约隔离，丢弃本次执行结果: task=%s", task.id)
         return "fenced"

@@ -353,6 +353,26 @@ def get_reconcilable_claim(
     )
 
 
+def list_active_reconcilable_claims(db: Session) -> list[Claim]:
+    """Return Claims for all running TaskAttempts holding active TaskLeases."""
+    pairs = tasks_domain.list_active_attempts_with_leases(db)
+    return [
+        Claim(
+            task_id=attempt.task_id,
+            attempt_id=attempt.id,
+            attempt_no=attempt.attempt_no,
+            lease_token=UUID(str(lease.lease_token)),
+        )
+        for attempt, lease in pairs
+    ]
+
+
+def get_task_pool(db: Session, task_id: int) -> str:
+    """Resolve the scheduling pool ('compute' or 'io') for an existing task."""
+    task = _get_task(db, task_id)
+    return POOL_BY_TYPE.get(task.type, "compute")
+
+
 def finish_attempt_record(
     db: Session, attempt_id: int, *, status: str, stop_reason: str | None
 ) -> TaskAttemptRecord | None:

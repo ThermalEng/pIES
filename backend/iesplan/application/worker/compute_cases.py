@@ -48,6 +48,8 @@ from iesplan.application.worker.lease_cases import Claim, LeaseRejectedError
 from iesplan.application.worker.transactions import run_worker_transaction
 from iesplan.assembly import ValidatedAssemblyArtifact, ValidationReceipt
 from iesplan.computation import (
+    COMPUTE_RESULT_SCHEMA,
+    COMPUTE_RESULT_VERSION,
     AttemptContext,
     CalculationConfig,
     ComputationUnavailableError,
@@ -63,6 +65,7 @@ from iesplan.computation import (
     SolverBundleManifest,
     StopProbe,
     check_convergence,
+    collect_resource_ids,
     materialize_non_predictive_series,
     prediction_delta,
     split_predictions_by_dependency,
@@ -71,19 +74,27 @@ from iesplan.computation import (
 from iesplan.computation.bundle import export_bundle_files
 from iesplan.computation.generators.highs_milp import SOLVER_REF
 from iesplan.computation.runtime.stage_runner import StageExecutionSpec
-from iesplan.core.content import Content, GeneratedContent, MemoryContent, json_chunks, read_content
+from iesplan.core.content import (
+    Content,
+    GeneratedContent,
+    MemoryContent,
+    SizedContent,
+    json_chunks,
+    read_content,
+)
 from iesplan.core.contracts import horizon_point_count
 from iesplan.core.diagnostics import Diagnostic
 from iesplan.core.yamlmini import load as _yaml_load
 from iesplan.finance import EffectiveFinanceConfig, EvaluationInput
 from iesplan.modeling import DeviceMathContribution, contribution_from_dict
-from iesplan.storage import add_ref, get_object, put_content
+from iesplan.storage import add_ref, get_object, get_object_content, put_content
 from iesplan.tasks import BUSINESS_OUTCOMES
 
 __all__ = [
     "HOURLY_OBJECT_PATH",
     "ComputeExecutionPlane",
     "EvaluatedStageOutput",
+    "FrozenSeriesInputs",
     "StageExecutionError",
     "adapt_result",
     "attach_evidence_objects",
@@ -139,6 +150,16 @@ class EvaluatedStageOutput:
 
 
 @dataclass(frozen=True, slots=True)
+class FrozenSeriesInputs:
+    """Deferred frozen object handles + predicted series for container-side materialization."""
+
+    operation_years: int
+    fixed_resources: Mapping[str, Content] = field(default_factory=dict)
+    predicted_series: tuple[MaterializedSeries, ...] = ()
+    prices: tuple[MaterializedPriceSeries, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
 class ComputeExecutionPlane:
     """容器化计算执行面句柄（组合根装配、调度器/Worker 持有、阶段命令消费）。"""
 
@@ -172,43 +193,18 @@ def _receipt_from_frozen(data: Mapping[str, Any]) -> ValidationReceipt:
     )
 
 
-def _collect_resource_ids(doc: Mapping[str, Any]) -> set[str]:
-    """从规范装配 devices 绑定收集 content.object_id（字符串身份集合）。
-
-    规范文本中的引用身份恒为字符串（提交侧由整数主键稳定序列化）；
-    读取时数字串转回整数主键走主键通道，非数字串走 oid 通道。
-    """
-    found: set[str] = set()
-
-    def collect(node: object) -> None:
-        if isinstance(node, Mapping):
-            content = node.get("content")
-            if isinstance(content, Mapping) and "object_id" in content:
-                found.add(str(content["object_id"]))
-            for value in node.values():
-                collect(value)
-        elif isinstance(node, list):
-            for value in node:
-                collect(value)
-
-    devices = doc.get("devices")
-    if isinstance(devices, Mapping):
-        collect(devices)
-    return found
-
-
 def _restore_artifact_resources_config(
     db: Session, task_project_id: int, snapshot: Any
 ) -> tuple[
-    ValidatedAssemblyArtifact, dict[str, bytes], CalculationConfig, int,
+    ValidatedAssemblyArtifact, dict[str, SizedContent], CalculationConfig, int,
 ]:
-    """从快照恢复装配产物、固定资源字节、计算配置与有效种子。
+    """从快照恢复装配产物、固定资源只读内容句柄、计算配置与有效种子。
 
     finance 按回执冻结血缘 {profile_id, revision} 取不可变 Effective 行
     （与提交闸门同一来源：钉选 revision，不读 latest/current 指针）；
-    固定资源按规范绑定 object_id 经 storage 公开门面读字节；有效种子取
-    快照冻结值（配置缺省时不再静默用 0，而是提交闸门同一派生规则）。
-    冻结缺件即实际结构错误直接可见，不重跑输入校验。
+    固定资源按规范绑定 object_id 经 storage 公开门面取内容句柄（不预先读入
+    全部字节）；有效种子取快照冻结值（配置缺省时不再静默用 0，而是提交
+    闸门同一派生规则）。冻结缺件即实际结构错误直接可见，不重跑输入校验。
     """
     receipt = _receipt_from_frozen(snapshot.assembly_receipt)
     artifact = ValidatedAssemblyArtifact(canonical_text=snapshot.canonical_assembly_text, receipt=receipt)
@@ -220,35 +216,58 @@ def _restore_artifact_resources_config(
     config = CalculationConfig.from_frozen({**body, "seed": seed})
 
     doc = json.loads(snapshot.canonical_assembly_text)
-    resource_ids = _collect_resource_ids(doc)
-    resources = {}
-    for object_id in sorted(resource_ids):
+    resource_ids = collect_resource_ids(doc)
+    resources: dict[str, SizedContent] = {}
+    for object_id in resource_ids:
         key: int | str = (
             int(object_id) if object_id.isdigit() else object_id
         )
-        resources[object_id] = get_object(db, key)
+        resources[object_id] = get_object_content(db, key)
     return artifact, resources, config, seed
 
 
+def _wanted_price_ids(doc: Mapping[str, Any], finance: EffectiveFinanceConfig) -> list[str]:
+    wanted: list[str] = []
+    for binding_id in sorted(doc.get("tariff_bindings") or {}):
+        price_id = (doc["tariff_bindings"][binding_id] or {}).get("price")
+        price = (finance.energy_prices or {}).get(price_id)
+        if price is not None and price.kind in ("time_series", "monthly_daily") and price_id not in wanted:
+            wanted.append(price_id)
+    return wanted
+
+
+def _collect_price_resource_ids(
+    doc: Mapping[str, Any], finance: EffectiveFinanceConfig
+) -> tuple[str, ...]:
+    found: set[str] = set()
+    for price_id in _wanted_price_ids(doc, finance):
+        price = finance.energy_prices[price_id]
+        if price.kind == "time_series" and price.ref:
+            found.add(str(price.ref))
+        elif price.kind == "monthly_daily" and price.months:
+            for month in range(1, 13):
+                found.add(str(price.months[str(month)].ref))
+    return tuple(sorted(found))
+
+
 def load_compute_inputs(
-    db: Session, task_project_id: int, snapshot: Any
+    db: Session,
+    task_project_id: int,
+    snapshot: Any,
+    *,
+    materialize_series: bool = True,
 ) -> tuple[
     ValidatedAssemblyArtifact,
     dict[str, DeviceMathContribution],
-    MaterializedSet,
+    MaterializedSet | FrozenSeriesInputs,
     EffectiveFinanceConfig,
     CalculationConfig,
     EvaluationInput,
 ]:
     """从快照恢复生成器直接输入并按序返回（不包装第二对象，不做缺省）。
 
-    finance 按回执冻结血缘取不可变 Effective 行；第三项为物化集合本身
-    （预测目标序列不在此物化，``pending_predict`` 保留），由
-    ``predict_target_round`` 经公开 predictor 完成后再与此处集合并为
-    完成态。序列按快照顶层评价确认块的已确认运营年限物化为运营期长度；
-    评价确认经 ``EvaluationInput.from_frozen`` 从同一冻结块直接恢复
-    类型化事实（只还原类型，不重跑提交校验），独立直传。提交边界唯一
-    校验，此处只读不验。冻结缺件即实际结构错误直接可见，不重跑输入校验。
+    当 ``materialize_series=False`` 时不物化大序列浮点数组，而是返回携带
+    不可变对象存储内容句柄的 ``FrozenSeriesInputs`` 供阶段容器直接消费。
     """
     artifact, resources, config, _seed = _restore_artifact_resources_config(
         db, task_project_id, snapshot
@@ -270,8 +289,22 @@ def load_compute_inputs(
 
     operation_years = snapshot.evaluation["operation_years"]
     evaluation = EvaluationInput.from_frozen(snapshot.evaluation)
+    if not materialize_series:
+        doc = json.loads(artifact.canonical_text)
+        fixed_resources: dict[str, Content] = dict(resources)
+        for object_id in _collect_price_resource_ids(doc, finance):
+            if object_id not in fixed_resources:
+                key: int | str = int(object_id) if object_id.isdigit() else object_id
+                fixed_resources[object_id] = get_object_content(db, key)
+        frozen_inputs = FrozenSeriesInputs(
+            operation_years=operation_years,
+            fixed_resources=fixed_resources,
+        )
+        return artifact, models, frozen_inputs, finance, config, evaluation
+
+    raw_resources = {oid: read_content(content) for oid, content in resources.items()}
     materialized = materialize_non_predictive_series(
-        artifact, resources, operation_years=operation_years
+        artifact, raw_resources, operation_years=operation_years
     )
     prices = _materialize_price_series(db, artifact, finance, operation_years=operation_years)
     if prices:
@@ -302,12 +335,7 @@ def _materialize_price_series(
 
     doc = json.loads(artifact.canonical_text)
     baseline = doc["project_baseline"]
-    wanted: list[str] = []
-    for binding_id in sorted(doc.get("tariff_bindings") or {}):
-        price_id = (doc["tariff_bindings"][binding_id] or {}).get("price")
-        price = (finance.energy_prices or {}).get(price_id)
-        if price is not None and price.kind in ("time_series", "monthly_daily") and price_id not in wanted:
-            wanted.append(price_id)
+    wanted = _wanted_price_ids(doc, finance)
     decoded: dict[str, tuple[float, ...]] = {}
 
     def read_oid(oid: str) -> tuple[float, ...]:
@@ -356,14 +384,21 @@ def _materialize_price_series(
 
 
 def complete_materialized(
-    base: MaterializedSet, predicted: tuple[MaterializedSeries, ...]
-) -> MaterializedSet:
+    base: MaterializedSet | FrozenSeriesInputs, predicted: tuple[MaterializedSeries, ...]
+) -> MaterializedSet | FrozenSeriesInputs:
     """预测产物并入为完成态集合（Generator 第三项输入形态）。
 
     年限沿用基集合携带的已确认值，不重读快照；预测阶段交付全部
     ``pending``（提交闸门 TASK-REQ-010/011 保证配置与绑定双向覆盖），
     此处只构成完成态，不复核。已物化价格区沿基集合透传。
     """
+    if isinstance(base, FrozenSeriesInputs):
+        return FrozenSeriesInputs(
+            operation_years=base.operation_years,
+            fixed_resources=base.fixed_resources,
+            predicted_series=tuple(predicted),
+            prices=base.prices,
+        )
     return MaterializedSet(
         operation_years=base.operation_years,
         series=tuple(base.series) + tuple(predicted),
@@ -446,6 +481,58 @@ def _serialize_materialized(materialized: MaterializedSet) -> dict[str, Any]:
     }
 
 
+def _attach_series_inputs(
+    request_payload: dict[str, Any],
+    input_files: dict[str, Content | bytes],
+    materialized: MaterializedSet | FrozenSeriesInputs,
+) -> None:
+    """Attach deferred object handles (`frozen_series_inputs`) or serialized `MaterializedSet`."""
+    if isinstance(materialized, FrozenSeriesInputs):
+        fixed_map: dict[str, str] = {}
+        for object_id in sorted(materialized.fixed_resources):
+            rel = f"objects/{object_id}"
+            fixed_map[object_id] = rel
+            input_files[rel] = materialized.fixed_resources[object_id]
+        request_payload["frozen_series_inputs"] = {
+            "fixed_resources": fixed_map,
+            "predicted_series": [item.to_dict() for item in materialized.predicted_series],
+        }
+        return
+    request_payload["materialized"] = _serialize_materialized(materialized)
+
+
+def _evaluated_output_from_result_json(
+    raw: Mapping[str, Any],
+    *,
+    resources: Mapping[str, Any],
+) -> EvaluatedStageOutput:
+    """Validate `schema`/`schema_version` at the external boundary and construct `ComputeResult`."""
+    schema = raw["schema"]
+    schema_version = raw["schema_version"]
+    if schema != COMPUTE_RESULT_SCHEMA:
+        raise ValueError(f"结果 schema 非法: {schema!r}")
+    if schema_version != COMPUTE_RESULT_VERSION:
+        raise ValueError(f"结果版本非法: {schema_version!r}")
+    outputs = dict(raw.get("outputs") or {})
+    hourly_series = outputs.pop("hourly_series", None)
+    financial_evaluation = outputs.pop("financial_evaluation", None)
+    adapted = ComputeResult(
+        schema=schema,
+        schema_version=schema_version,
+        bundle_id=str(raw["bundle_id"]),
+        receipt_id=str(raw["receipt_id"]),
+        execution_status=str(raw["execution_status"]),
+        math_status=str(raw["math_status"]),
+        outputs=outputs,
+    )
+    return EvaluatedStageOutput(
+        result=adapted,
+        hourly_series=hourly_series,
+        financial_evaluation=financial_evaluation,
+        resources=dict(resources),
+    )
+
+
 def _json_bytes(payload: Mapping[str, Any]) -> bytes:
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
 
@@ -480,6 +567,7 @@ def predict_round_stage(
     entries: tuple[Mapping[str, object], ...] | None = None,
     previous: Mapping[str, object] | None = None,
     stop: StopProbe | None = None,
+    detach: Any = None,
     on_stage_resources: Callable[[Mapping[str, Any]], None] | None = None,
 ) -> tuple[
     tuple[MaterializedSeries, ...],
@@ -560,7 +648,7 @@ def predict_round_stage(
             oid = item["history_object_id"]
             csv_rel = item["history_csv_rel"]
             if csv_rel not in input_files:
-                input_files[csv_rel] = MemoryContent(resources[oid])
+                input_files[csv_rel] = resources[oid]
 
         stage_id = f"predict-r{number}" if len(sorted_algos) == 1 else f"predict-r{number}-{idx}"
         group_series: list[MaterializedSeries] = []
@@ -650,6 +738,7 @@ def predict_round_stage(
                 ),
                 persist=_persist,
                 stop=stop,
+                **({"detach": detach} if detach is not None else {}),
             )
         except LeaseRejectedError:
             raise StageExecutionError(
@@ -728,7 +817,7 @@ def generate_bundle(
     snapshot: Any,
     artifact: ValidatedAssemblyArtifact,
     models: Mapping[str, DeviceMathContribution],
-    materialized: MaterializedSet,
+    materialized: MaterializedSet | FrozenSeriesInputs,
     finance: EffectiveFinanceConfig,
     config: CalculationConfig,
     evaluation: EvaluationInput,
@@ -742,6 +831,7 @@ def generate_bundle(
         tuple[int, dict[str, Any]],
     ],
     stop: StopProbe | None = None,
+    detach: Any = None,
     on_stage_resources: Callable[[Mapping[str, Any]], None] | None = None,
 ) -> tuple[int, dict[str, dict[str, object]]]:
     """经生成器阶段容器生成完整 Bundle，并在 cleanup 前带 Fencing Token 持久化检查点。"""
@@ -759,19 +849,19 @@ def generate_bundle(
     _stage_descriptor(plane, solver_ref, kind_label="solver")
     _stage_descriptor(plane, snapshot.result_adapter, kind_label="evaluator")
 
-    request_bytes = _json_bytes(
-        {
-            "artifact": {
-                "canonical_text": artifact.canonical_text,
-                "receipt": thaw_json_value(snapshot.assembly_receipt),
-            },
-            "device_models": thaw_json_value(snapshot.device_models),
-            "materialized": _serialize_materialized(materialized),
-            "finance": finance.to_dict(),
-            "calculation_config": config.to_dict(),
-            "evaluation": thaw_json_value(snapshot.evaluation),
-        }
-    )
+    request_payload: dict[str, Any] = {
+        "artifact": {
+            "canonical_text": artifact.canonical_text,
+            "receipt": thaw_json_value(snapshot.assembly_receipt),
+        },
+        "device_models": thaw_json_value(snapshot.device_models),
+        "finance": finance.to_dict(),
+        "calculation_config": config.to_dict(),
+        "evaluation": thaw_json_value(snapshot.evaluation),
+    }
+    input_files: dict[str, Content | bytes] = {}
+    _attach_series_inputs(request_payload, input_files, materialized)
+    input_files["request.json"] = _json_bytes(request_payload)
 
     saved_info: tuple[int, dict[str, dict[str, object]]] | None = None
 
@@ -820,12 +910,13 @@ def generate_bundle(
                 fencing_token=str(claim.lease_token),
                 image=gen_stage.image,
                 command=gen_stage.command,
-                input_files={"request.json": request_bytes},
+                input_files=input_files,
                 required_outputs=("bundle/bundle.yaml",),
                 collect_all_outputs=True,
             ),
             persist=_persist,
             stop=stop,
+            **({"detach": detach} if detach is not None else {}),
         )
     except LeaseRejectedError:
         raise StageExecutionError(
@@ -856,6 +947,7 @@ def adapt_result(
     session_factory: Callable[[], Session],
     save_checkpoint: Callable[[Session, Claim, int, Mapping[str, Any]], int],
     stop: StopProbe | None = None,
+    detach: Any = None,
 ) -> EvaluatedStageOutput:
     """经评价器阶段容器解释结果，在 cleanup 前带 Fencing Token 持久化检查点。"""
     eval_stage = _stage_descriptor(plane, receipt.result_adapter_ref, kind_label="evaluator")
@@ -884,24 +976,11 @@ def adapt_result(
                 "evaluate", stage_result, claim, number, session_factory
             )
         raw = json.loads(read_content(stage_result.outputs["result.json"]).decode("utf-8"))
+        evaluated = _evaluated_output_from_result_json(
+            raw, resources=stage_result.resources or {},
+        )
         # Durably persist container evaluation payload with Fencing Token BEFORE cleanup_stage.
         run_worker_transaction(session_factory, save_checkpoint, claim, number, raw)
-        outputs = dict(raw.get("outputs") or {})
-        hourly_series = outputs.pop("hourly_series", None)
-        financial_evaluation = outputs.pop("financial_evaluation", None)
-        adapted = ComputeResult(
-            bundle_id=str(raw["bundle_id"]),
-            receipt_id=str(raw["receipt_id"]),
-            execution_status=str(raw["execution_status"]),
-            math_status=str(raw["math_status"]),
-            outputs=outputs,
-        )
-        evaluated = EvaluatedStageOutput(
-            result=adapted,
-            hourly_series=hourly_series,
-            financial_evaluation=financial_evaluation,
-            resources=dict(stage_result.resources or {}),
-        )
         return evaluated
 
     try:
@@ -918,6 +997,7 @@ def adapt_result(
             ),
             persist=_persist,
             stop=stop,
+            **({"detach": detach} if detach is not None else {}),
         )
     except LeaseRejectedError:
         raise StageExecutionError(
@@ -940,12 +1020,13 @@ def run_algorithm_stage(
     claim: Claim,
     snapshot: Any,
     artifact: ValidatedAssemblyArtifact,
-    materialized: MaterializedSet,
+    materialized: MaterializedSet | FrozenSeriesInputs,
     finance: EffectiveFinanceConfig,
     config: CalculationConfig,
     session_factory: Callable[[], Session],
     save_checkpoint: Callable[[Session, Claim, Mapping[str, Any]], int],
     stop: StopProbe | None = None,
+    detach: Any = None,
 ) -> EvaluatedStageOutput:
     """一体化 algorithm 模式容器化执行，并在 cleanup 前持久化检查点。"""
     if config.algorithm is None:
@@ -954,25 +1035,25 @@ def run_algorithm_stage(
         plane.algorithm_registry.resolve(config)
     algo_stage = _stage_descriptor(plane, config.algorithm, kind_label="algorithm")
 
-    request_bytes = _json_bytes(
-        {
-            "artifact": {
-                "canonical_text": artifact.canonical_text,
-                "receipt": thaw_json_value(snapshot.assembly_receipt),
-            },
-            "device_models": thaw_json_value(snapshot.device_models),
-            "materialized": _serialize_materialized(materialized),
-            "finance": finance.to_dict(),
-            "calculation_config": config.to_dict(),
-            "evaluation": thaw_json_value(snapshot.evaluation),
-            "attempt": {
-                "attempt_id": attempt.attempt_id,
-                "bundle_id": attempt.bundle_id,
-                "assembly_id": attempt.assembly_id,
-                "calculation_config_id": attempt.calculation_config_id,
-            },
-        }
-    )
+    request_payload: dict[str, Any] = {
+        "artifact": {
+            "canonical_text": artifact.canonical_text,
+            "receipt": thaw_json_value(snapshot.assembly_receipt),
+        },
+        "device_models": thaw_json_value(snapshot.device_models),
+        "finance": finance.to_dict(),
+        "calculation_config": config.to_dict(),
+        "evaluation": thaw_json_value(snapshot.evaluation),
+        "attempt": {
+            "attempt_id": attempt.attempt_id,
+            "bundle_id": attempt.bundle_id,
+            "assembly_id": attempt.assembly_id,
+            "calculation_config_id": attempt.calculation_config_id,
+        },
+    }
+    input_files: dict[str, Content | bytes] = {}
+    _attach_series_inputs(request_payload, input_files, materialized)
+    input_files["request.json"] = _json_bytes(request_payload)
 
     evaluated: EvaluatedStageOutput | None = None
 
@@ -983,24 +1064,11 @@ def run_algorithm_stage(
                 "algorithm", stage_result, claim, 1, session_factory
             )
         raw = json.loads(read_content(stage_result.outputs["result.json"]).decode("utf-8"))
+        evaluated = _evaluated_output_from_result_json(
+            raw, resources=stage_result.resources or {},
+        )
         # Durably persist container algorithm payload with Fencing Token BEFORE cleanup_stage.
         run_worker_transaction(session_factory, save_checkpoint, claim, raw)
-        outputs = dict(raw.get("outputs") or {})
-        hourly_series = outputs.pop("hourly_series", None)
-        financial_evaluation = outputs.pop("financial_evaluation", None)
-        adapted = ComputeResult(
-            bundle_id=str(raw["bundle_id"]),
-            receipt_id=str(raw["receipt_id"]),
-            execution_status=str(raw["execution_status"]),
-            math_status=str(raw["math_status"]),
-            outputs=outputs,
-        )
-        evaluated = EvaluatedStageOutput(
-            result=adapted,
-            hourly_series=hourly_series,
-            financial_evaluation=financial_evaluation,
-            resources=dict(stage_result.resources or {}),
-        )
         return evaluated
 
     try:
@@ -1011,12 +1079,13 @@ def run_algorithm_stage(
                 fencing_token=str(claim.lease_token),
                 image=algo_stage.image,
                 command=algo_stage.command,
-                input_files={"request.json": request_bytes},
+                input_files=input_files,
                 required_outputs=("result.json",),
                 collect_all_outputs=True,
             ),
             persist=_persist,
             stop=stop,
+            **({"detach": detach} if detach is not None else {}),
         )
     except LeaseRejectedError:
         raise StageExecutionError(

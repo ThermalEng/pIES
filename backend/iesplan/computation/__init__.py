@@ -109,6 +109,7 @@ from iesplan.computation.protocols import (
     SolverBundleManifest,
     StopProbe,
     check_provider_ref,
+    freeze_json_value,
     read_stop_reason,
     thaw_json_value,
 )
@@ -147,6 +148,7 @@ from iesplan.computation.sequences import (
     MaterializedPriceSeries,
     MaterializedSeries,
     MaterializedSet,
+    collect_resource_ids,
     materialize_non_predictive_series,
     materialize_predicted_series,
 )
@@ -226,6 +228,7 @@ __all__ = [
     "check_convergence",
     "check_descriptor_options",
     "check_provider_ref",
+    "collect_resource_ids",
     "export_bundle_files",
     "get_algorithm",
     "list_algorithms",
@@ -237,6 +240,7 @@ __all__ = [
     "normalize_bundle",
     "prediction_delta",
     "split_predictions_by_dependency",
+    "freeze_json_value",
     "thaw_json_value",
     "read_stop_reason",
     "validate_bundle",

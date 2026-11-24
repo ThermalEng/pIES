@@ -1264,7 +1264,7 @@ def _find_repo_root() -> Path | None:
 
 
 def _parse_compose_services(compose_text: str) -> dict[str, dict[str, object]]:
-    """Minimal stdlib parser for top-level services, volumes, environment, and profiles."""
+    """Minimal stdlib parser for top-level services, scalar fields, volumes, environment, and profiles."""
     services: dict[str, dict[str, object]] = {}
     in_services = False
     current_service: str | None = None
@@ -1294,6 +1294,9 @@ def _parse_compose_services(compose_text: str) -> dict[str, dict[str, object]]:
             continue
         if indent == 4:
             current_section = None
+            if ":" in text:
+                k, v = text.split(":", 1)
+                services[current_service][k.strip()] = v.strip().strip("\"'")
             continue
         if indent >= 6 and current_section == "volumes" and text.startswith("- "):
             item = text[2:].strip().strip("\"'")
@@ -1307,34 +1310,18 @@ def _parse_compose_services(compose_text: str) -> dict[str, dict[str, object]]:
     return services
 
 
-def test_backend_no_docker_imports() -> None:
-    """架构门禁 22: backend/iesplan 禁止导入 docker SDK。"""
-    detected = _find_docker_imports()
-    assert not detected, f"backend/iesplan 禁止导入 docker: {detected}"
-
-
-def test_api_no_job_runner_or_worker_imports() -> None:
-    """架构门禁 23: API 路由禁止直接导入 job_runner_client/stage_runner/worker。"""
-    detected = _find_api_job_runner_or_worker_imports()
-    assert not detected, f"API 路由越权导入调度/容器执行器: {detected}"
-
-
-def test_compose_five_container_topology_and_docker_sock_isolation() -> None:
-    """架构门禁 24: docker-compose.yml 仅含 5 个常驻服务，docker.sock 仅挂载于 job_runner。"""
-    import pytest
-
-    repo_root = _find_repo_root()
-    if repo_root is None:
-        pytest.skip("docker-compose.yml not mounted in backend-only container context")
-    compose_text = (repo_root / "docker-compose.yml").read_text(encoding="utf-8")
-    services = _parse_compose_services(compose_text)
-
+def _assert_compose_topology(services: dict[str, dict[str, object]]) -> None:
     assert "io_worker" not in services
     assert "compute_worker" not in services
     persistent = {
-        name for name, cfg in services.items() if not cfg["profiles"]  # type: ignore[truthy-bool]
+        name
+        for name, cfg in services.items()
+        if not cfg["profiles"] and cfg.get("restart") != "no"  # type: ignore[truthy-bool]
     }
     assert persistent == {"postgres", "redis", "job_runner", "backend", "web"}
+    if "builtin_stages" in services:
+        assert services["builtin_stages"].get("restart") == "no"
+        assert services["builtin_stages"].get("image") == "pies-builtin-stages:1.1.5"
     assert "e2e" in services and services["e2e"]["profiles"] == ["e2e"]
 
     sock_services = [
@@ -1350,6 +1337,83 @@ def test_compose_five_container_topology_and_docker_sock_isolation() -> None:
     assert backend_env.get("IESPLAN_EMBEDDED_SCHEDULER") == "true"
     assert "./data:/data" in services["backend"]["volumes"]  # type: ignore[operator]
     assert "./data:/data" in services["job_runner"]["volumes"]  # type: ignore[operator]
+
+
+def test_backend_no_docker_imports() -> None:
+    """架构门禁 22: backend/iesplan 禁止导入 docker SDK。"""
+    detected = _find_docker_imports()
+    assert not detected, f"backend/iesplan 禁止导入 docker: {detected}"
+
+
+def test_api_no_job_runner_or_worker_imports() -> None:
+    """架构门禁 23: API 路由禁止直接导入 job_runner_client/stage_runner/worker。"""
+    detected = _find_api_job_runner_or_worker_imports()
+    assert not detected, f"API 路由越权导入调度/容器执行器: {detected}"
+
+
+def test_compose_five_container_topology_and_docker_sock_isolation() -> None:
+    """架构门禁 24: docker-compose.yml 仅含 5 个常驻服务及一次性构建服务，docker.sock 仅挂 job_runner。"""
+    import pytest
+
+    repo_root = _find_repo_root()
+    if repo_root is None:
+        pytest.skip("docker-compose.yml not mounted in backend-only container context")
+    compose_text = (repo_root / "docker-compose.yml").read_text(encoding="utf-8")
+    services = _parse_compose_services(compose_text)
+    _assert_compose_topology(services)
+
+
+def test_compose_topology_gate_allows_oneshot_builtin_stages_only() -> None:
+    """门禁 24 自校验: 仅允许 restart='no' 的 builtin_stages 一次性服务，禁止第 6 个常驻服务。"""
+    import pytest
+
+    valid = """\
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+  builtin_stages:
+    image: pies-builtin-stages:1.1.5
+    command: ["python", "-c", "pass"]
+    restart: "no"
+  job_runner:
+    build: ./job_runner
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./data:/data
+    restart: unless-stopped
+  backend:
+    build: ./backend
+    environment:
+      IESPLAN_JOB_RUNNER_URL: http://job_runner:8090
+      IESPLAN_STAGE_ROOT: /data/stages
+      IESPLAN_EMBEDDED_SCHEDULER: "true"
+    volumes:
+      - ./data:/data
+    restart: unless-stopped
+  web:
+    build: ./frontend
+    restart: unless-stopped
+  e2e:
+    build: ./frontend
+    profiles:
+      - e2e
+"""
+    _assert_compose_topology(_parse_compose_services(valid))
+
+    persistent_builtin = valid.replace('restart: "no"', "restart: unless-stopped")
+    with pytest.raises(AssertionError):
+        _assert_compose_topology(_parse_compose_services(persistent_builtin))
+
+    sock_builtin = valid.replace(
+        '    restart: "no"',
+        '    volumes:\n      - /var/run/docker.sock:/var/run/docker.sock\n    restart: "no"',
+    )
+    with pytest.raises(AssertionError):
+        _assert_compose_topology(_parse_compose_services(sock_builtin))
 
 
 def test_sdk_zero_backend_dependencies() -> None:

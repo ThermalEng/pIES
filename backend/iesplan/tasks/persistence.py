@@ -512,6 +512,19 @@ def list_attempts(db: Session, task_id: int) -> list[TaskAttemptRecord]:
     return [_row_to_attempt(row) for row in rows]
 
 
+def list_active_attempts_with_leases(
+    db: Session,
+) -> list[tuple[TaskAttemptRecord, TaskLeaseRecord]]:
+    """List all running attempts holding an active lease, ordered by attempt id."""
+    rows = db.execute(
+        select(TaskAttempt, TaskLease)
+        .join(TaskLease, TaskLease.attempt_id == TaskAttempt.id)
+        .where(TaskAttempt.status == "running", TaskLease.status == "active")
+        .order_by(TaskAttempt.id)
+    ).all()
+    return [(_row_to_attempt(attempt), _row_to_lease(lease)) for attempt, lease in rows]
+
+
 def latest_finished_at_for_tasks(db: Session, task_ids: Collection[int]) -> dict[int, str | None]:
     """批量取任务最新尝试完成时刻（MAX finished_at；无已完成尝试为 None）。
 

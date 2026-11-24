@@ -13,8 +13,11 @@ from iesplan.bootstrap import (
 )
 
 
-def test_assemble_api_full_context() -> None:
+def test_assemble_api_full_context(monkeypatch) -> None:
     """assemble_api 装配 database、storage、registry、生成器与内置阶段目录。"""
+    from iesplan.config import settings
+
+    monkeypatch.setattr(settings, "job_runner_url", "")
     ctx = assemble_api()
     assert isinstance(ctx, ApplicationContext)
     assert ctx.session_factory is not None

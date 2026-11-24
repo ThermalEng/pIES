@@ -240,6 +240,11 @@ class _ObjectContent:
     object_id: int
     size_bytes: int
 
+    @property
+    def path(self) -> Path | None:
+        """Expose underlying local file path when backed by a filesystem blob."""
+        return getattr(self.source, "path", None)
+
     def iter_chunks(self):
         try:
             yield from self.source.iter_chunks()

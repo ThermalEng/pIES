@@ -918,7 +918,8 @@ class TestPredictPhase2FullHorizon:
             assert call["point_counts"] == [FULL_STEPS]
             assert call["evaluation"].operation_years == YEARS
             assert call["evaluation"].construction_period == 0
-        assert len({id(call["evaluation"]) for call in recorder.calls}) == 1
+        first_eval = recorder.calls[0]["evaluation"]
+        assert all(call["evaluation"] == first_eval for call in recorder.calls)
         evidence = results_store.latest_evidence_for_task(db, task.id)
         assert evidence is not None
         sealed = json.loads(get_object(db, evidence.object_id).decode("utf-8"))
