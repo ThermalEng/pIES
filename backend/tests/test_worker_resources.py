@@ -126,20 +126,31 @@ def test_new_attempt_does_not_borrow_previous_attempt_stage(db, env, tmp_path):
 
 
 def test_memory_error_records_stage_and_does_not_become_generic_failure(
-    db, env, factory, monkeypatch, tmp_path,
+    db, env, factory, monkeypatch,
 ):
     claim = worker.acquire_attempt(db, env["task"].id, "resource-test")
-    observed = observation(tmp_path / "resources")
-    monkeypatch.setattr(worker, "observe_local_resources", lambda: observed)
 
     def exhaust(ctx):
+        ctx.update_stage_resources({
+            "source": "docker_and_cgroup_v2",
+            "memory_limit_bytes": {"status": "limited", "value": 8 * 1024**3},
+            "memory_current_bytes": {"status": "known", "value": 100},
+            "memory_peak_bytes": {"status": "known", "value": 200},
+            "oom_kill_count": {"status": "known", "value": 0},
+        })
         ctx.progress(85, "adapt", {"receipt_status": "succeeded"})
         raise MemoryError()
 
     monkeypatch.setattr(runner, "dispatch", exhaust)
     assert runner.run_task(factory, claim) == "failed"
     progress = tasks.latest_progress_for_task(db, claim.task_id)
-    assert progress.detail["worker_resources"] == observed.to_dict()
+    assert progress.detail["worker_resources"]["scope"] == "worker_cgroup"
+    assert progress.detail["worker_resources"]["memory_limit"] == {
+        "status": "limited", "bytes": 8 * 1024**3,
+    }
+    assert progress.detail["worker_resources"]["swap_limit"] == {"status": "limited", "bytes": 0}
+    assert progress.detail["worker_resources"]["memory_peak_bytes"] == 200
     diag = _task_diagnostics(db, claim.task_id)[-1]
     assert diag.code == TASK_RESOURCE_EXHAUSTED
     assert "adapt" in diag.message and "MemoryError" in diag.message
+    assert diag.context["worker_resources"] == progress.detail["worker_resources"]

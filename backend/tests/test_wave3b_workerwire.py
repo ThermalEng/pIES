@@ -1,21 +1,15 @@
-"""Wave3-B Worker 接线行为测试(bootstrap 组合根消费侧)。
+"""组合根调度接线与探针隔离行为测试(ADR-0016 五容器收敛)。
 
-覆盖(不碰 bootstrap 包内部/main.py/db.py):
-- worker/main.main 按 worker_type 选择 assemble_compute_worker()/
-  assemble_io_worker(), Daemon 会话工厂取自装配好的 ApplicationContext;
-- assemble 抛异常时直接传播(启动失败, 不发布半初始化状态, 无 fallback);
-- 业务模块队列模式收敛为 bootstrap 传入配置(api/limits、identity、
-  tasks/queue 的 configure_queue_mode; 默认行为不变);
+覆盖:
+- backend lifespan 按 IESPLAN_EMBEDDED_SCHEDULER 启停 EmbeddedScheduler,
+  并在退出时优雅关闭;
+- 业务模块队列模式收敛为 bootstrap 传入配置(tasks/queue 的 configure_queue_mode;
+  默认行为不变);
 - 启动/就绪行为: 存活探针不依赖就绪依赖, 缺依赖时 /readyz 503。
-
-bootstrap 真包由 W3-A 切片提供; 本文件用 sys.modules 桩验证消费契约,
-不锁定装配实现。
 """
 
 from __future__ import annotations
 
-import sys
-import types
 from types import SimpleNamespace
 from typing import Any
 
@@ -24,144 +18,66 @@ from fastapi.testclient import TestClient
 
 from iesplan.main import create_app
 
-
 # ---------------------------------------------------------------------------
-# 桩 bootstrap(装配实现归 W3-A, 此处只立消费契约)
-# ---------------------------------------------------------------------------
-
-
-@pytest.fixture()
-def stub_bootstrap(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
-    """向 sys.modules 注入桩 iesplan.bootstrap, 记录各 assemble 调用次数。
-
-    桩上下文只提供 Daemon 启动所需的会话工厂与计算执行面哨兵。
-    """
-    calls: dict[str, int] = {"compute": 0, "io": 0}
-    failures: dict[str, Exception] = {}
-    sentinel_factory = object()
-    sentinel_plane = object()
-
-    def _compute() -> SimpleNamespace:
-        calls["compute"] += 1
-        if "compute" in failures:
-            raise failures["compute"]
-        return SimpleNamespace(
-            session_factory=sentinel_factory,
-            compute_execution_plane=lambda: sentinel_plane,
-        )
-
-    def _io() -> SimpleNamespace:
-        calls["io"] += 1
-        if "io" in failures:
-            raise failures["io"]
-        return SimpleNamespace(session_factory=sentinel_factory)
-
-    module = types.ModuleType("iesplan.bootstrap")
-    module.assemble_compute_worker = _compute  # type: ignore[attr-defined]
-    module.assemble_io_worker = _io  # type: ignore[attr-defined]
-    monkeypatch.setitem(sys.modules, "iesplan.bootstrap", module)
-    return {
-        "calls": calls,
-        "failures": failures,
-        "session_factory": sentinel_factory,
-        "compute_plane": sentinel_plane,
-    }
-
-
-@pytest.fixture()
-def fake_worker(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
-    """替换 iesplan.worker.main.Worker, 记录构造参数与 run 调用。"""
-    import iesplan.worker.main as worker_main
-
-    state: dict[str, Any] = {"kwargs": None, "runs": 0}
-
-    class _FakeWorker:
-        def __init__(self, *args: Any, **kwargs: Any) -> None:
-            state["kwargs"] = kwargs
-            state["args"] = args
-
-        def run(self) -> None:
-            state["runs"] += 1
-
-    monkeypatch.setattr(worker_main, "Worker", _FakeWorker)
-    return state
-
-
-def _run_main(argv: list[str]) -> int:
-    import iesplan.worker.main as worker_main
-
-    return worker_main.main(argv)
-
-
-# ---------------------------------------------------------------------------
-# worker_type → assemble 选择
+# EmbeddedScheduler lifespan 接线
 # ---------------------------------------------------------------------------
 
 
-def test_main_selects_compute_assemble(
-    stub_bootstrap: dict[str, Any], fake_worker: dict[str, Any]
-) -> None:
-    assert _run_main(["--worker-type", "compute"]) == 0
-    assert stub_bootstrap["calls"] == {"compute": 1, "io": 0}
-    assert fake_worker["runs"] == 1
-    assert fake_worker["kwargs"]["worker_type"] == "compute"
-
-
-def test_main_selects_io_assemble(
-    stub_bootstrap: dict[str, Any], fake_worker: dict[str, Any]
-) -> None:
-    assert _run_main(["--worker-type", "io"]) == 0
-    assert stub_bootstrap["calls"] == {"compute": 0, "io": 1}
-    assert fake_worker["runs"] == 1
-    assert fake_worker["kwargs"]["worker_type"] == "io"
-
-
-def test_main_worker_type_from_env(
-    stub_bootstrap: dict[str, Any],
-    fake_worker: dict[str, Any],
+def test_lifespan_starts_and_stops_embedded_scheduler_when_enabled(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """CLI 未指定时取 IESPLAN_WORKER_TYPE 环境变量(部署编排现状不变)。"""
-    monkeypatch.setenv("IESPLAN_WORKER_TYPE", "io")
-    assert _run_main([]) == 0
-    assert stub_bootstrap["calls"] == {"compute": 0, "io": 1}
+    """IESPLAN_EMBEDDED_SCHEDULER=true 时 lifespan 经组合根启停调度器。"""
+    from iesplan import main as main_mod
+    from iesplan.config import settings
+
+    events: list[str] = []
+
+    class _FakeScheduler:
+        def start(self) -> None:
+            events.append("start")
+
+        def stop(self) -> None:
+            events.append("stop")
+
+    fake_ctx = SimpleNamespace(
+        session_factory=object(),
+        stage_runner=None,
+        job_runner_client=None,
+        compute_execution_plane=lambda: None,
+        health=lambda: {"db": "ok"},
+        ready=lambda: True,
+    )
+    monkeypatch.setattr(settings, "embedded_scheduler", True)
+    monkeypatch.setattr(main_mod, "assemble_api", lambda: fake_ctx)
+    monkeypatch.setattr(main_mod, "assemble_embedded_scheduler", lambda ctx: _FakeScheduler())
+
+    app = create_app()
+    with TestClient(app, raise_server_exceptions=False) as test_client:
+        assert events == ["start"]
+        assert test_client.get("/api/healthz").status_code == 200
+    assert events == ["start", "stop"]
 
 
-def test_main_session_factory_comes_from_context(
-    stub_bootstrap: dict[str, Any], fake_worker: dict[str, Any]
-) -> None:
-    """Daemon 会话工厂与计算执行面必须取自装配好的 context, 不再直连 SessionLocal。"""
-    _run_main(["--worker-type", "compute"])
-    assert fake_worker["kwargs"]["session_factory"] is stub_bootstrap["session_factory"]
-    assert fake_worker["kwargs"]["compute"] is stub_bootstrap["compute_plane"]
-
-
-# ---------------------------------------------------------------------------
-# 启动失败: 无 fallback, 无半初始化
-# ---------------------------------------------------------------------------
-
-
-def test_main_assemble_failure_propagates_without_half_init(
-    stub_bootstrap: dict[str, Any], fake_worker: dict[str, Any]
-) -> None:
-    """组合根拒绝装配时启动失败，Daemon 永不运行。"""
-    stub_bootstrap["failures"]["compute"] = RuntimeError("db unavailable")
-    with pytest.raises(RuntimeError, match="db unavailable"):
-        _run_main(["--worker-type", "compute"])
-    assert fake_worker["kwargs"] is None
-    assert fake_worker["runs"] == 0
-
-
-def test_main_invalid_worker_type_rejected_before_assemble(
-    stub_bootstrap: dict[str, Any],
-    fake_worker: dict[str, Any],
+def test_lifespan_skips_embedded_scheduler_when_disabled(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("IESPLAN_WORKER_TYPE", "bogus")
-    with pytest.raises(ValueError, match="非法 worker_type"):
-        _run_main([])
-    assert stub_bootstrap["calls"] == {"compute": 0, "io": 0}
-    assert fake_worker["runs"] == 0
+    """IESPLAN_EMBEDDED_SCHEDULER=false 时不启动后台调度器。"""
+    from iesplan import main as main_mod
+    from iesplan.config import settings
+
+    called = False
+
+    def _forbid(_ctx: Any) -> Any:
+        nonlocal called
+        called = True
+        raise AssertionError("embedded scheduler must not be assembled when disabled")
+
+    monkeypatch.setattr(settings, "embedded_scheduler", False)
+    monkeypatch.setattr(main_mod, "assemble_embedded_scheduler", _forbid)
+
+    with TestClient(create_app(), raise_server_exceptions=False) as test_client:
+        assert test_client.get("/api/healthz").status_code == 200
+    assert not called
 
 
 # ---------------------------------------------------------------------------
@@ -187,7 +103,7 @@ def test_queue_bootstrap_override_selects_memory(
     _clean_queue_state: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """bootstrap 传入 memory 时即便环境变量指向外部也走内存后端。"""
-    from iesplan.tasks.queue import _MemoryBackend, _get_backend, configure_queue_mode
+    from iesplan.tasks.queue import _get_backend, _MemoryBackend, configure_queue_mode
 
     monkeypatch.setenv("IESPLAN_QUEUE", "redis")
     configure_queue_mode("memory")
@@ -199,8 +115,8 @@ def test_queue_default_still_env_driven(
 ) -> None:
     """未配置时默认行为不变: 仍由 IESPLAN_QUEUE 环境变量驱动。"""
     from iesplan.tasks.queue import (
-        _MemoryBackend,
         _get_backend,
+        _MemoryBackend,
         _resolve_queue_mode,
         configure_queue_mode,
     )

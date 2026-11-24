@@ -55,6 +55,8 @@ class EmbeddedScheduler:
         poll_interval: float = 0.5,
         heartbeat_interval: float = 5.0,
     ) -> None:
+        if session_factory is None:
+            raise TypeError("EmbeddedScheduler 缺少必需的 session_factory(由组合根装配显式传入)")
         self.session_factory = session_factory
         self.compute_slots = int(compute_slots)
         self.io_slots = int(io_slots)

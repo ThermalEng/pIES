@@ -1,17 +1,13 @@
-"""组合根契约测试: assemble_* 装配形状与 metadata 注册。"""
+"""组合根契约测试: assemble_api / assemble_embedded_scheduler 装配形状与 metadata 注册。"""
 
 from __future__ import annotations
-
-from unittest.mock import Mock
 
 import pytest
 
 from iesplan.bootstrap import (
     ApplicationContext,
     assemble_api,
-    assemble_compute_worker,
-    assemble_io_worker,
-    assemble_task_runtime,
+    assemble_embedded_scheduler,
     collect_immutable_tables,
     collect_trigger_statements,
 )
@@ -42,23 +38,23 @@ def test_assemble_api_full_context() -> None:
     assert ctx.ready() is True
 
 
-def test_assemble_worker_subsets(monkeypatch) -> None:
+def test_assemble_container_execution_plane_and_scheduler(monkeypatch) -> None:
     """计算执行面只通过 ContainerStageRunner + JobRunnerClient 装配，无本地进程回退。"""
     from iesplan.config import settings
 
     # 未配置 job_runner_url 时不回退到进程内 LocalProcessProvider，compute_execution_plane 为 None。
     monkeypatch.setattr(settings, "job_runner_url", "")
-    no_runner = assemble_compute_worker()
+    no_runner = assemble_api()
     assert no_runner.stage_runner is None
     assert no_runner.compute_execution_plane() is None
     assert "executors" not in no_runner.health()
 
     # 配置 job_runner_url 后装配 ContainerStageRunner + BuiltinStageCatalog。
     monkeypatch.setattr(settings, "job_runner_url", "http://job_runner:8090")
-    compute = assemble_compute_worker()
-    assert compute.stage_runner is not None
-    assert compute.job_runner_client is not None
-    policy = compute.container_stage_policy
+    api = assemble_api()
+    assert api.stage_runner is not None
+    assert api.job_runner_client is not None
+    policy = api.container_stage_policy
     assert policy is not None
     assert policy.builtin_image == settings.stage_builtin_image
     assert policy.max_timeout_seconds == settings.solver_max_timeout_seconds
@@ -67,23 +63,27 @@ def test_assemble_worker_subsets(monkeypatch) -> None:
     assert policy.pids_limit == settings.stage_pids_limit
     assert policy.tmpfs_size_mb == settings.stage_tmpfs_size_mb
     assert policy.stop_grace_seconds == settings.stage_stop_grace_seconds
-    plane = compute.compute_execution_plane()
+    plane = api.compute_execution_plane()
     assert plane is not None
-    assert plane.stage_runner is compute.stage_runner
-    assert plane.stage_catalog is compute.builtin_stage_catalog
-
-    api = assemble_api()
-    assert api.compute_execution_plane() is not None
+    assert plane.stage_runner is api.stage_runner
+    assert plane.stage_catalog is api.builtin_stage_catalog
     assert "job_runner" in api.health()
 
-    io = assemble_io_worker()
-    assert io.storage is not None
-    assert io.device_registry is None
-    assert io.generator_registry is None
-    assert io.compute_execution_plane() is None
-    assert "registry" not in io.health()
-    assert "generators" not in io.health()
-    assert io.health()["db"] == "ok"
+    scheduler = assemble_embedded_scheduler(api)
+    try:
+        assert scheduler.session_factory is api.session_factory
+        assert scheduler.compute == plane
+        assert scheduler.stage_runner is api.stage_runner
+        assert scheduler.compute_slots == settings.compute_slots
+        assert scheduler.io_slots == settings.io_slots
+        assert scheduler.build_slots == settings.build_slots
+    finally:
+        scheduler.stop()
+
+    # job_runner_url 已配置但缺少执行面时拒绝装配调度器。
+    broken = ApplicationContext(session_factory=api.session_factory)
+    with pytest.raises(RuntimeError, match="compute execution plane"):
+        assemble_embedded_scheduler(broken)
 
 
 def test_assemble_configures_queue_mode_from_environment(monkeypatch) -> None:
@@ -92,7 +92,7 @@ def test_assemble_configures_queue_mode_from_environment(monkeypatch) -> None:
 
     monkeypatch.setenv("IESPLAN_QUEUE", "memory")
     try:
-        assemble_io_worker()
+        assemble_api()
         assert queue_module._resolve_queue_mode() == "memory"
     finally:
         queue_module.configure_queue_mode(None)
@@ -107,27 +107,6 @@ def test_public_facades_register_domain_metadata() -> None:
     assert "projects" in names
     assert "tasks" in names
     assert "objects" in names
-
-
-@pytest.mark.parametrize("worker_type", ["compute", "io"])
-def test_task_runtime_does_not_redeploy_database_or_seed_identity(worker_type, monkeypatch) -> None:
-    from iesplan import db
-    from iesplan.application import identity
-    from iesplan.config import settings
-
-    initialize = Mock()
-    seed = Mock()
-    monkeypatch.setattr(db, "init_db", initialize)
-    monkeypatch.setattr(identity, "seed_builtin_admin", seed)
-    monkeypatch.setattr(settings, "job_runner_url", "http://job_runner:8090")
-
-    ctx = assemble_task_runtime(worker_type)
-
-    initialize.assert_not_called()
-    seed.assert_not_called()
-    assert ctx.session_factory is db.SessionLocal
-    assert ctx.storage is not None
-    assert (ctx.compute_execution_plane() is not None) == (worker_type == "compute")
 
 
 def test_collect_trigger_statements_covers_immutable_tables() -> None:

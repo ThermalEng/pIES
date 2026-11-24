@@ -685,7 +685,9 @@ def run_task(
                 worker_app.run_worker_transaction(
                     factory, worker_app.fail_resource_attempt, claim,
                     cause=exc.detail,
-                    resources=dict(exc.resources or ctx.stage_resources),
+                    resources=executors.normalize_worker_resources(
+                        exc.resources or ctx.stage_resources
+                    ),
                 )
             except worker_app.LeaseRejectedError:
                 return "lease_rejected"
@@ -698,10 +700,15 @@ def run_task(
         return _handle_failure(factory, ctx, claim, exc)
     except (MemoryError, ResourceExhaustedError) as exc:
         try:
+            resources = (
+                executors.normalize_worker_resources(ctx.stage_resources)
+                if ctx.stage_resources
+                else worker_app.observe_local_resources().to_dict()
+            )
             worker_app.run_worker_transaction(
                 factory, worker_app.fail_resource_attempt, claim,
                 cause=type(exc).__name__ + (f": {exc}" if str(exc) else ""),
-                resources=dict(ctx.stage_resources),
+                resources=resources,
             )
         except worker_app.LeaseRejectedError:
             return "lease_rejected"

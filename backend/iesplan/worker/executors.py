@@ -67,6 +67,68 @@ def _thaw_json_value(value: Any) -> Any:
     return value
 
 
+def normalize_worker_resources(raw: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Normalize stage-container ``StageResources`` into the canonical ``worker_resources`` contract."""
+    if not raw:
+        return {
+            "source": "cgroup_v2",
+            "scope": "worker_cgroup",
+            "memory_limit": {"status": "unknown", "bytes": None},
+            "swap_limit": {"status": "unknown", "bytes": None},
+            "memory_current_bytes": None,
+            "memory_peak_bytes": None,
+            "swap_current_bytes": None,
+            "oom_kill_count": None,
+        }
+    if "memory_limit" in raw and "scope" in raw:
+        return _thaw_json_value(raw)
+
+    def _extract_limit(field: Any) -> dict[str, Any]:
+        if isinstance(field, Mapping):
+            status = field.get("status")
+            if status == "limited":
+                val = field.get("value", field.get("bytes"))
+                numeric = isinstance(val, (int, float)) and not isinstance(val, bool)
+                return {
+                    "status": "limited",
+                    "bytes": int(val) if numeric else None,
+                }
+            if status == "unlimited":
+                return {"status": "unlimited", "bytes": None}
+        return {"status": "unknown", "bytes": None}
+
+    def _extract_int_metric(field: Any) -> int | None:
+        if isinstance(field, Mapping):
+            if field.get("status") == "known":
+                val = field.get("value")
+                return int(val) if isinstance(val, (int, float)) and not isinstance(val, bool) else None
+            return None
+        if isinstance(field, (int, float)) and not isinstance(field, bool):
+            return int(field)
+        return None
+
+    memory_limit = _extract_limit(raw.get("memory_limit_bytes"))
+    swap_limit = (
+        _extract_limit(raw.get("swap_limit_bytes"))
+        if "swap_limit_bytes" in raw
+        else (
+            {"status": "limited", "bytes": 0}
+            if memory_limit["status"] == "limited"
+            else {"status": "unknown", "bytes": None}
+        )
+    )
+    return {
+        "source": "cgroup_v2",
+        "scope": "worker_cgroup",
+        "memory_limit": memory_limit,
+        "swap_limit": swap_limit,
+        "memory_current_bytes": _extract_int_metric(raw.get("memory_current_bytes")),
+        "memory_peak_bytes": _extract_int_metric(raw.get("memory_peak_bytes")),
+        "swap_current_bytes": _extract_int_metric(raw.get("swap_current_bytes")),
+        "oom_kill_count": _extract_int_metric(raw.get("oom_kill_count")),
+    }
+
+
 @dataclass(slots=True)
 class RunContext:
     """一次任务执行上下文(执行器/进度/取消检查共用)。
@@ -96,7 +158,7 @@ class RunContext:
         """Record latest observed stage-container cgroup v2 resource metrics."""
         if resources:
             self.stage_resources.clear()
-            self.stage_resources.update(_thaw_json_value(resources))
+            self.stage_resources.update(normalize_worker_resources(resources))
 
     def progress(self, percent: float, stage: str, detail: dict | None = None) -> None:
         """阶段化进度报告（PG 持久进度 + Redis 秒级进度，见 contracts §快照与异步契约）。"""
