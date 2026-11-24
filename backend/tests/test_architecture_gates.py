@@ -1378,3 +1378,20 @@ def test_sdk_zero_backend_dependencies() -> None:
                 if top in forbidden_roots:
                     hits.append((rel, node.lineno, f"from {node.module}"))
     assert not hits, f"sdk/pies_sdk 存在禁止的后端依赖: {hits}"
+
+
+def test_legacy_standalone_worker_daemon_retired() -> None:
+    """架构门禁 26 (ADR-0016 S4): 独立常驻 Worker 进程入口与旧装配函数已退场。"""
+    assert not (_WORKER_DIR / "main.py").exists(), (
+        "独立常驻 Worker 入口 backend/iesplan/worker/main.py 应已退场"
+    )
+    bootstrap_init = (_PKG_ROOT / "bootstrap" / "__init__.py").read_text(encoding="utf-8")
+    tree = ast.parse(bootstrap_init)
+    defined_funcs = {
+        node.name
+        for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    retired = {"assemble_compute_worker", "assemble_io_worker", "assemble_task_runtime"}
+    leaked = sorted(retired & defined_funcs)
+    assert not leaked, f"bootstrap 中仍残留已退场的旧 Worker 装配函数: {leaked}"

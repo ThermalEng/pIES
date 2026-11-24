@@ -50,7 +50,6 @@ test('任务运行图标旋转、完成进度100%，保留共享资源观测', a
   expect(facts.scope).toBe('worker_cgroup')
   if (process.env.E2E_WORKER_MEMORY_BYTES) {
     expect(facts.memory_limit).toEqual({ status: 'limited', bytes: Number(process.env.E2E_WORKER_MEMORY_BYTES) })
-    expect(facts.swap_limit).toEqual({ status: 'limited', bytes: 0 })
   }
   await expect(row.getByText('已完成', { exact: true })).toBeVisible()
   await expect(row.getByRole('progressbar')).toHaveAttribute('aria-valuenow', '100')

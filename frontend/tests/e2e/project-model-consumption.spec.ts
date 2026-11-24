@@ -36,7 +36,7 @@
 // 运行(仅在本工作树根目录执行: 数据目录即该工作树隔离 ./data, 勿从主线仓库根
 // 执行以免落到主线数据; 项目名/端口任取隔离值, 不碰其他栈):
 //   export IESPLAN_PORT=18087   # 任取空闲端口, 避免与其他栈冲突
-//   docker compose -p pies-pmc up -d --build web backend io_worker compute_worker
+//   docker compose -p pies-pmc up -d --build web backend job_runner
 //   docker compose -p pies-pmc --profile e2e run --rm --build --no-deps e2e \
 //     npx playwright test project-model-consumption.spec.ts
 

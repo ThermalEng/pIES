@@ -132,8 +132,6 @@ class Settings(BaseSettings):
     secret_key: str = DEFAULT_DEV_SECRET_KEY
     #: 对外服务地址(用于生成链接)
     app_url: str = "http://localhost:8080"
-    #: worker 类型: compute(计算) | io(导入导出等 IO 任务)
-    worker_type: str = "compute"
     #: 首启种子管理员初始密码(仅首次种子使用, 首登后强制改密)
     default_admin_password: str = "iesplan-admin-initial"
     #: 外部认证提供方: disabled(内置账号) | oidc(OpenID Connect 单点登录)

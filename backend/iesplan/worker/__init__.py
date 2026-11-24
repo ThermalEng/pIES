@@ -1,16 +1,16 @@
-"""计算 Worker 与 I/O Worker 共用框架(03-task-scheduling.md)。
+"""嵌入式后台调度器与任务执行框架(ADR-0016)。
 
 包含:
+- scheduler.py     收敛于 backend 的轻量级嵌入式调度器与隔离执行池;
 - executors.py     结果检查与 I/O 任务入口;
-- runner.py        任务执行分派与状态收拢;
-- main.py          Worker 入口(队列订阅、心跳与进程监督、槽门禁、信号处理)。
+- runner.py        任务执行分派与状态收拢。
 
 租约/提交/收拢直接消费 ``iesplan.application.worker`` 阶段网关,
-本层不设转发模块。
+本层不设转发模块。独立常驻 ``io_worker``/``compute_worker`` 进程已退场。
 """
 
 from __future__ import annotations
 
 from iesplan.worker.scheduler import EmbeddedScheduler
 
-__all__ = ["EmbeddedScheduler", "runner", "executors", "main"]
+__all__ = ["EmbeddedScheduler", "runner", "executors"]

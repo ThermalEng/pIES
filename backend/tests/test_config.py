@@ -43,7 +43,7 @@ def test_defaults_from_deploy_file() -> None:
     assert isinstance(s.data_dir, Path)
     assert s.secret_key == "dev-only-secret-change-me"
     assert s.app_url == "http://localhost:8080"
-    assert s.worker_type == "compute"
+    assert not hasattr(s, "worker_type")
     assert s.session_ttl_minutes == 480
     assert s.default_admin_password == "iesplan-admin-initial"
     assert s.debug is False
@@ -80,7 +80,6 @@ def test_env_override_only_for_env_layer(monkeypatch) -> None:
     monkeypatch.setenv("IESPLAN_REDIS_URL", "redis://redis:6380/1")
     monkeypatch.setenv("IESPLAN_DATA_DIR", "/tmp/ies-data")
     monkeypatch.setenv("IESPLAN_DEBUG", "true")
-    monkeypatch.setenv("IESPLAN_WORKER_TYPE", "io")
     monkeypatch.setenv("IESPLAN_JOB_RUNNER_URL", "http://job_runner:8090")
     monkeypatch.setenv("IESPLAN_STAGE_ROOT", "/tmp/ies-stages")
     monkeypatch.setenv("IESPLAN_EMBEDDED_SCHEDULER", "true")
@@ -92,7 +91,6 @@ def test_env_override_only_for_env_layer(monkeypatch) -> None:
     assert s.redis_url == "redis://redis:6380/1"
     assert s.data_dir == Path("/tmp/ies-data")
     assert s.debug is True
-    assert s.worker_type == "io"
     assert s.job_runner_url == "http://job_runner:8090"
     assert s.stage_root == Path("/tmp/ies-stages")
     assert s.embedded_scheduler is True

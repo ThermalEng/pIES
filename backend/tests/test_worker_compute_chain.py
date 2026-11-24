@@ -474,8 +474,9 @@ class TestComputeChainEndToEnd:
         progress_row = db.execute(
             select(TaskProgress).where(TaskProgress.attempt_id == claim.attempt_id)
         ).scalar_one()
-        assert progress_row.detail["worker_resources"]["source"] == "docker_and_cgroup_v2"
-        assert progress_row.detail["worker_resources"]["memory_peak_bytes"]["value"] == 8_388_608
+        assert progress_row.detail["worker_resources"]["source"] == "cgroup_v2"
+        assert progress_row.detail["worker_resources"]["scope"] == "worker_cgroup"
+        assert progress_row.detail["worker_resources"]["memory_peak_bytes"] == 8_388_608
 
         task = db.execute(select(Task).where(Task.id == task_id)).scalar_one()
         assert task.status == "completed"

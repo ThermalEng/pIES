@@ -4,7 +4,7 @@
   ``session_factory``; 无上下文或工厂缺失时显式失败(无静默全局回退);
 - ``iesplan.api.deps.get_request_db``: 从装配工厂取请求级会话, 用后关闭;
   HTTP 层无上下文时显式失败, 不触碰全局 ``SessionLocal``;
-- ``iesplan.worker.main.Worker``: 构造必须显式传入 ``session_factory``,
+- ``iesplan.worker.EmbeddedScheduler``: 构造必须显式传入 ``session_factory``,
   缺失立即失败, 不回退任何默认工厂。
 """
 
@@ -22,7 +22,7 @@ from fastapi import Depends, FastAPI  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
 from iesplan.api import deps as api_deps  # noqa: E402
-from iesplan.worker.main import Worker  # noqa: E402
+from iesplan.worker import EmbeddedScheduler  # noqa: E402
 
 
 def _request(app: object) -> SimpleNamespace:
@@ -131,22 +131,31 @@ def test_http_request_db_supports_override() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Worker 显式注入
+# EmbeddedScheduler 显式注入
 # ---------------------------------------------------------------------------
 
 
-def test_worker_requires_explicit_session_factory() -> None:
-    """Worker 缺 session_factory 立即失败(无默认、无回退)。"""
+def test_embedded_scheduler_requires_explicit_session_factory() -> None:
+    """EmbeddedScheduler 缺 session_factory 立即失败(无默认、无回退)。"""
     with pytest.raises(TypeError):
-        Worker(worker_type="compute")  # type: ignore[call-arg]
+        EmbeddedScheduler(compute_slots=1, io_slots=1, build_slots=1)  # type: ignore[call-arg]
     with pytest.raises(TypeError, match="session_factory"):
-        Worker(worker_type="io", session_factory=None)  # type: ignore[arg-type]
+        EmbeddedScheduler(session_factory=None, compute_slots=1, io_slots=1, build_slots=1)
 
 
-def test_worker_holds_explicit_session_factory() -> None:
-    """显式传入的工厂被 Worker 持有(组合根装配来源)。"""
+def test_embedded_scheduler_holds_explicit_session_factory() -> None:
+    """显式传入的工厂被 EmbeddedScheduler 持有(组合根装配来源)。"""
     sentinel = object()
     compute_plane = object()
-    worker = Worker(worker_type="compute", session_factory=sentinel, compute=compute_plane)
-    assert worker.session_factory is sentinel
-    assert worker.compute is compute_plane
+    scheduler = EmbeddedScheduler(
+        session_factory=sentinel,
+        compute_slots=1,
+        io_slots=1,
+        build_slots=1,
+        compute=compute_plane,
+    )
+    try:
+        assert scheduler.session_factory is sentinel
+        assert scheduler.compute is compute_plane
+    finally:
+        scheduler.stop()

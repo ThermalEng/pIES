@@ -41,7 +41,7 @@
 //   export IESPLAN_PORT=18085   # 任取空闲端口, 避免与其他栈冲突
 //   docker compose -p pies-ext-dev -f docker-compose.yml \
 //     -f frontend/tests/e2e/docker-compose.ext-device.yml up -d --build \
-//     web backend io_worker compute_worker
+//     web backend job_runner
 //   docker compose -p pies-ext-dev -f docker-compose.yml \
 //     -f frontend/tests/e2e/docker-compose.ext-device.yml --profile e2e \
 //     run --rm --build --no-deps e2e npx playwright test \

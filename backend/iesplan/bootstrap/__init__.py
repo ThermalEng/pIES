@@ -1,23 +1,18 @@
-"""应用组合根(backend-decoupling Wave3)。
+"""应用组合根(ADR-0016 五容器收敛)。
 
-系统唯一知道"这次部署具体使用哪些实现"的位置: 按进程角色
-(API / compute Worker / I/O Worker)装配所需能力子集, 输出完整
-``ApplicationContext`` 或明确启动失败。
+系统唯一知道"这次部署具体使用哪些实现"的位置: 统一装配 ``backend``
+进程所需的数据库、对象存储、设备注册表、生成器/预测器目录、内置容器阶段目录、
+``job_runner`` 客户端及可选嵌入式调度器, 输出完整 ``ApplicationContext``
+或明确启动失败。
 
 - ``assemble_api``: 装配 database + storage + devices 2.0 注册表 +
-  生成器目录(显式注册内置真实 provider)；不装配执行面（执行器目录/
-  运行时/执行策略只归计算 Worker）;
-- ``assemble_compute_worker``: 装配 database + storage + devices 2.0
-  注册表 + 生成器目录 + 执行器目录(含 HiGHS 本地进程绑定) + 结果适配器
-  目录 + 统一 Settings 派生的 DeploymentPolicy + 通用 SolverRuntime；
-  任一缺失即拒绝启动，不领取无法执行的计算任务；
-- ``assemble_io_worker``: I/O 所需子集(database + storage, 不含 devices
-  注册表与生成器目录）。
-- ``assemble_task_runtime``: 任务子进程装配运行依赖，不重复数据库初始化
-  或身份播种。
+  生成器/预测器目录 + 内置阶段目录 + (配置 ``IESPLAN_JOB_RUNNER_URL`` 时)
+  ``JobRunnerClient`` 与 ``ContainerStageRunner``;
+- ``assemble_embedded_scheduler``: 在 ``IESPLAN_EMBEDDED_SCHEDULER=true`` 时
+  为 ``backend`` lifespan 装配隔离有界计算/IO/构建执行池。
 
 失败语义: 任一必需依赖装配失败即抛异常(启动失败), 不发布半初始化
-状态, 不设 fallback。provider 选择与装配只归本组合根；API/Worker
+状态, 不设 fallback。provider 选择与装配只归本组合根；API/调度层
 不得自行发现或动态加载 provider，不做动态扫描。
 
 本包只做装配与健康聚合, 不实现业务规则, 不新增全局 registry(装配结果
@@ -32,7 +27,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any
 
 from iesplan import audit as audit_domain
 from iesplan import configuration as configuration_domain
@@ -372,9 +367,8 @@ def _assemble(
 
 
 def assemble_api() -> ApplicationContext:
-    """装配 API 进程：database、storage、devices 2.0 注册表、生成器目录与预测算法目录。
-
-    API 不装配执行面（执行器目录/运行时/执行策略只归计算 Worker）。
+    """装配 backend 进程：database、storage、devices 2.0 注册表、生成器/预测器目录、
+    内置容器阶段目录与 (配置 job_runner_url 时的) ContainerStageRunner。
     """
     _initialize_database()
     return _assemble(
@@ -382,41 +376,6 @@ def assemble_api() -> ApplicationContext:
         with_registry=True,
         with_generators=True,
         with_execution_plane=False,
-    )
-
-
-def assemble_compute_worker() -> ApplicationContext:
-    """装配计算 Worker：database、storage、devices 2.0 注册表、生成器目录
-    与完整计算执行面（执行器目录 + 适配器目录 + 通用运行时 + 统一 Settings
-    派生的 DeploymentPolicy）。
-
-    任一必需依赖缺失（缺二进制/版本自检失败/策略非法）即抛异常拒绝启动，
-    不领取无法执行的计算任务。
-    """
-    _initialize_database()
-    return _assemble(
-        with_storage=True, with_registry=True, with_generators=True,
-        with_execution_plane=True, check_readiness=True,
-    )
-
-
-def assemble_io_worker() -> ApplicationContext:
-    """装配 I/O Worker：database 与 storage，不含 devices 注册表、生成器目录与执行面。"""
-    _initialize_database()
-    return assemble_task_runtime("io")
-
-
-def assemble_task_runtime(worker_type: Literal["compute", "io"]) -> ApplicationContext:
-    """任务子进程重建自身依赖，复用服务入口已初始化的数据库。
-
-    不建表、部署触发器或播种身份；连接和 provider 均由该进程独立创建。
-    """
-    compute = worker_type == "compute"
-    return _assemble(
-        with_storage=True,
-        with_registry=compute,
-        with_generators=compute,
-        with_execution_plane=compute,
     )
 
 
@@ -454,10 +413,7 @@ def assemble_embedded_scheduler(
 __all__ = [
     "ApplicationContext",
     "assemble_api",
-    "assemble_compute_worker",
     "assemble_embedded_scheduler",
-    "assemble_io_worker",
-    "assemble_task_runtime",
     "collect_immutable_tables",
     "collect_trigger_statements",
 ]
