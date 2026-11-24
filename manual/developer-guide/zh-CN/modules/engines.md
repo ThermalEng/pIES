@@ -2,34 +2,36 @@
 
 > 代码边界：`backend/iesplan/computation/`；相关子模块：[计算生成器](generators.md)、[求解运行时](solver-runtime.md)、[Solver Bundle](../formats/solver-bundle.md)
 
-`computation` 将已校验的业务系统转换为具体求解器计算包并执行，再将原始求解结果还原为统一的业务输出，使求解器扩展与进程安全控制解耦于项目与界面逻辑。
+`computation` 将已校验的业务系统转换为具体求解器计算包并执行，再将原始求解结果还原为统一的业务输出与后期财务评价事实，使求解器扩展与容器隔离执行彻底解耦于项目与界面逻辑。
 
 ## 计算全链路与子模块分工
+
+在 `1.1.5` 目标架构下，预测（`predictor`）、组装（`generator`）、求解（`solver`）与结果适配及后期财务评价（`evaluator`）按统一 `/work/in → /work/out` 契约由 `backend` 经 `job_runner` 分步拉起断网临时计算容器执行；极简第三方算法可通过一体化 `algorithm` 容器直接产出结果并接入评价。
 
 ```text
 ValidatedAssemblyArtifact + CalculationConfig
   ↓ 序列物化（constant / data_repeat / data_full / data_predict）
 GeneratorProvider ──→ Solver Bundle ──→ SolverRuntime
                                              ↓
-ComputeResult ←── ResultAdapter ←── ExecutionReceipt + 原始输出
+ComputeResult ←── ResultAdapter & 财务评价 ←── ExecutionReceipt + 原始输出
   │
-  ├─ 独立预测：直接采用结果
-  └─ 耦合预测：按上一轮输出更新预测序列 → 重建并求解 → 判定收敛
+  ├─ 独立预测：前置临时预测容器产出序列后直接执行后续步骤
+  └─ 耦合 / 内部循环算法：通过专用 iteration 接口在单个临时容器内自闭环完成
 ```
 
 | 子模块 | 职责 | 不负责 |
 |---|---|---|
 | 序列物化 | 按项目基线将四类来源物化为全周期对齐 `MaterializedSet` | 修改装配或数据版本 |
-| [生成器](generators.md) | 数学降级、单位换算与生成 Solver Bundle | 启动进程、访问数据库 |
-| [求解运行时](solver-runtime.md) | 隔离执行 Bundle 命令并生成 `ExecutionReceipt` | 解释设备语义或求解结果 |
-| 结果适配器 | 将原始解与回执映射为规范单位的 `ComputeResult` | 重跑求解、读取当前草稿 |
+| [生成器](generators.md) | 数学降级、单位换算与生成 Solver Bundle | 访问数据库、直接联网 |
+| [求解运行时](solver-runtime.md) | 校验并经容器代理在隔离临时容器内执行 Bundle 并签发 `ExecutionReceipt` | 解释设备语义或求解结果 |
+| 结果适配器与评价 | 将原始解、回执与冻结财务输入映射为规范单位的 `ComputeResult` 与财务评价事实 | 重跑求解、读取当前草稿 |
 
-## 预测调度与收敛能力
+## 预测调度与内部循环接口
 
-任务提交按选中预测算法描述符的公开字段 `depends_on_solve_result` 自动选择执行路径：
+任务提交按选中预测算法描述符的公开字段 `depends_on_solve_result` 与清单 `iteration` 声明选择执行路径：
 
-- **独立预测（`false`）**：在首次生成前执行一次训练与序列生成，全过程保持固定；
-- **耦合预测（`true`）**：`predict(previous=...)` 首轮接收 `None`，后续轮次接收上一轮只读 `ComputeResult.outputs` 并重新物化、构模与求解，直至所有耦合目标均满足 `CalculationConfig.convergence.tolerance` 或达到 `max_iterations` 上限（不收敛时保留对应收敛状态与最终解）。
+- **独立预测（`false`）**：在生成环节之前于独立临时 `predictor` 容器执行一次训练与序列生成，全过程保持固定；
+- **耦合 / 内部循环算法（`true` 或 `iteration.enabled: true`）**：`predict(previous=...)` 与配套求解/迭代逻辑在**单个临时计算容器内部**自闭环执行（首轮 `previous=None`，后续轮次传递只读结果输出），直至所有耦合目标满足 `CalculationConfig.convergence.tolerance` 或达到 `max_iterations` 上限（不收敛时保留对应收敛状态与最终解），并通过 `/work/out/iterations.jsonl` 专用通道上报每轮收敛度量。
 
 ### 预测参数与收敛能力
 

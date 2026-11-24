@@ -13,7 +13,7 @@
 5. [领域模型与追溯链](domain-model.md)：草稿、版本、快照、任务与证据的生命周期及不可变追溯关系。
 6. [公共契约](contracts.md)：HTTP/JSON 规范、错误信封、单位与时间基准、异步任务与结果读取契约。
 7. [扩展体系](extensions.md)：设备内容、方程能力、计算 Provider 与存储适配器的扩展机制。
-8. [模型与算法](customization-center.md)：用户自定义设备模型、算法插件包与共享目录设计（规划中）。
+8. [模型与算法](customization-center.md)：本地模型库、算法插件与独立公共市场 pIES Market 设计（规划中）。
 9. [前端与帮助中心](frontend.md)：前端分层架构、状态管理、GUI 与后端契约边界、帮助中心机制。
 10. [部署与运行](deployment.md)：Docker 容器化部署、统一配置、Worker 并发与求解隔离、健康排查及备份恢复。
 11. [规范索引与文档边界](normative-index.md)：各文档权威归属与维护约定。
@@ -40,6 +40,6 @@
 | 后台守护进程、租约、检查点与重试 | [Worker](modules/worker.md) |
 | 领域表归属、Repository 与数据库迁移 | [持久化](modules/persistence.md) |
 | 前端页面、Feature 分层、浏览器验收与帮助中心 | [前端与帮助中心](frontend.md) |
-| 自定义模型库、算法插件与共享园地（`1.1.0` 目标） | [模型与算法](customization-center.md) |
+| 本地模型库、算法插件与 pIES Market（`1.2.0` 目标） | [模型与算法](customization-center.md) |
 
 返回[正式文档入口](../../README.md)或[项目入口](../../../README.md)。

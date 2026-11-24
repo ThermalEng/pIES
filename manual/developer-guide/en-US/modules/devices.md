@@ -12,7 +12,7 @@
 
 ## Validation Gate and Publication Mechanism
 
-1. **Unified entry point**: Built-in device catalogs, in-project new/saved models, and (`1.1.0` target) user model library forms, online YAML edits, and YAML uploads all pass through the same safe-YAML parsing, schema checking, unit/interface/equation validation, and canonicalization entry in `devices`.
+1. **Unified entry point**: Built-in device catalogs, in-project new/saved models, and (`1.2.0` target) local model library forms, online YAML edits, and YAML imports all pass through the same safe-YAML parsing, schema checking, unit/interface/equation validation, and canonicalization entry in `devices`.
 2. **Complete diagnostic reporting**: Validation aggregates all mutually independent errors within the same stage and returns a stably ordered `Diagnostic` list (including error codes, field paths, expected vs. actual values, and YAML line/column numbers).
 3. **Atomic snapshot publication**: At startup, all candidate devices are discovered and validated completely before publishing a catalog snapshot atomically; any invalid device or ID collision discards the candidate catalog without falling back to a static built-in table. Catalog snapshots remain immutable at runtime with no hot-reloading.
 

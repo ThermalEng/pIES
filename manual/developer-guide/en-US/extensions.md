@@ -9,11 +9,8 @@ pIES separates "declarative business content" from "executable computation capab
 | Extension Type | Owning Module | Pinning and Versioning Mechanism | Discovery and Runtime Behavior |
 |---|---|---|---|
 | Device Technical Model | `devices` | Stable `device.id` + publication `revision` + unified `ies.device-model` schema (no per-device semver) | Published via declarative YAML parsing; all devices share one parser and equation AST |
-| Computation Generator | `computation` | Namespaced ID + three-part semantic version | Discovered by composition root at startup and atomically registered |
-| Solver Executor | `computation` | Namespaced ID + three-part semantic version | Discovered at startup, mapped to controlled local process or container execution |
-| Result Adapter | `computation` | Namespaced ID + three-part semantic version | Discovered at startup, resolved by exact Bundle/receipt reference |
+| Computation Stages & Algorithm Plugins (`1.1.5` / `1.2.0` target) | `computation` / `customization` | Unified `ies.algorithm-plugin@1.0.0` (`plugin.yaml`) covering `predictor`, `generator`, `solver`, `evaluator`, and `algorithm`, pinned by ID + three-part semver | Both built-in and third-party plugins package into immutable computation images launched by `backend` via `job_runner` as ephemeral network-disabled containers; never hot-loaded into control-plane processes |
 | Storage Adapter | `storage` | Namespaced ID + three-part semantic version | Injected by composition root; handles byte-level I/O and health state only |
-| User Algorithm Plugin (`1.1.0` target) | `customization` | Plugin ID + three-part semantic version + offline dependency lock | Packaged as `*.algorithm.zip`, executed in an isolated container outside API/Worker processes |
 
 Official executable Providers are discovered, dependency-checked, and atomically published exclusively by the composition root at process startup; runtime hot-reloading and cross-module global registries are not supported.
 

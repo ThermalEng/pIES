@@ -34,7 +34,7 @@
 - Project package import supports uploading proposals and confirming creation, without a pending-proposal management list.
 - Dataset **Versions** does not currently render a row-by-row table preview of uploaded values.
 - Administrator **Audit log** supports read-only inspection; maintenance reconciliation and backup/restore run on the server side.
-- Custom model library, algorithm plugin upload, and shared hub capabilities are planned for subsequent `1.x` releases.
+- Custom model library, algorithm plugin import, and open plugin market (pIES Market) capabilities are planned for subsequent `1.x` releases.
 - Help Center publishes Simplified Chinese and English editions.
 
 See [Roadmap](../../changelog/en-US/roadmap.md) for upcoming milestones.

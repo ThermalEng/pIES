@@ -38,13 +38,13 @@ Three configuration pillars carry distinct responsibilities and revision histori
 - **Finance triplet**: Comprises regional `FinanceProfile` (reusable regional baseline), project `FinanceOverrides` (sparse atomic overrides over existing profile items), and deterministic merger output immutable `EffectiveFinanceConfig`. Assembly, planning, and financial evaluation consume the same `EffectiveFinanceConfig` snapshot without dynamically inheriting external prices at runtime.
 - **Calculation configuration**: Defines calculation mode, prediction algorithms and parameters, exact generator and solver refs, precision, coupled prediction convergence criteria, time limit, solver options, random seed, and requested outputs. Calculation configuration does not enter `ValidatedAssemblyArtifact`; instead, it freezes alongside the canonical assembly inside `CalcSnapshot` at task submission.
 
-## User-Defined Content (`1.1.0` Target)
+## Models, Algorithm Plugins, and Market Artifacts (`1.2.0` Target)
 
-User-defined model libraries and algorithm plugins planned for subsequent releases adopt a "mutable draft + immutable publication" split:
+The models and algorithms ecosystem targeted for `1.2.0` separates mutable drafts from immutable publications and installations:
 
-- Forms, online YAML editing, and YAML uploads all converge to the same canonical `ies.device-model` YAML object, pinned by publication `revision` without per-device semantic versions;
-- Algorithm plugin packages deliver generator/solver code and offline dependency locks in `ies.algorithm-plugin` ZIP archives validated and run inside isolated containers;
-- Shared hub approvals target exact immutable publications; installing into another user's catalog creates a reference record without copying underlying objects, and unsharing or uninstalling never breaks historical projects or frozen tasks.
+- Forms, online YAML editing, and imports all converge to the same canonical `ies.device-model` YAML object pinned by publication `revision` without per-device semantic versions; cross-instance market or imported artifacts preserve their original stable namespaced IDs, while personal local drafts use a CSPRNG `public_namespace`;
+- Algorithm plugins are validated and executed inside isolated runners so API and ordinary Worker processes never load user source code; installed plugins reside as immutable records and managed objects and become selectable for subsequent calculations without service restarts;
+- Local administrators toggle between **Local Mode** (remote market disabled; local sharing reaches administrator level only) and **Online Mode** (browse, download/install, and submit via email verification), referencing immutable artifacts via a unified catalog view; installing, disabling, or uninstalling affects only newly submitted calculations, which freeze exact artifacts into `CalcSnapshot` at submission (SHA-256 is checked solely at the external download/import boundary and never stored or re-verified internally), preserving in-flight and historical task traceability.
 
 ## Traceability Chain Across Snapshots, Tasks, and Results
 

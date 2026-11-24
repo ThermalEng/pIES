@@ -9,11 +9,8 @@ pIES 将“声明式业务内容”与“可执行计算能力”分开扩展：
 | 扩展类型 | 所属模块 | 固定内容与版本机制 | 发现与运行方式 |
 |---|---|---|---|
 | 设备技术模型 | `devices` | 稳定 `device.id` + 发布 `revision` + 统一 `ies.device-model` schema（无单设备语义版本） | 声明式 YAML 解析发布，所有设备共用统一解析器与方程 AST |
-| 计算生成器 | `computation` | 命名空间 ID + 三段式语义版本 | 组合根启动发现并原子注册 |
-| 求解执行器 | `computation` | 命名空间 ID + 三段式语义版本 | 组合根启动发现，映射到受控本地进程或容器运行方式 |
-| 结果适配器 | `computation` | 命名空间 ID + 三段式语义版本 | 组合根启动发现，按 Bundle/回执精确引用解析 |
+| 计算环节与算法插件（`1.1.5` / `1.2.0` 目标） | `computation` / `customization` | 统一 `ies.algorithm-plugin@1.0.0`（`plugin.yaml`），覆盖 `predictor`、`generator`、`solver`、`evaluator` 与 `algorithm` 五类，按 ID + 三段式语义版本固定 | 内置与第三方插件统一封装为不可变计算镜像，由 `backend` 经 `job_runner` 拉起临时断网容器执行，永不热加载进控制面进程 |
 | 存储适配器 | `storage` | 命名空间 ID + 三段式语义版本 | 组合根注入，仅负责字节级存取与健康状态 |
-| 用户算法插件（`1.1.0` 目标） | `customization` | 插件 ID + 三段式语义版本 + 离线依赖锁 | 打包为 `*.algorithm.zip`，由独立隔离容器运行，不加入 API/Worker 进程 |
 
 正式可执行 Provider 仅在进程启动时由组合根完成发现、依赖校验并一次性原子发布，不支持运行期热加载，亦不存在跨模块的全局注册表。
 

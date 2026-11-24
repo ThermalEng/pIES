@@ -1,11 +1,11 @@
 # pIES 架构宪法
 
 > 状态：生效
-> 版本：1.21.0
+> 版本：1.22.0
 > 生效日期：2026-08-20
-> 最后更新：2026-11-21
+> 最后更新：2026-11-24
 > 适用范围：根目录入口、`manual/`、`docs/`、`backend/`、`frontend/`、数据库、对象存储、Worker、测试与后续插件
-> 依据：2026-08-20 架构专项审查、ADR-0001 至 ADR-0008、2026-09-07 地区 FinanceProfile 三件套规范、2026-10-19 用户批准的嵌入式税务计算裁决（ADR-0011）、2026-10-20 用户批准的评价确认独立直传裁决（ADR-0012）、ADR-0013 至 ADR-0015
+> 依据：2026-08-20 架构专项审查、ADR-0001 至 ADR-0008、2026-09-07 地区 FinanceProfile 三件套规范、2026-10-19 用户批准的嵌入式税务计算裁决（ADR-0011）、2026-10-20 用户批准的评价确认独立直传裁决（ADR-0012）、ADR-0013 至 ADR-0015、2026-11-24 用户批准的后端统一调度与临时计算容器流水线架构裁决（ADR-0016）
 
 ## 1. 文档效力
 
@@ -149,7 +149,9 @@ schema、字段、公式与聚合枚举以 [装配与检查](modules/assembly.md
 
 - `GeneratorProvider` 直接接受已签发的 `ValidatedAssemblyArtifact`、按装配实例固定的设备数学贡献、已物化的全周期输入序列、不可变 `EffectiveFinanceConfig`、经过公开输入校验的 `CalculationConfig`，以及已确认并冻结的评价输入，在生成计算包时确定性生成 Solver Bundle；输入按职责分别传递，不为维持参数数量而混装，也不再建立外层包装或第二份业务事实；
 - `SolverRuntime` 执行可信 Bundle 中的结构化命令，检查必需输出，生成 `ExecutionReceipt` 与原始输出；
-- `ResultAdapter` 只把 Bundle、回执和声明输出映射为带 schema/version 的 `ComputeResult`。
+- `ResultAdapter` 与后期财务评价只把 Bundle、回执和声明输出映射为带 schema/version 的 `ComputeResult` 与评价事实。
+
+在 `1.1.5` 目标架构下，内置与第三方计算能力统一遵循同一插件与目录交接契约（`/work/in → /work/out`），按预测、组装、求解与后期财务评价（或一体化算法）环节由 `backend` 协调拉起断网临时计算容器执行；含内部迭代循环的算法通过专用内部循环接口在单个临时容器内闭环完成。
 
 GeneratorProvider 是业务单位到求解器内部单位的唯一转换边界，ResultAdapter 是反向换算的唯一边界；求解选项等计算配置在计算包生成时固定。SolverRuntime 不读取装配语义、不判断设备类型、不补数据或切换 solver。
 
@@ -193,15 +195,15 @@ GeneratorProvider 是业务单位到求解器内部单位的唯一转换边界�
 
 归属与过渡安排见 [应用用例](modules/application.md)。
 
-### 4.10 `worker`：异步执行
+### 4.10 `worker`：异步执行与资源调度
 
-Worker 领取任务、持有无时钟期限的执行租约、编排生成/执行/结果适配并提交结果，只消费不可变快照。快照依赖不可解析时启动失败或不进入 ready，不得领取后再临时降级。Worker 不拼 solver 命令，也不解释装配业务。控制面短时不可用时继续执行，进程真实退出时监督进程释放并发槽。管理员可以撤销尝试的写入资格并将任务重新排队。
+异步任务调度、IO 编排与计算资源协调收敛于 `backend` 控制面（`1.1.5` 目标架构不再部署独立常驻计算/IO Worker 守护进程）；调度层领取任务、持有无时钟期限的执行租约、按计算步骤向容器代理下发临时断网容器执行指令并提交阶段检查点与最终结果，只消费不可变快照。快照依赖不可解析时启动失败或不进入 ready，不得领取后再临时降级。调度层不拼 solver Shell 命令，也不解释装配业务。控制面短时不可用时已启动的临时计算容器继续执行，容器真实退出时由监督逻辑收拢状态并释放并发槽。管理员可以撤销尝试的写入资格并将任务重新排队。
 
 执行流程、租约与提交规则见 [Worker](modules/worker.md)。
 
 ### 4.11 `api`：传输适配
 
-`api` 是传输适配层：只做路由、认证、DTO 与用例转交。
+`api` 是传输适配层：只做路由、认证、DTO 与用例转交。`backend` 进程内 HTTP 传输层与异步任务调度层仍按模块边界严格隔离；同步 HTTP 路由不得在请求响应路径内直接运行耗时计算步骤或调用容器代理。
 
 禁止直接查询 ORM、拼对象路径、实现领域计算、组织跨端点工作流或返回兼容响应并集。
 
@@ -284,7 +286,7 @@ pIES/
 
 正式产品文档目录使用正确英文名称 `manual/`，禁止使用拼写错误的 `mannal/`。`README.md` 继续作为原有项目入口，不另建与其竞争的站点根入口。
 
-后端按稳定业务边界分模块：`bootstrap`（组合根与启动校验）、`core`（无状态公共基础）、`devices`/`modeling`/`assembly`/`computation`/`finance`/`analysis`（领域能力）、`storage`（对象与引用）、`application`（跨模块用例编排）、`api`（HTTP 适配）、`worker`（异步执行）、`migrations`（版本化迁移）。前端按 feature 垂直切分：`app/pages` 做路由级组合，`features` 拥有各业务能力的 contract、model、form、mapper、请求与组件，`shared` 只放不知道具体业务也成立的通用能力。
+后端按稳定业务边界分模块：`bootstrap`（组合根与启动校验）、`core`（无状态公共基础）、`devices`/`modeling`/`assembly`/`computation`/`finance`/`analysis`（领域能力）、`storage`（对象与引用）、`application`（跨模块用例编排）、`api`（HTTP 适配）、`worker`（异步调度与阶段编排）、`migrations`（版本化迁移）。运行期常驻服务收敛为 `web`、`backend`、`job_runner`、`postgres` 与 `redis`，重计算步骤按需拉起临时断网计算容器执行。前端按 feature 垂直切分：`app/pages` 做路由级组合，`features` 拥有各业务能力的 contract、model、form、mapper、请求与组件，`shared` 只放不知道具体业务也成立的通用能力。
 
 依赖方向必须是：后端 `api/worker → application → 领域模块 → core`，持久化实现只归属其领域所有者；前端 `app/pages → features → shared`，feature 之间不得相互导入内部文件，跨 feature 工作流放在 page 或显式 application hook。
 
@@ -557,7 +559,7 @@ docs/                                      # 后台证据，不是开发输入
 - 关键变更保留不可变、最小化的脱敏审计，不保存密码、原始令牌或不受控大对象；普通查看和日常运维不要求重型审计；
 - 错误响应不泄露堆栈、SQL、主机绝对路径或 provider 凭证；
 - 装配和设备文件不得提供任意代码执行入口；
-- 内置求解器在独立临时工作目录以参数数组运行，用户取消和运行超时均须终止并回收进程组。用户插件隔离要求适用专门的部署条款。
+- 内置与第三方计算步骤（预测、组装、求解、后期财务评价与一体化算法）统一在无业务凭证、断网（`--network=none`）、只读根文件系统及独立资源限额的临时计算容器中执行，用户取消和运行超时均须立即终止并销毁容器。`backend` 与临时计算容器严禁直接挂载宿主机 Docker Socket，所有镜像构建与容器启停统一经极薄白名单代理 `job_runner` 受控执行。
 
 求解隔离与执行细节见 [求解运行时](modules/solver-runtime.md) 与 [部署与运行](deployment.md)。
 

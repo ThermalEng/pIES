@@ -35,7 +35,7 @@ Repository 仅执行 `flush` 或局部 `savepoint`，严禁下层覆盖调用方
 | `validation` / `tasks` / `results` | 全项目装配校验、快照冻结与幂等任务创建、结果投影与方案应用 |
 | `exports` / `packages` | Excel 报表生成、离线项目包导出与导入提案两阶段确认 |
 | `operations` | 系统服务健康聚合、存储容量查看与管理端审计查询 |
-| `customizations`（`1.1.0` 目标） | 用户设备模型、算法插件及共享园地目录生命周期编排 |
+| `customizations`（`1.2.0` 目标） | 本地模型/插件管理及 pIES Market（本地/联网双模式）生命周期编排 |
 
 ## 关键跨模块约束
 

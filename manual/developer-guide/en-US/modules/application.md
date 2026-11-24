@@ -35,7 +35,7 @@ Repositories perform `flush` or local `savepoint` only and MUST NOT override the
 | `validation` / `tasks` / `results` | Full project assembly validation, snapshot freezing, idempotent task creation, result projection, scheme application |
 | `exports` / `packages` | Excel report generation, offline project package export, two-phase import proposal & confirmation |
 | `operations` | Aggregated service health, storage capacity inspection, admin audit log querying |
-| `customizations` (`1.1.0` target) | Lifecycle orchestration for user device models, algorithm plugins, and Shared Hub catalog |
+| `customizations` (`1.2.0` target) | Lifecycle orchestration for local models/plugins and pIES Market (Local/Online dual mode) |
 
 ## Key Cross-Module Invariants
 

@@ -1,11 +1,11 @@
 # pIES Architecture Constitution
 
 > Status: Effective
-> Version: 1.21.0
+> Version: 1.22.0
 > Effective Date: 2026-08-20
-> Last Updated: 2026-11-21
+> Last Updated: 2026-11-24
 > Scope: Repository root entry points, `manual/`, `docs/`, `backend/`, `frontend/`, database, object storage, Worker, tests, and subsequent plugins
-> Basis: 2026-08-20 Special Architecture Review, ADR-0001 through ADR-0008, 2026-09-07 Regional FinanceProfile Triplet Specification, User-Approved Embedded Tax Computation Ruling on 2026-10-19 (ADR-0011), User-Approved Direct Evaluation Confirmation Transmission Ruling on 2026-10-20 (ADR-0012), ADR-0013 through ADR-0015
+> Basis: 2026-08-20 Special Architecture Review, ADR-0001 through ADR-0008, 2026-09-07 Regional FinanceProfile Triplet Specification, User-Approved Embedded Tax Computation Ruling on 2026-10-19 (ADR-0011), User-Approved Direct Evaluation Confirmation Transmission Ruling on 2026-10-20 (ADR-0012), ADR-0013 through ADR-0015, User-Approved Unified Backend Orchestration & Ephemeral Computation Container Pipeline Ruling on 2026-11-24 (ADR-0016)
 
 ## 1. Document Precedence
 
@@ -149,7 +149,9 @@ Computation MUST be separated into three independent boundaries:
 
 - `GeneratorProvider` directly accepts the issued `ValidatedAssemblyArtifact`, per-instance frozen device mathematical contributions, materialized full-horizon input series, immutable `EffectiveFinanceConfig`, publicly validated `CalculationConfig`, and confirmed frozen evaluation inputs, deterministically producing a Solver Bundle during generation; inputs are passed separately by responsibility rather than bundled merely to preserve parameter count, without introducing outer wrappers or a second source of business truth;
 - `SolverRuntime` executes structured commands inside a trusted Bundle, checks required outputs, and produces an `ExecutionReceipt` along with raw outputs;
-- `ResultAdapter` solely maps the Bundle, receipt, and declared outputs into a schema/version-tagged `ComputeResult`.
+- `ResultAdapter` and post-solve financial evaluation solely map the Bundle, receipt, and declared outputs into a schema/version-tagged `ComputeResult` and evaluation facts.
+
+Under the `1.1.5` target architecture, built-in and third-party computation capabilities share one unified plugin and directory handoff contract (`/work/in → /work/out`), executing prediction, generation, solving, and post-solve financial evaluation (or unified single-step algorithms) inside per-step network-disabled ephemeral containers orchestrated by `backend`; algorithms with internal iterative loops execute self-contained inside a single ephemeral container via a dedicated internal-loop interface.
 
 `GeneratorProvider` is the sole boundary converting business units to solver internal units, and `ResultAdapter` is the sole boundary converting back; calculation configuration such as solver options is fixed at bundle generation time. `SolverRuntime` MUST NOT read assembly semantics, inspect device types, fill missing data, or switch solvers.
 
@@ -193,15 +195,15 @@ The application layer MAY depend on multiple modules, but MUST NOT access module
 
 Ownership and transitional arrangements are documented in [Application Use Cases](modules/application.md).
 
-### 4.10 `worker`: Asynchronous Execution
+### 4.10 `worker`: Asynchronous Execution and Resource Orchestration
 
-Workers claim tasks, hold clockless execution leases, orchestrate generation/execution/result adaptation, and commit results, consuming only immutable snapshots. If snapshot dependencies fail to resolve, startup MUST fail or stay not-ready; claiming a task and degrading dynamically afterward is prohibited. Workers MUST NOT construct solver commands or interpret assembly business semantics. When the control plane is briefly unavailable, running tasks continue executing, and supervisor processes release concurrency slots upon true process exit. Administrators MAY revoke an attempt's write lease and requeue the task.
+Asynchronous task scheduling, I/O orchestration, and computation resource coordination converge into the `backend` control plane (`1.1.5` target architecture no longer runs standalone persistent compute/IO Worker daemons); the scheduling layer claims tasks, holds clockless execution leases, dispatches per-step ephemeral network-disabled containers through the container proxy, and commits stage checkpoints and final results, consuming only immutable snapshots. If snapshot dependencies fail to resolve, startup MUST fail or stay not-ready; claiming a task and degrading dynamically afterward is prohibited. The scheduling layer MUST NOT construct solver shell commands or interpret assembly business semantics. When the control plane is briefly unavailable, running ephemeral containers continue executing, and supervisory logic reconciles status and releases concurrency slots upon container exit. Administrators MAY revoke an attempt's write lease and requeue the task.
 
 Execution workflows, leases, and commit rules are defined in [Worker](modules/worker.md).
 
 ### 4.11 `api`: Transport Adaptation
 
-`api` is the transport adapter layer: it handles routing, authentication, DTOs, and use-case delegation only.
+`api` is the transport adapter layer: it handles routing, authentication, DTOs, and use-case delegation only. Inside the `backend` process, the HTTP transport layer and asynchronous scheduling layer remain strictly isolated along module boundaries; synchronous HTTP routes MUST NOT run compute stages or invoke the container proxy inline.
 
 Direct ORM querying, object path construction, domain calculations, cross-endpoint workflow orchestration, or returning legacy compatibility unions is prohibited.
 
@@ -284,7 +286,7 @@ pIES/
 
 The official product documentation directory MUST use the proper English spelling `manual/`—never the misspelled `mannal/`. `README.md` remains the project entry point without introducing competing site roots.
 
-The backend is organized by stable business boundaries: `bootstrap` (composition root and startup validation), `core` (stateless common foundation), `devices`/`modeling`/`assembly`/`computation`/`finance`/`analysis` (domain capabilities), `storage` (objects and references), `application` (cross-module orchestration), `api` (HTTP adapters), `worker` (asynchronous execution), and `migrations` (versioned database migrations). The frontend is sliced vertically by feature: `app/pages` handles route-level composition, `features` own each business capability's contracts, models, forms, mappers, queries, and components, and `shared` contains only business-agnostic utilities.
+The backend is organized by stable business boundaries: `bootstrap` (composition root and startup validation), `core` (stateless common foundation), `devices`/`modeling`/`assembly`/`computation`/`finance`/`analysis` (domain capabilities), `storage` (objects and references), `application` (cross-module orchestration), `api` (HTTP adapters), `worker` (asynchronous scheduling and stage orchestration), and `migrations` (versioned database migrations). Runtime persistent services converge to `web`, `backend`, `job_runner`, `postgres`, and `redis`, while heavy computation stages launch ephemeral network-disabled containers on demand. The frontend is sliced vertically by feature: `app/pages` handles route-level composition, `features` own each business capability's contracts, models, forms, mappers, queries, and components, and `shared` contains only business-agnostic utilities.
 
 Dependency direction MUST flow strictly as: backend `api/worker → application → domain modules → core`, with persistence belonging solely to each domain owner; frontend `app/pages → features → shared`, where features MUST NOT import each other's internal files and cross-feature workflows live in pages or explicit application hooks.
 
@@ -557,7 +559,7 @@ The default deployment model is centralized administrator deployment with ordina
 - Critical mutations emit immutable, minimally redacted audit records without storing passwords, raw tokens, or unbounded payloads; routine reads and everyday operations do not require heavy auditing;
 - Error responses MUST NOT leak stack traces, SQL, host absolute paths, or provider credentials;
 - Assembly and device files MUST NOT expose arbitrary code execution entry points;
-- Built-in solvers run inside isolated temporary working directories with argument arrays, and both user cancellation and timeouts MUST terminate and reap the process group. User plugin isolation requirements fall under dedicated deployment rules.
+- Both built-in and third-party computation steps (prediction, generation, solving, post-solve financial evaluation, and unified algorithms) run inside ephemeral containers with no business credentials, disabled networking (`--network=none`), a read-only root filesystem, and explicit resource caps, and both user cancellation and timeouts MUST immediately terminate and destroy the container. `backend` and ephemeral computation containers MUST NOT mount the host Docker socket directly; all image builds and ephemeral container lifecycles execute strictly through the thin allowlisted proxy `job_runner`.
 
 Solver isolation and execution details appear in [Solver Runtime](modules/solver-runtime.md) and [Deployment and Operations](deployment.md).
 

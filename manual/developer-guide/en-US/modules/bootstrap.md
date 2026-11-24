@@ -8,7 +8,7 @@
 
 - **Responsible for**: Reading and strictly validating process-level TOML deployment config; establishing database, Redis, and storage connections per process role (API vs. Worker); discovering and cross-validating candidate Providers for devices, equations, generators, executors, result adapters, and storage; atomically publishing each module's registry; and releasing resources in reverse order on shutdown.
 - **Not responsible for**: Implementing domain rules, reading module-private registries or merging them into a global authoritative table, or mutating business data at startup.
-- **User plugin boundary**: The composition root registers only trusted generic sandbox Providers and the `plugin_runner` client (`1.1.0` target); concrete user algorithm packages travel with snapshots as immutable task payloads and never participate in startup discovery.
+- **Computation & plugin boundary**: Under `1.1.5`, the composition root inside the `backend` control plane statically wires APIs, lightweight scheduling orchestration, built-in immutable computation image descriptors, and the `job_runner` proxy client (`backend` holds no Docker socket); installed user algorithm plugins reside as immutable records, freeze into task snapshots at submission, and run inside per-step ephemeral network-disabled containers without startup discovery or runtime hot-reloading.
 
 ## Startup and Shutdown Flow
 

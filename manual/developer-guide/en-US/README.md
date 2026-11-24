@@ -13,7 +13,7 @@ Before designing or implementing changes, read the [Architecture Constitution](A
 5. [Domain Model and Traceability Chain](domain-model.md): Lifecycle and immutable traceability across drafts, versions, snapshots, tasks, and evidence.
 6. [Public Contracts](contracts.md): HTTP/JSON conventions, error envelopes, unit and time baselines, asynchronous tasks, and result reading contracts.
 7. [Extension System](extensions.md): Extension mechanisms for device content, equation capabilities, computation providers, and storage adapters.
-8. [Models and Algorithms](customization-center.md): Design for user-defined device models, algorithm plugin packages, and shared catalog (`1.1.0` target).
+8. [Models and Algorithms](customization-center.md): Design for local model library, algorithm plugins, and the independent public pIES Market (`1.2.0` target).
 9. [Frontend and Help Center](frontend.md): Frontend layered architecture, state management, GUI-backend contract boundaries, and Help Center mechanism.
 10. [Deployment and Operations](deployment.md): Docker containerized deployment, unified configuration, worker concurrency and solve isolation, health diagnostics, and backup/recovery.
 11. [Normative Index and Document Boundaries](normative-index.md): Authoritative ownership and maintenance conventions across documents.
@@ -40,6 +40,6 @@ Before designing or implementing changes, read the [Architecture Constitution](A
 | Background daemon, leases, checkpoints, and retries | [Worker](modules/worker.md) |
 | Domain table ownership, repositories, and database migrations | [Persistence](modules/persistence.md) |
 | Frontend pages, feature layering, browser acceptance, and Help Center | [Frontend and Help Center](frontend.md) |
-| Custom model library, algorithm plugins, and shared hub (`1.1.0` target) | [Models and Algorithms](customization-center.md) |
+| Local model library, algorithm plugins, and pIES Market (`1.2.0` target) | [Models and Algorithms](customization-center.md) |
 
 Return to the [Official Documentation Portal](../../README.md) or [Project Entry](../../../README.md).

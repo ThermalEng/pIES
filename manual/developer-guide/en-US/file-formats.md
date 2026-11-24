@@ -18,7 +18,7 @@ Core pIES business documents and offline interchange packages use standalone, ve
 | [Solver Bundle](formats/solver-bundle.md) | `bundle.yaml` + input/output directories | Solver input files, structured commands, output manifest, and result mappings | Solver runtime, result adapter |
 | [Calculation Config](formats/calculation-config.md) | Calculation config mapping | Calculation mode, prediction config, generator/solver versions, precision, time limit, and output requests | Submission validator, generators |
 | [Project Package](formats/project-package.md) | `*.zip` (`manifest.json` at root) | Offline export/import of project workspace, version history, and dependencies | Project package exporter/importer |
-| [Algorithm Plugin Package](formats/algorithm-plugin-package.md) | `*.algorithm.zip` | User-defined assembly-processing and solving algorithm bundle (`1.1.0` target) | Plugin validator and isolated runner |
+| [Algorithm Plugin Package](formats/algorithm-plugin-package.md) | `plugin.yaml` + `*.algorithm.zip` | Unified computation stage (predictor/generator/solver/evaluator/algorithm) and plugin package contract (`1.1.5` / `1.2.0` target) | `backend` orchestrator, `job_runner`, and ephemeral compute containers |
 
 **Boundary between hand-authored and machine-generated files**: Device model YAML, data CSV, `FinanceProfile`, `FinanceOverrides`, and assembly YAML support hand authoring; `EffectiveFinanceConfig` MUST be produced by the deterministic merger (and re-merged/verified from its sources on import); Solver Bundles MAY only be produced by generators.
 

@@ -2,34 +2,36 @@
 
 > Code Boundary: `backend/iesplan/computation/`; Related Submodules: [Computation Generators](generators.md), [Solver Runtime](solver-runtime.md), [Solver Bundle](../formats/solver-bundle.md)
 
-`computation` compiles a validated business system into concrete solver calculation bundles, executes them safely, and restores raw solver results back into uniform business outputs—decoupling solver extensibility and process security from project and UI logic.
+`computation` compiles a validated business system into concrete solver calculation bundles, executes them safely, and restores raw solver results back into uniform business outputs and post-solve financial evaluation facts—decoupling solver extensibility and container isolation from project and UI logic.
 
 ## End-to-End Computation Pipeline and Submodule Split
+
+Under the `1.1.5` target architecture, prediction (`predictor`), generation (`generator`), solving (`solver`), and result adaptation & post-solve financial evaluation (`evaluator`) follow the unified `/work/in → /work/out` contract and run as per-step network-disabled ephemeral containers orchestrated by `backend` via `job_runner`; simple third-party algorithms MAY use a unified single-step `algorithm` container before evaluation.
 
 ```text
 ValidatedAssemblyArtifact + CalculationConfig
   ↓ Series Materialization (constant / data_repeat / data_full / data_predict)
 GeneratorProvider ──→ Solver Bundle ──→ SolverRuntime
                                              ↓
-ComputeResult ←── ResultAdapter ←── ExecutionReceipt + Raw Outputs
+ComputeResult ←── ResultAdapter & Evaluation ←── ExecutionReceipt + Raw Outputs
   │
-  ├─ Standalone prediction: publish result directly
-  └─ Coupled prediction: update predicted series from prior outputs → rebuild & solve → check convergence
+  ├─ Standalone prediction: run ephemeral predictor container once before subsequent stages
+  └─ Coupled / internal-loop algorithms: execute self-contained inside one ephemeral container via the iteration interface
 ```
 
 | Submodule | Responsibility | Non-Responsibility |
 |---|---|---|
 | Series Materialization | Materializes the four source modes into a full-horizon aligned `MaterializedSet` per project baseline | Mutating assembly or dataset versions |
-| [Generators](generators.md) | Math lowering, unit conversion, Solver Bundle emission | Spawning processes, accessing databases |
-| [Solver Runtime](solver-runtime.md) | Executes Bundle commands in isolation and produces `ExecutionReceipt` | Interpreting device semantics or solver solutions |
-| Result Adapter | Maps raw outputs and receipt into `ComputeResult` with canonical units | Re-running solvers, reading live drafts |
+| [Generators](generators.md) | Math lowering, unit conversion, Solver Bundle emission | Accessing databases or network |
+| [Solver Runtime](solver-runtime.md) | Validates and dispatches Bundles through the container proxy inside isolated ephemeral containers to produce `ExecutionReceipt` | Interpreting device semantics or solver solutions |
+| Result Adapter & Evaluation | Maps raw outputs, receipt, and frozen finance inputs into canonical-unit `ComputeResult` and financial evaluation facts | Re-running solvers, reading live drafts |
 
-## Prediction Orchestration and Convergence Capabilities
+## Prediction Orchestration and Internal-Loop Interface
 
-Task execution automatically picks its path from the selected predictor descriptor's public `depends_on_solve_result` flag:
+Task execution picks its path from the selected predictor descriptor's public `depends_on_solve_result` flag and manifest `iteration` declaration:
 
-- **Standalone prediction (`false`)**: Trains and generates series once before initial generation and holds them constant throughout;
-- **Coupled prediction (`true`)**: `predict(previous=...)` receives `None` on iteration 1 and read-only `ComputeResult.outputs` from the preceding iteration thereafter, re-materializing, re-generating, and re-solving until every coupled target meets `CalculationConfig.convergence.tolerance` or reaches `max_iterations` (preserving actual convergence status and final solution if unconverged).
+- **Standalone prediction (`false`)**: Trains and generates series once inside an isolated ephemeral `predictor` container before generation and holds them constant throughout;
+- **Coupled / internal-loop algorithms (`true` or `iteration.enabled: true`)**: `predict(previous=...)` and companion solving/iterative logic execute **self-contained inside a single ephemeral container** (`None` on iteration 1 and read-only outputs thereafter) until every coupled target meets `CalculationConfig.convergence.tolerance` or reaches `max_iterations` (preserving actual convergence status and final solution if unconverged), emitting per-round convergence metrics to `/work/out/iterations.jsonl`.
 
 ### Prediction Parameters and Convergence Capabilities
 
