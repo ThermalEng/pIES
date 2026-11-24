@@ -36,12 +36,21 @@ services:
       retries: 20
     restart: unless-stopped
 
+  builtin_stages:
+    image: pies-builtin-stages:1.1.5
+    build:
+      context: .
+      dockerfile: plugins/Dockerfile
+    command: ["python", "-c", "pass"]
+    restart: "no"
+
   job_runner:
     build: ./job_runner
     command: uvicorn pies_job_runner.app:app --host 0.0.0.0 --port 8090
     environment:
       PIES_JOB_RUNNER_STAGE_ROOT: /data/stages
       PIES_JOB_RUNNER_PLUGIN_SOURCE_ROOT: /data/plugin_builds
+      PIES_JOB_RUNNER_REQUIRED_IMAGES: pies-builtin-stages:1.1.5
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ./data:/data
@@ -51,6 +60,9 @@ services:
       timeout: 5s
       retries: 20
       start_period: 10s
+    depends_on:
+      builtin_stages:
+        condition: service_completed_successfully
     restart: unless-stopped
 
   backend:

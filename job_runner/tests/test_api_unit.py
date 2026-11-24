@@ -8,7 +8,7 @@ import tarfile
 from pathlib import Path
 from typing import Any
 
-from docker.errors import DockerException
+from docker.errors import DockerException, ImageNotFound
 from fastapi.testclient import TestClient
 
 from pies_job_runner.app import create_app
@@ -155,10 +155,31 @@ class _FakeDockerAPI:
         yield {"stream": "Successfully built fake123\n"}
 
 
+class _FakeImagesManager:
+    def __init__(self, present_images: set[str] | None = None) -> None:
+        self.present_images = set(present_images or ())
+        self.get_calls: list[str] = []
+
+    def get(self, name: str) -> dict[str, str]:
+        self.get_calls.append(name)
+        if name not in self.present_images:
+            raise ImageNotFound(f"No such image: {name}")
+        return {"Id": f"sha256:{name}"}
+
+
 class _FakeDockerClient:
-    def __init__(self, *, ping_ok: bool = True) -> None:
+    def __init__(
+        self,
+        *,
+        ping_ok: bool = True,
+        present_images: set[str] | None = None,
+        ncpu: int = 16,
+    ) -> None:
         self.ping_ok = ping_ok
+        self.ncpu = ncpu
+        self.info_calls = 0
         self.containers = _FakeContainersManager()
+        self.images = _FakeImagesManager(present_images=present_images)
         self.api = _FakeDockerAPI()
 
     def ping(self) -> bool:
@@ -166,12 +187,19 @@ class _FakeDockerClient:
             raise DockerException("daemon down")
         return True
 
+    def info(self) -> dict[str, Any]:
+        self.info_calls += 1
+        return {"NCPU": self.ncpu}
+
 
 def _make_client(
     tmp_path: Path,
     *,
     ping_ok: bool = True,
     cgroup_root: Path | None = None,
+    required_images: str = "",
+    present_images: set[str] | None = None,
+    ncpu: int = 16,
 ) -> tuple[TestClient, _FakeDockerClient, JobRunnerSettings]:
     stage_root = tmp_path / "stages"
     plugin_root = tmp_path / "plugin_builds"
@@ -182,8 +210,9 @@ def _make_client(
         host_stage_root=stage_root,
         plugin_source_root=plugin_root,
         cgroup_root=cgroup_root or (tmp_path / "nonexistent_cgroup"),
+        required_images=required_images,
     )
-    fake_docker = _FakeDockerClient(ping_ok=ping_ok)
+    fake_docker = _FakeDockerClient(ping_ok=ping_ok, present_images=present_images, ncpu=ncpu)
     service = DockerJobRunnerService(settings, client=fake_docker)  # type: ignore[arg-type]
     app = create_app(settings=settings, service=service)
     return TestClient(app), fake_docker, settings
@@ -208,16 +237,46 @@ def test_only_fixed_endpoints_are_exposed(tmp_path: Path) -> None:
     }
 
 
-def test_healthz_and_readyz(tmp_path: Path) -> None:
+def test_healthz_and_readyz(tmp_path: Path, monkeypatch: Any) -> None:
     client_ok, _, _ = _make_client(tmp_path, ping_ok=True)
     assert client_ok.get("/healthz").json() == {"status": "ok"}
     ready = client_ok.get("/readyz")
     assert ready.status_code == 200
     assert ready.json()["status"] == "ready"
+    assert ready.json()["required_images"] == {}
 
     client_down, _, _ = _make_client(tmp_path, ping_ok=False)
     assert client_down.get("/healthz").status_code == 200
     assert client_down.get("/readyz").status_code == 503
+
+    # Required images present -> 200 with required_images status
+    client_img_ok, fake_ok, _ = _make_client(
+        tmp_path,
+        required_images="pies-builtin-stages:1.1.5, pies-plugin-base:latest, pies-builtin-stages:1.1.5",
+        present_images={"pies-builtin-stages:1.1.5", "pies-plugin-base:latest"},
+    )
+    ready_img_ok = client_img_ok.get("/readyz")
+    assert ready_img_ok.status_code == 200
+    assert ready_img_ok.json()["required_images"] == {
+        "pies-builtin-stages:1.1.5": "ok",
+        "pies-plugin-base:latest": "ok",
+    }
+    assert fake_ok.images.get_calls == ["pies-builtin-stages:1.1.5", "pies-plugin-base:latest"]
+
+    # Missing required image -> 503
+    client_img_missing, _, _ = _make_client(
+        tmp_path,
+        required_images="pies-builtin-stages:1.1.5, missing-stage:1.0.0",
+        present_images={"pies-builtin-stages:1.1.5"},
+    )
+    ready_img_missing = client_img_missing.get("/readyz")
+    assert ready_img_missing.status_code == 503
+    assert "missing-stage:1.0.0" in ready_img_missing.json()["detail"]
+
+    # Env var PIES_JOB_RUNNER_REQUIRED_IMAGES is parsed as comma-separated list
+    monkeypatch.setenv("PIES_JOB_RUNNER_REQUIRED_IMAGES", " pies-builtin-stages:1.1.5 , , extra:2 ")
+    env_settings = JobRunnerSettings()
+    assert env_settings.parsed_required_images() == ("pies-builtin-stages:1.1.5", "extra:2")
 
 
 def test_build_plugin_uses_controlled_template_and_declared_requirements(tmp_path: Path) -> None:
@@ -548,3 +607,51 @@ def test_read_iterations_summary_absent(tmp_path: Path) -> None:
     assert summary.present is False
     assert summary.count == 0
     assert summary.tail == []
+
+
+def test_start_stage_clamps_cpu_cores_to_host_ncpu_and_logs_errors(tmp_path: Path, caplog: Any) -> None:
+    client, fake_docker, settings = _make_client(tmp_path, ncpu=4)
+    (settings.stage_root / "exec-clamp-1" / "in").mkdir(parents=True)
+    (settings.stage_root / "exec-clamp-2" / "in").mkdir(parents=True)
+
+    r1 = client.post(
+        "/v1/stages/start",
+        json={
+            "attempt_id": "att-clamp-1",
+            "stage_id": "solver",
+            "stage_execution_id": "exec-clamp-1",
+            "fencing_token": "fence-1",
+            "image": "pies-builtin-stages:1.1.5",
+            "cpu_cores": 8.0,
+            "memory_mb": 256,
+            "pids_limit": 32,
+            "tmpfs_size_mb": 64,
+        },
+    )
+    assert r1.status_code == 200
+    assert fake_docker.containers.run_calls[0]["nano_cpus"] == 4_000_000_000
+
+    # Second start reuses cached host NCPU without re-querying client.info()
+    r2 = client.post(
+        "/v1/stages/start",
+        json={
+            "attempt_id": "att-clamp-2",
+            "stage_id": "solver",
+            "stage_execution_id": "exec-clamp-2",
+            "fencing_token": "fence-2",
+            "image": "pies-builtin-stages:1.1.5",
+            "cpu_cores": 6.0,
+            "memory_mb": 256,
+            "pids_limit": 32,
+            "tmpfs_size_mb": 64,
+        },
+    )
+    assert r2.status_code == 200
+    assert fake_docker.containers.run_calls[1]["nano_cpus"] == 4_000_000_000
+    assert fake_docker.info_calls == 1
+
+    # JobRunnerError is logged so 4xx/5xx reasons appear in container logs
+    with caplog.at_level("WARNING", logger="pies_job_runner.app"):
+        missing = client.get("/v1/stages/does-not-exist")
+    assert missing.status_code == 404
+    assert any("job_runner 404:" in rec.message for rec in caplog.records)

@@ -389,3 +389,65 @@ def test_real_docker_timeout_stop_and_oom_detection(docker_harness) -> None:
     assert oom_done["resources"]["oom_killed"] == {"status": "known", "value": True}
     assert oom_done["termination_reason"] == "oom"
     assert client.post(f"/v1/stages/{exec_oom}/cleanup", json={}).status_code == 200
+
+
+def test_real_docker_readyz_required_images(docker_harness) -> None:
+    _, settings, docker_client, run_id = docker_harness
+    present_image = settings.plugin_base_image
+    missing_image = f"pies-missing-required-test-{run_id}:nonexistent"
+
+    present_settings = settings.model_copy(update={"required_images": present_image})
+    present_client = TestClient(
+        create_app(
+            settings=present_settings,
+            service=DockerJobRunnerService(present_settings, client=docker_client),
+        )
+    )
+    resp_ok = present_client.get("/readyz")
+    assert resp_ok.status_code == 200, resp_ok.text
+    assert resp_ok.json()["required_images"] == {present_image: "ok"}
+
+    missing_settings = settings.model_copy(
+        update={"required_images": f"{present_image}, {missing_image}"}
+    )
+    missing_client = TestClient(
+        create_app(
+            settings=missing_settings,
+            service=DockerJobRunnerService(missing_settings, client=docker_client),
+        )
+    )
+    resp_missing = missing_client.get("/readyz")
+    assert resp_missing.status_code == 503
+    assert missing_image in resp_missing.json()["detail"]
+
+
+def test_real_docker_start_stage_clamps_cpu_cores_to_host_ncpu(docker_harness) -> None:
+    client, settings, docker_client, run_id = docker_harness
+    host_ncpu = int(docker_client.info()["NCPU"])
+    assert host_ncpu >= 1
+
+    exec_id = f"exec-{run_id}-cpu-clamp"
+    (settings.stage_root / exec_id / "in").mkdir(parents=True)
+    resp = client.post(
+        "/v1/stages/start",
+        json={
+            "attempt_id": f"att-{run_id}-cpu-clamp",
+            "stage_id": "solver",
+            "stage_execution_id": exec_id,
+            "fencing_token": "fence-cpu-clamp",
+            "image": "python:3.12-slim",
+            "command": ["python", "-c", "print('ok')"],
+            "cpu_cores": float(host_ncpu + 4),
+            "memory_mb": 64,
+            "pids_limit": 32,
+            "tmpfs_size_mb": 64,
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    container = docker_client.containers.get(resp.json()["container_id"])
+    assert container.attrs["HostConfig"]["NanoCpus"] == host_ncpu * 1_000_000_000
+
+    done = _wait_until_exited(client, exec_id)
+    assert done["exit_code"] == 0
+    assert done["resources"]["cpu_limit_cores"] == {"status": "limited", "value": float(host_ncpu)}
+    assert client.post(f"/v1/stages/{exec_id}/cleanup", json={}).status_code == 200

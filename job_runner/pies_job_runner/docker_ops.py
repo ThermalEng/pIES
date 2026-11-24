@@ -161,6 +161,7 @@ class DockerJobRunnerService:
         self._lock_guard = threading.Lock()
         self._stage_locks: dict[tuple[str, str], threading.Lock] = {}
         self._resolved_host_stage_root: Path | None = None
+        self._host_ncpu: int | None = None
 
     def _get_client(self) -> docker.DockerClient:
         if self._client is None:
@@ -173,6 +174,20 @@ class DockerJobRunnerService:
                 raise DockerUnavailableError(f"failed to initialize Docker client: {exc}") from exc
         return self._client
 
+    def _get_host_ncpu(self) -> int | None:
+        if self._host_ncpu is not None:
+            return self._host_ncpu
+        client = self._get_client()
+        try:
+            info = client.info()
+        except DockerException:
+            return None
+        ncpu = info.get("NCPU") if isinstance(info, dict) else None
+        if isinstance(ncpu, int) and ncpu > 0:
+            self._host_ncpu = ncpu
+            return ncpu
+        return None
+
     def _get_stage_lock(self, attempt_id: str, stage_id: str) -> threading.Lock:
         key = (attempt_id, stage_id)
         with self._lock_guard:
@@ -183,7 +198,7 @@ class DockerJobRunnerService:
             return lock
 
     def check_ready(self) -> dict[str, Any]:
-        """Verify Docker daemon ping and stage root accessibility for ``GET /readyz``."""
+        """Verify Docker daemon ping, stage root, and required local images for ``GET /readyz``."""
         client = self._get_client()
         try:
             client.ping()
@@ -198,7 +213,31 @@ class DockerJobRunnerService:
         except OSError as exc:
             raise DockerUnavailableError(f"stage_root unavailable: {exc}") from exc
 
-        return {"status": "ready", "docker": "ok", "stage_root": str(stage_root)}
+        image_statuses: dict[str, str] = {}
+        missing_images: list[str] = []
+        for image_ref in self.settings.parsed_required_images():
+            try:
+                client.images.get(image_ref)
+            except ImageNotFound:
+                missing_images.append(image_ref)
+            except DockerException as exc:
+                raise DockerUnavailableError(
+                    f"failed to inspect required image {image_ref}: {exc}"
+                ) from exc
+            else:
+                image_statuses[image_ref] = "ok"
+
+        if missing_images:
+            raise DockerUnavailableError(
+                f"required images missing locally: {', '.join(missing_images)}"
+            )
+
+        return {
+            "status": "ready",
+            "docker": "ok",
+            "stage_root": str(stage_root),
+            "required_images": image_statuses,
+        }
 
     def _resolve_host_stage_root(self) -> Path:
         """Translate container-local ``stage_root`` to the Docker host bind-mount path."""
@@ -500,7 +539,11 @@ class DockerJobRunnerService:
             # Ephemeral containers run as a non-root user and must be able to write /work/out.
             os.chmod(out_dir, 0o777)
 
-            nano_cpus = int(request.cpu_cores * 1_000_000_000)
+            effective_cpu = request.cpu_cores
+            host_ncpu = self._get_host_ncpu()
+            if host_ncpu is not None and host_ncpu > 0:
+                effective_cpu = min(effective_cpu, float(host_ncpu))
+            nano_cpus = int(effective_cpu * 1_000_000_000)
             if nano_cpus < 1_000_000:
                 raise BadRequestError("cpu_cores must be at least 0.001")
             mem_spec = f"{request.memory_mb}m"

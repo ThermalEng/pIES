@@ -176,6 +176,8 @@ jobs:
           read -r -a tests <<< "$TEST_FILES"
           printf 'Selected backend tests: %s\n' "${tests[*]}"
           docker compose run --rm --no-deps \
+            -e IESPLAN_JOB_RUNNER_URL="" \
+            -e IESPLAN_EMBEDDED_SCHEDULER=false \
             --volume "$PWD/ci-artifacts/backend:/ci-artifacts" \
             --volume "$PWD/manual:/manual:ro" \
             backend python -m pytest -vv -ra --durations=20 --log-cli-level=WARNING "${tests[@]}" \
