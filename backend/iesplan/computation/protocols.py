@@ -388,6 +388,39 @@ class CalculationConfig:
             "outputs": list(self.outputs),
         }
 
+    @classmethod
+    def from_frozen(cls, frozen: Mapping[str, Any]) -> CalculationConfig:
+        """从已校验持久化/快照字典直接恢复不可变载体（只还原类型，不重跑输入校验）。
+
+        调用方保证输入已通过保存入口校验；14 字段缺件即 ``KeyError`` 直接可见，
+        不设默认值、不回退旧 12 字段形态，也不重复执行引用格式或非有限浮点校验。
+        """
+        instance = object.__new__(cls)
+        object.__setattr__(instance, "schema", frozen["schema"])
+        object.__setattr__(instance, "schema_version", frozen["schema_version"])
+        object.__setattr__(instance, "mode", frozen["mode"])
+        object.__setattr__(
+            instance,
+            "predictions",
+            tuple(freeze_json_value(entry) for entry in frozen["predictions"]),
+        )
+        object.__setattr__(instance, "generator", frozen["generator"])
+        object.__setattr__(instance, "solver", frozen["solver"])
+        object.__setattr__(instance, "algorithm", frozen["algorithm"])
+        object.__setattr__(instance, "evaluator", frozen["evaluator"])
+        object.__setattr__(instance, "precision", frozen["precision"])
+        conv = frozen["convergence"]
+        object.__setattr__(
+            instance,
+            "convergence",
+            freeze_json_value(conv) if conv is not None else None,
+        )
+        object.__setattr__(instance, "time_limit_seconds", frozen["time_limit_seconds"])
+        object.__setattr__(instance, "options", freeze_json_value(frozen["options"]))
+        object.__setattr__(instance, "seed", frozen["seed"])
+        object.__setattr__(instance, "outputs", tuple(frozen["outputs"]))
+        return instance
+
 
 def _check_relative_path(path: object, name: str) -> str:
     """校验 Bundle 内相对路径（非空，不以 ``/`` 开头，不含 ``..`` 段）。"""

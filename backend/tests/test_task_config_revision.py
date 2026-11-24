@@ -1035,9 +1035,10 @@ def test_unified_algorithm_submit_freezes_14_field_snapshot(
     assert frozen["solver"] is None
 
 
-def test_submission_rejects_legacy_12_field_and_enforces_capabilities() -> None:
-    """提交边界拒绝缺字段的旧 12 字段正文（无静默回退），并执行模式/精度/评价器/选项门禁。"""
+def test_submission_rejects_legacy_12_field_and_enforces_capabilities(monkeypatch) -> None:
+    """提交边界拒绝缺字段的旧 12 字段正文（无静默回退），不重跑输入校验，并执行能力门禁。"""
     from iesplan.application.tasks.submissions import _resolve_execution_refs
+    from iesplan.computation import CalculationConfig
     from iesplan.computation.generators import HIGHS_MILP_PROVIDER, build_registry
     from iesplan.tasks.contracts import InvalidRequestError
 
@@ -1045,6 +1046,13 @@ def test_submission_rejects_legacy_12_field_and_enforces_capabilities() -> None:
     legacy_12 = {k: v for k, v in _body().items() if k not in ("algorithm", "evaluator")}
     with pytest.raises(KeyError):
         _resolve_execution_refs(legacy_12, gen_reg, project_id=1)
+
+    def _no_post_init(self) -> None:
+        raise AssertionError("提交边界恢复已保存配置不得重跑 __post_init__ 输入校验")
+
+    monkeypatch.setattr(CalculationConfig, "__post_init__", _no_post_init)
+    resolved = _resolve_execution_refs(_body(), gen_reg, project_id=1)
+    assert resolved[0] == "ies.result-adapter.highs@1.0.0"
 
     for bad_override, expected_code, expected_field in (
         ({"mode": "unsupported"}, "TASK-REQ-007", "mode"),

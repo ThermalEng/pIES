@@ -46,7 +46,6 @@ from iesplan import configuration as configuration_domain
 from iesplan.application.worker.lease_cases import Claim
 from iesplan.assembly import ValidatedAssemblyArtifact, ValidationReceipt
 from iesplan.computation import (
-    CALCULATION_CONFIG_FIELDS,
     AttemptContext,
     CalculationConfig,
     ComputationUnavailableError,
@@ -119,11 +118,6 @@ class ComputeExecutionPlane:
     predictor_registry: PredictorRegistry
 
 
-#: 快照计算配置正文恢复的显式字段（task_params/config_ref 等提交
-#: 绑定键不进入 CalculationConfig，不在白名单的键直接丢弃而非猜测）。
-_CONFIG_FIELDS = CALCULATION_CONFIG_FIELDS
-
-
 def _receipt_from_frozen(data: Mapping[str, Any]) -> ValidationReceipt:
     """回执结构恢复（只恢复形态，不重跑装配校验）。
 
@@ -189,11 +183,10 @@ def _restore_artifact_resources_config(
     artifact = ValidatedAssemblyArtifact(canonical_text=snapshot.canonical_assembly_text, receipt=receipt)
 
     body = snapshot.calc_config_snapshot
-    picked = {name: body[name] for name in _CONFIG_FIELDS}
-    seed = picked.get("seed")
+    seed = body["seed"]
     if not isinstance(seed, int) or isinstance(seed, bool):
         seed = snapshot.random_seed
-    config = CalculationConfig(**{**picked, "seed": seed})
+    config = CalculationConfig.from_frozen({**body, "seed": seed})
 
     doc = json.loads(snapshot.canonical_assembly_text)
     resource_ids = _collect_resource_ids(doc)

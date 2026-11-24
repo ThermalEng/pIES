@@ -339,9 +339,9 @@ def _resolve_execution_refs(
     - executors 非恰好一个 → 400 TASK-REQ-009；
     - 其余未注册/不兼容/非法选项 → 400 TASK-REQ-007。
     """
-    from iesplan.computation import CALCULATION_CONFIG_FIELDS, CalculationConfig
+    from iesplan.computation import CalculationConfig
 
-    config = CalculationConfig(**{name: body[name] for name in CALCULATION_CONFIG_FIELDS})
+    config = CalculationConfig.from_frozen(body)
     is_unified = config.algorithm is not None
     active_registry = algorithm_registry if is_unified else generator_registry
     selected_ref = config.algorithm if is_unified else config.generator
