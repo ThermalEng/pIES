@@ -1,0 +1,46 @@
+schema: ies.algorithm-plugin
+schema_version: "1.0.0"
+plugin_id: acme.algorithm.iterative_search
+version: "1.0.0"
+kind: algorithm
+name:
+  zh_cn: 迭代收敛示例算法
+  en_us: Iterative Loop Example
+description: Minimal self-contained iteration loop plugin reporting progress via /work/out/iterations.jsonl.
+license: MPL-2.0
+compatibility:
+  pies: ">=1.1.5,<2.0.0"
+runtime:
+  language: python
+  python: "3.12"
+entrypoint: main:solve
+parameters_schema:
+  type: object
+  additionalProperties: false
+  properties:
+    damping:
+      type: number
+      exclusiveMinimum: 0
+      maximum: 1.0
+      default: 0.5
+resources:
+  default:
+    cpu: 1
+    memory_mb: 256
+    timeout_seconds: 60
+    process_limit: 8
+  maximum:
+    cpu: 2
+    memory_mb: 1024
+    timeout_seconds: 300
+    process_limit: 16
+iteration:
+  enabled: true
+  max_iterations_default: 20
+  convergence_metric: max_relative_delta
+  progress_channel: /work/out/iterations.jsonl
+tests:
+  - id: minimal
+    input: tests/minimal/input.json
+    expected: tests/minimal/expected.json
+extensions: {}

@@ -1,0 +1,23 @@
+{
+  "bundle_id": "bundle-ref-001",
+  "execution_status": "completed",
+  "math_status": "solved",
+  "outputs": {
+    "dispatch_kw": [
+      30.0,
+      60.0,
+      90.0
+    ],
+    "solver_summary": {
+      "has_feasible_solution": true,
+      "math_status": "solved",
+      "objective_unit": "CNY",
+      "objective_value": 128.7,
+      "termination_reason": "optimal"
+    },
+    "total_cost": 128.7
+  },
+  "receipt_id": "receipt-ref-001",
+  "schema": "ies.compute-result",
+  "schema_version": "1.0.0"
+}

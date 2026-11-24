@@ -1,0 +1,45 @@
+schema: ies.algorithm-plugin
+schema_version: "1.0.0"
+plugin_id: acme.algorithm.reference_dispatch
+version: "1.0.0"
+kind: algorithm
+name:
+  zh_cn: 参考经济调度算法
+  en_us: Reference Dispatch Algorithm
+description: Standalone deterministic economic dispatch algorithm example using pies-sdk.
+license: MPL-2.0
+compatibility:
+  pies: ">=1.1.5,<2.0.0"
+  sdk: ">=1.1.5,<2.0.0"
+runtime:
+  language: python
+  python: "3.12"
+entrypoint: main:solve
+parameters_schema:
+  type: object
+  additionalProperties: false
+  properties:
+    tariff_multiplier:
+      type: number
+      exclusiveMinimum: 0
+      default: 1.0
+    max_power_kw:
+      type: number
+      exclusiveMinimum: 0
+      default: 100.0
+resources:
+  default:
+    cpu: 1
+    memory_mb: 256
+    timeout_seconds: 60
+    process_limit: 8
+  maximum:
+    cpu: 2
+    memory_mb: 1024
+    timeout_seconds: 300
+    process_limit: 16
+tests:
+  - id: minimal
+    input: tests/minimal/input.json
+    expected: tests/minimal/expected.json
+extensions: {}

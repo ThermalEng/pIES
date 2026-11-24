@@ -1,0 +1,23 @@
+# Official base image for pIES algorithm plugins (pies-plugin-base).
+# Built independently from sdk/ with zero backend dependencies.
+# Child plugin images built by job_runner can layer requirements/source atop this base.
+FROM python:3.12-slim
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1
+
+WORKDIR /app
+
+COPY pyproject.toml LICENSE ./
+COPY pies_sdk ./pies_sdk
+
+RUN pip install --no-cache-dir . \
+    && groupadd --gid 10001 pies \
+    && useradd --uid 10001 --gid 10001 --create-home --shell /usr/sbin/nologin pies \
+    && mkdir -p /work/in /work/out /app \
+    && chown -R pies:pies /app /work
+
+USER pies
+
+CMD ["python", "-m", "pies_sdk.runner"]

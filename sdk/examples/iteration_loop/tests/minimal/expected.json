@@ -1,0 +1,14 @@
+{
+  "bundle_id": "bundle-iter-001",
+  "execution_status": "completed",
+  "math_status": "solved",
+  "outputs": {
+    "converged": true,
+    "estimate": 99.375,
+    "final_metric_value": 0.00625,
+    "iterations_completed": 7
+  },
+  "receipt_id": "receipt-iter-001",
+  "schema": "ies.compute-result",
+  "schema_version": "1.0.0"
+}

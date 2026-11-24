@@ -1,0 +1,13 @@
+{
+  "bundle_id": "bundle-iter-001",
+  "receipt_id": "receipt-iter-001",
+  "initial_guess": 20.0,
+  "target_value": 100.0,
+  "convergence": {
+    "tolerance": 0.01,
+    "max_iterations": 15
+  },
+  "parameters": {
+    "damping": 0.5
+  }
+}
