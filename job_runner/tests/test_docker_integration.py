@@ -389,3 +389,33 @@ def test_real_docker_timeout_stop_and_oom_detection(docker_harness) -> None:
     assert oom_done["resources"]["oom_killed"] == {"status": "known", "value": True}
     assert oom_done["termination_reason"] == "oom"
     assert client.post(f"/v1/stages/{exec_oom}/cleanup", json={}).status_code == 200
+
+
+def test_real_docker_readyz_required_images(docker_harness) -> None:
+    _, settings, docker_client, run_id = docker_harness
+    present_image = settings.plugin_base_image
+    missing_image = f"pies-missing-required-test-{run_id}:nonexistent"
+
+    present_settings = settings.model_copy(update={"required_images": present_image})
+    present_client = TestClient(
+        create_app(
+            settings=present_settings,
+            service=DockerJobRunnerService(present_settings, client=docker_client),
+        )
+    )
+    resp_ok = present_client.get("/readyz")
+    assert resp_ok.status_code == 200, resp_ok.text
+    assert resp_ok.json()["required_images"] == {present_image: "ok"}
+
+    missing_settings = settings.model_copy(
+        update={"required_images": f"{present_image}, {missing_image}"}
+    )
+    missing_client = TestClient(
+        create_app(
+            settings=missing_settings,
+            service=DockerJobRunnerService(missing_settings, client=docker_client),
+        )
+    )
+    resp_missing = missing_client.get("/readyz")
+    assert resp_missing.status_code == 503
+    assert missing_image in resp_missing.json()["detail"]

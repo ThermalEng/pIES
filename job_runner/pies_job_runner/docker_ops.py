@@ -183,7 +183,7 @@ class DockerJobRunnerService:
             return lock
 
     def check_ready(self) -> dict[str, Any]:
-        """Verify Docker daemon ping and stage root accessibility for ``GET /readyz``."""
+        """Verify Docker daemon ping, stage root, and required local images for ``GET /readyz``."""
         client = self._get_client()
         try:
             client.ping()
@@ -198,7 +198,31 @@ class DockerJobRunnerService:
         except OSError as exc:
             raise DockerUnavailableError(f"stage_root unavailable: {exc}") from exc
 
-        return {"status": "ready", "docker": "ok", "stage_root": str(stage_root)}
+        image_statuses: dict[str, str] = {}
+        missing_images: list[str] = []
+        for image_ref in self.settings.parsed_required_images():
+            try:
+                client.images.get(image_ref)
+            except ImageNotFound:
+                missing_images.append(image_ref)
+            except DockerException as exc:
+                raise DockerUnavailableError(
+                    f"failed to inspect required image {image_ref}: {exc}"
+                ) from exc
+            else:
+                image_statuses[image_ref] = "ok"
+
+        if missing_images:
+            raise DockerUnavailableError(
+                f"required images missing locally: {', '.join(missing_images)}"
+            )
+
+        return {
+            "status": "ready",
+            "docker": "ok",
+            "stage_root": str(stage_root),
+            "required_images": image_statuses,
+        }
 
     def _resolve_host_stage_root(self) -> Path:
         """Translate container-local ``stage_root`` to the Docker host bind-mount path."""

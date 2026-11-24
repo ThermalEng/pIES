@@ -33,6 +33,9 @@ class JobRunnerSettings(BaseSettings):
         - ``container_user`` (``PIES_JOB_RUNNER_CONTAINER_USER``): Non-root UID:GID
           used for ephemeral containers and plugin image runtime (default ``10001:10001``,
           matching ``pies`` in ``pies-plugin-base``).
+        - ``required_images`` (``PIES_JOB_RUNNER_REQUIRED_IMAGES``): Optional
+          comma-separated Docker image references that must exist locally for
+          ``/readyz`` to report ready (default ``""``).
     """
 
     model_config = SettingsConfigDict(
@@ -48,3 +51,10 @@ class JobRunnerSettings(BaseSettings):
     docker_host: str | None = Field(default=None)
     cgroup_root: Path = Field(default=Path("/sys/fs/cgroup"))
     container_user: str = Field(default="10001:10001")
+    required_images: str = Field(default="")
+
+    def parsed_required_images(self) -> tuple[str, ...]:
+        """Parse comma-separated ``required_images`` into deduplicated non-empty image refs."""
+        return tuple(
+            dict.fromkeys(part.strip() for part in self.required_images.split(",") if part.strip())
+        )
