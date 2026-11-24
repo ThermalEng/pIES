@@ -14,7 +14,7 @@
     <img src="https://img.shields.io/badge/Backend-Python%203.12%20%7C%20FastAPI-3776AB?style=flat-square&logo=python&logoColor=white" alt="Python 3.12 FastAPI" />
     <img src="https://img.shields.io/badge/Frontend-React%2018%20%7C%20TypeScript-0891b2?style=flat-square&logo=react&logoColor=white" alt="React 18 TypeScript" />
     <img src="https://img.shields.io/badge/Solver-HiGHS%201.7.2%20MILP-1e7d32?style=flat-square" alt="Solver: HiGHS 1.7.2" />
-    <a href="manual/changelog/en-US/README.md#current-version-status"><img src="https://img.shields.io/badge/Release-v1.1.0-1e7d32?style=flat-square" alt="Release v1.1.0" /></a>
+    <a href="manual/changelog/en-US/README.md#current-version-status"><img src="https://img.shields.io/badge/Release-v1.1.5-1e7d32?style=flat-square" alt="Release v1.1.5" /></a>
   </p>
 
   <p>
@@ -102,14 +102,14 @@ flowchart TB
         Pages["app / pages<br/><sub>Routes · Workbench Context</sub>"] --> Features["features/*<br/><sub>contracts · model · mappers · api</sub>"] --> Shared["shared / components<br/><sub>HTTP · i18n · Design Tokens</sub>"]
     end
 
-    subgraph BE["Backend · Python 3.12 + FastAPI + Worker"]
+    subgraph BE["Backend · Python 3.12 + FastAPI + Embedded Scheduler"]
         direction LR
-        API["api / worker<br/><sub>HTTP Transport · Leased Execution</sub>"] --> App["application<br/><sub>Cross-Module Use Cases</sub>"] --> Domain["domain modules<br/><sub>devices · modeling · assembly<br/>computation · finance · analysis</sub>"] --> Core["core<br/><sub>Stateless Units · Diagnostics · Contracts</sub>"]
+        API["api / scheduler<br/><sub>HTTP Transport · Leased Scheduling</sub>"] --> App["application<br/><sub>Cross-Module Use Cases</sub>"] --> Domain["domain modules<br/><sub>devices · modeling · assembly<br/>computation · finance · analysis</sub>"] --> Core["core<br/><sub>Stateless Units · Diagnostics · Contracts</sub>"]
     end
 
     subgraph Pipe["Computation 3-Stage Boundary"]
         direction LR
-        Art["ValidatedAssemblyArtifact<br/>+ EffectiveFinanceConfig"] --> Gen["GeneratorProvider<br/><sub>Unit Conversion · Solver Bundle</sub>"] --> Run["SolverRuntime<br/><sub>Isolated HiGHS 1.7.2</sub>"] --> Adp["ResultAdapter<br/><sub>Sealed ComputeResult</sub>"]
+        Art["ValidatedAssemblyArtifact<br/>+ EffectiveFinanceConfig"] --> Gen["GeneratorProvider<br/><sub>Unit Conversion · Solver Bundle</sub>"] --> Run["SolverRuntime / job_runner<br/><sub>Ephemeral Isolated Container · HiGHS 1.7.2</sub>"] --> Adp["ResultAdapter<br/><sub>Sealed ComputeResult</sub>"]
     end
 
     FE -- "OpenAPI / snake_case DTO + Optimistic Locking revision" --> API
@@ -126,7 +126,7 @@ flowchart TB
 
 ## ⚡ 3-Step Quickstart (Docker)
 
-The entire stack (`web` + `backend` + `io_worker` + `compute_worker` + `postgres` + `redis`) runs inside Docker Compose with no host Python, Node, or HiGHS dependencies required.
+The entire stack runs inside Docker Compose as **5 persistent core containers** (`postgres` + `redis` + `job_runner` + `backend` + `web`) plus a one-shot `builtin_stages` image build (`pies-builtin-stages:1.1.5`), with no host Python, Node, or HiGHS dependencies required.
 
 ### 1. Build and Start All Services
 
@@ -135,6 +135,14 @@ git clone https://github.com/ThermalEng/pIES.git
 cd pIES
 docker compose up -d --build
 ```
+
+> [!NOTE]
+> **Upgrading from `1.1.0`**: `1.1.5` converges the former persistent `io_worker` and `compute_worker` daemons into the `backend` embedded scheduler and ephemeral network-isolated stage containers orchestrated via `job_runner`. When upgrading from `1.1.0`, run with `--remove-orphans` so deprecated worker containers are cleanly removed:
+> ```bash
+> docker compose up -d --build --remove-orphans
+> # Or remove old containers first:
+> # docker compose down --remove-orphans && docker compose up -d --build
+> ```
 
 Once healthy (verify via `curl http://localhost:8080/api/readyz`):
 - **Web Workbench**: `http://localhost:8080`
@@ -157,7 +165,7 @@ docker build --target build -f frontend/Dockerfile -t pies-fe-check . && \
 ```
 
 > [!CAUTION]
-> **Production Security Notice**: Rotate the default admin password, database credentials, and `IESPLAN_SECRET_KEY` before external exposure, and terminate TLS/HTTPS at a reverse proxy. See the [Deployment & Operations Guide](manual/developer-guide/en-US/deployment.md).
+> **Production Security Notice**: Rotate the default admin password, database credentials, and `IESPLAN_SECRET_KEY` before external exposure, and terminate TLS/HTTPS at a reverse proxy. See the [Deployment & Operations Guide](manual/developer-guide/en-US/deployment.md) for full configuration and ephemeral compute container isolation parameters.
 
 ---
 
@@ -175,7 +183,7 @@ docker build --target build -f frontend/Dockerfile -t pies-fe-check . && \
 
 ## 🗺️ Release Status & License
 
-- **Current Release**: Official version **`1.1.0`** ([pyproject.toml](backend/pyproject.toml)); next milestone **`1.2.0`** focuses on Models & Algorithms, Provider SDK, and device extensions (see [Changelog](manual/changelog/en-US/README.md) and [Roadmap](manual/changelog/en-US/roadmap.md)).
+- **Current Release**: Official version **`1.1.5`** ([pyproject.toml](backend/pyproject.toml)); next milestone **`1.2.0`** focuses on the Models & Algorithms ecosystem, Provider SDK, and device extensions (see [Changelog](manual/changelog/en-US/README.md) and [Roadmap](manual/changelog/en-US/roadmap.md)).
 - **License**: Released under the **[Mozilla Public License 2.0 (MPL-2.0)](LICENSE)**.
 
 <p align="center">

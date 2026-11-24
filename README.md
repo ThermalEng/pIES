@@ -14,7 +14,7 @@
     <img src="https://img.shields.io/badge/Backend-Python%203.12%20%7C%20FastAPI-3776AB?style=flat-square&logo=python&logoColor=white" alt="Python 3.12 FastAPI" />
     <img src="https://img.shields.io/badge/Frontend-React%2018%20%7C%20TypeScript-0891b2?style=flat-square&logo=react&logoColor=white" alt="React 18 TypeScript" />
     <img src="https://img.shields.io/badge/Solver-HiGHS%201.7.2%20MILP-1e7d32?style=flat-square" alt="Solver: HiGHS 1.7.2" />
-    <a href="manual/changelog/README.md#当前版本状态"><img src="https://img.shields.io/badge/Release-v1.1.0-1e7d32?style=flat-square" alt="版本 1.1.0 已发布" /></a>
+    <a href="manual/changelog/README.md#当前版本状态"><img src="https://img.shields.io/badge/Release-v1.1.5-1e7d32?style=flat-square" alt="版本 1.1.5 已发布" /></a>
   </p>
 
   <p>
@@ -102,14 +102,14 @@ flowchart TB
         Pages["app / pages<br/><sub>路由装配 · 工作台上下文</sub>"] --> Features["features/*<br/><sub>contracts · model · mappers · api</sub>"] --> Shared["shared / components<br/><sub>HTTP · i18n · 设计令牌</sub>"]
     end
 
-    subgraph BE["Backend · Python 3.12 + FastAPI + Worker"]
+    subgraph BE["Backend · Python 3.12 + FastAPI + Embedded Scheduler"]
         direction LR
-        API["api / worker<br/><sub>HTTP 传输 · 租约执行</sub>"] --> App["application<br/><sub>跨模块用例与事务边界</sub>"] --> Domain["domain modules<br/><sub>devices · modeling · assembly<br/>computation · finance · analysis</sub>"] --> Core["core<br/><sub>无状态量纲 · 诊断 · 契约</sub>"]
+        API["api / scheduler<br/><sub>HTTP 传输 · 租约调度</sub>"] --> App["application<br/><sub>跨模块用例与事务边界</sub>"] --> Domain["domain modules<br/><sub>devices · modeling · assembly<br/>computation · finance · analysis</sub>"] --> Core["core<br/><sub>无状态量纲 · 诊断 · 契约</sub>"]
     end
 
     subgraph Pipe["Computation 3-Stage Boundary"]
         direction LR
-        Art["ValidatedAssemblyArtifact<br/>+ EffectiveFinanceConfig"] --> Gen["GeneratorProvider<br/><sub>单位换算 · Solver Bundle</sub>"] --> Run["SolverRuntime<br/><sub>隔离执行 HiGHS 1.7.2</sub>"] --> Adp["ResultAdapter<br/><sub>封存 ComputeResult</sub>"]
+        Art["ValidatedAssemblyArtifact<br/>+ EffectiveFinanceConfig"] --> Gen["GeneratorProvider<br/><sub>单位换算 · Solver Bundle</sub>"] --> Run["SolverRuntime / job_runner<br/><sub>断网临时容器 · HiGHS 1.7.2</sub>"] --> Adp["ResultAdapter<br/><sub>封存 ComputeResult</sub>"]
     end
 
     FE -- "OpenAPI / snake_case DTO + 乐观锁 revision" --> API
@@ -126,7 +126,7 @@ flowchart TB
 
 ## ⚡ 3 步快速上手（Docker）
 
-项目采用完整容器化编排（`web` + `backend` + `io_worker` + `compute_worker` + `postgres` + `redis`），宿主机无需安装 Python、Node 或 HiGHS 依赖。
+项目采用完整容器化编排，收敛为 **5 个常驻核心容器**（`postgres` + `redis` + `job_runner` + `backend` + `web`）以及首次启动自动构建的一次性 `builtin_stages` 内置计算镜像（`pies-builtin-stages:1.1.5`），宿主机无需安装 Python、Node 或 HiGHS 依赖。
 
 ### 1. 一键构建并启动全套服务
 
@@ -135,6 +135,14 @@ git clone https://github.com/ThermalEng/pIES.git
 cd pIES
 docker compose up -d --build
 ```
+
+> [!NOTE]
+> **从 `1.1.0` 升级提示**：`1.1.5` 已将原常驻 `io_worker` 与 `compute_worker` 收敛进 `backend` 嵌入式调度器与断网临时计算容器（由 `job_runner` 代理拉起）。从 `1.1.0` 升级时请执行以下命令以清理已退役的旧 Worker 容器：
+> ```bash
+> docker compose up -d --build --remove-orphans
+> # 或先清理旧编排再重新拉起：
+> # docker compose down --remove-orphans && docker compose up -d --build
+> ```
 
 服务就绪后（可通过 `curl http://localhost:8080/api/readyz` 确认数据库、存储与设备/求解器注册表状态）：
 - **Web 控制台**：`http://localhost:8080`
@@ -157,7 +165,7 @@ docker build --target build -f frontend/Dockerfile -t pies-fe-check . && \
 ```
 
 > [!CAUTION]
-> **生产安全提示**：上线前必须更换默认管理员密码、数据库凭证与 `IESPLAN_SECRET_KEY`，并在反向代理层配置 HTTPS。完整配置项与 Worker 隔离参数见 [部署与运行指南](manual/developer-guide/zh-CN/deployment.md)。
+> **生产安全提示**：上线前必须更换默认管理员密码、数据库凭证与 `IESPLAN_SECRET_KEY`，并在反向代理层配置 HTTPS。完整配置项与临时计算容器隔离参数见 [部署与运行指南](manual/developer-guide/zh-CN/deployment.md)。
 
 ---
 
@@ -175,7 +183,7 @@ docker build --target build -f frontend/Dockerfile -t pies-fe-check . && \
 
 ## 🗺️ 开发状态与开源许可
 
-- **当前版本**：正式发布版本 **`1.1.0`**（[pyproject.toml](backend/pyproject.toml)）；下一演进目标 **`1.2.0`** 聚焦模型与算法、Provider SDK 与设备扩展，详见 [更新日志](manual/changelog/README.md) 与 [Roadmap](manual/changelog/roadmap.md)。
+- **当前版本**：正式发布版本 **`1.1.5`**（[pyproject.toml](backend/pyproject.toml)）；下一演进目标 **`1.2.0`** 聚焦模型与算法、Provider SDK 生态与设备扩展，详见 [更新日志](manual/changelog/README.md) 与 [Roadmap](manual/changelog/roadmap.md)。
 - **开源协议**：本项目基于 **[Mozilla Public License 2.0 (MPL-2.0)](LICENSE)** 开源发布。
 
 <p align="center">

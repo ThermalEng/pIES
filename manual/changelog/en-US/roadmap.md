@@ -9,7 +9,7 @@ The Roadmap tracks undelivered feature plans, release ordering, and exit criteri
 - `1.x`: Feature iterations during pilot testing (proprietary contract markers remain fixed at `1.0.0` prior to `2.0` public release);
 - `2.0.0`: First general public release (compatibility and migration policy established prior to release).
 
-## `1.1.0` Delivered Baseline
+## `1.1.5` Delivered Baseline
 
 ```text
 Third-Party Attack Surface & Public Boundaries (0.2–0.4)
@@ -20,21 +20,19 @@ Third-Party Attack Surface & Public Boundaries (0.2–0.4)
   → Finance & Prediction Calculation Convergence (0.14.5)
   → End-to-End Engineering Verification & Official 1.0.0 Release (1.0.0)
   → Solver-Embedded Structural Acceleration & Large-Scale Optimization (1.1.0)
+  → Ephemeral Container Computation Pipeline, Unified Plugin Contract & Backend Convergence (1.1.5)
 ```
 
-*(Note: `0.2.0` through `1.1.0` have been delivered and recorded in the [Changelog](README.md).)*
+*(Note: `0.2.0` through `1.1.5` have been delivered and recorded in the [Changelog](README.md).)*
 
-## Post-`1.1.0` `1.x` Evolution Plan
+### `1.1.5` Delivered Milestones (`S1`–`S4`)
 
-### `1.1.5` — Ephemeral Container Computation Pipeline, Unified Plugin Contract, and Backend Orchestration Convergence
+- [x] `S1` Standalone computation contract & minimal SDK: Delivered the backend-independent `pies-sdk` (`1.1.5`) and unified `ies.algorithm-plugin@1.0.0` contract passing all four runtime modularity gates.
+- [x] `S2` `job_runner` & container lifecycle: Delivered the 5-operation `job_runner` proxy, `--network=none --read-only` isolation, host NCPU clamping, DB-authoritative startup reconciliation, and non-blocking detach.
+- [x] `S3` Official pipeline migration: Delivered `pies-builtin-stages:1.1.5`, direct `frozen_series_inputs` materialization with `os.link` zero-copy stage handoffs, and the 14-field `CalculationConfig`.
+- [x] `S4` `1.1.5` acceptance & cutover: Converged `EmbeddedScheduler` into `backend`, passed cold-start and full acceptance checks, retired legacy `io_worker`/`compute_worker` daemons, and consolidated persistent services into 5 containers (`postgres`, `redis`, `job_runner`, `backend`, `web`).
 
-- Per `ADR-0016`, converge the former persistent `io_worker` and lightweight task scheduling into `backend` (isolating HTTP request threads from background scheduling, large-file I/O, and image builds with separate concurrency caps while keeping edit-time checks synchronous), introduce the `job_runner` proxy exposing five fixed business operations (`build_plugin`, `start_stage`, `inspect_stage`, `stop_stage`, `cleanup_stage`), and consolidate persistent services to five containers (`web`, `backend`, `job_runner`, `postgres`, `redis`);
-- Establish the concise unified `ies.algorithm-plugin@1.0.0` (`plugin.yaml` + `/work/in → /work/out`) contract covering `predictor`, `generator`, `solver`, `evaluator`, and single-step `algorithm`, alongside optional advanced extensions and a dedicated internal-loop interface;
-- Implementation and acceptance sequence:
-  - `S1` Standalone computation contract & minimal SDK: Finalize five-stage I/O contracts and verify a backend-independent reference plugin passing all four runtime modularity gates (independent build, independent execution, replaceability, dependency isolation);
-  - `S2` `job_runner` & container lifecycle: Verify the five fixed business operations, resource caps, cancellation/timeout/OOM handling, persist-before-cleanup handoff, and restart reconciliation via `Attempt`/`Fencing Token`/checkpoints without re-launching active stages;
-  - `S3` Official pipeline migration: Package built-in prediction, generation (HiGHS MILP), solving (HiGHS 1.7.2), adaptation, and post-solve financial evaluation into computation images on the ephemeral container pipeline, preserving business math rules and reading shared stage directories directly without extra serialization or disk copies;
-  - `S4` `1.1.5` acceptance & cutover: Pass cold-start checks, full engineering cases, financial reconciliation, checkpoint recovery, module replaceability gates, performance/peak-memory benchmarks against `1.1.0` baselines, and full Playwright regressions before removing legacy persistent Workers and execution paths.
+## Post-`1.1.5` `1.x` Evolution Plan
 
 ### `1.2.0` — Open Model & Algorithm Plugin Ecosystem and pIES Market
 

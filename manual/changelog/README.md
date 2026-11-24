@@ -6,14 +6,30 @@
 
 | 口径 | 当前状态 |
 | --- | --- |
-| 正式产品版本（`backend/pyproject.toml`） | `1.1.0` |
-| 最新正式发布版本 | `1.1.0`（2026-11-24 完成求解器内建结构加速与大规模长周期求解优化） |
-| 通用建模与计算升级 | 声明式设备/系统方程、分月电价、自然月需量、嵌入式税务、五页签结果可视化及默认 `on_demand_mutex` 结构加速均已交付 |
-| 下一开发目标 | `1.2.0`（模型与算法、Provider SDK 与设备扩展） |
-| 小范围测试版本 | `1.1.0` |
+| 正式产品版本（`backend/pyproject.toml`） | `1.1.5` |
+| 最新正式发布版本 | `1.1.5`（2026-11-25 完成临时计算容器流水线、统一插件契约与后端资源调度收敛） |
+| 通用建模与计算升级 | 声明式设备/系统方程、分月电价、自然月需量、嵌入式税务、结构加速与断网临时计算容器流水线均已交付 |
+| 下一开发目标 | `1.2.0`（模型与算法、Provider SDK 生态与设备扩展） |
+| 小范围测试版本 | `1.1.5` |
 | 首个面向公众发布的版本 | `2.0.0` |
 
-> 产品元数据（`backend/pyproject.toml`）、前端帮助清单与发布口径已于 2026-11-24 统一升级至 **`1.1.0`**；后续 `1.2.0` 将推进“模型与算法”模块、Provider SDK 与设备扩展。
+> 产品元数据（`backend/pyproject.toml`、`sdk/pyproject.toml`、`job_runner` 与帮助中心清单）已于 2026-11-25 统一升级至 **`1.1.5`**；从 `1.1.0` 升级部署时请使用 `docker compose up -d --build --remove-orphans`（或先执行 `docker compose down --remove-orphans`）以清理已退役的 `io_worker`/`compute_worker` 容器。下一阶段 `1.2.0` 将推进“模型与算法”模块与 `pIES-Market` 生态。
+
+## `1.1.5` — 2026-11-25 — 临时计算容器流水线、统一插件契约与后端资源调度收敛
+
+### 2026-11-25 — `1.1.5` 临时计算容器架构与调度收敛（S1–S4）交付
+
+- **什么时候完成**：2026-11-25 完成 S1–S4 全切片交付，并将产品版本由 `1.1.0` 升级至 **`1.1.5`**。
+- **更新了什么**：
+  - **容器代理 `job_runner` 与断网临时计算容器**：新增极薄容器编排代理 `job_runner`（`job_runner/pies_job_runner`），仅暴露 5 个固定业务操作（`build_plugin`、`start_stage`、`inspect_stage`、`stop_stage`、`cleanup_stage`），负责构建镜像并以 `--network=none --read-only --cap-drop=ALL`、非 root 身份拉起一次性计算容器；内建按宿主机可用逻辑核数自动钳位 `cpu_cores`（Host NCPU Clamping）及 `/readyz` 对必需镜像（`PIES_JOB_RUNNER_REQUIRED_IMAGES=pies-builtin-stages:1.1.5`）的就绪检查。
+  - **零后端依赖 `pies-sdk` 与统一插件契约**：交付独立 SDK 包 `pies-sdk`（`sdk/pyproject.toml`，版本 `1.1.5`），确立 `ies.algorithm-plugin@1.0.0`（`plugin.yaml` + `/work/in` → `/work/out`）统一契约，覆盖 `predictor`、`generator`、`solver`、`evaluator` 与一体化 `algorithm`。
+  - **官方内置计算镜像与零拷贝交接**：交付 `pies-builtin-stages:1.1.5`（Compose 中的一次性构建服务 `builtin_stages`，对应 `plugins/Dockerfile`），内置生成器容器直接从 `/work/in/objects` 物化 `frozen_series_inputs` 并采用 `os.link` 硬链接零拷贝跨阶段交接文件。
+  - **14 字段 `CalculationConfig`**：统一 `ies.calculation-config@1.0.0` 的 14 个必需顶层字段，同时支持分步组合（`generator` + `solver` + `evaluator`）与一体化算法（`algorithm`）配置。
+  - **`backend` 嵌入式调度器与服务收敛**：`EmbeddedScheduler` 收敛进 `backend` 进程（隔离 `compute_slots`、`io_slots` 与 `build_slots` 有界线程池），支持启动期基于数据库的权威在途容器核对恢复（`Attempt`、`Fencing Token`、阶段检查点防重复拉起）与控制面关闭时非阻塞 detach；正式退役常驻 `io_worker` 与 `compute_worker` 守护进程（移除 `backend/iesplan/worker/main.py`），常驻部署收敛为 **5 个容器**（`postgres`、`redis`、`job_runner`、`backend`、`web`）+ 一次性 `builtin_stages` 构建。
+- **解决了什么问题**：
+  - 彻底将 `backend` 与重计算/第三方插件执行环境物理隔离（无 Docker Socket 直挂、无数据库或对象存储凭证、无出网权限），避免计算内存峰值或异常拖垮控制面，同时消除独立常驻 Worker 的冗余运维与跨阶段重复序列化拷贝开销。
+  - **从 `1.1.0` 升级提示**：因 `io_worker` 与 `compute_worker` 已从 `docker-compose.yml` 移除，升级时请执行 `docker compose up -d --build --remove-orphans`（或先执行 `docker compose down --remove-orphans` 再启动）以清理旧的孤立 Worker 容器。
+- **版本进展到哪里**：`1.1.5`（S1–S4）已全部验收并合入 `master`，下一里程碑按 [Roadmap](roadmap.md) 推进 **`1.2.0`**（开放模型与算法插件生态与 `pIES Market`）。
 
 ## `1.1.0` — 2026-11-24 — 求解器内建结构加速与大规模长周期求解优化
 
