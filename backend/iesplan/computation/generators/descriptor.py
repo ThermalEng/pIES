@@ -11,35 +11,12 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
-from jsonschema import Draft202012Validator
-from jsonschema.exceptions import SchemaError
-
+from iesplan.computation.config import validate_options_schema
 from iesplan.computation.protocols import (
     check_provider_ref,
     freeze_json_value,
     thaw_json_value,
 )
-
-def _check_options_schema(schema: object) -> Mapping[str, object]:
-    """校验 options_schema 为完整 Draft 2020-12 JSON Schema 对象。
-
-    根 schema 必须描述 object，且 ``additionalProperties`` 必须显式为
-    ``false``（未知字段拒绝）；旧 properties 片段、空 ``{}`` 与非法
-    schema 一律拒绝。返回冻结后的 schema 映射。
-    """
-    if not isinstance(schema, Mapping):
-        raise TypeError(
-            f"options_schema 须为完整 JSON Schema 对象，得到 {type(schema).__name__}"
-        )
-    if schema.get("type") != "object":
-        raise ValueError("options_schema 根 schema 必须描述 object")
-    if schema.get("additionalProperties") is not False:
-        raise ValueError("options_schema 必须显式声明 additionalProperties: false")
-    try:
-        Draft202012Validator.check_schema(dict(schema))
-    except SchemaError as exc:
-        raise ValueError(f"options_schema 自身非法: {exc}") from exc
-    return freeze_json_value(dict(schema))
 
 
 def _check_assembly_schema_version(value: object) -> str:
@@ -81,6 +58,7 @@ class GeneratorDescriptor:
     executors: tuple[str, ...] = ()
     equation_contracts: tuple[str, ...] = ()
     result_adapter: str = ""
+    evaluators: tuple[str, ...] | None = None
     deterministic: bool = True
     resource_limits: Mapping[str, object] = field(default_factory=dict)
     unit_system: str = ""
@@ -126,9 +104,18 @@ class GeneratorDescriptor:
                 "result_adapter 不得为空：descriptor 必须声明配套结果适配器"
             )
         check_provider_ref(self.result_adapter, "result_adapter")
+        if self.evaluators is None:
+            evaluators = (self.result_adapter,)
+        else:
+            evaluators = tuple(self.evaluators)
+            if not evaluators:
+                raise ValueError("evaluators 若显式声明则不得为空")
+            for ev_ref in evaluators:
+                check_provider_ref(ev_ref, "evaluators")
+        object.__setattr__(self, "evaluators", evaluators)
         if not isinstance(self.deterministic, bool):
             raise TypeError("deterministic 须为布尔值")
-        object.__setattr__(self, "options_schema", _check_options_schema(self.options_schema))
+        object.__setattr__(self, "options_schema", validate_options_schema(self.options_schema))
         resource_limits = self.resource_limits
         if not isinstance(resource_limits, Mapping):
             raise TypeError("resource_limits 须为 Mapping")
@@ -149,6 +136,10 @@ class GeneratorDescriptor:
         """该 provider 是否兼容给定 solver 精确引用。"""
         return solver_ref in self.solvers
 
+    def supports_evaluator(self, evaluator_ref: str) -> bool:
+        """该 provider 是否兼容给定 evaluator 精确引用。"""
+        return evaluator_ref in (self.evaluators or ())
+
     def to_dict(self) -> dict[str, Any]:
         """序列化为 JSON 兼容独立副本。"""
         return {
@@ -163,6 +154,7 @@ class GeneratorDescriptor:
             "executors": list(self.executors),
             "equation_contracts": list(self.equation_contracts),
             "result_adapter": self.result_adapter,
+            "evaluators": list(self.evaluators or ()),
             "deterministic": self.deterministic,
             "options_schema": thaw_json_value(self.options_schema),
             "resource_limits": thaw_json_value(self.resource_limits),

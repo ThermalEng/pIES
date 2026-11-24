@@ -39,6 +39,8 @@ test.describe('场景 4: 数据上传 / 质量报告 / 绑定', () => {
         predictions: [],
         generator: 'ies.generator.highs_milp@1.0.0',
         solver: 'ies.solver.highs@1.7.2',
+        algorithm: null,
+        evaluator: null,
         precision: 'medium',
         convergence: null,
         time_limit_seconds: 600,
@@ -101,7 +103,8 @@ test.describe('PR #26: 两份数据集绑定状态与读回失败恢复', () => 
       calculation_config: {
         schema: 'ies.calculation-config', schema_version: '1.0.0',
         mode: 'planning', predictions: [], generator: 'ies.generator.highs_milp@1.0.0',
-        solver: 'ies.solver.highs@1.7.2', precision: 'medium', convergence: null,
+        solver: 'ies.solver.highs@1.7.2', algorithm: null, evaluator: null,
+        precision: 'medium', convergence: null,
         time_limit_seconds: 600, options: {}, seed: null, outputs: ['solution'],
       },
       expected_revision: null,

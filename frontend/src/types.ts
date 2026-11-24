@@ -500,14 +500,16 @@ export interface CalculationConvergence {
   max_iterations: number
 }
 
-/** 已发布 12 字段 CalculationConfig 全文(见 formats/calculation-config.md)。 */
+/** 已发布 14 字段 CalculationConfig 全文(见 formats/calculation-config.md)。 */
 export interface CalculationConfigBody {
   schema: string
   schema_version: string
   mode: string
   predictions: CalculationPrediction[]
-  generator: string
-  solver: string
+  generator: string | null
+  solver: string | null
+  algorithm: string | null
+  evaluator: string | null
   precision: 'low' | 'medium' | 'high'
   convergence: CalculationConvergence | null
   time_limit_seconds: number

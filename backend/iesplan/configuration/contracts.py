@@ -78,7 +78,7 @@ class PlanningRevisionRecord:
 class CalcConfigRecord:
     """计算配置 revision（calc_configs 表公开视图，不可变，归属本域）。
 
-    content 即已发布 12 字段 CalculationConfig 全文；version 按项目单调递增。
+    content 即已发布 14 字段 CalculationConfig 全文；version 按项目单调递增。
     """
 
     id: int

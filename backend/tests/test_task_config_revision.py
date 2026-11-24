@@ -28,13 +28,12 @@ from sqlalchemy.orm import Session, sessionmaker  # noqa: E402
 from sqlalchemy.pool import StaticPool  # noqa: E402
 
 from iesplan import tasks as tasks_domain  # noqa: E402
-from iesplan.core.jsonutil import jsonable  # noqa: E402
 from iesplan.api import projects as projects_api  # noqa: E402
 from iesplan.api import tasks as tasks_api  # noqa: E402
 from iesplan.api import validation as validation_api  # noqa: E402
 from iesplan.api.config import config_router  # noqa: E402
 from iesplan.api.deps import get_request_db  # noqa: E402
-from iesplan.application import identity  # noqa: E402
+from iesplan.core.jsonutil import jsonable  # noqa: E402
 from iesplan.db import Base  # noqa: E402
 from iesplan.identity.persistence import User  # noqa: E402,F401
 from iesplan.main import create_app  # noqa: E402
@@ -140,7 +139,7 @@ def _prepare_project(client: TestClient, db: Session, owner, name: str = "绑定
 
 
 def _body(**overrides: Any) -> dict[str, Any]:
-    """合法计算配置正文(12 字段契约)。"""
+    """合法计算配置正文(14 字段契约)。"""
     payload: dict[str, Any] = {
         "schema": "ies.calculation-config",
         "schema_version": "1.0.0",
@@ -148,6 +147,8 @@ def _body(**overrides: Any) -> dict[str, Any]:
         "predictions": [],
         "generator": "ies.generator.highs_milp@1.0.0",
         "solver": "ies.solver.highs@1.7.2",
+        "algorithm": None,
+        "evaluator": None,
         "precision": "medium",
         "convergence": None,
         "time_limit_seconds": 600,
@@ -723,6 +724,9 @@ def test_ambiguous_executors_blocked_without_guessing() -> None:
     from iesplan.computation.generators.descriptor import (  # noqa: E402
         GeneratorDescriptor,
     )
+    from iesplan.computation.generators.registry import (  # noqa: E402
+        GeneratorRegistry,
+    )
     from iesplan.tasks.contracts import InvalidRequestError  # noqa: E402
 
     desc = GeneratorDescriptor(
@@ -739,8 +743,8 @@ def test_ambiguous_executors_blocked_without_guessing() -> None:
         unit_system="SI",
         seed_semantics="seed 解释见 descriptor",
     )
-    registry = SimpleNamespace(get=lambda ref: SimpleNamespace(descriptor=desc))
-    body = {"generator": "ies.generator.multi@1.0.0", "solver": "ies.solver.highs@1.7.2"}
+    registry = GeneratorRegistry({desc.ref: SimpleNamespace(descriptor=desc)})
+    body = _body(generator="ies.generator.multi@1.0.0", solver="ies.solver.highs@1.7.2")
     try:
         _resolve_execution_refs(body, registry, project_id=1)
     except InvalidRequestError as exc:
@@ -756,7 +760,7 @@ def test_missing_generator_registry_is_server_error() -> None:
     )
     from iesplan.core.errors import AppError  # noqa: E402
 
-    body = {"generator": "ies.generator.highs_milp@1.0.0", "solver": "ies.solver.highs@1.7.2"}
+    body = _body(generator="ies.generator.highs_milp@1.0.0", solver="ies.solver.highs@1.7.2")
     try:
         _resolve_execution_refs(body, None, project_id=1)
     except AppError as exc:
@@ -972,3 +976,92 @@ def test_step_duration_shadow_rejected_on_public_planning_save(
     restored, unchanged_rev, _ = config_uc.get_planning_config(db, pid)
     assert unchanged_rev == rev
     assert restored.to_dict() == current.to_dict()
+
+
+def test_unified_algorithm_submit_freezes_14_field_snapshot(
+    client: TestClient, db: Session, factory, monkeypatch,
+) -> None:
+    """一体化算法配置经公开保存与提交闸门冻结 14 字段快照及 evaluator 引用。"""
+    from types import SimpleNamespace
+
+    from iesplan.computation import AlgorithmDescriptor, build_algorithm_registry
+
+    class _Algo:
+        descriptor = AlgorithmDescriptor(
+            algorithm_id="test.algorithm.unified_submit",
+            version="1.0.0",
+            modes=("planning",),
+            precisions=("medium",),
+            outputs=("solution",),
+            capabilities=("network.closed_ports",),
+            evaluators=("ies.result-adapter.highs@1.0.0", "custom.evaluator@1.0.0"),
+            parameters_schema={"type": "object", "additionalProperties": False},
+            result_adapter="ies.result-adapter.highs@1.0.0",
+        )
+        ref = descriptor.ref
+
+        def available(self) -> bool:
+            return True
+
+    orig_ctx = client.app.state.bootstrap_context
+    monkeypatch.setattr(
+        client.app.state,
+        "bootstrap_context",
+        SimpleNamespace(
+            generator_registry=orig_ctx.generator_registry,
+            predictor_registry=orig_ctx.predictor_registry,
+            algorithm_registry=build_algorithm_registry((_Algo(),)),
+        ),
+    )
+    owner = make_user(db, "owner_unified_submit")
+    pid = _prepare_project(client, db, owner, name="一体化提交测试")
+    unified = _body(
+        generator=None,
+        solver=None,
+        algorithm="test.algorithm.unified_submit@1.0.0",
+        evaluator="custom.evaluator@1.0.0",
+    )
+    rev = _save_config(client, pid, owner, unified)
+    status, body = _submit(client, pid, owner, {"config_revision": rev}, key="unified-submit-1")
+    assert status == 201, body
+    snap_id = body["task"]["calc_snapshot_id"]
+    snap = tasks_domain.get_snapshot(factory(), snap_id)
+    assert snap is not None
+    assert snap.result_adapter == "custom.evaluator@1.0.0"
+    frozen = jsonable(dict(snap.calc_config_snapshot))
+    assert frozen["algorithm"] == "test.algorithm.unified_submit@1.0.0"
+    assert frozen["evaluator"] == "custom.evaluator@1.0.0"
+    assert frozen["generator"] is None
+    assert frozen["solver"] is None
+
+
+def test_submission_rejects_legacy_12_field_and_enforces_capabilities(monkeypatch) -> None:
+    """提交边界拒绝缺字段的旧 12 字段正文（无静默回退），不重跑输入校验，并执行能力门禁。"""
+    from iesplan.application.tasks.submissions import _resolve_execution_refs
+    from iesplan.computation import CalculationConfig
+    from iesplan.computation.generators import HIGHS_MILP_PROVIDER, build_registry
+    from iesplan.tasks.contracts import InvalidRequestError
+
+    gen_reg = build_registry((HIGHS_MILP_PROVIDER,))
+    legacy_12 = {k: v for k, v in _body().items() if k not in ("algorithm", "evaluator")}
+    with pytest.raises(KeyError):
+        _resolve_execution_refs(legacy_12, gen_reg, project_id=1)
+
+    def _no_post_init(self) -> None:
+        raise AssertionError("提交边界恢复已保存配置不得重跑 __post_init__ 输入校验")
+
+    monkeypatch.setattr(CalculationConfig, "__post_init__", _no_post_init)
+    resolved = _resolve_execution_refs(_body(), gen_reg, project_id=1)
+    assert resolved[0] == "ies.result-adapter.highs@1.0.0"
+
+    for bad_override, expected_code, expected_field in (
+        ({"mode": "unsupported"}, "TASK-REQ-007", "mode"),
+        ({"precision": "low"}, "TASK-REQ-007", "precision"),
+        ({"evaluator": "missing.evaluator@1.0.0"}, "TASK-REQ-007", "evaluator"),
+        ({"options": {"unknown": 1}}, "TASK-REQ-007", "options"),
+        ({"solver": "other.solver@1.0.0"}, "TASK-REQ-008", "solver"),
+    ):
+        with pytest.raises(InvalidRequestError) as exc_info:
+            _resolve_execution_refs(_body(**bad_override), gen_reg, project_id=1)
+        assert exc_info.value.code == expected_code
+        assert exc_info.value.location["field"] == expected_field

@@ -35,6 +35,7 @@ SAMPLES = (
     / "calculation-config"
 )
 VALID = SAMPLES / "valid" / "2.0" / "minimal.json"
+VALID_UNIFIED = SAMPLES / "valid" / "2.0" / "unified-minimal.json"
 INVALID = SAMPLES / "invalid" / "2.0"
 
 GENERATOR = "acme.generator@1.0.0"
@@ -62,8 +63,8 @@ def test_schema_file_meta() -> None:
     assert schema["title"] == "ies.calculation-config 1.0.0 计算配置契约"
     assert set(schema["required"]) == {
         "schema", "schema_version", "mode", "predictions", "generator",
-        "solver", "precision", "convergence", "time_limit_seconds",
-        "options", "seed", "outputs",
+        "solver", "algorithm", "evaluator", "precision", "convergence",
+        "time_limit_seconds", "options", "seed", "outputs",
     }
     assert schema["properties"]["predictions"]["type"] == "array"
     assert schema["properties"]["options"] == {"type": "object"}
@@ -77,23 +78,35 @@ def test_schema_file_meta() -> None:
 
 
 def test_valid_sample_builds_frozen_config() -> None:
-    """合法样例通过校验并构造深层不可变载体。"""
+    """合法样例（分步与一体化）通过校验并构造深层不可变载体。"""
     config = validate_calculation_config(_load(VALID))
     assert isinstance(config, CalculationConfig)
     assert config.mode == "planning"
     assert config.precision == "medium"
+    assert config.algorithm is None
+    assert config.evaluator is None
     assert config.to_dict() == _load(VALID)
     with pytest.raises(dataclasses.FrozenInstanceError):
         config.mode = "other"  # type: ignore[misc]
 
+    unified = validate_calculation_config(_load(VALID_UNIFIED))
+    assert isinstance(unified, CalculationConfig)
+    assert unified.generator is None
+    assert unified.solver is None
+    assert unified.algorithm == "acme.algorithm.capacity_search@1.2.0"
+    assert unified.evaluator == "ies.result-adapter.highs@1.0.0"
+    assert unified.to_dict() == _load(VALID_UNIFIED)
+
 
 EXPECTED_INVALID = {
     "bad-precision.json": "ultra",
+    "both-generator-and-algorithm.json": "null",
     "discretization-rejected.json": "discretization",
     "duplicate-target.json": "不得重复",
     "bad-convergence.json": "tolerance",
     "missing-mode.json": "mode",
     "missing-convergence.json": "convergence",
+    "neither-generator-nor-algorithm.json": "generator",
     "empty-outputs.json": "outputs",
 }
 
@@ -208,3 +221,44 @@ def test_scalar_selections() -> None:
         _config(options={"k": float("nan")})
     with pytest.raises(TypeError, match="布尔"):
         _config(seed=True)
+
+
+def test_mutually_exclusive_modes_and_evaluator() -> None:
+    """分步模式与一体化模式严格互斥；evaluator 在两种模式下均按需可选。"""
+    stepped_with_eval = _config(evaluator="ies.result-adapter.highs@1.0.0")
+    assert stepped_with_eval.evaluator == "ies.result-adapter.highs@1.0.0"
+
+    unified = CalculationConfig(
+        mode="planning",
+        algorithm="acme.algorithm.capacity_search@1.2.0",
+        evaluator="ies.result-adapter.highs@1.0.0",
+        precision="medium",
+        time_limit_seconds=600,
+        outputs=["solution"],
+    )
+    assert unified.generator is None
+    assert unified.solver is None
+    assert unified.algorithm == "acme.algorithm.capacity_search@1.2.0"
+
+    with pytest.raises(ValueError, match="generator 与 solver 必须为 None"):
+        CalculationConfig(
+            mode="planning",
+            generator=GENERATOR,
+            solver=None,
+            algorithm="acme.algorithm.capacity_search@1.2.0",
+            precision="medium",
+            time_limit_seconds=600,
+            outputs=["solution"],
+        )
+    with pytest.raises(ValueError, match="generator 与 solver 必须同时提供"):
+        CalculationConfig(
+            mode="planning",
+            generator=GENERATOR,
+            solver=None,
+            algorithm=None,
+            precision="medium",
+            time_limit_seconds=600,
+            outputs=["solution"],
+        )
+    with pytest.raises(ValueError, match="evaluator"):
+        _config(evaluator="not-a-ref")

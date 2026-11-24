@@ -11,6 +11,8 @@
   ],
   "generator": "acme.generator@1.0.0",
   "solver": "ies.solver.highs@1.7.2",
+  "algorithm": null,
+  "evaluator": null,
   "precision": "ultra",
   "convergence": { "tolerance": 0.001, "max_iterations": 50 },
   "time_limit_seconds": 600,

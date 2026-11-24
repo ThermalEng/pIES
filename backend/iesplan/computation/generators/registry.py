@@ -18,14 +18,12 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 from typing import Any
 
-from jsonschema import Draft202012Validator
-
+from iesplan.computation.config import validate_config_capabilities
 from iesplan.computation.errors import ComputationUnavailableError
 from iesplan.computation.generators.descriptor import GeneratorDescriptor
 from iesplan.computation.protocols import (
     CalculationConfig,
     GeneratorProvider,
-    thaw_json_value,
 )
 
 
@@ -60,38 +58,17 @@ class GeneratorRegistry:
         """按计算配置选中真实 provider 并完成生成前门禁（通用门禁的唯一
         真实边界，provider 自身不再重复核对）。
 
-        1. 精确引用选中 provider；未知即 ``ComputationUnavailableError``；
-        2. 核对 mode/精度/solver/outputs 兼容性，不兼容即 ``ComputationUnavailableError``；
-        3. 用 descriptor 的 options_schema 校验 ``config.options``：
-           非法选项属于用户计算配置错误，抛明确 ``ValueError``（字段路径/
-           原因），不是不可用；不回退其他 generator，不删字段、不补默认、
-           不忽略未知项（schema 内 ``default`` 只作描述）。
+        1. 分步配置校验（``generator`` 非空）；
+        2. 精确引用选中 provider；未知即 ``ComputationUnavailableError``；
+        3. 统一门禁核对 mode/精度/solver/evaluator/outputs/options 兼容性；
         返回可直接调用 ``generate`` 的 provider 实例。
         """
+        if config.generator is None:
+            raise ValueError("分步生成器目录不接受一体化算法配置(generator 为 None)")
         provider = self.get(config.generator)
-        descriptor = provider.descriptor
-        if config.mode not in descriptor.modes:
-            raise ComputationUnavailableError(
-                f"生成器不支持所选 mode: {config.generator!r} x {config.mode!r}",
-                reason="incompatible-mode",
-            )
-        if config.precision not in descriptor.precisions:
-            raise ComputationUnavailableError(
-                f"生成器不支持所选精度: {config.generator!r} x {config.precision!r}",
-                reason="incompatible-precision",
-            )
-        if not descriptor.supports_solver(config.solver):
-            raise ComputationUnavailableError(
-                f"生成器不兼容所选求解器: {config.generator!r} x {config.solver!r}",
-                reason="incompatible-solver",
-            )
-        unsupported_outputs = tuple(name for name in config.outputs if name not in descriptor.outputs)
-        if unsupported_outputs:
-            raise ComputationUnavailableError(
-                f"生成器不支持所选 outputs: {config.generator!r} x {unsupported_outputs!r}",
-                reason="incompatible-outputs",
-            )
-        _check_options(descriptor, config)
+        validate_config_capabilities(
+            provider.descriptor, config, ref_label="生成器"
+        )
         return provider
 
     def to_dict(self) -> dict[str, Any]:
@@ -135,25 +112,6 @@ def build_registry(candidates: Iterable[GeneratorProvider]) -> GeneratorRegistry
             raise ValueError(f"生成器重复注册: {candidate.ref!r}")
         providers[candidate.ref] = candidate
     return GeneratorRegistry(providers)
-
-
-def _check_options(descriptor: GeneratorDescriptor, config: CalculationConfig) -> None:
-    """生成前 options 门禁：用 descriptor schema 校验配置选项。
-
-    非法选项是用户计算配置错误，抛明确 ``ValueError``（稳定字段路径与
-    原因），不是 ``ComputationUnavailableError``；调用方不得据此回退
-    其他 generator。只校验，不修改配置（schema 内 ``default`` 只作描述）。
-    """
-    schema = thaw_json_value(descriptor.options_schema)
-    options = thaw_json_value(config.options)
-    validator = Draft202012Validator(schema)
-    errors = list(validator.iter_errors(options))
-    if errors:
-        first = errors[0]
-        location = "/".join(str(p) for p in first.absolute_path)
-        raise ValueError(
-            f"计算选项非法[{location or '<root>'}]: {first.message}"
-        )
 
 
 __all__ = ["GeneratorRegistry", "build_registry"]

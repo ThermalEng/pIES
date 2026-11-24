@@ -327,59 +327,80 @@ def _resolve_execution_refs(
     body: Mapping[str, Any],
     generator_registry: Any | None,
     project_id: int,
+    algorithm_registry: Any | None = None,
 ) -> tuple[str, str, tuple[str, ...]]:
-    """解析并冻结执行引用(0.12-A3): generator → descriptor → 配套 adapter/executor。
+    """解析并冻结执行引用并执行提交阶段描述符能力/选项门禁(14 字段契约)。
 
-    只做引用解析, 不做 mode/精度/options 能力门禁(那是生成时
-    ``GeneratorRegistry.resolve`` 的职责, 此处不重复校验):
-    - 目录未装配(None) → 500(服务端装配缺失, 无回退);
-    - generator 未注册(含旧 ``ies.algo.*`` 引用, 不隐式映射) → 400
-      TASK-REQ-007;
-    - solver 不在 descriptor.solvers → 400 TASK-REQ-008;
-    - executors 非恰好一个 → 400 TASK-REQ-009(不按首项/注册顺序猜测)。
-    返回 (result_adapter 精确引用, executor 精确引用, 描述符能力标记)。
-    能力元组供本次提交税务闸门复用同一已解析描述符，不二次取目录。
+    直接从已保存 14 字段配置构造 ``CalculationConfig``（无旧 12 字段回退），
+    由 ``algorithm_registry.resolve`` 或 ``generator_registry.resolve`` 完成
+    ``mode``/``precision``/``solver``/``evaluator``/``outputs``/``options`` 核对：
+    - 目录未装配(None) → 500；
+    - solver 不兼容 → 400 TASK-REQ-008；
+    - executors 非恰好一个 → 400 TASK-REQ-009；
+    - 其余未注册/不兼容/非法选项 → 400 TASK-REQ-007。
     """
-    generator_ref = body.get("generator")
-    solver_ref = body.get("solver")
-    if generator_registry is None:
-        raise AppError(
-            "生成器目录未装配, 计算任务提交不可用",
-            params={"project_id": project_id},
+    from iesplan.computation import CalculationConfig
+
+    config = CalculationConfig.from_frozen(body)
+    is_unified = config.algorithm is not None
+    active_registry = algorithm_registry if is_unified else generator_registry
+    selected_ref = config.algorithm if is_unified else config.generator
+    ref_field = "algorithm" if is_unified else "generator"
+
+    if active_registry is None:
+        missing_msg = (
+            "一体化算法目录未装配, 计算任务提交不可用"
+            if is_unified
+            else "生成器目录未装配, 计算任务提交不可用"
         )
-    if not isinstance(generator_ref, str) or not generator_ref:
-        raise InvalidRequestError(
-            "计算配置引用的生成器不是合法精确引用",
-            code="TASK-REQ-007",
-            params={"project_id": project_id, "generator": generator_ref},
-            location={"object_type": "calculation_config", "object_id": project_id, "field": "generator"},
-        )
+        raise AppError(missing_msg, params={"project_id": project_id})
+
     try:
-        provider = generator_registry.get(generator_ref)
+        provider = active_registry.resolve(config)
     except ComputationUnavailableError as exc:
+        if exc.reason == "incompatible-solver":
+            raise InvalidRequestError(
+                "计算配置引用的求解器不在所选生成器兼容清单内",
+                code="TASK-REQ-008",
+                params={"project_id": project_id, "generator": selected_ref, "solver": config.solver},
+                location={"object_type": "calculation_config", "object_id": project_id, "field": "solver"},
+            ) from exc
+        field_map = {
+            "no-provider": ref_field,
+            "incompatible-mode": "mode",
+            "incompatible-precision": "precision",
+            "incompatible-evaluator": "evaluator",
+            "incompatible-outputs": "outputs",
+        }
+        field = field_map.get(exc.reason, ref_field)
         raise InvalidRequestError(
-            "计算配置引用的生成器未注册(旧算法引用不隐式映射到新生成器)",
+            str(exc),
             code="TASK-REQ-007",
-            params={"project_id": project_id, "generator": generator_ref},
-            location={"object_type": "calculation_config", "object_id": project_id, "field": "generator"},
+            params={"project_id": project_id, ref_field: selected_ref, field: getattr(config, field)},
+            location={"object_type": "calculation_config", "object_id": project_id, "field": field},
         ) from exc
-    descriptor = provider.descriptor
-    if solver_ref not in descriptor.solvers:
+    except ValueError as exc:
         raise InvalidRequestError(
-            "计算配置引用的求解器不在所选生成器兼容清单内",
-            code="TASK-REQ-008",
-            params={"project_id": project_id, "generator": generator_ref, "solver": solver_ref},
-            location={"object_type": "calculation_config", "object_id": project_id, "field": "solver"},
-        )
+            str(exc),
+            code="TASK-REQ-007",
+            params={"project_id": project_id, ref_field: selected_ref, "detail": str(exc)},
+            location={"object_type": "calculation_config", "object_id": project_id, "field": "options"},
+        ) from exc
+
+    descriptor = provider.descriptor
+    if is_unified:
+        resolved_adapter = config.evaluator or getattr(descriptor, "result_adapter", None) or ""
+        return resolved_adapter, "", tuple(getattr(descriptor, "capabilities", ()) or ())
+
     executors = tuple(descriptor.executors or ())
     if len(executors) != 1:
         raise InvalidRequestError(
             "所选生成器未声明唯一执行器(无公开选择规则, 不猜测)",
             code="TASK-REQ-009",
-            params={"project_id": project_id, "generator": generator_ref, "executors": list(executors)},
+            params={"project_id": project_id, "generator": selected_ref, "executors": list(executors)},
             location={"object_type": "calculation_config", "object_id": project_id, "field": "generator"},
         )
-    return descriptor.result_adapter, executors[0], tuple(descriptor.capabilities or ())
+    return config.evaluator or descriptor.result_adapter, executors[0], tuple(descriptor.capabilities or ())
 
 
 def _freeze_device_models(artifact: Any, device_documents: Mapping[str, Any]) -> dict[str, Any]:
@@ -563,6 +584,7 @@ def _assemble_snapshot(
     calculation_config: tuple[dict[str, Any], int] | None = None,
     generator_registry: Any | None = None,
     predictor_registry: Any | None = None,
+    algorithm_registry: Any | None = None,
     evaluation: _EvaluationInput | None = None,
 ) -> CalcSnapshotRecord:
     """组装不可变计算快照(相同输入复用)。
@@ -620,11 +642,12 @@ def _assemble_snapshot(
         random_seed = _derive_random_seed(version.id)
     dataset_ids = _bound_dataset_ids(content)
     extensions = content.get("extensions") or {}
-    # 执行引用与快照同事务冻结: 同一已解析 generator 派生同一配套对。
+    # 执行引用与快照同事务冻结: 同一已解析 generator/algorithm 派生配套对。
     # 描述符能力元组一并带回，供税务闸门复用，不二次取目录。
     result_adapter, executor, generator_capabilities = _resolve_execution_refs(
-        calc_config, generator_registry, project_id
+        calc_config, generator_registry, project_id, algorithm_registry=algorithm_registry
     )
+    selected_ref = calc_config["generator"] or calc_config["algorithm"]
 
     # 统一生产闸门: 先签发规范文本/回执二件套, 失败不创建快照或任务。
     # 回执与逐实例数学贡献进入快照身份; 快照去重使用内容字段逐项相等判定,
@@ -642,7 +665,7 @@ def _assemble_snapshot(
     evaluation = resolve_comparison(db, actor, evaluation, effective.currency)
     frozen_evaluation["comparison"] = evaluation.comparison.to_dict()
     check_comparison_inputs(
-        evaluation, artifact, effective, calc_config.get("generator"), generator_capabilities,
+        evaluation, artifact, effective, selected_ref, generator_capabilities,
     )
     device_models = _freeze_device_models(artifact, gate.device_documents)
     # 提交边界运营期覆盖核对(装配不核对点数; 已确认运营年限后在此阻断):
@@ -655,33 +678,33 @@ def _assemble_snapshot(
     _check_amount_evaluation_refs(evaluation, artifact, effective)
     from iesplan.application.tasks.finance_relations import check_financial_relation_inputs
     check_financial_relation_inputs(evaluation, artifact, effective)
-    # 提交边界税务能力闸门(C3): 凭本次已解析所选生成器描述符能力核对，
+    # 提交边界税务能力闸门(C3): 凭本次已解析所选描述符能力核对，
     # 缺项明确 007，不静默按税前执行。复用执行引用解析带回的能力元组与
     # 闸门实际消费的不可变快照，不二次取目录、不二次解析。
     _check_construction_capabilities(
-        artifact, effective, calc_config.get("generator"), generator_capabilities
+        artifact, effective, selected_ref, generator_capabilities
     )
     _check_amount_capabilities(
-        artifact, effective, calc_config.get("generator"), generator_capabilities
+        artifact, effective, selected_ref, generator_capabilities
     )
     _check_tax_capabilities(
-        calc_config.get("generator"), generator_capabilities, effective
+        selected_ref, generator_capabilities, effective
     )
     _check_demand_capabilities(
-        artifact, calc_config.get("generator"), generator_capabilities
+        artifact, selected_ref, generator_capabilities
     )
     _check_monthly_daily_capabilities(
-        artifact, effective, calc_config.get("generator"), generator_capabilities
+        artifact, effective, selected_ref, generator_capabilities
     )
     _check_step_constraint_capability(
-        artifact, calc_config.get("generator"), generator_capabilities
+        artifact, selected_ref, generator_capabilities
     )
     _check_network_capability(
-        artifact, device_models, calc_config.get("generator"), generator_capabilities
+        artifact, device_models, selected_ref, generator_capabilities
     )
-    _check_system_capabilities(artifact, calc_config.get("generator"), generator_capabilities)
+    _check_system_capabilities(artifact, selected_ref, generator_capabilities)
     _check_maintenance_refs(evaluation, artifact, device_models, effective)
-    _check_maintenance_capability(evaluation, calc_config.get("generator"), generator_capabilities)
+    _check_maintenance_capability(evaluation, selected_ref, generator_capabilities)
     receipt = artifact.receipt.to_dict()
     # 预测输入冻结核对(B5-1 双向匹配 + B5-2 算法相容): 失败不建快照。
     _check_prediction_inputs(
@@ -1822,6 +1845,7 @@ def _submit_task(
     parent_task_id: int | None = None,
     generator_registry: Any | None = None,
     predictor_registry: Any | None = None,
+    algorithm_registry: Any | None = None,
     evaluation: Mapping[str, Any] | None = None,
 ) -> tuple[TaskRecord, dict[str, bool]]:
     """创建任务(幂等检查 → 门禁 → 快照 → INSERT → 入队)。
@@ -1897,7 +1921,8 @@ def _submit_task(
         snapshot = _assemble_snapshot(
             db, project_id, task_type, config=config, user=user,
             calculation_config=pinned, generator_registry=generator_registry,
-            predictor_registry=predictor_registry, evaluation=parsed_evaluation,
+            predictor_registry=predictor_registry, algorithm_registry=algorithm_registry,
+            evaluation=parsed_evaluation,
         )
     # io 类任务(report/export/import/dataset_build): 无快照, 仅幂等键命中复用
 
@@ -1963,6 +1988,7 @@ def submit_task(
     parent_task_id: int | None = None,
     generator_registry: Any | None = None,
     predictor_registry: Any | None = None,
+    algorithm_registry: Any | None = None,
     evaluation: Mapping[str, Any] | None = None,
 ) -> tuple[TaskRecord, dict[str, bool]]:
     """提交任务用例(幂等键必填, 计算类任务另需顶层评价确认输入); 本层拥有事务提交/回滚。"""
@@ -1971,6 +1997,7 @@ def submit_task(
             db, user, project_id, task_type,
             config=config, idempotency_key=idempotency_key, parent_task_id=parent_task_id,
             generator_registry=generator_registry, predictor_registry=predictor_registry,
+            algorithm_registry=algorithm_registry,
             evaluation=evaluation,
         )
         db.commit()

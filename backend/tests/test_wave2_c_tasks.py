@@ -155,7 +155,7 @@ def test_submit_report_task_commits_and_repeatable(
     assert (old.type, old.status, old.calc_snapshot_id) == (task.type, task.status, task.calc_snapshot_id)
 
 
-#: 计算配置正文(12 字段契约; 与 test_http_contract._CALC_PAYLOAD 同构)。
+#: 计算配置正文(14 字段契约; 与 test_http_contract._CALC_PAYLOAD 同构)。
 _CONFIG_BODY: dict = {
     "schema": "ies.calculation-config",
     "schema_version": "1.0.0",
@@ -163,6 +163,8 @@ _CONFIG_BODY: dict = {
     "predictions": [],
     "generator": "ies.generator.highs_milp@1.0.0",
     "solver": "ies.solver.highs@1.7.2",
+    "algorithm": None,
+    "evaluator": None,
     "precision": "medium",
     "convergence": None,
     "time_limit_seconds": 600,

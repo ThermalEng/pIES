@@ -36,6 +36,8 @@ function emptyFormState(): {
   mode: string
   generator: string
   solver: string
+  algorithm: string
+  evaluator: string
   precision: '' | 'low' | 'medium' | 'high'
   timeLimit: string
   seed: string
@@ -48,6 +50,8 @@ function emptyFormState(): {
     mode: '',
     generator: '',
     solver: '',
+    algorithm: '',
+    evaluator: '',
     precision: '',
     timeLimit: '',
     seed: '',
@@ -87,6 +91,8 @@ export default function ConfigPage(props: ConfigPageProps) {
   const [mode, setMode] = useState('')
   const [generator, setGenerator] = useState('')
   const [solver, setSolver] = useState('')
+  const [algorithm, setAlgorithm] = useState('')
+  const [evaluator, setEvaluator] = useState('')
   const [precision, setPrecision] = useState<'' | 'low' | 'medium' | 'high'>('')
   const [timeLimit, setTimeLimit] = useState('')
   const [seed, setSeed] = useState('')
@@ -105,6 +111,8 @@ export default function ConfigPage(props: ConfigPageProps) {
     setMode(body.mode ?? '')
     setGenerator(body.generator ?? '')
     setSolver(body.solver ?? '')
+    setAlgorithm(body.algorithm ?? '')
+    setEvaluator(body.evaluator ?? '')
     setPrecision(body.precision === 'low' || body.precision === 'medium' || body.precision === 'high' ? body.precision : '')
     setTimeLimit(Number.isFinite(body.time_limit_seconds) ? String(body.time_limit_seconds) : '')
     setSeed(typeof body.seed === 'number' ? String(body.seed) : '')
@@ -143,6 +151,8 @@ export default function ConfigPage(props: ConfigPageProps) {
             setMode(e.mode)
             setGenerator(e.generator)
             setSolver(e.solver)
+            setAlgorithm(e.algorithm)
+            setEvaluator(e.evaluator)
             setPrecision(e.precision)
             setTimeLimit(String(d.calculation_defaults.time_limit_seconds))
             setSeed(e.seed)
@@ -175,8 +185,17 @@ export default function ConfigPage(props: ConfigPageProps) {
   function buildBody(): { body: CalculationConfigBody | null; errors: Record<string, string> } {
     const errors: Record<string, string> = {}
     if (!mode.trim()) errors.mode = t('ies.config.required')
-    if (!generator.trim()) errors.generator = t('ies.config.required')
-    if (!solver.trim()) errors.solver = t('ies.config.required')
+    const generatorVal = generator.trim() || null
+    const solverVal = solver.trim() || null
+    const algorithmVal = algorithm.trim() || null
+    const evaluatorVal = evaluator.trim() || null
+    if (algorithmVal) {
+      if (generatorVal) errors.generator = t('ies.config.mode_conflict')
+      if (solverVal) errors.solver = t('ies.config.mode_conflict')
+    } else {
+      if (!generatorVal) errors.generator = t('ies.config.required')
+      if (!solverVal) errors.solver = t('ies.config.required')
+    }
     if (!precision) errors.precision = t('ies.config.required')
     const limit = Number(timeLimit)
     if (!timeLimit.trim() || !Number.isInteger(limit) || limit <= 0) {
@@ -210,8 +229,10 @@ export default function ConfigPage(props: ConfigPageProps) {
         schema_version: '1.0.0',
         mode: mode.trim(),
         predictions: predictions.value as CalculationConfigBody['predictions'],
-        generator: generator.trim(),
-        solver: solver.trim(),
+        generator: generatorVal,
+        solver: solverVal,
+        algorithm: algorithmVal,
+        evaluator: evaluatorVal,
         precision: precision as 'low' | 'medium' | 'high',
         convergence: convergence.value as CalculationConfigBody['convergence'],
         time_limit_seconds: limit,
@@ -254,7 +275,7 @@ export default function ConfigPage(props: ConfigPageProps) {
       // 总览与字段旁同时展示，不把静态不相容留到任务运行后才发现。
       if (err instanceof ApiError && err.status === 422 && err.location?.field) {
         const field = err.location.field
-        if (['generator', 'mode', 'precision', 'solver', 'outputs', 'options'].includes(field)) {
+        if (['generator', 'solver', 'algorithm', 'evaluator', 'mode', 'precision', 'outputs', 'options'].includes(field)) {
           setFieldErrors({ [field]: errorMessage(err) })
         }
       }
@@ -323,7 +344,7 @@ export default function ConfigPage(props: ConfigPageProps) {
           <FormField label={t('ies.config.mode')} htmlFor="calc-mode" required error={fieldErrors.mode}>
             <Input id="calc-mode" value={mode} onChange={(e) => setMode(e.target.value)} placeholder="planning" invalid={!!fieldErrors.mode} />
           </FormField>
-          <FormField label={t('ies.config.generator')} htmlFor="calc-generator" required error={fieldErrors.generator} hint={t('ies.config.hint_refs')}>
+          <FormField label={t('ies.config.generator')} htmlFor="calc-generator" required={!algorithm.trim()} error={fieldErrors.generator} hint={t('ies.config.hint_refs')}>
             <Input
               id="calc-generator"
               value={generator}
@@ -332,13 +353,31 @@ export default function ConfigPage(props: ConfigPageProps) {
               invalid={!!fieldErrors.generator}
             />
           </FormField>
-          <FormField label={t('ies.config.solver')} htmlFor="calc-solver" required error={fieldErrors.solver} hint={t('ies.config.hint_refs')}>
+          <FormField label={t('ies.config.solver')} htmlFor="calc-solver" required={!algorithm.trim()} error={fieldErrors.solver} hint={t('ies.config.hint_refs')}>
             <Input
               id="calc-solver"
               value={solver}
               onChange={(e) => setSolver(e.target.value)}
               placeholder="ies.solver.highs@1.7.2"
               invalid={!!fieldErrors.solver}
+            />
+          </FormField>
+          <FormField label={t('ies.config.algorithm')} htmlFor="calc-algorithm" error={fieldErrors.algorithm} hint={t('ies.config.hint_refs')}>
+            <Input
+              id="calc-algorithm"
+              value={algorithm}
+              onChange={(e) => setAlgorithm(e.target.value)}
+              placeholder="acme.algorithm.capacity_search@1.2.0"
+              invalid={!!fieldErrors.algorithm}
+            />
+          </FormField>
+          <FormField label={t('ies.config.evaluator')} htmlFor="calc-evaluator" error={fieldErrors.evaluator} hint={t('ies.config.hint_refs')}>
+            <Input
+              id="calc-evaluator"
+              value={evaluator}
+              onChange={(e) => setEvaluator(e.target.value)}
+              placeholder="ies.result-adapter.highs@1.0.0"
+              invalid={!!fieldErrors.evaluator}
             />
           </FormField>
           <FormField label={t('ies.config.precision')} htmlFor="calc-precision" required error={fieldErrors.precision}>

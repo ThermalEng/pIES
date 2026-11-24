@@ -1,0 +1,16 @@
+{
+  "schema": "ies.calculation-config",
+  "schema_version": "1.0.0",
+  "mode": "planning",
+  "predictions": [],
+  "generator": null,
+  "solver": null,
+  "algorithm": null,
+  "evaluator": null,
+  "precision": "medium",
+  "convergence": null,
+  "time_limit_seconds": 600,
+  "options": {},
+  "seed": 42,
+  "outputs": ["solution", "metrics"]
+}

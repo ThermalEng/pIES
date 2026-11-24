@@ -430,7 +430,7 @@ def create_calculation_config(
 class CalcConfig(Base):
     """计算配置不可变 revision(仅 INSERT, 0.12-A1 起收敛旧自由形态)。
 
-    每行 content 即已发布 12 字段 CalculationConfig 全文(to_dict 形态,
+    每行 content 即已发布 14 字段 CalculationConfig 全文(to_dict 形态,
     应用输入入口唯一校验)；version 按项目单调递增，读取以最新 revision
     为准。旧形态列(params/variables/objectives/constraints/min_irr/
     algorithm/solver/tolerances/random_seed/status)已退役(0.12-A1)。

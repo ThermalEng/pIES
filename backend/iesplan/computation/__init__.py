@@ -46,8 +46,15 @@ from iesplan.computation.bundle import (
     validate_bundle,
 )
 from iesplan.computation.config import (
+    AlgorithmDescriptor,
+    AlgorithmProvider,
+    AlgorithmRegistry,
+    build_algorithm_registry,
+    check_descriptor_options,
     load_calculation_config_schema,
     validate_calculation_config,
+    validate_config_capabilities,
+    validate_options_schema,
 )
 from iesplan.computation.errors import ComputationUnavailableError
 from iesplan.computation.generators import (
@@ -78,6 +85,7 @@ from iesplan.computation.predictors import (
     split_predictions_by_dependency,
 )
 from iesplan.computation.protocols import (
+    CALCULATION_CONFIG_FIELDS,
     CALCULATION_CONFIG_SCHEMA,
     CALCULATION_CONFIG_VERSION,
     COMPUTE_RESULT_SCHEMA,
@@ -146,6 +154,7 @@ from iesplan.computation.sequences import (
 __all__ = [
     "LocalResourceUsage",
     "observe_local_resources",
+    "CALCULATION_CONFIG_FIELDS",
     "CALCULATION_CONFIG_SCHEMA",
     "CALCULATION_CONFIG_VERSION",
     "COMPUTE_RESULT_SCHEMA",
@@ -164,6 +173,9 @@ __all__ = [
     "NAIVE_PREDICTOR_REF",
     "SOLVER_BUNDLE_SCHEMA",
     "SOLVER_BUNDLE_VERSION",
+    "AlgorithmDescriptor",
+    "AlgorithmProvider",
+    "AlgorithmRegistry",
     "AlgorithmSpec",
     "AttemptContext",
     "CalculationConfig",
@@ -204,6 +216,7 @@ __all__ = [
     "TRAINING_ARTIFACT_MEDIA_TYPE",
     "LocalExecutable",
     "LocalProcessProvider",
+    "build_algorithm_registry",
     "build_executor_registry",
     "build_predictor_registry",
     "build_project_model",
@@ -211,6 +224,7 @@ __all__ = [
     "build_registry",
     "build_result_adapter_registry",
     "check_convergence",
+    "check_descriptor_options",
     "check_provider_ref",
     "export_bundle_files",
     "get_algorithm",
@@ -227,5 +241,7 @@ __all__ = [
     "read_stop_reason",
     "validate_bundle",
     "validate_calculation_config",
+    "validate_config_capabilities",
+    "validate_options_schema",
     "write_mps",
 ]

@@ -377,6 +377,7 @@ def submit_task_case(
     parent_task_id: int | None = None,
     generator_registry: Any | None = None,
     predictor_registry: Any | None = None,
+    algorithm_registry: Any | None = None,
     evaluation: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """提交任务完整用例(路由原顺序: 提交 → 摘要; 幂等标记同返回)。
@@ -391,6 +392,7 @@ def submit_task_case(
         db, user, project_id, task_type,
         config=config, idempotency_key=idempotency_key, parent_task_id=parent_task_id,
         generator_registry=generator_registry, predictor_registry=predictor_registry,
+        algorithm_registry=algorithm_registry,
         evaluation=evaluation,
     )
     return {

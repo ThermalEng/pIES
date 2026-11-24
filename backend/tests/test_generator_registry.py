@@ -17,11 +17,14 @@ from __future__ import annotations
 import pytest
 
 from iesplan.computation import (
+    AlgorithmDescriptor,
+    AlgorithmRegistry,
     CalculationConfig,
     ComputationUnavailableError,
     GeneratorDescriptor,
     GeneratorProvider,
     GeneratorRegistry,
+    build_algorithm_registry,
     build_registry,
     check_provider_ref,
 )
@@ -393,3 +396,136 @@ def test_registry_instances_hold_no_global_state() -> None:
     assert len(first) == 1
     assert len(second) == 0
     assert isinstance(first, GeneratorRegistry)
+
+
+class _FakeAlgorithmProvider:
+    def __init__(self, descriptor: AlgorithmDescriptor, available: bool = True) -> None:
+        self._descriptor = descriptor
+        self._available = available
+
+    @property
+    def ref(self) -> str:
+        return self._descriptor.ref
+
+    @property
+    def descriptor(self) -> AlgorithmDescriptor:
+        return self._descriptor
+
+    def available(self) -> bool:
+        return self._available
+
+
+def test_unified_algorithm_descriptor_and_registry_capability_checks() -> None:
+    """一体化算法描述符共用 mode/precision/evaluator/outputs/options 门禁；与分步注册表隔离。"""
+    algo_desc = AlgorithmDescriptor(
+        algorithm_id="acme.algorithm.capacity_search",
+        version="1.2.0",
+        modes=("planning", "search"),
+        precisions=("low", "medium"),
+        outputs=("solution", "metrics"),
+        evaluators=("ies.result-adapter.highs@1.0.0",),
+        parameters_schema={
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "type": "object",
+            "properties": {
+                "max_steps": {"type": "integer", "minimum": 1},
+            },
+            "additionalProperties": False,
+        },
+    )
+    algo_registry = build_algorithm_registry([_FakeAlgorithmProvider(algo_desc)])
+    assert isinstance(algo_registry, AlgorithmRegistry)
+
+    good = CalculationConfig(
+        mode="search",
+        algorithm=algo_desc.ref,
+        evaluator="ies.result-adapter.highs@1.0.0",
+        precision="medium",
+        time_limit_seconds=600,
+        options={"max_steps": 50},
+        outputs=["solution"],
+    )
+    assert algo_registry.resolve(good).ref == algo_desc.ref
+
+    with pytest.raises(ComputationUnavailableError) as exc_mode:
+        algo_registry.resolve(
+            CalculationConfig(
+                mode="unsupported",
+                algorithm=algo_desc.ref,
+                precision="medium",
+                time_limit_seconds=600,
+                options={"max_steps": 50},
+                outputs=["solution"],
+            )
+        )
+    assert exc_mode.value.reason == "incompatible-mode"
+
+    with pytest.raises(ComputationUnavailableError) as exc_ev:
+        algo_registry.resolve(
+            CalculationConfig(
+                mode="planning",
+                algorithm=algo_desc.ref,
+                evaluator="other.evaluator@1.0.0",
+                precision="medium",
+                time_limit_seconds=600,
+                options={},
+                outputs=["solution"],
+            )
+        )
+    assert exc_ev.value.reason == "incompatible-evaluator"
+
+    with pytest.raises(ValueError, match="max_steps"):
+        algo_registry.resolve(
+            CalculationConfig(
+                mode="planning",
+                algorithm=algo_desc.ref,
+                precision="medium",
+                time_limit_seconds=600,
+                options={"max_steps": 0},
+                outputs=["solution"],
+            )
+        )
+    with pytest.raises(ValueError, match="unknown"):
+        algo_registry.resolve(
+            CalculationConfig(
+                mode="planning",
+                algorithm=algo_desc.ref,
+                precision="medium",
+                time_limit_seconds=600,
+                options={"unknown": 1},
+                outputs=["solution"],
+            )
+        )
+
+    # 分步生成器目录不接受一体化配置，反之亦然
+    gen_registry = build_registry([_provider()])
+    with pytest.raises(ComputationUnavailableError) as exc_gen_ev:
+        gen_registry.resolve(_config(evaluator="missing.evaluator@1.0.0"))
+    assert exc_gen_ev.value.reason == "incompatible-evaluator"
+    assert gen_registry.resolve(_config(evaluator="acme.result-adapter@1.0.0")).ref == GENERATOR
+
+    # 未声明 evaluators/result_adapter 的一体化算法拒绝任何显式 evaluator (fail-closed)
+    no_ev_algo = AlgorithmDescriptor(
+        algorithm_id="acme.algorithm.no_ev",
+        version="1.0.0",
+        parameters_schema={"type": "object", "additionalProperties": False},
+    )
+    no_ev_reg = build_algorithm_registry([_FakeAlgorithmProvider(no_ev_algo)])
+    with pytest.raises(ComputationUnavailableError) as exc_no_ev:
+        no_ev_reg.resolve(
+            CalculationConfig(
+                mode="planning",
+                algorithm=no_ev_algo.ref,
+                evaluator="missing.evaluator@1.0.0",
+                precision="medium",
+                time_limit_seconds=600,
+                options={},
+                outputs=["solution"],
+            )
+        )
+    assert exc_no_ev.value.reason == "incompatible-evaluator"
+
+    with pytest.raises(ValueError, match="generator 为 None"):
+        gen_registry.resolve(good)
+    with pytest.raises(ValueError, match="algorithm 为 None"):
+        algo_registry.resolve(_config())

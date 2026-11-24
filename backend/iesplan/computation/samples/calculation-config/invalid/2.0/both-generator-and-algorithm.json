@@ -1,0 +1,16 @@
+{
+  "schema": "ies.calculation-config",
+  "schema_version": "1.0.0",
+  "mode": "planning",
+  "predictions": [],
+  "generator": "acme.generator@1.0.0",
+  "solver": "ies.solver.highs@1.7.2",
+  "algorithm": "acme.algorithm.capacity_search@1.2.0",
+  "evaluator": null,
+  "precision": "medium",
+  "convergence": null,
+  "time_limit_seconds": 600,
+  "options": {},
+  "seed": 42,
+  "outputs": ["solution", "metrics"]
+}

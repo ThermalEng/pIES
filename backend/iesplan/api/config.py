@@ -34,10 +34,10 @@ config_router = APIRouter(prefix="/api/projects/{project_id}/config", tags=["con
 
 
 class CalculationConfigSaveRequest(BaseModel):
-    """保存请求: 12 字段 CalculationConfig 全文 + 自有链期望 revision。"""
+    """保存请求: 14 字段 CalculationConfig 全文 + 自有链期望 revision。"""
 
     calculation_config: dict[str, Any] = Field(
-        description="计算配置(12 字段 CalculationConfig 契约)"
+        description="计算配置(14 字段 CalculationConfig 契约)"
     )
     expected_revision: int | None = Field(
         default=None, ge=1, description="期望的当前 revision; 首次保存为 null"
@@ -70,8 +70,12 @@ def save_config_endpoint(
     generator_registry = (
         getattr(bootstrap, "generator_registry", None) if bootstrap is not None else None
     )
+    algorithm_registry = (
+        getattr(bootstrap, "algorithm_registry", None) if bootstrap is not None else None
+    )
     return config_cases.save_calculation_config_case(
         db, user, project_id, body.calculation_config, body.expected_revision,
         predictor_registry=predictor_registry,
         generator_registry=generator_registry,
+        algorithm_registry=algorithm_registry,
     )

@@ -738,7 +738,7 @@ def load_task_into_draft(
             planning_revision=plan_rev,
         )
         # 冻结计算配置正文去任务级附加键(task_params/config_ref 为提交装配
-        # 附加, 非 12 字段配置正文); 缺席则不动配置链, 不猜测。
+        # 附加, 非 14 字段配置正文); 缺席则不动配置链, 不猜测。
         config_revision: int | None = None
         body = snapshot.calc_config_snapshot
         if isinstance(body, Mapping) and len(body) > 0:

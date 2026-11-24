@@ -419,7 +419,7 @@ def _declare_constant_bindings(
     return resp.json()["revision"]
 
 
-#: 合法 12 字段 CalculationConfig(与 test_config_api 同构的最小有效载荷)
+#: 合法 14 字段 CalculationConfig(与 test_config_api 同构的最小有效载荷)
 CALC_PAYLOAD: dict[str, Any] = {
     "schema": "ies.calculation-config",
     "schema_version": "1.0.0",
@@ -427,6 +427,8 @@ CALC_PAYLOAD: dict[str, Any] = {
     "predictions": [],
     "generator": "ies.generator.highs_milp@1.0.0",
     "solver": "ies.solver.highs@1.7.2",
+    "algorithm": None,
+    "evaluator": None,
     "precision": "medium",
     "convergence": None,
     "time_limit_seconds": 600,

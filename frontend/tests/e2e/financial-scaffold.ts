@@ -480,6 +480,8 @@ export async function scaffoldProject(
       predictions: [],
       generator: 'ies.generator.highs_milp@1.0.0',
       solver: 'ies.solver.highs@1.7.2',
+      algorithm: null,
+      evaluator: null,
       precision: 'medium',
       convergence: null,
       time_limit_seconds: 600,
