@@ -1,0 +1,53 @@
+schema: ies.algorithm-plugin
+schema_version: "1.0.0"
+plugin_id: ies.generator.highs_milp
+version: "1.0.0"
+kind: generator
+name:
+  zh_cn: HiGHS MILP 求解包生成器
+  en_us: HiGHS MILP Bundle Generator
+description: Official deterministic HiGHS MILP Solver Bundle generator preserving all iesplan modeling, unit, and tax rules.
+license: MPL-2.0
+compatibility:
+  pies: ">=1.1.5,<2.0.0"
+  sdk: ">=1.1.5,<2.0.0"
+runtime:
+  language: python
+  python: "3.12"
+entrypoint: generator_stage:generate
+parameters_schema:
+  type: object
+  additionalProperties: false
+  properties:
+    acceleration:
+      type: object
+      additionalProperties: false
+      properties:
+        mode:
+          type: string
+          enum:
+            - off
+            - on_demand_mutex
+          default: on_demand_mutex
+resources:
+  default:
+    cpu: 2
+    memory_mb: 4096
+    timeout_seconds: 1800
+    process_limit: 16
+  maximum:
+    cpu: 8
+    memory_mb: 16384
+    timeout_seconds: 43200
+    process_limit: 64
+advanced:
+  streaming_bundle: true
+  supported_modes:
+    - planning
+  supported_precisions:
+    - medium
+  companions:
+    solver: ies.solver.highs@1.7.2
+    evaluator: ies.result-adapter.highs@1.0.0
+    result_adapter: ies.result-adapter.highs@1.0.0
+extensions: {}

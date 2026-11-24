@@ -1,0 +1,53 @@
+schema: ies.algorithm-plugin
+schema_version: "1.0.0"
+plugin_id: ies.solver.highs
+version: "1.7.2"
+kind: solver
+name:
+  zh_cn: HiGHS 求解器
+  en_us: HiGHS MILP/LP Solver
+description: Official isolated HiGHS 1.7.2 solver stage executing ies-highs-solver against read-only /work/in/bundle/.
+license: MPL-2.0
+compatibility:
+  pies: ">=1.1.5,<2.0.0"
+  sdk: ">=1.1.5,<2.0.0"
+runtime:
+  language: python
+  python: "3.12"
+entrypoint: solver_stage:solve
+parameters_schema:
+  type: object
+  additionalProperties: false
+  properties:
+    threads:
+      type: integer
+      minimum: 1
+resources:
+  default:
+    cpu: 4
+    memory_mb: 4096
+    timeout_seconds: 43200
+    process_limit: 32
+  maximum:
+    cpu: 8
+    memory_mb: 16384
+    timeout_seconds: 172800
+    process_limit: 64
+advanced:
+  streaming_bundle: true
+  binary:
+    executable: /usr/local/bin/ies-highs-solver
+    arguments_template:
+      - input/problem.mps
+      - --solution_file
+      - output/solution.sol
+      - --time_limit
+      - "{time_limit_seconds}"
+      - --random_seed
+      - "{seed}"
+    env_allowlist: []
+  companions:
+    generator: ies.generator.highs_milp@1.0.0
+    evaluator: ies.result-adapter.highs@1.0.0
+    result_adapter: ies.result-adapter.highs@1.0.0
+extensions: {}
