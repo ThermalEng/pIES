@@ -263,8 +263,10 @@ def _parse_seq(
     return result, idx
 
 
-def _split_key_value(text: str) -> tuple[str, bool, str]:
-    """Split on the first unquoted ':' followed by whitespace or end-of-string."""
+def _split_key_value(
+    text: str, *, allow_adjacent_after_quote: bool = False
+) -> tuple[str, bool, str]:
+    """Split on the first unquoted ':' followed by whitespace, EOS, or (in flow maps) after quote."""
     in_single = False
     in_double = False
     escape = False
@@ -282,7 +284,8 @@ def _split_key_value(text: str) -> tuple[str, bool, str]:
         elif ch == '"' and not in_single:
             in_double = True
         elif ch == ":" and not in_single and not in_double:
-            if idx + 1 == len(text) or text[idx + 1].isspace():
+            after_quote = allow_adjacent_after_quote and text[:idx].rstrip().endswith(("'", '"'))
+            if idx + 1 == len(text) or text[idx + 1].isspace() or after_quote:
                 return text[:idx].strip(), True, text[idx + 1 :].strip()
     return text.strip(), False, ""
 
@@ -332,7 +335,7 @@ def _parse_flow_map(text: str, lineno: int) -> dict[str, Any]:
         raise SafeYamlError("Unbalanced braces in flow mapping", lineno)
     result: dict[str, Any] = {}
     for part in parts:
-        raw_key, sep, val = _split_key_value(part)
+        raw_key, sep, val = _split_key_value(part, allow_adjacent_after_quote=True)
         if not sep:
             raise SafeYamlError(f"Invalid flow mapping entry: {part!r}", lineno)
         _reject_unsafe_prefix(raw_key, lineno)
@@ -426,6 +429,20 @@ def _parse_scalar(text: str, lineno: int) -> Any:
     return text
 
 
+_SIMPLE_ESCAPES = {
+    "0": "\0",
+    "b": "\b",
+    "f": "\f",
+    "n": "\n",
+    "r": "\r",
+    "t": "\t",
+    '"': '"',
+    "\\": "\\",
+    "/": "/",
+}
+_HEX_ESCAPES = {"x": 2, "u": 4, "U": 8}
+
+
 def _unescape_double_quoted(raw: str, lineno: int) -> str:
     out: list[str] = []
     idx = 0
@@ -439,21 +456,25 @@ def _unescape_double_quoted(raw: str, lineno: int) -> str:
         if idx >= len(raw):
             raise SafeYamlError("Trailing backslash in double-quoted string", lineno)
         esc = raw[idx]
-        if esc == "n":
-            out.append("\n")
-        elif esc == "t":
-            out.append("\t")
-        elif esc == "r":
-            out.append("\r")
-        elif esc == '"':
-            out.append('"')
-        elif esc == "\\":
-            out.append("\\")
-        elif esc == "/":
-            out.append("/")
+        if esc in _SIMPLE_ESCAPES:
+            out.append(_SIMPLE_ESCAPES[esc])
+            idx += 1
+        elif esc in _HEX_ESCAPES:
+            width = _HEX_ESCAPES[esc]
+            hex_digits = raw[idx + 1 : idx + 1 + width]
+            if len(hex_digits) < width or not all(
+                c in "0123456789abcdefABCDEF" for c in hex_digits
+            ):
+                raise SafeYamlError(
+                    f"Invalid '\\{esc}' escape sequence in double-quoted string", lineno
+                )
+            codepoint = int(hex_digits, 16)
+            if codepoint > 0x10FFFF or (0xD800 <= codepoint <= 0xDFFF):
+                raise SafeYamlError(f"Invalid Unicode code point U+{codepoint:04X}", lineno)
+            out.append(chr(codepoint))
+            idx += 1 + width
         else:
             raise SafeYamlError(f"Unsupported escape sequence '\\{esc}'", lineno)
-        idx += 1
     return "".join(out)
 
 

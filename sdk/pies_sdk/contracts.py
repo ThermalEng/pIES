@@ -180,7 +180,30 @@ class PredictionOutputPayload:
             raise StageIOError(f"Invalid PredictionOutput schema_version: {self.schema_version!r}")
         if not isinstance(self.predictions, list):
             raise StageIOError("PredictionOutput 'predictions' must be a list")
-        check_finite_json(self.predictions, "predictions")
+        normalized_predictions: list[dict[str, Any]] = []
+        for idx, item in enumerate(self.predictions):
+            if not isinstance(item, Mapping):
+                raise StageIOError(
+                    f"predictions[{idx}] must be a JSON object, got {type(item).__name__}"
+                )
+            for req_key in ("instance", "interface"):
+                val = item.get(req_key)
+                if not isinstance(val, str) or not val:
+                    raise StageIOError(
+                        f"predictions[{idx}].{req_key} must be a non-empty string"
+                    )
+            values = item.get("values")
+            if not isinstance(values, list):
+                raise StageIOError(f"predictions[{idx}].values must be a list of numbers")
+            for v_idx, v in enumerate(values):
+                if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v):
+                    raise StageIOError(
+                        f"predictions[{idx}].values[{v_idx}] must be a finite number"
+                    )
+            check_finite_json(item, f"predictions[{idx}]")
+            normalized_predictions.append(dict(item))
+        object.__setattr__(self, "predictions", normalized_predictions)
+
         if not isinstance(self.artifacts, list):
             raise StageIOError("PredictionOutput 'artifacts' must be a list")
         for idx, rel in enumerate(self.artifacts):
@@ -205,9 +228,15 @@ class PredictionOutputPayload:
         for req in ("schema", "schema_version", "predictions"):
             if req not in data:
                 raise StageIOError(f"PredictionOutput missing required field: {req}")
+        predictions = data["predictions"]
+        if not isinstance(predictions, list):
+            raise StageIOError("PredictionOutput 'predictions' must be a list")
+        artifacts = data.get("artifacts", [])
+        if not isinstance(artifacts, list):
+            raise StageIOError("PredictionOutput 'artifacts' must be a list")
         return cls(
             schema=data["schema"],
             schema_version=data["schema_version"],
-            predictions=list(data["predictions"]),
-            artifacts=list(data.get("artifacts", [])),
+            predictions=predictions,
+            artifacts=artifacts,
         )

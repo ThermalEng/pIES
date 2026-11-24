@@ -39,6 +39,22 @@ url_list:
     }
 
 
+def test_flow_mapping_quoted_colon_and_unicode_escapes() -> None:
+    yaml_text = r'''
+schema_inline: {"type":"object","additionalProperties":false,"items":["\u4e2d\u6587","\x41","\U0001F600"]}
+'''
+    parsed = load_safe_yaml(yaml_text)
+    assert parsed == {
+        "schema_inline": {
+            "type": "object",
+            "additionalProperties": False,
+            "items": ["中文", "A", "😀"],
+        }
+    }
+    with pytest.raises(SafeYamlError, match="Invalid"):
+        load_safe_yaml('bad: "\\u12ZZ"\n')
+
+
 @pytest.mark.parametrize(
     ("bad_yaml", "match"),
     [

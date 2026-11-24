@@ -267,6 +267,52 @@ def parse_plugin_yaml(source: str | Path) -> dict[str, Any]:
     return parsed
 
 
+def _validate_parameters_schema(params_schema: Any) -> None:
+    """Validate Draft 2020-12 parameters_schema and forbid unknown parameter fields."""
+    try:
+        Draft202012Validator.check_schema(params_schema)
+    except SchemaError as exc:
+        raise PluginValidationError(
+            f"Invalid Draft 2020-12 parameters_schema: {exc.message}"
+        ) from exc
+    if not isinstance(params_schema, Mapping) or params_schema.get("type") != "object":
+        raise PluginValidationError("parameters_schema root must declare type: 'object'")
+    _check_object_schemas_forbid_additional_properties(params_schema, "parameters_schema")
+
+
+def _check_object_schemas_forbid_additional_properties(
+    node: Mapping[str, Any], path: str
+) -> None:
+    if node.get("type") == "object" and node.get("additionalProperties") is not False:
+        raise PluginValidationError(
+            f"{path} must set 'additionalProperties: false' to forbid unknown fields"
+        )
+    properties = node.get("properties")
+    if isinstance(properties, Mapping):
+        for prop_name, prop_schema in properties.items():
+            if isinstance(prop_schema, Mapping):
+                _check_object_schemas_forbid_additional_properties(
+                    prop_schema, f"{path}.properties.{prop_name}"
+                )
+    for key in ("$defs", "definitions"):
+        defs = node.get(key)
+        if isinstance(defs, Mapping):
+            for def_name, def_schema in defs.items():
+                if isinstance(def_schema, Mapping):
+                    _check_object_schemas_forbid_additional_properties(
+                        def_schema, f"{path}.{key}.{def_name}"
+                    )
+    items = node.get("items")
+    if isinstance(items, Mapping):
+        _check_object_schemas_forbid_additional_properties(items, f"{path}.items")
+    for comb in ("allOf", "anyOf", "oneOf"):
+        branches = node.get(comb)
+        if isinstance(branches, list):
+            for idx, branch in enumerate(branches):
+                if isinstance(branch, Mapping):
+                    _check_object_schemas_forbid_additional_properties(
+                        branch, f"{path}.{comb}[{idx}]"
+                    )
 def _build_resource_spec(raw: Mapping[str, Any], label: str) -> ResourceSpec:
     cpu = raw["cpu"]
     if isinstance(cpu, bool) or not isinstance(cpu, (int, float)):
@@ -317,12 +363,7 @@ def validate_plugin_manifest(
         raise PluginValidationError(f"Plugin manifest invalid [{loc}]: {first.message}")
 
     params_schema = data["parameters_schema"]
-    try:
-        Draft202012Validator.check_schema(params_schema)
-    except SchemaError as exc:
-        raise PluginValidationError(
-            f"Invalid Draft 2020-12 parameters_schema: {exc.message}"
-        ) from exc
+    _validate_parameters_schema(params_schema)
 
     default_res = _build_resource_spec(data["resources"]["default"], "default")
     max_res = _build_resource_spec(data["resources"]["maximum"], "maximum")

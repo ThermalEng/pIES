@@ -17,7 +17,6 @@ from pies_sdk.io import (
     read_prediction_output,
     read_predictor_request,
     read_solver_bundle,
-    validate_stage_inputs,
     validate_stage_outputs,
     write_compute_result,
     write_json_file,
@@ -59,7 +58,6 @@ def test_predictor_stage_io(tmp_path: Path) -> None:
         work_in / "request.json",
         {"parameters": {"window": 4}, "steps": 3, "history": [1.0, 2.0, 3.0]},
     )
-    validate_stage_inputs("predictor", work_in)
     req = read_predictor_request(work_in)
     assert req["steps"] == 3
 
@@ -75,7 +73,6 @@ def test_generator_solver_evaluator_stage_io(tmp_path: Path) -> None:
     gen_in = tmp_path / "gen_in"
     gen_out = tmp_path / "gen_out"
     write_json_file(gen_in / "calculation_config.json", {"mode": "planning", "options": {}})
-    validate_stage_inputs("generator", gen_in)
     gen_inputs = read_generator_inputs(gen_in)
     assert gen_inputs["calculation_config"]["mode"] == "planning"
 
@@ -83,7 +80,7 @@ def test_generator_solver_evaluator_stage_io(tmp_path: Path) -> None:
     write_solver_bundle(gen_out, bundle_manifest, {"input/problem.mps": "NAME TEST\nENDATA\n"})
     validate_stage_outputs("generator", gen_out)
 
-    # Solver consumes generator's bundle directory
+    # Solver consumes frozen generator bundle directory
     solver_in = tmp_path / "solver_in"
     solver_out = tmp_path / "solver_out"
     (solver_in / "bundle" / "input").mkdir(parents=True)
@@ -92,7 +89,6 @@ def test_generator_solver_evaluator_stage_io(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     (solver_in / "bundle" / "input" / "problem.mps").write_text("NAME TEST\nENDATA\n", encoding="utf-8")
-    validate_stage_inputs("solver", solver_in)
     loaded_manifest, _ = read_solver_bundle(solver_in)
     assert loaded_manifest["schema"] == "ies.solver-bundle"
 
@@ -114,7 +110,6 @@ def test_generator_solver_evaluator_stage_io(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     write_json_file(eval_in / "receipt.json", {"receipt_id": "rcpt-1", "status": "succeeded"})
-    validate_stage_inputs("evaluator", eval_in)
     ev = read_evaluator_inputs(eval_in)
     assert ev["receipt"]["receipt_id"] == "rcpt-1"
 
@@ -136,7 +131,6 @@ def test_algorithm_and_iterations_ndjson(tmp_path: Path) -> None:
     work_in = tmp_path / "in"
     work_out = tmp_path / "out"
     write_json_file(work_in / "request.json", {"bundle_id": "b1", "receipt_id": "r1"})
-    validate_stage_inputs("algorithm", work_in)
     assert read_algorithm_request(work_in)["bundle_id"] == "b1"
 
     log_path = work_out / "iterations.jsonl"
@@ -176,4 +170,39 @@ def test_rejects_non_finite_and_path_traversal(tmp_path: Path) -> None:
                 "inputs": [{"path": "../escape.txt", "media_type": "text/plain"}],
             },
             {"../escape.txt": "x"},
+        )
+
+
+def test_prediction_output_rejects_malformed_structure_and_coercion() -> None:
+    with pytest.raises(StageIOError, match="must be a list"):
+        PredictionOutputPayload.from_dict(
+            {
+                "schema": "ies.prediction-output",
+                "schema_version": "1.0.0",
+                "predictions": "abc",
+            }
+        )
+
+    with pytest.raises(StageIOError, match="must be a JSON object"):
+        PredictionOutputPayload.from_dict(
+            {
+                "schema": "ies.prediction-output",
+                "schema_version": "1.0.0",
+                "predictions": [42],
+            }
+        )
+
+    with pytest.raises(StageIOError, match="must be a finite number"):
+        PredictionOutputPayload(
+            predictions=[{"instance": "pv1", "interface": "power_out", "values": [True]}]
+        )
+
+    with pytest.raises(StageIOError, match="must be a list"):
+        PredictionOutputPayload.from_dict(
+            {
+                "schema": "ies.prediction-output",
+                "schema_version": "1.0.0",
+                "predictions": [{"instance": "pv1", "interface": "power_out", "values": [1.0]}],
+                "artifacts": "not-a-list",
+            }
         )

@@ -111,6 +111,20 @@ def test_rejects_unknown_fields_invalid_schema_and_resource_bounds() -> None:
     with pytest.raises(PluginValidationError, match="Draft 2020-12"):
         validate_plugin_manifest(bad_params_schema)
 
+    missing_additional_props = _base_manifest()
+    missing_additional_props["parameters_schema"] = {"type": "object"}
+    with pytest.raises(PluginValidationError, match="additionalProperties: false"):
+        validate_plugin_manifest(missing_additional_props)
+
+    nested_missing_additional_props = _base_manifest()
+    nested_missing_additional_props["parameters_schema"] = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {"nested": {"type": "object"}},
+    }
+    with pytest.raises(PluginValidationError, match="additionalProperties: false"):
+        validate_plugin_manifest(nested_missing_additional_props)
+
     bad_res = deepcopy(_base_manifest())
     bad_res["resources"]["default"]["memory_mb"] = 4096
     with pytest.raises(PluginValidationError, match="exceeds resources.maximum"):

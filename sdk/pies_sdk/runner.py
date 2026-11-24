@@ -19,7 +19,6 @@ from pies_sdk.io import (
     DEFAULT_WORK_OUT,
     StageContext,
     extract_stage_parameters,
-    validate_stage_inputs,
     validate_stage_outputs,
 )
 from pies_sdk.manifest import (
@@ -69,7 +68,7 @@ def run_plugin(
     pies_version: str = CURRENT_PIES_VERSION,
     sdk_version: str = CURRENT_SDK_VERSION,
 ) -> None:
-    """Validate manifest + /work/in, execute entrypoint(ctx), and validate /work/out."""
+    """Validate manifest, execute entrypoint(ctx) against /work/in, and validate /work/out."""
     manifest_file = Path(manifest_path)
     manifest = load_plugin_manifest(
         manifest_file,
@@ -80,7 +79,6 @@ def run_plugin(
 
     in_dir = Path(work_in)
     out_dir = Path(work_out)
-    validate_stage_inputs(manifest.kind, in_dir)
 
     raw_params = extract_stage_parameters(in_dir)
     validated_params = manifest.validate_parameters(raw_params)

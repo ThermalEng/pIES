@@ -103,7 +103,6 @@ def read_generator_inputs(work_in: Path = DEFAULT_WORK_IN) -> dict[str, Any]:
         candidate = root / yaml_name
         if candidate.is_file():
             parsed = load_safe_yaml(candidate.read_text(encoding="utf-8"))
-            check_finite_json(parsed, yaml_name)
             bundle[yaml_name.removesuffix(".yaml")] = parsed
     if "request" not in bundle and "calculation_config" not in bundle:
         raise StageIOError(
@@ -194,10 +193,21 @@ def validate_solver_bundle_dir(bundle_dir: Path) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
+def _read_frozen_bundle_manifest(bundle_dir: Path) -> dict[str, Any]:
+    """Read frozen /work/in/bundle/bundle.yaml directly without re-checking inputs."""
+    manifest_path = bundle_dir / "bundle.yaml"
+    if not manifest_path.is_file():
+        raise StageIOError(f"Solver Bundle missing bundle.yaml: {manifest_path}")
+    manifest = load_safe_yaml(manifest_path.read_text(encoding="utf-8"))
+    if not isinstance(manifest, dict):
+        raise StageIOError("bundle.yaml must be a YAML mapping")
+    return manifest
+
+
 def read_solver_bundle(work_in: Path = DEFAULT_WORK_IN) -> tuple[dict[str, Any], Path]:
     root = _ensure_work_in(work_in)
     bundle_dir = root / "bundle"
-    manifest = validate_solver_bundle_dir(bundle_dir)
+    manifest = _read_frozen_bundle_manifest(bundle_dir)
     return manifest, bundle_dir
 
 
@@ -250,7 +260,8 @@ def _find_evaluator_solutions(root: Path) -> list[Path]:
 
 def read_evaluator_inputs(work_in: Path = DEFAULT_WORK_IN) -> dict[str, Any]:
     root = _ensure_work_in(work_in)
-    bundle_manifest = validate_solver_bundle_dir(root / "bundle")
+    bundle_dir = root / "bundle"
+    bundle_manifest = _read_frozen_bundle_manifest(bundle_dir)
     solutions = _find_evaluator_solutions(root)
     if not solutions:
         raise StageIOError("evaluator /work/in missing solution.* output file")
@@ -266,7 +277,6 @@ def read_evaluator_inputs(work_in: Path = DEFAULT_WORK_IN) -> dict[str, Any]:
         finance = read_json_file(root / "finance.json")
     elif (root / "effective_finance.yaml").is_file():
         finance = load_safe_yaml((root / "effective_finance.yaml").read_text(encoding="utf-8"))
-        check_finite_json(finance, "effective_finance.yaml")
 
     evaluation = (
         read_json_file(root / "evaluation.json") if (root / "evaluation.json").is_file() else None
@@ -274,7 +284,7 @@ def read_evaluator_inputs(work_in: Path = DEFAULT_WORK_IN) -> dict[str, Any]:
 
     return {
         "bundle_manifest": bundle_manifest,
-        "bundle_dir": root / "bundle",
+        "bundle_dir": bundle_dir,
         "solution_paths": solutions,
         "receipt": receipt,
         "request": request,
@@ -315,23 +325,6 @@ def read_compute_result(work_out: Path = DEFAULT_WORK_OUT) -> ComputeResultPaylo
 # ---------------------------------------------------------------------------
 # Unified stage contract validation & StageContext
 # ---------------------------------------------------------------------------
-
-
-def validate_stage_inputs(kind: str, work_in: Path = DEFAULT_WORK_IN) -> None:
-    """Validate that /work/in satisfies the stage input contract for `kind`."""
-    if kind not in PLUGIN_KINDS:
-        raise StageIOError(f"Unknown plugin kind: {kind!r}")
-    root = _ensure_work_in(work_in)
-    if kind == "predictor":
-        read_predictor_request(root)
-    elif kind == "generator":
-        read_generator_inputs(root)
-    elif kind == "solver":
-        read_solver_bundle(root)
-    elif kind == "evaluator":
-        read_evaluator_inputs(root)
-    elif kind == "algorithm":
-        read_algorithm_request(root)
 
 
 def validate_stage_outputs(kind: str, work_out: Path = DEFAULT_WORK_OUT) -> None:
