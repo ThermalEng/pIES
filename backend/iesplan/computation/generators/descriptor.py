@@ -58,6 +58,7 @@ class GeneratorDescriptor:
     executors: tuple[str, ...] = ()
     equation_contracts: tuple[str, ...] = ()
     result_adapter: str = ""
+    evaluators: tuple[str, ...] | None = None
     deterministic: bool = True
     resource_limits: Mapping[str, object] = field(default_factory=dict)
     unit_system: str = ""
@@ -103,6 +104,15 @@ class GeneratorDescriptor:
                 "result_adapter 不得为空：descriptor 必须声明配套结果适配器"
             )
         check_provider_ref(self.result_adapter, "result_adapter")
+        if self.evaluators is None:
+            evaluators = (self.result_adapter,)
+        else:
+            evaluators = tuple(self.evaluators)
+            if not evaluators:
+                raise ValueError("evaluators 若显式声明则不得为空")
+            for ev_ref in evaluators:
+                check_provider_ref(ev_ref, "evaluators")
+        object.__setattr__(self, "evaluators", evaluators)
         if not isinstance(self.deterministic, bool):
             raise TypeError("deterministic 须为布尔值")
         object.__setattr__(self, "options_schema", validate_options_schema(self.options_schema))
@@ -126,6 +136,10 @@ class GeneratorDescriptor:
         """该 provider 是否兼容给定 solver 精确引用。"""
         return solver_ref in self.solvers
 
+    def supports_evaluator(self, evaluator_ref: str) -> bool:
+        """该 provider 是否兼容给定 evaluator 精确引用。"""
+        return evaluator_ref in (self.evaluators or ())
+
     def to_dict(self) -> dict[str, Any]:
         """序列化为 JSON 兼容独立副本。"""
         return {
@@ -140,6 +154,7 @@ class GeneratorDescriptor:
             "executors": list(self.executors),
             "equation_contracts": list(self.equation_contracts),
             "result_adapter": self.result_adapter,
+            "evaluators": list(self.evaluators or ()),
             "deterministic": self.deterministic,
             "options_schema": thaw_json_value(self.options_schema),
             "resource_limits": thaw_json_value(self.resource_limits),

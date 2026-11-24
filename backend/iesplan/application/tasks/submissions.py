@@ -329,122 +329,78 @@ def _resolve_execution_refs(
     project_id: int,
     algorithm_registry: Any | None = None,
 ) -> tuple[str, str, tuple[str, ...]]:
-    """解析并冻结执行引用(0.12-A3 / 1.1.5 14 字段契约)。
+    """解析并冻结执行引用并执行提交阶段描述符能力/选项门禁(14 字段契约)。
 
-    只做引用解析, 不做 mode/精度/options 能力门禁(那是生成/保存时
-    ``validate_config_capabilities`` 的职责, 此处不重复校验):
-    - 一体化算法模式(``algorithm`` 非空)：``generator``/``solver`` 须为 None；
-      目录未装配 → 500；未注册 → 400 TASK-REQ-007；返回配套或指定
-      ``evaluator``/``result_adapter``、空 executor 与描述符能力标记；
-    - 分步算法模式(``algorithm`` 为 None)：目录未装配 → 500；
-      generator 未注册 → 400 TASK-REQ-007；solver 不在 descriptor.solvers
-      → 400 TASK-REQ-008；executors 非恰好一个 → 400 TASK-REQ-009；
-      返回指定 ``evaluator``（或默认配套 ``result_adapter``）、executor 与能力标记。
+    直接从已保存 14 字段配置构造 ``CalculationConfig``（无旧 12 字段回退），
+    由 ``algorithm_registry.resolve`` 或 ``generator_registry.resolve`` 完成
+    ``mode``/``precision``/``solver``/``evaluator``/``outputs``/``options`` 核对：
+    - 目录未装配(None) → 500；
+    - solver 不兼容 → 400 TASK-REQ-008；
+    - executors 非恰好一个 → 400 TASK-REQ-009；
+    - 其余未注册/不兼容/非法选项 → 400 TASK-REQ-007。
     """
-    algorithm_ref = body.get("algorithm")
-    generator_ref = body.get("generator")
-    solver_ref = body.get("solver")
-    evaluator_ref = body.get("evaluator")
+    from iesplan.computation import CALCULATION_CONFIG_FIELDS, CalculationConfig
 
-    if algorithm_ref is not None:
-        if generator_ref is not None or solver_ref is not None:
+    config = CalculationConfig(**{name: body[name] for name in CALCULATION_CONFIG_FIELDS})
+    is_unified = config.algorithm is not None
+    active_registry = algorithm_registry if is_unified else generator_registry
+    selected_ref = config.algorithm if is_unified else config.generator
+    ref_field = "algorithm" if is_unified else "generator"
+
+    if active_registry is None:
+        missing_msg = (
+            "一体化算法目录未装配, 计算任务提交不可用"
+            if is_unified
+            else "生成器目录未装配, 计算任务提交不可用"
+        )
+        raise AppError(missing_msg, params={"project_id": project_id})
+
+    try:
+        provider = active_registry.resolve(config)
+    except ComputationUnavailableError as exc:
+        if exc.reason == "incompatible-solver":
             raise InvalidRequestError(
-                "一体化算法模式(algorithm 非空)下 generator 与 solver 必须为 null",
-                code="TASK-REQ-007",
-                params={"project_id": project_id, "algorithm": algorithm_ref},
-                location={"object_type": "calculation_config", "object_id": project_id, "field": "algorithm"},
-            )
-        if algorithm_registry is None:
-            raise AppError(
-                "一体化算法目录未装配, 计算任务提交不可用",
-                params={"project_id": project_id},
-            )
-        if not isinstance(algorithm_ref, str) or not algorithm_ref:
-            raise InvalidRequestError(
-                "计算配置引用的一体化算法不是合法精确引用",
-                code="TASK-REQ-007",
-                params={"project_id": project_id, "algorithm": algorithm_ref},
-                location={"object_type": "calculation_config", "object_id": project_id, "field": "algorithm"},
-            )
-        try:
-            provider = algorithm_registry.get(algorithm_ref)
-        except ComputationUnavailableError as exc:
-            raise InvalidRequestError(
-                "计算配置引用的一体化算法未注册",
-                code="TASK-REQ-007",
-                params={"project_id": project_id, "algorithm": algorithm_ref},
-                location={"object_type": "calculation_config", "object_id": project_id, "field": "algorithm"},
+                "计算配置引用的求解器不在所选生成器兼容清单内",
+                code="TASK-REQ-008",
+                params={"project_id": project_id, "generator": selected_ref, "solver": config.solver},
+                location={"object_type": "calculation_config", "object_id": project_id, "field": "solver"},
             ) from exc
-        descriptor = provider.descriptor
-        if evaluator_ref is not None:
-            supports_ev = getattr(descriptor, "supports_evaluator", None)
-            ev_ok = supports_ev(evaluator_ref) if callable(supports_ev) else True
-            if not ev_ok:
-                raise InvalidRequestError(
-                    "计算配置引用的评价器不兼容所选一体化算法",
-                    code="TASK-REQ-007",
-                    params={
-                        "project_id": project_id,
-                        "algorithm": algorithm_ref,
-                        "evaluator": evaluator_ref,
-                    },
-                    location={
-                        "object_type": "calculation_config",
-                        "object_id": project_id,
-                        "field": "evaluator",
-                    },
-                )
-        resolved_adapter = evaluator_ref or getattr(descriptor, "result_adapter", None) or ""
+        field_map = {
+            "no-provider": ref_field,
+            "incompatible-mode": "mode",
+            "incompatible-precision": "precision",
+            "incompatible-evaluator": "evaluator",
+            "incompatible-outputs": "outputs",
+        }
+        field = field_map.get(exc.reason, ref_field)
+        raise InvalidRequestError(
+            str(exc),
+            code="TASK-REQ-007",
+            params={"project_id": project_id, ref_field: selected_ref, field: getattr(config, field)},
+            location={"object_type": "calculation_config", "object_id": project_id, "field": field},
+        ) from exc
+    except ValueError as exc:
+        raise InvalidRequestError(
+            str(exc),
+            code="TASK-REQ-007",
+            params={"project_id": project_id, ref_field: selected_ref, "detail": str(exc)},
+            location={"object_type": "calculation_config", "object_id": project_id, "field": "options"},
+        ) from exc
+
+    descriptor = provider.descriptor
+    if is_unified:
+        resolved_adapter = config.evaluator or getattr(descriptor, "result_adapter", None) or ""
         return resolved_adapter, "", tuple(getattr(descriptor, "capabilities", ()) or ())
 
-    if generator_registry is None:
-        raise AppError(
-            "生成器目录未装配, 计算任务提交不可用",
-            params={"project_id": project_id},
-        )
-    if not isinstance(generator_ref, str) or not generator_ref:
-        raise InvalidRequestError(
-            "计算配置引用的生成器不是合法精确引用",
-            code="TASK-REQ-007",
-            params={"project_id": project_id, "generator": generator_ref},
-            location={"object_type": "calculation_config", "object_id": project_id, "field": "generator"},
-        )
-    try:
-        provider = generator_registry.get(generator_ref)
-    except ComputationUnavailableError as exc:
-        raise InvalidRequestError(
-            "计算配置引用的生成器未注册(旧算法引用不隐式映射到新生成器)",
-            code="TASK-REQ-007",
-            params={"project_id": project_id, "generator": generator_ref},
-            location={"object_type": "calculation_config", "object_id": project_id, "field": "generator"},
-        ) from exc
-    descriptor = provider.descriptor
-    if solver_ref not in descriptor.solvers:
-        raise InvalidRequestError(
-            "计算配置引用的求解器不在所选生成器兼容清单内",
-            code="TASK-REQ-008",
-            params={"project_id": project_id, "generator": generator_ref, "solver": solver_ref},
-            location={"object_type": "calculation_config", "object_id": project_id, "field": "solver"},
-        )
-    if evaluator_ref is not None:
-        supports_ev = getattr(descriptor, "supports_evaluator", None)
-        ev_ok = supports_ev(evaluator_ref) if callable(supports_ev) else True
-        if not ev_ok:
-            raise InvalidRequestError(
-                "计算配置引用的评价器不兼容所选生成器",
-                code="TASK-REQ-007",
-                params={"project_id": project_id, "generator": generator_ref, "evaluator": evaluator_ref},
-                location={"object_type": "calculation_config", "object_id": project_id, "field": "evaluator"},
-            )
     executors = tuple(descriptor.executors or ())
     if len(executors) != 1:
         raise InvalidRequestError(
             "所选生成器未声明唯一执行器(无公开选择规则, 不猜测)",
             code="TASK-REQ-009",
-            params={"project_id": project_id, "generator": generator_ref, "executors": list(executors)},
+            params={"project_id": project_id, "generator": selected_ref, "executors": list(executors)},
             location={"object_type": "calculation_config", "object_id": project_id, "field": "generator"},
         )
-    return evaluator_ref or descriptor.result_adapter, executors[0], tuple(descriptor.capabilities or ())
+    return config.evaluator or descriptor.result_adapter, executors[0], tuple(descriptor.capabilities or ())
 
 
 def _freeze_device_models(artifact: Any, device_documents: Mapping[str, Any]) -> dict[str, Any]:
@@ -691,7 +647,7 @@ def _assemble_snapshot(
     result_adapter, executor, generator_capabilities = _resolve_execution_refs(
         calc_config, generator_registry, project_id, algorithm_registry=algorithm_registry
     )
-    selected_ref = calc_config.get("generator") or calc_config.get("algorithm")
+    selected_ref = calc_config["generator"] or calc_config["algorithm"]
 
     # 统一生产闸门: 先签发规范文本/回执二件套, 失败不创建快照或任务。
     # 回执与逐实例数学贡献进入快照身份; 快照去重使用内容字段逐项相等判定,

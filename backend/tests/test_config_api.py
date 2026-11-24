@@ -322,6 +322,7 @@ def test_save_uses_selected_public_descriptor_for_all_static_choices(
         ("mode", "planning", "ies.config.unsupported_mode"),
         ("precision", "medium", "ies.config.unsupported_precision"),
         ("solver", "test.solver.other@2.0.0", "ies.config.unsupported_solver"),
+        ("evaluator", "missing.evaluator@1.0.0", "ies.config.unsupported_evaluator"),
         ("outputs", ["trace", "unknown"], "ies.config.unsupported_outputs"),
         ("generator", "test.generator.missing@1.0.0", "ies.config.unsupported_generator"),
     ]

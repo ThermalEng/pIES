@@ -138,12 +138,8 @@ def validate_config_capabilities(
         if callable(supports_evaluator):
             evaluator_ok = supports_evaluator(config.evaluator)
         else:
-            declared_evaluators = getattr(descriptor, "evaluators", None)
-            evaluator_ok = (
-                True
-                if declared_evaluators is None
-                else config.evaluator in declared_evaluators
-            )
+            declared_evaluators = getattr(descriptor, "evaluators", ())
+            evaluator_ok = config.evaluator in (declared_evaluators or ())
         if not evaluator_ok:
             raise ComputationUnavailableError(
                 f"{ref_label}不兼容所选评价器: {ref!r} x {config.evaluator!r}",
@@ -194,13 +190,17 @@ class AlgorithmDescriptor:
         if any(not isinstance(c, str) or not c for c in capabilities):
             raise ValueError("capabilities 条目须为非空字符串")
         object.__setattr__(self, "capabilities", capabilities)
-        if self.evaluators is not None:
+        if self.result_adapter is not None:
+            check_provider_ref(self.result_adapter, "result_adapter")
+        if self.evaluators is None:
+            evaluators = (
+                (self.result_adapter,) if self.result_adapter is not None else ()
+            )
+        else:
             evaluators = tuple(self.evaluators)
             for ev in evaluators:
                 check_provider_ref(ev, "evaluators")
-            object.__setattr__(self, "evaluators", evaluators)
-        if self.result_adapter is not None:
-            check_provider_ref(self.result_adapter, "result_adapter")
+        object.__setattr__(self, "evaluators", evaluators)
         object.__setattr__(
             self,
             "parameters_schema",
@@ -213,10 +213,8 @@ class AlgorithmDescriptor:
         return f"{self.algorithm_id}@{self.version}"
 
     def supports_evaluator(self, evaluator_ref: str) -> bool:
-        """该算法是否兼容给定 evaluator 精确引用（未限制清单时开放）。"""
-        if self.evaluators is None:
-            return True
-        return evaluator_ref in self.evaluators
+        """该算法是否兼容给定 evaluator 精确引用（未声明则拒绝，fail-closed）。"""
+        return evaluator_ref in (self.evaluators or ())
 
     def to_dict(self) -> dict[str, Any]:
         """序列化为 JSON 兼容独立副本。"""
@@ -227,7 +225,7 @@ class AlgorithmDescriptor:
             "precisions": list(self.precisions),
             "outputs": list(self.outputs),
             "capabilities": list(self.capabilities),
-            "evaluators": list(self.evaluators) if self.evaluators is not None else None,
+            "evaluators": list(self.evaluators or ()),
             "result_adapter": self.result_adapter,
             "parameters_schema": thaw_json_value(self.parameters_schema),
         }

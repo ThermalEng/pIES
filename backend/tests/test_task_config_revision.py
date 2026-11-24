@@ -724,6 +724,9 @@ def test_ambiguous_executors_blocked_without_guessing() -> None:
     from iesplan.computation.generators.descriptor import (  # noqa: E402
         GeneratorDescriptor,
     )
+    from iesplan.computation.generators.registry import (  # noqa: E402
+        GeneratorRegistry,
+    )
     from iesplan.tasks.contracts import InvalidRequestError  # noqa: E402
 
     desc = GeneratorDescriptor(
@@ -740,8 +743,8 @@ def test_ambiguous_executors_blocked_without_guessing() -> None:
         unit_system="SI",
         seed_semantics="seed 解释见 descriptor",
     )
-    registry = SimpleNamespace(get=lambda ref: SimpleNamespace(descriptor=desc))
-    body = {"generator": "ies.generator.multi@1.0.0", "solver": "ies.solver.highs@1.7.2"}
+    registry = GeneratorRegistry({desc.ref: SimpleNamespace(descriptor=desc)})
+    body = _body(generator="ies.generator.multi@1.0.0", solver="ies.solver.highs@1.7.2")
     try:
         _resolve_execution_refs(body, registry, project_id=1)
     except InvalidRequestError as exc:
@@ -757,7 +760,7 @@ def test_missing_generator_registry_is_server_error() -> None:
     )
     from iesplan.core.errors import AppError  # noqa: E402
 
-    body = {"generator": "ies.generator.highs_milp@1.0.0", "solver": "ies.solver.highs@1.7.2"}
+    body = _body(generator="ies.generator.highs_milp@1.0.0", solver="ies.solver.highs@1.7.2")
     try:
         _resolve_execution_refs(body, None, project_id=1)
     except AppError as exc:
@@ -991,6 +994,7 @@ def test_unified_algorithm_submit_freezes_14_field_snapshot(
             precisions=("medium",),
             outputs=("solution",),
             capabilities=("network.closed_ports",),
+            evaluators=("ies.result-adapter.highs@1.0.0", "custom.evaluator@1.0.0"),
             parameters_schema={"type": "object", "additionalProperties": False},
             result_adapter="ies.result-adapter.highs@1.0.0",
         )
@@ -1029,3 +1033,27 @@ def test_unified_algorithm_submit_freezes_14_field_snapshot(
     assert frozen["evaluator"] == "custom.evaluator@1.0.0"
     assert frozen["generator"] is None
     assert frozen["solver"] is None
+
+
+def test_submission_rejects_legacy_12_field_and_enforces_capabilities() -> None:
+    """提交边界拒绝缺字段的旧 12 字段正文（无静默回退），并执行模式/精度/评价器/选项门禁。"""
+    from iesplan.application.tasks.submissions import _resolve_execution_refs
+    from iesplan.computation.generators import HIGHS_MILP_PROVIDER, build_registry
+    from iesplan.tasks.contracts import InvalidRequestError
+
+    gen_reg = build_registry((HIGHS_MILP_PROVIDER,))
+    legacy_12 = {k: v for k, v in _body().items() if k not in ("algorithm", "evaluator")}
+    with pytest.raises(KeyError):
+        _resolve_execution_refs(legacy_12, gen_reg, project_id=1)
+
+    for bad_override, expected_code, expected_field in (
+        ({"mode": "unsupported"}, "TASK-REQ-007", "mode"),
+        ({"precision": "low"}, "TASK-REQ-007", "precision"),
+        ({"evaluator": "missing.evaluator@1.0.0"}, "TASK-REQ-007", "evaluator"),
+        ({"options": {"unknown": 1}}, "TASK-REQ-007", "options"),
+        ({"solver": "other.solver@1.0.0"}, "TASK-REQ-008", "solver"),
+    ):
+        with pytest.raises(InvalidRequestError) as exc_info:
+            _resolve_execution_refs(_body(**bad_override), gen_reg, project_id=1)
+        assert exc_info.value.code == expected_code
+        assert exc_info.value.location["field"] == expected_field

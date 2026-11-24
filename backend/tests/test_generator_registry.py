@@ -499,6 +499,32 @@ def test_unified_algorithm_descriptor_and_registry_capability_checks() -> None:
 
     # 分步生成器目录不接受一体化配置，反之亦然
     gen_registry = build_registry([_provider()])
+    with pytest.raises(ComputationUnavailableError) as exc_gen_ev:
+        gen_registry.resolve(_config(evaluator="missing.evaluator@1.0.0"))
+    assert exc_gen_ev.value.reason == "incompatible-evaluator"
+    assert gen_registry.resolve(_config(evaluator="acme.result-adapter@1.0.0")).ref == GENERATOR
+
+    # 未声明 evaluators/result_adapter 的一体化算法拒绝任何显式 evaluator (fail-closed)
+    no_ev_algo = AlgorithmDescriptor(
+        algorithm_id="acme.algorithm.no_ev",
+        version="1.0.0",
+        parameters_schema={"type": "object", "additionalProperties": False},
+    )
+    no_ev_reg = build_algorithm_registry([_FakeAlgorithmProvider(no_ev_algo)])
+    with pytest.raises(ComputationUnavailableError) as exc_no_ev:
+        no_ev_reg.resolve(
+            CalculationConfig(
+                mode="planning",
+                algorithm=no_ev_algo.ref,
+                evaluator="missing.evaluator@1.0.0",
+                precision="medium",
+                time_limit_seconds=600,
+                options={},
+                outputs=["solution"],
+            )
+        )
+    assert exc_no_ev.value.reason == "incompatible-evaluator"
+
     with pytest.raises(ValueError, match="generator 为 None"):
         gen_registry.resolve(good)
     with pytest.raises(ValueError, match="algorithm 为 None"):
