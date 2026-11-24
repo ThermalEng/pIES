@@ -45,7 +45,6 @@ from iesplan.api import tasks as tasks_api  # noqa: E402
 from iesplan.api.config import config_router  # noqa: E402
 from iesplan.api.datasets import router as datasets_router  # noqa: E402
 from iesplan.api.deps import get_request_db  # noqa: E402
-from iesplan.bootstrap import assemble_compute_worker  # noqa: E402
 from iesplan.computation import NAIVE_PREDICTOR_REF  # noqa: E402
 from iesplan.db import Base  # noqa: E402
 from iesplan.devices import is_device_data_csv  # noqa: E402
@@ -104,9 +103,11 @@ def client(engine: Engine, db: Session, tmp_path: Path) -> Iterator[TestClient]:
         yield test_client
 
 
-@pytest.fixture(scope="module")
-def plane():
-    return assemble_compute_worker().compute_execution_plane()
+@pytest.fixture()
+def plane(tmp_path: Path):
+    from stage_testkit import build_test_compute_plane
+
+    return build_test_compute_plane(tmp_path / "stages")
 
 
 BASE_META = [

@@ -112,7 +112,7 @@ def _predict_round(
     ctx: RunContext, plane: Any, snapshot: Any,
     previous: Mapping[str, object] | None,
 ) -> tuple[tuple, tuple]:
-    """复用已保存预测，否则计算实际预测并另经短事务保存产物。"""
+    """复用已保存预测，否则经容器预测阶段执行并在清理前保存检查点。"""
     saved = worker_app.run_worker_transaction(
         ctx.session_factory, worker_app.load_prediction_checkpoint,
         ctx.claim, 1,
@@ -120,14 +120,21 @@ def _predict_round(
     if saved is not None:
         ctx.prediction_artifacts[1] = saved[2]
         return saved[:2]
-    series, predicted = worker_app.run_worker_transaction(
-        ctx.session_factory, worker_app.predict_target_round,
-        plane, ctx.task.project_id, snapshot, previous=previous,
+    series, predicted, artifacts = worker_app.predict_round_stage(
+        plane=plane,
+        task_project_id=ctx.task.project_id,
+        snapshot=snapshot,
+        claim=ctx.claim,
+        number=1,
+        session_factory=ctx.session_factory,
+        save_checkpoint=worker_app.save_prediction_checkpoint,
+        save_group_checkpoint=worker_app.save_prediction_group_checkpoint,
+        publish_combined_checkpoint=worker_app.publish_prediction_checkpoint_with_artifacts,
+        previous=previous,
+        stop=_stop_probe(ctx),
+        on_stage_resources=ctx.update_stage_resources,
     )
-    ctx.prediction_artifacts[1] = worker_app.run_worker_transaction(
-        ctx.session_factory, worker_app.save_prediction_checkpoint,
-        ctx.claim, 1, series, predicted,
-    )
+    ctx.prediction_artifacts[1] = artifacts
     return series, predicted
 
 
@@ -135,7 +142,7 @@ def _predict_selected_round(
     ctx: RunContext, plane: Any, snapshot: Any,
     entries: tuple, previous: Mapping[str, object] | None, number: int,
 ) -> tuple[tuple, tuple]:
-    """耦合轮次复用已保存产物，否则计算指定条目并提交本轮检查点。"""
+    """耦合轮次复用已保存产物，否则经容器预测阶段执行并提交本轮检查点。"""
     saved = worker_app.run_worker_transaction(
         ctx.session_factory, worker_app.load_prediction_checkpoint,
         ctx.claim, number,
@@ -143,14 +150,22 @@ def _predict_selected_round(
     if saved is not None:
         ctx.prediction_artifacts[number] = saved[2]
         return saved[:2]
-    series, predicted = worker_app.run_worker_transaction(
-        ctx.session_factory, worker_app.predict_selected_round,
-        plane, ctx.task.project_id, snapshot, entries, previous=previous,
+    series, predicted, artifacts = worker_app.predict_round_stage(
+        plane=plane,
+        task_project_id=ctx.task.project_id,
+        snapshot=snapshot,
+        claim=ctx.claim,
+        number=number,
+        session_factory=ctx.session_factory,
+        save_checkpoint=worker_app.save_prediction_checkpoint,
+        save_group_checkpoint=worker_app.save_prediction_group_checkpoint,
+        publish_combined_checkpoint=worker_app.publish_prediction_checkpoint_with_artifacts,
+        entries=entries,
+        previous=previous,
+        stop=_stop_probe(ctx),
+        on_stage_resources=ctx.update_stage_resources,
     )
-    ctx.prediction_artifacts[number] = worker_app.run_worker_transaction(
-        ctx.session_factory, worker_app.save_prediction_checkpoint,
-        ctx.claim, number, series, predicted,
-    )
+    ctx.prediction_artifacts[number] = artifacts
     return series, predicted
 
 
@@ -159,40 +174,31 @@ def _solve_round(
     materialized: Any, finance: Any, config: Any, evaluation: Any, attempt: Any,
     number: int = 1,
 ) -> tuple:
-    """单轮求解: 生成 → 执行(含回执分流) → 适配 → 业务结局。
-
-    每轮回执独立判定: cancelled → TaskCancelled, timed_out → TaskTimedOut,
-    fenced → LeaseFenced（不写终态）, 其他非成功/不可映射 → EngineRunError。生成后与回执判定后
-    分别写进度（判定前不写 execute 进度）。评价确认逐轮透传同一冻结值，
-    不读最新草稿。返回 (bundle, receipt, collected, result, outcome, sealed_files)。
-    """
+    """单轮求解: 容器化生成 → 容器化执行(含回执分流) → 容器化适配 → 业务结局。"""
     ctx.checkpoint("restore_round")
     saved = worker_app.run_worker_transaction(
         ctx.session_factory, worker_app.restore_round,
         ctx.claim, number,
     )
     if saved is None:
-        bundle = worker_app.generate_bundle(
+        worker_app.generate_bundle(
             plane, snapshot, artifact, models, materialized, finance, config, evaluation,
-            stop=_stop_probe(ctx))
-        generated_id, bundle_refs = worker_app.run_worker_transaction(
-            ctx.session_factory, worker_app.save_bundle_checkpoint,
-            ctx.claim, number, bundle, attempt,
+            attempt=attempt, claim=ctx.claim, number=number,
+            session_factory=ctx.session_factory,
+            save_checkpoint=worker_app.save_bundle_checkpoint,
+            stop=_stop_probe(ctx),
+            on_stage_resources=ctx.update_stage_resources,
         )
-        # Replace generator-owned content after publication; release its matrix/metadata.
-        del bundle
         saved = worker_app.run_worker_transaction(
             ctx.session_factory, worker_app.restore_round,
             ctx.claim, number,
         )
-        bundle = saved.bundle
-    else:
-        bundle = saved.bundle
-        generated_id = saved.generated_id
-        bundle_refs = saved.files["bundle_files"]
-        attempt = replace(attempt, bundle_id=saved.bundle_id)
+    bundle = saved.bundle
+    generated_id = saved.generated_id
+    bundle_refs = saved.files["bundle_files"]
+    attempt = replace(attempt, bundle_id=saved.bundle_id)
     ctx.progress(40.0, "generate", None)
-    if saved is not None and saved.receipt is not None:
+    if saved.receipt is not None:
         receipt, collected = saved.receipt, saved.outputs
         solution_refs = saved.files["solution"]
     else:
@@ -200,16 +206,25 @@ def _solve_round(
             plane=plane, bundle=bundle, attempt=attempt, claim=ctx.claim, number=number,
             generated_id=generated_id, session_factory=ctx.session_factory, stop=_stop_probe(ctx),
         )
+    ctx.update_stage_resources(receipt.resource_usage)
     _raise_for_receipt_status(receipt)
     ctx.progress(85.0, "execute", {"receipt_status": receipt.status})
-    result = worker_app.adapt_result(plane, bundle, receipt, collected)
+    evaluated = worker_app.adapt_result(
+        plane, bundle, receipt, collected,
+        claim=ctx.claim, number=number, finance=finance, snapshot=snapshot,
+        session_factory=ctx.session_factory,
+        save_checkpoint=worker_app.save_evaluation_checkpoint,
+        stop=_stop_probe(ctx),
+    )
+    ctx.update_stage_resources(evaluated.resources)
+    result = evaluated.result
     outcome = worker_app.business_outcome_for(result)
     if outcome is None:
         raise EngineRunError(
             f"统一结果无法映射业务结局(execution={result.execution_status}, "
             f"math={result.math_status}, receipt={receipt.receipt_id})"
         )
-    return bundle, receipt, collected, result, outcome, {
+    return bundle, receipt, collected, evaluated, outcome, {
         "bundle_files": bundle_refs, "solution": solution_refs,
     }
 
@@ -299,9 +314,43 @@ def _execute_compute(ctx: RunContext) -> tuple[dict, dict]:
     # 配置与绑定双向覆盖），由应用层合并构成，不复核。
     completed = worker_app.complete_materialized(materialized, predicted_series)
     attempt = worker_app.build_attempt_context(task, ctx.claim, snapshot)
+    if config.algorithm is not None:
+        evaluated = worker_app.run_algorithm_stage(
+            plane=plane,
+            attempt=attempt,
+            claim=ctx.claim,
+            snapshot=snapshot,
+            artifact=artifact,
+            materialized=completed,
+            finance=finance,
+            config=config,
+            session_factory=ctx.session_factory,
+            save_checkpoint=worker_app.save_algorithm_checkpoint,
+            stop=_stop_probe(ctx),
+        )
+        ctx.update_stage_resources(evaluated.resources)
+        result = evaluated.result
+        outcome = worker_app.business_outcome_for(result)
+        if outcome is None:
+            raise EngineRunError(
+                f"一体化结果无法映射业务结局(execution={result.execution_status}, "
+                f"math={result.math_status})"
+            )
+        output_files: dict[str, Any] = {}
+        payload: dict[str, Any] = {
+            "outcome": outcome,
+            "compute_result": result.to_mapping(),
+        }
+        hourly_files = worker_app.hourly_files_from_payload(evaluated.hourly_series)
+        if hourly_files:
+            output_files["hourly"] = hourly_files
+        if evaluated.financial_evaluation is not None:
+            payload["financial_evaluation"] = dict(evaluated.financial_evaluation)
+        return payload, output_files
     rounds_log: list[dict] = []
-    bundle, receipt, collected, result, outcome, sealed = _solve_round(
+    bundle, receipt, collected, evaluated, outcome, sealed = _solve_round(
         ctx, plane, snapshot, artifact, models, completed, finance, config, evaluation, attempt)
+    result = evaluated.result
     rounds_log.append({
         "round": 1, "phase": "phase1",
         "manifest": bundle.manifest.to_dict(), "receipt": receipt, "files": sealed,
@@ -328,9 +377,10 @@ def _execute_compute(ctx: RunContext) -> tuple[dict, dict]:
             completed = worker_app.complete_materialized(
                 materialized, independent_series + new_series)
             del bundle, collected  # 前轮仅保留对象引用，不与新轮大矩阵同时常驻。
-            bundle, receipt, collected, result, outcome, sealed = _solve_round(
+            bundle, receipt, collected, evaluated, outcome, sealed = _solve_round(
                 ctx, plane, snapshot, artifact, models, completed,
                 finance, config, evaluation, attempt, prediction_rounds)
+            result = evaluated.result
             solve_rounds += 1
             current_coupled = {(item.device, item.interface): item for item in new_predicted}
             aggregate, records = worker_app.convergence_for_round(
@@ -466,19 +516,13 @@ def _execute_compute(ctx: RunContext) -> tuple[dict, dict]:
         ctx.sealed_output_files["round_history"] = history_refs
         payload["rounds"] = rounds
         payload["authoritative_round"] = solve_rounds
-    # 统一求解步序列对象(0.14-R5/R6): 只对最终轮结果已恢复的统一序列
-    # 序列化, 随 output_files 进同一证据封存/提交单元；无序列(缺 solution
-    # 输出/metrics-only/无可发布步变量)即无文件, 不伪造。
+    # 直接发布评价器容器产出的 hourly_series 与 financial_evaluation（不在控制面重算）。
     del bundle, collected, materialized, completed, models, artifact
-    hourly_files = worker_app.build_hourly_files(result.outputs)
+    hourly_files = worker_app.hourly_files_from_payload(evaluated.hourly_series)
     if hourly_files:
         output_files["hourly"] = hourly_files
-    # 同次解财务事实投影与封存评价: 只对最终轮已求解结果投影, 随
-    # payload 进同一证据封存/提交单元；未求解或缺 solution 输出返回
-    # None（不写财务块，不伪造）；配套事实缺件即实际错误可见失败。
-    financial = worker_app.build_financial_evaluation(snapshot, finance, result)
-    if financial is not None:
-        payload["financial_evaluation"] = financial
+    if evaluated.financial_evaluation is not None:
+        payload["financial_evaluation"] = dict(evaluated.financial_evaluation)
     return payload, output_files
 
 
@@ -561,12 +605,16 @@ def run_task(
         raise SnapshotInputError("任务不存在", params={"task_id": claim.task_id})
 
     def _report_progress(percent: float, stage: str, detail: dict | None) -> None:
-        # 每次进度各自新短会话短事务, 提交后即刻对其他会话可见
+        # 每次进度各自新短会话短事务, 提交后即刻对其他会话可见;
+        # worker_resources 上报已观测到的阶段容器 cgroup v2 指标, 不伪造控制面进程指标。
+        payload_detail = dict(detail or {})
+        if ctx.stage_resources:
+            payload_detail["worker_resources"] = dict(ctx.stage_resources)
         accepted = worker_app.run_worker_transaction(
             factory,
             lambda db: worker_app.report_attempt_progress(
                 db, claim.attempt_id, claim.lease_token, task.id, percent, stage,
-                {**(detail or {}), "worker_resources": worker_app.observe_local_resources().to_dict()},
+                payload_detail or None,
             ),
         )
         if not accepted:
@@ -618,6 +666,31 @@ def run_task(
         if exc.reason == "fenced":
             return "fenced"
         return _handle_failure(factory, ctx, claim, exc)
+    except worker_app.StageExecutionError as exc:
+        if exc.status == "cancelled":
+            return _handle_cancel(factory, ctx, claim, exc.stage)
+        if exc.status == "fenced":
+            logger.warning("阶段租约隔离，丢弃本次执行结果: task=%s stage=%s", task.id, exc.stage)
+            return "fenced"
+        if exc.status == "timed_out":
+            try:
+                worker_app.run_worker_transaction(
+                    factory, worker_app.timeout_attempt, claim, message=exc.detail,
+                )
+            except worker_app.LeaseRejectedError:
+                return "lease_rejected"
+            return "timed_out"
+        if exc.status == "oom":
+            try:
+                worker_app.run_worker_transaction(
+                    factory, worker_app.fail_resource_attempt, claim,
+                    cause=exc.detail,
+                    resources=dict(exc.resources or ctx.stage_resources),
+                )
+            except worker_app.LeaseRejectedError:
+                return "lease_rejected"
+            return "failed"
+        return _handle_failure(factory, ctx, claim, EngineRunError(exc.detail))
     except (
         worker_app.LeaseRejectedError, SnapshotInputError, EngineRunError,
         AppError,
@@ -628,7 +701,7 @@ def run_task(
             worker_app.run_worker_transaction(
                 factory, worker_app.fail_resource_attempt, claim,
                 cause=type(exc).__name__ + (f": {exc}" if str(exc) else ""),
-                resources=worker_app.observe_local_resources().to_dict(),
+                resources=dict(ctx.stage_resources),
             )
         except worker_app.LeaseRejectedError:
             return "lease_rejected"

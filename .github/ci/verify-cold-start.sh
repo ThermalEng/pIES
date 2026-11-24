@@ -24,5 +24,5 @@ trap 'docker compose "${compose[@]}" logs --no-color --tail=120 || true' ERR
 echo "Cold-start matrix round $round/3 on fresh PostgreSQL, Redis, and data"
 bash .github/ci/start-stack.sh
 docker compose "${compose[@]}" ps
-echo "Cold-start matrix round $round/3 passed: API and both workers initialized"
+echo "Cold-start matrix round $round/3 passed: 5-container stack initialized"
 # Cleanup is performed by the workflow's if:always() step on this runner.

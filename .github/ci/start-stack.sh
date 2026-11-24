@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Staged app startup shared by browser checks and cold-start verification.
+# Staged 5-container app startup shared by browser checks and cold-start verification.
 set -euo pipefail
 : "${CI_TEST_DATA_DIR:?Set CI_TEST_DATA_DIR to an isolated disposable directory}"
 mkdir -p "$CI_TEST_DATA_DIR"
@@ -18,32 +18,9 @@ if [[ "${CI_DOCKER_CACHE:-false}" == "true" ]]; then
     compose+=(-f .github/ci/docker-compose-cache-write.yml)
   fi
 fi
-# Start just the API and its healthy DB/Redis dependencies. This initializes
-# the schema and seeds the admin before either background worker enters.
-docker compose "${compose[@]}" up -d --build --wait backend
-docker compose "${compose[@]}" up -d --build --wait web io_worker compute_worker
-
-# Worker services have no Docker healthcheck. Their process can be "running"
-# before the bootstrap assembly is complete; require a post-assembly signal.
-for spec in "io_worker:io" "compute_worker:compute"; do
-  service="${spec%%:*}"
-  worker_type="${spec#*:}"
-  ready=false
-  for attempt in $(seq 1 60); do
-    container_id="$(docker compose "${compose[@]}" ps -q "$service")"
-    if [[ -n "$container_id" ]] &&
-       [[ "$(docker inspect --format '{{.State.Running}}' "$container_id")" == "true" ]] &&
-       docker compose "${compose[@]}" logs --no-color "$service" 2>&1 |
-         grep -F "Worker 启动:" | grep -Fq "type=$worker_type"; then
-      ready=true
-      break
-    fi
-    sleep 1
-  done
-  if [[ "$ready" != "true" ]]; then
-    echo "Worker $service did not finish bootstrap and enter the loop" >&2
-    docker compose "${compose[@]}" logs --no-color --tail=120 "$service" >&2
-    exit 1
-  fi
-  echo "$service assembled and started ($worker_type)"
-done
+# Provision the official built-in stage image before starting Compose readiness checks.
+docker build -f plugins/Dockerfile -t pies-builtin-stages:1.1.5 .
+# Start healthy DB/Redis/job_runner, then backend (which initializes schema,
+# seeds admin, and starts the embedded scheduler), and finally web.
+docker compose "${compose[@]}" up -d --build --wait postgres redis job_runner backend web
+echo "5-container stack healthy (postgres, redis, job_runner, backend, web)"

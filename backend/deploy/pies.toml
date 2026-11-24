@@ -14,6 +14,8 @@
 compute_slots = 2
 # IO 任务并发槽数（导入导出等 IO 任务与计算任务共用租约槽位表）
 io_slots = 2
+# 插件镜像后台构建并发槽数
+build_slots = 1
 
 [session]
 # 用户无操作的会话期限（分钟）；真实操作续期，后台轮询不续期
@@ -38,3 +40,13 @@ allowed_environment_vars = []
 # 新建计算配置表单 time_limit_seconds 初值：12 小时（秒）。保存后该值
 # 属于项目 CalculationConfig revision，部署配置变更不得改写历史输入。
 time_limit_seconds = 43200
+
+[stage]
+# 内置计算阶段容器镜像精确引用
+builtin_image = "pies-builtin-stages:1.1.5"
+# 临时计算容器进程数上限
+pids_limit = 256
+# 临时计算容器 /tmp tmpfs 大小上限（MiB）
+tmpfs_size_mb = 512
+# 停止/取消临时容器宽限（秒）
+stop_grace_seconds = 5

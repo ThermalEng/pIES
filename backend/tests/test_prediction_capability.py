@@ -51,7 +51,6 @@ from iesplan.application.tasks.submissions import (  # noqa: E402
     submit_task,
 )
 from iesplan.assembly.contracts import ValidatedAssemblyArtifact, ValidationReceipt  # noqa: E402
-from iesplan.bootstrap import assemble_compute_worker  # noqa: E402
 from iesplan.computation import (  # noqa: E402
     NAIVE_PREDICTOR,
     NAIVE_PREDICTOR_REF,
@@ -123,9 +122,11 @@ def client(engine: Engine, db: Session, tmp_path: Path) -> Iterator[TestClient]:
         yield test_client
 
 
-@pytest.fixture(scope="module")
-def plane():
-    return assemble_compute_worker().compute_execution_plane()
+@pytest.fixture()
+def plane(tmp_path: Path):
+    from stage_testkit import build_test_compute_plane
+
+    return build_test_compute_plane(tmp_path / "stages")
 
 
 class _StrictPredictor:
@@ -1185,11 +1186,11 @@ class TestPredictEndToEnd:
             generator_registry=plane.generator_registry,
             predictor_registry=registry,
         )
-        chase_plane = worker_app.ComputeExecutionPlane(
+        from stage_testkit import build_test_compute_plane
+
+        chase_plane = build_test_compute_plane(
+            plane.stage_runner.stage_root,
             generator_registry=plane.generator_registry,
-            executor_registry=plane.executor_registry,
-            adapter_registry=plane.adapter_registry,
-            runtime=plane.runtime,
             predictor_registry=registry,
         )
         claim = _claim(db, task.id)
@@ -1205,11 +1206,11 @@ class TestPredictEndToEnd:
             adaptations = []
             native_adapt = worker_app.adapt_result
 
-            def adapt(*args):
+            def adapt(*args, **kwargs):
                 adaptations.append(args[2].receipt_id)
                 if len(adaptations) == 2:
                     raise SystemExit("simulated exit during coupled round 2")
-                return native_adapt(*args)
+                return native_adapt(*args, **kwargs)
 
             monkeypatch.setattr(worker_app, "adapt_result", adapt)
             with pytest.raises(SystemExit, match="coupled round 2"):
@@ -1434,11 +1435,11 @@ class TestPredictEndToEnd:
             )
 
         def _chase_plane():
-            return worker_app.ComputeExecutionPlane(
+            from stage_testkit import build_test_compute_plane
+
+            return build_test_compute_plane(
+                plane.stage_runner.stage_root,
                 generator_registry=plane.generator_registry,
-                executor_registry=plane.executor_registry,
-                adapter_registry=plane.adapter_registry,
-                runtime=plane.runtime,
                 predictor_registry=registry,
             )
 
@@ -1616,11 +1617,11 @@ class TestPredictEndToEnd:
             generator_registry=plane.generator_registry,
             predictor_registry=registry,
         )
-        chase_plane = worker_app.ComputeExecutionPlane(
+        from stage_testkit import build_test_compute_plane
+
+        chase_plane = build_test_compute_plane(
+            plane.stage_runner.stage_root,
             generator_registry=plane.generator_registry,
-            executor_registry=plane.executor_registry,
-            adapter_registry=plane.adapter_registry,
-            runtime=plane.runtime,
             predictor_registry=registry,
         )
         claim = _claim(db, task.id)
@@ -1693,11 +1694,11 @@ class TestPredictEndToEnd:
             generator_registry=plane.generator_registry,
             predictor_registry=registry,
         )
-        contractor_plane = worker_app.ComputeExecutionPlane(
+        from stage_testkit import build_test_compute_plane
+
+        contractor_plane = build_test_compute_plane(
+            plane.stage_runner.stage_root,
             generator_registry=plane.generator_registry,
-            executor_registry=plane.executor_registry,
-            adapter_registry=plane.adapter_registry,
-            runtime=plane.runtime,
             predictor_registry=registry,
         )
         claim = _claim(db, task.id)
@@ -1803,11 +1804,11 @@ class TestPredictEndToEnd:
             generator_registry=plane.generator_registry,
             predictor_registry=registry,
         )
-        chase_plane = worker_app.ComputeExecutionPlane(
+        from stage_testkit import build_test_compute_plane
+
+        chase_plane = build_test_compute_plane(
+            plane.stage_runner.stage_root,
             generator_registry=plane.generator_registry,
-            executor_registry=plane.executor_registry,
-            adapter_registry=plane.adapter_registry,
-            runtime=plane.runtime,
             predictor_registry=registry,
         )
         claim = _claim(db, task.id)

@@ -142,8 +142,10 @@ def test_spawned_attempt_completes_real_solve_and_seals_results(tmp_path, monkey
     from iesplan.tasks.persistence import Task, TaskAttempt
 
     url = f"sqlite+pysqlite:///{tmp_path}/task.db"
+    stage_root = tmp_path / "stages"
     monkeypatch.setenv("IESPLAN_DB_URL", url)
     monkeypatch.setenv("IESPLAN_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("IESPLAN_STAGE_ROOT", str(stage_root))
     monkeypatch.setattr(settings, "data_dir", tmp_path)
     engine = create_engine(url, connect_args={"check_same_thread": False})
     Base.metadata.create_all(engine)
@@ -158,41 +160,45 @@ def test_spawned_attempt_completes_real_solve_and_seals_results(tmp_path, monkey
             task_id = _submit_calc_task(client, db, dict(_CONFIG_BODY), dict(PLANNING_BODY))
         snapshot_id = db.get(Task, task_id).calc_snapshot_id
     log_path = tmp_path / "worker.log"
-    with log_path.open("w") as log:
-        process = subprocess.Popen(
-            [sys.executable, "-m", "iesplan.worker.main", "--worker-type", "compute"],
-            stdout=log, stderr=subprocess.STDOUT, text=True,
-        )
-    try:
-        deadline = time.monotonic() + 60
-        while process.poll() is None and time.monotonic() < deadline:
-            with factory() as db:
-                if db.get(Task, task_id).status == "completed":
-                    break
-            time.sleep(0.05)
-        with factory() as db:
-            task = db.get(Task, task_id)
-            assert (task.status, task.business_outcome) == (
-                "completed", "normal_completion",
-            ), log_path.read_text()
-            assert (task.calc_snapshot_id, task.attempt_count) == (snapshot_id, 1)
-            attempt = db.scalar(select(TaskAttempt).where(TaskAttempt.task_id == task_id))
-            assert attempt.status == "succeeded"
-            evidence = db.scalar(select(EvidencePackage).where(EvidencePackage.task_id == task_id))
-            assert evidence.attempt_id == attempt.id
-            assert db.scalar(select(ResultIndex).where(ResultIndex.evidence_package_id == evidence.id))
-            sealed = json.loads(get_object(db, evidence.object_id))
-            assert sealed["compute_result"]["math_status"] == "solved"
-            assert sealed["receipt"]["status"] == "succeeded"
-            assert sealed["receipt"]["attempt_id"] == str(attempt.id)
-    finally:
-        process.terminate()
+    from stage_testkit import serve_mock_job_runner
+
+    with serve_mock_job_runner(stage_root) as job_runner_url:
+        monkeypatch.setenv("IESPLAN_JOB_RUNNER_URL", job_runner_url)
+        with log_path.open("w") as log:
+            process = subprocess.Popen(
+                [sys.executable, "-m", "iesplan.worker.main", "--worker-type", "compute"],
+                stdout=log, stderr=subprocess.STDOUT, text=True,
+            )
         try:
-            process.wait(timeout=40)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.wait()
-        engine.dispose()
+            deadline = time.monotonic() + 60
+            while process.poll() is None and time.monotonic() < deadline:
+                with factory() as db:
+                    if db.get(Task, task_id).status == "completed":
+                        break
+                time.sleep(0.05)
+            with factory() as db:
+                task = db.get(Task, task_id)
+                assert (task.status, task.business_outcome) == (
+                    "completed", "normal_completion",
+                ), log_path.read_text()
+                assert (task.calc_snapshot_id, task.attempt_count) == (snapshot_id, 1)
+                attempt = db.scalar(select(TaskAttempt).where(TaskAttempt.task_id == task_id))
+                assert attempt.status == "succeeded"
+                evidence = db.scalar(select(EvidencePackage).where(EvidencePackage.task_id == task_id))
+                assert evidence.attempt_id == attempt.id
+                assert db.scalar(select(ResultIndex).where(ResultIndex.evidence_package_id == evidence.id))
+                sealed = json.loads(get_object(db, evidence.object_id))
+                assert sealed["compute_result"]["math_status"] == "solved"
+                assert sealed["receipt"]["status"] == "succeeded"
+                assert sealed["receipt"]["attempt_id"] == str(attempt.id)
+        finally:
+            process.terminate()
+            try:
+                process.wait(timeout=40)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+            engine.dispose()
     assert process.returncode == 0, log_path.read_text()
 
 

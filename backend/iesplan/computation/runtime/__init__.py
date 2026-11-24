@@ -3,8 +3,8 @@
 公开 ExecutorProvider 身份与唯一调用形状、描述符、原子注册表，
 执行层消费的 attempt 上下文、部署策略、具体通用 ``SolverRuntime``，
 以及真实本地进程 ``LocalProcessProvider`` 与 executable 绑定。
-执行器选择与装配只归 bootstrap 组合根；API/Worker 不得自行发现或动态
-加载 provider。无可用 provider 时统一抛 ``ComputationUnavailableError``。
+容器代理客户端 (``job_runner_client``) 与 6 步容器阶段运行器 (``stage_runner``)
+位于显式子模块，不在本包顶层惰性重导出以免在纯计算容器内触发 ``httpx`` 依赖。
 """
 
 from iesplan.computation.runtime.context import AttemptContext

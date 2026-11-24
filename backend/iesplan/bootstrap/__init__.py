@@ -65,51 +65,35 @@ class ApplicationContext:
     #: 已发布的预测算法目录(未装配该能力时为 None; 内置朴素 predictor
     #: 由组合根显式注册，未知引用选择时即明确不可用)
     predictor_registry: Any | None = None
-    #: 已发布的执行器目录(只归计算 Worker 装配; API 不装配执行面)
-    executor_registry: Any | None = None
-    #: 已发布的结果适配器目录(只归计算 Worker 装配)
-    result_adapter_registry: Any | None = None
-    #: 通用求解运行时(只归计算 Worker 装配)
-    solver_runtime: Any | None = None
-    #: 统一 Settings 派生的部署执行策略(只归计算 Worker 装配)
-    deployment_policy: Any | None = None
+    #: 内置计算阶段容器描述符目录
+    builtin_stage_catalog: Any | None = None
+    #: 临时计算容器执行策略(来自 pies.toml)
+    container_stage_policy: Any | None = None
+    #: job_runner 代理客户端(仅配置 IESPLAN_JOB_RUNNER_URL 时装配)
+    job_runner_client: Any | None = None
+    #: 6 步临时容器阶段执行器(仅配置 IESPLAN_JOB_RUNNER_URL 时装配)
+    stage_runner: Any | None = None
 
     def compute_execution_plane(self) -> Any | None:
-        """计算执行面句柄：生成器/执行器/适配器/预测目录与运行时五件齐备才装配。
-
-        任一缺席返回 None（计算 Worker 构造即拒绝，不领取任务）。
-        """
+        """容器计算执行面句柄：生成器/预测目录与容器阶段目录/执行器齐备才装配。"""
         if (
             self.generator_registry is None
-            or self.executor_registry is None
-            or self.result_adapter_registry is None
-            or self.solver_runtime is None
             or self.predictor_registry is None
+            or self.builtin_stage_catalog is None
+            or self.stage_runner is None
         ):
             return None
         from iesplan.application.worker import ComputeExecutionPlane
 
         return ComputeExecutionPlane(
             generator_registry=self.generator_registry,
-            executor_registry=self.executor_registry,
-            adapter_registry=self.result_adapter_registry,
-            runtime=self.solver_runtime,
             predictor_registry=self.predictor_registry,
+            stage_runner=self.stage_runner,
+            stage_catalog=self.builtin_stage_catalog,
         )
 
     def health(self) -> dict[str, str]:
-        """各已装配依赖的健康状态(值仅为 ``"ok"`` 或 ``"unavailable"``)。
-
-        - ``db``: 始终上报(会话 SELECT 1 探活);
-        - ``storage`` / ``registry`` / ``generators`` / ``executors``:
-          仅在装配了该能力时上报; 未装配(能力子集, 如 Worker 上下文)
-          时不出现该键, 不伪装健康。
-        - ``generators`` / ``executors`` 只探针目录本身可确定性快照
-          (装配健康), 空表仍为 ``"ok"``; 未注册引用不可用语义在选择时
-          表达(``get``/``resolve`` 抛 ``ComputationUnavailableError``),
-          不污染就绪状态。
-        探针失败原因只进日志, 不进入返回值(避免内部细节外泄)。
-        """
+        """各已装配依赖的健康状态(值仅为 ``"ok"`` 或 ``"unavailable"``)。"""
         result: dict[str, str] = {}
         result["db"] = "ok" if _check_database(self.session_factory) else "unavailable"
         if self.storage is not None:
@@ -120,9 +104,13 @@ class ApplicationContext:
             result["generators"] = (
                 "ok" if _check_generator_registry(self.generator_registry) else "unavailable"
             )
-        if self.executor_registry is not None:
-            result["executors"] = (
-                "ok" if _check_executor_registry(self.executor_registry) else "unavailable"
+        if self.builtin_stage_catalog is not None:
+            result["stages"] = (
+                "ok" if _check_stage_catalog(self.builtin_stage_catalog) else "unavailable"
+            )
+        if self.job_runner_client is not None:
+            result["job_runner"] = (
+                "ok" if _check_job_runner(self.job_runner_client) else "unavailable"
             )
         return result
 
@@ -191,81 +179,40 @@ def _check_generator_registry(registry: Any) -> bool:
         return False
 
 
-def _check_executor_registry(registry: Any) -> bool:
-    """执行器目录装配检查: 已发布目录可给出确定性快照(语义同生成器目录)。"""
+def _check_stage_catalog(catalog: Any) -> bool:
+    """内置容器阶段目录检查: 至少包含四个内置阶段描述符。"""
     try:
-        registry.snapshot()
-        return True
+        return len(catalog.snapshot()) >= 4
     except Exception:
-        logger.exception("组合根执行器目录探活失败")
+        logger.exception("组合根内置阶段目录探活失败")
         return False
 
 
-def _deployment_policy_from_settings() -> Any:
-    """从统一 Settings 构造部署执行策略(组合根唯一装配点，不复制常量)。
+def _check_job_runner(client: Any) -> bool:
+    """job_runner 代理可达性检查: 失败如实返回 False, 绝不伪造 ok。"""
+    try:
+        payload = client.check_ready()
+        return isinstance(payload, dict) and payload.get("status") in ("ready", "ok")
+    except Exception:
+        logger.exception("组合根 job_runner 探活失败")
+        return False
 
-    数值与 allowlist 全部取自 pies.toml 经 Settings 类型化的部署值；
-    Settings 缺失/非法在进程启动时已失败，此处直接装配、不重复校验。
-    """
-    from iesplan.computation.runtime import DeploymentPolicy
+
+def _container_stage_policy_from_settings() -> Any:
+    """从统一 Settings 构造临时容器阶段策略(唯一权威来自 pies.toml)。"""
+    from iesplan.computation.runtime.stage_runner import ContainerStagePolicy
     from iesplan.config import settings
 
-    return DeploymentPolicy(
-        executables=tuple(settings.solver_allowed_executables),
-        environment_vars=tuple(settings.solver_allowed_environment_vars),
-        max_timeout_seconds=settings.solver_max_timeout_seconds,
-        max_memory_mib=settings.solver_max_memory_mib,
-        max_cpu_cores=settings.solver_max_cpu_cores,
-        allow_network=settings.solver_allow_network,
+    return ContainerStagePolicy(
+        builtin_image=settings.stage_builtin_image,
+        cpu_cores=float(settings.solver_max_cpu_cores),
+        memory_mb=int(settings.solver_max_memory_mib),
+        pids_limit=int(settings.stage_pids_limit),
+        tmpfs_size_mb=int(settings.stage_tmpfs_size_mb),
+        stop_grace_seconds=int(settings.stage_stop_grace_seconds),
+        max_timeout_seconds=float(settings.solver_max_timeout_seconds),
+        allowed_environment_vars=tuple(settings.solver_allowed_environment_vars),
     )
-
-
-def _assemble_execution_plane(policy: Any, *, check_readiness: bool) -> tuple[Any, Any, Any]:
-    """装配计算执行面三件套(执行器目录 + 适配器目录 + 通用运行时)。
-
-    HiGHS 本地进程绑定与结果适配器均为组合根显式注册的内置真实
-    provider；任一不可用(缺二进制/版本自检失败)即整体拒绝，不发布
-    半表，不回退。执行器引用取生成器声明的配套值，不另存第二份。
-    """
-    from iesplan.computation import (
-        HIGHS_ADAPTER,
-        HIGHS_ADAPTER_PATH,
-        HIGHS_EXECUTABLE_REF,
-        HIGHS_VERSION,
-        ExecutableReadiness,
-        ExecutorDescriptor,
-        LocalExecutable,
-        LocalProcessProvider,
-        SolverRuntime,
-        build_executor_registry,
-        build_result_adapter_registry,
-    )
-    from iesplan.computation.generators.highs_milp import EXECUTOR_REF
-
-    executor_id, _, executor_version = EXECUTOR_REF.rpartition("@")
-    local_provider = LocalProcessProvider(
-        ExecutorDescriptor(
-            executor_id=executor_id,
-            version=executor_version,
-            executables=(HIGHS_EXECUTABLE_REF,),
-        ),
-        (
-            LocalExecutable(
-                ref=HIGHS_EXECUTABLE_REF,
-                path=HIGHS_ADAPTER_PATH,
-                readiness=ExecutableReadiness(
-                    version=HIGHS_VERSION,
-                    self_test=("--self-test",),
-                    output_path="self-test.sol",
-                ),
-            ),
-        ),
-        base_environ={},
-    )
-    executor_registry = build_executor_registry([local_provider], check_readiness=check_readiness)
-    adapter_registry = build_result_adapter_registry([HIGHS_ADAPTER])
-    runtime = SolverRuntime(executor_registry, policy)
-    return executor_registry, adapter_registry, runtime
 
 
 def _resolve_queue_mode() -> str:
@@ -373,30 +320,41 @@ def _assemble(
 
         generator_registry = build_registry((HIGHS_MILP_PROVIDER,))
         predictor_registry = build_predictor_registry((NAIVE_PREDICTOR,))
-    # 4. 计算执行面(只归计算 Worker: 执行器/适配器目录 + 通用运行时 +
-    #    统一 Settings 派生的部署策略; 任一缺失即拒绝启动)
-    executor_registry: Any | None = None
-    result_adapter_registry: Any | None = None
-    solver_runtime: Any | None = None
-    deployment_policy: Any | None = None
-    if with_execution_plane:
-        deployment_policy = _deployment_policy_from_settings()
-        executor_registry, result_adapter_registry, solver_runtime = _assemble_execution_plane(
-            deployment_policy, check_readiness=check_readiness
+    # 4. 容器化阶段目录与 job_runner 客户端(所有计算通过 job_runner 临时容器执行)
+    builtin_stage_catalog: Any | None = None
+    container_stage_policy: Any | None = None
+    job_runner_client: Any | None = None
+    stage_runner: Any | None = None
+    if with_generators or with_execution_plane:
+        from iesplan.computation.runtime.job_runner_client import JobRunnerClient
+        from iesplan.computation.runtime.stage_runner import (
+            ContainerStageRunner,
+            build_builtin_stage_catalog,
         )
+        from iesplan.config import settings
+
+        container_stage_policy = _container_stage_policy_from_settings()
+        builtin_stage_catalog = build_builtin_stage_catalog(settings.stage_builtin_image)
+        if settings.job_runner_url.strip():
+            job_runner_client = JobRunnerClient(settings.job_runner_url.strip())
+            stage_runner = ContainerStageRunner(
+                job_runner_client,
+                stage_root=settings.stage_root,
+                policy=container_stage_policy,
+            )
     context = ApplicationContext(
         session_factory=db_module.SessionLocal,
         storage=storage,
         device_registry=device_registry,
         generator_registry=generator_registry,
         predictor_registry=predictor_registry,
-        executor_registry=executor_registry,
-        result_adapter_registry=result_adapter_registry,
-        solver_runtime=solver_runtime,
-        deployment_policy=deployment_policy,
+        builtin_stage_catalog=builtin_stage_catalog,
+        container_stage_policy=container_stage_policy,
+        job_runner_client=job_runner_client,
+        stage_runner=stage_runner,
     )
     logger.info(
-        "组合根装配完成: storage=%s registry=%s generators=%s executors=%s",
+        "组合根装配完成: storage=%s registry=%s generators=%s stage_runner=%s",
         "assembled" if storage is not None else "skipped",
         (
             f"assembled({len(device_registry.snapshot())} devices)"
@@ -408,11 +366,7 @@ def _assemble(
             if generator_registry is not None
             else "skipped"
         ),
-        (
-            f"assembled({len(executor_registry.snapshot())} executors)"
-            if executor_registry is not None
-            else "skipped"
-        ),
+        "assembled" if stage_runner is not None else "skipped",
     )
     return context
 
@@ -466,10 +420,42 @@ def assemble_task_runtime(worker_type: Literal["compute", "io"]) -> ApplicationC
     )
 
 
+def assemble_embedded_scheduler(
+    context: ApplicationContext,
+    *,
+    compute: Any = None,
+    poll_interval: float = 0.5,
+) -> Any:
+    """装配嵌入式后台调度器(仅在 IESPLAN_EMBEDDED_SCHEDULER=true 时由 lifespan 启停)。
+
+    计算、IO 与插件构建各自使用独立有界执行池，分别受 pies.toml 中
+    compute_slots / io_slots / build_slots 控制，与 HTTP 请求线程完全隔离。
+    """
+    from iesplan.config import settings
+    from iesplan.worker import EmbeddedScheduler
+
+    resolved_compute = compute if compute is not None else context.compute_execution_plane()
+    if resolved_compute is None and settings.job_runner_url.strip():
+        raise RuntimeError(
+            "EmbeddedScheduler requires a complete compute execution plane when "
+            "IESPLAN_JOB_RUNNER_URL is configured"
+        )
+    return EmbeddedScheduler(
+        session_factory=context.session_factory,
+        compute_slots=settings.compute_slots,
+        io_slots=settings.io_slots,
+        build_slots=settings.build_slots,
+        compute=resolved_compute,
+        stage_runner=context.stage_runner,
+        poll_interval=poll_interval,
+    )
+
+
 __all__ = [
     "ApplicationContext",
     "assemble_api",
     "assemble_compute_worker",
+    "assemble_embedded_scheduler",
     "assemble_io_worker",
     "assemble_task_runtime",
     "collect_immutable_tables",

@@ -335,6 +335,24 @@ def get_attempt_record(db: Session, attempt_id: int) -> TaskAttemptRecord | None
     return tasks_domain.get_attempt(db, attempt_id)
 
 
+def get_reconcilable_claim(
+    db: Session, attempt_id: int, fencing_token: str
+) -> Claim | None:
+    """Restart reconciliation check: return Claim iff attempt is running and lease token matches."""
+    attempt = tasks_domain.get_attempt(db, attempt_id)
+    if attempt is None or attempt.status != "running":
+        return None
+    lease = tasks_domain.get_active_lease_for_attempt(db, attempt_id)
+    if lease is None or str(lease.lease_token) != str(fencing_token):
+        return None
+    return Claim(
+        task_id=attempt.task_id,
+        attempt_id=attempt.id,
+        attempt_no=attempt.attempt_no,
+        lease_token=UUID(str(lease.lease_token)),
+    )
+
+
 def finish_attempt_record(
     db: Session, attempt_id: int, *, status: str, stop_reason: str | None
 ) -> TaskAttemptRecord | None:

@@ -11,11 +11,11 @@ from __future__ import annotations
 
 import json
 import os
-import sys
 import threading
 import time
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 os.environ.setdefault("IESPLAN_DB_URL", "sqlite+pysqlite://")
 os.environ.setdefault("IESPLAN_QUEUE", "memory")
@@ -44,7 +44,6 @@ from iesplan.api import tasks as tasks_api  # noqa: E402
 from iesplan.api.config import config_router  # noqa: E402
 from iesplan.api.deps import get_request_db  # noqa: E402
 from iesplan.application import worker as worker_app  # noqa: E402
-from iesplan.bootstrap import assemble_compute_worker  # noqa: E402
 from iesplan.core.diagnostics import TASK_TIMEOUT  # noqa: E402
 from iesplan.db import Base  # noqa: E402
 from iesplan.main import create_app  # noqa: E402
@@ -119,12 +118,11 @@ def client(engine: Engine, db: Session, tmp_path: Path) -> Iterator[TestClient]:
 
 
 @pytest.fixture()
-def plane():
-    """真实计算执行面(组合根装配，与 Worker 进程同一构成)。"""
-    ctx = assemble_compute_worker()
-    plane = ctx.compute_execution_plane()
-    assert plane is not None
-    return plane
+def plane(tmp_path: Path):
+    """容器化计算执行面(经 ContainerStageRunner + JobRunnerClient)。"""
+    from stage_testkit import build_test_compute_plane
+
+    return build_test_compute_plane(tmp_path / "stages")
 
 
 def _save_config_body(client: TestClient, pid: int, user, body: dict) -> int:
@@ -272,42 +270,15 @@ def _run(engine: Engine, claim: worker_app.Claim, plane) -> str:
     return runner.run_task(factory, claim, worker_id="cw-e2e", compute=plane)
 
 
-class _StubRuntime:
-    """桩运行时：返回预设状态的停止回执（只覆盖 fenced/cancelled 分流）。"""
-
-    def __init__(self, status: str) -> None:
-        self._status = status
-
-    def run(self, bundle, attempt, *, stop=None, handoff=None):
-        from iesplan.computation import ExecutionReceipt  # noqa: E402
-
-        receipt = ExecutionReceipt(
-                receipt_id=f"stub-{self._status}",
-                bundle_id=attempt.bundle_id,
-                attempt_id=attempt.attempt_id,
-                assembly_id=attempt.assembly_id,
-                calculation_config_id=attempt.calculation_config_id,
-                generator_ref="ies.generator.highs_milp@1.0.0",
-                solver_ref="ies.solver.highs@1.7.2",
-                executor_ref="ies.executor.local_process@1.0.0",
-                executable_ref="ies.solver.highs@1.7.2",
-                result_adapter_ref="ies.result-adapter.highs@1.0.0",
-                status=self._status,
-                termination_reason=self._status,
-            )
-        if handoff is not None:
-            handoff(receipt, {})
-        return receipt, {}
-
-
 def _plane_with_stub_runtime(plane, status: str):
-    """复用真实目录，仅把运行时换成预设停止回执的桩。"""
-    return worker_app.ComputeExecutionPlane(
+    """复用真实目录，仅把求解阶段容器结果覆写为预设停止状态。"""
+    from stage_testkit import build_test_compute_plane
+
+    return build_test_compute_plane(
+        plane.stage_runner.stage_root,
         generator_registry=plane.generator_registry,
-        executor_registry=plane.executor_registry,
-        adapter_registry=plane.adapter_registry,
-        runtime=_StubRuntime(status),
         predictor_registry=plane.predictor_registry,
+        stage_overrides={"solve": status},
     )
 
 
@@ -347,22 +318,23 @@ class TestComputeChainEndToEnd:
             delays.append(seconds)
             clock += seconds
 
-        original_run = type(plane.runtime).run
+        original_run_stage = plane.stage_runner.run_stage
 
-        def run_with_outage(runtime, *args, handoff, **kwargs):
-            def unavailable_during_handoff(receipt, outputs):
+        def run_with_outage(spec, *, persist, stop=None):
+            def persist_with_outage(stage_result):
                 nonlocal objects_before_outage
-                objects_before_outage = disk_objects()
-                sealed_outputs = handoff(receipt, outputs)
-                # One physical file per solver output plus the execution checkpoint.
-                assert len(disk_objects() - objects_before_outage) == len(outputs) + 1
-                return sealed_outputs
+                if spec.stage_id.startswith("solve"):
+                    objects_before_outage = disk_objects()
+                    persisted = persist(stage_result)
+                    assert len(disk_objects() - objects_before_outage) >= 2
+                    return persisted
+                return persist(stage_result)
 
-            return original_run(runtime, *args, handoff=unavailable_during_handoff, **kwargs)
+            return original_run_stage(spec, persist=persist_with_outage, stop=stop)
 
         monkeypatch.setattr(transactions, "sleep", advance)
         monkeypatch.setattr(transactions, "monotonic", lambda: clock)
-        monkeypatch.setattr(type(plane.runtime), "run", run_with_outage)
+        monkeypatch.setattr(plane.stage_runner, "run_stage", run_with_outage)
         event.listen(engine, "before_cursor_execute", unavailable)
         try:
             assert _run(engine, claim, plane) == "completed"
@@ -385,11 +357,6 @@ class TestComputeChainEndToEnd:
     def test_restart_uses_committed_stage_without_resolving(
         self, client, db, engine, plane, monkeypatch, stage,
     ):
-        import weakref
-        from functools import partial
-
-        from iesplan.computation import SolverBundle
-        from iesplan.core.content import GeneratedContent
         from iesplan.storage import find_refs_by_owner
         from iesplan.storage import service as storage_service
 
@@ -412,34 +379,22 @@ class TestComputeChainEndToEnd:
         calls = {"generate": 0, "execute": 0}
         expected = []
         crashed = False
-        owners = []
-
-        class Owner:
-            pass
-
-        def chunks(owner, content):
-            yield from content.iter_chunks()
 
         def generate(*args, **kwargs):
-            calls["generate"] += 1
-            bundle = original_generate(*args, **kwargs)
-            owner = Owner()
-            owners.append(weakref.ref(owner))
-            return SolverBundle(bundle.manifest, {
-                path: GeneratedContent(partial(chunks, owner, content))
-                for path, content in bundle.files.items()
-            })
-
-        def execute(**kwargs):
             nonlocal crashed
-            assert all(owner() is None for owner in owners), "release generator ownership after checkpoint"
+            calls["generate"] += 1
+            res = original_generate(*args, **kwargs)
             if stage == "generated" and not crashed:
                 crashed = True
                 raise SystemExit("simulated worker exit before solver")
+            return res
+
+        def execute(**kwargs):
+            nonlocal crashed
             calls["execute"] += 1
             return original_execute(**kwargs)
 
-        def adapt(*args):
+        def adapt(*args, **kwargs):
             nonlocal crashed
             if stage == "resource" and not crashed:
                 crashed = True
@@ -447,7 +402,7 @@ class TestComputeChainEndToEnd:
             if stage == "executed" and not crashed:
                 crashed = True
                 raise SystemExit("simulated worker exit before adaptation")
-            result = original_adapt(*args)
+            result = original_adapt(*args, **kwargs)
             expected.append(result.to_dict())
             if stage == "adapted" and not crashed:
                 crashed = True
@@ -509,13 +464,18 @@ class TestComputeChainEndToEnd:
         追溯真实装配 id 与配置 revision。
         """
         task_id = _submit_calc_task(client, db, dict(_CONFIG_BODY), dict(PLANNING_BODY))
-        from iesplan.computation import observe_local_resources
+        def _forbid_local_resources():
+            raise AssertionError("must report stage container resources, not backend process")
 
-        unknown = observe_local_resources(tmp_path / "no-cgroup")
-        monkeypatch.setattr(worker_app, "observe_local_resources", lambda: unknown)
+        monkeypatch.setattr(worker_app, "observe_local_resources", _forbid_local_resources)
         claim = _claim(db, task_id)
         assert _run(engine, claim, plane) == "completed"
         assert worker_app.get_task_record(db, task_id).status == "completed"
+        progress_row = db.execute(
+            select(TaskProgress).where(TaskProgress.attempt_id == claim.attempt_id)
+        ).scalar_one()
+        assert progress_row.detail["worker_resources"]["source"] == "docker_and_cgroup_v2"
+        assert progress_row.detail["worker_resources"]["memory_peak_bytes"]["value"] == 8_388_608
 
         task = db.execute(select(Task).where(Task.id == task_id)).scalar_one()
         assert task.status == "completed"
@@ -551,14 +511,16 @@ class TestComputeChainEndToEnd:
             assert get_object(db, descriptor["object_id"]) is not None
 
     def test_tax_task_completes_with_sealed_financial_evaluation(
-        self, client: TestClient, db: Session, engine: Engine, plane
+        self, client: TestClient, db: Session, engine: Engine, plane, monkeypatch
     ) -> None:
-        """含税则闭环(C3)：提交 201 → 真实求解 → 封存 financial_evaluation。
-
-        同任务/attempt/快照身份；税后 CF/NPV 与求解目标同源（评价 NPV ==
-        同次解目标值）；公开事实形状符合映射表；无交易税基的税额关系
-        强制成立（VAT 全零、所得税零税/亏损恒等），不手填电池调度值。
-        """
+        """含税则闭环(C3)：提交 201 → 真实求解 → 封存容器产出的 financial_evaluation。"""
+        monkeypatch.setattr(
+            worker_app,
+            "build_financial_evaluation",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("financial evaluation must run in evaluator container, not backend")
+            ),
+        )
         task_id = _submit_tax_calc_task(client, db)
         claim = _claim(db, task_id)
         assert _run(engine, claim, plane) == "completed"
@@ -650,37 +612,40 @@ class TestComputeChainEndToEnd:
         assert resp["error"]["code"] == "TASK-REQ-010"
 
     def test_frozen_provider_mismatch_fails_clearly(
-        self, client: TestClient, db: Session, engine: Engine
+        self, client: TestClient, db: Session, engine: Engine, plane
     ) -> None:
-        """冻结依赖不可解析明确失败：执行器/适配器目录为空时，求解前即拒绝。"""
-        from iesplan.bootstrap import _deployment_policy_from_settings  # noqa: E402
-        from iesplan.computation import (  # noqa: E402
-            NAIVE_PREDICTOR,
-            SolverRuntime,
-            build_executor_registry,
-            build_predictor_registry,
-            build_result_adapter_registry,
-        )
-        from iesplan.computation.generators import (  # noqa: E402
-            HIGHS_MILP_PROVIDER,  # noqa: E402
-            build_registry,  # noqa: E402
+        """冻结依赖不可解析明确失败：阶段目录缺失冻结引用时，求解前即拒绝。"""
+        from iesplan.computation.runtime.stage_runner import (  # noqa: E402
+            BuiltinStageCatalog,
+            BuiltinStageDescriptor,
         )
 
         task_id = _submit_calc_task(client, db, dict(_CONFIG_BODY), dict(PLANNING_BODY))
         claim = _claim(db, task_id)
-        executor_registry = build_executor_registry(())
-        plane = worker_app.ComputeExecutionPlane(
-            generator_registry=build_registry((HIGHS_MILP_PROVIDER,)),
-            executor_registry=executor_registry,
-            adapter_registry=build_result_adapter_registry([]),
-            runtime=SolverRuntime(executor_registry, _deployment_policy_from_settings()),
-            predictor_registry=build_predictor_registry((NAIVE_PREDICTOR,)),
+        mismatched_catalog = BuiltinStageCatalog(
+            tuple(
+                BuiltinStageDescriptor(
+                    plugin_id=d.plugin_id,
+                    version="0.0.0" if d.kind == "evaluator" else d.version,
+                    kind=d.kind,
+                    image=d.image,
+                    entrypoint=d.entrypoint,
+                    manifest_path=d.manifest_path,
+                )
+                for d in plane.stage_catalog.snapshot()
+            )
         )
-        assert _run(engine, claim, plane) == "failed"
+        mismatched_plane = worker_app.ComputeExecutionPlane(
+            generator_registry=plane.generator_registry,
+            predictor_registry=plane.predictor_registry,
+            stage_runner=plane.stage_runner,
+            stage_catalog=mismatched_catalog,
+        )
+        assert _run(engine, claim, mismatched_plane) == "failed"
         diagnostics = (
             db.execute(select(TaskDiagnostic).where(TaskDiagnostic.task_id == task_id)).scalars().all()
         )
-        assert any("ies.executor.local_process@1.0.0" in (d.message or "") for d in diagnostics)
+        assert any("ies.result-adapter.highs@1.0.0" in (d.message or "") for d in diagnostics)
 
     def test_fenced_receipt_abandons_without_cancel(
         self, client: TestClient, db: Session, engine: Engine, plane
@@ -985,51 +950,63 @@ class _ControlledGenerator:
 
 
 def _controlled_plane(plane, mode: str, started: threading.Event, timeout: float):
-    """执行层仍使用真实 LocalProcessProvider / SolverRuntime，且精确绑定。"""
-    from iesplan.computation import (
-        DeploymentPolicy,
-        ExecutorDescriptor,
-        GeneratorRegistry,
-        LocalExecutable,
-        LocalProcessProvider,
-        SolverRuntime,
-        build_executor_registry,
+    """通过真实 ContainerStageRunner + MockJobRunnerBackend 控制阶段启动与超时。"""
+    from stage_testkit import build_test_compute_plane, build_test_stage_catalog
+
+    from iesplan.computation import GeneratorRegistry  # noqa: E402
+    from iesplan.computation.runtime.stage_runner import (  # noqa: E402
+        BuiltinStageDescriptor,
+        ContainerStagePolicy,
     )
 
-    helper = str(Path(__file__).with_name("local_exec_probe.py"))
-
-    class ObservedProcess(LocalProcessProvider):
-        def execute(self, command, workdir, *, stop=None):
-            started.set()
-            outcome = super().execute(command, workdir, stop=stop)
-            self.last_outcome = outcome
-            return outcome
-
-    executor = ObservedProcess(
-        ExecutorDescriptor(
-            executor_id="ies.executor.local_process", version="1.0.0",
-            executables=("test.solver.probe@1.0.0",),
-        ),
-        (LocalExecutable(
-            ref="test.solver.probe@1.0.0", path=sys.executable,
-        ),),
-        base_environ={},
+    gen_reg = GeneratorRegistry({
+        "ies.generator.highs_milp@1.0.0": _ControlledGenerator(mode, started, timeout),
+    })
+    probe_desc = BuiltinStageDescriptor(
+        plugin_id="test.solver.probe",
+        version="1.0.0",
+        kind="solver",
+        image="pies-builtin-stages:1.1.5",
+        entrypoint="probe:solve",
     )
-    registry = build_executor_registry((executor,))
-    policy = DeploymentPolicy(
-        executables=("test.solver.probe@1.0.0",),
-        max_timeout_seconds=20, max_memory_mib=128, max_cpu_cores=1,
-    )
-    controlled = worker_app.ComputeExecutionPlane(
-        generator_registry=GeneratorRegistry({
-            "ies.generator.highs_milp@1.0.0": _ControlledGenerator(mode, started, timeout),
-        }),
-        executor_registry=registry,
-        adapter_registry=plane.adapter_registry,
-        runtime=SolverRuntime(registry, policy),
+    catalog = build_test_stage_catalog(
+        generator_registry=gen_reg,
         predictor_registry=plane.predictor_registry,
+        extra_descriptors=(probe_desc,),
     )
-    return controlled, executor
+    outcomes: dict[str, Any] = {}
+
+    def on_start(body: dict[str, Any]) -> None:
+        if mode == "solve" and str(body["stage_id"]).startswith("solve"):
+            started.set()
+
+    controlled = build_test_compute_plane(
+        plane.stage_runner.stage_root,
+        generator_registry=gen_reg,
+        predictor_registry=plane.predictor_registry,
+        stage_catalog=catalog,
+        policy=ContainerStagePolicy(
+            builtin_image="pies-builtin-stages:1.1.5",
+            cpu_cores=1.0,
+            memory_mb=128,
+            pids_limit=64,
+            tmpfs_size_mb=64,
+            stop_grace_seconds=1,
+            max_timeout_seconds=20.0,
+            allowed_environment_vars=(),
+        ),
+        poll_interval=0.01,
+        on_start=on_start,
+    )
+    orig_stop = controlled.stage_runner.client.stop_stage
+
+    def tracked_stop(stage_execution_id: str, **kwargs: Any):
+        res = orig_stop(stage_execution_id, **kwargs)
+        outcomes["termination_reason"] = res.termination_reason
+        return res
+
+    controlled.stage_runner.client.stop_stage = tracked_stop  # type: ignore[method-assign]
+    return controlled, outcomes
 
 
 def _run_async(engine: Engine, claim, plane):
@@ -1069,11 +1046,12 @@ class TestStopLifecycle:
         self, client: TestClient, db: Session, engine: Engine, plane, phase: str,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        from iesplan.computation.runtime import local_process
+        import subprocess
+
         from iesplan.identity.persistence import User
 
         spawned: list[int] = []
-        real_popen = local_process.subprocess.Popen
+        real_popen = subprocess.Popen
 
         def observe_spawn(args, *other, **kwargs):
             proc = real_popen(args, *other, **kwargs)
@@ -1081,14 +1059,14 @@ class TestStopLifecycle:
                 spawned.append(proc.pid)
             return proc
 
-        monkeypatch.setattr(local_process.subprocess, "Popen", observe_spawn)
+        monkeypatch.setattr(subprocess, "Popen", observe_spawn)
 
         task_id = _submit_calc_task(client, db, dict(_CONFIG_BODY), dict(PLANNING_BODY))
         claim = _claim(db, task_id)
         original = db.get(Task, task_id)
         user = db.get(User, original.requested_by)
         started = threading.Event()
-        controlled, executor = _controlled_plane(plane, phase, started, 18)
+        controlled, outcomes = _controlled_plane(plane, phase, started, 18)
         thread, result, stop = _run_async(engine, claim, controlled)
         try:
             assert started.wait(8), result
@@ -1106,10 +1084,10 @@ class TestStopLifecycle:
             _assert_stopped(db, claim, "cancelled", "stopped", "revoked")
             assert worker_app.slot_available(db, "compute")
             if phase == "generate":
-                assert not hasattr(executor, "last_outcome"), "生成取消不得启动求解"
+                assert "termination_reason" not in outcomes or outcomes["termination_reason"] == "cancelled"
                 assert not spawned
             else:
-                assert executor.last_outcome.termination_reason == "cancelled"
+                assert outcomes["termination_reason"] == "cancelled"
                 assert spawned, "求解阶段必须实际启动受控子进程"
                 for pid in spawned:
                     with pytest.raises(ProcessLookupError):
@@ -1135,10 +1113,10 @@ class TestStopLifecycle:
         task_id = _submit_calc_task(client, db, dict(_CONFIG_BODY), dict(PLANNING_BODY))
         claim = _claim(db, task_id)
         started = threading.Event()
-        controlled, executor = _controlled_plane(plane, "solve", started, 0.3)
+        controlled, outcomes = _controlled_plane(plane, "solve", started, 0.3)
         assert _run(engine, claim, controlled) == "timed_out"
         _assert_stopped(db, claim, "timed_out", "stopped", "revoked")
-        assert executor.last_outcome.termination_reason == "timeout"
+        assert outcomes["termination_reason"] == "timed_out"
         assert db.get(TaskAttempt, claim.attempt_id).stop_reason == "timeout"
         assert any(
             row.code == TASK_TIMEOUT
@@ -1152,7 +1130,7 @@ class TestStopLifecycle:
         task_id = _submit_calc_task(client, db, dict(_CONFIG_BODY), dict(PLANNING_BODY))
         claim = _claim(db, task_id)
         started = threading.Event()
-        controlled, executor = _controlled_plane(plane, "solve", started, 18)
+        controlled, outcomes = _controlled_plane(plane, "solve", started, 18)
         thread, result, stop = _run_async(engine, claim, controlled)
         try:
             assert started.wait(8), result
@@ -1161,7 +1139,7 @@ class TestStopLifecycle:
             thread.join(timeout=8)
             assert not thread.is_alive()
             assert result == {"status": "fenced"}
-            assert executor.last_outcome.termination_reason == "fenced"
+            assert outcomes["termination_reason"] == "fenced"
             _assert_stopped(db, claim, "running", "running", "active")
         finally:
             stop.set()

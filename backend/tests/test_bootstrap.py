@@ -18,10 +18,7 @@ from iesplan.bootstrap import (
 
 
 def test_assemble_api_full_context() -> None:
-    """assemble_api 装配 database、storage、registry 与生成器目录。
-
-    生成器目录显式注册内置真实 provider（非空表、非扫描发现）。
-    """
+    """assemble_api 装配 database、storage、registry、生成器与内置阶段目录。"""
     ctx = assemble_api()
     assert isinstance(ctx, ApplicationContext)
     assert ctx.session_factory is not None
@@ -36,44 +33,48 @@ def test_assemble_api_full_context() -> None:
     assert health["db"] == "ok"
     assert health["registry"] == "ok"
     assert health["generators"] == "ok"
+    assert health["stages"] == "ok"
+    assert "job_runner" not in health
+    assert ctx.builtin_stage_catalog is not None
+    assert len(ctx.builtin_stage_catalog.snapshot()) == 4
+    assert ctx.container_stage_policy is not None
     assert all(isinstance(v, str) for v in health.values())
     assert ctx.ready() is True
 
 
-def test_assemble_worker_subsets() -> None:
-    """计算 Worker 装配完整执行面（执行器/适配器目录 + 运行时 + 策略）；
-    API 与 I/O Worker 不装配执行面。"""
+def test_assemble_worker_subsets(monkeypatch) -> None:
+    """计算执行面只通过 ContainerStageRunner + JobRunnerClient 装配，无本地进程回退。"""
     from iesplan.config import settings
 
+    # 未配置 job_runner_url 时不回退到进程内 LocalProcessProvider，compute_execution_plane 为 None。
+    monkeypatch.setattr(settings, "job_runner_url", "")
+    no_runner = assemble_compute_worker()
+    assert no_runner.stage_runner is None
+    assert no_runner.compute_execution_plane() is None
+    assert "executors" not in no_runner.health()
+
+    # 配置 job_runner_url 后装配 ContainerStageRunner + BuiltinStageCatalog。
+    monkeypatch.setattr(settings, "job_runner_url", "http://job_runner:8090")
     compute = assemble_compute_worker()
-    assert compute.executor_registry is not None
-    assert [d.ref for d in compute.executor_registry.snapshot()] == [
-        "ies.executor.local_process@1.0.0"
-    ]
-    assert compute.result_adapter_registry is not None
-    assert [
-        d.ref for d in compute.result_adapter_registry.snapshot()
-    ] == ["ies.result-adapter.highs@1.0.0"]
-    assert compute.solver_runtime is not None
-    policy = compute.deployment_policy
+    assert compute.stage_runner is not None
+    assert compute.job_runner_client is not None
+    policy = compute.container_stage_policy
     assert policy is not None
-    assert policy.executables == tuple(settings.solver_allowed_executables)
+    assert policy.builtin_image == settings.stage_builtin_image
     assert policy.max_timeout_seconds == settings.solver_max_timeout_seconds
-    assert policy.max_memory_mib == settings.solver_max_memory_mib
-    assert policy.max_cpu_cores == settings.solver_max_cpu_cores
-    assert policy.allow_network is settings.solver_allow_network
-    assert compute.health()["executors"] == "ok"
+    assert policy.memory_mb == settings.solver_max_memory_mib
+    assert policy.cpu_cores == settings.solver_max_cpu_cores
+    assert policy.pids_limit == settings.stage_pids_limit
+    assert policy.tmpfs_size_mb == settings.stage_tmpfs_size_mb
+    assert policy.stop_grace_seconds == settings.stage_stop_grace_seconds
     plane = compute.compute_execution_plane()
     assert plane is not None
-    assert plane.runtime is compute.solver_runtime
+    assert plane.stage_runner is compute.stage_runner
+    assert plane.stage_catalog is compute.builtin_stage_catalog
 
     api = assemble_api()
-    assert api.executor_registry is None
-    assert api.result_adapter_registry is None
-    assert api.solver_runtime is None
-    assert api.deployment_policy is None
-    assert "executors" not in api.health()
-    assert api.compute_execution_plane() is None
+    assert api.compute_execution_plane() is not None
+    assert "job_runner" in api.health()
 
     io = assemble_io_worker()
     assert io.storage is not None
@@ -112,11 +113,13 @@ def test_public_facades_register_domain_metadata() -> None:
 def test_task_runtime_does_not_redeploy_database_or_seed_identity(worker_type, monkeypatch) -> None:
     from iesplan import db
     from iesplan.application import identity
+    from iesplan.config import settings
 
     initialize = Mock()
     seed = Mock()
     monkeypatch.setattr(db, "init_db", initialize)
     monkeypatch.setattr(identity, "seed_builtin_admin", seed)
+    monkeypatch.setattr(settings, "job_runner_url", "http://job_runner:8090")
 
     ctx = assemble_task_runtime(worker_type)
 
@@ -136,14 +139,3 @@ def test_collect_trigger_statements_covers_immutable_tables() -> None:
         assert f"CREATE FUNCTION tg_{table}_immutable() RETURNS trigger" in ddl
         assert f"CREATE TRIGGER tg_{table}_no_update BEFORE UPDATE ON {table}" in ddl
         assert f"CREATE TRIGGER tg_{table}_no_delete BEFORE DELETE ON {table}" in ddl
-
-
-def test_highs_readiness_probes_once_in_compute_worker_entry(monkeypatch) -> None:
-    from iesplan.computation import LocalProcessProvider
-
-    readiness = Mock(return_value=True)
-    monkeypatch.setattr(LocalProcessProvider, "available", readiness)
-    assemble_compute_worker()
-    assemble_task_runtime("compute")
-    assemble_task_runtime("compute")
-    readiness.assert_called_once_with()
