@@ -8,9 +8,10 @@ Constitution §2.6).
 from __future__ import annotations
 
 import csv
-from collections.abc import Iterator, Mapping, Sequence
+import json
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from decimal import Decimal
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from types import MappingProxyType
 from typing import Any, TypeVar
 
@@ -30,10 +31,15 @@ from iesplan.computation.sequences import (
     MaterializedPriceSeries,
     MaterializedSeries,
     MaterializedSet,
+    materialize_non_predictive_series,
 )
 from iesplan.core.content import CHUNK_BYTES, Content
 from iesplan.core.diagnostics import Diagnostic
-from iesplan.finance import evaluate_project_investment
+from iesplan.finance import (
+    evaluate_project_investment,
+    expand_monthly_daily_prices,
+    read_trusted_price_values,
+)
 from iesplan.finance.triplet import (
     AmountDefinition,
     AmountPeriod,
@@ -88,6 +94,7 @@ from iesplan.finance.triplet import (
     UpfrontCapexNetBaseFrom,
     VatRule,
 )
+from pies_sdk import StageIOError, check_relative_path
 
 T = TypeVar("T")
 
@@ -203,6 +210,242 @@ def artifact_from_frozen(data: Mapping[str, Any]) -> ValidatedAssemblyArtifact:
     )
 
 
+def _materialized_series_from_frozen(entry: Mapping[str, Any]) -> MaterializedSeries:
+    return _construct(
+        MaterializedSeries,
+        device=entry["device"],
+        interface=entry["interface"],
+        mode=entry["mode"],
+        resolution=entry["resolution"],
+        point_count=entry["point_count"],
+        values=tuple(entry["values"]),
+        source=MappingProxyType(dict(entry["source"])),
+    )
+
+
+def _predicted_series_from_prediction_payload(
+    prediction_payload: Mapping[str, Any],
+    *,
+    resolution: str | None = None,
+) -> tuple[MaterializedSeries, ...]:
+    out: list[MaterializedSeries] = []
+    for pred in prediction_payload["predictions"]:
+        values = tuple(pred["values"])
+        pred_res = str(pred.get("resolution") or resolution or "")
+        out.append(
+            _construct(
+                MaterializedSeries,
+                device=pred["instance"],
+                interface=pred["interface"],
+                mode="data_predict",
+                resolution=pred_res,
+                point_count=len(values),
+                values=values,
+                source=MappingProxyType(
+                    {
+                        "kind": "data_predict",
+                        "object_id": str(pred.get("history_object_id") or ""),
+                    }
+                ),
+            )
+        )
+    return tuple(out)
+
+
+def safe_work_in_subpath(work_in: Path, rel_path: str, name: str = "path") -> Path:
+    """Validate a safe relative subpath inside `work_in` without escaping it."""
+    rel = check_relative_path(rel_path, name)
+    parts = PurePosixPath(rel).parts
+    if not parts or any(part in ("", ".", "..") for part in parts):
+        raise StageIOError(f"{name} escapes stage directory {work_in}: {rel_path!r}")
+    return work_in / rel
+
+
+class _LazyObjectBytesMapping(Mapping[str, bytes]):
+    """On-demand `object_id -> bytes` mapping backed by `read_object`."""
+
+    __slots__ = ("_object_ids", "_id_set", "_read_object", "_cache")
+
+    def __init__(
+        self,
+        object_ids: Sequence[str] | Mapping[str, Any],
+        read_object: Callable[[str], bytes],
+    ) -> None:
+        self._object_ids = tuple(str(oid) for oid in object_ids)
+        self._id_set = frozenset(self._object_ids)
+        self._read_object = read_object
+        self._cache: dict[str, bytes] = {}
+
+    def __getitem__(self, key: str) -> bytes:
+        oid = str(key)
+        if oid not in self._id_set:
+            raise KeyError(oid)
+        if oid not in self._cache:
+            self._cache[oid] = self._read_object(oid)
+        return self._cache[oid]
+
+    def __contains__(self, key: object) -> bool:
+        return isinstance(key, str) and key in self._id_set
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._object_ids)
+
+    def __len__(self) -> int:
+        return len(self._object_ids)
+
+
+def complete_materialized(
+    base: MaterializedSet, predicted: Sequence[MaterializedSeries]
+) -> MaterializedSet:
+    """Merge predicted `MaterializedSeries` into a completed `MaterializedSet`."""
+    return MaterializedSet(
+        operation_years=base.operation_years,
+        series=tuple(base.series) + tuple(predicted),
+        pending_predict=(),
+        prices=base.prices,
+    )
+
+
+def materialize_price_series_from_objects(
+    artifact: ValidatedAssemblyArtifact,
+    finance: EffectiveFinanceConfig,
+    read_object: Callable[[str], bytes],
+    *,
+    operation_years: int,
+) -> tuple[MaterializedPriceSeries, ...]:
+    """Materialize tariff-bound price series from frozen `/work/in` object files."""
+    doc = json.loads(artifact.canonical_text)
+    baseline = doc["project_baseline"]
+    wanted: list[str] = []
+    for binding_id in sorted(doc.get("tariff_bindings") or {}):
+        price_id = (doc["tariff_bindings"][binding_id] or {}).get("price")
+        price = (finance.energy_prices or {}).get(price_id)
+        if (
+            price is not None
+            and price.kind in ("time_series", "monthly_daily")
+            and price_id not in wanted
+        ):
+            wanted.append(price_id)
+    if not wanted:
+        return ()
+
+    decoded: dict[str, tuple[float, ...]] = {}
+
+    def read_oid(oid: str) -> tuple[float, ...]:
+        if oid not in decoded:
+            decoded[oid] = read_trusted_price_values(read_object(oid))
+        return decoded[oid]
+
+    out: list[MaterializedPriceSeries] = []
+    for price_id in wanted:
+        price = finance.energy_prices[price_id]
+        if price.kind == "time_series":
+            assert price.ref is not None and price.series_meta is not None
+            values = read_oid(price.ref)
+            meta = price.series_meta
+            source: dict[str, Any] = {"kind": "price_series", "object_id": price.ref}
+        else:
+            assert price.months is not None
+            month_sources = price.months
+            curves = {
+                month: read_oid(month_sources[str(month)].ref)
+                for month in range(1, 13)
+            }
+            values = expand_monthly_daily_prices(
+                curves,
+                resolution=baseline["resolution"],
+                start_year=baseline["start_year"],
+                operation_years=operation_years,
+            )
+            meta = month_sources["1"].series_meta
+            source = {
+                "kind": "monthly_daily",
+                "months": {
+                    str(month): month_sources[str(month)].ref
+                    for month in range(1, 13)
+                },
+            }
+        out.append(
+            MaterializedPriceSeries(
+                price_id=price_id,
+                point_count=len(values),
+                resolution=meta.resolution,
+                unit=meta.unit,
+                values=values,
+                source=source,
+            )
+        )
+    return tuple(out)
+
+
+def materialized_from_frozen_series_inputs(
+    frozen_inputs: Mapping[str, Any],
+    *,
+    work_in: Path,
+    artifact: ValidatedAssemblyArtifact,
+    finance: EffectiveFinanceConfig,
+    operation_years: int,
+    prediction_payload: Mapping[str, Any] | None = None,
+    resolution: str | None = None,
+) -> MaterializedSet:
+    """Materialize non-predictive series and prices directly from `/work/in` object files."""
+    raw_fixed = frozen_inputs.get("fixed_resources")
+    if raw_fixed is None:
+        raw_fixed = {}
+    if not isinstance(raw_fixed, Mapping):
+        raise TypeError("frozen_series_inputs.fixed_resources must be a mapping")
+
+    object_paths: dict[str, Path] = {
+        str(object_id): safe_work_in_subpath(
+            work_in,
+            rel_path,
+            f"frozen_series_inputs.fixed_resources[{object_id!r}]",
+        )
+        for object_id, rel_path in raw_fixed.items()
+    }
+
+    def read_object(object_id: str) -> bytes:
+        oid = str(object_id)
+        if oid not in object_paths:
+            raise ValueError(f"固定资源缺失（必要输入不完整）: object {oid!r}")
+        return object_paths[oid].read_bytes()
+
+    lazy_resources = _LazyObjectBytesMapping(object_paths, read_object)
+    base_materialized = materialize_non_predictive_series(
+        artifact,
+        lazy_resources,
+        operation_years=operation_years,
+    )
+    prices = materialize_price_series_from_objects(
+        artifact,
+        finance,
+        read_object,
+        operation_years=operation_years,
+    )
+    if prices:
+        base_materialized = MaterializedSet(
+            operation_years=base_materialized.operation_years,
+            series=base_materialized.series,
+            pending_predict=base_materialized.pending_predict,
+            prices=prices,
+        )
+
+    if prediction_payload is not None:
+        predicted_series = _predicted_series_from_prediction_payload(
+            prediction_payload, resolution=resolution
+        )
+        return complete_materialized(base_materialized, predicted_series)
+
+    raw_predicted = frozen_inputs.get("predicted_series") or ()
+    if raw_predicted:
+        predicted_series = tuple(
+            _materialized_series_from_frozen(entry) for entry in raw_predicted
+        )
+        return complete_materialized(base_materialized, predicted_series)
+
+    return base_materialized
+
+
 def materialized_from_frozen(
     data: Mapping[str, Any],
     *,
@@ -210,43 +453,14 @@ def materialized_from_frozen(
     resolution: str | None = None,
 ) -> MaterializedSet:
     """Reconstruct `MaterializedSet` from trusted frozen dict without `__post_init__` checks."""
-    series = [
-        _construct(
-            MaterializedSeries,
-            device=entry["device"],
-            interface=entry["interface"],
-            mode=entry["mode"],
-            resolution=entry["resolution"],
-            point_count=entry["point_count"],
-            values=tuple(entry["values"]),
-            source=MappingProxyType(dict(entry["source"])),
-        )
-        for entry in data.get("series", ())
-    ]
+    series = [_materialized_series_from_frozen(entry) for entry in data.get("series", ())]
     pending = tuple(
         MappingProxyType(dict(entry)) for entry in data.get("pending_predict", ())
     )
     if prediction_payload is not None:
-        for pred in prediction_payload["predictions"]:
-            values = tuple(pred["values"])
-            pred_res = str(pred.get("resolution") or resolution or "")
-            series.append(
-                _construct(
-                    MaterializedSeries,
-                    device=pred["instance"],
-                    interface=pred["interface"],
-                    mode="data_predict",
-                    resolution=pred_res,
-                    point_count=len(values),
-                    values=values,
-                    source=MappingProxyType(
-                        {
-                            "kind": "data_predict",
-                            "object_id": str(pred.get("history_object_id") or ""),
-                        }
-                    ),
-                )
-            )
+        series.extend(
+            _predicted_series_from_prediction_payload(prediction_payload, resolution=resolution)
+        )
         pending = ()
 
     prices = tuple(
