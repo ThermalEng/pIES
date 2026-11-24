@@ -23,6 +23,11 @@ from iesplan.storage.contracts import BlobMissingError
 class _BlobContent:
     storage_path: str
 
+    @property
+    def path(self) -> Path:
+        """Local filesystem path to the immutable stored blob."""
+        return _path_of(self.storage_path)
+
     def iter_chunks(self) -> Iterator[bytes]:
         try:
             with _path_of(self.storage_path).open("rb") as source:

@@ -301,13 +301,92 @@ class MockJobRunnerBackend:
         work_out: Path,
         stop_ev: threading.Event,
     ) -> None:
+        from iesplan.computation import materialize_non_predictive_series
+        from iesplan.finance import expand_monthly_daily_prices, read_trusted_price_values
+
         req = json.loads((work_in / "request.json").read_text(encoding="utf-8"))
         artifact = _artifact_from_json(req["artifact"])
         models = {inst: contribution_from_dict(c) for inst, c in req["device_models"].items()}
-        materialized = _materialized_from_json(req["materialized"])
         finance = EffectiveFinanceConfig.from_dict(req["finance"])
         config = CalculationConfig.from_frozen(req["calculation_config"])
         evaluation = EvaluationInput.from_frozen(req["evaluation"])
+        if "frozen_series_inputs" in req:
+            frozen = req["frozen_series_inputs"]
+            resources = {
+                str(oid): (work_in / str(rel)).read_bytes()
+                for oid, rel in (frozen.get("fixed_resources") or {}).items()
+            }
+            base = materialize_non_predictive_series(
+                artifact,
+                resources,
+                operation_years=evaluation.operation_years,
+            )
+            doc = json.loads(artifact.canonical_text)
+            baseline = doc["project_baseline"]
+            prices = []
+            seen_prices: set[str] = set()
+            for binding_id in sorted(doc.get("tariff_bindings") or {}):
+                price_id = (doc["tariff_bindings"][binding_id] or {}).get("price")
+                price = (finance.energy_prices or {}).get(price_id)
+                if (
+                    price is None
+                    or price_id in seen_prices
+                    or price.kind not in ("time_series", "monthly_daily")
+                ):
+                    continue
+                seen_prices.add(price_id)
+                if price.kind == "time_series":
+                    assert price.ref is not None and price.series_meta is not None
+                    vals = read_trusted_price_values(resources[price.ref])
+                    meta = price.series_meta
+                    source: dict[str, Any] = {"kind": "price_series", "object_id": price.ref}
+                else:
+                    assert price.months is not None
+                    curves = {
+                        m: read_trusted_price_values(resources[price.months[str(m)].ref])
+                        for m in range(1, 13)
+                    }
+                    vals = expand_monthly_daily_prices(
+                        curves,
+                        resolution=baseline["resolution"],
+                        start_year=baseline["start_year"],
+                        operation_years=evaluation.operation_years,
+                    )
+                    meta = price.months["1"].series_meta
+                    source = {
+                        "kind": "monthly_daily",
+                        "months": {str(m): price.months[str(m)].ref for m in range(1, 13)},
+                    }
+                prices.append(
+                    MaterializedPriceSeries(
+                        price_id=price_id,
+                        point_count=len(vals),
+                        resolution=meta.resolution,
+                        unit=meta.unit,
+                        values=vals,
+                        source=source,
+                    )
+                )
+            predicted = tuple(
+                MaterializedSeries(
+                    device=entry["device"],
+                    interface=entry["interface"],
+                    mode=entry["mode"],
+                    resolution=entry["resolution"],
+                    point_count=entry["point_count"],
+                    values=tuple(entry["values"]),
+                    source=dict(entry["source"]),
+                )
+                for entry in frozen.get("predicted_series") or ()
+            )
+            materialized = MaterializedSet(
+                operation_years=base.operation_years,
+                series=tuple(base.series) + predicted,
+                pending_predict=(),
+                prices=tuple(prices),
+            )
+        else:
+            materialized = _materialized_from_json(req["materialized"])
         provider = self.generator_registry.resolve(config)
         gen_with_stop = getattr(provider, "generate_with_stop", None)
         if callable(gen_with_stop):

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -12,22 +13,26 @@ from sqlalchemy.orm import Session
 
 from iesplan import tasks
 from iesplan.application.tasks import Claim
-from iesplan.application.worker.compute_cases import seal_output_objects
+from iesplan.application.worker.compute_cases import EvaluatedStageOutput, seal_output_objects
 from iesplan.application.worker.lease_cases import LeaseRejectedError, verify_lease
 from iesplan.application.worker.transactions import run_worker_transaction
 from iesplan.computation import (
+    COMPUTE_RESULT_SCHEMA,
+    COMPUTE_RESULT_VERSION,
     AttemptContext,
     ComputationUnavailableError,
+    ComputeResult,
     ExecutionReceipt,
     MaterializedSeries,
     PredictedTarget,
     SolverBundle,
     SolverBundleManifest,
+    freeze_json_value,
     thaw_json_value,
 )
 from iesplan.computation.bundle import export_bundle_files
 from iesplan.computation.runtime.stage_runner import StageExecutionSpec
-from iesplan.core.content import Content, read_content
+from iesplan.core.content import Content, GeneratedContent, json_chunks, read_content
 from iesplan.storage import add_ref, find_refs_by_owner, get_object, get_object_content, put_object
 
 
@@ -241,6 +246,7 @@ def _build_receipt_from_stage(
 def execute_saved_bundle(
     *, plane: Any, bundle: SolverBundle, attempt: AttemptContext, claim: Claim,
     number: int, generated_id: int, session_factory: Callable[[], Session], stop=None,
+    detach: Any = None,
 ) -> tuple[ExecutionReceipt, Mapping[str, Content], dict]:
     executable_ref = str(bundle.manifest.command["executable"])
     try:
@@ -321,6 +327,7 @@ def execute_saved_bundle(
             ),
             persist=_persist,
             stop=stop,
+            **({"detach": detach} if detach is not None else {}),
         )
     except LeaseRejectedError:
         fenced_receipt = ExecutionReceipt(
@@ -434,26 +441,88 @@ def publish_prediction_checkpoint_with_artifacts(
         raise
 
 
+def _evaluated_from_checkpoint(raw: Mapping[str, Any]) -> EvaluatedStageOutput:
+    """Reconstruct `EvaluatedStageOutput` from trusted stored checkpoint without revalidating."""
+    outputs = dict(raw.get("outputs") or {})
+    hourly_series = outputs.pop("hourly_series", None)
+    financial_evaluation = outputs.pop("financial_evaluation", None)
+    result = object.__new__(ComputeResult)
+    object.__setattr__(result, "schema", raw.get("schema", COMPUTE_RESULT_SCHEMA))
+    object.__setattr__(result, "schema_version", raw.get("schema_version", COMPUTE_RESULT_VERSION))
+    object.__setattr__(result, "bundle_id", str(raw["bundle_id"]))
+    object.__setattr__(result, "receipt_id", str(raw["receipt_id"]))
+    object.__setattr__(result, "execution_status", str(raw["execution_status"]))
+    object.__setattr__(result, "math_status", str(raw["math_status"]))
+    object.__setattr__(result, "outputs", freeze_json_value(outputs))
+    return EvaluatedStageOutput(
+        result=result,
+        hourly_series=hourly_series,
+        financial_evaluation=financial_evaluation,
+    )
+
+
+def _load_evaluated_stage_checkpoint(
+    db: Session, claim: Claim, number: int, stage: str,
+) -> EvaluatedStageOutput | None:
+    checkpoint = _find(db, claim, number, stage)
+    if checkpoint is None:
+        return None
+    data = checkpoint[1]["data"]
+    result_file = data.get("result_file")
+    if isinstance(result_file, Mapping):
+        content = get_object_content(db, int(result_file["object_id"]))
+        raw = json.loads(read_content(content).decode("utf-8"))
+    else:
+        raw = data["result"]
+    return _evaluated_from_checkpoint(raw)
+
+
+def _save_evaluated_stage_checkpoint(
+    db: Session, claim: Claim, number: int, stage: str, raw_result: Mapping[str, Any],
+) -> int:
+    try:
+        files = seal_output_objects(
+            db,
+            {
+                "result.json": (
+                    GeneratedContent(partial(json_chunks, dict(raw_result))),
+                    "application/json",
+                )
+            },
+            actor_id=None,
+        )
+        return _publish(db, claim, number, stage, {"result_file": files["result.json"]}, {stage: files})
+    except Exception:
+        db.rollback()
+        raise
+
+
+def load_evaluation_checkpoint(
+    db: Session, claim: Claim, number: int
+) -> EvaluatedStageOutput | None:
+    """Consume persisted evaluator stage checkpoint for ``(claim.task_id, number)``."""
+    return _load_evaluated_stage_checkpoint(db, claim, number, "evaluation")
+
+
+def load_algorithm_checkpoint(
+    db: Session, claim: Claim
+) -> EvaluatedStageOutput | None:
+    """Consume persisted algorithm stage checkpoint for ``claim.task_id``."""
+    return _load_evaluated_stage_checkpoint(db, claim, 1, "algorithm")
+
+
 def save_evaluation_checkpoint(
     db: Session, claim: Claim, number: int, raw_result: Mapping[str, Any],
 ) -> int:
     """Persist evaluator stage result.json durably with Fencing Token before cleanup_stage."""
-    try:
-        return _publish(db, claim, number, "evaluation", {"result": dict(raw_result)}, {})
-    except Exception:
-        db.rollback()
-        raise
+    return _save_evaluated_stage_checkpoint(db, claim, number, "evaluation", raw_result)
 
 
 def save_algorithm_checkpoint(
     db: Session, claim: Claim, raw_result: Mapping[str, Any],
 ) -> int:
     """Persist unified algorithm stage result.json durably with Fencing Token before cleanup_stage."""
-    try:
-        return _publish(db, claim, 1, "algorithm", {"result": dict(raw_result)}, {})
-    except Exception:
-        db.rollback()
-        raise
+    return _save_evaluated_stage_checkpoint(db, claim, 1, "algorithm", raw_result)
 
 
 def save_stage_outcome_checkpoint(

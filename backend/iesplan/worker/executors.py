@@ -59,6 +59,9 @@ class LeaseFenced(Exception):
     """
 
 
+ControlPlaneDetached = worker_app.ControlPlaneDetached
+
+
 def _thaw_json_value(value: Any) -> Any:
     if isinstance(value, Mapping):
         return {str(k): _thaw_json_value(v) for k, v in value.items()}
@@ -126,6 +129,7 @@ class RunContext:
     worker_id: str = ""
     stop_event: threading.Event | None = None
     cancel_event: threading.Event | None = None
+    detach_event: threading.Event | None = None
     progress_fn: Callable[[float, str, dict | None], None] | None = None
     snapshot: worker_app.CalcSnapshotRecord | None = None  # 计算类任务快照记录; 网关读出
     io_params: dict[str, Any] = field(default_factory=dict)  # io 任务参数(队列消息扩展)
@@ -148,8 +152,10 @@ class RunContext:
     def checkpoint(self, stage: str) -> None:
         """取消检查点: 每阶段检查任务是否 cancelling（见宪法 §12）。
 
-        用户取消与租约/Worker 停止是不同控制流，均阻断后续写回。
+        用户取消、租约隔离与控制面关闭分离是不同控制流。
         """
+        if self.detach_event is not None and self.detach_event.is_set():
+            raise ControlPlaneDetached(f"control plane detached at stage {stage}")
         reason = self.stop_reason()
         if reason == "fenced":
             raise LeaseFenced()

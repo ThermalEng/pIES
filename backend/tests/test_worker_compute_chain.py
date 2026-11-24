@@ -376,7 +376,7 @@ class TestComputeChainEndToEnd:
         original_generate = worker_app.generate_bundle
         original_execute = worker_app.execute_saved_bundle
         original_adapt = worker_app.adapt_result
-        calls = {"generate": 0, "execute": 0}
+        calls = {"generate": 0, "execute": 0, "adapt": 0}
         expected = []
         crashed = False
 
@@ -396,6 +396,7 @@ class TestComputeChainEndToEnd:
 
         def adapt(*args, **kwargs):
             nonlocal crashed
+            calls["adapt"] += 1
             if stage == "resource" and not crashed:
                 crashed = True
                 raise MemoryError("simulated resource exhaustion after committed solve")
@@ -439,7 +440,11 @@ class TestComputeChainEndToEnd:
         replacement = _claim(db, task_id)
         assert replacement.lease_token != claim.lease_token
         assert streaming_run(replacement) == "completed"
-        assert calls == {"generate": 1, "execute": 1}
+        assert calls == {
+            "generate": 1,
+            "execute": 1,
+            "adapt": 1 if stage in {"generated", "adapted"} else 2,
+        }
         db.expire_all()
         evidence = results_store.latest_evidence_for_task(db, task_id)
         sealed = json.loads(get_object(db, evidence.object_id))
@@ -448,8 +453,7 @@ class TestComputeChainEndToEnd:
         source_attempt = replacement.attempt_id if stage == "generated" else claim.attempt_id
         assert sealed["receipt"]["attempt_id"] == str(source_attempt)
         assert sealed["compute_result"] == expected[-1]
-        if stage == "adapted":
-            assert expected[0] == expected[1]
+        assert len(expected) == 1
         assert db.query(results_store.EvidencePackage).filter_by(task_id=task_id).count() == 1
 
     def test_real_higs_task_completes_with_sealed_evidence(

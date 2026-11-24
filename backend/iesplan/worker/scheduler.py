@@ -20,6 +20,7 @@ import threading
 import time
 from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import wait as wait_futures
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -82,11 +83,17 @@ class EmbeddedScheduler:
         self._lock = threading.Lock()
         self._active: dict[int, _ActiveTask] = {}
         self._stop = threading.Event()
+        self._shutdown_event = threading.Event()
         self._wake = threading.Event()
         self._thread: threading.Thread | None = None
         self._last_heartbeat = 0.0
         self._started = False
         self._reconciled = False
+
+    @property
+    def shutdown_event(self) -> threading.Event:
+        """Control-plane shutdown event propagated as detach signal to active stage waits."""
+        return self._shutdown_event
 
     @property
     def is_running(self) -> bool:
@@ -113,8 +120,9 @@ class EmbeddedScheduler:
     def start(self) -> None:
         if self._started:
             return
+        self._shutdown_event.clear()
         self._stop.clear()
-        if self.stage_runner is not None and not self._reconciled:
+        if not self._reconciled:
             self.reconcile_on_startup()
         self._thread = threading.Thread(
             target=self._loop,
@@ -132,55 +140,66 @@ class EmbeddedScheduler:
         )
 
     def stop(self, *, timeout: float = 10.0) -> None:
-        if not self._started:
-            self._shutdown_executors()
-            return
+        self._shutdown_event.set()
         self._stop.set()
         self._wake.set()
-        if self._thread is not None:
-            self._thread.join(timeout=timeout)
-            self._thread = None
+        deadline = time.monotonic() + max(0.0, float(timeout))
+        if self._started:
+            if self._thread is not None:
+                remaining = max(0.0, deadline - time.monotonic())
+                self._thread.join(timeout=remaining)
+                self._thread = None
+            with self._lock:
+                active_futures = [item.future for item in self._active.values()]
+            if active_futures:
+                remaining = max(0.0, deadline - time.monotonic())
+                wait_futures(active_futures, timeout=remaining)
+            try:
+                worker_app.publish_heartbeat(self.worker_id, {}, ttl=1)
+            except Exception:  # noqa: BLE001 - best-effort cleanup on shutdown
+                logger.debug("Failed to clear scheduler heartbeat on shutdown", exc_info=True)
+            self._started = False
         self._shutdown_executors()
-        try:
-            worker_app.publish_heartbeat(self.worker_id, {}, ttl=1)
-        except Exception:  # noqa: BLE001 - best-effort cleanup on shutdown
-            logger.debug("Failed to clear scheduler heartbeat on shutdown", exc_info=True)
-        self._started = False
         logger.info("EmbeddedScheduler stopped: id=%s", self.worker_id)
 
     def _shutdown_executors(self) -> None:
         for executor in (self._compute_executor, self._io_executor, self._build_executor):
-            executor.shutdown(wait=True, cancel_futures=False)
+            executor.shutdown(wait=False, cancel_futures=True)
 
     def reconcile_on_startup(self) -> list[str]:
-        """Reconcile managed job_runner containers against TaskAttempt + Fencing Token."""
-        if self.stage_runner is None:
-            self._reconciled = True
-            return []
+        """Reconcile managed job_runner containers and authoritative active DB claims."""
         actions: list[str] = []
-        try:
-            stages = self.stage_runner.list_stages(include_stats=False)
-        except Exception:  # noqa: BLE001 - retry on subsequent ticks until job_runner responds
-            logger.warning("Startup stage reconciliation could not list job_runner stages", exc_info=True)
-            return actions
-
-        adopted_attempts: set[int] = set()
-        for stage in stages:
-            attempt_id_int: int | None = None
+        stages: tuple[Any, ...] = ()
+        if self.stage_runner is not None:
             try:
-                attempt_id_int = int(stage.attempt_id)
-            except (TypeError, ValueError):
-                attempt_id_int = None
+                stages = tuple(self.stage_runner.list_stages(include_stats=False))
+            except Exception:  # noqa: BLE001 - retry on subsequent ticks until job_runner responds
+                logger.warning(
+                    "Startup stage reconciliation could not list job_runner stages",
+                    exc_info=True,
+                )
+                return actions
 
-            claim: worker_app.Claim | None = None
-            if attempt_id_int is not None:
-                with self.session_factory() as db:
-                    claim = worker_app.get_reconcilable_claim(
-                        db, attempt_id_int, stage.fencing_token
-                    )
+        with self.session_factory() as db:
+            active_claims = worker_app.list_active_reconcilable_claims(db)
+            claim_pools = {
+                claim.attempt_id: worker_app.get_task_pool(db, claim.task_id)
+                for claim in active_claims
+            }
 
-            if claim is None:
-                # Orphaned or fenced stage container: stop if running, then cleanup.
+        active_by_key = {
+            (str(claim.attempt_id), str(claim.lease_token)): claim
+            for claim in active_claims
+        }
+        adopted_attempts: set[int] = set()
+
+        # (a) Clean up any job_runner container whose (attempt_id, fencing_token)
+        # does not match any active DB claim; adopt matched container attempts.
+        for stage in stages:
+            matched_claim = active_by_key.get(
+                (str(stage.attempt_id), str(stage.fencing_token))
+            )
+            if matched_claim is None:
                 if stage.running or stage.status in ("created", "running", "paused", "restarting"):
                     try:
                         self.stage_runner.stop_stage(stage.stage_execution_id, reason="fenced")
@@ -201,14 +220,28 @@ class EmbeddedScheduler:
                     )
                 continue
 
+            pool = claim_pools[matched_claim.attempt_id]
             if (
-                self.compute is not None
-                and claim.attempt_id not in adopted_attempts
-                and self._can_adopt_attempt(claim.attempt_id)
+                (pool != "compute" or self.compute is not None)
+                and matched_claim.attempt_id not in adopted_attempts
+                and self._can_adopt_attempt(matched_claim.attempt_id)
             ):
-                adopted_attempts.add(claim.attempt_id)
-                self._launch_claimed_task(claim, pool="compute")
+                adopted_attempts.add(matched_claim.attempt_id)
+                self._launch_claimed_task(matched_claim, pool=pool)
                 actions.append(f"adopted:{stage.stage_execution_id}")
+
+        # (b) Launch recovery for EVERY remaining active DB claim even if job_runner
+        # has zero containers for that attempt (pre-Stage-1, inter-stage, post-cleanup).
+        for claim in active_claims:
+            if claim.attempt_id in adopted_attempts:
+                continue
+            pool = claim_pools[claim.attempt_id]
+            if pool == "compute" and self.compute is None:
+                continue
+            if self._can_adopt_attempt(claim.attempt_id):
+                adopted_attempts.add(claim.attempt_id)
+                self._launch_claimed_task(claim, pool=pool)
+                actions.append(f"adopted:attempt-{claim.attempt_id}")
 
         self._reconciled = True
         return actions
@@ -330,6 +363,7 @@ class EmbeddedScheduler:
             worker_id=self.worker_id,
             stop_event=fence_event,
             cancel_event=cancel_event,
+            detach_event=self._shutdown_event,
             compute=compute_arg,
         )
         with self._lock:

@@ -14,6 +14,7 @@ Enforces the ADR-0016 container stage lifecycle through ``JobRunnerClient``:
 from __future__ import annotations
 
 import os
+import threading
 import time
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass, field
@@ -34,6 +35,22 @@ if TYPE_CHECKING:
 _OUTPUT_READ_CHUNK_BYTES = 65_536
 _TERMINAL_CONTAINER_STATUSES = frozenset(("exited", "dead"))
 _VALID_STAGE_KINDS = frozenset(("predictor", "generator", "solver", "evaluator", "algorithm"))
+
+
+class ControlPlaneDetached(Exception):
+    """Control-plane shutdown detached while waiting on a stage container.
+
+    Control-flow signal: caller must exit without stopping or cleaning up
+    the live stage container or writing a terminal state to the active Attempt.
+    """
+
+
+def _is_detached(detach: threading.Event | Callable[[], bool] | None) -> bool:
+    if detach is None:
+        return False
+    if callable(detach):
+        return bool(detach())
+    return bool(detach.is_set())
 
 
 def _resolve_stage_subpath(root: Path, rel_path: str, *, field_name: str) -> Path:
@@ -279,6 +296,7 @@ class ContainerStageRunner:
         *,
         persist: Callable[[StageRunResult], Any],
         stop: StopProbe | None = None,
+        detach: threading.Event | Callable[[], bool] | None = None,
     ) -> StageRunResult:
         """Execute a stage container enforcing persist-before-cleanup and restart reconciliation."""
         if not callable(persist):
@@ -338,6 +356,10 @@ class ContainerStageRunner:
                 )
             wait_timeout = self._remaining_timeout(resolved_timeout, inspection.started_at)
         else:
+            if _is_detached(detach):
+                raise ControlPlaneDetached(
+                    f"control plane detached before launching stage {stage_execution_id}"
+                )
             pre_stop = read_stop_reason(stop)
             if pre_stop is not None:
                 return StageRunResult(
@@ -381,12 +403,13 @@ class ContainerStageRunner:
             if reused:
                 wait_timeout = self._remaining_timeout(resolved_timeout, inspection.started_at)
 
-        # Step 2 & 3: Wait for natural exit, cancel, fence, or remaining timeout.
+        # Step 2 & 3: Wait for natural exit, cancel, fence, detach, or remaining timeout.
         inspection = self._wait_for_exit(
             stage_execution_id,
             initial=inspection,
             timeout_seconds=wait_timeout,
             stop=stop,
+            detach=detach,
         )
 
         # Step 4: Inspect final state + collect declared outputs directly from <stage_root>/<rel>/out.
@@ -512,6 +535,17 @@ class ContainerStageRunner:
         for rel_path, content in spec.input_files.items():
             target = _resolve_stage_subpath(in_dir, rel_path, field_name="input_files")
             target.parent.mkdir(parents=True, exist_ok=True)
+            src_path = getattr(content, "path", None)
+            if src_path is not None:
+                try:
+                    try:
+                        os.link(src_path, target)
+                    except FileExistsError:
+                        target.unlink()
+                        os.link(src_path, target)
+                    continue
+                except OSError:
+                    pass
             chunk_source = MemoryContent(content) if isinstance(content, bytes) else content
             with open(target, "wb") as handle:
                 for chunk in chunk_source.iter_chunks():
@@ -526,10 +560,15 @@ class ContainerStageRunner:
         initial: StageInspection,
         timeout_seconds: float,
         stop: StopProbe | None,
+        detach: threading.Event | Callable[[], bool] | None = None,
     ) -> StageInspection:
         inspection = initial
         deadline = time.monotonic() + timeout_seconds
         while inspection.running or inspection.status not in _TERMINAL_CONTAINER_STATUSES:
+            if _is_detached(detach):
+                raise ControlPlaneDetached(
+                    f"control plane detached while waiting for stage {stage_execution_id}"
+                )
             stop_reason = read_stop_reason(stop)
             if stop_reason is not None:
                 return self.client.stop_stage(
@@ -546,7 +585,18 @@ class ContainerStageRunner:
                     reason=reason,
                     grace_seconds=self.policy.stop_grace_seconds,
                 )
-            time.sleep(min(self.poll_interval, remaining))
+            wait_duration = min(self.poll_interval, remaining)
+            if isinstance(detach, threading.Event):
+                if detach.wait(timeout=wait_duration):
+                    raise ControlPlaneDetached(
+                        f"control plane detached while waiting for stage {stage_execution_id}"
+                    )
+            else:
+                time.sleep(wait_duration)
+                if _is_detached(detach):
+                    raise ControlPlaneDetached(
+                        f"control plane detached while waiting for stage {stage_execution_id}"
+                    )
             inspection = self.client.inspect_stage(
                 stage_execution_id,
                 iterations_tail=0,
@@ -598,6 +648,7 @@ __all__ = [
     "BuiltinStageDescriptor",
     "ContainerStagePolicy",
     "ContainerStageRunner",
+    "ControlPlaneDetached",
     "StageExecutionSpec",
     "StageRunResult",
     "build_builtin_stage_catalog",

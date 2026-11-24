@@ -178,6 +178,27 @@ class MaterializedSet:
         }
 
 
+def collect_resource_ids(doc: Mapping[str, Any]) -> tuple[str, ...]:
+    """Return sorted ``content.object_id`` references declared under ``doc['devices']``."""
+    found: set[str] = set()
+
+    def _collect(node: object) -> None:
+        if isinstance(node, Mapping):
+            content = node.get("content")
+            if isinstance(content, Mapping) and "object_id" in content:
+                found.add(str(content["object_id"]))
+            for value in node.values():
+                _collect(value)
+        elif isinstance(node, list):
+            for value in node:
+                _collect(value)
+
+    devices = doc.get("devices")
+    if isinstance(devices, Mapping):
+        _collect(devices)
+    return tuple(sorted(found))
+
+
 def materialize_non_predictive_series(
     artifact: ValidatedAssemblyArtifact,
     resources: Mapping[str, bytes],
@@ -397,6 +418,7 @@ __all__ = [
     "MaterializedPriceSeries",
     "MaterializedSeries",
     "MaterializedSet",
+    "collect_resource_ids",
     "materialize_non_predictive_series",
     "materialize_predicted_series",
 ]

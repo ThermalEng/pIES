@@ -48,6 +48,8 @@ from iesplan.application.worker.attempt_cases import (
 )
 from iesplan.application.worker.checkpoints import (
     execute_saved_bundle,
+    load_algorithm_checkpoint,
+    load_evaluation_checkpoint,
     load_prediction_checkpoint,
     publish_prediction_checkpoint_with_artifacts,
     restore_round,
@@ -62,6 +64,7 @@ from iesplan.application.worker.compute_cases import (
     HOURLY_OBJECT_PATH,
     ComputeExecutionPlane,
     EvaluatedStageOutput,
+    FrozenSeriesInputs,
     StageExecutionError,
     adapt_result,
     attach_evidence_objects,
@@ -88,6 +91,8 @@ from iesplan.application.worker.lease_cases import (
     attempt_stop_reason,
     dequeue_task,
     get_reconcilable_claim,
+    get_task_pool,
+    list_active_reconcilable_claims,
     publish_heartbeat,
     slot_available,
     verify_lease,
@@ -110,12 +115,19 @@ from iesplan.application.worker.runner_cases import (
 )
 from iesplan.application.worker.transactions import run_worker_transaction
 from iesplan.computation import ComputationUnavailableError, observe_local_resources
+from iesplan.computation.runtime.stage_runner import ControlPlaneDetached
 from iesplan.tasks import (
     BUSINESS_OUTCOMES,
     ExecutionUnavailableError,
 )
 
 __all__ = [
+    "ControlPlaneDetached",
+    "FrozenSeriesInputs",
+    "get_task_pool",
+    "list_active_reconcilable_claims",
+    "load_algorithm_checkpoint",
+    "load_evaluation_checkpoint",
     "run_worker_transaction",
     "observe_local_resources",
     "fail_resource_attempt",
