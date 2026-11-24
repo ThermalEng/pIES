@@ -1,0 +1,38 @@
+schema: ies.algorithm-plugin
+schema_version: "1.0.0"
+plugin_id: ies.predictor.naive
+version: "1.0.0"
+kind: predictor
+name:
+  zh_cn: 朴素末值携载预测器
+  en_us: Naive Carry-Forward Predictor
+description: Official deterministic naive carry-forward predictor (last finite historical value across horizon).
+license: MPL-2.0
+compatibility:
+  pies: ">=1.1.5,<2.0.0"
+  sdk: ">=1.1.5,<2.0.0"
+runtime:
+  language: python
+  python: "3.12"
+entrypoint: predictor_stage:predict
+parameters_schema:
+  type: object
+  additionalProperties: false
+  properties: {}
+resources:
+  default:
+    cpu: 1
+    memory_mb: 512
+    timeout_seconds: 300
+    process_limit: 16
+  maximum:
+    cpu: 2
+    memory_mb: 2048
+    timeout_seconds: 1800
+    process_limit: 32
+advanced:
+  depends_on_solve_result: false
+  extensions:
+    accepts_any_target_type: true
+    needs_history: true
+extensions: {}

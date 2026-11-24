@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pies-builtin-plugins"
+version = "1.1.5"
+description = "Official built-in computation stage plugins and catalog for pIES"
+license = "MPL-2.0"
+requires-python = ">=3.12"
+dependencies = [
+    "pies-sdk>=1.1.5,<2.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.2",
+    "ruff>=0.5",
+]
+
+[tool.setuptools.packages.find]
+include = ["pies_builtin_plugins*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]

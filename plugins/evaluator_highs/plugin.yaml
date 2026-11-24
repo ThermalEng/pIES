@@ -1,0 +1,37 @@
+schema: ies.algorithm-plugin
+schema_version: "1.0.0"
+plugin_id: ies.result-adapter.highs
+version: "1.0.0"
+kind: evaluator
+name:
+  zh_cn: HiGHS 结果适配与财务评价器
+  en_us: HiGHS Result Adapter & Financial Evaluator
+description: Official built-in evaluator converting Solver Bundle, HiGHS solution, receipt, and frozen finance/evaluation config into ComputeResult + financial evaluation.
+license: MPL-2.0
+compatibility:
+  pies: ">=1.1.5,<2.0.0"
+  sdk: ">=1.1.5,<2.0.0"
+runtime:
+  language: python
+  python: "3.12"
+entrypoint: evaluator_stage:evaluate
+parameters_schema:
+  type: object
+  additionalProperties: false
+  properties: {}
+resources:
+  default:
+    cpu: 1
+    memory_mb: 2048
+    timeout_seconds: 1800
+    process_limit: 16
+  maximum:
+    cpu: 4
+    memory_mb: 8192
+    timeout_seconds: 7200
+    process_limit: 32
+advanced:
+  companions:
+    generator: ies.generator.highs_milp@1.0.0
+    solver: ies.solver.highs@1.7.2
+extensions: {}
