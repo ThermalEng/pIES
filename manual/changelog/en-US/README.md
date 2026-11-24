@@ -6,14 +6,30 @@ This page records only implemented and accepted changes in reverse chronological
 
 | Scope | Current Status |
 |---|---|
-| Official product version (`backend/pyproject.toml`) | `1.1.0` |
-| Latest released version | `1.1.0` (2026-11-24 solver-embedded structural acceleration & large-scale optimization delivery) |
-| General modeling & computation upgrade | Declarative device/system equations, monthly TOU prices, monthly peak demand, embedded tax modeling, 5-tab visualizations, and default `on_demand_mutex` acceleration delivered |
-| Next development target | `1.2.0` (Models & Algorithms, Provider SDK, and Device Extensions) |
-| Limited pilot release version | `1.1.0` |
+| Official product version (`backend/pyproject.toml`) | `1.1.5` |
+| Latest released version | `1.1.5` (2026-11-25 ephemeral container pipeline, unified plugin contract & backend scheduler convergence) |
+| General modeling & computation upgrade | Declarative device/system equations, monthly TOU prices, monthly peak demand, embedded tax modeling, structural acceleration, and isolated ephemeral compute pipeline delivered |
+| Next development target | `1.2.0` (Models & Algorithms Ecosystem, Provider SDK, and Device Extensions) |
+| Limited pilot release version | `1.1.5` |
 | First general public release version | `2.0.0` |
 
-> The authoritative product version source (`backend/pyproject.toml`) and Help Center build manifest have been bumped to **`1.1.0`** on 2026-11-24. Starting from `1.2.0`, development moves to Models & Algorithms, Provider SDK, and device extensions.
+> Authoritative product metadata (`backend/pyproject.toml`, `sdk/pyproject.toml`, `job_runner`, and Help Center manifest) has been bumped to **`1.1.5`** on 2026-11-25. When upgrading from `1.1.0`, run `docker compose up -d --build --remove-orphans` (or `docker compose down --remove-orphans` first) to clean up retired `io_worker`/`compute_worker` containers. Starting from `1.2.0`, development moves to the Models & Algorithms ecosystem and `pIES Market`.
+
+## `1.1.5` — 2026-11-25 — Ephemeral Container Computation Pipeline, Unified Plugin Contract, and Backend Orchestration Convergence
+
+### 2026-11-25 — `1.1.5` Ephemeral Container Architecture & Scheduler Convergence (S1–S4) Delivery
+
+- **When completed**: 2026-11-25, completing slices S1–S4 and bumping the product version from `1.1.0` to **`1.1.5`**.
+- **What changed**:
+  - **`job_runner` proxy & isolated ephemeral containers**: Introduced the thin container proxy `job_runner` (`job_runner/pies_job_runner`) exposing strictly 5 fixed business operations (`build_plugin`, `start_stage`, `inspect_stage`, `stop_stage`, `cleanup_stage`), launching one-shot computation containers with `--network=none --read-only --cap-drop=ALL` and non-root execution; includes host NCPU clamping for `cpu_cores` and `/readyz` checks against required images (`PIES_JOB_RUNNER_REQUIRED_IMAGES=pies-builtin-stages:1.1.5`).
+  - **Standalone zero-backend `pies-sdk` & unified plugin contract**: Delivered the standalone `pies-sdk` package (`sdk/pyproject.toml`, version `1.1.5`) establishing the unified `ies.algorithm-plugin@1.0.0` (`plugin.yaml` + `/work/in` → `/work/out`) contract across `predictor`, `generator`, `solver`, `evaluator`, and single-step `algorithm` stages.
+  - **Built-in stages image & zero-copy handoffs**: Packaged `pies-builtin-stages:1.1.5` (built via the one-shot `builtin_stages` Compose service from `plugins/Dockerfile`), enabling generator containers to materialize `frozen_series_inputs` directly from `/work/in/objects` and pass stage artifacts via zero-copy `os.link` hardlinks.
+  - **14-field `CalculationConfig`**: Standardized the 14 required top-level fields of `ies.calculation-config@1.0.0` to support both multi-stage (`generator` + `solver` + `evaluator`) and single-step (`algorithm`) execution modes cleanly.
+  - **`backend` embedded scheduler & service consolidation**: Converged `EmbeddedScheduler` into `backend` with isolated bounded `compute_slots`, `io_slots`, and `build_slots` pools, DB-authoritative startup reconciliation/recovery (`Attempt`, `Fencing Token`, and stage checkpoints preventing duplicate launches), and non-blocking detach on control-plane shutdown; retired legacy persistent `io_worker` and `compute_worker` daemon containers (removing `backend/iesplan/worker/main.py`) and converged persistent Compose services to **5 containers** (`postgres`, `redis`, `job_runner`, `backend`, `web`) plus the one-shot `builtin_stages` build.
+- **What problem it solved**:
+  - Physically isolated computation and plugin workloads from the `backend` control plane (no Docker socket inside `backend` or compute stages, no DB/object-storage credentials, and no network egress), preventing solver memory spikes from destabilizing API serving while eliminating legacy daemon overhead and redundant stage serialization copies.
+  - **Upgrading from `1.1.0`**: Because `io_worker` and `compute_worker` have been removed from `docker-compose.yml`, run `docker compose up -d --build --remove-orphans` (or `docker compose down --remove-orphans` first) when upgrading so deprecated worker containers are cleanly removed.
+- **Where the release stands**: `1.1.5` (S1–S4) is complete and merged to `master`; the next planned milestone in [Roadmap](roadmap.md) is **`1.2.0`** (Open Model & Algorithm Plugin Ecosystem and `pIES Market`).
 
 ## `1.1.0` — 2026-11-24 — Solver-Embedded Structural Acceleration and Large-Scale Long-Horizon Optimization
 
