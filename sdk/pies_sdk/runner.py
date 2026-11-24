@@ -81,14 +81,13 @@ def run_plugin(
     out_dir = Path(work_out)
 
     raw_params = extract_stage_parameters(in_dir)
-    validated_params = manifest.validate_parameters(raw_params)
 
     out_dir.mkdir(parents=True, exist_ok=True)
     ctx = StageContext(
         manifest=manifest,
         work_in=in_dir,
         work_out=out_dir,
-        parameters=validated_params,
+        parameters=raw_params,
     )
     fn = resolve_entrypoint(manifest.entrypoint, manifest_file.parent)
     fn(ctx)

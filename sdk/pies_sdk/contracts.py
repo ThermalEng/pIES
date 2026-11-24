@@ -76,13 +76,11 @@ def read_json_file(path: Path) -> Any:
         raise StageIOError(f"Required JSON file does not exist: {path}")
     try:
         raw = path.read_text(encoding="utf-8")
-        data = json.loads(raw, parse_constant=_reject_json_constant)
+        return json.loads(raw, parse_constant=_reject_json_constant)
     except StageIOError:
         raise
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise StageIOError(f"Failed to read JSON file {path}: {exc}") from exc
-    check_finite_json(data, path.name)
-    return data
 
 
 def write_json_file(path: Path, data: Any) -> Path:

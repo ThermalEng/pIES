@@ -80,24 +80,47 @@ def test_iteration_loop_plugin_via_runner(tmp_path: Path) -> None:
     assert iterations[-1].metric == "max_relative_delta"
 
 
-def test_runner_returns_exit_code_2_on_invalid_parameters(tmp_path: Path) -> None:
-    plugin_dir = EXAMPLES_DIR / "reference_algorithm"
+def test_runner_returns_exit_code_2_on_invalid_output_or_manifest(tmp_path: Path) -> None:
+    plugin_dir = tmp_path / "bad_output_plugin"
+    plugin_dir.mkdir()
+    (plugin_dir / "main.py").write_text("def solve(ctx):\n    pass\n", encoding="utf-8")
+    (plugin_dir / "plugin.yaml").write_text(
+        """schema: ies.algorithm-plugin
+schema_version: "1.0.0"
+plugin_id: acme.algorithm.noop
+version: "1.0.0"
+kind: algorithm
+name:
+  en_us: Noop
+description: Plugin that omits required /work/out/result.json.
+compatibility:
+  pies: ">=1.1.5,<2.0.0"
+runtime:
+  language: python
+  python: "3.12"
+entrypoint: main:solve
+parameters_schema:
+  type: object
+  additionalProperties: false
+  properties: {}
+resources:
+  default:
+    cpu: 1
+    memory_mb: 128
+    timeout_seconds: 30
+    process_limit: 4
+  maximum:
+    cpu: 1
+    memory_mb: 256
+    timeout_seconds: 60
+    process_limit: 8
+""",
+        encoding="utf-8",
+    )
     work_in = tmp_path / "in"
     work_out = tmp_path / "out"
     work_in.mkdir()
     work_out.mkdir()
-    (work_in / "request.json").write_text(
-        json.dumps(
-            {
-                "bundle_id": "b1",
-                "receipt_id": "r1",
-                "demand_kw": [10.0],
-                "price_per_kwh": [0.5],
-                "parameters": {"unknown_param": 123},
-            }
-        ),
-        encoding="utf-8",
-    )
 
     rc = main(
         [
@@ -110,3 +133,16 @@ def test_runner_returns_exit_code_2_on_invalid_parameters(tmp_path: Path) -> Non
         ]
     )
     assert rc == 2
+
+    (plugin_dir / "plugin.yaml").write_text("schema: ies.algorithm-plugin\n", encoding="utf-8")
+    rc_bad_manifest = main(
+        [
+            "--manifest",
+            str(plugin_dir / "plugin.yaml"),
+            "--work-in",
+            str(work_in),
+            "--work-out",
+            str(work_out),
+        ]
+    )
+    assert rc_bad_manifest == 2
