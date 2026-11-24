@@ -1,7 +1,7 @@
 # pIES Architecture Constitution
 
 > Status: Effective
-> Version: 1.22.0
+> Version: 1.22.1
 > Effective Date: 2026-08-20
 > Last Updated: 2026-11-24
 > Scope: Repository root entry points, `manual/`, `docs/`, `backend/`, `frontend/`, database, object storage, Worker, tests, and subsequent plugins
@@ -559,7 +559,7 @@ The default deployment model is centralized administrator deployment with ordina
 - Critical mutations emit immutable, minimally redacted audit records without storing passwords, raw tokens, or unbounded payloads; routine reads and everyday operations do not require heavy auditing;
 - Error responses MUST NOT leak stack traces, SQL, host absolute paths, or provider credentials;
 - Assembly and device files MUST NOT expose arbitrary code execution entry points;
-- Both built-in and third-party computation steps (prediction, generation, solving, post-solve financial evaluation, and unified algorithms) run inside ephemeral containers with no business credentials, disabled networking (`--network=none`), a read-only root filesystem, and explicit resource caps, and both user cancellation and timeouts MUST immediately terminate and destroy the container. `backend` and ephemeral computation containers MUST NOT mount the host Docker socket directly; all image builds and ephemeral container lifecycles execute strictly through the thin allowlisted proxy `job_runner`.
+- Both built-in and third-party computation steps (prediction, generation, solving, post-solve financial evaluation, and unified algorithms) run inside ephemeral containers with no business credentials, disabled networking (`--network=none`), a read-only root filesystem, and explicit resource caps, and both user cancellation and timeouts MUST immediately terminate the computation and clean up the container and temporary files after completing status and valid output handoff. `backend` and ephemeral computation containers MUST NOT mount the host Docker socket directly; all image builds and ephemeral container lifecycles execute strictly through the thin allowlisted proxy `job_runner`. Computation traceability is guaranteed by immutable frozen input files, task snapshots, and persisted outputs/evidence rather than mandating immutable or identical runtime environments/images for ephemeral containers.
 
 Solver isolation and execution details appear in [Solver Runtime](modules/solver-runtime.md) and [Deployment and Operations](deployment.md).
 

@@ -136,7 +136,7 @@ iteration:
 
 ## Container Execution Contract (`/work/in → /work/out`) and Image Builds
 
-- **Automated immutable image build at install time**: When importing or installing a third-party plugin, `job_runner` applies the official standard template on top of `pies-plugin-base` to build an immutable computation image `pies-plugin/<plugin_id>:<version>` without requiring authors to write Dockerfiles (dependency-free plugins reuse the base layer directly). Dependency installation and runtime execution are strictly separated.
+- **Automated image build at install time**: When importing or installing a third-party plugin, `job_runner` applies the official standard template on top of `pies-plugin-base` to build a dedicated plugin computation image `pies-plugin/<plugin_id>:<version>` without requiring authors to write Dockerfiles (dependency-free plugins reuse the base layer directly). Dependency installation and runtime execution are strictly separated; immutability governs frozen `/work/in` input files, task snapshots, and persisted evidence for traceability rather than enforcing immutable runtime environments/images on ephemeral containers.
 - **Network-disabled runtime handoff**: For each computation step, `backend` writes frozen inputs to a per-attempt directory and requests `job_runner` to launch an ephemeral container (`--network=none --read-only --cap-drop=ALL` with hard cgroup limits):
   - `/work/in` (read-only mount): Standardized frozen input package (JSON / chunked streams), parameters, and seed;
   - `/work/out` (read-write mount): Declared output artifacts, bounded logs, and optional `/work/out/iterations.jsonl`.

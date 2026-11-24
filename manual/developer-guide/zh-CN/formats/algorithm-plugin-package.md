@@ -136,7 +136,7 @@ iteration:
 
 ## 容器执行契约（`/work/in → /work/out`）与镜像构建
 
-- **安装期自动构建不可变镜像**：导入或安装第三方插件时，由 `job_runner` 套用官方标准模板基于 `pies-plugin-base` 自动构建专属不可变计算镜像 `pies-plugin/<plugin_id>:<version>`（不要求作者手写 Dockerfile；无额外依赖的插件直接复用基础层）。依赖安装阶段与运行阶段彻底分离。
+- **安装期自动构建计算镜像**：导入或安装第三方插件时，由 `job_runner` 套用官方标准模板基于 `pies-plugin-base` 自动构建专属插件计算镜像 `pies-plugin/<plugin_id>:<version>`（不要求作者手写 Dockerfile；无额外依赖的插件直接复用基础层）。依赖安装阶段与运行阶段彻底分离；不可变约束针对冻结生成的 `/work/in` 输入文件、任务快照与持久化证据（用于可追溯），不强行要求一次即毁的临时容器运行环境或镜像不可变。
 - **运行期断网隔离交接**：每次执行某一计算环节时，`backend` 将该环节的冻结只读输入写入独立作业目录并由 `job_runner` 拉起临时计算容器（`--network=none --read-only --cap-drop=ALL`，带硬资源限额）：
   - `/work/in`（只读挂载）：承载标准化冻结输入包（JSON/分块文件流）及参数/种子配置；
   - `/work/out`（可写挂载）：承载声明输出产物、结构化日志与可选 `/work/out/iterations.jsonl`。
