@@ -1,5 +1,6 @@
 """FastAPI application exposing ONLY /healthz, /readyz, and the 5 job_runner operations."""
 
+import logging
 from typing import Annotated, Any
 
 from fastapi import Depends, FastAPI, Query, Request
@@ -17,6 +18,8 @@ from pies_job_runner.models import (
     StartStageRequest,
     StopStageRequest,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def _get_service(request: Request) -> DockerJobRunnerService:
@@ -44,6 +47,7 @@ def create_app(
 
     @app.exception_handler(JobRunnerError)
     async def _handle_job_runner_error(_request: Request, exc: JobRunnerError) -> JSONResponse:
+        logger.warning("job_runner %s: %s", exc.status_code, exc)
         return JSONResponse(status_code=exc.status_code, content={"detail": str(exc)})
 
     @app.get("/healthz")

@@ -173,8 +173,11 @@ class _FakeDockerClient:
         *,
         ping_ok: bool = True,
         present_images: set[str] | None = None,
+        ncpu: int = 16,
     ) -> None:
         self.ping_ok = ping_ok
+        self.ncpu = ncpu
+        self.info_calls = 0
         self.containers = _FakeContainersManager()
         self.images = _FakeImagesManager(present_images=present_images)
         self.api = _FakeDockerAPI()
@@ -184,6 +187,10 @@ class _FakeDockerClient:
             raise DockerException("daemon down")
         return True
 
+    def info(self) -> dict[str, Any]:
+        self.info_calls += 1
+        return {"NCPU": self.ncpu}
+
 
 def _make_client(
     tmp_path: Path,
@@ -192,6 +199,7 @@ def _make_client(
     cgroup_root: Path | None = None,
     required_images: str = "",
     present_images: set[str] | None = None,
+    ncpu: int = 16,
 ) -> tuple[TestClient, _FakeDockerClient, JobRunnerSettings]:
     stage_root = tmp_path / "stages"
     plugin_root = tmp_path / "plugin_builds"
@@ -204,7 +212,7 @@ def _make_client(
         cgroup_root=cgroup_root or (tmp_path / "nonexistent_cgroup"),
         required_images=required_images,
     )
-    fake_docker = _FakeDockerClient(ping_ok=ping_ok, present_images=present_images)
+    fake_docker = _FakeDockerClient(ping_ok=ping_ok, present_images=present_images, ncpu=ncpu)
     service = DockerJobRunnerService(settings, client=fake_docker)  # type: ignore[arg-type]
     app = create_app(settings=settings, service=service)
     return TestClient(app), fake_docker, settings
@@ -599,3 +607,51 @@ def test_read_iterations_summary_absent(tmp_path: Path) -> None:
     assert summary.present is False
     assert summary.count == 0
     assert summary.tail == []
+
+
+def test_start_stage_clamps_cpu_cores_to_host_ncpu_and_logs_errors(tmp_path: Path, caplog: Any) -> None:
+    client, fake_docker, settings = _make_client(tmp_path, ncpu=4)
+    (settings.stage_root / "exec-clamp-1" / "in").mkdir(parents=True)
+    (settings.stage_root / "exec-clamp-2" / "in").mkdir(parents=True)
+
+    r1 = client.post(
+        "/v1/stages/start",
+        json={
+            "attempt_id": "att-clamp-1",
+            "stage_id": "solver",
+            "stage_execution_id": "exec-clamp-1",
+            "fencing_token": "fence-1",
+            "image": "pies-builtin-stages:1.1.5",
+            "cpu_cores": 8.0,
+            "memory_mb": 256,
+            "pids_limit": 32,
+            "tmpfs_size_mb": 64,
+        },
+    )
+    assert r1.status_code == 200
+    assert fake_docker.containers.run_calls[0]["nano_cpus"] == 4_000_000_000
+
+    # Second start reuses cached host NCPU without re-querying client.info()
+    r2 = client.post(
+        "/v1/stages/start",
+        json={
+            "attempt_id": "att-clamp-2",
+            "stage_id": "solver",
+            "stage_execution_id": "exec-clamp-2",
+            "fencing_token": "fence-2",
+            "image": "pies-builtin-stages:1.1.5",
+            "cpu_cores": 6.0,
+            "memory_mb": 256,
+            "pids_limit": 32,
+            "tmpfs_size_mb": 64,
+        },
+    )
+    assert r2.status_code == 200
+    assert fake_docker.containers.run_calls[1]["nano_cpus"] == 4_000_000_000
+    assert fake_docker.info_calls == 1
+
+    # JobRunnerError is logged so 4xx/5xx reasons appear in container logs
+    with caplog.at_level("WARNING", logger="pies_job_runner.app"):
+        missing = client.get("/v1/stages/does-not-exist")
+    assert missing.status_code == 404
+    assert any("job_runner 404:" in rec.message for rec in caplog.records)

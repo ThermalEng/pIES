@@ -161,6 +161,7 @@ class DockerJobRunnerService:
         self._lock_guard = threading.Lock()
         self._stage_locks: dict[tuple[str, str], threading.Lock] = {}
         self._resolved_host_stage_root: Path | None = None
+        self._host_ncpu: int | None = None
 
     def _get_client(self) -> docker.DockerClient:
         if self._client is None:
@@ -172,6 +173,20 @@ class DockerJobRunnerService:
             except DockerException as exc:
                 raise DockerUnavailableError(f"failed to initialize Docker client: {exc}") from exc
         return self._client
+
+    def _get_host_ncpu(self) -> int | None:
+        if self._host_ncpu is not None:
+            return self._host_ncpu
+        client = self._get_client()
+        try:
+            info = client.info()
+        except DockerException:
+            return None
+        ncpu = info.get("NCPU") if isinstance(info, dict) else None
+        if isinstance(ncpu, int) and ncpu > 0:
+            self._host_ncpu = ncpu
+            return ncpu
+        return None
 
     def _get_stage_lock(self, attempt_id: str, stage_id: str) -> threading.Lock:
         key = (attempt_id, stage_id)
@@ -524,7 +539,11 @@ class DockerJobRunnerService:
             # Ephemeral containers run as a non-root user and must be able to write /work/out.
             os.chmod(out_dir, 0o777)
 
-            nano_cpus = int(request.cpu_cores * 1_000_000_000)
+            effective_cpu = request.cpu_cores
+            host_ncpu = self._get_host_ncpu()
+            if host_ncpu is not None and host_ncpu > 0:
+                effective_cpu = min(effective_cpu, float(host_ncpu))
+            nano_cpus = int(effective_cpu * 1_000_000_000)
             if nano_cpus < 1_000_000:
                 raise BadRequestError("cpu_cores must be at least 0.001")
             mem_spec = f"{request.memory_mb}m"
