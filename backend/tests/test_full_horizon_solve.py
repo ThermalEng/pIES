@@ -61,7 +61,6 @@ from iesplan.assembly.contracts import (  # noqa: E402
     ValidationReceipt,
 )
 from iesplan.assembly.validator import validate_project_export  # noqa: E402
-from iesplan.bootstrap import assemble_compute_worker  # noqa: E402
 from iesplan.computation import (  # noqa: E402
     HIGHS_MILP_PROVIDER,
     CalculationConfig,
@@ -291,12 +290,11 @@ def client(engine: Engine, db: Session, tmp_path: Path) -> Iterator[TestClient]:
 
 
 @pytest.fixture()
-def plane():
-    """真实计算执行面（与 Worker 进程同一构成）。"""
-    ctx = assemble_compute_worker()
-    plane = ctx.compute_execution_plane()
-    assert plane is not None
-    return plane
+def plane(tmp_path: Path):
+    """容器化计算执行面（经 ContainerStageRunner + JobRunnerClient）。"""
+    from stage_testkit import build_test_compute_plane
+
+    return build_test_compute_plane(tmp_path / "stages")
 
 
 def _craft_full_version(
@@ -864,7 +862,6 @@ class TestPredictPhase2FullHorizon:
             _save_calc_case,
         )
 
-        from iesplan.application import worker as worker_app  # noqa: E402
         from iesplan.application.tasks.submissions import submit_task  # noqa: E402
         from iesplan.computation import build_registry  # noqa: E402
         from iesplan.computation.predictors import (  # noqa: E402
@@ -895,11 +892,11 @@ class TestPredictPhase2FullHorizon:
             generator_registry=gene_registry,
             predictor_registry=pred_registry,
         )
-        n2_plane = worker_app.ComputeExecutionPlane(
+        from stage_testkit import build_test_compute_plane
+
+        n2_plane = build_test_compute_plane(
+            plane.stage_runner.stage_root,
             generator_registry=gene_registry,
-            executor_registry=plane.executor_registry,
-            adapter_registry=plane.adapter_registry,
-            runtime=plane.runtime,
             predictor_registry=pred_registry,
         )
         claim = claim_for_direct_run(db, task.id, "predict-n2-e2e")
@@ -1025,7 +1022,6 @@ class TestShortPredictionRejected:
         from sqlalchemy import select  # noqa: E402
         from test_prediction_capability import _save_calc_case  # noqa: E402
 
-        from iesplan.application import worker as worker_app  # noqa: E402
         from iesplan.application.tasks.submissions import submit_task  # noqa: E402
         from iesplan.computation.predictors import (  # noqa: E402
             build_predictor_registry,
@@ -1052,11 +1048,11 @@ class TestShortPredictionRejected:
             generator_registry=plane.generator_registry,
             predictor_registry=pred_registry,
         )
-        short_plane = worker_app.ComputeExecutionPlane(
+        from stage_testkit import build_test_compute_plane
+
+        short_plane = build_test_compute_plane(
+            plane.stage_runner.stage_root,
             generator_registry=plane.generator_registry,
-            executor_registry=plane.executor_registry,
-            adapter_registry=plane.adapter_registry,
-            runtime=plane.runtime,
             predictor_registry=pred_registry,
         )
         claim = claim_for_direct_run(db, task.id, "predict-n2-short")

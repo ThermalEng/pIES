@@ -1,14 +1,14 @@
 """Ephemeral 6-step container stage runner and built-in stage catalog.
 
 Enforces the ADR-0016 container stage lifecycle through ``JobRunnerClient``:
-1. ``start_stage`` (after label-based restart reconciliation so restarted
-   controllers adopt existing stage containers without duplicate launches);
+1. Reconcile existing stage containers by ``(attempt_id, stage_id)`` labels, or
+   prepare ``<stage_root>/<workspace_rel>/in`` and call ``start_stage``;
 2. Isolated execution (network-disabled, read-only rootfs, non-root, cgroup limits);
-3. Wait for natural exit, user cancellation, lease fencing, or timeout;
+3. Wait for natural exit, user cancellation, lease fencing, or deployment/stage timeout;
 4. ``inspect_stage`` and collect declared outputs directly from
    ``<stage_root>/<workspace_rel>/out`` plus cgroup v2 resource metrics;
-5. Persist checkpoints/artifacts with Fencing Token (caller callback);
-6. ``cleanup_stage`` ONLY after persistence succeeds.
+5. Persist checkpoints/artifacts with Fencing Token via required ``persist`` callback;
+6. ``cleanup_stage`` ONLY after ``persist`` succeeds.
 """
 
 from __future__ import annotations
@@ -17,17 +17,19 @@ import os
 import time
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from iesplan.computation.protocols import StopProbe, check_provider_ref, read_stop_reason
-from iesplan.computation.runtime.job_runner_client import (
-    CleanupStageResult,
-    JobRunnerClient,
-    StageInspection,
-    StartStageSpec,
-)
 from iesplan.core.content import Content, MemoryContent
+
+if TYPE_CHECKING:
+    from iesplan.computation.runtime.job_runner_client import (
+        CleanupStageResult,
+        JobRunnerClient,
+        StageInspection,
+    )
 
 _OUTPUT_READ_CHUNK_BYTES = 65_536
 _TERMINAL_CONTAINER_STATUSES = frozenset(("exited", "dead"))
@@ -75,26 +77,6 @@ class ContainerStagePolicy:
     stop_grace_seconds: int
     max_timeout_seconds: float
     allowed_environment_vars: tuple[str, ...] = ()
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.builtin_image, str) or not self.builtin_image.strip():
-            raise ValueError("builtin_image must be a non-empty image reference")
-        if self.cpu_cores <= 0:
-            raise ValueError(f"cpu_cores must be positive: {self.cpu_cores!r}")
-        if self.memory_mb <= 0:
-            raise ValueError(f"memory_mb must be positive: {self.memory_mb!r}")
-        if self.pids_limit <= 0:
-            raise ValueError(f"pids_limit must be positive: {self.pids_limit!r}")
-        if self.tmpfs_size_mb <= 0:
-            raise ValueError(f"tmpfs_size_mb must be positive: {self.tmpfs_size_mb!r}")
-        if self.stop_grace_seconds < 0 or self.stop_grace_seconds > 300:
-            raise ValueError(
-                f"stop_grace_seconds must be in [0, 300]: {self.stop_grace_seconds!r}"
-            )
-        if self.max_timeout_seconds <= 0:
-            raise ValueError(
-                f"max_timeout_seconds must be positive: {self.max_timeout_seconds!r}"
-            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -215,6 +197,7 @@ class StageExecutionSpec:
     prepare_inputs: Callable[[Path], None] | None = None
     required_outputs: tuple[str, ...] = ()
     optional_outputs: tuple[str, ...] = ()
+    collect_all_outputs: bool = False
     timeout_seconds: float | None = None
     cpu_cores: float | None = None
     memory_mb: int | None = None
@@ -259,8 +242,6 @@ class ContainerStageRunner:
         policy: ContainerStagePolicy,
         poll_interval: float = 0.25,
     ) -> None:
-        if poll_interval <= 0:
-            raise ValueError(f"poll_interval must be positive: {poll_interval!r}")
         self.client = client
         self.stage_root = Path(stage_root)
         self.policy = policy
@@ -296,39 +277,21 @@ class ContainerStageRunner:
         self,
         spec: StageExecutionSpec,
         *,
+        persist: Callable[[StageRunResult], Any],
         stop: StopProbe | None = None,
-        persist: Callable[[StageRunResult], Any] | None = None,
     ) -> StageRunResult:
         """Execute a stage container enforcing persist-before-cleanup and restart reconciliation."""
+        if not callable(persist):
+            raise TypeError("persist callback is required before stage cleanup")
         if stop is not None and not callable(stop):
             raise TypeError(f"stop probe must be callable, got {type(stop).__name__}")
+
+        from iesplan.computation.runtime.job_runner_client import StartStageSpec
 
         stage_execution_id = spec.stage_execution_id or f"{spec.attempt_id}--{spec.stage_id}"
         workspace_rel = spec.workspace_rel or stage_execution_id
         # Validate workspace_rel path safety before touching local stage_root.
         _resolve_stage_subpath(self.stage_root, workspace_rel, field_name="workspace_rel")
-
-        pre_stop = read_stop_reason(stop)
-        if pre_stop is not None:
-            return StageRunResult(
-                stage_execution_id=stage_execution_id,
-                attempt_id=spec.attempt_id,
-                stage_id=spec.stage_id,
-                fencing_token=spec.fencing_token,
-                workspace_rel=workspace_rel,
-                status=pre_stop,
-                reused=False,
-                exit_code=None,
-                termination_reason=pre_stop,
-                started_at=None,
-                finished_at=None,
-                resources={},
-                iterations={"present": False, "count": 0, "tail": []},
-                outputs={},
-                missing_required_outputs=(),
-                output_files=(),
-                cleaned_up=False,
-            )
 
         resolved_cpu = self._resolve_cpu_cores(spec.cpu_cores)
         resolved_mem = self._resolve_memory_mb(spec.memory_mb)
@@ -340,8 +303,9 @@ class ContainerStageRunner:
         resolved_env = self._filter_environment(spec.environment)
         resolved_image = spec.image or self.policy.builtin_image
 
-        # Restart reconciliation: adopt existing container for (attempt_id, stage_id) without
-        # launching a duplicate container.
+        # Reconcile existing managed containers by (attempt_id, stage_id) labels FIRST so
+        # any cancelled/fenced/timed-out container left running across a restart is stopped,
+        # inspected, persisted, and cleaned up rather than skipped by pre-start checks.
         existing_matches = self.client.list_stages(
             attempt_id=spec.attempt_id,
             stage_id=spec.stage_id,
@@ -349,13 +313,13 @@ class ContainerStageRunner:
             include_stats=False,
         )
         reused = False
+        wait_timeout = resolved_timeout
         if existing_matches:
             inspection = existing_matches[0]
             reused = True
             stage_execution_id = inspection.stage_execution_id
             workspace_rel = inspection.workspace_rel
             if inspection.status == "created":
-                # Resume a container that crashed between creation and start via idempotent start_stage.
                 inspection = self.client.start_stage(
                     StartStageSpec(
                         attempt_id=spec.attempt_id,
@@ -372,13 +336,36 @@ class ContainerStageRunner:
                         tmpfs_size_mb=resolved_tmpfs,
                     )
                 )
+            wait_timeout = self._remaining_timeout(resolved_timeout, inspection.started_at)
         else:
+            pre_stop = read_stop_reason(stop)
+            if pre_stop is not None:
+                return StageRunResult(
+                    stage_execution_id=stage_execution_id,
+                    attempt_id=str(spec.attempt_id),
+                    stage_id=spec.stage_id,
+                    fencing_token=str(spec.fencing_token),
+                    workspace_rel=workspace_rel,
+                    status=pre_stop,
+                    reused=False,
+                    exit_code=None,
+                    termination_reason=pre_stop,
+                    started_at=None,
+                    finished_at=None,
+                    resources={},
+                    iterations={"present": False, "count": 0, "tail": []},
+                    outputs={},
+                    missing_required_outputs=(),
+                    output_files=(),
+                    cleaned_up=False,
+                )
+
             self._prepare_workspace(workspace_rel, spec)
             inspection = self.client.start_stage(
                 StartStageSpec(
-                    attempt_id=spec.attempt_id,
+                    attempt_id=str(spec.attempt_id),
                     stage_id=spec.stage_id,
-                    fencing_token=spec.fencing_token,
+                    fencing_token=str(spec.fencing_token),
                     image=resolved_image,
                     stage_execution_id=stage_execution_id,
                     workspace_rel=workspace_rel,
@@ -391,12 +378,14 @@ class ContainerStageRunner:
                 )
             )
             reused = inspection.reused
+            if reused:
+                wait_timeout = self._remaining_timeout(resolved_timeout, inspection.started_at)
 
-        # Step 2 & 3: Wait for natural exit, cancel, fence, or timeout.
+        # Step 2 & 3: Wait for natural exit, cancel, fence, or remaining timeout.
         inspection = self._wait_for_exit(
             stage_execution_id,
             initial=inspection,
-            timeout_seconds=resolved_timeout,
+            timeout_seconds=wait_timeout,
             stop=stop,
         )
 
@@ -414,6 +403,7 @@ class ContainerStageRunner:
             required_outputs=spec.required_outputs,
             optional_outputs=spec.optional_outputs,
             discovered_files=final_inspection.output_files,
+            collect_all_outputs=spec.collect_all_outputs,
         )
         status = self._derive_stage_status(final_inspection, missing_required)
 
@@ -437,9 +427,7 @@ class ContainerStageRunner:
         )
 
         # Step 5: Persist checkpoints / artifacts with Fencing Token BEFORE cleanup.
-        persisted_value: Any = None
-        if persist is not None:
-            persisted_value = persist(result)
+        persisted_value = persist(result)
 
         # Step 6: Cleanup container & temporary workspace ONLY after persistence succeeds.
         cleanup_result = self.client.cleanup_stage(stage_execution_id, force=False)
@@ -483,15 +471,29 @@ class ContainerStageRunner:
             )
         return int(requested)
 
-    def _resolve_timeout(self, requested: float | None) -> float | None:
+    def _resolve_timeout(self, requested: float | None) -> float:
         if requested is None:
-            return None
+            return float(self.policy.max_timeout_seconds)
         if requested <= 0 or requested > self.policy.max_timeout_seconds:
             raise ValueError(
                 f"timeout_seconds={requested!r} exceeds policy limit "
                 f"{self.policy.max_timeout_seconds!r}"
             )
         return float(requested)
+
+    @staticmethod
+    def _remaining_timeout(timeout_seconds: float, started_at: str | None) -> float:
+        if not started_at:
+            return timeout_seconds
+        try:
+            normalized = started_at[:-1] + "+00:00" if started_at.endswith("Z") else started_at
+            started = datetime.fromisoformat(normalized)
+            if started.tzinfo is None:
+                started = started.replace(tzinfo=UTC)
+            elapsed = max(0.0, (datetime.now(UTC) - started.astimezone(UTC)).total_seconds())
+            return max(0.0, timeout_seconds - elapsed)
+        except ValueError:
+            return timeout_seconds
 
     def _filter_environment(self, environment: Mapping[str, str]) -> dict[str, str]:
         denied = sorted(k for k in environment if k not in self.policy.allowed_environment_vars)
@@ -522,11 +524,11 @@ class ContainerStageRunner:
         stage_execution_id: str,
         *,
         initial: StageInspection,
-        timeout_seconds: float | None,
+        timeout_seconds: float,
         stop: StopProbe | None,
     ) -> StageInspection:
         inspection = initial
-        deadline = time.monotonic() + timeout_seconds if timeout_seconds is not None else None
+        deadline = time.monotonic() + timeout_seconds
         while inspection.running or inspection.status not in _TERMINAL_CONTAINER_STATUSES:
             stop_reason = read_stop_reason(stop)
             if stop_reason is not None:
@@ -535,7 +537,8 @@ class ContainerStageRunner:
                     reason=stop_reason,
                     grace_seconds=self.policy.stop_grace_seconds,
                 )
-            if deadline is not None and time.monotonic() >= deadline:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
                 stop_reason = read_stop_reason(stop)
                 reason = stop_reason if stop_reason is not None else "timed_out"
                 return self.client.stop_stage(
@@ -543,13 +546,7 @@ class ContainerStageRunner:
                     reason=reason,
                     grace_seconds=self.policy.stop_grace_seconds,
                 )
-            sleep_for = self.poll_interval
-            if deadline is not None:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    continue
-                sleep_for = min(sleep_for, remaining)
-            time.sleep(sleep_for)
+            time.sleep(min(self.poll_interval, remaining))
             inspection = self.client.inspect_stage(
                 stage_execution_id,
                 iterations_tail=0,
@@ -564,9 +561,13 @@ class ContainerStageRunner:
         required_outputs: tuple[str, ...],
         optional_outputs: tuple[str, ...],
         discovered_files: tuple[str, ...],
+        collect_all_outputs: bool = False,
     ) -> tuple[dict[str, Content], tuple[str, ...]]:
         declared = list(dict.fromkeys((*required_outputs, *optional_outputs)))
-        candidates = declared if declared else list(discovered_files)
+        if collect_all_outputs:
+            candidates = list(dict.fromkeys((*declared, *discovered_files)))
+        else:
+            candidates = declared if declared else list(discovered_files)
         collected: dict[str, Content] = {}
         missing_required: list[str] = []
         for rel_path in candidates:

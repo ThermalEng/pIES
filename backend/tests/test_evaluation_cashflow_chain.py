@@ -44,7 +44,6 @@ from iesplan.api import tasks as tasks_api  # noqa: E402
 from iesplan.api.config import config_router  # noqa: E402
 from iesplan.api.deps import get_request_db  # noqa: E402
 from iesplan.application import worker as worker_app  # noqa: E402
-from iesplan.bootstrap import assemble_compute_worker  # noqa: E402
 from iesplan.db import Base  # noqa: E402
 from iesplan.main import create_app  # noqa: E402
 from iesplan.results import persistence as results_store  # noqa: E402
@@ -576,11 +575,10 @@ def client(engine: Engine, db: Session, tmp_path: Path) -> Iterator[TestClient]:
 
 
 @pytest.fixture()
-def plane():
-    ctx = assemble_compute_worker()
-    plane = ctx.compute_execution_plane()
-    assert plane is not None
-    return plane
+def plane(tmp_path: Path):
+    from stage_testkit import build_test_compute_plane
+
+    return build_test_compute_plane(tmp_path / "stages")
 
 
 BASE_PLANNING = _planning(

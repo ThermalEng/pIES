@@ -18,6 +18,8 @@ if [[ "${CI_DOCKER_CACHE:-false}" == "true" ]]; then
     compose+=(-f .github/ci/docker-compose-cache-write.yml)
   fi
 fi
+# Provision the official built-in stage image before starting Compose readiness checks.
+docker build -f plugins/Dockerfile -t pies-builtin-stages:1.1.5 .
 # Start healthy DB/Redis/job_runner, then backend (which initializes schema,
 # seeds admin, and starts the embedded scheduler), and finally web.
 docker compose "${compose[@]}" up -d --build --wait postgres redis job_runner backend web

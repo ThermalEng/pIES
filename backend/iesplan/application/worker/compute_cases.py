@@ -35,7 +35,7 @@ storage/领域门面 + computation 公开门面)。
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from functools import partial
 from typing import Any
@@ -43,7 +43,8 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from iesplan import configuration as configuration_domain
-from iesplan.application.worker.lease_cases import Claim
+from iesplan.application.worker.lease_cases import Claim, LeaseRejectedError, verify_lease
+from iesplan.application.worker.transactions import run_worker_transaction
 from iesplan.assembly import ValidatedAssemblyArtifact, ValidationReceipt
 from iesplan.computation import (
     AttemptContext,
@@ -51,7 +52,6 @@ from iesplan.computation import (
     ComputationUnavailableError,
     ComputeResult,
     ExecutionReceipt,
-    ExecutorRegistry,
     GeneratorRegistry,
     MaterializedPriceSeries,
     MaterializedSeries,
@@ -59,20 +59,21 @@ from iesplan.computation import (
     PredictedTarget,
     PredictorRegistry,
     SolverBundle,
-    SolverRuntime,
+    SolverBundleManifest,
     StopProbe,
     check_convergence,
     materialize_non_predictive_series,
-    materialize_predicted_series,
     prediction_delta,
-    read_stop_reason,
     split_predictions_by_dependency,
     thaw_json_value,
 )
-from iesplan.computation.result_adapter import ResultAdapterRegistry
-from iesplan.core.content import Content, GeneratedContent, MemoryContent, json_chunks
+from iesplan.computation.bundle import export_bundle_files
+from iesplan.computation.generators.highs_milp import SOLVER_REF
+from iesplan.computation.runtime.stage_runner import StageExecutionSpec
+from iesplan.core.content import Content, GeneratedContent, MemoryContent, json_chunks, read_content
 from iesplan.core.contracts import horizon_point_count
 from iesplan.core.diagnostics import Diagnostic
+from iesplan.core.yamlmini import load as _yaml_load
 from iesplan.finance import EffectiveFinanceConfig, EvaluationInput
 from iesplan.modeling import DeviceMathContribution, contribution_from_dict
 from iesplan.storage import add_ref, get_object, put_content
@@ -81,6 +82,7 @@ from iesplan.tasks import BUSINESS_OUTCOMES
 __all__ = [
     "HOURLY_OBJECT_PATH",
     "ComputeExecutionPlane",
+    "StageExecutionError",
     "adapt_result",
     "attach_evidence_objects",
     "build_attempt_context",
@@ -89,34 +91,44 @@ __all__ = [
     "business_outcome_for",
     "complete_materialized",
     "convergence_for_round",
-    "execute_bundle",
     "generate_bundle",
     "load_compute_inputs",
-    "predict_selected_round",
-    "predict_target_round",
+    "predict_round_stage",
     "prediction_delta",
     "result_step_series",
+    "run_algorithm_stage",
     "seal_output_objects",
     "split_predictions_by_dependency",
 ]
 
 
+class StageExecutionError(Exception):
+    """Non-succeeded container stage outcome translated into worker terminal states."""
+
+    def __init__(
+        self,
+        *,
+        stage: str,
+        status: str,
+        termination_reason: str | None,
+        detail: str,
+    ) -> None:
+        self.stage = stage
+        self.status = status
+        self.termination_reason = termination_reason
+        self.detail = detail
+        super().__init__(detail)
+
+
 @dataclass(frozen=True, slots=True)
 class ComputeExecutionPlane:
-    """计算执行面句柄（组合根装配、Worker 持有、阶段命令消费）。
-
-    五个成员均为已发布/已装配实例：生成器目录、执行器目录、结果适配器
-    目录、预测算法目录与通用运行时。API 进程不装配执行面（执行器目录/
-    运行时/策略只归计算 Worker 组合根；预测目录随生成器目录在 API 与
-    Worker 上下文同时装配，供提交相容核对与执行预测使用）。
-    """
+    """容器化计算执行面句柄（组合根装配、调度器/Worker 持有、阶段命令消费）。"""
 
     generator_registry: GeneratorRegistry
-    executor_registry: ExecutorRegistry
-    adapter_registry: ResultAdapterRegistry
-    runtime: SolverRuntime
     predictor_registry: PredictorRegistry
-    stage_runner: Any | None = None
+    stage_runner: Any
+    stage_catalog: Any
+    algorithm_registry: Any | None = None
 
 
 def _receipt_from_frozen(data: Mapping[str, Any]) -> ValidationReceipt:
@@ -342,103 +354,269 @@ def complete_materialized(
     )
 
 
-def _predict_entries(
-    artifact: ValidatedAssemblyArtifact,
-    resources: Mapping[str, bytes],
-    entries: tuple[Mapping[str, object], ...],
-    resolve_predictor: Any,
-    seed: int | None,
-    *,
-    operation_years: int,
-    previous: Mapping[str, object] | None = None,
-    allow_subset: bool = False,
-) -> tuple[tuple[MaterializedSeries, ...], tuple[PredictedTarget, ...]]:
-    """按给定配置条目经公开 predictor 物化运营期序列（无数据库写入）。
+def _verify_lease_tx(db: Session, claim: Claim) -> None:
+    if verify_lease(db, claim.attempt_id, claim.lease_token) is None:
+        raise LeaseRejectedError("租约失效，拒绝提交阶段产物")
 
-    历史列按绑定接口名投影，目标类型不透明透传；返回均按（实例，接口）
-    稳定排序。运营期点数取权威推导，不以 predictor 输出长度自洽。
-    ``allow_subset`` 为真时只物化给定条目命中的绑定（耦合轮次用）。
-    """
-    if not entries:
-        return (), ()
-    predicted = materialize_predicted_series(
-        artifact, resources, tuple(entries), resolve_predictor, seed,
-        operation_years=operation_years,
-        previous=previous,
-        allow_subset=allow_subset,
+
+def _stage_descriptor(plane: ComputeExecutionPlane, ref: str, *, kind_label: str) -> Any:
+    try:
+        return plane.stage_catalog.get_by_ref(ref)
+    except KeyError:
+        raise ComputationUnavailableError(
+            f"{kind_label}阶段容器未发布: {ref!r}",
+            reason="no-provider",
+        ) from None
+
+
+def _handle_non_succeeded_stage(
+    stage_result: Any,
+    claim: Claim,
+    session_factory: Callable[[], Session],
+) -> None:
+    if stage_result.status == "fenced":
+        raise LeaseRejectedError("容器阶段执行期间租约已失效(fenced)")
+    run_worker_transaction(session_factory, _verify_lease_tx, claim)
+
+
+def _raise_stage_error(stage: str, stage_result: Any) -> None:
+    raise StageExecutionError(
+        stage=stage,
+        status=str(stage_result.status),
+        termination_reason=stage_result.termination_reason,
+        detail=(
+            f"阶段 {stage} 未成功"
+            f"(status={stage_result.status}, reason={stage_result.termination_reason})"
+        ),
     )
-    baseline_data = json.loads(artifact.canonical_text)["project_baseline"]
-    # 运营期点数取权威推导（与非预测物化同一来源），不以 predictor 输出
-    # 长度自洽：短/空输出由 MaterializedSeries 自身长度不变式自然拒绝。
-    point_count = horizon_point_count(
-        baseline_data["resolution"], baseline_data["start_year"], operation_years
+
+
+def _serialize_materialized(materialized: MaterializedSet) -> dict[str, Any]:
+    return {
+        "operation_years": materialized.operation_years,
+        "series": [
+            {
+                "device": item.device,
+                "interface": item.interface,
+                "mode": item.mode,
+                "resolution": item.resolution,
+                "point_count": item.point_count,
+                "values": list(item.values),
+                "source": thaw_json_value(item.source),
+            }
+            for item in materialized.series
+        ],
+        "pending_predict": [thaw_json_value(entry) for entry in materialized.pending_predict],
+        "prices": [
+            {
+                "price_id": item.price_id,
+                "point_count": item.point_count,
+                "resolution": item.resolution,
+                "unit": item.unit,
+                "values": list(item.values),
+                "source": thaw_json_value(item.source),
+            }
+            for item in materialized.prices
+        ],
+    }
+
+
+def _json_bytes(payload: Mapping[str, Any]) -> bytes:
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+
+
+def predict_round_stage(
+    *,
+    plane: ComputeExecutionPlane,
+    task_project_id: int,
+    snapshot: Any,
+    claim: Claim,
+    number: int,
+    session_factory: Callable[[], Session],
+    save_checkpoint: Callable[
+        [Session, Claim, int, tuple[MaterializedSeries, ...], tuple[PredictedTarget, ...]],
+        dict[str, dict[str, object]],
+    ],
+    entries: tuple[Mapping[str, object], ...] | None = None,
+    previous: Mapping[str, object] | None = None,
+    stop: StopProbe | None = None,
+) -> tuple[
+    tuple[MaterializedSeries, ...],
+    tuple[PredictedTarget, ...],
+    dict[str, dict[str, object]],
+]:
+    """预测阶段容器化执行：读取历史字节 → job_runner 预测阶段 → 检查点落库后清理。"""
+    artifact, resources, config, seed = run_worker_transaction(
+        session_factory, _restore_artifact_resources_config, task_project_id, snapshot
     )
-    series = tuple(
-        MaterializedSeries(
-            device=item.device,
-            interface=item.interface,
-            mode="data_predict",
-            resolution=baseline_data["resolution"],
-            point_count=point_count,
-            values=item.values,
-            source={"kind": "data_predict", "object_id": item.history_object_id},
+    target_entries = tuple(config.predictions or ()) if entries is None else tuple(entries)
+    allow_subset = entries is not None
+    if not target_entries:
+        return (), (), {}
+
+    doc = json.loads(artifact.canonical_text)
+    baseline = doc["project_baseline"]
+    operation_years = int(snapshot.evaluation["operation_years"])
+    point_count = horizon_point_count(baseline["resolution"], baseline["start_year"], operation_years)
+
+    by_target: dict[tuple[str, str], Mapping[str, object]] = {}
+    for entry in target_entries:
+        target = entry["target"]
+        by_target[(str(target["instance"]), str(target["interface"]))] = entry
+
+    grouped: dict[str, tuple[Any, list[dict[str, Any]]]] = {}
+    devices = doc.get("devices") or {}
+    for device_id in sorted(devices):
+        bindings = devices[device_id].get("predefined_interfaces") or {}
+        for interface_id in sorted(bindings):
+            binding = bindings[interface_id]
+            if not isinstance(binding, Mapping) or binding.get("mode") != "data_predict":
+                continue
+            key = (str(device_id), str(interface_id))
+            if key not in by_target:
+                if allow_subset:
+                    continue
+                raise KeyError(key)
+            entry = by_target[key]
+            algo_ref = str(entry["algorithm"])
+            plane.predictor_registry.get(algo_ref)
+            descriptor = _stage_descriptor(plane, algo_ref, kind_label="predictor")
+            object_id = str(binding["content"]["object_id"])
+            if object_id not in resources:
+                raise ValueError(
+                    "固定资源缺失（必要输入不完整）: "
+                    f"{device_id!r} x {interface_id!r} x object {object_id!r}"
+                )
+            grouped.setdefault(algo_ref, (descriptor, []))[1].append(
+                {
+                    "instance": str(device_id),
+                    "interface": str(interface_id),
+                    "target_type": str(binding["target_type"]),
+                    "history_object_id": object_id,
+                    "history_csv_rel": f"history/{object_id}.csv",
+                    "parameters": thaw_json_value(entry.get("parameters") or {}),
+                }
+            )
+
+    all_predicted: list[PredictedTarget] = []
+    all_series: list[MaterializedSeries] = []
+    saved_artifacts: dict[str, dict[str, object]] = {}
+    sorted_algos = sorted(grouped)
+
+    for idx, algo_ref in enumerate(sorted_algos):
+        descriptor, group_targets = grouped[algo_ref]
+        input_files: dict[str, Content | bytes] = {
+            "request.json": _json_bytes(
+                {
+                    "point_count": point_count,
+                    "seed": seed,
+                    "previous": thaw_json_value(previous) if previous is not None else None,
+                    "targets": group_targets,
+                }
+            )
+        }
+        for item in group_targets:
+            oid = item["history_object_id"]
+            csv_rel = item["history_csv_rel"]
+            if csv_rel not in input_files:
+                input_files[csv_rel] = MemoryContent(resources[oid])
+
+        stage_id = f"predict-r{number}" if len(sorted_algos) == 1 else f"predict-r{number}-{idx}"
+        group_series: list[MaterializedSeries] = []
+        group_predicted: list[PredictedTarget] = []
+
+        def _persist(stage_result: Any) -> Any:
+            nonlocal group_series, group_predicted, saved_artifacts
+            if stage_result.status != "succeeded":
+                _handle_non_succeeded_stage(stage_result, claim, session_factory)
+                return None
+            payload = json.loads(read_content(stage_result.outputs["prediction.json"]).decode("utf-8"))
+            parsed_series: list[MaterializedSeries] = []
+            parsed_predicted: list[PredictedTarget] = []
+            for pred in payload["predictions"]:
+                artifact_bytes = read_content(stage_result.outputs[str(pred["artifact_path"])])
+                values = tuple(float(v) for v in pred["values"])
+                parsed_predicted.append(
+                    PredictedTarget(
+                        device=str(pred["instance"]),
+                        interface=str(pred["interface"]),
+                        target_type=str(pred["target_type"]),
+                        values=values,
+                        history_object_id=str(pred.get("history_object_id") or ""),
+                        artifact=artifact_bytes,
+                        artifact_media_type=str(pred.get("artifact_media_type") or "application/json"),
+                        receipt=dict(pred.get("receipt") or {}),
+                    )
+                )
+                parsed_series.append(
+                    MaterializedSeries(
+                        device=str(pred["instance"]),
+                        interface=str(pred["interface"]),
+                        mode="data_predict",
+                        resolution=str(baseline["resolution"]),
+                        point_count=point_count,
+                        values=values,
+                        source={
+                            "kind": "data_predict",
+                            "object_id": str(pred.get("history_object_id") or ""),
+                        },
+                    )
+                )
+            group_series = parsed_series
+            group_predicted = parsed_predicted
+            if len(sorted_algos) == 1:
+                sorted_pair_p = tuple(
+                    sorted(parsed_predicted, key=lambda target: (target.device, target.interface))
+                )
+                sorted_pair_s = tuple(
+                    sorted(parsed_series, key=lambda target: (target.device, target.interface))
+                )
+                saved_artifacts = run_worker_transaction(
+                    session_factory,
+                    save_checkpoint,
+                    claim,
+                    number,
+                    sorted_pair_s,
+                    sorted_pair_p,
+                )
+            else:
+                run_worker_transaction(session_factory, _verify_lease_tx, claim)
+            return True
+
+        try:
+            stage_result = plane.stage_runner.run_stage(
+                StageExecutionSpec(
+                    attempt_id=str(claim.attempt_id),
+                    stage_id=stage_id,
+                    fencing_token=str(claim.lease_token),
+                    image=descriptor.image,
+                    command=descriptor.command,
+                    input_files=input_files,
+                    required_outputs=("prediction.json",),
+                    collect_all_outputs=True,
+                ),
+                persist=_persist,
+                stop=stop,
+            )
+        except LeaseRejectedError:
+            raise StageExecutionError(
+                stage="predict",
+                status="fenced",
+                termination_reason="fenced",
+                detail="预测阶段租约已失效(fenced)",
+            ) from None
+        if stage_result.status != "succeeded":
+            _raise_stage_error("predict", stage_result)
+        all_series.extend(group_series)
+        all_predicted.extend(group_predicted)
+
+    final_series = tuple(sorted(all_series, key=lambda item: (item.device, item.interface)))
+    final_predicted = tuple(sorted(all_predicted, key=lambda item: (item.device, item.interface)))
+    if len(sorted_algos) > 1:
+        saved_artifacts = run_worker_transaction(
+            session_factory, save_checkpoint, claim, number, final_series, final_predicted
         )
-        for item in predicted
-    )
-    return series, predicted
-
-
-def predict_target_round(
-    db: Session,
-    plane: ComputeExecutionPlane,
-    task_project_id: int,
-    snapshot: Any,
-    *,
-    previous: Mapping[str, object] | None = None,
-) -> tuple[tuple[MaterializedSeries, ...], tuple[PredictedTarget, ...]]:
-    """预测阶段命令：经公开 predictor 物化全部 data_predict 运营期序列。
-
-    纯计算阶段（读快照与固定资源字节，无数据库写入）：按配置条目经
-    执行面预测目录精确解析算法（未注册/目标类型不支持即明确不可用，
-    不回退），历史列按绑定接口名投影，目标类型不透明透传。返回
-    （生成器可消费序列，预测产物〈序列值/训练产物字节/回执基底〉），
-    均按（实例，接口）稳定排序。训练产物引用由提交密封后回填。
-    """
-    artifact, resources, config, seed = _restore_artifact_resources_config(
-        db, task_project_id, snapshot
-    )
-    return _predict_entries(
-        artifact, resources, tuple(config.predictions or ()),
-        plane.predictor_registry.get, seed,
-        operation_years=snapshot.evaluation["operation_years"],
-        previous=previous,
-    )
-
-
-def predict_selected_round(
-    db: Session,
-    plane: ComputeExecutionPlane,
-    task_project_id: int,
-    snapshot: Any,
-    entries: tuple[Mapping[str, object], ...],
-    *,
-    previous: Mapping[str, object] | None = None,
-) -> tuple[tuple[MaterializedSeries, ...], tuple[PredictedTarget, ...]]:
-    """预测阶段命令：只重算给定配置条目（耦合轮次用，独立产物由调用方复用）。
-
-    与 ``predict_target_round`` 同一物化路径；调用方传入已按依赖声明
-    拆出的条目（见 ``split_predictions_by_dependency``），此处不重复分流。
-    """
-    artifact, resources, _config, seed = _restore_artifact_resources_config(
-        db, task_project_id, snapshot
-    )
-    return _predict_entries(
-        artifact, resources, tuple(entries),
-        plane.predictor_registry.get, seed,
-        operation_years=snapshot.evaluation["operation_years"],
-        previous=previous,
-        allow_subset=True,
-    )
+    return final_series, final_predicted, saved_artifacts
 
 
 def convergence_for_round(
@@ -449,21 +627,13 @@ def convergence_for_round(
     previous_outputs: Mapping[str, object] | None,
     current_outputs: Mapping[str, object],
 ) -> tuple[float, tuple[dict[str, object], ...]]:
-    """逐耦合目标调用算法收敛度量并汇总（求解完成后的公开输出边界）。
-
-    每项目返回值经 ``check_convergence`` 校验；汇总值为各目标无量纲值
-    的最大值，调用方以同一 ``tolerance`` 比较（全部不大于才收敛）。
-    参数取各条目已固定的 ``parameters``，此处不重复跑参数校验。
-    返回（汇总值，逐目标记录）：记录为
-    ``{device, interface, algorithm, metric, value, unit}`` 按目标排序。
-    """
+    """逐耦合目标调用算法收敛度量并汇总（求解完成后的公开输出边界）。"""
     records: list[dict[str, object]] = []
     for entry in coupled_entries:
         target = entry["target"]
         key = (str(target["instance"]), str(target["interface"]))
         algorithm = str(entry["algorithm"])
         predictor = plane.predictor_registry.get(algorithm)
-        # 可用性已由注册边界确定（耦合必有收敛度量），此处直接调用。
         convergence = check_convergence(
             predictor.measure_convergence(
                 previous_prediction=previous_predicted[key],
@@ -498,58 +668,110 @@ def generate_bundle(
     config: CalculationConfig,
     evaluation: EvaluationInput,
     *,
+    attempt: AttemptContext,
+    claim: Claim,
+    number: int,
+    session_factory: Callable[[], Session],
+    save_checkpoint: Callable[
+        [Session, Claim, int, SolverBundle, AttemptContext],
+        tuple[int, dict[str, Any]],
+    ],
     stop: StopProbe | None = None,
-) -> SolverBundle:
-    """经生成器目录选中精确 provider 生成完整 Bundle，并消费快照冻结引用。
-
-    第三项为已完成物化的集合（调用方在预测产物合并后构成，此处只透传，
-    不复核）。冻结评价确认独立直传（无默认值；调用方传同一任务冻结块
-    恢复的值，不读最新草稿）。注册表 resolve 即通用选择门禁的唯一真实
-    边界（未注册/不兼容即 ``ComputationUnavailableError``；用户计算选项
-    非法为 ``ValueError``）。生成后核对 Bundle 声明的执行器/适配器与快照
-    冻结精确引用一致，并预先解析两者（不可解析即明确失败，不等到求解后；
-    不读当前可变目录）。
-    """
-    reason = read_stop_reason(stop)
-    if reason is not None:
-        raise ComputationUnavailableError("生成前已停止", reason=reason)
+) -> tuple[int, dict[str, dict[str, object]]]:
+    """经生成器阶段容器生成完整 Bundle，并在 cleanup 前带 Fencing Token 持久化检查点。"""
+    del models, evaluation
     provider = plane.generator_registry.resolve(config)
-    # 稳定 GeneratorProvider.generate 协议不能追加 stop 关键字。
-    # 可协作停止的生成器自愿实现扩展，旧 provider 保持原有调用形状。
-    stoppable_generate = getattr(provider, "generate_with_stop", None)
-    if stop is not None and callable(stoppable_generate):
-        bundle = stoppable_generate(
-            artifact, models, materialized, finance, config, evaluation, stop=stop,
-        )
-    else:
-        bundle = provider.generate(
-            artifact, models, materialized, finance, config, evaluation,
-        )
-    reason = read_stop_reason(stop)
-    if reason is not None:
-        raise ComputationUnavailableError("生成后已停止", reason=reason)
-    declared_executor = bundle.manifest.command["executor"]
-    if declared_executor != snapshot.executor or bundle.manifest.result_adapter != snapshot.result_adapter:
+    descriptor = provider.descriptor
+    if snapshot.executor not in descriptor.executors or snapshot.result_adapter != descriptor.result_adapter:
         raise ComputationUnavailableError(
-            "Bundle 声明与快照冻结 provider 不一致 "
-            f"(bundle={declared_executor!r}/{bundle.manifest.result_adapter!r}, "
-            f"snapshot={snapshot.executor!r}/{snapshot.result_adapter!r})",
+            "生成器声明与快照冻结 provider 不一致 "
+            f"(snapshot={snapshot.executor!r}/{snapshot.result_adapter!r})",
             reason="frozen-provider-mismatch",
         )
-    plane.executor_registry.get(snapshot.executor)
-    plane.adapter_registry.get(snapshot.result_adapter)
-    return bundle
+    gen_stage = _stage_descriptor(plane, provider.ref, kind_label="generator")
+    solver_ref = config.solver or SOLVER_REF
+    _stage_descriptor(plane, solver_ref, kind_label="solver")
+    _stage_descriptor(plane, snapshot.result_adapter, kind_label="evaluator")
 
+    request_bytes = _json_bytes(
+        {
+            "artifact": {
+                "canonical_text": artifact.canonical_text,
+                "receipt": thaw_json_value(snapshot.assembly_receipt),
+            },
+            "device_models": thaw_json_value(snapshot.device_models),
+            "materialized": _serialize_materialized(materialized),
+            "finance": finance.to_dict(),
+            "calculation_config": config.to_dict(),
+            "evaluation": thaw_json_value(snapshot.evaluation),
+        }
+    )
 
-def execute_bundle(
-    *,
-    plane: ComputeExecutionPlane,
-    bundle: SolverBundle,
-    attempt: AttemptContext,
-    stop: StopProbe | None = None,
-) -> tuple[ExecutionReceipt, Mapping[str, Content]]:
-    """经组合根装配的通用运行时执行完整 Bundle（调用方停止探针透传）。"""
-    return plane.runtime.run(bundle, attempt, stop=stop)
+    saved_info: tuple[int, dict[str, dict[str, object]]] | None = None
+
+    def _persist(stage_result: Any) -> Any:
+        nonlocal saved_info
+        if stage_result.status != "succeeded":
+            _handle_non_succeeded_stage(stage_result, claim, session_factory)
+            return None
+        manifest_raw = _yaml_load(
+            read_content(stage_result.outputs["bundle/bundle.yaml"]).decode("utf-8")
+        )
+        manifest = SolverBundleManifest(**manifest_raw)
+        declared_executor = manifest.command["executor"]
+        if (
+            declared_executor != snapshot.executor
+            or manifest.result_adapter != snapshot.result_adapter
+        ):
+            raise ComputationUnavailableError(
+                "Bundle 声明与快照冻结 provider 不一致 "
+                f"(bundle={declared_executor!r}/{manifest.result_adapter!r}, "
+                f"snapshot={snapshot.executor!r}/{snapshot.result_adapter!r})",
+                reason="frozen-provider-mismatch",
+            )
+        bundle_files: dict[str, Content] = {
+            rel.removeprefix("bundle/"): content
+            for rel, content in stage_result.outputs.items()
+            if rel.startswith("bundle/") and rel != "bundle/bundle.yaml"
+        }
+        bundle = SolverBundle(manifest, bundle_files)
+        saved_info = run_worker_transaction(
+            session_factory,
+            save_checkpoint,
+            claim,
+            number,
+            bundle,
+            attempt,
+        )
+        return saved_info
+
+    try:
+        stage_result = plane.stage_runner.run_stage(
+            StageExecutionSpec(
+                attempt_id=attempt.attempt_id,
+                stage_id=f"generate-r{number}",
+                fencing_token=str(claim.lease_token),
+                image=gen_stage.image,
+                command=gen_stage.command,
+                input_files={"request.json": request_bytes},
+                required_outputs=("bundle/bundle.yaml",),
+                collect_all_outputs=True,
+            ),
+            persist=_persist,
+            stop=stop,
+        )
+    except LeaseRejectedError:
+        raise StageExecutionError(
+            stage="generate",
+            status="fenced",
+            termination_reason="fenced",
+            detail="生成阶段租约已失效(fenced)",
+        ) from None
+
+    if stage_result.status != "succeeded":
+        _raise_stage_error("generate", stage_result)
+    assert saved_info is not None
+    return saved_info
 
 
 def adapt_result(
@@ -557,9 +779,166 @@ def adapt_result(
     bundle: SolverBundle,
     receipt: ExecutionReceipt,
     collected: Mapping[str, object],
+    *,
+    claim: Claim,
+    number: int,
+    finance: EffectiveFinanceConfig,
+    snapshot: Any,
+    session_factory: Callable[[], Session],
+    stop: StopProbe | None = None,
 ) -> ComputeResult:
-    """按回执固定的精确引用选中配套适配器并解释（只凭三元组，不回退）。"""
-    return plane.adapter_registry.resolve(receipt.result_adapter_ref).adapt(bundle, receipt, collected)
+    """经评价器阶段容器解释结果并在 cleanup 前验证 Fencing Token。"""
+    eval_stage = _stage_descriptor(plane, receipt.result_adapter_ref, kind_label="evaluator")
+    input_files: dict[str, Content | bytes] = {
+        f"bundle/{rel}": content for rel, content in export_bundle_files(bundle).items()
+    }
+    for rel, content in collected.items():
+        if isinstance(content, (Content, bytes)):
+            input_files[f"outputs/{rel}"] = content
+    input_files["receipt.json"] = _json_bytes(receipt.to_dict())
+    input_files["request.json"] = _json_bytes(
+        {
+            "finance": finance.to_dict(),
+            "evaluation": thaw_json_value(snapshot.evaluation),
+        }
+    )
+
+    adapted: ComputeResult | None = None
+
+    def _persist(stage_result: Any) -> Any:
+        nonlocal adapted
+        if stage_result.status != "succeeded":
+            _handle_non_succeeded_stage(stage_result, claim, session_factory)
+            return None
+        run_worker_transaction(session_factory, _verify_lease_tx, claim)
+        raw = json.loads(read_content(stage_result.outputs["result.json"]).decode("utf-8"))
+        outputs = dict(raw.get("outputs") or {})
+        outputs.pop("hourly_series", None)
+        outputs.pop("financial_evaluation", None)
+        adapted = ComputeResult(
+            bundle_id=str(raw["bundle_id"]),
+            receipt_id=str(raw["receipt_id"]),
+            execution_status=str(raw["execution_status"]),
+            math_status=str(raw["math_status"]),
+            outputs=outputs,
+        )
+        return True
+
+    try:
+        stage_result = plane.stage_runner.run_stage(
+            StageExecutionSpec(
+                attempt_id=receipt.attempt_id,
+                stage_id=f"evaluate-r{number}",
+                fencing_token=str(claim.lease_token),
+                image=eval_stage.image,
+                command=eval_stage.command,
+                input_files=input_files,
+                required_outputs=("result.json",),
+            ),
+            persist=_persist,
+            stop=stop,
+        )
+    except LeaseRejectedError:
+        raise StageExecutionError(
+            stage="evaluate",
+            status="fenced",
+            termination_reason="fenced",
+            detail="结果适配阶段租约已失效(fenced)",
+        ) from None
+
+    if stage_result.status != "succeeded":
+        _raise_stage_error("evaluate", stage_result)
+    assert adapted is not None
+    return adapted
+
+
+def run_algorithm_stage(
+    *,
+    plane: ComputeExecutionPlane,
+    attempt: AttemptContext,
+    claim: Claim,
+    snapshot: Any,
+    artifact: ValidatedAssemblyArtifact,
+    materialized: MaterializedSet,
+    finance: EffectiveFinanceConfig,
+    config: CalculationConfig,
+    session_factory: Callable[[], Session],
+    stop: StopProbe | None = None,
+) -> ComputeResult:
+    """一体化 algorithm 模式容器化执行。"""
+    if config.algorithm is None:
+        raise ValueError("run_algorithm_stage requires config.algorithm")
+    if plane.algorithm_registry is not None:
+        plane.algorithm_registry.resolve(config)
+    algo_stage = _stage_descriptor(plane, config.algorithm, kind_label="algorithm")
+
+    request_bytes = _json_bytes(
+        {
+            "artifact": {
+                "canonical_text": artifact.canonical_text,
+                "receipt": thaw_json_value(snapshot.assembly_receipt),
+            },
+            "device_models": thaw_json_value(snapshot.device_models),
+            "materialized": _serialize_materialized(materialized),
+            "finance": finance.to_dict(),
+            "calculation_config": config.to_dict(),
+            "evaluation": thaw_json_value(snapshot.evaluation),
+            "attempt": {
+                "attempt_id": attempt.attempt_id,
+                "bundle_id": attempt.bundle_id,
+                "assembly_id": attempt.assembly_id,
+                "calculation_config_id": attempt.calculation_config_id,
+            },
+        }
+    )
+
+    adapted: ComputeResult | None = None
+
+    def _persist(stage_result: Any) -> Any:
+        nonlocal adapted
+        if stage_result.status != "succeeded":
+            _handle_non_succeeded_stage(stage_result, claim, session_factory)
+            return None
+        run_worker_transaction(session_factory, _verify_lease_tx, claim)
+        raw = json.loads(read_content(stage_result.outputs["result.json"]).decode("utf-8"))
+        outputs = dict(raw.get("outputs") or {})
+        outputs.pop("hourly_series", None)
+        outputs.pop("financial_evaluation", None)
+        adapted = ComputeResult(
+            bundle_id=str(raw["bundle_id"]),
+            receipt_id=str(raw["receipt_id"]),
+            execution_status=str(raw["execution_status"]),
+            math_status=str(raw["math_status"]),
+            outputs=outputs,
+        )
+        return True
+
+    try:
+        stage_result = plane.stage_runner.run_stage(
+            StageExecutionSpec(
+                attempt_id=attempt.attempt_id,
+                stage_id="algorithm-r1",
+                fencing_token=str(claim.lease_token),
+                image=algo_stage.image,
+                command=algo_stage.command,
+                input_files={"request.json": request_bytes},
+                required_outputs=("result.json",),
+            ),
+            persist=_persist,
+            stop=stop,
+        )
+    except LeaseRejectedError:
+        raise StageExecutionError(
+            stage="algorithm",
+            status="fenced",
+            termination_reason="fenced",
+            detail="一体化算法阶段租约已失效(fenced)",
+        ) from None
+
+    if stage_result.status != "succeeded":
+        _raise_stage_error("algorithm", stage_result)
+    assert adapted is not None
+    return adapted
 
 
 def build_attempt_context(task: Any, claim: Claim, snapshot: Any) -> AttemptContext:

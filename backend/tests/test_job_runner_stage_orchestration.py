@@ -8,6 +8,7 @@ import json
 import threading
 import time
 from collections.abc import Iterator
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -22,16 +23,18 @@ from sqlalchemy.pool import StaticPool
 
 from iesplan import tasks as tasks_domain
 from iesplan.application import worker as worker_app
-from iesplan.computation.runtime import (
-    ContainerStagePolicy,
-    ContainerStageRunner,
+from iesplan.computation.runtime.job_runner_client import (
     JobRunnerBadRequestError,
     JobRunnerClient,
     JobRunnerConflictError,
     JobRunnerNotFoundError,
     JobRunnerUnavailableError,
-    StageExecutionSpec,
     StartStageSpec,
+)
+from iesplan.computation.runtime.stage_runner import (
+    ContainerStagePolicy,
+    ContainerStageRunner,
+    StageExecutionSpec,
     build_builtin_stage_catalog,
 )
 from iesplan.config import settings
@@ -67,6 +70,7 @@ def _stage_payload(
     exit_code: int | None = 0,
     termination_reason: str | None = "normal",
     reused: bool = False,
+    started_at: str | None = None,
     output_files: list[str] | None = None,
     iterations: dict[str, Any] | None = None,
     oom_killed: bool = False,
@@ -85,7 +89,7 @@ def _stage_payload(
         "running": running,
         "exit_code": exit_code,
         "termination_reason": termination_reason,
-        "started_at": "2026-11-24T08:00:00Z",
+        "started_at": started_at or datetime.now(UTC).isoformat().replace("+00:00", "Z"),
         "finished_at": None if running else "2026-11-24T08:00:01Z",
         "resources": _sample_resources(oom_killed=oom_killed),
         "iterations": iterations or {"present": False, "count": 0, "tail": []},
@@ -211,7 +215,7 @@ def test_job_runner_client_fixed_endpoints_and_error_mapping() -> None:
     with pytest.raises(JobRunnerConflictError):
         client.cleanup_stage("busy")
     with pytest.raises(JobRunnerBadRequestError):
-        client.stop_stage("bad")
+        client.stop_stage("bad", grace_seconds=5)
     with pytest.raises(JobRunnerUnavailableError):
         client.inspect_stage("unavailable")
 
@@ -552,7 +556,8 @@ def test_stage_runner_restart_reconciliation_no_duplicate_launch(
             stage_id="solver",
             fencing_token="tok-44",
             required_outputs=("solution.sol",),
-        )
+        ),
+        persist=lambda _res: "ok",
     )
     assert res.reused is True
     assert res.status == "succeeded"
@@ -572,7 +577,9 @@ def test_stage_runner_restart_reconciliation_no_duplicate_launch(
 def test_readyz_reports_job_runner_health_and_never_fakes_ok(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from iesplan.computation.runtime import JobRunnerClient as RealJobRunnerClient
+    from iesplan.computation.runtime.job_runner_client import (
+        JobRunnerClient as RealJobRunnerClient,
+    )
 
     monkeypatch.setenv("IESPLAN_DATA_DIR", str(tmp_path))
     monkeypatch.setattr(settings, "data_dir", tmp_path)
@@ -585,7 +592,7 @@ def test_readyz_reports_job_runner_health_and_never_fakes_ok(
         return httpx.Response(200, json={"status": "ready", "docker": "ok", "stage_root": "/data/stages"})
 
     monkeypatch.setattr(
-        "iesplan.computation.runtime.JobRunnerClient",
+        "iesplan.computation.runtime.job_runner_client.JobRunnerClient",
         lambda base_url: RealJobRunnerClient(
             base_url,
             client=httpx.Client(base_url=base_url, transport=httpx.MockTransport(ok_handler)),
@@ -605,7 +612,7 @@ def test_readyz_reports_job_runner_health_and_never_fakes_ok(
         return httpx.Response(503, json={"detail": "docker daemon unreachable"})
 
     monkeypatch.setattr(
-        "iesplan.computation.runtime.JobRunnerClient",
+        "iesplan.computation.runtime.job_runner_client.JobRunnerClient",
         lambda base_url: RealJobRunnerClient(
             base_url,
             client=httpx.Client(base_url=base_url, transport=httpx.MockTransport(down_handler)),
@@ -840,6 +847,7 @@ def test_embedded_scheduler_reconcile_on_startup_adopts_active_and_cleans_orphan
         session_factory=factory,
         compute_slots=1,
         io_slots=1,
+        build_slots=1,
         stage_runner=FakeStageRunner(),
         poll_interval=0.5,
     )
@@ -872,3 +880,277 @@ def test_builtin_stage_catalog_contains_all_four_official_stages() -> None:
         "--manifest",
         "/app/plugins/solver_highs/plugin.yaml",
     )
+
+
+def test_computation_package_imports_cleanly_without_httpx() -> None:
+    """iesplan.computation & runtime must remain importable in plugin containers without httpx."""
+    import subprocess
+    import sys
+
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import sys; sys.modules['httpx'] = None; "
+                "import iesplan.computation; import iesplan.computation.runtime; "
+                "assert not hasattr(iesplan.computation.runtime, 'JobRunnerClient'); "
+                "assert not hasattr(iesplan.computation.runtime, 'ContainerStageRunner')"
+            ),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr
+
+
+def test_stage_runner_requires_persist_callback_and_enforces_timeout_ceiling(
+    tmp_path: Path,
+) -> None:
+    from datetime import UTC, datetime, timedelta
+
+    stage_root = tmp_path / "stages"
+    out_dir = stage_root / "61--solver" / "out"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / "solution.sol").write_text("ok", encoding="utf-8")
+
+    started_at = (datetime.now(UTC) - timedelta(seconds=9.5)).isoformat().replace("+00:00", "Z")
+    events: list[str] = []
+    stopped = {"flag": False}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path == "/v1/stages":
+            events.append("list_stages")
+            return httpx.Response(
+                200,
+                json={
+                    "items": [
+                        _stage_payload(
+                            stage_execution_id="61--solver",
+                            attempt_id="61",
+                            stage_id="solver",
+                            fencing_token="tok-61",
+                            status="running",
+                            running=True,
+                            exit_code=None,
+                            termination_reason=None,
+                            started_at=started_at,
+                            output_files=["solution.sol"],
+                        )
+                    ],
+                    "total": 1,
+                },
+            )
+        if request.method == "POST" and request.url.path == "/v1/stages/61--solver/stop":
+            body = json.loads(request.content.decode())
+            stopped["flag"] = True
+            events.append(f"stop:{body['reason']}")
+            return httpx.Response(
+                200,
+                json=_stage_payload(
+                    stage_execution_id="61--solver",
+                    attempt_id="61",
+                    stage_id="solver",
+                    fencing_token="tok-61",
+                    status="exited",
+                    running=False,
+                    exit_code=137,
+                    termination_reason=body["reason"],
+                    started_at=started_at,
+                    output_files=["solution.sol"],
+                ),
+            )
+        if request.method == "GET" and request.url.path == "/v1/stages/61--solver":
+            if not stopped["flag"]:
+                return httpx.Response(
+                    200,
+                    json=_stage_payload(
+                        stage_execution_id="61--solver",
+                        attempt_id="61",
+                        stage_id="solver",
+                        fencing_token="tok-61",
+                        status="running",
+                        running=True,
+                        exit_code=None,
+                        termination_reason=None,
+                        started_at=started_at,
+                    ),
+                )
+            return httpx.Response(
+                200,
+                json=_stage_payload(
+                    stage_execution_id="61--solver",
+                    attempt_id="61",
+                    stage_id="solver",
+                    fencing_token="tok-61",
+                    status="exited",
+                    running=False,
+                    exit_code=137,
+                    termination_reason="timed_out",
+                    started_at=started_at,
+                    output_files=["solution.sol"],
+                ),
+            )
+        if request.method == "POST" and request.url.path == "/v1/stages/61--solver/cleanup":
+            events.append("cleanup_stage")
+            return httpx.Response(
+                200,
+                json={
+                    "stage_execution_id": "61--solver",
+                    "status": "cleaned",
+                    "container_removed": True,
+                    "workspace_removed": True,
+                },
+            )
+        raise AssertionError(f"Unexpected call: {request.method} {request.url}")
+
+    client = JobRunnerClient(
+        "http://job_runner:8090",
+        client=httpx.Client(base_url="http://job_runner:8090", transport=httpx.MockTransport(handler)),
+    )
+    policy = ContainerStagePolicy(
+        builtin_image="pies-builtin-stages:1.1.5",
+        cpu_cores=2.0,
+        memory_mb=512,
+        pids_limit=256,
+        tmpfs_size_mb=128,
+        stop_grace_seconds=3,
+        max_timeout_seconds=10.0,
+    )
+    runner = ContainerStageRunner(client, stage_root=stage_root, policy=policy, poll_interval=0.05)
+
+    with pytest.raises(TypeError, match="persist"):
+        runner.run_stage(
+            StageExecutionSpec(attempt_id="61", stage_id="solver", fencing_token="tok-61"),
+            persist=None,  # type: ignore[arg-type]
+        )
+
+    # Elapsed ~9.5s out of max_timeout_seconds=10.0s -> remaining <= ~0.5s even with timeout_seconds=None.
+    result = runner.run_stage(
+        StageExecutionSpec(
+            attempt_id="61",
+            stage_id="solver",
+            fencing_token="tok-61",
+            timeout_seconds=None,
+            optional_outputs=("solution.sol",),
+        ),
+        persist=lambda res: events.append(f"persist:{res.status}"),
+    )
+    assert result.reused is True
+    assert result.status == "timed_out"
+    assert events == ["list_stages", "stop:timed_out", "persist:timed_out", "cleanup_stage"]
+
+
+def test_stage_runner_reconciles_existing_container_before_pre_start_stop_probe(
+    tmp_path: Path,
+) -> None:
+    stage_root = tmp_path / "stages"
+    events: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path == "/v1/stages":
+            events.append("list_stages")
+            return httpx.Response(
+                200,
+                json={
+                    "items": [
+                        _stage_payload(
+                            stage_execution_id="71--solver",
+                            attempt_id="71",
+                            stage_id="solver",
+                            fencing_token="tok-71",
+                            status="running",
+                            running=True,
+                            exit_code=None,
+                            termination_reason=None,
+                        )
+                    ],
+                    "total": 1,
+                },
+            )
+        if request.method == "POST" and request.url.path == "/v1/stages/71--solver/stop":
+            body = json.loads(request.content.decode())
+            events.append(f"stop:{body['reason']}")
+            return httpx.Response(
+                200,
+                json=_stage_payload(
+                    stage_execution_id="71--solver",
+                    attempt_id="71",
+                    stage_id="solver",
+                    fencing_token="tok-71",
+                    status="exited",
+                    running=False,
+                    exit_code=137,
+                    termination_reason=body["reason"],
+                ),
+            )
+        if request.method == "GET" and request.url.path == "/v1/stages/71--solver":
+            return httpx.Response(
+                200,
+                json=_stage_payload(
+                    stage_execution_id="71--solver",
+                    attempt_id="71",
+                    stage_id="solver",
+                    fencing_token="tok-71",
+                    status="exited",
+                    running=False,
+                    exit_code=137,
+                    termination_reason="cancelled",
+                ),
+            )
+        if request.method == "POST" and request.url.path == "/v1/stages/71--solver/cleanup":
+            events.append("cleanup_stage")
+            return httpx.Response(
+                200,
+                json={
+                    "stage_execution_id": "71--solver",
+                    "status": "cleaned",
+                    "container_removed": True,
+                    "workspace_removed": True,
+                },
+            )
+        raise AssertionError(f"Unexpected call: {request.method} {request.url}")
+
+    client = JobRunnerClient(
+        "http://job_runner:8090",
+        client=httpx.Client(base_url="http://job_runner:8090", transport=httpx.MockTransport(handler)),
+    )
+    runner = ContainerStageRunner(client, stage_root=stage_root, policy=_default_policy(), poll_interval=0.01)
+
+    res = runner.run_stage(
+        StageExecutionSpec(attempt_id="71", stage_id="solver", fencing_token="tok-71"),
+        stop=lambda: "cancelled",
+        persist=lambda r: events.append(f"persist:{r.status}"),
+    )
+    assert res.reused is True
+    assert res.status == "cancelled"
+    assert events == ["list_stages", "stop:cancelled", "persist:cancelled", "cleanup_stage"]
+
+
+def test_embedded_scheduler_retries_reconciliation_after_transient_startup_failure(
+    memory_db: tuple[Engine, sessionmaker[Session]],
+) -> None:
+    _eng, factory = memory_db
+    calls = {"n": 0}
+
+    class FlakyStageRunner:
+        def list_stages(self, **_kwargs: Any) -> list[Any]:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("job_runner not yet reachable")
+            return []
+
+    scheduler = EmbeddedScheduler(
+        session_factory=factory,
+        compute_slots=1,
+        io_slots=1,
+        build_slots=1,
+        stage_runner=FlakyStageRunner(),
+        poll_interval=0.5,
+    )
+    assert scheduler.reconcile_on_startup() == []
+    assert scheduler._reconciled is False
+    scheduler.tick_once()
+    assert calls["n"] == 2
+    assert scheduler._reconciled is True

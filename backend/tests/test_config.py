@@ -50,6 +50,7 @@ def test_defaults_from_deploy_file() -> None:
     # 部署文件唯一权威的值
     assert s.compute_slots == 2
     assert s.io_slots == 2
+    assert s.build_slots == 1
     assert s.solver_max_timeout_seconds == 172800
     assert s.solver_max_memory_mib == 16384
     assert s.solver_max_cpu_cores == 8

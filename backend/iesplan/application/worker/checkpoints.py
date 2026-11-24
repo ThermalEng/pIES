@@ -5,17 +5,19 @@ from __future__ import annotations
 import json
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from sqlalchemy.orm import Session
 
 from iesplan import tasks
-from iesplan.application.worker.transactions import run_worker_transaction
 from iesplan.application.tasks import Claim
 from iesplan.application.worker.compute_cases import seal_output_objects
 from iesplan.application.worker.lease_cases import LeaseRejectedError, verify_lease
+from iesplan.application.worker.transactions import run_worker_transaction
 from iesplan.computation import (
     AttemptContext,
+    ComputationUnavailableError,
     ExecutionReceipt,
     MaterializedSeries,
     PredictedTarget,
@@ -23,7 +25,9 @@ from iesplan.computation import (
     SolverBundleManifest,
     thaw_json_value,
 )
-from iesplan.core.content import Content
+from iesplan.computation.bundle import export_bundle_files
+from iesplan.computation.runtime.stage_runner import StageExecutionSpec
+from iesplan.core.content import Content, read_content
 from iesplan.storage import add_ref, find_refs_by_owner, get_object, get_object_content, put_object
 
 
@@ -130,16 +134,176 @@ def restore_round(db: Session, claim: Claim, number: int) -> SavedRound | None:
                       {"bundle_files": bundle_refs, "solution": solution_refs})
 
 
+def _stage_status_to_receipt_status(status: str, termination_reason: str | None) -> tuple[str, str]:
+    if status == "succeeded":
+        return "succeeded", "exited"
+    if status == "cancelled":
+        return "cancelled", "cancelled"
+    if status == "fenced":
+        return "fenced", "fenced"
+    if status == "timed_out":
+        return "timed_out", "timeout"
+    if status == "oom":
+        return "process_failed", "oom"
+    if status == "output_protocol_failed":
+        return "output_protocol_failed", "exited"
+    return "process_failed", "exited"
+
+
+def _build_receipt_from_stage(
+    *,
+    attempt: AttemptContext,
+    bundle: SolverBundle,
+    stage_result: Any,
+    outputs: Mapping[str, Content],
+    meta: Mapping[str, Any] | None,
+) -> ExecutionReceipt:
+    from datetime import UTC, datetime
+
+    status, termination_reason = _stage_status_to_receipt_status(
+        str(stage_result.status),
+        stage_result.termination_reason,
+    )
+    declared_outputs = tuple(bundle.manifest.outputs or ())
+    if status == "succeeded":
+        missing = [
+            entry["path"]
+            for entry in declared_outputs
+            if entry.get("required", True) and entry["path"] not in outputs
+        ]
+        if missing:
+            status = "output_protocol_failed"
+            termination_reason = "exited"
+    meta_by_path = {
+        str(entry["path"]): (
+            str(entry.get("media_type") or "application/octet-stream"),
+            bool(entry.get("required", True)),
+        )
+        for entry in declared_outputs
+    }
+    output_entries = tuple(
+        {
+            "path": path,
+            "media_type": meta_by_path.get(path, ("application/octet-stream", True))[0],
+            "size_bytes": content.size_bytes,
+            "required": meta_by_path.get(path, ("application/octet-stream", True))[1],
+        }
+        for path, content in sorted(outputs.items())
+    )
+    meta_dict = dict(meta or {})
+    raw_exit_code = meta_dict.get("exit_code", stage_result.exit_code)
+    signal_number: int | None = None
+    exit_code: int | None = int(raw_exit_code) if raw_exit_code is not None else None
+    now_iso = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+    started_at = str(meta_dict.get("started_at") or stage_result.started_at or "")
+    ended_at = str(meta_dict.get("ended_at") or stage_result.finished_at or "")
+    if status in ("cancelled", "fenced"):
+        if not started_at and not ended_at:
+            exit_code = None
+            signal_number = None
+        else:
+            if not started_at:
+                started_at = ended_at
+            if not ended_at:
+                ended_at = now_iso
+            if exit_code is None:
+                signal_number = 15
+    else:
+        if not started_at:
+            started_at = now_iso
+        if not ended_at:
+            ended_at = started_at
+        if termination_reason == "oom":
+            exit_code = None
+            signal_number = 9
+        elif exit_code is None:
+            exit_code = 0 if status == "succeeded" else 1
+
+    stdout = str(meta_dict.get("stdout") or "")
+    stderr = str(meta_dict.get("stderr") or "")
+    error_msg = ""
+    if status != "succeeded":
+        error_msg = stderr.strip() or (
+            f"solver container finished with status={stage_result.status} "
+            f"(reason={termination_reason})"
+        )
+    return ExecutionReceipt(
+        receipt_id=f"receipt-{attempt.attempt_id}-{stage_result.stage_id}",
+        bundle_id=attempt.bundle_id,
+        assembly_id=attempt.assembly_id,
+        calculation_config_id=attempt.calculation_config_id,
+        attempt_id=attempt.attempt_id,
+        generator_ref=str(bundle.manifest.bundle["generator"]),
+        solver_ref=str(bundle.manifest.bundle["solver"]),
+        executor_ref=str(bundle.manifest.command["executor"]),
+        executable_ref=str(bundle.manifest.command["executable"]),
+        result_adapter_ref=str(bundle.manifest.result_adapter),
+        status=status,
+        exit_code=exit_code,
+        signal_number=signal_number,
+        termination_reason=termination_reason,
+        started_at=started_at,
+        ended_at=ended_at,
+        error=error_msg,
+        stdout=stdout,
+        stderr=stderr,
+        outputs=output_entries,
+        resource_usage=dict(stage_result.resources or {}),
+    )
+
+
 def execute_saved_bundle(
     *, plane: Any, bundle: SolverBundle, attempt: AttemptContext, claim: Claim,
     number: int, generated_id: int, session_factory: Callable[[], Session], stop=None,
 ) -> tuple[ExecutionReceipt, Mapping[str, Content], dict]:
-    files = {}
+    executable_ref = str(bundle.manifest.command["executable"])
+    try:
+        solver_stage = plane.stage_catalog.get_by_ref(executable_ref)
+    except KeyError:
+        raise ComputationUnavailableError(
+            f"solver阶段容器未发布: {executable_ref!r}",
+            reason="no-provider",
+        ) from None
 
-    def handoff(receipt: ExecutionReceipt, outputs: Mapping[str, Content]) -> Mapping[str, Content]:
-        nonlocal files
-        if receipt.status == "fenced":
-            return {}
+    input_files: dict[str, Any] = {
+        f"bundle/{rel}": content for rel, content in export_bundle_files(bundle).items()
+    }
+    raw_timeout = bundle.manifest.command.get("timeout_seconds")
+    timeout_seconds = float(raw_timeout) if raw_timeout is not None else None
+    stage_id = f"solve-r{number}"
+
+    files: dict = {}
+    receipt_box: list[ExecutionReceipt] = []
+    reopened_outputs: Mapping[str, Content] = {}
+
+    def _collect_solution_outputs(stage_result: Any) -> dict[str, Content]:
+        declared_outputs = tuple(bundle.manifest.outputs or ())
+        collected: dict[str, Content] = {}
+        for entry in declared_outputs:
+            declared_path = str(entry["path"])
+            basename = Path(declared_path).name
+            if declared_path in stage_result.outputs:
+                collected[declared_path] = stage_result.outputs[declared_path]
+            elif basename in stage_result.outputs:
+                collected[declared_path] = stage_result.outputs[basename]
+        return collected
+
+    def _persist(stage_result: Any) -> Any:
+        nonlocal files, reopened_outputs
+        if stage_result.status == "fenced":
+            raise LeaseRejectedError("求解容器阶段租约已失效(fenced)")
+        meta: dict[str, Any] | None = None
+        if "solver_meta.json" in stage_result.outputs:
+            meta = json.loads(read_content(stage_result.outputs["solver_meta.json"]).decode("utf-8"))
+        outputs = _collect_solution_outputs(stage_result)
+        receipt = _build_receipt_from_stage(
+            attempt=attempt,
+            bundle=bundle,
+            stage_result=stage_result,
+            outputs=outputs,
+            meta=meta,
+        )
+
         def publish(db: Session) -> Mapping[str, Content]:
             nonlocal files
             media = {entry["path"]: entry["media_type"] for entry in receipt.outputs}
@@ -152,10 +316,53 @@ def execute_saved_bundle(
             return {path: get_object_content(db, ref["object_id"])
                     for path, ref in files.items()}
 
-        return run_worker_transaction(session_factory, publish)
+        reopened_outputs = run_worker_transaction(session_factory, publish)
+        receipt_box.append(receipt)
+        return receipt
 
-    receipt, outputs = plane.runtime.run(bundle, attempt, stop=stop, handoff=handoff)
-    return receipt, outputs, files
+    try:
+        stage_result = plane.stage_runner.run_stage(
+            StageExecutionSpec(
+                attempt_id=attempt.attempt_id,
+                stage_id=stage_id,
+                fencing_token=str(claim.lease_token),
+                image=solver_stage.image,
+                command=solver_stage.command,
+                input_files=input_files,
+                optional_outputs=("solver_meta.json",),
+                collect_all_outputs=True,
+                timeout_seconds=timeout_seconds,
+            ),
+            persist=_persist,
+            stop=stop,
+        )
+    except LeaseRejectedError:
+        fenced_receipt = ExecutionReceipt(
+            receipt_id=f"receipt-{attempt.attempt_id}-{stage_id}",
+            bundle_id=attempt.bundle_id,
+            assembly_id=attempt.assembly_id,
+            calculation_config_id=attempt.calculation_config_id,
+            attempt_id=attempt.attempt_id,
+            generator_ref=str(bundle.manifest.bundle["generator"]),
+            solver_ref=str(bundle.manifest.bundle["solver"]),
+            executor_ref=str(bundle.manifest.command["executor"]),
+            executable_ref=str(bundle.manifest.command["executable"]),
+            result_adapter_ref=str(bundle.manifest.result_adapter),
+            status="fenced",
+            termination_reason="fenced",
+        )
+        return fenced_receipt, {}, {}
+
+    if not receipt_box:
+        pre_stop_receipt = _build_receipt_from_stage(
+            attempt=attempt,
+            bundle=bundle,
+            stage_result=stage_result,
+            outputs={},
+            meta=None,
+        )
+        return pre_stop_receipt, {}, {}
+    return receipt_box[0], reopened_outputs, files
 
 
 def load_prediction_checkpoint(db: Session, claim: Claim, number: int) -> tuple | None:

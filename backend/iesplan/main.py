@@ -12,6 +12,7 @@ from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import Any
 
+import anyio
 from fastapi import APIRouter, FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
@@ -100,7 +101,9 @@ def _build_health_router() -> APIRouter:
         """
         context = getattr(request.app.state, "bootstrap_context", None)
         readiness: dict[str, Any] = (
-            context.readiness() if context is not None else {"ready": False, "health": {}}
+            await anyio.to_thread.run_sync(context.readiness)
+            if context is not None
+            else {"ready": False, "health": {}}
         )
         health: dict[str, str] = dict(readiness.get("health", {}))
         # API 进程实际必需的已装配能力(与 assemble_api 装配子集一致): 缺一即 503

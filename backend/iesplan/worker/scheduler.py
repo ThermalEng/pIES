@@ -4,10 +4,11 @@ Replaces standalone persistent ``io_worker`` and ``compute_worker`` daemon
 containers (ADR-0016):
 - Isolates HTTP request threads from background scheduling, compute execution,
   large-file I/O, and plugin image builds via separate bounded executors;
-- Enforces ``compute_slots`` and ``io_slots`` from ``pies.toml`` independently;
-- Reconciles in-flight ``job_runner`` stage containers on startup via existing
-  ``TaskAttempt``, ``Fencing Token``, and container labels without creating a
-  second task state machine or launching duplicate stage containers.
+- Enforces ``compute_slots``, ``io_slots``, and ``build_slots`` from ``pies.toml``;
+- Reconciles in-flight ``job_runner`` stage containers on startup (and retries
+  reconciliation on transient failures) via existing ``TaskAttempt``,
+  ``Fencing Token``, and container labels without creating a second task state
+  machine or launching duplicate stage containers.
 """
 
 from __future__ import annotations
@@ -47,22 +48,13 @@ class EmbeddedScheduler:
         session_factory: Any,
         compute_slots: int,
         io_slots: int,
-        build_slots: int = 1,
+        build_slots: int,
         compute: Any = None,
         stage_runner: Any = None,
         worker_id: str | None = None,
         poll_interval: float = 0.5,
         heartbeat_interval: float = 5.0,
     ) -> None:
-        if session_factory is None:
-            raise TypeError("EmbeddedScheduler requires session_factory")
-        if compute_slots <= 0:
-            raise ValueError(f"compute_slots must be positive: {compute_slots!r}")
-        if io_slots <= 0:
-            raise ValueError(f"io_slots must be positive: {io_slots!r}")
-        if build_slots <= 0:
-            raise ValueError(f"build_slots must be positive: {build_slots!r}")
-
         self.session_factory = session_factory
         self.compute_slots = int(compute_slots)
         self.io_slots = int(io_slots)
@@ -122,7 +114,6 @@ class EmbeddedScheduler:
         self._stop.clear()
         if self.stage_runner is not None and not self._reconciled:
             self.reconcile_on_startup()
-            self._reconciled = True
         self._thread = threading.Thread(
             target=self._loop,
             name="pies-scheduler",
@@ -131,10 +122,11 @@ class EmbeddedScheduler:
         self._started = True
         self._thread.start()
         logger.info(
-            "EmbeddedScheduler started: id=%s compute_slots=%s io_slots=%s",
+            "EmbeddedScheduler started: id=%s compute_slots=%s io_slots=%s build_slots=%s",
             self.worker_id,
             self.compute_slots,
             self.io_slots,
+            self.build_slots,
         )
 
     def stop(self, *, timeout: float = 10.0) -> None:
@@ -161,11 +153,12 @@ class EmbeddedScheduler:
     def reconcile_on_startup(self) -> list[str]:
         """Reconcile managed job_runner containers against TaskAttempt + Fencing Token."""
         if self.stage_runner is None:
+            self._reconciled = True
             return []
         actions: list[str] = []
         try:
             stages = self.stage_runner.list_stages(include_stats=False)
-        except Exception:  # noqa: BLE001 - job_runner may still be warming up; keep loop alive
+        except Exception:  # noqa: BLE001 - retry on subsequent ticks until job_runner responds
             logger.warning("Startup stage reconciliation could not list job_runner stages", exc_info=True)
             return actions
 
@@ -210,6 +203,8 @@ class EmbeddedScheduler:
                 adopted_attempts.add(claim.attempt_id)
                 self._launch_claimed_task(claim, pool="compute")
                 actions.append(f"adopted:{stage.stage_execution_id}")
+
+        self._reconciled = True
         return actions
 
     def _can_adopt_attempt(self, attempt_id: int) -> bool:
@@ -226,7 +221,11 @@ class EmbeddedScheduler:
             self._wake.clear()
 
     def tick_once(self) -> None:
-        """Execute one scheduler cycle: reap finished tasks, check cancel/fence, heartbeat, claim."""
+        """Execute one scheduler cycle: reconcile if needed, reap, control check, heartbeat, claim."""
+        if self.stage_runner is not None and not self._reconciled:
+            self.reconcile_on_startup()
+            if not self._reconciled:
+                return
         self._reap_finished()
         now = time.monotonic()
         if now - self._last_heartbeat >= self.heartbeat_interval:

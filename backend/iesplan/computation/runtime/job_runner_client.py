@@ -338,8 +338,8 @@ class JobRunnerClient:
         self,
         stage_execution_id: str,
         *,
+        grace_seconds: int,
         reason: str = "cancelled",
-        grace_seconds: int = 5,
     ) -> StageInspection:
         """Stop a stage container via POST /v1/stages/{stage_execution_id}/stop."""
         data = self._request(

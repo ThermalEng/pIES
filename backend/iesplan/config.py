@@ -36,7 +36,7 @@ DEFAULT_DEPLOY_CONFIG_FILE = Path(__file__).resolve().parent.parent / "deploy" /
 
 #: 允许的 TOML 节与键(未知节/键即非法输入，防拼写漂移)。
 _ALLOWED_DEPLOY_SECTIONS: dict[str, frozenset[str]] = {
-    "worker": frozenset({"compute_slots", "io_slots"}),
+    "worker": frozenset({"compute_slots", "io_slots", "build_slots"}),
     "session": frozenset({"ttl_minutes"}),
     "solver": frozenset({
         "max_timeout_seconds",
@@ -59,6 +59,7 @@ _ALLOWED_DEPLOY_SECTIONS: dict[str, frozenset[str]] = {
 _APP_TOML_MAP: tuple[tuple[str, str, str], ...] = (
     ("compute_slots", "worker", "compute_slots"),
     ("io_slots", "worker", "io_slots"),
+    ("build_slots", "worker", "build_slots"),
     ("session_ttl_minutes", "session", "ttl_minutes"),
     ("solver_max_timeout_seconds", "solver", "max_timeout_seconds"),
     ("solver_max_memory_mib", "solver", "max_memory_mib"),
@@ -158,6 +159,8 @@ class Settings(BaseSettings):
     compute_slots: int = Field(exclude=True, gt=0)
     #: IO 任务并发槽数（与计算并发槽共用租约槽位表，部署可调）
     io_slots: int = Field(exclude=True, gt=0)
+    #: 插件镜像后台构建并发槽数
+    build_slots: int = Field(exclude=True, gt=0)
     #: 用户无操作的会话期限(分钟；真实操作续期，后台轮询不续期)
     session_ttl_minutes: int = Field(exclude=True, gt=0)
     #: 求解单次超时上限(秒)：策略上限，非单次计算默认请求
