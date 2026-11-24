@@ -194,7 +194,13 @@ def _build_receipt_from_stage(
     exit_code: int | None = int(raw_exit_code) if raw_exit_code is not None else None
     started_at = str(meta_dict.get("started_at") or stage_result.started_at or "")
     ended_at = str(meta_dict.get("ended_at") or stage_result.finished_at or "")
-    if termination_reason == "oom" and exit_code == 137:
+    if exit_code is not None and exit_code < 0:
+        # Python subprocess reports signal termination as negative return code (-signal).
+        signal_number = -exit_code
+        exit_code = None
+        if status == "process_failed" and termination_reason == "exited":
+            termination_reason = "signaled"
+    elif termination_reason == "oom" and exit_code == 137:
         # Container OOM killer terminates with SIGKILL (exit code 128 + 9 = 137).
         exit_code = None
         signal_number = 9
@@ -445,6 +451,39 @@ def save_algorithm_checkpoint(
     """Persist unified algorithm stage result.json durably with Fencing Token before cleanup_stage."""
     try:
         return _publish(db, claim, 1, "algorithm", {"result": dict(raw_result)}, {})
+    except Exception:
+        db.rollback()
+        raise
+
+
+def save_stage_outcome_checkpoint(
+    db: Session, claim: Claim, number: int, stage: str, stage_result: Any,
+) -> int:
+    """Persist non-succeeded stage facts and any collected outputs with Fencing Token before cleanup."""
+    try:
+        sealed_outputs = seal_output_objects(
+            db,
+            {
+                path: (content, "application/octet-stream")
+                for path, content in (stage_result.outputs or {}).items()
+            },
+            actor_id=None,
+        )
+        data = {
+            "stage_execution_id": stage_result.stage_execution_id,
+            "stage_id": stage_result.stage_id,
+            "status": stage_result.status,
+            "exit_code": stage_result.exit_code,
+            "termination_reason": stage_result.termination_reason,
+            "started_at": stage_result.started_at,
+            "finished_at": stage_result.finished_at,
+            "resources": thaw_json_value(stage_result.resources or {}),
+            "iterations": thaw_json_value(stage_result.iterations or {}),
+            "missing_required_outputs": list(stage_result.missing_required_outputs or ()),
+            "files": sealed_outputs,
+        }
+        groups = {"stage_outputs": sealed_outputs} if sealed_outputs else {}
+        return _publish(db, claim, number, f"{stage}:outcome", data, groups)
     except Exception:
         db.rollback()
         raise

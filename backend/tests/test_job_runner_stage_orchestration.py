@@ -1530,3 +1530,305 @@ def test_build_receipt_from_stage_does_not_fabricate_missing_execution_facts() -
     assert receipt.exit_code is None
     assert receipt.started_at == "2026-11-24T08:00:00Z"
     assert receipt.ended_at == "2026-11-24T08:00:05Z"
+
+    # Negative subprocess return code (-9 in solver_meta.json) under OOM must normalize to signal_number=9.
+    neg_oom_receipt = _build_receipt_from_stage(
+        attempt=attempt,
+        bundle=bundle,
+        stage_result=oom_result,
+        outputs={},
+        meta={
+            "exit_code": -9,
+            "started_at": "2026-11-24T08:00:00Z",
+            "ended_at": "2026-11-24T08:00:04Z",
+            "stderr": "killed by OOM",
+        },
+    )
+    assert neg_oom_receipt.status == "process_failed"
+    assert neg_oom_receipt.termination_reason == "oom"
+    assert neg_oom_receipt.signal_number == 9
+    assert neg_oom_receipt.exit_code is None
+
+    # Non-OOM negative subprocess return code (-11) normalizes cleanly to signaled + signal_number=11.
+    sigsegv_stage = StageRunResult(
+        stage_execution_id="1--solve-r1",
+        attempt_id="1",
+        stage_id="solve-r1",
+        fencing_token="tok-1",
+        workspace_rel="1--solve-r1",
+        status="process_failed",
+        reused=False,
+        exit_code=139,
+        termination_reason="process_failed",
+        started_at="2026-11-24T08:00:00Z",
+        finished_at="2026-11-24T08:00:02Z",
+        resources={},
+        iterations={"present": False, "count": 0, "tail": []},
+        outputs={},
+        missing_required_outputs=(),
+        output_files=(),
+    )
+    sig_receipt = _build_receipt_from_stage(
+        attempt=attempt,
+        bundle=bundle,
+        stage_result=sigsegv_stage,
+        outputs={},
+        meta={"exit_code": -11, "started_at": "2026-11-24T08:00:00Z", "ended_at": "2026-11-24T08:00:02Z"},
+    )
+    assert sig_receipt.status == "process_failed"
+    assert sig_receipt.termination_reason == "signaled"
+    assert sig_receipt.signal_number == 11
+    assert sig_receipt.exit_code is None
+
+
+@pytest.mark.parametrize("stage_kind", ["generate", "evaluate", "algorithm"])
+def test_non_succeeded_non_solve_stages_persist_outcome_before_cleanup(
+    memory_db: tuple[Engine, sessionmaker[Session]],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stage_kind: str,
+) -> None:
+    from types import SimpleNamespace
+
+    from iesplan.application.worker.checkpoints import (
+        save_algorithm_checkpoint,
+        save_bundle_checkpoint,
+        save_evaluation_checkpoint,
+    )
+    from iesplan.computation import (
+        NAIVE_PREDICTOR,
+        AttemptContext,
+        CalculationConfig,
+        ExecutionReceipt,
+        MaterializedSet,
+        SolverBundle,
+        SolverBundleManifest,
+        build_predictor_registry,
+    )
+    from iesplan.computation.generators import HIGHS_MILP_PROVIDER, build_registry
+    from iesplan.computation.runtime.stage_runner import BuiltinStageCatalog, BuiltinStageDescriptor
+    from iesplan.storage import find_refs_by_owner, get_object
+
+    _eng, factory = memory_db
+    monkeypatch.setattr(settings, "data_dir", tmp_path)
+    with factory() as db:
+        from auth_helpers import make_user
+
+        from iesplan import project as project_domain
+
+        user = make_user(db, f"fail_{stage_kind}", role="admin")
+        proj = project_domain.create_project(
+            db,
+            name=f"Fail-{stage_kind}",
+            description="",
+            owner_id=user.id,
+            created_by=user.id,
+            baseline_start_year=2026,
+        )
+        task = tasks_domain.create_task(
+            db,
+            project_id=proj.id,
+            type="calc",
+            idempotency_key=f"fail-{stage_kind}",
+            requested_by=user.id,
+        )
+        db.commit()
+        claim = worker_app.acquire_attempt(db, task.id, "test-worker")
+        assert claim is not None
+
+    stage_root = tmp_path / "stages"
+    cleanup_saw_outcome: list[bool] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content.decode()) if request.content else None
+        if request.method == "GET" and request.url.path == "/v1/stages":
+            return httpx.Response(200, json={"items": [], "total": 0})
+        if request.method == "POST" and request.url.path == "/v1/stages/start":
+            out_dir = stage_root / body["workspace_rel"] / "out"
+            out_dir.mkdir(parents=True, exist_ok=True)
+            (out_dir / "partial.log").write_text("partial-diagnostic-data", encoding="utf-8")
+            return httpx.Response(
+                200,
+                json=_stage_payload(
+                    stage_execution_id=body["stage_execution_id"],
+                    attempt_id=body["attempt_id"],
+                    stage_id=body["stage_id"],
+                    fencing_token=body["fencing_token"],
+                    status="exited",
+                    running=False,
+                    exit_code=1,
+                    termination_reason="process_failed",
+                    output_files=["partial.log"],
+                ),
+            )
+        if request.method == "GET" and request.url.path.startswith("/v1/stages/"):
+            seid = request.url.path.split("/")[-1]
+            return httpx.Response(
+                200,
+                json=_stage_payload(
+                    stage_execution_id=seid,
+                    attempt_id=str(claim.attempt_id),
+                    stage_id=seid.split("--", 1)[-1],
+                    fencing_token=str(claim.lease_token),
+                    status="exited",
+                    running=False,
+                    exit_code=1,
+                    termination_reason="process_failed",
+                    output_files=["partial.log"],
+                ),
+            )
+        if request.method == "POST" and request.url.path.endswith("/cleanup"):
+            seid = request.url.path.split("/")[-2]
+            with factory() as db:
+                refs = find_refs_by_owner(db, "task_checkpoint", claim.attempt_id, "task_attempts")
+                matching = [r for r in refs if r["purpose"] == f"round-1:{stage_kind}:outcome"]
+                assert matching, f"expected round-1:{stage_kind}:outcome persisted before cleanup"
+                doc = json.loads(get_object(db, matching[0]["object_id"]).decode("utf-8"))
+                assert doc["data"]["status"] == "process_failed"
+                assert doc["data"]["exit_code"] == 1
+                assert doc["data"]["resources"]["memory_peak_bytes"]["value"] == 12_345_678
+                assert "partial.log" in doc["data"]["files"]
+                raw_log = get_object(db, doc["data"]["files"]["partial.log"]["object_id"])
+                assert raw_log == b"partial-diagnostic-data"
+            cleanup_saw_outcome.append(True)
+            return httpx.Response(
+                200,
+                json={
+                    "stage_execution_id": seid,
+                    "status": "cleaned",
+                    "container_removed": True,
+                    "workspace_removed": True,
+                },
+            )
+        raise AssertionError(f"Unexpected call: {request.method} {request.url}")
+
+    client = JobRunnerClient(
+        "http://job_runner:8090",
+        client=httpx.Client(base_url="http://job_runner:8090", transport=httpx.MockTransport(handler)),
+    )
+    runner = ContainerStageRunner(client, stage_root=stage_root, policy=_default_policy(), poll_interval=0.01)
+    descs = list(build_builtin_stage_catalog("pies-builtin-stages:1.1.5").snapshot())
+    descs.append(
+        BuiltinStageDescriptor(
+            plugin_id="acme.algorithm.demo",
+            version="1.0.0",
+            kind="algorithm",
+            image="pies-plugin/acme:1.0.0",
+            entrypoint="algo:run",
+        )
+    )
+    plane = worker_app.ComputeExecutionPlane(
+        generator_registry=build_registry((HIGHS_MILP_PROVIDER,)),
+        predictor_registry=build_predictor_registry((NAIVE_PREDICTOR,)),
+        stage_runner=runner,
+        stage_catalog=BuiltinStageCatalog(tuple(descs)),
+    )
+    attempt = AttemptContext(
+        attempt_id=str(claim.attempt_id),
+        bundle_id="b-1",
+        assembly_id="a-1",
+        calculation_config_id="c-1",
+    )
+    fake_finance = SimpleNamespace(to_dict=lambda: {"profile_id": "p"})
+    fake_snapshot = SimpleNamespace(
+        executor="ies.executor.local_process@1.0.0",
+        result_adapter="ies.result-adapter.highs@1.0.0",
+        assembly_receipt={"schema": "ies.validation-receipt"},
+        device_models={},
+        evaluation={"evaluation_years": 1},
+    )
+    materialized = MaterializedSet(operation_years=1, series=(), pending_predict=(), prices=())
+
+    with pytest.raises(worker_app.StageExecutionError) as exc_info:
+        if stage_kind == "generate":
+            cfg = CalculationConfig(
+                mode="planning",
+                generator="ies.generator.highs_milp@1.0.0",
+                solver="ies.solver.highs@1.7.2",
+                precision="medium",
+                time_limit_seconds=60,
+                outputs=("solution", "metrics"),
+            )
+            worker_app.generate_bundle(
+                plane,
+                fake_snapshot,
+                SimpleNamespace(canonical_text="{}"),  # type: ignore[arg-type]
+                {},
+                materialized,
+                fake_finance,  # type: ignore[arg-type]
+                cfg,
+                SimpleNamespace(),  # type: ignore[arg-type]
+                attempt=attempt,
+                claim=claim,
+                number=1,
+                session_factory=factory,
+                save_checkpoint=save_bundle_checkpoint,
+            )
+        elif stage_kind == "evaluate":
+            manifest = SolverBundleManifest(
+                bundle={"generator": "ies.generator.highs_milp@1.0.0", "solver": "ies.solver.highs@1.7.2"},
+                inputs=[{"path": "input/problem.mps", "media_type": "text/plain"}],
+                command={
+                    "executor": "ies.executor.local_process@1.0.0",
+                    "executable": "ies.solver.highs@1.7.2",
+                    "arguments": ["input/problem.mps"],
+                    "timeout_seconds": 30,
+                    "network": False,
+                },
+                outputs=[{"path": "output/solution.sol", "media_type": "text/plain", "required": True}],
+                result_adapter="ies.result-adapter.highs@1.0.0",
+            )
+            bundle = SolverBundle(manifest, {"input/problem.mps": MemoryContent(b"NAME X\nENDATA\n")})
+            receipt = ExecutionReceipt(
+                receipt_id="r-1",
+                bundle_id="b-1",
+                assembly_id="a-1",
+                calculation_config_id="c-1",
+                attempt_id=str(claim.attempt_id),
+                generator_ref="ies.generator.highs_milp@1.0.0",
+                solver_ref="ies.solver.highs@1.7.2",
+                executor_ref="ies.executor.local_process@1.0.0",
+                executable_ref="ies.solver.highs@1.7.2",
+                result_adapter_ref="ies.result-adapter.highs@1.0.0",
+                status="succeeded",
+                exit_code=0,
+                termination_reason="exited",
+                started_at="2026-11-24T08:00:00Z",
+                ended_at="2026-11-24T08:00:01Z",
+            )
+            worker_app.adapt_result(
+                plane,
+                bundle,
+                receipt,
+                {"output/solution.sol": MemoryContent(b"HIGHS_SOLUTION_V1\n")},
+                claim=claim,
+                number=1,
+                finance=fake_finance,  # type: ignore[arg-type]
+                snapshot=fake_snapshot,
+                session_factory=factory,
+                save_checkpoint=save_evaluation_checkpoint,
+            )
+        else:
+            algo_cfg = CalculationConfig(
+                mode="planning",
+                algorithm="acme.algorithm.demo@1.0.0",
+                precision="medium",
+                time_limit_seconds=60,
+                outputs=("solution", "metrics"),
+            )
+            worker_app.run_algorithm_stage(
+                plane=plane,
+                attempt=attempt,
+                claim=claim,
+                snapshot=fake_snapshot,
+                artifact=SimpleNamespace(canonical_text="{}"),  # type: ignore[arg-type]
+                materialized=materialized,
+                finance=fake_finance,  # type: ignore[arg-type]
+                config=algo_cfg,
+                session_factory=factory,
+                save_checkpoint=save_algorithm_checkpoint,
+            )
+
+    assert exc_info.value.stage == stage_kind
+    assert exc_info.value.status == "process_failed"
+    assert cleanup_saw_outcome == [True]

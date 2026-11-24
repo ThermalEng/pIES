@@ -56,6 +56,7 @@ from iesplan.application.worker.checkpoints import (
     save_evaluation_checkpoint,
     save_prediction_checkpoint,
     save_prediction_group_checkpoint,
+    save_stage_outcome_checkpoint,
 )
 from iesplan.application.worker.compute_cases import (
     HOURLY_OBJECT_PATH,
@@ -158,6 +159,7 @@ __all__ = [
     "save_evaluation_checkpoint",
     "save_prediction_checkpoint",
     "save_prediction_group_checkpoint",
+    "save_stage_outcome_checkpoint",
     "fail_attempt",
     "generate_bundle",
     "get_dataset_data_object",

@@ -44,7 +44,7 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from iesplan import configuration as configuration_domain
-from iesplan.application.worker.lease_cases import Claim, LeaseRejectedError, verify_lease
+from iesplan.application.worker.lease_cases import Claim, LeaseRejectedError
 from iesplan.application.worker.transactions import run_worker_transaction
 from iesplan.assembly import ValidatedAssemblyArtifact, ValidationReceipt
 from iesplan.computation import (
@@ -372,11 +372,6 @@ def complete_materialized(
     )
 
 
-def _verify_lease_tx(db: Session, claim: Claim) -> None:
-    if verify_lease(db, claim.attempt_id, claim.lease_token) is None:
-        raise LeaseRejectedError("租约失效，拒绝提交阶段产物")
-
-
 def _stage_descriptor(plane: ComputeExecutionPlane, ref: str, *, kind_label: str) -> Any:
     try:
         return plane.stage_catalog.get_by_ref(ref)
@@ -388,13 +383,24 @@ def _stage_descriptor(plane: ComputeExecutionPlane, ref: str, *, kind_label: str
 
 
 def _handle_non_succeeded_stage(
+    stage: str,
     stage_result: Any,
     claim: Claim,
+    number: int,
     session_factory: Callable[[], Session],
-) -> None:
+) -> int:
     if stage_result.status == "fenced":
         raise LeaseRejectedError("容器阶段执行期间租约已失效(fenced)")
-    run_worker_transaction(session_factory, _verify_lease_tx, claim)
+    from iesplan.application.worker.checkpoints import save_stage_outcome_checkpoint
+
+    return run_worker_transaction(
+        session_factory,
+        save_stage_outcome_checkpoint,
+        claim,
+        number,
+        stage,
+        stage_result,
+    )
 
 
 def _raise_stage_error(stage: str, stage_result: Any) -> None:
@@ -563,8 +569,9 @@ def predict_round_stage(
         def _persist(stage_result: Any, *, group_idx: int = idx) -> Any:
             nonlocal group_series, group_predicted, saved_artifacts
             if stage_result.status != "succeeded":
-                _handle_non_succeeded_stage(stage_result, claim, session_factory)
-                return None
+                return _handle_non_succeeded_stage(
+                    "predict", stage_result, claim, number, session_factory
+                )
             payload = json.loads(read_content(stage_result.outputs["prediction.json"]).decode("utf-8"))
             parsed_series: list[MaterializedSeries] = []
             parsed_predicted: list[PredictedTarget] = []
@@ -771,8 +778,9 @@ def generate_bundle(
     def _persist(stage_result: Any) -> Any:
         nonlocal saved_info
         if stage_result.status != "succeeded":
-            _handle_non_succeeded_stage(stage_result, claim, session_factory)
-            return None
+            return _handle_non_succeeded_stage(
+                "generate", stage_result, claim, number, session_factory
+            )
         manifest_raw = _yaml_load(
             read_content(stage_result.outputs["bundle/bundle.yaml"]).decode("utf-8")
         )
@@ -872,8 +880,9 @@ def adapt_result(
     def _persist(stage_result: Any) -> Any:
         nonlocal evaluated
         if stage_result.status != "succeeded":
-            _handle_non_succeeded_stage(stage_result, claim, session_factory)
-            return None
+            return _handle_non_succeeded_stage(
+                "evaluate", stage_result, claim, number, session_factory
+            )
         raw = json.loads(read_content(stage_result.outputs["result.json"]).decode("utf-8"))
         # Durably persist container evaluation payload with Fencing Token BEFORE cleanup_stage.
         run_worker_transaction(session_factory, save_checkpoint, claim, number, raw)
@@ -905,6 +914,7 @@ def adapt_result(
                 command=eval_stage.command,
                 input_files=input_files,
                 required_outputs=("result.json",),
+                collect_all_outputs=True,
             ),
             persist=_persist,
             stop=stop,
@@ -969,8 +979,9 @@ def run_algorithm_stage(
     def _persist(stage_result: Any) -> Any:
         nonlocal evaluated
         if stage_result.status != "succeeded":
-            _handle_non_succeeded_stage(stage_result, claim, session_factory)
-            return None
+            return _handle_non_succeeded_stage(
+                "algorithm", stage_result, claim, 1, session_factory
+            )
         raw = json.loads(read_content(stage_result.outputs["result.json"]).decode("utf-8"))
         # Durably persist container algorithm payload with Fencing Token BEFORE cleanup_stage.
         run_worker_transaction(session_factory, save_checkpoint, claim, raw)
@@ -1002,6 +1013,7 @@ def run_algorithm_stage(
                 command=algo_stage.command,
                 input_files={"request.json": request_bytes},
                 required_outputs=("result.json",),
+                collect_all_outputs=True,
             ),
             persist=_persist,
             stop=stop,
