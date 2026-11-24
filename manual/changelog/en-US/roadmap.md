@@ -9,7 +9,7 @@ The Roadmap tracks undelivered feature plans, release ordering, and exit criteri
 - `1.x`: Feature iterations during pilot testing (proprietary contract markers remain fixed at `1.0.0` prior to `2.0` public release);
 - `2.0.0`: First general public release (compatibility and migration policy established prior to release).
 
-## `1.0.0` Delivered Baseline
+## `1.1.0` Delivered Baseline
 
 ```text
 Third-Party Attack Surface & Public Boundaries (0.2–0.4)
@@ -19,20 +19,12 @@ Third-Party Attack Surface & Public Boundaries (0.2–0.4)
   → GUI & Frontend Convergence (0.13–0.14)
   → Finance & Prediction Calculation Convergence (0.14.5)
   → End-to-End Engineering Verification & Official 1.0.0 Release (1.0.0)
+  → Solver-Embedded Structural Acceleration & Large-Scale Optimization (1.1.0)
 ```
 
-*(Note: `0.2.0` through `1.0.0` development and end-to-end engineering verification have been delivered and officially released as `1.0.0`, recorded in the [Changelog](README.md).)*
+*(Note: `0.2.0` through `1.1.0` have been delivered and recorded in the [Changelog](README.md).)*
 
-## Post-`1.0.0` `1.x` Evolution Plan
-
-### `1.1.0` — Non-Traditional Solvers and Large-Scale Long-Horizon Acceleration
-
-Address the performance bottleneck observed on long-horizon, high-resolution multi-energy planning cases (e.g., 25-year horizons at 30-minute resolution totaling `438,288` steps) where traditional branch-and-bound MILP solvers are too slow, while preserving public architecture boundaries and immutable evidence trails:
-
-- **Pluggable non-traditional solver engines**: Integrate first-order operator-splitting solvers (e.g., PDLP-style algorithms), structural decomposition/coordination methods (Benders / ADMM / temporal decomposition), GPU/massively parallel solvers, or hybrid metaheuristic–exact acceleration plugins through the public `GeneratorProvider`, `SolverRuntime`, and `ResultAdapterProvider` contracts;
-- **Solver-embedded structural acceleration**: Embed structural relaxation, on-demand constraint recovery, and resource/incumbent guardrails inside the built-in solver via `CalculationConfig.options` and verified Bundle structural metadata without introducing a standalone presolve plugin layer, reducing long-horizon MILP/LP runtime and memory risk while preserving full-model constraints and status honesty, and keeping future non-HiGHS solvers on the public `ExecutorProvider` and `ResultAdapter` contracts;
-- **Strict domain equivalence & transparent reporting**: Preserve physical conservation, monthly TOU pricing, natural-month peak demand billing, and after-tax cash-flow semantics, while explicitly reporting the chosen non-traditional solver method, convergence residuals, optimality gaps, or boundary verification diagnostics in sealed results and summary cards;
-- **Zero-trust isolation preserved**: Execute new solver runtimes inside isolated environments driven by structured Solver Bundles without compromising module autonomy, snapshot immutability, or financial auditability.
+## Post-`1.1.0` `1.x` Evolution Plan
 
 ### `1.2.0` — Models & Algorithms, Provider SDK, and Device Extensions
 

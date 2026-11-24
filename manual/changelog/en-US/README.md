@@ -6,14 +6,29 @@ This page records only implemented and accepted changes in reverse chronological
 
 | Scope | Current Status |
 |---|---|
-| Official product version (`backend/pyproject.toml`) | `1.0.0` |
-| Latest released version | `1.0.0` (officially packaged and released on 2026-11-22 after full-workflow testing) |
-| General modeling & computation upgrade | Declarative device/system equations, monthly TOU prices, monthly peak demand, embedded tax modeling, and 5-tab interactive visualizations delivered in `1.0.0` |
-| Next development target | `1.1.0` (Non-traditional solvers and large-scale long-horizon acceleration) |
-| Limited pilot release version | `1.0.0` |
+| Official product version (`backend/pyproject.toml`) | `1.1.0` |
+| Latest released version | `1.1.0` (2026-11-24 solver-embedded structural acceleration & large-scale optimization delivery) |
+| General modeling & computation upgrade | Declarative device/system equations, monthly TOU prices, monthly peak demand, embedded tax modeling, 5-tab visualizations, and default `on_demand_mutex` acceleration delivered |
+| Next development target | `1.2.0` (Models & Algorithms, Provider SDK, and Device Extensions) |
+| Limited pilot release version | `1.1.0` |
 | First general public release version | `2.0.0` |
 
-> The authoritative product version source (`backend/pyproject.toml`), Help Center build manifest, and release tag have been bumped to **`1.0.0`** for formal packaging and publication on 2026-11-22. Starting from `1.1.0`, development prioritizes non-traditional solvers to accelerate large-scale, long-horizon optimization workloads.
+> The authoritative product version source (`backend/pyproject.toml`) and Help Center build manifest have been bumped to **`1.1.0`** on 2026-11-24. Starting from `1.2.0`, development moves to Models & Algorithms, Provider SDK, and device extensions.
+
+## `1.1.0` — 2026-11-24 — Solver-Embedded Structural Acceleration and Large-Scale Long-Horizon Optimization
+
+### 2026-11-24 — `1.1.0` Solver-Embedded Structural Acceleration (S1–S3) Closure
+
+- **When completed**: 2026-11-24, completing S1 acceleration contracts & guardrails, S2 on-demand mutex recovery with large-LP IPM/Simplex refinement, S3 equal-budget anti-OOM benchmarking, plus fixes for HiGHS infeasible `kNotset` status preservation and TasksPage mount-hydration race conditions, bumping the product version to **`1.1.0`**.
+- **What changed**:
+  - Enabled `acceleration.mode="on_demand_mutex"` by default in `ies.generator.highs_milp@1.0.0` (while preserving `off` opt-out and legacy frozen configs), exporting structural mutex metadata in `input/acceleration.json` without introducing a standalone presolve plugin layer.
+  - Implemented in-handle on-demand mutex relaxation and multi-round recovery in `ies-highs-solver` (`ies.solver.highs@1.7.2`): solves continuous relaxations, switches large LPs (`>= 10,000` columns) to IPM, verifies full original-model constraints with scale-aware tolerances, applies `clearSolver()` + Simplex refinement or on-demand conflict re-injection when needed, and safely falls back to the original MILP on unbounded relaxations or verification failures without ever publishing unverified primals.
+  - Enforced strict monotonic `deadline`/`io_margin` guardrails and incumbent-first atomic writes; read `handle.getModelStatus()` and solution data before resetting `solver="choose"` in `finally:` blocks so HiGHS 1.7.2 infeasible presolve models preserve `kInfeasible` instead of reverting to `kNotset`.
+  - Fixed a frontend mount-hydration race in `TasksPage` where reopening the submit dialog before initial `refreshDetailed()` settled could let stale snapshot values overwrite in-progress edits.
+- **What problem it solved**:
+  - Curbed root-node cut memory blowups and solve-time overruns on large-scale long-horizon MILP workloads under `8 GiB` zero-swap isolation: `campus_5y_bat_zero` improved from `OOMKill` (`8,192 MiB` ceiling) to **`11.84s`** proven optimal (`Gap=0.0%`, `-85.4%` peak RSS); `campus_2y_budget1` (`60s` budget) improved from `121.12s` timeout (`not_solved`) to **`49.69s`** proven optimal; `campus_10y_bat_on` (`120s` budget) eliminated `+505s` overruns and bounded wall time to `120.40s`.
+  - Preserved exact physical conservation, monthly TOU pricing, natural-month peak demand, and after-tax cash-flow semantics.
+- **Where the release stands**: `1.1.0` structural solver acceleration is complete on `master`; the next milestone in [Roadmap](roadmap.md) is **`1.2.0`** (Models & Algorithms, Provider SDK, and Device Extensions).
 
 ## `1.0.0` — 2026-11-22 — Official 1.0.0 Release and Full-Workflow Engineering Closure
 

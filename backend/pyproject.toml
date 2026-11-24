@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "iesplan"
-version = "1.0.0"
+version = "1.1.0"
 description = "pIES - 综合能源系统规划平台"
 license = "MPL-2.0"
 license-files = ["LICENSE"]

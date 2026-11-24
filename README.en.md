@@ -14,7 +14,7 @@
     <img src="https://img.shields.io/badge/Backend-Python%203.12%20%7C%20FastAPI-3776AB?style=flat-square&logo=python&logoColor=white" alt="Python 3.12 FastAPI" />
     <img src="https://img.shields.io/badge/Frontend-React%2018%20%7C%20TypeScript-0891b2?style=flat-square&logo=react&logoColor=white" alt="React 18 TypeScript" />
     <img src="https://img.shields.io/badge/Solver-HiGHS%201.7.2%20MILP-1e7d32?style=flat-square" alt="Solver: HiGHS 1.7.2" />
-    <a href="manual/changelog/en-US/README.md#current-version-status"><img src="https://img.shields.io/badge/Release-v1.0.0-1e7d32?style=flat-square" alt="Release v1.0.0" /></a>
+    <a href="manual/changelog/en-US/README.md#current-version-status"><img src="https://img.shields.io/badge/Release-v1.1.0-1e7d32?style=flat-square" alt="Release v1.1.0" /></a>
   </p>
 
   <p>
@@ -175,7 +175,7 @@ docker build --target build -f frontend/Dockerfile -t pies-fe-check . && \
 
 ## 🗺️ Release Status & License
 
-- **Current Release**: Official version **`1.0.0`** ([pyproject.toml](backend/pyproject.toml)); next milestone **`1.1.0`** focuses on non-traditional solver acceleration for large-scale long-horizon problems (see [Changelog](manual/changelog/en-US/README.md) and [Roadmap](manual/changelog/en-US/roadmap.md)).
+- **Current Release**: Official version **`1.1.0`** ([pyproject.toml](backend/pyproject.toml)); next milestone **`1.2.0`** focuses on Models & Algorithms, Provider SDK, and device extensions (see [Changelog](manual/changelog/en-US/README.md) and [Roadmap](manual/changelog/en-US/roadmap.md)).
 - **License**: Released under the **[Mozilla Public License 2.0 (MPL-2.0)](LICENSE)**.
 
 <p align="center">
