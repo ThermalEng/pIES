@@ -1101,16 +1101,16 @@ def _run_on_demand_mutex_recovery(
         round_started = time.monotonic()
         if use_ipm:
             _set_highs_option(handle, "solver", "ipm")
-            try:
-                if handle.run() == highspy.HighsStatus.kError:
-                    raise RuntimeError("HiGHS 求解执行错误")
-            finally:
-                _set_highs_option(handle, "solver", "choose")
-        else:
+        try:
             if handle.run() == highspy.HighsStatus.kError:
                 raise RuntimeError("HiGHS 求解执行错误")
-        round_elapsed = time.monotonic() - round_started
-        model_status = handle.getModelStatus()
+            round_elapsed = time.monotonic() - round_started
+            # HiGHS 1.7.2 在无解后重置 solver="choose" 会将 model_status 清为 kNotset，需先读取状态与解
+            model_status = handle.getModelStatus()
+            feasible, objective, best_bound, gap, primals = _extract_solution_data(handle, model_status)
+        finally:
+            if use_ipm:
+                _set_highs_option(handle, "solver", "choose")
         last_status = model_status
 
         if model_status == highspy.HighsModelStatus.kInfeasible:
@@ -1156,8 +1156,6 @@ def _run_on_demand_mutex_recovery(
                 io_margin=io_margin,
                 reason="relaxation_unbounded",
             )
-
-        feasible, objective, best_bound, gap, primals = _extract_solution_data(handle, model_status)
         if not feasible:
             _log_stage(
                 "mutex_round",
@@ -1239,15 +1237,15 @@ def _run_on_demand_mutex_recovery(
                         _set_highs_time_limit(handle, refine_budget)
                         if handle.run() == highspy.HighsStatus.kError:
                             raise RuntimeError("HiGHS Simplex 精修执行错误")
+                        model_status = handle.getModelStatus()
+                        feasible, objective, best_bound, gap, primals = _extract_solution_data(
+                            handle, model_status
+                        )
                     finally:
                         _set_highs_option(handle, "solver", "choose")
                         if has_basis:
                             _set_highs_option(handle, "presolve", "choose")
-                    model_status = handle.getModelStatus()
                     last_status = model_status
-                    feasible, objective, best_bound, gap, primals = _extract_solution_data(
-                        handle, model_status
-                    )
                     if feasible:
                         conflicting = [
                             idx

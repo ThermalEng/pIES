@@ -1288,3 +1288,60 @@ def test_unbounded_relaxation_falls_back_to_bounded_original_milp(
     assert res.execution_status == "completed"
     assert res.math_status == "solved"
     assert res.outputs["solution"]["objective_value"] == pytest.approx(-5.0)
+
+
+def test_ipm_infeasible_relaxation_preserves_infeasible_status(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """IPM 求解不可行模型后必须在重置 solver=choose 前读取 kInfeasible 状态，不能退化成 kNotset。"""
+    mod = _load_solver_module()
+    model, pair_names = _build_chain_mutex_model([(1.0, 2.0)], cap=5.0, demand=3.0)
+    # 叠加矛盾约束（变量均非负，总和不可能 <= -1）
+    infeas_model = LinearModel(
+        variables=model.variables,
+        constraints=(
+            *model.constraints,
+            LinearConstraint(
+                name="impossible_cap",
+                expression=LinearExpression(terms=((("x_0", 0), 1.0), (("y_0", 0), 1.0))),
+                sense="le",
+                rhs=-1.0,
+            ),
+        ),
+        objective=model.objective,
+        sense="minimize",
+    )
+    mps_inf, accel_inf, mps_inf_bytes, _ = _write_mps_and_accel(
+        tmp_path, infeas_model, pair_names, mps_name="ipm_inf.mps", accel_name="ipm_inf.json"
+    )
+    sol_inf = tmp_path / "ipm_inf.sol"
+
+    monkeypatch.setattr(mod, "_IPM_LP_MIN_COLS", 1)
+    handle, st_inf, slot_inf = mod._run_accelerated_solve(
+        str(mps_inf),
+        str(sol_inf),
+        20.0,
+        0,
+        acceleration_mode="on_demand_mutex",
+        acceleration_file=str(accel_inf),
+    )
+
+    assert st_inf == highspy.HighsModelStatus.kInfeasible
+    assert slot_inf.incumbent is None
+    assert handle.getOptionValue("solver")[1] == "choose"
+
+    sol_bytes = sol_inf.read_bytes()
+    facts = _parse_solution(sol_bytes.decode("utf-8"))
+    assert facts["model_status"] == "HighsModelStatus.kInfeasible"
+    assert facts["solve_domain"] == "valid_relaxation"
+    assert facts["original_model_verified"] == "true"
+
+    bundle_files = fixture_files(
+        {
+            PROBLEM_PATH: mps_inf_bytes,
+            PARAMETERS_PATH: _parameters(unit_map={}, offset=0.0),
+        }
+    )
+    res = _adapt(bundle_files, _receipt(), sol_bytes)
+    assert res.execution_status == "completed"
+    assert res.math_status == "infeasible"
