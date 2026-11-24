@@ -268,6 +268,7 @@ export default function TasksPage() {
    * 未就绪时表单仍是默认空态，提交必须禁用，避免在草稿读到前把空值
    * 当成用户输入冻结；切换载入等待中同样禁用，避免冻结旧任务的值。 */
   const [workingReady, setWorkingReady] = useState(false)
+  const [mountSynced, setMountSynced] = useState(false)
 
   // 提交表单
   const [createOpen, setCreateOpen] = useState(false)
@@ -751,8 +752,8 @@ export default function TasksPage() {
       }
       return
     }
-    // 项目未载入时表单仍是默认空态，不可提交（等下分支水合后再开）。
-    if (project === null) {
+    // 项目未载入或挂载重读尚未落定时，表单仍是旧快照/默认空态，不得提前水合或开闸。
+    if (project === null || !mountSynced) {
       setWorkingReady(false)
       return
     }
@@ -779,12 +780,19 @@ export default function TasksPage() {
       setForm(next)
     }
     setWorkingReady(true)
-  }, [project, selectedId, draftRevision, draftWorking])
+  }, [project, selectedId, draftRevision, draftWorking, mountSynced])
 
   // 挂载即重读项目视图(工作台 Provider 常驻, 子页重进不自动重读; 重读后
   // 上方水合 effect 以最新草稿为准, 不读旧快照覆盖编辑)。
   useEffect(() => {
-    void refreshDetailed()
+    let active = true
+    setMountSynced(false)
+    void refreshDetailed().finally(() => {
+      if (active) setMountSynced(true)
+    })
+    return () => {
+      active = false
+    }
   }, [refreshDetailed])
 
   // 卸载兜底: 脏输入落定一次, 保住导航前最后一次编辑。执行时重读修订
@@ -865,7 +873,11 @@ export default function TasksPage() {
         <Card
           title={t('ies.task.task_list')}
           actions={
-            <Button icon="plus" onClick={() => setCreateOpen(true)}>
+            <Button
+              icon="plus"
+              disabled={!mountSynced || (project !== null && !workingReady)}
+              onClick={() => setCreateOpen(true)}
+            >
               {t('ies.task.submit')}
             </Button>
           }
