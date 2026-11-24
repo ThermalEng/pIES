@@ -18,6 +18,7 @@ from pies_builtin_plugins.stage_io import (
     artifact_from_frozen,
     effective_finance_from_frozen,
     materialized_from_frozen,
+    materialized_from_frozen_series_inputs,
     stream_content_to_file,
 )
 
@@ -29,7 +30,8 @@ def _read_optional_json(path: Path) -> Any | None:
 def _load_stage_inputs(work_in: Path) -> tuple[
     Mapping[str, Any],
     Mapping[str, Any],
-    Mapping[str, Any],
+    Mapping[str, Any] | None,
+    Mapping[str, Any] | None,
     EffectiveFinanceConfig,
     Mapping[str, Any],
     Mapping[str, Any],
@@ -46,9 +48,17 @@ def _load_stage_inputs(work_in: Path) -> tuple[
     if raw_models is None:
         raise KeyError("generator /work/in missing 'device_models' in request.json or device_models.json")
 
-    raw_materialized = req.get("materialized") or _read_optional_json(work_in / "sequences.json")
-    if raw_materialized is None:
-        raise KeyError("generator /work/in missing 'materialized' in request.json or sequences.json")
+    raw_frozen_inputs = req.get("frozen_series_inputs")
+    raw_materialized: Mapping[str, Any] | None = None
+    if raw_frozen_inputs is None:
+        raw_materialized = req.get("materialized") or _read_optional_json(work_in / "sequences.json")
+        if raw_materialized is None:
+            raise KeyError(
+                "generator /work/in missing 'frozen_series_inputs' or 'materialized' "
+                "in request.json or sequences.json"
+            )
+    elif not isinstance(raw_frozen_inputs, Mapping):
+        raise TypeError("generator /work/in 'frozen_series_inputs' must be a JSON object")
 
     if "finance" in req:
         finance = effective_finance_from_frozen(req["finance"])
@@ -83,6 +93,7 @@ def _load_stage_inputs(work_in: Path) -> tuple[
         raw_artifact,
         raw_models,
         raw_materialized,
+        raw_frozen_inputs,
         finance,
         raw_config,
         raw_evaluation,
@@ -96,6 +107,7 @@ def generate(ctx: StageContext) -> None:
         raw_artifact,
         raw_models,
         raw_materialized,
+        raw_frozen_inputs,
         finance,
         raw_config,
         raw_evaluation,
@@ -104,14 +116,27 @@ def generate(ctx: StageContext) -> None:
 
     artifact = artifact_from_frozen(raw_artifact)
     models = {inst: contribution_from_dict(contrib) for inst, contrib in raw_models.items()}
-    resolution = str(json.loads(artifact.canonical_text)["project_baseline"]["resolution"])
-    materialized = materialized_from_frozen(
-        raw_materialized,
-        prediction_payload=prediction_payload,
-        resolution=resolution,
-    )
     config = CalculationConfig.from_frozen(raw_config)
     evaluation = EvaluationInput.from_frozen(raw_evaluation)
+    resolution = str(json.loads(artifact.canonical_text)["project_baseline"]["resolution"])
+
+    if raw_frozen_inputs is not None:
+        materialized = materialized_from_frozen_series_inputs(
+            raw_frozen_inputs,
+            work_in=ctx.work_in,
+            artifact=artifact,
+            finance=finance,
+            operation_years=evaluation.operation_years,
+            prediction_payload=prediction_payload,
+            resolution=resolution,
+        )
+    else:
+        assert raw_materialized is not None
+        materialized = materialized_from_frozen(
+            raw_materialized,
+            prediction_payload=prediction_payload,
+            resolution=resolution,
+        )
 
     bundle = HIGHS_MILP_PROVIDER.generate(
         artifact,
