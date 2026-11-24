@@ -140,19 +140,17 @@ def test_real_docker_build_plugin_and_run_isolated_stage(docker_harness) -> None
     assert client.get("/healthz").status_code == 200
     assert client.get("/readyz").status_code == 200
 
-    # 1. Stage a plugin with a decoy Dockerfile and declared runtime.requirements path
+    # 1. Stage a plugin with a decoy Dockerfile and a requirements path containing spaces
     src_dir = settings.plugin_source_root / "acme.algo" / "1.0.0"
-    (src_dir / "deps").mkdir(parents=True)
+    (src_dir / "my deps").mkdir(parents=True)
     (src_dir / "plugin.yaml").write_text(
-        "schema: ies.algorithm-plugin\n"
-        "schema_version: '1.0.0'\n"
-        "runtime:\n"
-        "  language: python\n"
-        "  python: '3.12'\n"
-        "  requirements: deps/requirements.txt\n",
+        "schema: ies.algorithm-plugin\nschema_version: '1.0.0'\n",
         encoding="utf-8",
     )
-    (src_dir / "deps" / "requirements.txt").write_text("# no external pypi packages\n", encoding="utf-8")
+    (src_dir / "my deps" / "requirements.txt").write_text(
+        "# no external pypi packages\n",
+        encoding="utf-8",
+    )
     (src_dir / "Dockerfile").write_text("FROM nonexistent-invalid-base:999\n", encoding="utf-8")
     (src_dir / "main.py").write_text(
         "import json, os, pathlib, socket\n"
@@ -198,7 +196,7 @@ def test_real_docker_build_plugin_and_run_isolated_stage(docker_harness) -> None
             "plugin_id": "acme.algo",
             "version": "1.0.0",
             "source_rel": "acme.algo/1.0.0",
-            "install_requirements": True,
+            "requirements_rel": "my deps/requirements.txt",
         },
     )
     assert build_resp.status_code == 200, build_resp.text

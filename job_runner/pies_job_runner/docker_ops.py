@@ -14,7 +14,6 @@ from pathlib import Path
 from typing import Any
 
 import docker
-import yaml
 from docker.errors import APIError, DockerException, ImageNotFound
 from docker.types import Mount
 
@@ -100,10 +99,11 @@ def render_plugin_dockerfile(
         "WORKDIR /plugin",
     ]
     if requirements_rel:
+        target_req = f"/plugin/{requirements_rel}"
         lines.extend(
             [
-                f"COPY {requirements_rel} /plugin/{requirements_rel}",
-                f"RUN pip install --no-cache-dir -r /plugin/{requirements_rel}",
+                f"COPY {json.dumps([requirements_rel, target_req])}",
+                f"RUN {json.dumps(['pip', 'install', '--no-cache-dir', '-r', target_req])}",
             ]
         )
     lines.extend(
@@ -121,45 +121,6 @@ def render_plugin_dockerfile(
         ]
     )
     return "\n".join(lines) + "\n"
-
-
-def _resolve_plugin_requirements_rel(source_dir: Path, request: BuildPluginRequest) -> str | None:
-    """Resolve optional requirements file path from request override or ``plugin.yaml``."""
-    if not request.install_requirements:
-        return None
-
-    raw_rel = request.requirements_rel
-    if raw_rel is None:
-        manifest_path = source_dir / "plugin.yaml"
-        try:
-            manifest = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeError, yaml.YAMLError) as exc:
-            raise BadRequestError(f"failed to read plugin.yaml: {exc}") from exc
-        if isinstance(manifest, dict):
-            runtime = manifest.get("runtime")
-            if isinstance(runtime, dict):
-                req_val = runtime.get("requirements")
-                if req_val is None:
-                    return None
-                if not isinstance(req_val, str) or not req_val:
-                    raise BadRequestError("runtime.requirements in plugin.yaml must be a non-empty string")
-                raw_rel = req_val
-
-    if raw_rel is None:
-        return None
-    if any(ch.isspace() for ch in raw_rel):
-        raise BadRequestError(f"requirements_rel must not contain whitespace: {raw_rel!r}")
-    try:
-        norm_rel, req_path = resolve_relative_subpath(
-            source_dir,
-            raw_rel,
-            field_name="requirements_rel",
-        )
-    except UnsafePathError as exc:
-        raise BadRequestError(str(exc)) from exc
-    if req_path.is_symlink() or not req_path.is_file():
-        raise BadRequestError(f"declared requirements file missing: {norm_rel}")
-    return norm_rel
 
 
 def _build_plugin_tar_context(source_dir: Path, dockerfile_content: str) -> io.BytesIO:
@@ -445,10 +406,18 @@ class DockerJobRunnerService:
 
         if not source_dir.is_dir():
             raise BadRequestError(f"plugin source directory does not exist: {request.source_rel}")
-        if not (source_dir / "plugin.yaml").is_file():
-            raise BadRequestError(f"plugin.yaml missing in plugin source directory: {request.source_rel}")
 
-        requirements_rel = _resolve_plugin_requirements_rel(source_dir, request)
+        requirements_rel: str | None = None
+        if request.requirements_rel is not None:
+            try:
+                requirements_rel, _ = resolve_relative_subpath(
+                    source_dir,
+                    request.requirements_rel,
+                    field_name="requirements_rel",
+                )
+            except UnsafePathError as exc:
+                raise BadRequestError(str(exc)) from exc
+
         dockerfile_content = render_plugin_dockerfile(
             base_image=self.settings.plugin_base_image,
             plugin_id=request.plugin_id,

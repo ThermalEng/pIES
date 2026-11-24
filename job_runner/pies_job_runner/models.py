@@ -39,7 +39,6 @@ class BuildPluginRequest(_StrictModel):
     version: str
     source_rel: str = Field(min_length=1, max_length=256)
     requirements_rel: str | None = Field(default=None, min_length=1, max_length=256)
-    install_requirements: bool = True
 
     @field_validator("plugin_id")
     @classmethod
