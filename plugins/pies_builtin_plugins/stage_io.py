@@ -24,7 +24,6 @@ from iesplan.computation.protocols import (
     ExecutionReceipt,
     SolverBundle,
     SolverBundleManifest,
-    freeze_json_value,
     thaw_json_value,
 )
 from iesplan.computation.sequences import (
@@ -155,6 +154,28 @@ def _frozen_value(value: object) -> object:
     return value
 
 
+def _diagnostic_from_frozen(entry: Mapping[str, Any]) -> Diagnostic:
+    """Reconstruct `Diagnostic` from trusted frozen JSON without `__post_init__` checks."""
+    raw_loc = entry.get("location")
+    return _construct(
+        Diagnostic,
+        code=entry["code"],
+        severity=entry.get("severity", "error"),
+        blocking=bool(entry.get("blocking", False)),
+        message_key=entry.get("message_key", ""),
+        params=_frozen_mapping(entry.get("params", {})),
+        location=_frozen_mapping(raw_loc) if raw_loc is not None else None,
+        fix_hint_key=entry.get("fix_hint_key", ""),
+        ref_ids=tuple(entry.get("ref_ids", ())),
+        occurred_at=entry.get("occurred_at", ""),
+        source=entry.get("source", ""),
+        trace_id=entry.get("trace_id", ""),
+        project_id=entry.get("project_id", ""),
+        task_id=entry.get("task_id", ""),
+        suppressed=bool(entry.get("suppressed", False)),
+    )
+
+
 def receipt_from_frozen(data: Mapping[str, Any]) -> ValidationReceipt:
     """Reconstruct `ValidationReceipt` from trusted frozen data without revalidation."""
     return _construct(
@@ -170,7 +191,7 @@ def receipt_from_frozen(data: Mapping[str, Any]) -> ValidationReceipt:
         finance_snapshot=_frozen_mapping(data["finance_snapshot"]),
         planning=_frozen_mapping(data["planning"]),
         system_equations=_frozen_mapping(data["system_equations"]),
-        diagnostics=tuple(Diagnostic(**dict(entry)) for entry in data["diagnostics"]),
+        diagnostics=tuple(_diagnostic_from_frozen(entry) for entry in data["diagnostics"]),
     )
 
 
@@ -255,12 +276,12 @@ def bundle_manifest_from_frozen(data: Mapping[str, Any]) -> SolverBundleManifest
         SolverBundleManifest,
         schema=data.get("schema", SOLVER_BUNDLE_SCHEMA),
         schema_version=data.get("schema_version", SOLVER_BUNDLE_VERSION),
-        bundle=freeze_json_value(dict(data["bundle"])),
-        inputs=tuple(freeze_json_value(dict(item)) for item in data["inputs"]),
-        command=freeze_json_value(dict(data["command"])),
-        outputs=tuple(freeze_json_value(dict(item)) for item in data["outputs"]),
+        bundle=_frozen_mapping(data["bundle"]),
+        inputs=tuple(_frozen_mapping(item) for item in data["inputs"]),
+        command=_frozen_mapping(data["command"]),
+        outputs=tuple(_frozen_mapping(item) for item in data["outputs"]),
         result_adapter=data["result_adapter"],
-        extensions=freeze_json_value(dict(data.get("extensions", {}))),
+        extensions=_frozen_mapping(data.get("extensions", {})),
     )
 
 
@@ -302,9 +323,9 @@ def execution_receipt_from_frozen(data: Mapping[str, Any]) -> ExecutionReceipt:
         stderr=data.get("stderr", ""),
         stdout_truncated=bool(data.get("stdout_truncated", False)),
         stderr_truncated=bool(data.get("stderr_truncated", False)),
-        outputs=tuple(freeze_json_value(dict(item)) for item in data.get("outputs", ())),
-        policy_evaluated=freeze_json_value(dict(data.get("policy_evaluated", {}))),
-        resource_usage=freeze_json_value(dict(data.get("resource_usage", {}))),
+        outputs=tuple(_frozen_mapping(item) for item in data.get("outputs", ())),
+        policy_evaluated=_frozen_mapping(data.get("policy_evaluated", {})),
+        resource_usage=_frozen_mapping(data.get("resource_usage", {})),
     )
 
 
