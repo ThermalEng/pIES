@@ -83,49 +83,29 @@ def normalize_worker_resources(raw: Mapping[str, Any] | None) -> dict[str, Any]:
     if "memory_limit" in raw and "scope" in raw:
         return _thaw_json_value(raw)
 
-    def _extract_limit(field: Any) -> dict[str, Any]:
+    def _limit(field: Any) -> dict[str, Any]:
         if isinstance(field, Mapping):
             status = field.get("status")
             if status == "limited":
-                val = field.get("value", field.get("bytes"))
-                numeric = isinstance(val, (int, float)) and not isinstance(val, bool)
-                return {
-                    "status": "limited",
-                    "bytes": int(val) if numeric else None,
-                }
+                return {"status": "limited", "bytes": field.get("value")}
             if status == "unlimited":
                 return {"status": "unlimited", "bytes": None}
         return {"status": "unknown", "bytes": None}
 
-    def _extract_int_metric(field: Any) -> int | None:
-        if isinstance(field, Mapping):
-            if field.get("status") == "known":
-                val = field.get("value")
-                return int(val) if isinstance(val, (int, float)) and not isinstance(val, bool) else None
-            return None
-        if isinstance(field, (int, float)) and not isinstance(field, bool):
-            return int(field)
+    def _metric(field: Any) -> Any:
+        if isinstance(field, Mapping) and field.get("status") == "known":
+            return field.get("value")
         return None
 
-    memory_limit = _extract_limit(raw.get("memory_limit_bytes"))
-    swap_limit = (
-        _extract_limit(raw.get("swap_limit_bytes"))
-        if "swap_limit_bytes" in raw
-        else (
-            {"status": "limited", "bytes": 0}
-            if memory_limit["status"] == "limited"
-            else {"status": "unknown", "bytes": None}
-        )
-    )
     return {
         "source": "cgroup_v2",
         "scope": "worker_cgroup",
-        "memory_limit": memory_limit,
-        "swap_limit": swap_limit,
-        "memory_current_bytes": _extract_int_metric(raw.get("memory_current_bytes")),
-        "memory_peak_bytes": _extract_int_metric(raw.get("memory_peak_bytes")),
-        "swap_current_bytes": _extract_int_metric(raw.get("swap_current_bytes")),
-        "oom_kill_count": _extract_int_metric(raw.get("oom_kill_count")),
+        "memory_limit": _limit(raw.get("memory_limit_bytes")),
+        "swap_limit": {"status": "unknown", "bytes": None},
+        "memory_current_bytes": _metric(raw.get("memory_current_bytes")),
+        "memory_peak_bytes": _metric(raw.get("memory_peak_bytes")),
+        "swap_current_bytes": None,
+        "oom_kill_count": _metric(raw.get("oom_kill_count")),
     }
 
 

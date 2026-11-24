@@ -148,7 +148,7 @@ def test_memory_error_records_stage_and_does_not_become_generic_failure(
     assert progress.detail["worker_resources"]["memory_limit"] == {
         "status": "limited", "bytes": 8 * 1024**3,
     }
-    assert progress.detail["worker_resources"]["swap_limit"] == {"status": "limited", "bytes": 0}
+    assert progress.detail["worker_resources"]["swap_limit"] == {"status": "unknown", "bytes": None}
     assert progress.detail["worker_resources"]["memory_peak_bytes"] == 200
     diag = _task_diagnostics(db, claim.task_id)[-1]
     assert diag.code == TASK_RESOURCE_EXHAUSTED

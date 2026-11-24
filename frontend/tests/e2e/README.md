@@ -13,7 +13,7 @@
 
 ```bash
 # 1. 在隔离 Compose 项目及数据目录构建并启动当前应用
-docker compose up -d --build web backend io_worker
+docker compose up -d --build web backend job_runner
 
 # 2. 等待 backend 就绪(首次启动会自动 seed admin + 初始化数据库)
 #    管理员初始密码: iesplan-admin-initial(首次运行 global-setup 自动完成首登改密)
@@ -60,7 +60,7 @@ export PIES_EXT_DEVICE_DIR="$PWD/frontend/tests/e2e/device-catalog-external"
 export IESPLAN_PORT=18085   # 任取空闲端口, 避免与其他栈冲突
 docker compose -p pies-ext-dev -f docker-compose.yml \
   -f frontend/tests/e2e/docker-compose.ext-device.yml up -d --build \
-  web backend io_worker compute_worker
+  web backend job_runner
 
 # 运行本用例(专用配置; --build 确保测试镜像含当前 spec/配置, 不用陈旧镜像)
 docker compose -p pies-ext-dev -f docker-compose.yml \
@@ -101,7 +101,7 @@ API 提交 → 真实 io/compute Worker 求解 → 逐时/年累计与封存评�
 # 在待验收工作树根目录执行: 数据目录即该根的 ./data(隔离副本); 勿在别的
 # 仓库根运行, 以免误用主线数据。项目名/端口任取隔离值, 不碰其他栈。
 export IESPLAN_PORT=18086   # 任取空闲端口, 避免与其他栈冲突
-docker compose -p pies-ext-csv up -d --build web backend io_worker compute_worker
+docker compose -p pies-ext-csv up -d --build web backend job_runner
 
 # 运行本用例(默认套件收集; --build 确保测试镜像含当前 spec/工件)
 docker compose -p pies-ext-csv --profile e2e run --rm --build --no-deps e2e \
@@ -120,7 +120,7 @@ GUI 提交(K=0/N=1)必须放行合法声明(无 “存在 1 项阻断问题…�
 
 ```bash
 export IESPLAN_PORT=18087   # 任取空闲端口, 避免与其他栈冲突
-docker compose -p pies-ext-csv-gui up -d --build web backend io_worker compute_worker
+docker compose -p pies-ext-csv-gui up -d --build web backend job_runner
 docker compose -p pies-ext-csv-gui --profile e2e run --rm --build --no-deps e2e \
   npx playwright test device-data-csv-gui-submit.spec.ts --project=chromium
 ```
