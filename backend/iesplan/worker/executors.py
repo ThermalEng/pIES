@@ -20,7 +20,7 @@ TASK-EXEC-001），不得借用 TASK-SOLVE-001 充数，更不伪造成功。
 from __future__ import annotations
 
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -59,6 +59,14 @@ class LeaseFenced(Exception):
     """
 
 
+def _thaw_json_value(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {str(k): _thaw_json_value(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_thaw_json_value(v) for v in value]
+    return value
+
+
 @dataclass(slots=True)
 class RunContext:
     """一次任务执行上下文(执行器/进度/取消检查共用)。
@@ -82,6 +90,13 @@ class RunContext:
     compute: worker_app.ComputeExecutionPlane | None = None  # 计算执行面(组合根装配; 无则计算任务不可执行)
     sealed_output_files: dict = field(default_factory=dict)
     prediction_artifacts: dict = field(default_factory=dict)
+    stage_resources: dict[str, Any] = field(default_factory=dict)
+
+    def update_stage_resources(self, resources: Mapping[str, Any] | None) -> None:
+        """Record latest observed stage-container cgroup v2 resource metrics."""
+        if resources:
+            self.stage_resources.clear()
+            self.stage_resources.update(_thaw_json_value(resources))
 
     def progress(self, percent: float, stage: str, detail: dict | None = None) -> None:
         """阶段化进度报告（PG 持久进度 + Redis 秒级进度，见 contracts §快照与异步契约）。"""

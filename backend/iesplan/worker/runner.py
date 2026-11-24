@@ -128,8 +128,11 @@ def _predict_round(
         number=1,
         session_factory=ctx.session_factory,
         save_checkpoint=worker_app.save_prediction_checkpoint,
+        save_group_checkpoint=worker_app.save_prediction_group_checkpoint,
+        publish_combined_checkpoint=worker_app.publish_prediction_checkpoint_with_artifacts,
         previous=previous,
         stop=_stop_probe(ctx),
+        on_stage_resources=ctx.update_stage_resources,
     )
     ctx.prediction_artifacts[1] = artifacts
     return series, predicted
@@ -155,9 +158,12 @@ def _predict_selected_round(
         number=number,
         session_factory=ctx.session_factory,
         save_checkpoint=worker_app.save_prediction_checkpoint,
+        save_group_checkpoint=worker_app.save_prediction_group_checkpoint,
+        publish_combined_checkpoint=worker_app.publish_prediction_checkpoint_with_artifacts,
         entries=entries,
         previous=previous,
         stop=_stop_probe(ctx),
+        on_stage_resources=ctx.update_stage_resources,
     )
     ctx.prediction_artifacts[number] = artifacts
     return series, predicted
@@ -181,6 +187,7 @@ def _solve_round(
             session_factory=ctx.session_factory,
             save_checkpoint=worker_app.save_bundle_checkpoint,
             stop=_stop_probe(ctx),
+            on_stage_resources=ctx.update_stage_resources,
         )
         saved = worker_app.run_worker_transaction(
             ctx.session_factory, worker_app.restore_round,
@@ -199,20 +206,25 @@ def _solve_round(
             plane=plane, bundle=bundle, attempt=attempt, claim=ctx.claim, number=number,
             generated_id=generated_id, session_factory=ctx.session_factory, stop=_stop_probe(ctx),
         )
+    ctx.update_stage_resources(receipt.resource_usage)
     _raise_for_receipt_status(receipt)
     ctx.progress(85.0, "execute", {"receipt_status": receipt.status})
-    result = worker_app.adapt_result(
+    evaluated = worker_app.adapt_result(
         plane, bundle, receipt, collected,
         claim=ctx.claim, number=number, finance=finance, snapshot=snapshot,
-        session_factory=ctx.session_factory, stop=_stop_probe(ctx),
+        session_factory=ctx.session_factory,
+        save_checkpoint=worker_app.save_evaluation_checkpoint,
+        stop=_stop_probe(ctx),
     )
+    ctx.update_stage_resources(evaluated.resources)
+    result = evaluated.result
     outcome = worker_app.business_outcome_for(result)
     if outcome is None:
         raise EngineRunError(
             f"统一结果无法映射业务结局(execution={result.execution_status}, "
             f"math={result.math_status}, receipt={receipt.receipt_id})"
         )
-    return bundle, receipt, collected, result, outcome, {
+    return bundle, receipt, collected, evaluated, outcome, {
         "bundle_files": bundle_refs, "solution": solution_refs,
     }
 
@@ -303,7 +315,7 @@ def _execute_compute(ctx: RunContext) -> tuple[dict, dict]:
     completed = worker_app.complete_materialized(materialized, predicted_series)
     attempt = worker_app.build_attempt_context(task, ctx.claim, snapshot)
     if config.algorithm is not None:
-        result = worker_app.run_algorithm_stage(
+        evaluated = worker_app.run_algorithm_stage(
             plane=plane,
             attempt=attempt,
             claim=ctx.claim,
@@ -313,8 +325,11 @@ def _execute_compute(ctx: RunContext) -> tuple[dict, dict]:
             finance=finance,
             config=config,
             session_factory=ctx.session_factory,
+            save_checkpoint=worker_app.save_algorithm_checkpoint,
             stop=_stop_probe(ctx),
         )
+        ctx.update_stage_resources(evaluated.resources)
+        result = evaluated.result
         outcome = worker_app.business_outcome_for(result)
         if outcome is None:
             raise EngineRunError(
@@ -326,16 +341,16 @@ def _execute_compute(ctx: RunContext) -> tuple[dict, dict]:
             "outcome": outcome,
             "compute_result": result.to_mapping(),
         }
-        hourly_files = worker_app.build_hourly_files(result.outputs)
+        hourly_files = worker_app.hourly_files_from_payload(evaluated.hourly_series)
         if hourly_files:
             output_files["hourly"] = hourly_files
-        financial = worker_app.build_financial_evaluation(snapshot, finance, result)
-        if financial is not None:
-            payload["financial_evaluation"] = financial
+        if evaluated.financial_evaluation is not None:
+            payload["financial_evaluation"] = dict(evaluated.financial_evaluation)
         return payload, output_files
     rounds_log: list[dict] = []
-    bundle, receipt, collected, result, outcome, sealed = _solve_round(
+    bundle, receipt, collected, evaluated, outcome, sealed = _solve_round(
         ctx, plane, snapshot, artifact, models, completed, finance, config, evaluation, attempt)
+    result = evaluated.result
     rounds_log.append({
         "round": 1, "phase": "phase1",
         "manifest": bundle.manifest.to_dict(), "receipt": receipt, "files": sealed,
@@ -362,9 +377,10 @@ def _execute_compute(ctx: RunContext) -> tuple[dict, dict]:
             completed = worker_app.complete_materialized(
                 materialized, independent_series + new_series)
             del bundle, collected  # 前轮仅保留对象引用，不与新轮大矩阵同时常驻。
-            bundle, receipt, collected, result, outcome, sealed = _solve_round(
+            bundle, receipt, collected, evaluated, outcome, sealed = _solve_round(
                 ctx, plane, snapshot, artifact, models, completed,
                 finance, config, evaluation, attempt, prediction_rounds)
+            result = evaluated.result
             solve_rounds += 1
             current_coupled = {(item.device, item.interface): item for item in new_predicted}
             aggregate, records = worker_app.convergence_for_round(
@@ -500,19 +516,13 @@ def _execute_compute(ctx: RunContext) -> tuple[dict, dict]:
         ctx.sealed_output_files["round_history"] = history_refs
         payload["rounds"] = rounds
         payload["authoritative_round"] = solve_rounds
-    # 统一求解步序列对象(0.14-R5/R6): 只对最终轮结果已恢复的统一序列
-    # 序列化, 随 output_files 进同一证据封存/提交单元；无序列(缺 solution
-    # 输出/metrics-only/无可发布步变量)即无文件, 不伪造。
+    # 直接发布评价器容器产出的 hourly_series 与 financial_evaluation（不在控制面重算）。
     del bundle, collected, materialized, completed, models, artifact
-    hourly_files = worker_app.build_hourly_files(result.outputs)
+    hourly_files = worker_app.hourly_files_from_payload(evaluated.hourly_series)
     if hourly_files:
         output_files["hourly"] = hourly_files
-    # 同次解财务事实投影与封存评价: 只对最终轮已求解结果投影, 随
-    # payload 进同一证据封存/提交单元；未求解或缺 solution 输出返回
-    # None（不写财务块，不伪造）；配套事实缺件即实际错误可见失败。
-    financial = worker_app.build_financial_evaluation(snapshot, finance, result)
-    if financial is not None:
-        payload["financial_evaluation"] = financial
+    if evaluated.financial_evaluation is not None:
+        payload["financial_evaluation"] = dict(evaluated.financial_evaluation)
     return payload, output_files
 
 
@@ -595,12 +605,16 @@ def run_task(
         raise SnapshotInputError("任务不存在", params={"task_id": claim.task_id})
 
     def _report_progress(percent: float, stage: str, detail: dict | None) -> None:
-        # 每次进度各自新短会话短事务, 提交后即刻对其他会话可见
+        # 每次进度各自新短会话短事务, 提交后即刻对其他会话可见;
+        # worker_resources 上报已观测到的阶段容器 cgroup v2 指标, 不伪造控制面进程指标。
+        payload_detail = dict(detail or {})
+        if ctx.stage_resources:
+            payload_detail["worker_resources"] = dict(ctx.stage_resources)
         accepted = worker_app.run_worker_transaction(
             factory,
             lambda db: worker_app.report_attempt_progress(
                 db, claim.attempt_id, claim.lease_token, task.id, percent, stage,
-                {**(detail or {}), "worker_resources": worker_app.observe_local_resources().to_dict()},
+                payload_detail or None,
             ),
         )
         if not accepted:
@@ -671,7 +685,7 @@ def run_task(
                 worker_app.run_worker_transaction(
                     factory, worker_app.fail_resource_attempt, claim,
                     cause=exc.detail,
-                    resources=worker_app.observe_local_resources().to_dict(),
+                    resources=dict(exc.resources or ctx.stage_resources),
                 )
             except worker_app.LeaseRejectedError:
                 return "lease_rejected"
@@ -687,7 +701,7 @@ def run_task(
             worker_app.run_worker_transaction(
                 factory, worker_app.fail_resource_attempt, claim,
                 cause=type(exc).__name__ + (f": {exc}" if str(exc) else ""),
-                resources=worker_app.observe_local_resources().to_dict(),
+                resources=dict(ctx.stage_resources),
             )
         except worker_app.LeaseRejectedError:
             return "lease_rejected"

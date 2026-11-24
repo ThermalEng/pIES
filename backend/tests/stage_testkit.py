@@ -401,6 +401,10 @@ class MockJobRunnerBackend:
             raise RuntimeError(f"solver exited with code {proc.returncode}: {stderr}")
 
     def _exec_evaluate(self, work_in: Path, work_out: Path) -> None:
+        from decimal import Decimal
+
+        from iesplan.finance import evaluate_project_investment
+
         bundle_dir = work_in / "bundle"
         manifest_raw = yaml_load((bundle_dir / "bundle.yaml").read_text(encoding="utf-8"))
         manifest = SolverBundleManifest(**manifest_raw)
@@ -411,17 +415,121 @@ class MockJobRunnerBackend:
         bundle = SolverBundle(manifest, bundle_files)
         raw_receipt = json.loads((work_in / "receipt.json").read_text(encoding="utf-8"))
         receipt = ExecutionReceipt(**raw_receipt)
+
+        # Mirror Part 1 `plugins/evaluator_highs/evaluator_stage.py` non-recursive lookup.
+        solution_path: Path | None = None
+        for directory in (work_in / "outputs", work_in, work_in / "bundle" / "output"):
+            if directory.is_dir():
+                matches = sorted(
+                    p for p in directory.iterdir() if p.is_file() and p.name.startswith("solution.")
+                )
+                if matches:
+                    solution_path = matches[0]
+                    break
         outputs_map: dict[str, Content] = {}
-        outputs_dir = work_in / "outputs"
-        if outputs_dir.is_dir():
-            for path in sorted(p for p in outputs_dir.rglob("*") if p.is_file()):
-                rel = str(path.relative_to(outputs_dir)).replace("\\", "/")
-                outputs_map[rel] = _FileContent(path)
+        if solution_path is not None:
+            declared_sol_path = str(manifest.outputs[0]["path"])
+            outputs_map[declared_sol_path] = _FileContent(solution_path)
+
         result = self.adapter_registry.resolve(receipt.result_adapter_ref).adapt(
             bundle, receipt, outputs_map
         )
+        result_dict = result.to_dict()
+        outputs_payload = dict(result_dict["outputs"])
+
+        # Mirror Part 1 evaluator container hourly_series + financial_evaluation generation.
+        merged_series: dict[str, dict[str, Any]] = {}
+        for kind, key in (("device", "series"), ("system", "system_series")):
+            group = outputs_payload.get(key)
+            if isinstance(group, Mapping):
+                for identity, entry in group.items():
+                    merged_series[str(identity)] = {"series_id": str(identity), "kind": kind, **dict(entry)}
+        if merged_series:
+            data = {sid: list(merged_series[sid]["values"]) for sid in sorted(merged_series)}
+            units = {sid: str(merged_series[sid]["unit"]) for sid in sorted(merged_series)}
+            identities = {
+                sid: {k: v for k, v in merged_series[sid].items() if k != "values"}
+                for sid in sorted(merged_series)
+            }
+            outputs_payload["hourly_series"] = {
+                "data": data,
+                "meta": {"units": units, "series": identities},
+            }
+
+        req_path = work_in / "request.json"
+        req = json.loads(req_path.read_text(encoding="utf-8")) if req_path.is_file() else {}
+        finance_meta = req.get("finance")
+        eval_meta = req.get("evaluation")
+        if (
+            finance_meta is not None
+            and eval_meta is not None
+            and result.math_status in ("solved", "feasible")
+            and "solution" in result.outputs
+        ):
+            facts = result.outputs["financial_facts"]
+            years = int(eval_meta["evaluation_years"])
+            rate = float(eval_meta["discount_rate"])
+            tax_cash = thaw_json_value(facts["tax_cash"])
+            flows = list(facts["annual_net_flows"])
+            comparison = thaw_json_value(facts["comparison"])
+            evaluation_flows = (
+                comparison["evaluation_net_flows"] if comparison["mode"] == "difference" else flows
+            )
+            assessed = evaluate_project_investment(
+                [Decimal(value) for value in evaluation_flows],
+                rate,
+                years,
+                currency=str(finance_meta["currency"]),
+                price_basis=str(finance_meta["price_basis"]),
+                base_year=int(finance_meta["base_year"]),
+            )
+            outputs_payload["financial_evaluation"] = {
+                "schema": "ies.financial-evaluation",
+                "schema_version": "1.0.0",
+                "status": "evaluated",
+                "evaluation_years": years,
+                "construction_period": int(eval_meta["construction_period"]),
+                "operation_years": int(eval_meta["operation_years"]),
+                "currency": str(finance_meta["currency"]),
+                "price_basis": str(finance_meta["price_basis"]),
+                "base_year": int(finance_meta["base_year"]),
+                "profile_id": str(finance_meta["profile_id"]),
+                "discount_rate": rate,
+                "construction_total": facts["construction_total"],
+                "construction_total_unit": str(finance_meta["currency"]),
+                "annual_fixed_om": facts["annual_fixed_om"],
+                "payments_applied": [
+                    {"t": entry["t"], "ratio": entry["ratio"], "amount": entry["amount"]}
+                    for entry in facts["payments_applied"]
+                ],
+                "net_cashflows": thaw_json_value(facts["net_cashflows"]),
+                "cost_items": thaw_json_value(facts["cost_items"]),
+                "amounts": thaw_json_value(facts["amounts"]),
+                "cash_movements": thaw_json_value(facts["cash_movements"]),
+                "assets": thaw_json_value(facts["assets"]),
+                "construction_units": thaw_json_value(facts["construction_units"]),
+                "annual_operation": [
+                    {
+                        "financial_year": entry["financial_year"],
+                        "energy_net": entry["energy_net"],
+                        "variable_om": entry["variable_om"],
+                        "fixed_om": entry["fixed_om"],
+                        "maintenance": entry["maintenance"],
+                        "demand_charge": entry["demand_charge"],
+                        "net": entry["net"],
+                    }
+                    for entry in facts["annual_operation"]
+                ],
+                "monthly_demand": thaw_json_value(facts["monthly_demand"]),
+                "tax_cash": tax_cash,
+                "annual_net_flows": flows,
+                "comparison": comparison,
+                "evaluation": assessed.to_dict(),
+            }
+
+        result_dict["outputs"] = outputs_payload
         (work_out / "result.json").write_text(
-            json.dumps(result.to_dict()),
+            json.dumps(result_dict),
             encoding="utf-8",
         )
 
@@ -525,10 +633,17 @@ class MockJobRunnerBackend:
 
     def _payload(self, st: Mapping[str, Any], *, reused: bool | None = None) -> dict[str, Any]:
         out_dir = self.stage_root / st["workspace_rel"] / "out"
+        is_oom = st["termination_reason"] == "oom"
         return {
             **st,
             "reused": st["reused"] if reused is None else reused,
-            "resources": {},
+            "resources": {
+                "source": "docker_and_cgroup_v2",
+                "stage_execution_id": st["stage_execution_id"],
+                "memory_peak_bytes": {"status": "known", "value": 8_388_608},
+                "oom_killed": {"status": "known", "value": is_oom},
+                "oom_kill_count": {"status": "known", "value": 1 if is_oom else 0},
+            },
             "iterations": {"present": False, "count": 0, "tail": []},
             "output_files": self._discover_outputs(out_dir),
         }

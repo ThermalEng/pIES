@@ -464,13 +464,18 @@ class TestComputeChainEndToEnd:
         追溯真实装配 id 与配置 revision。
         """
         task_id = _submit_calc_task(client, db, dict(_CONFIG_BODY), dict(PLANNING_BODY))
-        from iesplan.computation import observe_local_resources
+        def _forbid_local_resources():
+            raise AssertionError("must report stage container resources, not backend process")
 
-        unknown = observe_local_resources(tmp_path / "no-cgroup")
-        monkeypatch.setattr(worker_app, "observe_local_resources", lambda: unknown)
+        monkeypatch.setattr(worker_app, "observe_local_resources", _forbid_local_resources)
         claim = _claim(db, task_id)
         assert _run(engine, claim, plane) == "completed"
         assert worker_app.get_task_record(db, task_id).status == "completed"
+        progress_row = db.execute(
+            select(TaskProgress).where(TaskProgress.attempt_id == claim.attempt_id)
+        ).scalar_one()
+        assert progress_row.detail["worker_resources"]["source"] == "docker_and_cgroup_v2"
+        assert progress_row.detail["worker_resources"]["memory_peak_bytes"]["value"] == 8_388_608
 
         task = db.execute(select(Task).where(Task.id == task_id)).scalar_one()
         assert task.status == "completed"
@@ -506,14 +511,16 @@ class TestComputeChainEndToEnd:
             assert get_object(db, descriptor["object_id"]) is not None
 
     def test_tax_task_completes_with_sealed_financial_evaluation(
-        self, client: TestClient, db: Session, engine: Engine, plane
+        self, client: TestClient, db: Session, engine: Engine, plane, monkeypatch
     ) -> None:
-        """含税则闭环(C3)：提交 201 → 真实求解 → 封存 financial_evaluation。
-
-        同任务/attempt/快照身份；税后 CF/NPV 与求解目标同源（评价 NPV ==
-        同次解目标值）；公开事实形状符合映射表；无交易税基的税额关系
-        强制成立（VAT 全零、所得税零税/亏损恒等），不手填电池调度值。
-        """
+        """含税则闭环(C3)：提交 201 → 真实求解 → 封存容器产出的 financial_evaluation。"""
+        monkeypatch.setattr(
+            worker_app,
+            "build_financial_evaluation",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("financial evaluation must run in evaluator container, not backend")
+            ),
+        )
         task_id = _submit_tax_calc_task(client, db)
         claim = _claim(db, task_id)
         assert _run(engine, claim, plane) == "completed"

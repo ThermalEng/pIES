@@ -36,8 +36,9 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import partial
+from pathlib import Path
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -82,6 +83,7 @@ from iesplan.tasks import BUSINESS_OUTCOMES
 __all__ = [
     "HOURLY_OBJECT_PATH",
     "ComputeExecutionPlane",
+    "EvaluatedStageOutput",
     "StageExecutionError",
     "adapt_result",
     "attach_evidence_objects",
@@ -92,6 +94,7 @@ __all__ = [
     "complete_materialized",
     "convergence_for_round",
     "generate_bundle",
+    "hourly_files_from_payload",
     "load_compute_inputs",
     "predict_round_stage",
     "prediction_delta",
@@ -112,12 +115,27 @@ class StageExecutionError(Exception):
         status: str,
         termination_reason: str | None,
         detail: str,
+        resources: Mapping[str, Any] | None = None,
     ) -> None:
         self.stage = stage
         self.status = status
         self.termination_reason = termination_reason
         self.detail = detail
+        self.resources: dict[str, Any] = dict(resources or {})
         super().__init__(detail)
+
+
+@dataclass(frozen=True, slots=True)
+class EvaluatedStageOutput:
+    """Container-produced evaluator / algorithm outputs preserved without backend recomputation."""
+
+    result: ComputeResult
+    hourly_series: Mapping[str, Any] | None = None
+    financial_evaluation: Mapping[str, Any] | None = None
+    resources: Mapping[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return self.result.to_dict()
 
 
 @dataclass(frozen=True, slots=True)
@@ -388,6 +406,7 @@ def _raise_stage_error(stage: str, stage_result: Any) -> None:
             f"阶段 {stage} 未成功"
             f"(status={stage_result.status}, reason={stage_result.termination_reason})"
         ),
+        resources=dict(stage_result.resources or {}),
     )
 
 
@@ -437,9 +456,25 @@ def predict_round_stage(
         [Session, Claim, int, tuple[MaterializedSeries, ...], tuple[PredictedTarget, ...]],
         dict[str, dict[str, object]],
     ],
+    save_group_checkpoint: Callable[
+        [Session, Claim, int, int, tuple[MaterializedSeries, ...], tuple[PredictedTarget, ...]],
+        dict[str, dict[str, object]],
+    ] | None = None,
+    publish_combined_checkpoint: Callable[
+        [
+            Session,
+            Claim,
+            int,
+            tuple[MaterializedSeries, ...],
+            tuple[PredictedTarget, ...],
+            Mapping[str, Mapping[str, object]],
+        ],
+        dict[str, dict[str, object]],
+    ] | None = None,
     entries: tuple[Mapping[str, object], ...] | None = None,
     previous: Mapping[str, object] | None = None,
     stop: StopProbe | None = None,
+    on_stage_resources: Callable[[Mapping[str, Any]], None] | None = None,
 ) -> tuple[
     tuple[MaterializedSeries, ...],
     tuple[PredictedTarget, ...],
@@ -525,7 +560,7 @@ def predict_round_stage(
         group_series: list[MaterializedSeries] = []
         group_predicted: list[PredictedTarget] = []
 
-        def _persist(stage_result: Any) -> Any:
+        def _persist(stage_result: Any, *, group_idx: int = idx) -> Any:
             nonlocal group_series, group_predicted, saved_artifacts
             if stage_result.status != "succeeded":
                 _handle_non_succeeded_stage(stage_result, claim, session_factory)
@@ -564,13 +599,13 @@ def predict_round_stage(
                 )
             group_series = parsed_series
             group_predicted = parsed_predicted
+            sorted_pair_p = tuple(
+                sorted(parsed_predicted, key=lambda target: (target.device, target.interface))
+            )
+            sorted_pair_s = tuple(
+                sorted(parsed_series, key=lambda target: (target.device, target.interface))
+            )
             if len(sorted_algos) == 1:
-                sorted_pair_p = tuple(
-                    sorted(parsed_predicted, key=lambda target: (target.device, target.interface))
-                )
-                sorted_pair_s = tuple(
-                    sorted(parsed_series, key=lambda target: (target.device, target.interface))
-                )
                 saved_artifacts = run_worker_transaction(
                     session_factory,
                     save_checkpoint,
@@ -580,7 +615,18 @@ def predict_round_stage(
                     sorted_pair_p,
                 )
             else:
-                run_worker_transaction(session_factory, _verify_lease_tx, claim)
+                if save_group_checkpoint is None:
+                    raise RuntimeError("save_group_checkpoint is required for multi-algorithm prediction")
+                group_artifacts = run_worker_transaction(
+                    session_factory,
+                    save_group_checkpoint,
+                    claim,
+                    number,
+                    group_idx,
+                    sorted_pair_s,
+                    sorted_pair_p,
+                )
+                saved_artifacts.update(group_artifacts)
             return True
 
         try:
@@ -605,6 +651,8 @@ def predict_round_stage(
                 termination_reason="fenced",
                 detail="预测阶段租约已失效(fenced)",
             ) from None
+        if on_stage_resources is not None and stage_result.resources:
+            on_stage_resources(stage_result.resources)
         if stage_result.status != "succeeded":
             _raise_stage_error("predict", stage_result)
         all_series.extend(group_series)
@@ -613,8 +661,18 @@ def predict_round_stage(
     final_series = tuple(sorted(all_series, key=lambda item: (item.device, item.interface)))
     final_predicted = tuple(sorted(all_predicted, key=lambda item: (item.device, item.interface)))
     if len(sorted_algos) > 1:
+        if publish_combined_checkpoint is None:
+            raise RuntimeError(
+                "publish_combined_checkpoint is required for multi-algorithm prediction"
+            )
         saved_artifacts = run_worker_transaction(
-            session_factory, save_checkpoint, claim, number, final_series, final_predicted
+            session_factory,
+            publish_combined_checkpoint,
+            claim,
+            number,
+            final_series,
+            final_predicted,
+            saved_artifacts,
         )
     return final_series, final_predicted, saved_artifacts
 
@@ -677,6 +735,7 @@ def generate_bundle(
         tuple[int, dict[str, Any]],
     ],
     stop: StopProbe | None = None,
+    on_stage_resources: Callable[[Mapping[str, Any]], None] | None = None,
 ) -> tuple[int, dict[str, dict[str, object]]]:
     """经生成器阶段容器生成完整 Bundle，并在 cleanup 前带 Fencing Token 持久化检查点。"""
     del models, evaluation
@@ -768,6 +827,8 @@ def generate_bundle(
             detail="生成阶段租约已失效(fenced)",
         ) from None
 
+    if on_stage_resources is not None and stage_result.resources:
+        on_stage_resources(stage_result.resources)
     if stage_result.status != "succeeded":
         _raise_stage_error("generate", stage_result)
     assert saved_info is not None
@@ -785,16 +846,19 @@ def adapt_result(
     finance: EffectiveFinanceConfig,
     snapshot: Any,
     session_factory: Callable[[], Session],
+    save_checkpoint: Callable[[Session, Claim, int, Mapping[str, Any]], int],
     stop: StopProbe | None = None,
-) -> ComputeResult:
-    """经评价器阶段容器解释结果并在 cleanup 前验证 Fencing Token。"""
+) -> EvaluatedStageOutput:
+    """经评价器阶段容器解释结果，在 cleanup 前带 Fencing Token 持久化检查点。"""
     eval_stage = _stage_descriptor(plane, receipt.result_adapter_ref, kind_label="evaluator")
     input_files: dict[str, Content | bytes] = {
         f"bundle/{rel}": content for rel, content in export_bundle_files(bundle).items()
     }
     for rel, content in collected.items():
         if isinstance(content, (Content, bytes)):
-            input_files[f"outputs/{rel}"] = content
+            # Part 1 evaluator searches directly under /work/in/outputs/ (non-recursive).
+            staged_rel = Path(rel).name if rel.startswith("output/") else rel
+            input_files[f"outputs/{staged_rel}"] = content
     input_files["receipt.json"] = _json_bytes(receipt.to_dict())
     input_files["request.json"] = _json_bytes(
         {
@@ -803,18 +867,19 @@ def adapt_result(
         }
     )
 
-    adapted: ComputeResult | None = None
+    evaluated: EvaluatedStageOutput | None = None
 
     def _persist(stage_result: Any) -> Any:
-        nonlocal adapted
+        nonlocal evaluated
         if stage_result.status != "succeeded":
             _handle_non_succeeded_stage(stage_result, claim, session_factory)
             return None
-        run_worker_transaction(session_factory, _verify_lease_tx, claim)
         raw = json.loads(read_content(stage_result.outputs["result.json"]).decode("utf-8"))
+        # Durably persist container evaluation payload with Fencing Token BEFORE cleanup_stage.
+        run_worker_transaction(session_factory, save_checkpoint, claim, number, raw)
         outputs = dict(raw.get("outputs") or {})
-        outputs.pop("hourly_series", None)
-        outputs.pop("financial_evaluation", None)
+        hourly_series = outputs.pop("hourly_series", None)
+        financial_evaluation = outputs.pop("financial_evaluation", None)
         adapted = ComputeResult(
             bundle_id=str(raw["bundle_id"]),
             receipt_id=str(raw["receipt_id"]),
@@ -822,7 +887,13 @@ def adapt_result(
             math_status=str(raw["math_status"]),
             outputs=outputs,
         )
-        return True
+        evaluated = EvaluatedStageOutput(
+            result=adapted,
+            hourly_series=hourly_series,
+            financial_evaluation=financial_evaluation,
+            resources=dict(stage_result.resources or {}),
+        )
+        return evaluated
 
     try:
         stage_result = plane.stage_runner.run_stage(
@@ -848,8 +919,8 @@ def adapt_result(
 
     if stage_result.status != "succeeded":
         _raise_stage_error("evaluate", stage_result)
-    assert adapted is not None
-    return adapted
+    assert evaluated is not None
+    return evaluated
 
 
 def run_algorithm_stage(
@@ -863,9 +934,10 @@ def run_algorithm_stage(
     finance: EffectiveFinanceConfig,
     config: CalculationConfig,
     session_factory: Callable[[], Session],
+    save_checkpoint: Callable[[Session, Claim, Mapping[str, Any]], int],
     stop: StopProbe | None = None,
-) -> ComputeResult:
-    """一体化 algorithm 模式容器化执行。"""
+) -> EvaluatedStageOutput:
+    """一体化 algorithm 模式容器化执行，并在 cleanup 前持久化检查点。"""
     if config.algorithm is None:
         raise ValueError("run_algorithm_stage requires config.algorithm")
     if plane.algorithm_registry is not None:
@@ -892,18 +964,19 @@ def run_algorithm_stage(
         }
     )
 
-    adapted: ComputeResult | None = None
+    evaluated: EvaluatedStageOutput | None = None
 
     def _persist(stage_result: Any) -> Any:
-        nonlocal adapted
+        nonlocal evaluated
         if stage_result.status != "succeeded":
             _handle_non_succeeded_stage(stage_result, claim, session_factory)
             return None
-        run_worker_transaction(session_factory, _verify_lease_tx, claim)
         raw = json.loads(read_content(stage_result.outputs["result.json"]).decode("utf-8"))
+        # Durably persist container algorithm payload with Fencing Token BEFORE cleanup_stage.
+        run_worker_transaction(session_factory, save_checkpoint, claim, raw)
         outputs = dict(raw.get("outputs") or {})
-        outputs.pop("hourly_series", None)
-        outputs.pop("financial_evaluation", None)
+        hourly_series = outputs.pop("hourly_series", None)
+        financial_evaluation = outputs.pop("financial_evaluation", None)
         adapted = ComputeResult(
             bundle_id=str(raw["bundle_id"]),
             receipt_id=str(raw["receipt_id"]),
@@ -911,7 +984,13 @@ def run_algorithm_stage(
             math_status=str(raw["math_status"]),
             outputs=outputs,
         )
-        return True
+        evaluated = EvaluatedStageOutput(
+            result=adapted,
+            hourly_series=hourly_series,
+            financial_evaluation=financial_evaluation,
+            resources=dict(stage_result.resources or {}),
+        )
+        return evaluated
 
     try:
         stage_result = plane.stage_runner.run_stage(
@@ -937,8 +1016,8 @@ def run_algorithm_stage(
 
     if stage_result.status != "succeeded":
         _raise_stage_error("algorithm", stage_result)
-    assert adapted is not None
-    return adapted
+    assert evaluated is not None
+    return evaluated
 
 
 def build_attempt_context(task: Any, claim: Claim, snapshot: Any) -> AttemptContext:
@@ -972,6 +1051,20 @@ def result_step_series(outputs: Mapping[str, object]) -> dict[str, dict]:
         for identity, entry in outputs.get(key, {}).items():
             result[identity] = {"series_id": identity, "kind": kind, **entry}
     return result
+
+
+def hourly_files_from_payload(
+    hourly_series: Mapping[str, Any] | None,
+) -> dict[str, tuple[Content, str]]:
+    """Serialize container-produced `hourly_series` payload into output files without recomputation."""
+    if not hourly_series:
+        return {}
+    return {
+        HOURLY_OBJECT_PATH: (
+            GeneratedContent(partial(json_chunks, dict(hourly_series))),
+            HOURLY_OBJECT_MEDIA_TYPE,
+        )
+    }
 
 
 def build_hourly_files(

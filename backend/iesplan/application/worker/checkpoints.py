@@ -158,8 +158,6 @@ def _build_receipt_from_stage(
     outputs: Mapping[str, Content],
     meta: Mapping[str, Any] | None,
 ) -> ExecutionReceipt:
-    from datetime import UTC, datetime
-
     status, termination_reason = _stage_status_to_receipt_status(
         str(stage_result.status),
         stage_result.termination_reason,
@@ -194,30 +192,12 @@ def _build_receipt_from_stage(
     raw_exit_code = meta_dict.get("exit_code", stage_result.exit_code)
     signal_number: int | None = None
     exit_code: int | None = int(raw_exit_code) if raw_exit_code is not None else None
-    now_iso = datetime.now(UTC).isoformat().replace("+00:00", "Z")
     started_at = str(meta_dict.get("started_at") or stage_result.started_at or "")
     ended_at = str(meta_dict.get("ended_at") or stage_result.finished_at or "")
-    if status in ("cancelled", "fenced"):
-        if not started_at and not ended_at:
-            exit_code = None
-            signal_number = None
-        else:
-            if not started_at:
-                started_at = ended_at
-            if not ended_at:
-                ended_at = now_iso
-            if exit_code is None:
-                signal_number = 15
-    else:
-        if not started_at:
-            started_at = now_iso
-        if not ended_at:
-            ended_at = started_at
-        if termination_reason == "oom":
-            exit_code = None
-            signal_number = 9
-        elif exit_code is None:
-            exit_code = 0 if status == "succeeded" else 1
+    if termination_reason == "oom" and exit_code == 137:
+        # Container OOM killer terminates with SIGKILL (exit code 128 + 9 = 137).
+        exit_code = None
+        signal_number = 9
 
     stdout = str(meta_dict.get("stdout") or "")
     stderr = str(meta_dict.get("stderr") or "")
@@ -393,19 +373,78 @@ def save_prediction_checkpoint(
             f"{item.device}/{item.interface}": (item.artifact, item.artifact_media_type)
             for item in predicted
         }, actor_id=None)
+        return publish_prediction_checkpoint_with_artifacts(
+            db, claim, number, series, predicted, artifacts, stage="prediction"
+        )
+    except Exception:
+        db.rollback()
+        raise
+
+
+def save_prediction_group_checkpoint(
+    db: Session, claim: Claim, number: int, group_index: int, series: tuple, predicted: tuple,
+) -> dict:
+    """Persist a single predictor stage group's artifacts and checkpoint before cleanup_stage."""
+    try:
+        artifacts = seal_output_objects(db, {
+            f"{item.device}/{item.interface}": (item.artifact, item.artifact_media_type)
+            for item in predicted
+        }, actor_id=None)
+        return publish_prediction_checkpoint_with_artifacts(
+            db, claim, number, series, predicted, artifacts, stage=f"prediction-g{group_index}"
+        )
+    except Exception:
+        db.rollback()
+        raise
+
+
+def publish_prediction_checkpoint_with_artifacts(
+    db: Session,
+    claim: Claim,
+    number: int,
+    series: tuple,
+    predicted: tuple,
+    artifacts: Mapping[str, Mapping[str, object]],
+    *,
+    stage: str = "prediction",
+) -> dict:
+    """Publish a prediction checkpoint referencing already-sealed durable storage artifacts."""
+    try:
         rows = [{
             "device": item.device, "interface": item.interface,
             "target_type": item.target_type, "values": list(item.values),
             "history_object_id": item.history_object_id,
             "artifact_media_type": item.artifact_media_type,
-            "artifact": artifacts[f"{item.device}/{item.interface}"],
+            "artifact": dict(artifacts[f"{item.device}/{item.interface}"]),
             "receipt": thaw_json_value(item.receipt),
         } for item in predicted]
         series_rows = [{key: value for key, value in item.to_dict().items() if key != "values"}
                        for item in series]
-        _publish(db, claim, number, "prediction", {"predicted": rows, "series": series_rows},
+        _publish(db, claim, number, stage, {"predicted": rows, "series": series_rows},
                  {"prediction": artifacts})
-        return artifacts
+        return {k: dict(v) for k, v in artifacts.items()}
+    except Exception:
+        db.rollback()
+        raise
+
+
+def save_evaluation_checkpoint(
+    db: Session, claim: Claim, number: int, raw_result: Mapping[str, Any],
+) -> int:
+    """Persist evaluator stage result.json durably with Fencing Token before cleanup_stage."""
+    try:
+        return _publish(db, claim, number, "evaluation", {"result": dict(raw_result)}, {})
+    except Exception:
+        db.rollback()
+        raise
+
+
+def save_algorithm_checkpoint(
+    db: Session, claim: Claim, raw_result: Mapping[str, Any],
+) -> int:
+    """Persist unified algorithm stage result.json durably with Fencing Token before cleanup_stage."""
+    try:
+        return _publish(db, claim, 1, "algorithm", {"result": dict(raw_result)}, {})
     except Exception:
         db.rollback()
         raise

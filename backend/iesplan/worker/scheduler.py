@@ -199,7 +199,11 @@ class EmbeddedScheduler:
                     )
                 continue
 
-            if claim.attempt_id not in adopted_attempts and self._can_adopt_attempt(claim.attempt_id):
+            if (
+                self.compute is not None
+                and claim.attempt_id not in adopted_attempts
+                and self._can_adopt_attempt(claim.attempt_id)
+            ):
                 adopted_attempts.add(claim.attempt_id)
                 self._launch_claimed_task(claim, pool="compute")
                 actions.append(f"adopted:{stage.stage_execution_id}")
@@ -234,7 +238,8 @@ class EmbeddedScheduler:
             self._last_heartbeat = now
         if self._stop.is_set():
             return
-        self._fill_pool("compute", self.compute_slots)
+        if self.compute is not None:
+            self._fill_pool("compute", self.compute_slots)
         self._fill_pool("io", self.io_slots)
 
     def _reap_finished(self) -> None:

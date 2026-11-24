@@ -435,6 +435,11 @@ def assemble_embedded_scheduler(
     from iesplan.worker import EmbeddedScheduler
 
     resolved_compute = compute if compute is not None else context.compute_execution_plane()
+    if resolved_compute is None and settings.job_runner_url.strip():
+        raise RuntimeError(
+            "EmbeddedScheduler requires a complete compute execution plane when "
+            "IESPLAN_JOB_RUNNER_URL is configured"
+        )
     return EmbeddedScheduler(
         session_factory=context.session_factory,
         compute_slots=settings.compute_slots,
