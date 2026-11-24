@@ -116,6 +116,7 @@ class ComputeExecutionPlane:
     adapter_registry: ResultAdapterRegistry
     runtime: SolverRuntime
     predictor_registry: PredictorRegistry
+    stage_runner: Any | None = None
 
 
 def _receipt_from_frozen(data: Mapping[str, Any]) -> ValidationReceipt:

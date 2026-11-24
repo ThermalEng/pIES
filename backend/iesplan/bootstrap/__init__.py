@@ -73,6 +73,14 @@ class ApplicationContext:
     solver_runtime: Any | None = None
     #: 统一 Settings 派生的部署执行策略(只归计算 Worker 装配)
     deployment_policy: Any | None = None
+    #: 内置计算阶段容器描述符目录
+    builtin_stage_catalog: Any | None = None
+    #: 临时计算容器执行策略(来自 pies.toml)
+    container_stage_policy: Any | None = None
+    #: job_runner 代理客户端(仅配置 IESPLAN_JOB_RUNNER_URL 时装配)
+    job_runner_client: Any | None = None
+    #: 6 步临时容器阶段执行器(仅配置 IESPLAN_JOB_RUNNER_URL 时装配)
+    stage_runner: Any | None = None
 
     def compute_execution_plane(self) -> Any | None:
         """计算执行面句柄：生成器/执行器/适配器/预测目录与运行时五件齐备才装配。
@@ -123,6 +131,14 @@ class ApplicationContext:
         if self.executor_registry is not None:
             result["executors"] = (
                 "ok" if _check_executor_registry(self.executor_registry) else "unavailable"
+            )
+        if self.builtin_stage_catalog is not None:
+            result["stages"] = (
+                "ok" if _check_stage_catalog(self.builtin_stage_catalog) else "unavailable"
+            )
+        if self.job_runner_client is not None:
+            result["job_runner"] = (
+                "ok" if _check_job_runner(self.job_runner_client) else "unavailable"
             )
         return result
 
@@ -199,6 +215,42 @@ def _check_executor_registry(registry: Any) -> bool:
     except Exception:
         logger.exception("组合根执行器目录探活失败")
         return False
+
+
+def _check_stage_catalog(catalog: Any) -> bool:
+    """内置容器阶段目录检查: 至少包含四个内置阶段描述符。"""
+    try:
+        return len(catalog.snapshot()) >= 4
+    except Exception:
+        logger.exception("组合根内置阶段目录探活失败")
+        return False
+
+
+def _check_job_runner(client: Any) -> bool:
+    """job_runner 代理可达性检查: 失败如实返回 False, 绝不伪造 ok。"""
+    try:
+        payload = client.check_ready()
+        return isinstance(payload, dict) and payload.get("status") in ("ready", "ok")
+    except Exception:
+        logger.exception("组合根 job_runner 探活失败")
+        return False
+
+
+def _container_stage_policy_from_settings() -> Any:
+    """从统一 Settings 构造临时容器阶段策略(唯一权威来自 pies.toml)。"""
+    from iesplan.computation.runtime import ContainerStagePolicy
+    from iesplan.config import settings
+
+    return ContainerStagePolicy(
+        builtin_image=settings.stage_builtin_image,
+        cpu_cores=float(settings.solver_max_cpu_cores),
+        memory_mb=int(settings.solver_max_memory_mib),
+        pids_limit=int(settings.stage_pids_limit),
+        tmpfs_size_mb=int(settings.stage_tmpfs_size_mb),
+        stop_grace_seconds=int(settings.stage_stop_grace_seconds),
+        max_timeout_seconds=float(settings.solver_max_timeout_seconds),
+        allowed_environment_vars=tuple(settings.solver_allowed_environment_vars),
+    )
 
 
 def _deployment_policy_from_settings() -> Any:
@@ -384,6 +436,28 @@ def _assemble(
         executor_registry, result_adapter_registry, solver_runtime = _assemble_execution_plane(
             deployment_policy, check_readiness=check_readiness
         )
+    # 5. 容器化阶段目录与 job_runner 客户端(配置了 IESPLAN_JOB_RUNNER_URL 时装配)
+    builtin_stage_catalog: Any | None = None
+    container_stage_policy: Any | None = None
+    job_runner_client: Any | None = None
+    stage_runner: Any | None = None
+    if with_generators:
+        from iesplan.computation.runtime import (
+            ContainerStageRunner,
+            JobRunnerClient,
+            build_builtin_stage_catalog,
+        )
+        from iesplan.config import settings
+
+        container_stage_policy = _container_stage_policy_from_settings()
+        builtin_stage_catalog = build_builtin_stage_catalog(settings.stage_builtin_image)
+        if settings.job_runner_url.strip():
+            job_runner_client = JobRunnerClient(settings.job_runner_url.strip())
+            stage_runner = ContainerStageRunner(
+                job_runner_client,
+                stage_root=settings.stage_root,
+                policy=container_stage_policy,
+            )
     context = ApplicationContext(
         session_factory=db_module.SessionLocal,
         storage=storage,
@@ -394,6 +468,10 @@ def _assemble(
         result_adapter_registry=result_adapter_registry,
         solver_runtime=solver_runtime,
         deployment_policy=deployment_policy,
+        builtin_stage_catalog=builtin_stage_catalog,
+        container_stage_policy=container_stage_policy,
+        job_runner_client=job_runner_client,
+        stage_runner=stage_runner,
     )
     logger.info(
         "组合根装配完成: storage=%s registry=%s generators=%s executors=%s",
@@ -466,10 +544,54 @@ def assemble_task_runtime(worker_type: Literal["compute", "io"]) -> ApplicationC
     )
 
 
+def assemble_embedded_scheduler(
+    context: ApplicationContext,
+    *,
+    compute: Any = None,
+    poll_interval: float = 0.5,
+) -> Any:
+    """装配嵌入式后台调度器(仅在 IESPLAN_EMBEDDED_SCHEDULER=true 时由 lifespan 启停)。
+
+    计算、IO 与插件构建各自使用独立有界执行池，分别受 pies.toml 中
+    compute_slots / io_slots 控制，与 HTTP 请求线程完全隔离。
+    """
+    from iesplan.application.worker import ComputeExecutionPlane
+    from iesplan.config import settings
+    from iesplan.worker import EmbeddedScheduler
+
+    resolved_compute = compute if compute is not None else context.compute_execution_plane()
+    if (
+        resolved_compute is None
+        and context.generator_registry is not None
+        and context.predictor_registry is not None
+    ):
+        policy = _deployment_policy_from_settings()
+        executor_registry, adapter_registry, solver_runtime = _assemble_execution_plane(
+            policy, check_readiness=False
+        )
+        resolved_compute = ComputeExecutionPlane(
+            generator_registry=context.generator_registry,
+            executor_registry=executor_registry,
+            adapter_registry=adapter_registry,
+            runtime=solver_runtime,
+            predictor_registry=context.predictor_registry,
+            stage_runner=context.stage_runner,
+        )
+    return EmbeddedScheduler(
+        session_factory=context.session_factory,
+        compute_slots=settings.compute_slots,
+        io_slots=settings.io_slots,
+        compute=resolved_compute,
+        stage_runner=context.stage_runner,
+        poll_interval=poll_interval,
+    )
+
+
 __all__ = [
     "ApplicationContext",
     "assemble_api",
     "assemble_compute_worker",
+    "assemble_embedded_scheduler",
     "assemble_io_worker",
     "assemble_task_runtime",
     "collect_immutable_tables",

@@ -9,6 +9,18 @@
 
 from iesplan.computation.runtime.context import AttemptContext
 from iesplan.computation.runtime.descriptor import ExecutorDescriptor
+from iesplan.computation.runtime.job_runner_client import (
+    BuildPluginResult,
+    CleanupStageResult,
+    JobRunnerBadRequestError,
+    JobRunnerClient,
+    JobRunnerClientError,
+    JobRunnerConflictError,
+    JobRunnerNotFoundError,
+    JobRunnerUnavailableError,
+    StageInspection,
+    StartStageSpec,
+)
 from iesplan.computation.runtime.local_process import (
     HIGHS_ADAPTER_PATH,
     HIGHS_EXECUTABLE_REF,
@@ -26,22 +38,48 @@ from iesplan.computation.runtime.registry import (
 )
 from iesplan.computation.runtime.resources import LocalResourceUsage, observe_local_resources
 from iesplan.computation.runtime.solver_runtime import SolverRuntime
+from iesplan.computation.runtime.stage_runner import (
+    BuiltinStageCatalog,
+    BuiltinStageDescriptor,
+    ContainerStagePolicy,
+    ContainerStageRunner,
+    StageExecutionSpec,
+    StageRunResult,
+    build_builtin_stage_catalog,
+)
 
 __all__ = [
     "AttemptContext",
+    "BuildPluginResult",
+    "BuiltinStageCatalog",
+    "BuiltinStageDescriptor",
+    "CleanupStageResult",
+    "ContainerStagePolicy",
+    "ContainerStageRunner",
     "DeploymentPolicy",
     "ExecutorDescriptor",
     "ExecutorRegistry",
     "HIGHS_ADAPTER_PATH",
     "HIGHS_EXECUTABLE_REF",
     "HIGHS_VERSION",
+    "JobRunnerBadRequestError",
+    "JobRunnerClient",
+    "JobRunnerClientError",
+    "JobRunnerConflictError",
+    "JobRunnerNotFoundError",
+    "JobRunnerUnavailableError",
     "MAX_STREAM_BYTES",
     "TERMINATE_GRACE_SECONDS",
     "ExecutableReadiness",
     "LocalExecutable",
     "LocalProcessProvider",
     "SolverRuntime",
+    "StageExecutionSpec",
+    "StageInspection",
+    "StageRunResult",
+    "StartStageSpec",
     "LocalResourceUsage",
+    "build_builtin_stage_catalog",
     "observe_local_resources",
     "build_executor_registry",
 ]

@@ -1,5 +1,5 @@
-# pIES - 本地单机部署编排
-# 组件: PostgreSQL(事务事实) / Redis(可重建状态) / backend API / worker / web(nginx)
+# pIES - 本地单机部署编排（1.1.5 五容器架构）
+# 组件: PostgreSQL(事务事实) / Redis(可重建状态) / job_runner(容器代理) / backend(控制面与调度) / web(nginx)
 # 数据卷位于 ./data, 容器重建不丢数据；首次启动时由 Compose 自动创建。
 #
 # Compose 默认使用 compose 文件所在目录的 basename 作为项目名。目录移动或改名后，
@@ -36,9 +36,26 @@ services:
       retries: 20
     restart: unless-stopped
 
+  job_runner:
+    build: ./job_runner
+    command: uvicorn pies_job_runner.app:app --host 0.0.0.0 --port 8090
+    environment:
+      PIES_JOB_RUNNER_STAGE_ROOT: /data/stages
+      PIES_JOB_RUNNER_PLUGIN_SOURCE_ROOT: /data/plugin_builds
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./data:/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8090/readyz', timeout=3)"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+    restart: unless-stopped
+
   backend:
     build: ./backend
-    # One API process on a cold database; workers start only after readyz.
+    # One API/scheduler control-plane process on a cold database.
     # PostgreSQL initialization additionally takes a transaction advisory lock.
     command: uvicorn iesplan.main:app --host 0.0.0.0 --port 8000 --workers 1
     environment:
@@ -47,9 +64,12 @@ services:
       IESPLAN_DATA_DIR: /data
       IESPLAN_SECRET_KEY: ${IESPLAN_SECRET_KEY:-dev-only-secret-change-me}
       IESPLAN_APP_URL: http://localhost:8080
+      IESPLAN_JOB_RUNNER_URL: http://job_runner:8090
+      IESPLAN_STAGE_ROOT: /data/stages
+      IESPLAN_EMBEDDED_SCHEDULER: "true"
     volumes:
       - ./data:/data
-    # RR-P2-13: 应用就绪探针(数据库 + 建模命令注册表均可用才算 ready)
+    # RR-P2-13: 应用就绪探针(数据库 + 存储 + 建模注册表 + 内置阶段目录 + job_runner 均可用才算 ready)
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/readyz', timeout=3)"]
       interval: 5s
@@ -61,49 +81,7 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-    restart: unless-stopped
-
-  io_worker:
-    build: ./backend
-    command: python -m iesplan.worker.main
-    environment:
-      IESPLAN_DB_URL: postgresql+psycopg://${IESPLAN_DB_USER:-iesplan}:${IESPLAN_DB_PASSWORD:-iesplan_dev_password}@postgres:5432/${IESPLAN_DB_NAME:-iesplan}
-      IESPLAN_REDIS_URL: redis://redis:6379/0
-      IESPLAN_DATA_DIR: /data
-      IESPLAN_SECRET_KEY: ${IESPLAN_SECRET_KEY:-dev-only-secret-change-me}
-      IESPLAN_APP_URL: http://localhost:8080
-      IESPLAN_WORKER_TYPE: io
-    volumes:
-      - ./data:/data
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-      backend:
-        condition: service_healthy
-    restart: unless-stopped
-
-  # B4: 计算 Worker 常驻 daemon，与 io_worker 同一后端镜像与统一部署配置
-  # 装配（执行面缺失即拒绝启动，不领取任务）。
-  compute_worker:
-    build: ./backend
-    command: python -m iesplan.worker.main --worker-type compute
-    environment:
-      IESPLAN_DB_URL: postgresql+psycopg://${IESPLAN_DB_USER:-iesplan}:${IESPLAN_DB_PASSWORD:-iesplan_dev_password}@postgres:5432/${IESPLAN_DB_NAME:-iesplan}
-      IESPLAN_REDIS_URL: redis://redis:6379/0
-      IESPLAN_DATA_DIR: /data
-      IESPLAN_SECRET_KEY: ${IESPLAN_SECRET_KEY:-dev-only-secret-change-me}
-      IESPLAN_APP_URL: http://localhost:8080
-      IESPLAN_WORKER_TYPE: compute
-    volumes:
-      - ./data:/data
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-      backend:
+      job_runner:
         condition: service_healthy
     restart: unless-stopped
 

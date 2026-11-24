@@ -19,7 +19,10 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.cors import CORSMiddleware
 
 from iesplan import __version__
-from iesplan.bootstrap import assemble_api
+from iesplan.bootstrap import assemble_api, assemble_embedded_scheduler
+from iesplan.config import settings
+from iesplan.core.errors import AppError
+from iesplan.core.errors import error_envelope as _error_envelope
 
 logger = logging.getLogger(__name__)
 
@@ -28,8 +31,6 @@ APP_NAME = "iesplan"
 # ---------------------------------------------------------------------------
 # 全局异常 → 标准错误信封(与 AppError.to_dict 同构; 构造器权威源在 core.errors)
 # ---------------------------------------------------------------------------
-
-from iesplan.core.errors import AppError, error_envelope as _error_envelope
 
 
 def _app_error_response(exc: Exception) -> JSONResponse:
@@ -53,7 +54,7 @@ def _app_error_response(exc: Exception) -> JSONResponse:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    """应用生命周期: 启动时经组合根装配, 关闭时记录日志。
+    """应用生命周期: 启动时经组合根装配, 按配置启停嵌入式调度器, 关闭时逆序释放。
 
     ``assemble_api`` 失败即启动失败: 不捕获、不发布半初始化状态、
     不设 fallback(就绪探针只读已装配上下文的公开健康状态)。
@@ -61,8 +62,19 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     logger.info("pIES API 启动, 版本=%s", __version__)
     context = assemble_api()
     app.state.bootstrap_context = context
-    yield
-    logger.info("pIES API 关闭")
+    scheduler = None
+    if settings.embedded_scheduler:
+        scheduler = assemble_embedded_scheduler(context)
+        scheduler.start()
+    app.state.scheduler = scheduler
+    try:
+        yield
+    finally:
+        if scheduler is not None:
+            scheduler.stop()
+        if context.job_runner_client is not None:
+            context.job_runner_client.close()
+        logger.info("pIES API 关闭")
 
 
 def _build_health_router() -> APIRouter:
@@ -92,7 +104,7 @@ def _build_health_router() -> APIRouter:
         )
         health: dict[str, str] = dict(readiness.get("health", {}))
         # API 进程实际必需的已装配能力(与 assemble_api 装配子集一致): 缺一即 503
-        required: tuple[tuple[str, str, str, dict[str, str]], ...] = (
+        required: list[tuple[str, str, str, dict[str, str]]] = [
             ("db", "API-RZ-001", "ies.error.db_unavailable", {"service": "db"}),
             ("storage", "API-RZ-003", "ies.error.storage_unavailable", {"service": "storage"}),
             (
@@ -101,7 +113,20 @@ def _build_health_router() -> APIRouter:
                 "ies.error.registry_unavailable",
                 {"service": "modeling_registry", "detail": "unavailable"},
             ),
-        )
+        ]
+        if "stages" in health:
+            required.append(
+                ("stages", "API-RZ-005", "ies.error.stages_unavailable", {"service": "stages"})
+            )
+        if "job_runner" in health:
+            required.append(
+                (
+                    "job_runner",
+                    "API-RZ-004",
+                    "ies.error.job_runner_unavailable",
+                    {"service": "job_runner"},
+                )
+            )
         for capability, code, message_key, params in required:
             if health.get(capability) != "ok":
                 # A3 脱敏: 探活失败的原始异常串(可能含内部路径/凭证/堆栈)
@@ -112,16 +137,18 @@ def _build_health_router() -> APIRouter:
                     params=params,
                 )
                 return JSONResponse(status_code=503, content=body)
-        return JSONResponse(
-            status_code=200,
-            content={
-                "status": "ok",
-                "service": APP_NAME,
-                "db": "ok",
-                "storage": "ok",
-                "registry": "ok",
-            },
-        )
+        ready_body: dict[str, Any] = {
+            "status": "ok",
+            "service": APP_NAME,
+            "db": "ok",
+            "storage": "ok",
+            "registry": "ok",
+        }
+        if "stages" in health:
+            ready_body["stages"] = "ok"
+        if "job_runner" in health:
+            ready_body["job_runner"] = "ok"
+        return JSONResponse(status_code=200, content=ready_body)
 
     return router
 

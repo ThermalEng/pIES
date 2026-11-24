@@ -36,6 +36,11 @@ def test_assemble_api_full_context() -> None:
     assert health["db"] == "ok"
     assert health["registry"] == "ok"
     assert health["generators"] == "ok"
+    assert health["stages"] == "ok"
+    assert "job_runner" not in health
+    assert ctx.builtin_stage_catalog is not None
+    assert len(ctx.builtin_stage_catalog.snapshot()) == 4
+    assert ctx.container_stage_policy is not None
     assert all(isinstance(v, str) for v in health.values())
     assert ctx.ready() is True
 

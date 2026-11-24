@@ -78,9 +78,10 @@ from iesplan.application.worker.lease_cases import (
     Claim,
     LeaseRejectedError,
     TaskRecord,
-    dequeue_task,
-    publish_heartbeat,
     attempt_stop_reason,
+    dequeue_task,
+    get_reconcilable_claim,
+    publish_heartbeat,
     slot_available,
     verify_lease,
 )
@@ -100,13 +101,12 @@ from iesplan.application.worker.runner_cases import (
     load_version_content,
     parse_dataset_csv,
 )
+from iesplan.application.worker.transactions import run_worker_transaction
 from iesplan.computation import ComputationUnavailableError, observe_local_resources
 from iesplan.tasks import (
     BUSINESS_OUTCOMES,
     ExecutionUnavailableError,
 )
-
-from iesplan.application.worker.transactions import run_worker_transaction
 
 __all__ = [
     "run_worker_transaction",
@@ -141,6 +141,7 @@ __all__ = [
     "dequeue_task",
     "execute_bundle",
     "execute_saved_bundle",
+    "get_reconcilable_claim",
     "load_prediction_checkpoint",
     "restore_round",
     "save_bundle_checkpoint",

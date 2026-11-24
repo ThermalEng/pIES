@@ -47,6 +47,12 @@ _ALLOWED_DEPLOY_SECTIONS: dict[str, frozenset[str]] = {
         "allowed_environment_vars",
     }),
     "calculation": frozenset({"time_limit_seconds"}),
+    "stage": frozenset({
+        "builtin_image",
+        "pids_limit",
+        "tmpfs_size_mb",
+        "stop_grace_seconds",
+    }),
 }
 
 #: Settings 应用运行字段 ← (TOML 节, 键)。
@@ -61,6 +67,10 @@ _APP_TOML_MAP: tuple[tuple[str, str, str], ...] = (
     ("solver_allowed_executables", "solver", "allowed_executables"),
     ("solver_allowed_environment_vars", "solver", "allowed_environment_vars"),
     ("calc_time_limit_seconds", "calculation", "time_limit_seconds"),
+    ("stage_builtin_image", "stage", "builtin_image"),
+    ("stage_pids_limit", "stage", "pids_limit"),
+    ("stage_tmpfs_size_mb", "stage", "tmpfs_size_mb"),
+    ("stage_stop_grace_seconds", "stage", "stop_grace_seconds"),
 )
 
 
@@ -135,6 +145,12 @@ class Settings(BaseSettings):
     debug: bool = False
     #: 部署配置文件路径(包内默认文件，或以挂载文件覆盖)
     deploy_config_file: Path = DEFAULT_DEPLOY_CONFIG_FILE
+    #: 容器代理 job_runner HTTP 地址(空串表示未启用容器代理模式)
+    job_runner_url: str = ""
+    #: 临时计算容器共享 stage 工作根目录(与 job_runner PIES_JOB_RUNNER_STAGE_ROOT 对齐)
+    stage_root: Path = Path("/data/stages")
+    #: 是否在 backend lifespan 中启停嵌入式后台任务调度器
+    embedded_scheduler: bool = False
 
     # --- 应用运行层：部署文件唯一权威（禁环境变量，禁程序内默认）---
     # 有效性约束只设在本边界一次：槽数/窗口/上限/TTL/资源上限/表单初值为正数，
@@ -158,6 +174,14 @@ class Settings(BaseSettings):
     solver_allowed_environment_vars: tuple[str, ...] = Field(exclude=True)
     #: 新建计算配置表单 time_limit_seconds 初值(秒)；保存后属项目 revision
     calc_time_limit_seconds: int = Field(exclude=True, gt=0)
+    #: 内置计算阶段容器镜像精确引用
+    stage_builtin_image: str = Field(exclude=True, min_length=1)
+    #: 临时计算容器进程数上限
+    stage_pids_limit: int = Field(exclude=True, gt=0)
+    #: 临时计算容器 /tmp tmpfs 大小上限(MiB)
+    stage_tmpfs_size_mb: int = Field(exclude=True, gt=0)
+    #: 停止/取消临时容器宽限(秒)
+    stage_stop_grace_seconds: int = Field(exclude=True, ge=0, le=300)
 
     def __init__(self, **values: Any) -> None:
         raw_path = (

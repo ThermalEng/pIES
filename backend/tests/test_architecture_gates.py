@@ -1199,3 +1199,182 @@ def test_gate_bootstrap_import_detection(tmp_path):
         "iesplan.bootstrap.bad_importlib",
         "iesplan.bootstrap.bad_dunder",
     }, sorted(dynamic_hits)
+
+
+# ---------------------------------------------------------------------------
+# 门禁 22–25: 1.1.5 五容器架构与运行时模块化门禁 (S3 Part 2)
+# ---------------------------------------------------------------------------
+
+
+def _find_docker_imports(
+    scan_root: Path = _PKG_ROOT, pkg_root: Path = _PKG_ROOT
+) -> list[tuple[str, int, str]]:
+    """门禁 22: 扫描 backend/iesplan 下所有 import docker / from docker.*。"""
+    found: list[tuple[str, int, str]] = []
+    for path, mod in _iter_modules(scan_root, pkg_root):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for a in node.names:
+                    if a.name == "docker" or a.name.startswith("docker."):
+                        found.append((mod, node.lineno, f"import {a.name}"))
+            elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                if node.module == "docker" or node.module.startswith("docker."):
+                    found.append((mod, node.lineno, f"from {node.module}"))
+    return found
+
+
+def _find_api_job_runner_or_worker_imports(
+    scan_root: Path = _API_DIR, pkg_root: Path = _PKG_ROOT
+) -> list[tuple[str, int, str]]:
+    """门禁 23: HTTP API 路由不得直接导入 worker、job_runner_client 或 stage_runner。"""
+    forbidden_substrings = ("job_runner_client", "stage_runner")
+    found: list[tuple[str, int, str]] = []
+    for path, mod in _iter_modules(scan_root, pkg_root):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            targets: list[str] = []
+            if isinstance(node, ast.Import):
+                targets.extend(a.name for a in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                targets.append(node.module)
+                if node.module == "iesplan.computation" or node.module == "iesplan.computation.runtime":
+                    for a in node.names:
+                        if any(tok in a.name.lower() for tok in ("jobrunner", "stagerunner")):
+                            found.append((mod, node.lineno, f"{node.module}.{a.name}"))
+            for target in targets:
+                if target == "iesplan.worker" or target.startswith("iesplan.worker."):
+                    found.append((mod, node.lineno, target))
+                elif any(tok in target for tok in forbidden_substrings):
+                    found.append((mod, node.lineno, target))
+    return found
+
+
+def _find_repo_root() -> Path | None:
+    """Locate repository root (direct checkout or mounted /repo inside test container)."""
+    import os
+
+    env_root = os.environ.get("PIES_REPO_ROOT")
+    candidates = [Path(env_root)] if env_root else []
+    candidates.extend([Path(__file__).resolve().parents[2], Path("/repo")])
+    for candidate in candidates:
+        if (candidate / "docker-compose.yml").is_file() and (candidate / "sdk" / "pies_sdk").is_dir():
+            return candidate
+    return None
+
+
+def _parse_compose_services(compose_text: str) -> dict[str, dict[str, object]]:
+    """Minimal stdlib parser for top-level services, volumes, environment, and profiles."""
+    services: dict[str, dict[str, object]] = {}
+    in_services = False
+    current_service: str | None = None
+    current_section: str | None = None
+    for raw_line in compose_text.splitlines():
+        stripped = raw_line.split("#", 1)[0].rstrip()
+        if not stripped.strip():
+            continue
+        indent = len(stripped) - len(stripped.lstrip(" "))
+        text = stripped.strip()
+        if indent == 0:
+            in_services = text == "services:"
+            current_service = None
+            current_section = None
+            continue
+        if not in_services:
+            continue
+        if indent == 2 and text.endswith(":"):
+            current_service = text[:-1].strip()
+            services[current_service] = {"volumes": [], "environment": {}, "profiles": []}
+            current_section = None
+            continue
+        if current_service is None:
+            continue
+        if indent == 4 and text.endswith(":"):
+            current_section = text[:-1].strip()
+            continue
+        if indent == 4:
+            current_section = None
+            continue
+        if indent >= 6 and current_section == "volumes" and text.startswith("- "):
+            item = text[2:].strip().strip("\"'")
+            services[current_service]["volumes"].append(item)  # type: ignore[union-attr]
+        elif indent >= 6 and current_section == "profiles" and text.startswith("- "):
+            item = text[2:].strip().strip("\"'")
+            services[current_service]["profiles"].append(item)  # type: ignore[union-attr]
+        elif indent >= 6 and current_section == "environment" and ":" in text:
+            k, v = text.split(":", 1)
+            services[current_service]["environment"][k.strip()] = v.strip().strip("\"'")  # type: ignore[index]
+    return services
+
+
+def test_backend_no_docker_imports() -> None:
+    """架构门禁 22: backend/iesplan 禁止导入 docker SDK。"""
+    detected = _find_docker_imports()
+    assert not detected, f"backend/iesplan 禁止导入 docker: {detected}"
+
+
+def test_api_no_job_runner_or_worker_imports() -> None:
+    """架构门禁 23: API 路由禁止直接导入 job_runner_client/stage_runner/worker。"""
+    detected = _find_api_job_runner_or_worker_imports()
+    assert not detected, f"API 路由越权导入调度/容器执行器: {detected}"
+
+
+def test_compose_five_container_topology_and_docker_sock_isolation() -> None:
+    """架构门禁 24: docker-compose.yml 仅含 5 个常驻服务，docker.sock 仅挂载于 job_runner。"""
+    import pytest
+
+    repo_root = _find_repo_root()
+    if repo_root is None:
+        pytest.skip("docker-compose.yml not mounted in backend-only container context")
+    compose_text = (repo_root / "docker-compose.yml").read_text(encoding="utf-8")
+    services = _parse_compose_services(compose_text)
+
+    assert "io_worker" not in services
+    assert "compute_worker" not in services
+    persistent = {
+        name for name, cfg in services.items() if not cfg["profiles"]  # type: ignore[truthy-bool]
+    }
+    assert persistent == {"postgres", "redis", "job_runner", "backend", "web"}
+    assert "e2e" in services and services["e2e"]["profiles"] == ["e2e"]
+
+    sock_services = [
+        name
+        for name, cfg in services.items()
+        if any("/var/run/docker.sock" in vol for vol in cfg["volumes"])  # type: ignore[attr-defined]
+    ]
+    assert sock_services == ["job_runner"], f"docker.sock 只能挂载于 job_runner, 实际: {sock_services}"
+
+    backend_env = services["backend"]["environment"]  # type: ignore[index]
+    assert backend_env.get("IESPLAN_JOB_RUNNER_URL") == "http://job_runner:8090"
+    assert backend_env.get("IESPLAN_STAGE_ROOT") == "/data/stages"
+    assert backend_env.get("IESPLAN_EMBEDDED_SCHEDULER") == "true"
+    assert "./data:/data" in services["backend"]["volumes"]  # type: ignore[operator]
+    assert "./data:/data" in services["job_runner"]["volumes"]  # type: ignore[operator]
+
+
+def test_sdk_zero_backend_dependencies() -> None:
+    """架构门禁 25 (Runtime Modularity Gates 1 & 4): sdk/pies_sdk 零 iesplan/DB/FastAPI/Redis 依赖。"""
+    import pytest
+
+    repo_root = _find_repo_root()
+    if repo_root is None:
+        pytest.skip("sdk/pies_sdk not mounted in backend-only container context")
+    sdk_root = repo_root / "sdk" / "pies_sdk"
+    forbidden_roots = frozenset(
+        {"iesplan", "sqlalchemy", "fastapi", "redis", "psycopg", "alembic", "docker"}
+    )
+    hits: list[tuple[str, int, str]] = []
+    for py_file in sorted(sdk_root.rglob("*.py")):
+        tree = ast.parse(py_file.read_text(encoding="utf-8"))
+        rel = py_file.relative_to(sdk_root).as_posix()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for a in node.names:
+                    top = a.name.split(".")[0]
+                    if top in forbidden_roots:
+                        hits.append((rel, node.lineno, f"import {a.name}"))
+            elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                top = node.module.split(".")[0]
+                if top in forbidden_roots:
+                    hits.append((rel, node.lineno, f"from {node.module}"))
+    assert not hits, f"sdk/pies_sdk 存在禁止的后端依赖: {hits}"

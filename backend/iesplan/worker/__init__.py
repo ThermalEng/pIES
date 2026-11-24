@@ -11,4 +11,6 @@
 
 from __future__ import annotations
 
-__all__ = ["runner", "executors", "main"]
+from iesplan.worker.scheduler import EmbeddedScheduler
+
+__all__ = ["EmbeddedScheduler", "runner", "executors", "main"]

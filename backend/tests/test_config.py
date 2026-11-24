@@ -57,6 +57,13 @@ def test_defaults_from_deploy_file() -> None:
     assert tuple(s.solver_allowed_executables) == ("ies.solver.highs@1.7.2",)
     assert tuple(s.solver_allowed_environment_vars) == ()
     assert s.calc_time_limit_seconds == 43200
+    assert s.stage_builtin_image == "pies-builtin-stages:1.1.5"
+    assert s.stage_pids_limit == 256
+    assert s.stage_tmpfs_size_mb == 512
+    assert s.stage_stop_grace_seconds == 5
+    assert s.job_runner_url == ""
+    assert s.stage_root == Path("/data/stages")
+    assert s.embedded_scheduler is False
     assert not hasattr(s, "task_timeout_hours")
 
 
@@ -73,16 +80,24 @@ def test_env_override_only_for_env_layer(monkeypatch) -> None:
     monkeypatch.setenv("IESPLAN_DATA_DIR", "/tmp/ies-data")
     monkeypatch.setenv("IESPLAN_DEBUG", "true")
     monkeypatch.setenv("IESPLAN_WORKER_TYPE", "io")
+    monkeypatch.setenv("IESPLAN_JOB_RUNNER_URL", "http://job_runner:8090")
+    monkeypatch.setenv("IESPLAN_STAGE_ROOT", "/tmp/ies-stages")
+    monkeypatch.setenv("IESPLAN_EMBEDDED_SCHEDULER", "true")
     monkeypatch.setenv("IESPLAN_COMPUTE_SLOTS", "8")
     monkeypatch.setenv("IESPLAN_SOLVER_MAX_TIMEOUT_SECONDS", "60")
+    monkeypatch.setenv("IESPLAN_STAGE_PIDS_LIMIT", "999")
     s = Settings()
     assert s.db_url == "postgresql+psycopg://u:p@db:5432/other"
     assert s.redis_url == "redis://redis:6380/1"
     assert s.data_dir == Path("/tmp/ies-data")
     assert s.debug is True
     assert s.worker_type == "io"
+    assert s.job_runner_url == "http://job_runner:8090"
+    assert s.stage_root == Path("/tmp/ies-stages")
+    assert s.embedded_scheduler is True
     assert s.compute_slots == 2
     assert s.solver_max_timeout_seconds == 172800
+    assert s.stage_pids_limit == 256
 
 
 def test_deploy_boundary_values_rejected(tmp_path: Path) -> None:
@@ -115,6 +130,12 @@ def test_deploy_boundary_values_rejected(tmp_path: Path) -> None:
                 'allowed_executables = ["ies.solver.highs@1.7.2"]': "allowed_executables = []"
             })
         )
+    with pytest.raises(ValueError, match="部署配置文件非法"):
+        Settings(deploy_config_file=_settings_with({"pids_limit = 256": "pids_limit = 0"}))
+    with pytest.raises(ValueError, match="部署配置文件非法"):
+        Settings(deploy_config_file=_settings_with({"tmpfs_size_mb = 512": "tmpfs_size_mb = 0"}))
+    with pytest.raises(ValueError, match="部署配置文件非法"):
+        Settings(deploy_config_file=_settings_with({"stop_grace_seconds = 5": "stop_grace_seconds = 301"}))
 
 
 def test_deploy_file_override(tmp_path: Path) -> None:
