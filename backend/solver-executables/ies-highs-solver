@@ -129,6 +129,8 @@ _SOLVE_DOMAINS = ("original", "valid_relaxation", "restricted")
 _ACCELERATION_MODES = ("off", "on_demand_mutex")
 _ACCELERATION_SCHEMA = "ies.solver-acceleration"
 _ACCELERATION_SCHEMA_VERSION = "1.0.0"
+_EPIGRAPH_SCHEMA = "ies.solver-epigraph"
+_EPIGRAPH_SCHEMA_VERSION = "1.0.0"
 _MUTEX_CONFLICT_TOLERANCE = 1e-7
 _IPM_LP_MIN_COLS = 10_000
 _TIEBREAK_MAX_REL_GAP = 1e-6
@@ -153,6 +155,31 @@ def _set_highs_time_limit(handle, budget_seconds: float, *, cumulative: bool = T
     _set_highs_option(handle, "time_limit", elapsed + budget_seconds)
 
 
+def verify_epigraphs(
+    primals: Sequence[float],
+    epigraphs: Sequence[tuple[int, Sequence[int]]],
+) -> bool:
+    """Verify continuous demand upper-envelope tightness: peak - max(flow) <= tol."""
+    for peak_col, flow_cols in epigraphs:
+        if not flow_cols:
+            continue
+        peak = float(primals[peak_col])
+        if not math.isfinite(peak):
+            return False
+        max_flow: float | None = None
+        for col in flow_cols:
+            flow = float(primals[col])
+            if not math.isfinite(flow):
+                return False
+            if max_flow is None or flow > max_flow:
+                max_flow = flow
+        if max_flow is not None:
+            tol = max(1e-4, 1e-7 * max(1.0, abs(max_flow), abs(peak)))
+            if peak - max_flow > tol:
+                return False
+    return True
+
+
 def verify_primal_against_lp(
     lp,
     primals: Sequence[float],
@@ -161,8 +188,9 @@ def verify_primal_against_lp(
     relative_tolerance: float = 1e-12,
     integrality_tolerance: float = 1e-6,
     original_mutex_overrides: Mapping[str, object] | None = None,
+    epigraphs: Sequence[tuple[int, Sequence[int]]] | None = None,
 ) -> bool:
-    """Verify ``primals`` satisfies all variable bounds, integrality, and row bounds of ``lp``."""
+    """Verify ``primals`` satisfies bounds, integrality, row bounds, and epigraph tightness."""
     import highspy
 
     num_col = int(lp.num_col_)
@@ -206,7 +234,7 @@ def verify_primal_against_lp(
             return False
 
     if num_row == 0:
-        return True
+        return verify_epigraphs(xs, epigraphs) if epigraphs else True
 
     matrix = lp.a_matrix_
     starts = matrix.start_
@@ -273,6 +301,8 @@ def verify_primal_against_lp(
             feasibility_tolerance + relative_tolerance * max(row_scale, abs(hi))
         ):
             return False
+    if epigraphs and not verify_epigraphs(xs, epigraphs):
+        return False
     return True
 
 
@@ -397,6 +427,8 @@ def _atomic_write_solution_v1(
     subdomain_status: str | None = None,
     subdomain_best_bound: float | None = None,
     subdomain_relative_gap: float | None = None,
+    model_num_columns: int | None = None,
+    epigraph_verified: bool | None = None,
 ) -> None:
     _atomic_write_lines(
         sol_path,
@@ -412,6 +444,8 @@ def _atomic_write_solution_v1(
             subdomain_status=subdomain_status,
             subdomain_best_bound=subdomain_best_bound,
             subdomain_relative_gap=subdomain_relative_gap,
+            model_num_columns=model_num_columns,
+            epigraph_verified=epigraph_verified,
         ),
     )
 
@@ -465,7 +499,14 @@ class VerifiedIncumbent:
 class VerifiedIncumbentSlot:
     """Single-slot incumbent tracker with atomic streaming persistence to ``sol_path``."""
 
-    def __init__(self, *, sense: object = "minimize", sol_path: str | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        sense: object = "minimize",
+        sol_path: str | None = None,
+        epigraphs: Sequence[tuple[int, Sequence[int]]] = (),
+        model_num_columns: int | None = None,
+    ) -> None:
         sense_name = str(sense)
         if sense_name in ("minimize", "ObjSense.kMinimize"):
             self.sense = "minimize"
@@ -474,6 +515,8 @@ class VerifiedIncumbentSlot:
         else:
             raise ValueError(f"未知优化方向: {sense!r}")
         self.sol_path = sol_path
+        self.epigraphs = tuple((int(p), tuple(int(c) for c in fs)) for p, fs in epigraphs)
+        self.model_num_columns = model_num_columns
         self.incumbent: VerifiedIncumbent | None = None
 
     def is_better(self, objective_value: float) -> bool:
@@ -516,7 +559,10 @@ class VerifiedIncumbentSlot:
             original_lp,
             compact_primals,
             original_mutex_overrides=original_mutex_overrides,
+            epigraphs=self.epigraphs,
         ):
+            return False
+        if original_lp is None and self.epigraphs and not verify_epigraphs(compact_primals, self.epigraphs):
             return False
         if not self.is_better(obj):
             return False
@@ -547,6 +593,8 @@ class VerifiedIncumbentSlot:
                 subdomain_status=candidate.subdomain_status,
                 subdomain_best_bound=candidate.subdomain_best_bound,
                 subdomain_relative_gap=candidate.subdomain_relative_gap,
+                model_num_columns=self.model_num_columns,
+                epigraph_verified=True if self.epigraphs else None,
             )
         self.incumbent = candidate
         return True
@@ -604,6 +652,8 @@ class VerifiedIncumbentSlot:
             subdomain_status=inc.subdomain_status,
             subdomain_best_bound=inc.subdomain_best_bound,
             subdomain_relative_gap=inc.subdomain_relative_gap,
+            model_num_columns=self.model_num_columns,
+            epigraph_verified=True if self.epigraphs else None,
         )
 
 
@@ -717,6 +767,47 @@ def _load_acceleration_metadata(
         seen_bins.add(bin_col)
         pairs.append((bin_col, x_col, y_col, row_x, row_y))
     return tuple(pairs)
+
+
+def _load_epigraph_metadata(
+    path: str,
+    *,
+    expected_num_col: int,
+) -> tuple[tuple[int, tuple[int, ...]], ...]:
+    """Load and validate ``input/epigraphs.json`` continuous demand upper-envelope groups."""
+    with open(path, encoding="utf-8") as stream:
+        doc = json.load(stream)
+    if not isinstance(doc, Mapping):
+        raise ValueError("epigraphs 元数据顶层须为 JSON 对象")
+    if doc.get("schema") != _EPIGRAPH_SCHEMA:
+        raise ValueError(f"非法 epigraph schema: {doc.get('schema')!r}")
+    if doc.get("schema_version") != _EPIGRAPH_SCHEMA_VERSION:
+        raise ValueError(f"非法 epigraph schema_version: {doc.get('schema_version')!r}")
+    num_columns = doc.get("num_columns")
+    if not _is_strict_int(num_columns) or num_columns != expected_num_col:
+        raise ValueError(
+            f"epigraphs num_columns={num_columns!r} 与模型列数 {expected_num_col} 不一致"
+        )
+    raw_groups = doc.get("epigraphs")
+    if not isinstance(raw_groups, list):
+        raise ValueError("epigraphs 字段须为列表")
+    groups: list[tuple[int, tuple[int, ...]]] = []
+    for idx, entry in enumerate(raw_groups):
+        if not isinstance(entry, Mapping) or set(entry) != {"peak_col", "flow_cols"}:
+            raise ValueError(f"epigraphs[{idx}] 须恰含 peak_col 与 flow_cols")
+        peak_col = entry["peak_col"]
+        flow_cols = entry["flow_cols"]
+        if not _is_strict_int(peak_col) or not (0 <= peak_col < expected_num_col):
+            raise ValueError(f"epigraphs[{idx}].peak_col 越界: {peak_col!r}")
+        if not isinstance(flow_cols, list):
+            raise ValueError(f"epigraphs[{idx}].flow_cols 须为整数列表")
+        norm_flows: list[int] = []
+        for f_idx, col in enumerate(flow_cols):
+            if not _is_strict_int(col) or not (0 <= col < expected_num_col):
+                raise ValueError(f"epigraphs[{idx}].flow_cols[{f_idx}] 越界: {col!r}")
+            norm_flows.append(int(col))
+        groups.append((int(peak_col), tuple(norm_flows)))
+    return tuple(groups)
 
 
 def _validate_and_snapshot_mutex_pairs(
@@ -872,6 +963,7 @@ def _run_original_fallback(
                 primals=(),
                 solve_domain="valid_relaxation",
                 original_model_verified=True,
+                model_num_columns=slot.model_num_columns,
             )
         return highspy.HighsModelStatus.kTimeLimit
 
@@ -898,7 +990,12 @@ def _run_original_fallback(
     )
     if slot.incumbent is None:
         _write_unrecorded_terminal_solution(
-            handle, fallback_status, sol_path, solve_domain="original"
+            handle,
+            fallback_status,
+            sol_path,
+            solve_domain="original",
+            model_num_columns=slot.model_num_columns,
+            epigraphs=slot.epigraphs,
         )
     return fallback_status
 
@@ -1028,6 +1125,7 @@ def _resolve_degenerate_lp_conflicts(
             lp_snapshot,
             reconstructed,
             original_mutex_overrides=relaxed_overrides,
+            epigraphs=slot.epigraphs,
         )
         del lp_snapshot
         if verified:
@@ -1126,6 +1224,7 @@ def _run_on_demand_mutex_recovery(
                 sol_path,
                 solve_domain="valid_relaxation",
                 original_model_verified=True,
+                model_num_columns=slot.model_num_columns,
             )
             return last_status
 
@@ -1215,6 +1314,7 @@ def _run_on_demand_mutex_recovery(
                 lp_snapshot,
                 reconstructed,
                 original_mutex_overrides=relaxed_overrides,
+                epigraphs=slot.epigraphs,
             )
             is_pure_lp = not any(
                 t == highspy.HighsVarType.kInteger for t in lp_snapshot.integrality_
@@ -1263,6 +1363,7 @@ def _run_on_demand_mutex_recovery(
                                 lp_snapshot,
                                 reconstructed,
                                 original_mutex_overrides=relaxed_overrides,
+                                epigraphs=slot.epigraphs,
                             )
                             del lp_snapshot
 
@@ -1357,6 +1458,7 @@ def _run_on_demand_mutex_recovery(
             primals=(),
             solve_domain="valid_relaxation",
             original_model_verified=True,
+            model_num_columns=slot.model_num_columns,
         )
     return last_status
 
@@ -1369,6 +1471,8 @@ def _run_accelerated_solve(
     *,
     acceleration_mode: str,
     acceleration_file: str | None = None,
+    epigraph_file: str | None = None,
+    report_model_columns: bool = False,
     threads: int | None = None,
     min_guard: float = _DEFAULT_MIN_SOLVE_GUARD_SECONDS,
     io_margin: float = _DEFAULT_IO_MARGIN_SECONDS,
@@ -1390,7 +1494,19 @@ def _run_accelerated_solve(
     sense_status, obj_sense = handle.getObjectiveSense()
     if sense_status != highspy.HighsStatus.kOk:
         raise RuntimeError(f"HiGHS 无法读取目标方向 (status={sense_status})")
-    slot = VerifiedIncumbentSlot(sense=obj_sense, sol_path=sol_path)
+    num_col = int(handle.getNumCol())
+    epigraphs = (
+        _load_epigraph_metadata(epigraph_file, expected_num_col=num_col)
+        if epigraph_file is not None
+        else ()
+    )
+    model_num_columns = num_col if (report_model_columns or epigraph_file is not None) else None
+    slot = VerifiedIncumbentSlot(
+        sense=obj_sense,
+        sol_path=sol_path,
+        epigraphs=epigraphs,
+        model_num_columns=model_num_columns,
+    )
     _set_highs_option(handle, "random_seed", seed)
     if threads is not None:
         _set_highs_option(handle, "threads", threads)
@@ -1469,7 +1585,12 @@ def _run_accelerated_solve(
 
     if slot.incumbent is None:
         _write_unrecorded_terminal_solution(
-            handle, last_status, sol_path, solve_domain=last_domain
+            handle,
+            last_status,
+            sol_path,
+            solve_domain=last_domain,
+            model_num_columns=slot.model_num_columns,
+            epigraphs=slot.epigraphs,
         )
     return handle, last_status, slot
 
@@ -1480,12 +1601,15 @@ def _write_unrecorded_terminal_solution(
     sol_path: str,
     *,
     solve_domain: str = "original",
+    model_num_columns: int | None = None,
+    epigraphs: Sequence[tuple[int, Sequence[int]]] = (),
 ) -> None:
     """Safely write terminal solution when no candidate entered ``VerifiedIncumbentSlot``."""
-    feasible, _objective, _best_bound, _gap, _primals = _extract_solution_data(
+    feasible, _objective, _best_bound, _gap, primals = _extract_solution_data(
         handle, model_status
     )
     if feasible:
+        epigraph_verified = verify_epigraphs(primals, epigraphs) if epigraphs else None
         with _timed_stage("solution_write"):
             _atomic_write_solution_v1(
                 sol_path,
@@ -1497,6 +1621,8 @@ def _write_unrecorded_terminal_solution(
                 primals=(),
                 solve_domain=solve_domain,
                 original_model_verified=False,
+                model_num_columns=model_num_columns,
+                epigraph_verified=epigraph_verified,
             )
     else:
         _write_solution(
@@ -1505,6 +1631,7 @@ def _write_unrecorded_terminal_solution(
             sol_path,
             solve_domain=solve_domain,
             original_model_verified=True,
+            model_num_columns=model_num_columns,
         )
 
 
@@ -1518,6 +1645,8 @@ def _write_solution(
     subdomain_status: str | None = None,
     subdomain_best_bound: float | None = None,
     subdomain_relative_gap: float | None = None,
+    model_num_columns: int | None = None,
+    epigraph_verified: bool | None = None,
 ) -> None:
     """生成 ``HIGHS_SOLUTION_V1`` 内容并原子写出声明文件；失败抛异常。"""
     with _timed_stage("solution_write"):
@@ -1527,6 +1656,8 @@ def _write_solution(
             and subdomain_status is None
             and subdomain_best_bound is None
             and subdomain_relative_gap is None
+            and model_num_columns is None
+            and epigraph_verified is None
         ):
             _atomic_write_text(sol_path, _solution_text(handle, model_status))
         else:
@@ -1546,6 +1677,8 @@ def _write_solution(
                 subdomain_status=subdomain_status,
                 subdomain_best_bound=subdomain_best_bound,
                 subdomain_relative_gap=subdomain_relative_gap,
+                model_num_columns=model_num_columns,
+                epigraph_verified=epigraph_verified,
             )
 
 
@@ -1585,6 +1718,8 @@ def _iter_solution_v1_lines(
     subdomain_status: str | None = None,
     subdomain_best_bound: float | None = None,
     subdomain_relative_gap: float | None = None,
+    model_num_columns: int | None = None,
+    epigraph_verified: bool | None = None,
 ) -> Iterator[str]:
     if solve_domain not in _SOLVE_DOMAINS:
         raise ValueError(f"非法 solve_domain: {solve_domain!r}")
@@ -1604,6 +1739,10 @@ def _iter_solution_v1_lines(
     yield f"best_bound: {number(best_bound)}\n"
     yield f"relative_gap: {number(relative_gap)}\n"
     yield f"num_columns: {len(primals)}\n"
+    if model_num_columns is not None:
+        yield f"model_num_columns: {model_num_columns}\n"
+    if epigraph_verified is not None:
+        yield f"epigraph_verified: {str(bool(epigraph_verified)).lower()}\n"
     if solve_domain != "original" or not original_model_verified:
         yield f"solve_domain: {solve_domain}\n"
         yield f"original_model_verified: {str(bool(original_model_verified)).lower()}\n"
@@ -1675,7 +1814,9 @@ def _solution_text(
     )
 
 
-def _parse_solve_args(args: list[str]) -> tuple[str, str, float, int, str, str | None, int | None]:
+def _parse_solve_args(
+    args: list[str],
+) -> tuple[str, str, float, int, str, str | None, str | None, bool, int | None]:
     if len(args) < 7 or (len(args) - 7) % 2 != 0:
         raise ValueError(f"求解参数须为七项基础参数加可选成对选项，得到 {len(args)} 项")
     mps_path, flag1, sol_path, flag2, limit_text, flag3, seed_text = args[:7]
@@ -1696,6 +1837,8 @@ def _parse_solve_args(args: list[str]) -> tuple[str, str, float, int, str, str |
 
     acceleration_mode = "off"
     acceleration_file: str | None = None
+    epigraph_file: str | None = None
+    report_model_columns = False
     threads: int | None = None
     seen: set[str] = set()
     for idx in range(7, len(args), 2):
@@ -1710,6 +1853,13 @@ def _parse_solve_args(args: list[str]) -> tuple[str, str, float, int, str, str |
         elif flag == "--acceleration_file":
             _check_relative_path(value, "--acceleration_file")
             acceleration_file = value
+        elif flag == "--epigraph_file":
+            _check_relative_path(value, "--epigraph_file")
+            epigraph_file = value
+        elif flag == "--report_model_columns":
+            if value not in ("true", "false"):
+                raise ValueError(f"--report_model_columns 须为 true 或 false，得到 {value!r}")
+            report_model_columns = value == "true"
         elif flag == "--threads":
             if not value.isascii() or not value.isdigit():
                 raise ValueError(f"--threads 须为正整数，得到 {value!r}")
@@ -1718,7 +1868,17 @@ def _parse_solve_args(args: list[str]) -> tuple[str, str, float, int, str, str |
                 raise ValueError(f"--threads 须为正整数，得到 {value!r}")
         else:
             raise ValueError(f"未知选项: {flag!r}")
-    return mps_path, sol_path, time_limit, seed, acceleration_mode, acceleration_file, threads
+    return (
+        mps_path,
+        sol_path,
+        time_limit,
+        seed,
+        acceleration_mode,
+        acceleration_file,
+        epigraph_file,
+        report_model_columns,
+        threads,
+    )
 
 
 def _cmd_solve(args: list[str]) -> int:
@@ -1730,6 +1890,8 @@ def _cmd_solve(args: list[str]) -> int:
             seed,
             acceleration_mode,
             acceleration_file,
+            epigraph_file,
+            report_model_columns,
             threads,
         ) = _parse_solve_args(args)
     except ValueError as exc:
@@ -1743,7 +1905,66 @@ def _cmd_solve(args: list[str]) -> int:
                 acceleration_mode=acceleration_mode,
                 threads=threads,
             )
-            _write_solution(handle, model_status, sol_path)
+            num_col = int(handle.getNumCol())
+            model_num_columns = num_col if (report_model_columns or epigraph_file is not None) else None
+            if epigraph_file is not None:
+                lp = handle.getLp()
+                epigraphs = _load_epigraph_metadata(epigraph_file, expected_num_col=num_col)
+                feasible, objective, best_bound, gap, primals = _extract_solution_data(
+                    handle, model_status
+                )
+                if feasible:
+                    lp_ok = verify_primal_against_lp(lp, primals)
+                    epi_ok = verify_epigraphs(primals, epigraphs)
+                    if not (lp_ok and epi_ok):
+                        _atomic_write_solution_v1(
+                            sol_path,
+                            model_status=model_status,
+                            feasible=False,
+                            objective=None,
+                            best_bound=best_bound,
+                            relative_gap=None,
+                            primals=(),
+                            solve_domain="original",
+                            original_model_verified=False,
+                            model_num_columns=model_num_columns,
+                            epigraph_verified=epi_ok,
+                        )
+                        return 0
+                    _atomic_write_solution_v1(
+                        sol_path,
+                        model_status=model_status,
+                        feasible=True,
+                        objective=objective,
+                        best_bound=best_bound,
+                        relative_gap=gap,
+                        primals=primals,
+                        solve_domain="original",
+                        original_model_verified=True,
+                        model_num_columns=model_num_columns,
+                        epigraph_verified=True,
+                    )
+                    return 0
+                _atomic_write_solution_v1(
+                    sol_path,
+                    model_status=model_status,
+                    feasible=False,
+                    objective=None,
+                    best_bound=best_bound,
+                    relative_gap=None,
+                    primals=(),
+                    solve_domain="original",
+                    original_model_verified=True,
+                    model_num_columns=model_num_columns,
+                    epigraph_verified=True,
+                )
+                return 0
+            _write_solution(
+                handle,
+                model_status,
+                sol_path,
+                model_num_columns=model_num_columns,
+            )
         else:
             _run_accelerated_solve(
                 mps_path,
@@ -1752,6 +1973,8 @@ def _cmd_solve(args: list[str]) -> int:
                 seed,
                 acceleration_mode=acceleration_mode,
                 acceleration_file=acceleration_file,
+                epigraph_file=epigraph_file,
+                report_model_columns=report_model_columns,
                 threads=threads,
             )
     except Exception as exc:  # 求解链基础设施失败，不伪造输出
