@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import ast
+import stat
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -19,14 +20,15 @@ import sqlalchemy as sa
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
-from iesplan.config import settings
-from iesplan.db import Base
 from iesplan.audit.persistence import RetentionRule
+from iesplan.config import settings
+from iesplan.core.content import MemoryContent
+from iesplan.db import Base
 from iesplan.identity.persistence import User
 from iesplan.storage import RetentionPolicy, put_object, safe_cleanup
+from iesplan.storage.adapters.filesystem import FileSystemBlobStore
 from iesplan.storage.persistence import StoredObject, list_active_retention_rules
 from iesplan.storage.service import _match_retention_rule
-
 
 # ---------------------------------------------------------------------------
 # 夹具(与 test_objects_api 同构)
@@ -204,3 +206,16 @@ def test_safe_cleanup_releases_orphan_without_rule(session: Session, data_dir) -
     assert plan["count"] == 1
     assert len(plan["retained"]) == 0
     assert plan["candidates"][0]["id"] == orphan.id
+
+
+def test_filesystem_blob_store_put_blob_sets_world_readable_mode(data_dir: Path) -> None:
+    """put_blob 落盘对象需具备 0o644(至少 0o444)权限，供非 root 容器只读挂载。"""
+    store = FileSystemBlobStore()
+    storage_path, size = store.put_blob(MemoryContent(b"blob-perm-check"), "perm-check-oid")
+    assert storage_path == "objects/perm-check-oid"
+    assert size == len(b"blob-perm-check")
+    blob_file = data_dir / storage_path
+    assert blob_file.is_file()
+    mode = stat.S_IMODE(blob_file.stat().st_mode)
+    assert mode == 0o644
+    assert (mode & 0o444) == 0o444

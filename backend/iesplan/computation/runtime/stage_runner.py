@@ -543,9 +543,12 @@ class ContainerStageRunner:
                     except FileExistsError:
                         target.unlink()
                         os.link(src_path, target)
+                    mode = target.stat().st_mode
+                    if (mode & 0o444) != 0o444:
+                        os.chmod(target, (mode | 0o444) & 0o777)
                     continue
                 except OSError:
-                    pass
+                    target.unlink(missing_ok=True)
             chunk_source = MemoryContent(content) if isinstance(content, bytes) else content
             with open(target, "wb") as handle:
                 for chunk in chunk_source.iter_chunks():

@@ -482,6 +482,47 @@ def test_stage_runner_prepare_workspace_hardlinks_and_falls_back_on_oserror(
     assert os.stat(fallback_target).st_ino != os.stat(src_path).st_ino
 
 
+def test_stage_runner_prepare_workspace_upgrades_0600_hardlink_permissions(
+    memory_db: tuple[Engine, sessionmaker[Session]],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _eng, factory = memory_db
+    monkeypatch.setattr(settings, "data_dir", tmp_path)
+
+    with factory() as db:
+        handle = put_object(db, b"step,p\n0,2.5\n", "text/csv", "dataset_file")
+        db.commit()
+        content = get_object_content(db, handle.id)
+        src_path = getattr(content, "path", None)
+        assert isinstance(src_path, Path) and src_path.is_file()
+
+    os.chmod(src_path, 0o600)
+    assert (src_path.stat().st_mode & 0o777) == 0o600
+
+    stage_root = tmp_path / "stages"
+    client = JobRunnerClient(
+        "http://job_runner:8090",
+        client=httpx.Client(
+            base_url="http://job_runner:8090",
+            transport=httpx.MockTransport(lambda _req: httpx.Response(200, json={"items": []})),
+        ),
+    )
+    sr = ContainerStageRunner(client, stage_root=stage_root, policy=_default_policy(), poll_interval=0.01)
+    spec = StageExecutionSpec(
+        attempt_id="12",
+        stage_id="gen",
+        fencing_token="tok-12",
+        input_files={f"objects/{handle.id}": content},
+    )
+    sr._prepare_workspace("12--gen", spec)
+
+    target = stage_root / "12--gen" / "in" / "objects" / f"{handle.id}"
+    assert target.read_bytes() == b"step,p\n0,2.5\n"
+    assert target.stat().st_ino == src_path.stat().st_ino
+    assert (target.stat().st_mode & 0o444) == 0o444
+
+
 def test_load_compute_inputs_deferred_passes_frozen_series_inputs_and_hardlinks(
     memory_db: tuple[Engine, sessionmaker[Session]],
     tmp_path: Path,

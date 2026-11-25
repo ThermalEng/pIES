@@ -79,6 +79,7 @@ class FileSystemBlobStore:
                     size += len(chunk)
                 fh.flush()
                 os.fsync(fh.fileno())
+                os.fchmod(fh.fileno(), 0o644)
             os.replace(tmp_name, final_path)
         except BaseException:
             try:
