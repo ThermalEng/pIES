@@ -13,15 +13,15 @@
 | `schema` | 字符串 | 固定为 `ies.calculation-config` |
 | `schema_version` | 字符串 | 固定为 `"1.0.0"` |
 | `mode` | 非空字符串 | 计算模式，须在所选生成器或一体化算法描述符的 `modes` 中（内置为 `planning`） |
-| `predictions` | 数组（可为 `[]`） | 预测配置列表，每项为 `{target: {instance, interface}, algorithm, parameters}`，`target` 不可重复 |
+| `predictions` | 数组（可为 `[]`） | 单趟前置预测配置列表，每项为 `{target: {instance, interface}, algorithm, parameters}`，`target` 不可重复；路由至同一 `predictor` 插件的关联目标在单次容器执行中联合预测，保留共享潜变量相关性 |
 | `generator` | `<ID>@<版本>` 或 `null` | 所选组装/生成器精确引用（分步算法必填；一体化算法固定为 `null`） |
 | `solver` | `<ID>@<版本>` 或 `null` | 所选求解器精确引用（分步算法必填；一体化算法固定为 `null`） |
 | `algorithm` | `<ID>@<版本>` 或 `null` | 所选一体化算法精确引用（一体化算法必填；分步算法固定为 `null`） |
-| `evaluator` | `<ID>@<版本>` 或 `null` | 所选结果适配与后期财务评价器精确引用（按需选择；为 `null` 时使用默认配套评价器） |
+| `evaluator` | `<ID>@<版本>` 或 `null` | 所选后期评价器精确引用（`1.2.0` 目标下显式置 `null` 表示跳过独立评价环节直接交付上游结果，非空则运行独立评价环节） |
 | `precision` | 枚举 | 计算精度：`low`、`medium`、`high` |
-| `convergence` | `null` 或 `{tolerance, max_iterations}` | 当包含耦合预测目标时必填（`tolerance > 0` 无量纲阈值，`max_iterations >= 2`）；仅有独立预测或无预测时固定为 `null` |
+| `convergence` | `null` 或 `{tolerance, max_iterations}` | `1.1.5` 遗留字段（`1.2.0` 单链收敛后不再设依赖求解结果的跨容器外循环，统一置 `null` 或随单一 `1.0.0` 契约一并精简；算法内部迭代统一走 `plugin.yaml` 的 `iteration` 与本环节 `options`） |
 | `time_limit_seconds` | 正整数 | 请求求解时限（秒） |
-| `options` | 对象（可为 `{}`） | 算法/生成/求解扩展选项，按所选生成器或一体化算法描述符的选项 Schema（`options_schema` / `parameters_schema`）严格校验 |
+| `options` | 对象（可为 `{}`） | `1.2.0` 目标按环节显式分槽组织扩展选项（分步模式为 `{generator, solver, evaluator}` 子对象，一体化模式为 `{algorithm, evaluator}` 子对象，缺省子槽位视为空对象 `{}`），各子槽位分别按所选插件的 `parameters_schema` 独立校验，消除跨环节同名参数冲突 |
 | `seed` | 整数或 `null` | 随机种子（禁止布尔值） |
 | `outputs` | 非空字符串数组 | 请求发布的结果输出项（顺序保留，如 `["solution", "metrics"]`） |
 
@@ -66,4 +66,4 @@
 ## 时限预算与校验边界
 
 - **求解时限与外层监督**：内置 HiGHS 生成器将用户请求的 `time_limit_seconds` 原样传入求解器内部 `--time_limit`，并在外层容器/进程监督预留 `+600` 秒有界宽限（`command.timeout_seconds = time_limit_seconds + 600`）用于启动、MPS 读模与解写出；整体壁钟仍须在部署策略 `max_timeout_seconds` 允许范围内（超限在启动前拒绝）。
-- **静态能力检查**：配置保存与任务提交阶段依据所选生成器或一体化算法描述符校验 `mode`、`precision`、`solver`、`evaluator`、`outputs`、`options` 与预测算法参数规则（参见[预测参数与收敛能力](../modules/engines.md#预测参数与收敛能力)）；具体数学模型是否可成功降级或求解由对应计算环节判定。
+- **静态能力与单链可组合检查**：配置保存与任务提交阶段校验 `mode`、`precision`、`outputs`、上下游插件公开数据契约标识（`produces` / `consumes` 匹配及可选 `companions` 限制）、`predictions[].parameters` 与 `options` 各环节子槽位的 `parameters_schema`；不兼容组合在提交闸门直接拒绝，不在执行期猜测转换。

@@ -1,11 +1,11 @@
 # pIES 架构宪法
 
 > 状态：生效
-> 版本：1.22.1
+> 版本：1.23.0
 > 生效日期：2026-08-20
-> 最后更新：2026-11-24
+> 最后更新：2026-11-25
 > 适用范围：根目录入口、`manual/`、`docs/`、`backend/`、`frontend/`、数据库、对象存储、Worker、测试与后续插件
-> 依据：2026-08-20 架构专项审查、ADR-0001 至 ADR-0008、2026-09-07 地区 FinanceProfile 三件套规范、2026-10-19 用户批准的嵌入式税务计算裁决（ADR-0011）、2026-10-20 用户批准的评价确认独立直传裁决（ADR-0012）、ADR-0013 至 ADR-0015、2026-11-24 用户批准的后端统一调度与临时计算容器流水线架构裁决（ADR-0016）
+> 依据：2026-08-20 架构专项审查、ADR-0001 至 ADR-0008、2026-09-07 地区 FinanceProfile 三件套规范、2026-10-19 用户批准的嵌入式税务计算裁决（ADR-0011）、2026-10-20 用户批准的评价确认独立直传裁决（ADR-0012）、ADR-0013 至 ADR-0015、2026-11-24 用户批准的后端统一调度与临时计算容器流水线架构裁决（ADR-0016）、2026-11-25 用户批准的单链阶段文件交接与多目标单趟联合预测裁决（ADR-0017）
 
 ## 1. 文档效力
 
@@ -145,15 +145,15 @@ schema、字段、公式与聚合枚举以 [装配与检查](modules/assembly.md
 
 ### 4.5 `computation`：生成、执行与结果适配
 
-计算必须拆为三个独立边界：
+计算职责必须保持三个清晰边界：
 
-- `GeneratorProvider` 直接接受已签发的 `ValidatedAssemblyArtifact`、按装配实例固定的设备数学贡献、已物化的全周期输入序列、不可变 `EffectiveFinanceConfig`、经过公开输入校验的 `CalculationConfig`，以及已确认并冻结的评价输入，在生成计算包时确定性生成 Solver Bundle；输入按职责分别传递，不为维持参数数量而混装，也不再建立外层包装或第二份业务事实；
-- `SolverRuntime` 执行可信 Bundle 中的结构化命令，检查必需输出，生成 `ExecutionReceipt` 与原始输出；
-- `ResultAdapter` 与后期财务评价只把 Bundle、回执和声明输出映射为带 schema/version 的 `ComputeResult` 与评价事实。
+- `GeneratorProvider` 直接接受已签发的 `ValidatedAssemblyArtifact`、按装配实例固定的设备数学贡献、已物化的全周期输入序列、不可变 `EffectiveFinanceConfig`、经过公开输入校验的 `CalculationConfig`，以及已确认并冻结的评价输入，在生成计算包时确定性生成求解输入、声明式变量/单位映射（`variable_map`）与跨链透传上下文（`passthrough`）；输入按职责分别传递，不为维持参数数量而混装，也不再建立外层包装或第二份业务事实；
+- `SolverRuntime` 执行受控求解命令，产出求解器无关的标准原变量解与 `ExecutionReceipt`，并将上游跨链字段（`variable_map`、`passthrough`）原样透传至出口目录；
+- `ResultAdapter` / 后期 `Evaluator` 仅读取紧邻上一环节（`solver` 或一体化 `algorithm`）的出口文件，依据透传映射或标准工程解完成反向单位换算并结合冻结财务/评价上下文生成带 `schema`/`schema_version` 的 `ComputeResult` 与评价事实。
 
-在 `1.1.5` 目标架构下，内置与第三方计算能力统一遵循同一插件与目录交接契约（`/work/in → /work/out`），按预测、组装、求解与后期财务评价（或一体化算法）环节由 `backend` 协调拉起断网临时计算容器执行；含内部迭代循环的算法通过专用内部循环接口在单个临时容器内闭环完成。
+内置与第三方计算能力统一遵循同一插件与**严格单趟单向单链**目录交接契约（`/work/in → /work/out`，即 `冻结输入 → [predictor] → (generator → solver | algorithm) → [evaluator] → 结果`），由 `backend` 协调拉起断网临时计算容器执行：上一环节的出口文件即为紧邻下一环节的唯一进口文件，禁止跨级旁路挂载上游目录，禁止跨容器往返循环；需要跨环节传递的信息统一通过显式字段由中间环节原样透传。`predictor` 原生支持多目标同源单趟联合预测；含内部迭代寻优的算法通过专用 `iteration` 接口在单个临时容器内闭环完成。
 
-GeneratorProvider 是业务单位到求解器内部单位的唯一转换边界，ResultAdapter 是反向换算的唯一边界；求解选项等计算配置在计算包生成时固定。SolverRuntime 不读取装配语义、不判断设备类型、不补数据或切换 solver。
+GeneratorProvider 是业务单位到求解器内部单位的唯一正向转换边界，下游结果适配/评价读取层是反向换算的唯一边界；各环节独立选项在任务提交冻结时按环节分槽固定。SolverRuntime 不读取装配语义、不判断设备类型、不执行业务单位换算、不补数据或切换 solver。
 
 计算模块禁止：
 

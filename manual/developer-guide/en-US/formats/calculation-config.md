@@ -13,15 +13,15 @@ All 14 top-level fields below are required (`generator`, `solver`, `algorithm`, 
 | `schema` | String | Fixed to `ies.calculation-config` |
 | `schema_version` | String | Fixed to `"1.0.0"` |
 | `mode` | Non-empty string | Computation mode; MUST appear in the selected generator or unified algorithm descriptor's `modes` (built-in: `planning`) |
-| `predictions` | Array (may be `[]`) | Prediction entries `{target: {instance, interface}, algorithm, parameters}`; `target` entries MUST be unique |
+| `predictions` | Array (may be `[]`) | Single-pass upstream prediction entries `{target: {instance, interface}, algorithm, parameters}` (`target` unique); correlated targets routed to the same `predictor` plugin run jointly in one container pass |
 | `generator` | `<ID>@<version>` or `null` | Exact selected generator ref (required for staged mode; `null` for unified algorithm mode) |
 | `solver` | `<ID>@<version>` or `null` | Exact selected solver ref (required for staged mode; `null` for unified algorithm mode) |
 | `algorithm` | `<ID>@<version>` or `null` | Exact selected unified algorithm ref (required for unified algorithm mode; `null` for staged mode) |
-| `evaluator` | `<ID>@<version>` or `null` | Exact selected result adapter & post-solve financial evaluator ref (optional; `null` selects the default paired evaluator) |
+| `evaluator` | `<ID>@<version>` or `null` | Exact selected post-solve evaluator ref (under `1.2.0`, `null` explicitly skips post-solve evaluation and delivers upstream results directly; non-null runs the independent evaluator stage) |
 | `precision` | Enum | Computation precision: `low`, `medium`, or `high` |
-| `convergence` | `null` or `{tolerance, max_iterations}` | Required when coupled prediction targets exist (`tolerance > 0` dimensionless threshold, `max_iterations >= 2`); MUST be `null` for standalone or zero predictions |
+| `convergence` | `null` or `{tolerance, max_iterations}` | Legacy `1.1.5` field (`1.2.0` single-chain removes solver-coupled cross-container outer loops, keeping `null` or streamlining under the single `1.0.0` contract; intra-plugin loops use `plugin.yaml` `iteration` and stage `options`) |
 | `time_limit_seconds` | Positive integer | Requested solver runtime limit in seconds |
-| `options` | Object (may be `{}`) | Algorithm/generator/solver extension options validated strictly against the chosen generator or unified algorithm descriptor's options schema (`options_schema` / `parameters_schema`) |
+| `options` | Object (may be `{}`) | Under `1.2.0`, organized into explicit per-stage slots (`{generator, solver, evaluator}` for staged mode or `{algorithm, evaluator}` for unified mode, defaulting omitted slots to `{}`), validated independently against each selected plugin's `parameters_schema` without key collisions |
 | `seed` | Integer or `null` | Random seed (booleans prohibited) |
 | `outputs` | Non-empty string array | Requested output artifacts (order preserved, e.g., `["solution", "metrics"]`) |
 
@@ -66,4 +66,4 @@ Save and task submission gates strictly enforce mutual exclusivity—specifying 
 ## Time-Limit Budget and Validation Boundaries
 
 - **Solver time limit and outer supervision**: The built-in HiGHS generator passes the user's requested `time_limit_seconds` verbatim to HiGHS `--time_limit` while adding a bounded `+600`-second outer container/process supervision grace (`command.timeout_seconds = time_limit_seconds + 600`) for startup, MPS model reading, and solution writing; total wall-clock budget MUST still fit within deployment policy `max_timeout_seconds` (rejected prior to launch if exceeded).
-- **Static capability checks**: At config save and task submission, `mode`, `precision`, `solver`, `evaluator`, `outputs`, `options`, and prediction parameter rules are validated against the selected generator or unified algorithm descriptor (see [Prediction Parameters and Convergence Capabilities](../modules/engines.md#prediction-parameters-and-convergence-capabilities)); whether a concrete math model lowers or solves cleanly is determined during the computation stages.
+- **Static capability and single-chain composition checks**: At config save and task submission, `mode`, `precision`, `outputs`, upstream/downstream public data contract IDs (`produces` / `consumes` plus optional `companions` restrictions), `predictions[].parameters`, and per-stage `options` slots are validated against each selected plugin's `parameters_schema`; incompatible combinations fail immediately at the submission gate without runtime guessing.

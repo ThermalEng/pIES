@@ -1,63 +1,64 @@
 # Algorithm Plugin Package
 
-> Contract ID: `ies.algorithm-plugin`; Target `schema_version`: `"1.0.0"`; Manifest File: `plugin.yaml`; Filename Extension: `*.algorithm.zip`; Target Product Version: `1.1.5` (unified built-in contract & ephemeral container foundation) / `1.2.0` (external plugin import, automated image build & market distribution)
+> Contract ID: `ies.algorithm-plugin`; Target `schema_version`: `"1.0.0"`; Manifest File: `plugin.yaml`; Filename Extension: `*.algorithm.zip`; Target Product Version: `1.1.5` (unified built-in contract & ephemeral container foundation) / `1.2.0` (single-chain replaceable handoffs, controlled build/self-test gate & open market distribution)
 
-The Algorithm Plugin Package defines the unified packaging and runtime contract for all computable extensions in pIES. **Both official built-in computation stages (predictor, generator, solver, result adaptation & post-solve financial evaluation) and local/market third-party plugins follow this exact contract**, executed by `backend` orchestration through the allowlisted container proxy `job_runner` as per-step network-disabled ephemeral containers—ensuring Web/API control-plane processes never load or execute user Python code.
+The Algorithm Plugin Package defines the unified packaging and runtime contract for all computable extensions in pIES. **Both official built-in computation stages and local/market third-party plugins follow this exact contract**, executed by `backend` orchestration through the allowlisted proxy `job_runner` along a **strict single-pass unidirectional chain** (`Frozen Input → [predictor] → (generator → solver | algorithm) → [evaluator] → Result`) as network-disabled ephemeral containers—ensuring Web/API control-plane processes never load or execute user Python code.
 
-## Five Plugin Kinds (`kind`)
+## Five Plugin Kinds (`kind`) and Single-Chain Handoff Contract
 
-| `kind` | Pipeline Stage | Typical Responsibilities and Entry Shape |
-|---|---|---|
-| `predictor` | Prediction stage | Consumes historical series and parameters to output predicted series and training receipts (coupled variants integrate with the internal-loop interface) |
-| `generator` | Generation stage | Consumes frozen assembly, series, finance, and calculation config to emit a canonical `Solver Bundle` |
-| `solver` | Solving stage | Consumes a `Solver Bundle` and produces raw solver outputs and execution logs |
-| `evaluator` | Result adaptation & post-solve evaluation | Consumes the `Bundle`, raw solution, and frozen finance/evaluation baseline to emit `ComputeResult` and financial evaluation facts |
-| `algorithm` | Minimal unified single-step algorithm | Skips generator/solver split; a single entry function consumes the standard frozen input package and outputs canonical results |
+Each stage's output directory (`/work/out`) serves directly as the sole input directory (`/work/in`) of the immediately following stage—**cross-stage side-channel directory mounts and cross-container loops are strictly prohibited**; cross-stage mappings and frozen context travel inside explicit `passthrough` fields carried **verbatim** by intermediate stages (with standard `pies-sdk` passthrough helpers):
 
-### Standard Input/Output Layout and Composition Rules
-
-| `kind` | `/work/in` Standard Inputs | `/work/out` Standard Outputs | Composition Compatibility Rules |
+| `kind` | `/work/in` Single-Chain Input | `/work/out` Single-Chain Output | Replaceable Composition & Contract IDs (`consumes` / `produces`) |
 |---|---|---|---|
-| `predictor` | `/work/in/request.json` and historical series | `/work/out/prediction.json` and training artifact | Precedes `generator` or unified `algorithm` |
-| `generator` | `/work/in/` frozen assembly, series, finance, and calc config | `/work/out/bundle/` standard `Solver Bundle` | MUST match the selected `solver` contract and media types |
-| `solver` | `/work/in/bundle/` (read-only `Solver Bundle`) | `/work/out/solution.*` declared outputs | Declared compatible by the chosen `generator` and verified at submission |
-| `evaluator` | `/work/in/bundle/` (or `algorithm` canonical solution), raw solution, receipt, and frozen finance/baseline | `/work/out/result.json` (`ComputeResult` and financial evaluation facts) | Consumes paired upstream declarations and receipt under the public result contract |
-| `algorithm` | `/work/in/` standardized frozen computation input package | `/work/out/result.json` (canonical planning/dispatch result file) | Strictly replaces the `generator + solver` split without crossing upstream `predictor` or downstream `evaluator` boundaries (feeds the independently configured `evaluator` or stands alone when `evaluator: null`) |
+| `predictor` | `/work/in/request.json` (all correlated `targets[]` routed to this plugin, historical series, per-target parameters) plus upstream `passthrough` | `/work/out/prediction.json`, training artifacts, and merged single-chain downstream input package | Natively supports single-pass multi-target joint prediction (preserving shared latent weather/solar correlations across load and renewables) with no solver-coupled cross-container outer loop |
+| `generator` | Frozen assembly, materialized series, calculation config, and frozen finance/evaluation context from upstream | Solver input files (e.g., `problem.mps`), declarative column-to-business-variable/unit `variable_map`, and `passthrough` (frozen `finance` & `evaluation`) | Emits a public bundle contract (e.g., `ies.solver-bundle.mps@1.0.0`) consumable by any `solver` declaring that contract |
+| `solver` | **Reads solely `generator`'s output directory** (model files, `variable_map`, `passthrough`, and solver options) | Solver-neutral canonical primal solution (`primal_solution.json`: unified status enum, objective value, column values, receipt metadata) + **verbatim** `variable_map` and `passthrough` | Consumes matching `generator` contract and emits `ies.primal-solution@1.0.0`; performs zero business unit conversion so third-party `.mps` solvers drop-in replace built-in HiGHS |
+| `algorithm` | Standardized frozen computation input package from upstream (with algorithm options and `passthrough`) | Business-unit canonical engineering solution (`solution.json`: capacities, build selections, step series, solver summary) + **verbatim** `passthrough` | Strictly replaces the `generator + solver` split, emitting `ies.engineering-solution@1.0.0` without crossing upstream `predictor` or downstream `evaluator` boundaries |
+| `evaluator` | **Reads solely the immediately preceding stage's (`solver` or `algorithm`) output directory** (never side-mounting `generator`'s directory) plus evaluator options | `/work/out/result.json` (`ComputeResult`, step series, and same-basis `ies.financial-evaluation@1.0.0` evaluation facts) | Normalizes `{primal_solution + variable_map}` and `{engineering_solution}` uniformly via `pies-sdk` and evaluates forward cash flows from `passthrough`; skipped when `CalculationConfig.evaluator` is `null` |
 
-## ZIP Directory Layout (Simplicity First, Complex Packages Supported)
+## ZIP Directory Layout and Dual-Form Self-Test Fixtures
 
-The archive root MUST NOT contain an extra wrapper directory and accepts regular files and directories only (symlinks, hardlinks, absolute paths, `..` traversal, case collisions, and encrypted entries are prohibited).
+The archive root MUST NOT contain an extra wrapper directory and accepts regular files and directories only (symlinks, hardlinks, absolute paths, `..` traversal, case collisions, encrypted entries, and bundled `Dockerfile`s are prohibited).
 
-### Minimal Valid Layout (Local Offline Testing & Simple Algorithms)
+### Minimal Valid Layout (Local Authoring & Simple Algorithms)
 
 ```text
 my-plugin/   # Pack contents at the ZIP root without this wrapper folder
 ├── plugin.yaml
 ├── main.py
-└── requirements.txt   # Optional; omit when using only pre-installed base packages
+└── requirements.txt   # Optional; omit when using only base packages (zero-network build)
 ```
 
-### Full Layout (Complex Packages or Public Market Submissions)
+### Full Layout (Supporting Both Single-JSON Shorthand & Multi-File Directory `tests`)
+
+Public market submissions require `README.md`, `LICENSE`, and at least one network-free `tests` fixture. To support both lightweight plugins and multi-file `generator` / `solver` bundles cleanly, `tests` accepts both **single-file JSON shorthand** and **full `/work/in → /work/out` directory fixtures**:
 
 ```text
 plugin.yaml
 requirements.txt       # Optional; extra pure-Python dependencies
-src/                   # Optional; multi-module Python package
+src/
   __init__.py
   solver.py
-tests/                 # Required for public market submissions; >= 1 offline self-test
-  minimal/
+tests/
+  minimal_dir/         # Directory form: in/ maps verbatim to /work/in/, expected/ checks /work/out/
+    in/
+      problem.mps
+      variable_map.json
+      passthrough.json
+    expected/
+      primal_solution.json
+  simple_json/         # Single-file shorthand: input.json maps to /work/in/request.json
     input.json
     expected.json
-LICENSE                # Required for public market submissions
-README.md              # Required for public market submissions
+LICENSE
+README.md
 ```
 
 ## `plugin.yaml` Manifest
 
-The Manifest uses the YAML 1.2 safe subset. Standard single-step algorithms and predictors declare core metadata and inline `parameters_schema`; built-in or high-performance solvers MAY declare optional `advanced` and `iteration` sections.
+The Manifest uses the YAML 1.2 safe subset. Plugins declare consumed and produced public data contract IDs via `consumes` and `produces` so cross-author plugins compose and substitute freely.
 
-### Minimal Plugin Example
+### Plugin Manifest Example
 
 ```yaml
 schema: ies.algorithm-plugin
@@ -68,10 +69,14 @@ kind: algorithm
 name:
   zh_cn: 容量搜索算法
   en_us: Capacity search
-description: Restricted search for continuous and integer capacity variables.
+description: Restricted heuristic search for continuous and integer capacity variables.
 license: MPL-2.0
 compatibility:
-  pies: ">=1.1.5,<2.0.0"
+  pies: ">=1.2.0,<2.0.0"
+consumes:
+  - ies.stage-input@1.0.0
+produces:
+  - ies.engineering-solution@1.0.0
 runtime:
   language: python
   python: "3.12"
@@ -97,30 +102,31 @@ resources:
     timeout_seconds: 3600
     process_limit: 32
 tests:
-  - id: minimal
-    input: tests/minimal/input.json
-    expected: tests/minimal/expected.json
+  - id: simple_json
+    input: tests/simple_json/input.json
+    expected: tests/simple_json/expected.json
 extensions: {}
 ```
 
-### Core and Optional Extension Fields
+### Core and Extension Fields
 
 | Field | Description and Constraints |
 |---|---|
-| `plugin_id` / `version` | Stable namespaced ID (`ies.*` / `<publisher>.*`) and three-part semantic version |
+| `plugin_id` / `version` | Stable namespaced ID (`ies.*` / `<publisher>.*` / local `user.<public_namespace>.*`) and three-part semantic version |
 | `kind` | Closed enum: `predictor` / `generator` / `solver` / `evaluator` / `algorithm` |
-| `compatibility` | Compatible pIES or SDK version range |
-| `runtime` | Python version and optional relative `requirements` file; omitting extra dependencies reuses the official base environment directly |
-| `entrypoint` | Fixed `<module.path>:<public_function>` format, supporting single-file `main:solve` or package paths `src.solver:solve` |
-| `parameters_schema` | Inline Draft 2020-12 JSON Schema (`additionalProperties: false`), driving dynamic forms and submission validation |
+| `compatibility` | Compatible pIES or SDK version range; mismatches fail explicitly at install and submission gates |
+| `consumes` / `produces` | Public input/output data contract IDs used by the submission gate to verify stage composition compatibility (incompatible pairs are rejected at submission without runtime guessing) |
+| `runtime` | Python version and optional relative `requirements` path; omitting `requirements` reuses `pies-plugin-base` with zero network access |
+| `entrypoint` | Fixed `<module.path>:<public_function>` format |
+| `parameters_schema` | Inline Draft 2020-12 JSON Schema (`additionalProperties: false`) governing this stage's dedicated parameter slot (`predictions[].parameters` or `options.<kind>`) without cross-stage key collisions |
 | `resources` | Default and maximum resource requests (`cpu`, `memory_mb`, `timeout_seconds`, `process_limit`), capped by deployment policy ceilings |
-| `advanced` | **Optional advanced extension**: declares chunked streaming `Solver Bundle` layouts, external solver binary argument conventions, and paired stage refs (shared by built-in HiGHS and future high-performance solvers) |
-| `iteration` | **Optional internal-loop interface**: configures algorithms executing an internal iterative loop (see below) |
-| `tests` | Network-free minimal self-test cases (required for public market submissions) |
+| `advanced` | **Optional advanced section**: streaming bundle flags, trusted solver binary argument templates, and **optional** `companions` restrictions (used only when genuinely coupled to a specific companion rather than hardcoding mutual IDs) |
+| `iteration` | **Optional internal-loop interface**: single-container iterative progress reporting (see below) |
+| `tests` | Network-free self-test fixtures (single JSON or `in/` + `expected/` directory form; required for public market submissions) |
 
 ## Dedicated Internal-Loop Interface (`iteration`)
 
-Algorithms with internal iterative loops (such as coupled prediction-solving or iterative heuristics) **execute self-contained inside a single ephemeral container** rather than cold-starting containers on every iteration. Plugins opt into unified progress and convergence reporting by declaring `iteration` in `plugin.yaml`:
+Algorithms containing iterative search loops (such as metaheuristics, simulation-optimization, or intra-solver multi-round recovery) **execute self-contained inside a single ephemeral container** rather than looping across containers. Declaring `iteration` enables unified progress tracking:
 
 ```yaml
 iteration:
@@ -130,19 +136,15 @@ iteration:
   progress_channel: /work/out/iterations.jsonl
 ```
 
-- **Input convention**: The container reads frozen `tolerance`, `max_iterations`, and overall time budget from `/work/in/request.json`;
-- **Per-round reporting**: After each iteration, the container appends one NDJSON record (`iteration`, `metric`, `value`, `unit: "1"`, status) to `/work/out/iterations.jsonl`;
-- **Budget and cancellation**: Internal loops remain strictly bounded by the single container timeout and external stop signals, writing final outputs upon convergence or iteration cap before exiting cleanly.
+- After each internal iteration, the container appends one NDJSON record (`iteration`, `metric`, `value`, `unit: "1"`, status) to `/work/out/iterations.jsonl`, bounded strictly by the single container timeout and external stop signals.
 
-## Container Execution Contract (`/work/in → /work/out`) and Image Builds
+## Build Trust Boundary, Network-Disabled Self-Test, and Execution Lifecycle
 
-- **Automated image build & network-disabled self-test gate**: When importing or installing a third-party plugin, `job_runner` applies the official standard template on top of `pies-plugin-base` to build a dedicated plugin computation image `pies-plugin/<plugin_id>:<version>` (honoring an optional admin-configured pip mirror/intranet index URL, defaulting to PyPI when unset; no author Dockerfile required; dependency-free plugins reuse the base layer directly with zero network access). Whenever `plugin.yaml` declares `tests`, all self-test cases MUST pass inside a `--network=none` container immediately after build before the plugin version becomes available. Dependency installation and runtime execution are strictly separated; immutability governs frozen `/work/in` input files, task snapshots, and persisted evidence for traceability rather than enforcing immutable runtime environments/images on ephemeral containers; when an administrator fully uninstalls a plugin version, `job_runner`'s allowlisted `delete_plugin_image` operation cleans up only managed `pies-plugin/*` images.
-- **Minimal `pies-sdk` validation & packaging**: All five plugin kinds (`predictor` / `generator` / `solver` / `evaluator` / `algorithm`) share universal `pies-sdk validate` (checking `plugin.yaml`, archive safety, and offline self-tests) and `pies-sdk pack` (producing canonical `*.algorithm.zip` archives and emitting `sha256`).
-- **Network-disabled runtime handoff**: For each computation step, `backend` writes frozen inputs to a per-attempt directory and requests `job_runner` to launch an ephemeral container (`--network=none --read-only --cap-drop=ALL` with hard cgroup limits):
-  - `/work/in` (read-only mount): Standardized frozen input package (JSON / chunked streams), parameters, and seed;
-  - `/work/out` (read-write mount): Declared output artifacts, bounded logs, and optional `/work/out/iterations.jsonl`.
-- **Result boundary & external verification**:
-  - Containers follow the uniform lifecycle in [Deployment and Operations](../deployment.md#ephemeral-container-isolation-and-resource-observation) (natural exit / cancel / timeout → collect exit status & declared outputs → persist valid artifacts → `cleanup_stage` cleanup of container and temp files); declared outputs MUST pass strict public result-contract validation (structure, field types, finite numeric values, and reference consistency) before entering pIES result models, and **the platform does not endorse or certify the mathematical optimality or financial correctness of third-party plugins** (correctness responsibility rests with plugin authors and selectors);
-  - Archive safety and `sha256` digests are verified once at the external market download or offline import boundary; once ingested, pIES never stores, recomputes, or compares SHA-256 internally;
-  - Changing entry points, schemas, units, or algorithm semantics MUST bump `MAJOR`; backward-compatible additions bump `MINOR`; bug fixes bump `PATCH`. Released versions MUST NOT be overwritten silently.
-  - Prior to `2.0.0`, pIES maintains a single current contract without multi-version compatibility matrices; when a plugin's declared `compatibility` does not match the running pIES version, install and submission gates MUST fail with an explicit diagnostic rather than failing silently.
+- **Install-time build trust boundary & network-disabled self-test gate**:
+  - Dependency-free plugins MUST build with `--network=none` directly atop `pies-plugin-base`; plugins with `requirements` build inside `job_runner`'s controlled in-memory context (zero host business mounts, zero business credentials, bounded build timeout) using optional `pip_index_url` or default PyPI (marking `build_failed` with an explicit admin-contact warning if offline dependency download fails);
+  - Immediately after build, any declared `tests` MUST pass inside a `--network=none` container before advancing status to `ready`. `pies-sdk validate` and `pies-sdk pack` uniformly support all five plugin kinds.
+- **Runtime single-chain isolation & non-endorsement boundary**:
+  - Every stage runs as a non-root `--network=none --read-only --cap-drop=ALL` ephemeral container (read-only `/work/in`, read-write `/work/out`) cleaned up via `cleanup_stage` after valid outputs are persisted;
+  - Declared outputs undergo strict public result-contract validation prior to ingestion; **both the platform and self-test gate verify contract compliance only and never endorse mathematical optimality or engineering/financial correctness**;
+  - External digests obey the three-way boundary rule (mandatory `index.json` `sha256` match on market downloads, supplied-digest match when provided offline, archive/contract checks only on bare offline packages), with zero internal SHA-256 storage or recomputation afterward;
+  - Admin removal of `pies-plugin/*` images performs a stateless active-task check: `delete_plugin_image` executes only when zero non-terminal tasks reference that exact version, otherwise delisting for new tasks while prompting retry after in-flight runs finish.

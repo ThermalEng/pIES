@@ -1,72 +1,146 @@
 # Models and Algorithms Extension Guide
 
-> Status: Effective Target Guide; Target Product Version: `1.2.0`; Governing Spec: [Architecture Constitution](ARCHITECTURE_CONSTITUTION.md); Related Formats: [Device Model YAML](formats/device-model-yaml.md), [Algorithm Plugin Package](formats/algorithm-plugin-package.md)
+> Status: Effective Target Guide; Target Product Version: `1.2.0`; Governing Spec: [Architecture Constitution](ARCHITECTURE_CONSTITUTION.md); Related Formats: [Device Model YAML](formats/device-model-yaml.md), [Algorithm Plugin Package](formats/algorithm-plugin-package.md), [Calculation Config](formats/calculation-config.md)
 
-This guide defines the long-term delivery standards, identity and multi-version model, operating modes, approval controls, and isolation boundaries for user-defined device models, algorithm plugin packages, and the independent public **pIES Market** (planned for delivery in `1.2.0`).
+This guide defines the long-term delivery standards, public market index and stateless submission contracts, identity and multi-version model, orthogonal operating mode and approval controls, and security isolation boundaries for user-defined device models, algorithm plugin packages, and the independent public **pIES Market** (planned for delivery in `1.2.0`).
 
 ## Core Architectural Positioning
 
 The models and algorithms ecosystem comprises **local management (`ThermalEng/pIES`)** and an **independent public marketplace (`ThermalEng/pIES-Market`)**:
 
-- **Local model & plugin management**: Manages declarative device models (`ies.device-model` YAML unified across bidirectional forms for common metadata/`properties`/`interfaces` fields, online YAML editing, and `.device.yaml` file import/export, keeping complex `equations` in YAML/expression editing) and algorithm plugins (`ies.algorithm-plugin` ZIPs built, offline self-tested, and executed inside isolated containers) within a pIES deployment, backed by a minimal zero-backend-dependency package `pies-sdk` providing runtime contracts and universal `validate`/`pack` commands.
-- **pIES Market (public marketplace)**: Decoupled from any pIES deployment instance, composed of a static JSON index (`index.json`), artifact distribution with a co-hosted pure static browse/download page (allowing unauthenticated filtering, README/license/`sha256` inspection, and offline package downloads), and an independent self-hostable thin stateless submission gateway (email OTP verification → automated GitHub PR creation → human PR Review → automated post-merge validation, `sha256` calculation, release publishing, and static index/page regeneration). The public market MUST NOT become a runtime dependency for local pIES computation—when the market is disabled, unreachable, or offline, locally installed models, plugins, and offline import/export continue operating normally.
-- **Unified single-page "Models and Algorithms" view & admin console split**: pIES upgrades the `/custom` entry into a single unified "Models and Algorithms" page without maintaining a parallel "Shared Hub" workflow, organized into two peer tabs:
-  - **"Market & Installed"**: Presents the unified artifact stream supporting filtering by artifact/plugin kind (device models and the five algorithm plugin kinds), switching across exact historical versions/revisions of the same stable ID, and marking each entry with one of three explicit states:
+- **Local model & plugin management**: Manages declarative device models (`ies.device-model` YAML unified across bidirectional forms for common metadata/`properties`/`interfaces` fields, online YAML editing, and `.device.yaml` file import/export, keeping complex `equations` in YAML/expression editing) and algorithm plugins (`ies.algorithm-plugin` ZIPs built under controlled isolation, offline self-tested, and executed along the single-chain container pipeline), backed by the minimal zero-backend-dependency package `pies-sdk` providing runtime contracts and universal `validate`/`pack` tools.
+- **pIES Market (public marketplace)**: Decoupled from any pIES deployment instance, composed of a static JSON index (`index.json`), artifact distribution with a co-hosted pure static browse/download page (allowing unauthenticated filtering, README/license/`sha256` inspection, and offline package downloads), and an independent self-hostable thin stateless submission gateway. The public market MUST NOT become a runtime dependency for local pIES computation—when the market is disabled, unreachable, or offline, locally installed models, plugins, and offline import/export continue operating normally.
+- **Unified single-page "Models and Algorithms" view & admin console split**: pIES upgrades `/custom` into a single unified "Models and Algorithms" page without maintaining a parallel "Shared Hub" workflow, organized into two peer tabs:
+  - **"Market & Installed"**: Presents the unified artifact stream supporting filtering by artifact/plugin kind (device models and the five algorithm plugin kinds), switching across exact historical versions/revisions of the same stable ID, and marking each entry with one of three primary frontend badges:
     - **`Remote`**: Public market artifacts visible only in Online mode;
-    - **`Local (Not Installed)`**: Artifacts published in the local catalog (package and image ready at the instance level) that the current member has not yet installed;
-    - **`Local (Installed)`**: Artifacts installed and active for modeling or computation by the current member.
-  - **"My Creations / Drafts"**: Hosts the personal custom device model editor (form/YAML/file import-export, draft saving, and publishing) alongside the member's local upload and approval records for device models and algorithm plugins.
-  - **Admin Console (`/admin`)**: Centralizes instance operating mode switching (Local Mode / Online Mode), market index and submission gateway URLs, optional pip mirror/intranet index URL, the local upload approval toggle (`local_upload_requires_approval`), the pending approval queue, and enabling/disabling/uninstalling local catalog entries.
+    - **`Local (Not Installed)`**: Ready (`ready`) local catalog entries that the current member has not yet installed;
+    - **`Local (Installed)`**: Entries installed and active for modeling or computation by the current member.
+  - **"My Creations / Drafts"**: Hosts the personal custom device model editor (form/YAML/file import-export, draft saving, and publishing) alongside the member's local submission records and backend lifecycle states (`pending_approval` / `building` / `ready` / `build_failed` / `disabled`) with diagnostics.
+  - **Admin Console (`/admin`)**: Centralizes the two orthogonal instance policies (`market_mode` and `local_upload_requires_approval`), market index and submission gateway URLs, optional `pip_index_url` mirror/intranet source, pending approval queue, and enabling/disabling/uninstalling local catalog entries.
 
-## Identity, Immutable Publication, and Multi-Version Installation Model
+## Identity, Namespace Ownership, and Multi-Version Coexistence
 
-### Stable Namespace Rules
+### Stable Namespace and Ownership Rules
 
-| Source Category | Stable Identifier Format | Publication and Distribution Rules |
+| Source Category | Stable Identifier Format | Ownership, Market Conversion, and Pinning Rules |
 |---|---|---|
 | Official built-in & market releases | `ies.<type>.<slug>` | Reserved for official maintenance and official publications; pinned by immutable version or revision |
-| Single-instance local personal drafts | `user.<public_namespace>.<type>.<slug>` | `public_namespace` is assigned via CSPRNG and never changes; avoids cross-instance naming collisions |
-| Community / vendor public market | `<publisher>.<type>.<slug>` | Uses a stable prefix for the contributor, team, or vendor (assigned at first market review if unspecified); guaranteed globally unique via manual review and immutable once released |
+| Single-instance local personal drafts | `user.<public_namespace>.<type>.<slug>` | `public_namespace` is a system-allocated 12-char Base32 CSPRNG token (60-bit entropy), immutable for life, preventing cross-instance offline package collisions and redacting internal usernames |
+| Community / vendor public market | `<publisher>.<type>.<slug>` | Public market submissions converge to a readable `<publisher>` prefix; upon first approved PR, a static repo registry binds `<publisher>` to a salted/HMAC digest of the verified contributor email (zero plaintext emails), restricting subsequent version/revision releases under that prefix to the same verified email |
 
-- When downloading from the public market or importing an offline package across instances, **the original stable ID is preserved verbatim** without rewriting namespaces;
-- Device models pin by publication `revision` and validation receipt (no per-device semantic version); algorithm plugins pin by exact three-part semantic version. Published artifacts MUST NOT be overwritten silently, and re-publishing identical canonical content remains idempotent.
+- **Preserving original identity and revision across instances**: Downloading from the public market or importing an offline package **preserves the original stable ID and publisher-assigned exact version or integer `revision` verbatim** (pure technical `.device.yaml` bodies carry no version field; `revision` travels in market index or export metadata, defaulting to `revision = 1` or an explicit import parameter for bare single-file imports), never renumbering locally.
+- **Idempotency and conflict rejection**: Importing an identical `(id, version/revision)` with identical canonical content succeeds idempotently; differing content is rejected explicitly with `409` conflict—**automatic renaming, auto-incrementing revisions, or silent overwrites are strictly prohibited**.
 
 ### Instance-Level Shared Cache, Multi-Version Coexistence, and Snapshot Freezing
 
-- **No runtime hot-reloading**: Web, API, and scheduler control-plane processes never load or `import` user plugin source code; the composition root statically registers trusted execution bridges at process startup only.
-- **Instance-deduplicated cache + per-member multi-version installation**: Underlying artifact blobs and built plugin computation images are deduplicated across the instance by exact `(id, version/revision)`, while installation/activation state is tracked independently **per member**. Multiple exact versions or revisions of the same stable ID MAY coexist in both the local catalog and a member's installed list (market cards display the latest version by default with version switching in details), allowing different projects and calculation configs to pin distinct exact versions without interference.
-- **Immediate availability for subsequent computations**: Published and installed models and plugins are managed as immutable records in the database and managed object storage; installing or toggling availability **requires no service restart**. Projects and calculation configurations MAY reference only entries currently installed and enabled for the member by exact revision or version—referencing drafts or `latest` is prohibited.
-- **Submission gate and change isolation**: Before launching a calculation, the submission gate verifies compatibility and parameters, then freezes immutable generated input files and exact `(artifact_id, version, package_object_id, env_id, parameters)` into an immutable `CalcSnapshot` with object reference tracking for traceability without mandating identical ephemeral runtime environments. Installing, disabling, or uninstalling affects **only newly submitted calculations afterward**, leaving in-flight runs and historical project versions, snapshots, and evidence untouched.
+- **No runtime hot-reloading**: Web, API, and scheduler control-plane processes never load or `import` user plugin source code; the composition root statically registers trusted execution bridges at startup only.
+- **Instance-deduplicated cache + per-member multi-version installation**: Underlying artifact blobs and built plugin images are deduplicated across the instance by exact `(id, version/revision)`, while installation/activation state is tracked independently **per member**. Multiple exact versions or revisions of the same stable ID MAY coexist in both the local catalog and a member's installed list (cards show latest by default with version switching in details), letting different projects pin distinct exact versions without interference.
+- **Immediate post-install availability & submission freezing**: Only exact versions/revisions in `ready` state that are installed and enabled for the current member MAY be referenced by projects and calculation configs (drafts and `latest` are prohibited). At task submission, exact references, per-stage option slots, and immutable input files freeze into `CalcSnapshot` with object references; subsequent installs, disables, or uninstalls affect **only newly submitted calculations**, leaving in-flight runs and historical snapshots untouched.
 
-### External Integrity Verification Boundary
+### External Integrity Verification Boundary (Three-Way Rule)
 
-- Public market indices publish the `sha256` digest of each released artifact; pIES verifies `sha256` and archive safety **once at the external download or import boundary**.
-- In strict compliance with the [Architecture Constitution](ARCHITECTURE_CONSTITUTION.md#26-validation-only-at-real-boundaries): once ingested under an immutable `ObjectId`, pIES database tables, `CalcSnapshot`, and internal runtime handoffs **never store, recompute, or compare SHA-256 digests**, nor use content digests as business identifiers.
+In strict compliance with the [Architecture Constitution](ARCHITECTURE_CONSTITUTION.md#26-validate-only-at-true-boundaries), boundary checks distinguish three external ingestion sources:
+
+| External Source | Boundary Verification Rule |
+|---|---|
+| Public market remote download | **Mandatory** comparison against the authoritative `sha256` in `index.json`, plus archive safety and contract validation |
+| Offline import with expected digest | Comparison against the user-supplied expected `sha256`, plus archive safety and contract validation |
+| Bare offline package without digest | Archive safety and public contract validation only, without forcing manual hash entry so offline sharing stays frictionless |
+
+Once ingested into managed object storage under an immutable `ObjectId`, pIES database tables, snapshots, and runtime handoffs **never store, recompute, or compare SHA-256 digests**, nor use content digests as business identifiers.
+
+## Public Market Index Contract and Stateless Submission Protocol
+
+### Static Market Index Contract (`ies.market-index@1.0.0`)
+
+`index.json` generated by `ThermalEng/pIES-Market` is the **sole authoritative public artifact catalog** consumed identically by both the co-hosted static browse/download web page and pIES clients (no duplicate catalog is maintained):
+
+```json
+{
+  "schema": "ies.market-index",
+  "schema_version": "1.0.0",
+  "generated_at": "2026-11-25T12:00:00Z",
+  "artifacts": [
+    {
+      "id": "acme.device.chp",
+      "kind": "device_model",
+      "revision": 1,
+      "name": { "zh_cn": "燃气热电联产机组", "en_us": "Gas CHP Unit" },
+      "description": "Pure technical declarative gas CHP device model.",
+      "publisher": "acme",
+      "license": "MPL-2.0",
+      "compatibility": { "pies": ">=1.2.0,<2.0.0" },
+      "url": "artifacts/acme.device.chp-r1.device.yaml",
+      "readme_url": "artifacts/acme.device.chp-r1.README.md",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "size_bytes": 4096
+    },
+    {
+      "id": "acme.solver.cbc_mps",
+      "kind": "solver",
+      "version": "1.0.0",
+      "name": { "zh_cn": "CBC MPS 求解器", "en_us": "CBC MPS Solver" },
+      "description": "Consumes standard MPS bundles and emits solver-neutral primal solutions.",
+      "publisher": "acme",
+      "license": "MPL-2.0",
+      "compatibility": { "pies": ">=1.2.0,<2.0.0" },
+      "consumes": ["ies.solver-bundle.mps@1.0.0"],
+      "produces": ["ies.primal-solution@1.0.0"],
+      "url": "artifacts/acme.solver.cbc_mps-1.0.0.algorithm.zip",
+      "readme_url": "artifacts/acme.solver.cbc_mps-1.0.0.README.md",
+      "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "size_bytes": 102400
+    }
+  ]
+}
+```
+
+- **Version markers**: `kind: "device_model"` uses positive integer `revision`; the five algorithm plugin kinds (`predictor` / `generator` / `solver` / `evaluator` / `algorithm`) use three-part semantic `version`; multiple historical versions/revisions of the same `id` coexist in `artifacts`.
+- **Delisting isolation**: Delisting in the public market removes or marks entries for remote distribution only and **never remotely revokes or breaks artifacts already installed on local pIES instances**.
+
+### Thin Stateless Submission Gateway Protocol
+
+The submission gateway requires no database or account system, treating GitHub PRs themselves as persistent review records:
+
+1. **Request OTP**: Contributor submits an email address (protected by send-rate and sliding-window throttling) to receive a short-lived one-time code over SMTP;
+2. **Stateless verification**: Verifying the code issues a short-lived, purpose-bound, server-HMAC-signed stateless submission token;
+3. **Upload & pre-check**: Uploading `.device.yaml` or `.algorithm.zip` with the token runs archive-safety checks, static contract validation, and `publishers.yaml` email-HMAC ownership verification (confirming a new `<publisher>` is unclaimed or an existing `<publisher>` matches the verified email digest);
+4. **Idempotent PR creation**: Using a least-privilege GitHub App / Token, the gateway checks for existing open PRs on the same `(id, version/revision)` and opens a branch and PR; **contributor emails serve solely for verification and non-plaintext digest binding and are omitted from public PR bodies and `index.json` by default**;
+5. **Read-only isolated CI & human merge**: PRs trigger a read-only `pull_request` workflow (`pull_request_target` prohibited; zero GitHub write tokens, zero SMTP/release secrets, and `--network=none` during self-tests); after human PR Review and merge, a separate trusted release workflow computes `sha256` and regenerates `index.json` and the static catalog page.
 
 ## Device Model Library Rules
 
-1. **Pure technical semantics and dual-mode authoring**: Follow [Device Model YAML](formats/device-model-yaml.md), including only stable identity, time-invariant `properties`, five `interfaces` classes, optional template `inputs`, and restricted declarative `equations`; carrying prices, costs, calculation precision, or code paths is strictly prohibited. "My Creations / Drafts" provides bidirectional synchronization between structured forms (metadata, `properties`, `interfaces`) and online YAML plus `.device.yaml` file import/export, all governed by the single authoritative backend validator.
-2. **Validation gate and atomic saving**: Submitted candidate models MUST pass safe-YAML, schema, unit, interface, and equation checks completely; failing candidates remain only in editing state or temporary staging without receiving official IDs or entering modeling selectors.
-3. **Version and palette visibility**: Installed and enabled device models appear directly in the project model creation selector; model assets visible on a project canvas derive strictly from the model references declared in the current draft or selected project version, so restoring a historical version never injects model assets created afterward.
+1. **Pure technical semantics and dual-mode authoring**: Follow [Device Model YAML](formats/device-model-yaml.md), containing only stable identity, time-invariant `properties`, five `interfaces` classes, optional template `inputs`, and declarative `equations`, excluding prices, costs, precision, or code paths. "My Creations / Drafts" provides bidirectional common-field forms, online YAML editing, and `.device.yaml` import/export backed by the authoritative backend validator.
+2. **Validation gate, palette visibility, and version isolation**: Invalid candidates remain in drafts only; installed and enabled models appear in project model creation selectors, while restoring historical project versions displays only model references declared in that version.
 
-## Algorithm Plugin Development and Execution Constraints
+## Algorithm Plugin Single-Chain Contract, Build Trust Boundary, and Execution Rules
 
-1. **Uniform support for five plugin kinds & strict stage decoupling**: Both built-in computation stages and external algorithm plugins follow [Algorithm Plugin Package](formats/algorithm-plugin-package.md) (`plugin.yaml`), uniformly supporting dynamic installation and configuration selection across all five kinds (`predictor`, `generator`, `solver`, `evaluator`, and unified single-step `algorithm`) plus the `iteration` internal-loop interface. **Stage boundaries remain strictly decoupled**: `algorithm` serves strictly as the merged equivalent of `generator + solver` without crossing upstream `predictor` or downstream `evaluator` boundaries—when `algorithm` is selected, downstream post-solve financial evaluation continues through an independently configured `CalculationConfig.evaluator` (or `evaluator: null` when retaining only the algorithm's own output).
-2. **Install-time automated builds, pip mirror support, and network-disabled self-test gate**: When installing plugins declaring `requirements.txt`, the allowlisted proxy `job_runner` builds a dedicated image `pies-plugin/<plugin_id>:<version>` atop the official `pies-plugin-base` image (honoring an optional admin-configured pip mirror/intranet index URL, defaulting to PyPI when unset); dependency-free plugins reuse `pies-plugin-base` directly with zero network access. Immediately after image build, if `plugin.yaml` declares `tests`, `backend` MUST run all declared self-test cases via `job_runner` inside a `--network=none` container before marking the plugin version available.
-3. **Ephemeral network-disabled container execution & controlled image cleanup**: `backend` orchestrates each computation step via `job_runner` inside an ephemeral network-disabled container (`/work/in → /work/out`), cleaned up with its temporary files after status and valid outputs are persisted; runtime containers have zero public/internal network access, no database/object-storage credentials, no Docker socket, and no host repository paths, bounded by deployment resource limits (CPU, memory, timeout, process count, output size). See [Deployment and Operations](deployment.md). When an administrator fully uninstalls a plugin version, `job_runner`'s allowlisted `delete_plugin_image` operation removes only managed `pies-plugin/*` images carrying `pies.managed="true"`, strictly refusing to remove built-in base images (`pies-builtin-stages`, `pies-plugin-base`).
-4. **Determinism, output boundary, and minimal `pies-sdk`**: Identical inputs, versions, dependencies, and seeds MUST yield deterministic results; plugin outputs undergo strict public result-contract validation before entering result models and contain only finite values and bounded logs; **the platform validates public result-contract compliance only and never endorses mathematical optimality or financial correctness**. Reference plugins MUST pass the four runtime modularity gates in [Extension System](extensions.md#boundary-split-and-runtime-modularity-gates). `pies-sdk` remains minimal with zero backend dependencies, providing only runtime contracts/entrypoints plus universal `validate` (manifest, archive safety, and local self-tests) and `pack` (canonical `*.algorithm.zip` creation and `sha256` output) commands across all five plugin kinds, without scaffolding bloat or PyPI release coupling.
+1. **Strict single-pass unidirectional chain & replaceable compatibility**: Following [Algorithm Plugin Package](formats/algorithm-plugin-package.md) (`plugin.yaml`), the five plugin kinds execute along `Frozen Input → [predictor] → (generator → solver | algorithm) → [evaluator] → Result`:
+   - **Each stage's output is the sole input of the next**: Cross-stage side-channel directory mounts and cross-container loops are prohibited; cross-stage variable mappings and frozen finance/evaluation context travel via explicit `passthrough` fields carried **verbatim** by intermediate stages;
+   - **Single-pass multi-target joint prediction**: Multiple prediction targets assigned to the same `predictor` plugin enter one container together for joint multivariate prediction (preserving shared latent weather/solar correlations), while iterative search algorithms execute internally inside one container via `iteration`;
+   - **Unified forward financial evaluation & contract matching**: A built-in forward engineering-finance `evaluator` deterministically computes complete financial evaluations from canonical engineering solutions (or primal solutions normalized via passthrough `variable_map`) plus passthrough finance context, working identically across any compatible `solver` or `algorithm` (`evaluator: null` delivers upstream results directly); stage compatibility matches on public input/output contract IDs (`consumes` / `produces`), and `CalculationConfig.options` validates in per-stage slots without hardcoded mutual plugin IDs.
+2. **Build-stage trust boundary & pip source policy**:
+   - Dependency-free plugins (`requirements` omitted) MUST build with `--network=none` directly atop local `pies-plugin-base`;
+   - Plugins declaring `requirements.txt` build inside `job_runner`'s controlled in-memory context with **zero host business directory mounts, zero database/Redis/secret credentials, and bounded build timeouts**; builds use the admin-configured `pip_index_url` when set or default PyPI (Local Mode disables only `pIES-Market`, not `pip`); if dependency installation fails in an offline environment, the backend marks `build_failed` and surfaces an explicit warning naming the failed plugin/dependency and instructing the user to contact the administrator.
+3. **Install-time network-disabled self-test gate & backend states**: Once built, if `plugin.yaml` declares `tests` (supporting both single-JSON shorthand and `in/` → `expected/` directory fixtures), `backend` MUST run all cases via `job_runner` in a `--network=none` container before advancing status from `building` to `ready` (marking `build_failed` on failure). **Passing self-tests proves compliance with author samples and public output schemas only—the platform never endorses mathematical optimality or engineering/financial correctness**.
+4. **Minimal `pies-sdk`**: Remains zero-backend-dependency, providing only runtime contracts/entrypoints plus universal `validate` (manifest, archive safety, and single-file/directory offline self-tests) and `pack` (canonical `*.algorithm.zip` creation and `sha256` output) across all five plugin kinds.
 
-## Operating Modes, Approval Toggle, and Lifecycle
+## Orthogonal Operating Modes, Approval Toggle, and Stateless Uninstall Protection
 
-- **Strict separation of roles and accounts**: Public market administrators review, merge, and delist public artifacts via GitHub PRs without administrative access to any pIES deployment or user engineering data; pIES local administrators manage instance operating mode, market and submission gateway URLs, pip mirror URL, local approval policy, and local catalog status under `/admin`. Market email-verified contributor identities remain independent of local pIES accounts and require no credential synchronization.
-- **Local Mode vs. Online Mode** (toggled by the local administrator in `/admin`):
-  - **Local Mode**: Disables the remote public market and external submissions—zero outbound market requests are made and remote items are hidden; ordinary members can install locally published entries and upload/share local device models or algorithm plugins, governed by the administrator toggle **`local_upload_requires_approval`**:
-    - When **enabled**: ordinary member uploads perform only static archive-safety and contract validation and enter the `/admin` pending approval queue (triggering no Docker image build and remaining invisible to other members) until an administrator approves them for local publication, image build, and network-disabled self-testing;
-    - When **disabled**: valid member uploads proceed directly to build, self-test, and local catalog publication; administrator imports always bypass approval.
-  - **Online Mode**: All signed-in members can browse remote market models and plugins, freely download/install remote entries or import offline packages (reusing instance-level image caches with automated build and self-test), and submit contributions to the public market via email OTP through the submission gateway.
-- **Isolation and reference protection**: Unpublished personal device model drafts, pending uploads, and rejection diagnostics are visible only to the owner (and reviewing administrators); administrators can enable, disable, or fully uninstall local catalog entries under `/admin`. Member uninstallation or administrator removal detaches catalog availability references (and MAY invoke `delete_plugin_image` for `pies-plugin/*` images), while object-storage packages still referenced by historical project versions, task snapshots, or evidence MUST NOT be physically deleted, with reference impact surfaced beforehand.
+Administrators configure two **mutually orthogonal** instance policies under `/admin`:
+
+| Admin Setting | Scope and Enforcement Rule |
+|---|---|
+| `market_mode` (`local` / `online`) | Controls remote `pIES-Market` connectivity: Local Mode makes zero outbound market requests, hides remote items, and disables external submissions; Online Mode enables remote browsing, downloading, and email-verified submissions |
+| `local_upload_requires_approval` (`true` / `false`) | **Enforced uniformly in both Local Mode and Online Mode**: Direct downloads from the audited public market in Online Mode require no local approval, whereas **every non-admin user-supplied local upload or offline import** obeys this toggle (when enabled, static validation places items in `pending_approval` without building images until admin approval advances them to `building → ready`; when disabled, valid uploads build and publish directly; admin imports always bypass approval), preventing offline-import bypasses in Online Mode |
+
+**Two-step stateless uninstall & in-flight task protection**:
+
+- **Disable & delist (immediate)**: Member uninstallation or administrator disable/uninstall immediately removes catalog availability references, blocking new project selections and new task submissions;
+- **Physical image cleanup (stateless active-task check)**: When an administrator requests plugin image removal, the backend checks whether any non-terminal task (`queued` / `running` / `cancelling`) references that `(plugin_id, version)` in its frozen snapshot—if zero active tasks reference it, `job_runner`'s allowlisted `delete_plugin_image` immediately removes the `pies.managed="true"` `pies-plugin/*` image (never touching `pies-builtin-stages` or `pies-plugin-base`); if $N$ active tasks still reference it, **image deletion is statelessly rejected** with a clear notice ("Delisted for new tasks; $N$ in-flight tasks still use this image—retry image cleanup after they finish"), maintaining no background pending-cleanup state machine;
+- **Object reference protection**: Object-storage packages referenced by historical project versions, task snapshots, or evidence remain protected by `ObjectOwner` and MUST NOT be physically deleted, with reference impact surfaced beforehand.
 
 ## External Delivery Self-Check List
 
-- **Before submitting a device model**: Confirm `1.0.0` schema compliance, absence of financial/precision/code fields, stable ID, license, and valid sample inputs.
-- **Before submitting an algorithm plugin**: Run `pies-sdk validate` and `pies-sdk pack` to verify ZIP layout safety, manifest compliance, and deterministic offline self-test execution; include a clear `README.md`, explicit license, and at least one network-free `tests` case when submitting to the public market.
+- **Before submitting a device model**: Confirm `1.0.0` schema compliance, absence of financial/precision/code fields, readable `<publisher>` prefix (for market submissions), license, and valid sample inputs.
+- **Before submitting an algorithm plugin**: Run `pies-sdk validate` and `pies-sdk pack` to verify ZIP layout safety, manifest and `consumes`/`produces` compliance, and deterministic offline self-test execution; include a clear `README.md`, explicit license, and at least one network-free `tests` case for public market submissions.

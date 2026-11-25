@@ -1,11 +1,11 @@
 # pIES Architecture Constitution
 
 > Status: Effective
-> Version: 1.22.1
+> Version: 1.23.0
 > Effective Date: 2026-08-20
-> Last Updated: 2026-11-24
+> Last Updated: 2026-11-25
 > Scope: Repository root entry points, `manual/`, `docs/`, `backend/`, `frontend/`, database, object storage, Worker, tests, and subsequent plugins
-> Basis: 2026-08-20 Special Architecture Review, ADR-0001 through ADR-0008, 2026-09-07 Regional FinanceProfile Triplet Specification, User-Approved Embedded Tax Computation Ruling on 2026-10-19 (ADR-0011), User-Approved Direct Evaluation Confirmation Transmission Ruling on 2026-10-20 (ADR-0012), ADR-0013 through ADR-0015, User-Approved Unified Backend Orchestration & Ephemeral Computation Container Pipeline Ruling on 2026-11-24 (ADR-0016)
+> Basis: 2026-08-20 Special Architecture Review, ADR-0001 through ADR-0008, 2026-09-07 Regional FinanceProfile Triplet Specification, User-Approved Embedded Tax Computation Ruling on 2026-10-19 (ADR-0011), User-Approved Direct Evaluation Confirmation Transmission Ruling on 2026-10-20 (ADR-0012), ADR-0013 through ADR-0015, User-Approved Unified Backend Orchestration & Ephemeral Computation Container Pipeline Ruling on 2026-11-24 (ADR-0016), User-Approved Single-Chain Stage Handoff & Single-Pass Joint Prediction Ruling on 2026-11-25 (ADR-0017)
 
 ## 1. Document Precedence
 
@@ -145,15 +145,15 @@ Authoritative schemas, fields, formulas, and aggregation enums are defined in [A
 
 ### 4.5 `computation`: Generation, Execution, and Result Adaptation
 
-Computation MUST be separated into three independent boundaries:
+Computation responsibilities MUST maintain three distinct boundaries:
 
-- `GeneratorProvider` directly accepts the issued `ValidatedAssemblyArtifact`, per-instance frozen device mathematical contributions, materialized full-horizon input series, immutable `EffectiveFinanceConfig`, publicly validated `CalculationConfig`, and confirmed frozen evaluation inputs, deterministically producing a Solver Bundle during generation; inputs are passed separately by responsibility rather than bundled merely to preserve parameter count, without introducing outer wrappers or a second source of business truth;
-- `SolverRuntime` executes structured commands inside a trusted Bundle, checks required outputs, and produces an `ExecutionReceipt` along with raw outputs;
-- `ResultAdapter` and post-solve financial evaluation solely map the Bundle, receipt, and declared outputs into a schema/version-tagged `ComputeResult` and evaluation facts.
+- `GeneratorProvider` directly accepts the issued `ValidatedAssemblyArtifact`, per-instance frozen device mathematical contributions, materialized full-horizon input series, immutable `EffectiveFinanceConfig`, publicly validated `CalculationConfig`, and confirmed frozen evaluation inputs, deterministically producing solver inputs, declarative variable/unit mappings (`variable_map`), and cross-stage passthrough context (`passthrough`); inputs are passed separately by responsibility rather than bundled merely to preserve parameter count, without introducing outer wrappers or a second source of business truth;
+- `SolverRuntime` executes controlled solver commands to emit a solver-neutral canonical primal solution and `ExecutionReceipt`, while passing upstream cross-stage fields (`variable_map`, `passthrough`) verbatim to its output directory;
+- `ResultAdapter` / post-solve `Evaluator` consumes solely the output files of the immediately preceding stage (`solver` or unified `algorithm`), performing reverse unit conversion via passthrough mappings or reading canonical engineering solutions and combining frozen finance/evaluation context into a `schema`/`schema_version`-tagged `ComputeResult` and evaluation facts.
 
-Under the `1.1.5` target architecture, built-in and third-party computation capabilities share one unified plugin and directory handoff contract (`/work/in → /work/out`), executing prediction, generation, solving, and post-solve financial evaluation (or unified single-step algorithms) inside per-step network-disabled ephemeral containers orchestrated by `backend`; algorithms with internal iterative loops execute self-contained inside a single ephemeral container via a dedicated internal-loop interface.
+Built-in and third-party computation capabilities share one unified plugin and **strict single-pass unidirectional single-chain** directory handoff contract (`/work/in → /work/out`, i.e., `Frozen Input → [predictor] → (generator → solver | algorithm) → [evaluator] → Result`) inside per-step network-disabled ephemeral containers orchestrated by `backend`: each stage's output files serve directly as the sole input files of the next stage, prohibiting cross-stage side-channel mounts and cross-container loops; cross-stage context travels in explicit fields carried verbatim by intermediate stages. `predictor` natively supports single-pass multi-target joint prediction across correlated series, while algorithms requiring internal iterative search execute self-contained inside a single ephemeral container via the `iteration` interface.
 
-`GeneratorProvider` is the sole boundary converting business units to solver internal units, and `ResultAdapter` is the sole boundary converting back; calculation configuration such as solver options is fixed at bundle generation time. `SolverRuntime` MUST NOT read assembly semantics, inspect device types, fill missing data, or switch solvers.
+`GeneratorProvider` is the sole forward boundary converting business units to solver internal units, and the downstream adaptation/evaluation reader is the sole reverse conversion boundary; stage-specific options are fixed in per-stage slots when freezing task snapshots. `SolverRuntime` MUST NOT read assembly semantics, inspect device types, perform business unit conversions, fill missing data, or switch solvers.
 
 Computation modules MUST NOT:
 
