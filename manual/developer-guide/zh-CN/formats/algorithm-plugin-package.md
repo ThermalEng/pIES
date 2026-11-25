@@ -1,50 +1,46 @@
 # 算法插件包
 
-> 契约标识：`ies.algorithm-plugin`；目标 `schema_version`：`"1.0.0"`；清单文件：`plugin.yaml`；文件后缀：`*.algorithm.zip`；目标产品版本：`1.1.5`（统一内置契约与临时计算容器底座）/ `1.2.0`（单链可替换交接、受控构建自检与开放市场分发）
+> 契约标识：`ies.algorithm-plugin`；目标 `schema_version`：`"1.0.0"`；清单文件：`plugin.yaml`；文件后缀：`*.algorithm.zip`；目标产品版本：`1.1.5`（统一内置契约与临时计算容器底座）/ `1.2.0`（框架零拷贝交接、底座自动工程解还原、并联自描述评价与开放市场分发）
 
-算法插件包是 pIES 全部可计算扩展的统一打包与运行契约。**官方内置计算环节与本地/市场第三方插件均遵循本同一契约**，由 `backend` 经白名单容器代理 `job_runner` 按**严格单趟单向单链**（`冻结输入 → [predictor] → (generator → solver | algorithm) → [evaluator] → 结果`）拉起断网临时计算容器执行，确保 Web/API 控制面永不加载或执行用户 Python 源码。
+算法插件包是 pIES 全部可计算扩展的统一打包与运行契约。**官方内置计算环节与本地/市场第三方插件均遵循本同一契约**，由 `backend` 经白名单代理 `job_runner` 按**严格单趟单向流水线**拉起断网临时计算容器执行，确保控制面永不加载或执行用户 Python 源码。
 
-## 五类插件种类（`kind`）与单链交接契约
+## 五类插件种类（`kind`）与框架单向交接协议
 
-每一环节的出口目录（`/work/out`）直接作为紧邻下一环节的唯一进口目录（`/work/in`），**禁止跨级旁路挂载上游目录，禁止跨容器往返循环**；需要跨环节传递的映射与冻结上下文统一装入显式 `passthrough` 字段由中间环节**原样透传**（`pies-sdk` 提供标准透传辅助）：
+流水线拓扑固定为：
+`冻结输入 → [predictions[]: 同层按插件分组执行] → (generator → solver → 平台底座自动还原工程解 | algorithm) → [evaluators[]: 0..N 个评价器并联执行] → 最终封存结果`。
 
-| `kind` | `/work/in` 单链输入 | `/work/out` 单链输出 | 可替换组合与契约标识（`consumes` / `produces`） |
+**框架负责跨环节只读交接**：第三方插件**绝不承担搬运无关上游文件的职责**；跨环节所需的只读不可变上下文（如冻结装配、物化序列/价格、财务/评价确认及 `generator` 产出的 `variable_map`）统一由 `backend` 调度框架通过硬链接（`os.link`）零拷贝组装进目标环节的只读 `/work/in` 目录，既维持每一环只读自身 `/work/in` 的清晰单向逻辑，又彻底消除插件漏传、篡改或重复校验问题：
+
+| `kind` | `/work/in` 框架组装的只读输入 | `/work/out` 插件自身唯一产物 | 组合与契约标识（`consumes` / `produces`） |
 |---|---|---|---|
-| `predictor` | `/work/in/request.json`（含分配给本插件的全部关联 `targets[]`、历史序列与单目标参数）及上游 `passthrough` | `/work/out/prediction.json`、训练产物及合并后的单链下游输入包 | 原生支持单趟多目标同源联合预测（保留负荷与风光间共享气温/日照潜变量相关性），不再设依赖求解结果的跨容器外循环 |
-| `generator` | 上一环交付的冻结装配、物化序列、计算配置与冻结财务/评价上下文 | 求解输入文件（如 `problem.mps`）、声明式列号—业务变量/单位映射 `variable_map` 及 `passthrough`（含冻结 `finance` 与 `evaluation`） | 产出公开求解包契约（如 `ies.solver-bundle.mps@1.0.0`），供任意声明消费该契约的 `solver` 接入 |
-| `solver` | **仅读取 `generator` 出口目录**（模型文件、`variable_map`、`passthrough` 与本环节参数） | 求解器无关标准原变量解（`primal_solution.json`：统一状态枚举、目标值、列值序列与回执元数据）+ **原样透传**的 `variable_map` 与 `passthrough` | 消费匹配 `generator` 契约并产出 `ies.primal-solution@1.0.0`；不执行业务单位换算，第三方 `.mps` 求解器可直接无感替换内置 HiGHS |
-| `algorithm` | 上一环交付的标准化冻结计算输入包（含本环节参数与 `passthrough`） | 业务单位标准工程解（`solution.json`：装机容量、选建状态、逐时序列与求解摘要）+ **原样透传**的 `passthrough` | 严格等价替代 `generator + solver` 拆分，产出 `ies.engineering-solution@1.0.0`，不跨越上游 `predictor` 与下游 `evaluator` 边界 |
-| `evaluator` | **仅读取紧邻上一环（`solver` 或 `algorithm`）出口目录**（绝不跨级挂载 `generator` 目录）及本环节参数 | `/work/out/result.json`（`ComputeResult`、逐时序列及同口径 `ies.financial-evaluation@1.0.0` 财务评价事实） | 经 `pies-sdk` 统一归一化 `{primal_solution + variable_map}` 与 `{engineering_solution}`，结合透传 `passthrough` 正向算出完整评价；当 `CalculationConfig.evaluator` 显式置 `null` 时跳过本环节直接交付上游结果 |
+| `predictor` | 分配给本插件的全部关联 `targets[]`、历史序列与各目标 `parameters` | `/work/out/prediction.json` 与训练产物 | 同层按所选插件分组执行；同插件多目标单趟同源联合预测（保留负荷与风光共享潜变量相关性），框架合并全部预测序列后送入下一环 |
+| `generator` | 冻结规范装配、完整物化序列、冻结财务/评价上下文与 `options.generator` | 求解模型文件（如 `problem.mps`）与声明式变量/单位映射 `variable_map`（内置为 `parameters.json` + `parameters.jsonl`） | 产出公开求解包契约（如 `ies.solver-bundle.mps@1.0.0`），执行唯一业务单位到求解内部单位的正向转换 |
+| `solver` | `generator` 产出的求解模型文件与 `options.solver`（无需传入财务或装配文件） | 求解器无关标准原变量解（`primal_solution.json`：统一状态枚举、目标值、列值序列与回执元数据），**不搬运 `variable_map` 或财务文件** | 消费匹配 `generator` 契约并产出 `ies.primal-solution@1.0.0`；运行结束后**由平台底座自动结合 `variable_map` 还原出业务单位标准工程解**，第三方 `.mps` 求解器可直接无感替换内置 HiGHS |
+| `algorithm` | 冻结规范装配、完整物化序列/价格、冻结财务/评价上下文与 `options.algorithm` | 业务单位标准工程解（`solution.json`：`ies.engineering-solution@1.0.0`） | 严格等价替代 `generator + solver`；产出与分步模式底座还原后**完全同构的标准工程解**（两种模式均支持 `evaluators: []`） |
+| `evaluator` | 标准工程解（`ies.engineering-solution@1.0.0`）+ 框架硬链接的完整只读冻结上下文（规范装配 `ValidatedAssemblyArtifact`、物化 `prices`、`EffectiveFinanceConfig`、`EvaluationInput`）+ 本评价器 `parameters` | 官方财务评价器输出标准 `ies.financial-evaluation@1.0.0`；第三方评价器输出自描述报告块 `evaluation_report.json`（`metrics` / `charts` / `tables`） | 支持 `0..N` 个评价器并联独立运行；自描述展示协议由前端通用组件自动渲染并支持导出为 Excel Sheet，新增评价器无需修改前端代码 |
 
-## ZIP 目录布局与多形态自检样例
+### 标准工程解（`ies.engineering-solution@1.0.0`）与自描述评价块契约
 
-归档根目录不得嵌套额外顶层目录，只允许普通文件和目录（禁止符号链接、硬链接、绝对路径、`..` 路径逃逸、大小写碰撞、加密条目及自带 `Dockerfile`）。
+- **标准工程解必填项**（供前端工程页签展示及下游任意 `evaluator` 正向计算）：
+  1. `construction_units`：装配中全部规划建设单元的 `built`（布尔值）与各 `planning_variable_id` 业务单位数值；
+  2. `series` / `system_series`：覆盖所有电表计费绑定（`meter_bindings`）、变动运维及命名金额引用的设备接口/变量与系统辅助变量完整连续 `step` 业务单位序列；
+  3. `solver_summary`（终止原因、`math_status`、可行解标记、目标值与单位等）及可选 `metrics`；缺失财务评价必需的建设单元或计费序列时明确报错，严禁静默补零。
+- **评价器自描述报告块（`ies.evaluation-report@1.0.0`）**：第三方 `evaluator`（如碳排放、供电可靠性、㶲效率或海外 PPA 评价）输出自包含的标题、摘要指标列表 `metrics`（`{id, label, value, unit}`）、序列图表列表 `charts`（横纵轴标签、单位与序列数组）及二维明细表列表 `tables`（列定义、单位与行数组），与前端固定财务页签彻底解耦。
 
-### 最简合法结构（本地开发与极简算法）
+## ZIP 目录布局与双形态自检样例
 
-```text
-my-plugin/   # 打包为 ZIP 根目录内容，不含此顶层目录名
-├── plugin.yaml
-├── main.py
-└── requirements.txt   # 可选；仅用基础环境内置库时省略（零联网构建）
-```
-
-### 完整结构（支持单 JSON 简写与多文件目录级 `tests`）
-
-向公共市场投稿必填 `README.md`、`LICENSE` 及至少一个无网络依赖的 `tests` 样例。为同时适配轻量插件与需要多文件输入输出的 `generator` / `solver`，`tests` 支持**单文件 JSON 简写**与**完整 `/work/in → /work/out` 目录样例**两种形态：
+归档根目录不得嵌套额外顶层目录，只允许普通文件和目录（禁止符号链接、硬链接、绝对路径、`..` 路径逃逸、大小写碰撞、加密条目及自带 `Dockerfile`）。向公共市场投稿必填 `README.md`、`LICENSE` 及至少一个无网络依赖的 `tests` 样例，同时支持**单文件 JSON 简写**与**完整 `/work/in → /work/out` 目录样例**（适配 `generator` / `solver` 多文件交接）：
 
 ```text
 plugin.yaml
-requirements.txt       # 可选；声明额外纯 Python 依赖
+requirements.txt       # 可选；仅用基础内置库时省略（强制 --network=none 构建）
 src/
   __init__.py
   solver.py
 tests/
-  minimal_dir/         # 目录形态：in/ 原样映射为 /work/in/，expected/ 核对 /work/out/
+  minimal_dir/         # 目录形态：in/ 映射为 /work/in/，expected/ 核对 /work/out/
     in/
       problem.mps
-      variable_map.json
-      passthrough.json
     expected/
       primal_solution.json
   simple_json/         # 单文件简写：input.json 映射为 /work/in/request.json
@@ -56,9 +52,7 @@ README.md
 
 ## `plugin.yaml` 清单
 
-Manifest 采用 YAML 1.2 安全子集书写。插件通过 `consumes` 与 `produces` 声明所消费与产出的公开数据契约标识，实现跨作者插件自由替换组合。
-
-### 插件清单示例
+Manifest 采用 YAML 1.2 安全子集书写，通过 `consumes` 与 `produces` 声明所消费与产出的公开数据契约标识：
 
 ```yaml
 schema: ies.algorithm-plugin
@@ -115,36 +109,21 @@ extensions: {}
 | `plugin_id` / `version` | 稳定命名空间 ID（`ies.*` / `<publisher>.*` / 本地 `user.<public_namespace>.*`）与三段式语义版本 |
 | `kind` | 封闭枚举：`predictor` / `generator` / `solver` / `evaluator` / `algorithm` |
 | `compatibility` | 兼容的 pIES 或 SDK 版本范围，不满足时在安装与任务提交闸门明确报错拒绝 |
-| `consumes` / `produces` | 公开输入/输出数据契约标识列表，作为提交闸门校验上下游可组合性的权威依据（不兼容组合在提交闸门直接拒绝，严禁运行期猜测转换） |
-| `runtime` | 声明 Python 版本与可选 `requirements` 相对路径；未声明额外依赖时直接零联网复用 `pies-plugin-base` |
+| `consumes` / `produces` | 公开输入/输出数据契约标识列表，作为提交闸门校验上下游可组合性的权威依据 |
+| `runtime` | Python 版本与可选 `requirements` 相对路径；未声明额外依赖时直接以 `--network=none` 复用 `pies-plugin-base` |
 | `entrypoint` | 固定 `<module.path>:<public_function>` 格式 |
-| `parameters_schema` | 内联 Draft 2020-12 JSON Schema（`additionalProperties: false`），对应 `CalculationConfig` 中本环节专属参数槽（`predictions[].parameters` 或 `options.<kind>`），各环节参数隔离不冲突 |
-| `resources` | 默认与上限资源建议（`cpu`、`memory_mb`、`timeout_seconds`、`process_limit`），受部署策略上限强制裁决 |
-| `advanced` | **可选高级扩展段**：用于流式分块声明、受信任二进制求解器参数模板及**可选** `companions` 限定（仅当确实依赖特定专用伙伴版本时声明，常规插件不得硬编码锁定对方 ID） |
-| `iteration` | **可选内部循环专用接口**：用于单容器内自闭环迭代进度上报，详见下方说明 |
+| `parameters_schema` | 内联 Draft 2020-12 JSON Schema（`additionalProperties: false`），对应本插件在 `predictions[].parameters`、`options.<kind>` 或 `evaluators[].parameters` 中的专属参数槽 |
+| `resources` | 默认与上限资源建议，最终受部署策略上限强制裁决 |
+| `advanced` | **可选高级扩展段**：流式分块声明、受信任二进制求解器参数模板及**可选** `companions` 限制（常规插件不得硬编码锁定对方 ID） |
+| `iteration` | **可选内部循环专用接口**：单容器内自闭环迭代进度上报（追加 NDJSON 至 `/work/out/iterations.jsonl`） |
 | `tests` | 无网络自检样例列表（支持单文件 JSON 或 `in/` + `expected/` 目录形态；公共市场投稿必填） |
-
-## 内部循环算法专用接口（`iteration`）
-
-凡包含迭代寻优循环的算法（如启发式搜索、仿真优化或单求解器内部多轮恢复），**一律在单个临时计算容器内部自闭环运行**，不拆成跨容器往返循环。插件声明 `iteration` 段接入统一进度观测：
-
-```yaml
-iteration:
-  enabled: true
-  max_iterations_default: 20
-  convergence_metric: max_relative_delta
-  progress_channel: /work/out/iterations.jsonl
-```
-
-- 容器每完成一轮内部迭代向 `/work/out/iterations.jsonl` 追加一行 NDJSON 记录（含 `iteration`、`metric`、`value`、`unit: "1"` 与状态标记），严格受单容器总超时与外部停止信号约束。
 
 ## 构建信任边界、断网自检与执行生命周期
 
-- **安装期构建信任边界与断网自检门禁**：
-  - 无 `requirements` 插件强制以 `--network=none` 直接基于 `pies-plugin-base` 构建；含 `requirements` 插件在 `job_runner` 内存受控上下文中构建（零宿主机业务目录挂载、零业务凭证注入、带硬超时限制），使用可选 `pip_index_url` 或默认 PyPI（离线拉包失败时标记 `build_failed` 并弹窗提示联系管理员处理）；
-  - 构建完成后，若声明了 `tests`，强制在 `--network=none` 容器内跑通全部单文件/目录级自检样例后才置为 `ready`。`pies-sdk validate` 与 `pies-sdk pack` 统一覆盖全部五类插件。
-- **运行期断网单链交接与免背书边界**：
-  - 每次执行单链一环时，以 `--network=none --read-only --cap-drop=ALL` 非 root 身份拉起临时容器（只读 `/work/in`、可写 `/work/out`），持久化有效产物后立即 `cleanup_stage` 清理；
-  - 声明输出进入结果模型前严格通过公开结果契约校验，**平台与自检门禁仅验证契约合规性，不对任何插件的工程最优性或财务正确性背书**；
-  - 外部摘要遵循三分校验规则（市场下载强制核对 `index.json` `sha256`、带摘要离线包核对所给 `sha256`、普通裸离线包仅做归档安全与契约校验），入库后内部永不存储或重算 `sha256`；
-  - 管理员卸载清理 `pies-plugin/*` 镜像时执行无状态在途任务检查：仅在无未终结任务引用该精确版本时调用 `delete_plugin_image`，有在途引用时仅下架阻止新任务并提示待在途任务结束后清理。
+- **安装期构建信任边界与优先源回退策略**：
+  - 无 `requirements` 插件强制以 `--network=none` 直接基于 `pies-plugin-base` 构建；含 `requirements` 插件在 `job_runner` 内存受控上下文中构建（零宿主机业务目录挂载、零业务凭证注入、带硬构建超时）；若管理员配置了 `pip_index_url`，作为**优先源并允许回退默认公网 PyPI**（`--index-url <pip_index_url> --extra-index-url https://pypi.org/simple`，留空直接走默认 PyPI）；离线环境拉包失败时标记 `build_failed` 并弹窗提示所缺插件/依赖及联系管理员处理；
+  - 构建完成后，声明的 `tests` 强制在 `--network=none` 容器内全部通过才转入 `ready`。`pies-sdk validate` 与 `pies-sdk pack` 统一覆盖全部五类插件。
+- **运行期隔离、同源财务评价与无状态并发安全卸载**：
+  - 所有计算环节均以 `--network=none --read-only --cap-drop=ALL` 非 root 临时容器运行；内置财务评价器复用同源财务领域规则对标准工程解做正向全量评价（与内置生成器优化目标数学口径严格一致），**平台与自检门禁仅校验公开契约合法性，不复核插件物理最优性，也不为任何第三方插件的计算正确性背书**；
+  - 外部摘要遵循三分校验规则，入库后内部永不存储或重算 `sha256`；
+  - 插件停用/卸载与新任务提交共用数据库事务行级锁核对，防止并发竞态；仅在零未终结任务引用该精确版本时经 `delete_plugin_image` 物理清理 `pies-plugin/*` 镜像。

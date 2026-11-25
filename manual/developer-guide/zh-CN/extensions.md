@@ -40,25 +40,25 @@ pIES 将“声明式业务内容”与“可执行计算能力”分开扩展：
 3. 输出与求解器无关的变量、约束与映射元数据；
 4. 同步更新通用生成器降级能力与契约测试。
 
-## 计算 Provider 体系
+## 计算环节与插件体系
 
-计算阶段通过三个独立角色解耦数学构模与进程执行：
+计算全流程通过清晰的容器阶段与平台还原层解耦数学构模、求解执行与多维评价（详见[算法插件包](formats/algorithm-plugin-package.md)与[模型与算法](customization-center.md)）：
 
-- **GeneratorProvider**：直接消费已签发的 `ValidatedAssemblyArtifact`、设备数学贡献、全周期物化序列、`EffectiveFinanceConfig`、`CalculationConfig` 与冻结评价确认，执行唯一业务单位到求解内部单位转换，确定性产出 [Solver Bundle](formats/solver-bundle.md)。
-- **ExecutorProvider**：维护受信任 executable 白名单、参数与环境过滤规则、资源与网络隔离策略，执行 Bundle 中的结构化命令并返回 `ExecutionReceipt`。
-- **ResultAdapterProvider**：消费只读 Bundle、回执与原始求解输出，将求解器状态、目标、变量及财务事实还原为带规范业务单位的 `ComputeResult`。
+- **预测与核心求解插件（`predictor` / `generator` / `solver` / `algorithm`）**：`predictor` 按所选插件同层分组单趟执行（支持多目标同源联合预测）；`generator` 执行唯一业务单位到求解内部单位的正向转换并产出求解输入与 `variable_map`；`solver` 仅消费模型文件并输出求解器无关的标准原变量解；`algorithm` 跳过 `generator + solver` 拆分直接输出业务单位标准工程解。
+- **平台运行底座结果还原（`ResultAdapter`）**：在分步模式 `solver` 结束后自动结合 `variable_map` 与执行回执完成唯一反向单位换算，还原出与 `algorithm` 完全同构的业务单位标准工程解。
+- **并联评价插件（`evaluator`）**：`0..N` 个独立评价器并联只读标准工程解及框架零拷贝硬链接的冻结上下文；官方内置财务评价器输出标准财务评价事实，第三方评价器按自描述 `metrics` / `charts` / `tables` 协议输出报告块并由前端通用渲染。
 
-每个 Provider 通过 Descriptor 显式声明支持的 Schema、模式、能力集合、Options JSON Schema（Draft 2020-12）及配套依赖版本。
+各插件在 `plugin.yaml` 中显式声明 `consumes` / `produces` 公开数据契约标识、支持的模式/精度及专属 `parameters_schema`（Draft 2020-12），无需修改组合根代码或互相写死插件 ID 即可自由替换。
 
 ## 存储与外部数据源
 
 - **存储适配器**：仅封装底层 Blob 字节读写、删除与存在性/大小查询；对象身份、Owner 引用清单、保留策略与中断恢复统一由 `storage` 领域服务管理。
 - **外部时序数据**：气象、负荷或价格数据先经过格式与单位校验形成不可变数据版本或价格对象，再在装配或财务文件绑定；数据准备阶段保持来源原始分辨率与连续 `step`，不执行隐式插值或重采样。
 
-## 开发新 Provider 的标准流程
+## 开发新扩展的标准流程
 
-1. 确定目标所属模块与单一 Provider 角色，分配带命名空间的稳定 ID 与语义版本；
-2. 实现对应模块的公开 Protocol 与 Descriptor（包含配置 Schema 与自检方法）；
-3. 使用对应模块的契约测试集验证合法输入、非法输入、单位边界与确定性；
-4. 在组合根注册候选 Provider，验证依赖解析与部分失败回滚行为；
-5. 通过端到端测试证明在不修改 API、装配与前端类型映射的前提下完成接入。
+1. 确定扩展类别（纯声明式 `ies.device-model` 设备 YAML、五类 `ies.algorithm-plugin` 计算插件或内部存储适配器），分配带命名空间的稳定 ID（插件另配三段式语义版本）；
+2. 对计算插件编写 `plugin.yaml`（声明 `consumes`/`produces`、`parameters_schema` 与无网络 `tests` 样例）并仅依赖公开 `pies-sdk` 实现入口函数；
+3. 运行 `pies-sdk validate` 与 `pies-sdk pack` 验证归档安全、输入输出契约、单位边界与离线确定性自检；
+4. 在本地实例离线导入或上架公共市场（触发 `job_runner` 受控构建与 `--network=none` 自检门禁）；
+5. 通过端到端任务验证在不修改后端调度、API 路由与前端页面代码的前提下完成替换或并联运行。

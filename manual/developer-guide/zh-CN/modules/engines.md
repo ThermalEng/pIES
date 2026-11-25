@@ -6,37 +6,28 @@
 
 ## 计算全链路与子模块分工
 
-在 `1.1.5` 目标架构下，预测（`predictor`）、组装（`generator`）、求解（`solver`）与结果适配及后期财务评价（`evaluator`）按统一 `/work/in → /work/out` 契约由 `backend` 经 `job_runner` 分步拉起断网临时计算容器执行；极简第三方算法可通过一体化 `algorithm` 容器直接产出结果并接入评价。
+在 `1.2.0` 单向流水线架构下，预测（`predictor`）、组装（`generator`）、求解（`solver`）、一体化算法（`algorithm`）与并联后置评价（`evaluator`）按统一 `/work/in → /work/out` 契约由 `backend` 经 `job_runner` 分步拉起断网临时计算容器执行；跨环节所需的只读不可变上下文由调度框架通过硬链接零拷贝组装进各环节只读 `/work/in`：
 
 ```text
 ValidatedAssemblyArtifact + CalculationConfig
-  ↓ 序列物化（constant / data_repeat / data_full / data_predict）
-GeneratorProvider ──→ Solver Bundle ──→ SolverRuntime
-                                             ↓
-ComputeResult ←── ResultAdapter & 财务评价 ←── ExecutionReceipt + 原始输出
-  │
-  ├─ 独立预测：前置临时预测容器产出序列后直接执行后续步骤
-  └─ 耦合 / 内部循环算法：通过专用 iteration 接口在单个临时容器内自闭环完成
+  ↓ 序列物化（constant / data_repeat / data_full + predictions[] 同层按插件分组联合预测）
+  ├─ 分步模式：GeneratorProvider ──→ SolverRuntime ──→ 平台底座按 variable_map 自动还原标准工程解
+  └─ 一体化模式：Algorithm 容器 ─────────────────────→ 直接产出标准工程解
+                                                              ↓
+        最终封存结果 ←── evaluators[]（0..N 个独立评价器并联执行：内置财务评价 + 自描述扩展评价）
 ```
 
 | 子模块 | 职责 | 不负责 |
 |---|---|---|
-| 序列物化 | 按项目基线将四类来源物化为全周期对齐 `MaterializedSet` | 修改装配或数据版本 |
-| [生成器](generators.md) | 数学降级、单位换算与生成 Solver Bundle | 访问数据库、直接联网 |
-| [求解运行时](solver-runtime.md) | 校验并经容器代理在隔离临时容器内执行 Bundle 并签发 `ExecutionReceipt` | 解释设备语义或求解结果 |
-| 结果适配器与评价 | 将原始解、回执与冻结财务输入映射为规范单位的 `ComputeResult` 与财务评价事实 | 重跑求解、读取当前草稿 |
+| 序列物化与前置预测 | 将静态来源与按插件同层分组执行的单趟预测结果合并为全周期对齐 `MaterializedSet` | 修改装配或跨容器往返循环 |
+| [生成器](generators.md) | 数学降级、正向单位换算并产出求解模型文件与 `variable_map` | 访问数据库、直接联网 |
+| [求解运行时](solver-runtime.md) | 经容器代理在隔离临时容器内执行求解并产出标准原变量解与 `ExecutionReceipt` | 解释设备语义、单位换算或搬运业务文件 |
+| 平台结果还原与并联评价 | 平台底座结合 `variable_map` 还原业务单位标准工程解；`0..N` 个 `evaluator` 并联生成标准财务评价或自描述报告块 | 重跑求解、读取当前草稿或复核第三方算法最优性 |
 
-## 预测调度与内部循环接口
+## 同层分组预测与单容器内部循环接口
 
-任务提交按选中预测算法描述符的公开字段 `depends_on_solve_result` 与清单 `iteration` 声明选择执行路径：
-
-- **独立预测（`false`）**：在生成环节之前于独立临时 `predictor` 容器执行一次训练与序列生成，全过程保持固定；
-- **耦合 / 内部循环算法（`true` 或 `iteration.enabled: true`）**：`predict(previous=...)` 与配套求解/迭代逻辑在**单个临时计算容器内部**自闭环执行（首轮 `previous=None`，后续轮次传递只读结果输出），直至所有耦合目标满足 `CalculationConfig.convergence.tolerance` 或达到 `max_iterations` 上限（不收敛时保留对应收敛状态与最终解），并通过 `/work/out/iterations.jsonl` 专用通道上报每轮收敛度量。
-
-### 预测参数与收敛能力
-
-- **参数校验**：预测 Provider 通过公开 `validate_parameters(parameters)` 在计算配置保存或任务提交边界完成参数校验，执行阶段直接消费已冻结参数。
-- **收敛度量**：耦合算法 Provider 必须提供纯函数 `measure_convergence(previous_prediction, current_prediction, previous_outputs, current_outputs, parameters)`，返回不可变的 `PredictionConvergence`（含指标标识 `metric`、非负有限值 `value` 与无量纲单位 `"1"`）；多目标共存时汇总值为各目标收敛量最大值。首轮求解无前一轮对比，不生成零差值。
+- **同层分组与多目标同源联合预测**：任务提交阶段按各预测插件自身的 `parameters_schema` 独立校验 `predictions[].parameters`。执行阶段在逻辑预测环节内部按所选 `predictor` 插件分组运行（路由至同一插件的多个关联目标在单次容器调用内联合预测，保留共享气温/日照潜变量相关性），全部完成后由框架合并为物化输入序列，不再设依赖求解结果的跨容器外循环。
+- **单容器内部循环接口（`iteration`）**：凡含内部迭代寻优（如元启发式搜索、仿真优化或单求解器内部多轮恢复）的插件，统一在**单个临时计算容器内部**自闭环执行，并通过 `/work/out/iterations.jsonl` 专用通道逐轮追加收敛度量记录（`iteration`、`metric`、`value`、`unit: "1"`），严格受单容器总超时约束。
 
 ## 求解器内建结构加速
 

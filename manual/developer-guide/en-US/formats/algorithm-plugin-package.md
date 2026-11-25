@@ -1,50 +1,46 @@
 # Algorithm Plugin Package
 
-> Contract ID: `ies.algorithm-plugin`; Target `schema_version`: `"1.0.0"`; Manifest File: `plugin.yaml`; Filename Extension: `*.algorithm.zip`; Target Product Version: `1.1.5` (unified built-in contract & ephemeral container foundation) / `1.2.0` (single-chain replaceable handoffs, controlled build/self-test gate & open market distribution)
+> Contract ID: `ies.algorithm-plugin`; Target `schema_version`: `"1.0.0"`; Manifest File: `plugin.yaml`; Filename Extension: `*.algorithm.zip`; Target Product Version: `1.1.5` (unified built-in contract & ephemeral container foundation) / `1.2.0` (framework zero-copy handoffs, runtime engineering-solution restoration, parallel self-describing evaluators & open market distribution)
 
-The Algorithm Plugin Package defines the unified packaging and runtime contract for all computable extensions in pIES. **Both official built-in computation stages and local/market third-party plugins follow this exact contract**, executed by `backend` orchestration through the allowlisted proxy `job_runner` along a **strict single-pass unidirectional chain** (`Frozen Input → [predictor] → (generator → solver | algorithm) → [evaluator] → Result`) as network-disabled ephemeral containers—ensuring Web/API control-plane processes never load or execute user Python code.
+The Algorithm Plugin Package defines the unified packaging and runtime contract for all computable extensions in pIES. **Both official built-in computation stages and local/market third-party plugins follow this exact contract**, executed by `backend` orchestration through the allowlisted proxy `job_runner` along a **strict single-pass unidirectional pipeline** as network-disabled ephemeral containers—ensuring control-plane processes never load or execute user Python code.
 
-## Five Plugin Kinds (`kind`) and Single-Chain Handoff Contract
+## Five Plugin Kinds (`kind`) and Framework Unidirectional Handoff Protocol
 
-Each stage's output directory (`/work/out`) serves directly as the sole input directory (`/work/in`) of the immediately following stage—**cross-stage side-channel directory mounts and cross-container loops are strictly prohibited**; cross-stage mappings and frozen context travel inside explicit `passthrough` fields carried **verbatim** by intermediate stages (with standard `pies-sdk` passthrough helpers):
+The pipeline topology is fixed to:
+`Frozen Input → [predictions[]: grouped per predictor plugin in parallel] → (generator → solver → platform runtime engineering-solution restoration | algorithm) → [evaluators[]: 0..N evaluators in parallel] → Sealed Result`.
 
-| `kind` | `/work/in` Single-Chain Input | `/work/out` Single-Chain Output | Replaceable Composition & Contract IDs (`consumes` / `produces`) |
+**Framework-managed read-only handoffs**: Third-party plugins **never bear responsibility for relaying unrelated upstream files**; read-only immutable context required downstream (frozen assembly, materialized series/prices, finance/evaluation confirmations, and `generator`'s `variable_map`) is staged directly into the target stage's read-only `/work/in` directory via zero-copy hardlinks (`os.link`) by the `backend` orchestrator—preserving clean single-directory stage inputs while eliminating omitted, mutated, or re-verified passthrough files:
+
+| `kind` | `/work/in` Framework-Staged Read-Only Input | `/work/out` Plugin's Sole Output | Composition & Contract IDs (`consumes` / `produces`) |
 |---|---|---|---|
-| `predictor` | `/work/in/request.json` (all correlated `targets[]` routed to this plugin, historical series, per-target parameters) plus upstream `passthrough` | `/work/out/prediction.json`, training artifacts, and merged single-chain downstream input package | Natively supports single-pass multi-target joint prediction (preserving shared latent weather/solar correlations across load and renewables) with no solver-coupled cross-container outer loop |
-| `generator` | Frozen assembly, materialized series, calculation config, and frozen finance/evaluation context from upstream | Solver input files (e.g., `problem.mps`), declarative column-to-business-variable/unit `variable_map`, and `passthrough` (frozen `finance` & `evaluation`) | Emits a public bundle contract (e.g., `ies.solver-bundle.mps@1.0.0`) consumable by any `solver` declaring that contract |
-| `solver` | **Reads solely `generator`'s output directory** (model files, `variable_map`, `passthrough`, and solver options) | Solver-neutral canonical primal solution (`primal_solution.json`: unified status enum, objective value, column values, receipt metadata) + **verbatim** `variable_map` and `passthrough` | Consumes matching `generator` contract and emits `ies.primal-solution@1.0.0`; performs zero business unit conversion so third-party `.mps` solvers drop-in replace built-in HiGHS |
-| `algorithm` | Standardized frozen computation input package from upstream (with algorithm options and `passthrough`) | Business-unit canonical engineering solution (`solution.json`: capacities, build selections, step series, solver summary) + **verbatim** `passthrough` | Strictly replaces the `generator + solver` split, emitting `ies.engineering-solution@1.0.0` without crossing upstream `predictor` or downstream `evaluator` boundaries |
-| `evaluator` | **Reads solely the immediately preceding stage's (`solver` or `algorithm`) output directory** (never side-mounting `generator`'s directory) plus evaluator options | `/work/out/result.json` (`ComputeResult`, step series, and same-basis `ies.financial-evaluation@1.0.0` evaluation facts) | Normalizes `{primal_solution + variable_map}` and `{engineering_solution}` uniformly via `pies-sdk` and evaluates forward cash flows from `passthrough`; skipped when `CalculationConfig.evaluator` is `null` |
+| `predictor` | All correlated `targets[]` routed to this plugin, historical series, and per-target `parameters` | `/work/out/prediction.json` and training artifacts | Grouped by selected plugin within the logical prediction stage; targets sharing a plugin run jointly in one pass (preserving shared latent correlations), and the framework merges all predicted series |
+| `generator` | Frozen assembly, full materialized series, frozen finance/evaluation context, and `options.generator` | Solver model files (e.g., `problem.mps`) and declarative variable/unit mapping `variable_map` (built-in: `parameters.json` + `parameters.jsonl`) | Emits a public bundle contract (e.g., `ies.solver-bundle.mps@1.0.0`) and performs the sole forward conversion from business units to solver internal units |
+| `solver` | Solver model files from `generator` and `options.solver` (no finance or assembly files needed) | Solver-neutral canonical primal solution (`primal_solution.json`: unified status enum, objective value, column values, receipt metadata)—**never copies `variable_map` or finance files** | Consumes matching `generator` contract and emits `ies.primal-solution@1.0.0`; upon exit, **the platform runtime automatically combines `variable_map` to restore the business-unit canonical engineering solution**, letting third-party `.mps` solvers drop-in replace built-in HiGHS |
+| `algorithm` | Frozen assembly, full materialized series/prices, frozen finance/evaluation context, and `options.algorithm` | Business-unit canonical engineering solution (`solution.json`: `ies.engineering-solution@1.0.0`) | Strictly replaces `generator + solver`; emits the **exact same canonical engineering solution schema** produced after staged runtime restoration (`evaluators: []` is valid in both modes) |
+| `evaluator` | Canonical engineering solution (`ies.engineering-solution@1.0.0`) + framework-hardlinked read-only frozen context (`ValidatedAssemblyArtifact`, materialized `prices`, `EffectiveFinanceConfig`, `EvaluationInput`) + this evaluator's `parameters` | Official financial evaluator emits canonical `ies.financial-evaluation@1.0.0`; third-party evaluators emit self-describing `evaluation_report.json` (`metrics` / `charts` / `tables`) | Supports `0..N` evaluators running independently in parallel; self-describing report blocks render generically in the frontend and export automatically to Excel sheets with zero frontend code changes |
+
+### Canonical Engineering Solution (`ies.engineering-solution@1.0.0`) & Self-Describing Evaluation Blocks
+
+- **Required canonical engineering solution contents** (consumed by frontend engineering views and any downstream `evaluator`):
+  1. `construction_units`: `built` boolean and business-unit values for every `planning_variable_id` across all planning construction units in assembly;
+  2. `series` / `system_series`: contiguous full-horizon business-unit step series covering all device interfaces/variables and system variables referenced by `meter_bindings`, variable O&M, and named amounts;
+  3. `solver_summary` (termination reason, `math_status`, feasibility flag, objective value/unit) plus optional `metrics`; missing construction units or metered series required by an evaluator fail explicitly without silent zero-filling.
+- **Self-describing evaluation report block (`ies.evaluation-report@1.0.0`)**: Third-party `evaluator` plugins (such as carbon accounting, power/heat reliability, exergy efficiency, or overseas PPA finance) output self-contained titles, `metrics` (`{id, label, value, unit}`), `charts` (axis labels, units, and series arrays), and `tables` (column schemas, units, and row arrays), decoupling evaluators completely from fixed frontend financial tabs.
 
 ## ZIP Directory Layout and Dual-Form Self-Test Fixtures
 
-The archive root MUST NOT contain an extra wrapper directory and accepts regular files and directories only (symlinks, hardlinks, absolute paths, `..` traversal, case collisions, encrypted entries, and bundled `Dockerfile`s are prohibited).
-
-### Minimal Valid Layout (Local Authoring & Simple Algorithms)
-
-```text
-my-plugin/   # Pack contents at the ZIP root without this wrapper folder
-├── plugin.yaml
-├── main.py
-└── requirements.txt   # Optional; omit when using only base packages (zero-network build)
-```
-
-### Full Layout (Supporting Both Single-JSON Shorthand & Multi-File Directory `tests`)
-
-Public market submissions require `README.md`, `LICENSE`, and at least one network-free `tests` fixture. To support both lightweight plugins and multi-file `generator` / `solver` bundles cleanly, `tests` accepts both **single-file JSON shorthand** and **full `/work/in → /work/out` directory fixtures**:
+The archive root MUST NOT contain an extra wrapper directory and accepts regular files and directories only (symlinks, hardlinks, absolute paths, `..` traversal, case collisions, encrypted entries, and bundled `Dockerfile`s are prohibited). Public market submissions require `README.md`, `LICENSE`, and at least one network-free `tests` fixture, supporting both **single-file JSON shorthand** and **full `/work/in → /work/out` directory fixtures**:
 
 ```text
 plugin.yaml
-requirements.txt       # Optional; extra pure-Python dependencies
+requirements.txt       # Optional; omit when using only base packages (enforces --network=none build)
 src/
   __init__.py
   solver.py
 tests/
-  minimal_dir/         # Directory form: in/ maps verbatim to /work/in/, expected/ checks /work/out/
+  minimal_dir/         # Directory form: in/ maps to /work/in/, expected/ checks /work/out/
     in/
       problem.mps
-      variable_map.json
-      passthrough.json
     expected/
       primal_solution.json
   simple_json/         # Single-file shorthand: input.json maps to /work/in/request.json
@@ -56,9 +52,7 @@ README.md
 
 ## `plugin.yaml` Manifest
 
-The Manifest uses the YAML 1.2 safe subset. Plugins declare consumed and produced public data contract IDs via `consumes` and `produces` so cross-author plugins compose and substitute freely.
-
-### Plugin Manifest Example
+The Manifest uses the YAML 1.2 safe subset, declaring consumed and produced public data contract IDs via `consumes` and `produces`:
 
 ```yaml
 schema: ies.algorithm-plugin
@@ -115,36 +109,21 @@ extensions: {}
 | `plugin_id` / `version` | Stable namespaced ID (`ies.*` / `<publisher>.*` / local `user.<public_namespace>.*`) and three-part semantic version |
 | `kind` | Closed enum: `predictor` / `generator` / `solver` / `evaluator` / `algorithm` |
 | `compatibility` | Compatible pIES or SDK version range; mismatches fail explicitly at install and submission gates |
-| `consumes` / `produces` | Public input/output data contract IDs used by the submission gate to verify stage composition compatibility (incompatible pairs are rejected at submission without runtime guessing) |
-| `runtime` | Python version and optional relative `requirements` path; omitting `requirements` reuses `pies-plugin-base` with zero network access |
+| `consumes` / `produces` | Public input/output data contract IDs used by the submission gate to verify stage composition compatibility |
+| `runtime` | Python version and optional relative `requirements` path; omitting `requirements` reuses `pies-plugin-base` with `--network=none` |
 | `entrypoint` | Fixed `<module.path>:<public_function>` format |
-| `parameters_schema` | Inline Draft 2020-12 JSON Schema (`additionalProperties: false`) governing this stage's dedicated parameter slot (`predictions[].parameters` or `options.<kind>`) without cross-stage key collisions |
-| `resources` | Default and maximum resource requests (`cpu`, `memory_mb`, `timeout_seconds`, `process_limit`), capped by deployment policy ceilings |
-| `advanced` | **Optional advanced section**: streaming bundle flags, trusted solver binary argument templates, and **optional** `companions` restrictions (used only when genuinely coupled to a specific companion rather than hardcoding mutual IDs) |
-| `iteration` | **Optional internal-loop interface**: single-container iterative progress reporting (see below) |
+| `parameters_schema` | Inline Draft 2020-12 JSON Schema (`additionalProperties: false`) governing this plugin's dedicated parameter slot (`predictions[].parameters`, `options.<kind>`, or `evaluators[].parameters`) |
+| `resources` | Default and maximum resource requests, capped by deployment policy ceilings |
+| `advanced` | **Optional advanced section**: streaming bundle flags, trusted solver binary argument templates, and **optional** `companions` restrictions |
+| `iteration` | **Optional internal-loop interface**: single-container iterative progress reporting (appending NDJSON to `/work/out/iterations.jsonl`) |
 | `tests` | Network-free self-test fixtures (single JSON or `in/` + `expected/` directory form; required for public market submissions) |
-
-## Dedicated Internal-Loop Interface (`iteration`)
-
-Algorithms containing iterative search loops (such as metaheuristics, simulation-optimization, or intra-solver multi-round recovery) **execute self-contained inside a single ephemeral container** rather than looping across containers. Declaring `iteration` enables unified progress tracking:
-
-```yaml
-iteration:
-  enabled: true
-  max_iterations_default: 20
-  convergence_metric: max_relative_delta
-  progress_channel: /work/out/iterations.jsonl
-```
-
-- After each internal iteration, the container appends one NDJSON record (`iteration`, `metric`, `value`, `unit: "1"`, status) to `/work/out/iterations.jsonl`, bounded strictly by the single container timeout and external stop signals.
 
 ## Build Trust Boundary, Network-Disabled Self-Test, and Execution Lifecycle
 
-- **Install-time build trust boundary & network-disabled self-test gate**:
-  - Dependency-free plugins MUST build with `--network=none` directly atop `pies-plugin-base`; plugins with `requirements` build inside `job_runner`'s controlled in-memory context (zero host business mounts, zero business credentials, bounded build timeout) using optional `pip_index_url` or default PyPI (marking `build_failed` with an explicit admin-contact warning if offline dependency download fails);
+- **Install-time build trust boundary & preferred-mirror fallback**:
+  - Dependency-free plugins MUST build with `--network=none` directly atop `pies-plugin-base`; plugins with `requirements` build inside `job_runner`'s controlled in-memory context (zero host business mounts, zero business credentials, bounded build timeout); when `pip_index_url` is configured by the administrator, it acts as the **preferred primary index with fallback to default public PyPI** (`--index-url <pip_index_url> --extra-index-url https://pypi.org/simple`, using default PyPI when unset); offline download failures mark `build_failed` and surface an explicit warning instructing the user to contact the administrator;
   - Immediately after build, any declared `tests` MUST pass inside a `--network=none` container before advancing status to `ready`. `pies-sdk validate` and `pies-sdk pack` uniformly support all five plugin kinds.
-- **Runtime single-chain isolation & non-endorsement boundary**:
-  - Every stage runs as a non-root `--network=none --read-only --cap-drop=ALL` ephemeral container (read-only `/work/in`, read-write `/work/out`) cleaned up via `cleanup_stage` after valid outputs are persisted;
-  - Declared outputs undergo strict public result-contract validation prior to ingestion; **both the platform and self-test gate verify contract compliance only and never endorse mathematical optimality or engineering/financial correctness**;
-  - External digests obey the three-way boundary rule (mandatory `index.json` `sha256` match on market downloads, supplied-digest match when provided offline, archive/contract checks only on bare offline packages), with zero internal SHA-256 storage or recomputation afterward;
-  - Admin removal of `pies-plugin/*` images performs a stateless active-task check: `delete_plugin_image` executes only when zero non-terminal tasks reference that exact version, otherwise delisting for new tasks while prompting retry after in-flight runs finish.
+- **Runtime isolation, shared-truth financial evaluation & race-free stateless uninstall**:
+  - Every stage runs as a non-root `--network=none --read-only --cap-drop=ALL` ephemeral container; the official financial evaluator reuses shared `finance` domain rules for full forward evaluation on canonical engineering solutions (maintaining exact mathematical parity with the built-in generator's objective), while **the platform and self-test gate verify public contract compliance only—never re-checking physical optimality or endorsing third-party calculation correctness**;
+  - External digests obey the three-way boundary rule with zero internal SHA-256 storage afterward;
+  - Plugin disable/uninstall and new task submissions share transactional row-level locking to prevent concurrent TOCTOU races, invoking `delete_plugin_image` only when zero non-terminal tasks reference that exact version.

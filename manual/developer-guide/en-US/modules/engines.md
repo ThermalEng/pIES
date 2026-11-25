@@ -6,37 +6,28 @@
 
 ## End-to-End Computation Pipeline and Submodule Split
 
-Under the `1.1.5` target architecture, prediction (`predictor`), generation (`generator`), solving (`solver`), and result adaptation & post-solve financial evaluation (`evaluator`) follow the unified `/work/in → /work/out` contract and run as per-step network-disabled ephemeral containers orchestrated by `backend` via `job_runner`; simple third-party algorithms MAY use a unified single-step `algorithm` container before evaluation.
+Under the `1.2.0` unidirectional pipeline architecture, prediction (`predictor`), generation (`generator`), solving (`solver`), unified algorithms (`algorithm`), and parallel post-solve evaluation (`evaluator`) follow the unified `/work/in → /work/out` contract and run as per-step network-disabled ephemeral containers orchestrated by `backend` via `job_runner`, with cross-stage read-only context staged via zero-copy hardlinks by the orchestrator:
 
 ```text
 ValidatedAssemblyArtifact + CalculationConfig
-  ↓ Series Materialization (constant / data_repeat / data_full / data_predict)
-GeneratorProvider ──→ Solver Bundle ──→ SolverRuntime
-                                             ↓
-ComputeResult ←── ResultAdapter & Evaluation ←── ExecutionReceipt + Raw Outputs
-  │
-  ├─ Standalone prediction: run ephemeral predictor container once before subsequent stages
-  └─ Coupled / internal-loop algorithms: execute self-contained inside one ephemeral container via the iteration interface
+  ↓ Series Materialization (constant / data_repeat / data_full + grouped joint predictions[])
+  ├─ Staged Mode:  GeneratorProvider ──→ SolverRuntime ──→ Platform Runtime Restores Canonical Engineering Solution
+  └─ Unified Mode: Algorithm Container ──────────────────→ Emits Canonical Engineering Solution Directly
+                                                                  ↓
+        Sealed Result ←── evaluators[] (0..N independent evaluators in parallel: official finance + self-describing blocks)
 ```
 
 | Submodule | Responsibility | Non-Responsibility |
 |---|---|---|
-| Series Materialization | Materializes the four source modes into a full-horizon aligned `MaterializedSet` per project baseline | Mutating assembly or dataset versions |
-| [Generators](generators.md) | Math lowering, unit conversion, Solver Bundle emission | Accessing databases or network |
-| [Solver Runtime](solver-runtime.md) | Validates and dispatches Bundles through the container proxy inside isolated ephemeral containers to produce `ExecutionReceipt` | Interpreting device semantics or solver solutions |
-| Result Adapter & Evaluation | Maps raw outputs, receipt, and frozen finance inputs into canonical-unit `ComputeResult` and financial evaluation facts | Re-running solvers, reading live drafts |
+| Series Materialization & Prediction | Merges static sources and per-plugin grouped single-pass predictions into a full-horizon aligned `MaterializedSet` | Mutating assembly or cross-container loops |
+| [Generators](generators.md) | Math lowering, forward unit conversion, solver input & `variable_map` emission | Accessing databases or network |
+| [Solver Runtime](solver-runtime.md) | Executes solvers via the container proxy inside isolated ephemeral containers to emit canonical primal solutions and `ExecutionReceipt` | Interpreting device semantics, converting units, or relaying business files |
+| Runtime Restoration & Parallel Evaluators | Restores business-unit canonical engineering solutions via `variable_map`; runs `0..N` parallel `evaluator` plugins producing financial facts or self-describing report blocks | Re-running solvers, reading live drafts, or certifying third-party optimality |
 
-## Prediction Orchestration and Internal-Loop Interface
+## Per-Plugin Grouped Prediction and Intra-Container Loop Interface
 
-Task execution picks its path from the selected predictor descriptor's public `depends_on_solve_result` flag and manifest `iteration` declaration:
-
-- **Standalone prediction (`false`)**: Trains and generates series once inside an isolated ephemeral `predictor` container before generation and holds them constant throughout;
-- **Coupled / internal-loop algorithms (`true` or `iteration.enabled: true`)**: `predict(previous=...)` and companion solving/iterative logic execute **self-contained inside a single ephemeral container** (`None` on iteration 1 and read-only outputs thereafter) until every coupled target meets `CalculationConfig.convergence.tolerance` or reaches `max_iterations` (preserving actual convergence status and final solution if unconverged), emitting per-round convergence metrics to `/work/out/iterations.jsonl`.
-
-### Prediction Parameters and Convergence Capabilities
-
-- **Parameter validation**: Prediction Providers expose `validate_parameters(parameters)` invoked at calculation config save and task submission boundaries; execution directly consumes the frozen parameters.
-- **Convergence metrics**: Coupled predictors MUST implement pure function `measure_convergence(previous_prediction, current_prediction, previous_outputs, current_outputs, parameters)` returning an immutable `PredictionConvergence` (`metric` ID, non-negative finite `value`, dimensionless unit `"1"`); when multiple targets coexist, total convergence error equals the maximum across targets. Iteration 1 has no predecessor and never fabricates zero error.
+- **Grouped & joint multi-target prediction**: At config save and task submission, `predictions[].parameters` validates independently against each predictor plugin's `parameters_schema`. At runtime, targets group by selected `predictor` plugin within the logical prediction stage so correlated targets run jointly in one container pass (preserving shared latent weather/solar correlations) before the framework merges all predicted series, with no solver-coupled cross-container outer loop.
+- **Intra-container loop interface (`iteration`)**: Plugins containing internal iterative search (metaheuristics, simulation-optimization, or intra-solver recovery) execute **self-contained inside one ephemeral container**, appending per-round convergence metrics (`iteration`, `metric`, `value`, `unit: "1"`) to `/work/out/iterations.jsonl` under the single container timeout.
 
 ## Solver-Embedded Structural Acceleration
 

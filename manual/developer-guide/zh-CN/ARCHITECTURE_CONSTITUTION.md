@@ -147,13 +147,13 @@ schema、字段、公式与聚合枚举以 [装配与检查](modules/assembly.md
 
 计算职责必须保持三个清晰边界：
 
-- `GeneratorProvider` 直接接受已签发的 `ValidatedAssemblyArtifact`、按装配实例固定的设备数学贡献、已物化的全周期输入序列、不可变 `EffectiveFinanceConfig`、经过公开输入校验的 `CalculationConfig`，以及已确认并冻结的评价输入，在生成计算包时确定性生成求解输入、声明式变量/单位映射（`variable_map`）与跨链透传上下文（`passthrough`）；输入按职责分别传递，不为维持参数数量而混装，也不再建立外层包装或第二份业务事实；
-- `SolverRuntime` 执行受控求解命令，产出求解器无关的标准原变量解与 `ExecutionReceipt`，并将上游跨链字段（`variable_map`、`passthrough`）原样透传至出口目录；
-- `ResultAdapter` / 后期 `Evaluator` 仅读取紧邻上一环节（`solver` 或一体化 `algorithm`）的出口文件，依据透传映射或标准工程解完成反向单位换算并结合冻结财务/评价上下文生成带 `schema`/`schema_version` 的 `ComputeResult` 与评价事实。
+- `GeneratorProvider` 直接接受已签发的 `ValidatedAssemblyArtifact`、按装配实例固定的设备数学贡献、已物化的全周期输入序列、不可变 `EffectiveFinanceConfig`、经过公开输入校验的 `CalculationConfig`，以及已确认并冻结的评价输入，确定性生成求解输入与声明式变量/单位映射（`variable_map`）；输入按职责分别传递，不为维持参数数量而混装，也不再建立外层包装或第二份业务事实；
+- `SolverRuntime` 执行受控求解命令，仅负责产出求解器无关的标准原变量解与 `ExecutionReceipt`，不搬运无关业务文件；
+- `ResultAdapter`（平台底座结果还原）将分步模式的 `variable_map`、回执与标准原变量解还原为业务单位标准工程解（与一体化 `algorithm` 直出的标准工程解完全同构）；下游 `Evaluator` 仅只读标准工程解及框架提供的冻结上下文，产出标准财务评价事实或自描述评价报告块（`metrics` / `charts` / `tables`）。
 
-内置与第三方计算能力统一遵循同一插件与**严格单趟单向单链**目录交接契约（`/work/in → /work/out`，即 `冻结输入 → [predictor] → (generator → solver | algorithm) → [evaluator] → 结果`），由 `backend` 协调拉起断网临时计算容器执行：上一环节的出口文件即为紧邻下一环节的唯一进口文件，禁止跨级旁路挂载上游目录，禁止跨容器往返循环；需要跨环节传递的信息统一通过显式字段由中间环节原样透传。`predictor` 原生支持多目标同源单趟联合预测；含内部迭代寻优的算法通过专用 `iteration` 接口在单个临时容器内闭环完成。
+内置与第三方计算能力统一遵循同一插件与**严格单趟单向流水线**契约（`/work/in → /work/out`）：`冻结输入 → [predictions[]: 同层按插件分组执行（支持多目标同源联合预测）] → (generator → solver → 底座自动还原工程解 | algorithm) → [evaluators[]: 0..N 个独立评价器并联执行] → 最终封存结果`。跨环节所需的只读不可变上下文统一由调度框架通过硬链接零拷贝组装进目标环节的只读 `/work/in`，禁止让插件手工搬运无关文件，禁止跨容器往返循环；含内部迭代寻优的算法通过专用 `iteration` 接口在单个临时容器内闭环完成。
 
-GeneratorProvider 是业务单位到求解器内部单位的唯一正向转换边界，下游结果适配/评价读取层是反向换算的唯一边界；各环节独立选项在任务提交冻结时按环节分槽固定。SolverRuntime 不读取装配语义、不判断设备类型、不执行业务单位换算、不补数据或切换 solver。
+GeneratorProvider 是业务单位到求解器内部单位的唯一正向转换边界，平台底座结果还原层是反向换算的唯一边界；各环节独立参数在任务提交冻结时按各自槽位固定。SolverRuntime 不读取装配语义、不判断设备类型、不执行业务单位换算、不补数据或切换 solver。
 
 计算模块禁止：
 

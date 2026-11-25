@@ -40,25 +40,25 @@ Device descriptors originate solely from [Device Model YAML](formats/device-mode
 3. Solver-independent output variables, constraints, and mapping metadata;
 4. Coordinated updates to generic generator lowering and contract tests.
 
-## Computation Provider Architecture
+## Computation Stages and Plugin Architecture
 
-Computation decouples mathematical formulation from process execution across three independent roles:
+Computation decouples mathematical formulation, solver execution, and multi-dimensional evaluation across isolated container stages and platform runtime restoration (see [Algorithm Plugin Package](formats/algorithm-plugin-package.md) and [Models and Algorithms](customization-center.md)):
 
-- **`GeneratorProvider`**: Directly consumes issued `ValidatedAssemblyArtifact`, device math contributions, materialized full-horizon series, `EffectiveFinanceConfig`, `CalculationConfig`, and frozen evaluation confirmation; performs the sole business-to-solver-unit conversion; and deterministically produces a [Solver Bundle](formats/solver-bundle.md).
-- **`ExecutorProvider`**: Maintains the trusted executable allowlist, argument and environment filtering rules, and resource/network isolation policies; executes structured commands inside the Bundle; and returns an `ExecutionReceipt`.
-- **`ResultAdapterProvider`**: Consumes the read-only Bundle, receipt, and raw solver outputs, restoring solver status, objective, variables, and financial facts into a `ComputeResult` with canonical business units.
+- **Prediction & core optimization plugins (`predictor` / `generator` / `solver` / `algorithm`)**: `predictor` plugins group targets by selected plugin in one logical stage (supporting joint multi-target prediction); `generator` performs the sole forward conversion from business units to solver internal units and emits solver inputs plus `variable_map`; `solver` consumes model files only and emits a solver-neutral canonical primal solution; `algorithm` skips the `generator + solver` split to emit a business-unit canonical engineering solution directly.
+- **Platform runtime solution restoration (`ResultAdapter`)**: Automatically combines `variable_map` and the execution receipt right after staged `solver` completion to execute the sole reverse unit conversion into the same canonical engineering solution schema emitted by `algorithm`.
+- **Parallel evaluation plugins (`evaluator`)**: `0..N` independent evaluators run in parallel against the read-only canonical engineering solution and framework-hardlinked frozen context; the official built-in financial evaluator emits standard financial evaluation facts, while third-party evaluators output self-describing `metrics` / `charts` / `tables` blocks rendered generically by the frontend.
 
-Each Provider declares supported schemas, modes, capability sets, an Options JSON Schema (Draft 2020-12), and companion dependency versions through its Descriptor.
+Each plugin declares public `consumes` / `produces` data contract IDs, supported modes/precisions, and its dedicated `parameters_schema` (Draft 2020-12) in `plugin.yaml`, allowing drop-in replacement without composition-root code edits or hardcoded mutual plugin IDs.
 
 ## Storage and External Data Sources
 
 - **Storage adapters**: Encapsulate only raw blob read/write/delete and existence/size queries; object identity, owner reference manifests, retention policies, and crash reconciliation belong to the `storage` domain service.
 - **External time-series data**: Weather, load, and price data pass format and unit validation first to become immutable dataset versions or price objects before binding in assembly or finance files; data preparation preserves original source resolution and contiguous `step` indices without implicit interpolation or resampling.
 
-## Standard Workflow for Developing a New Provider
+## Standard Workflow for Developing a New Extension
 
-1. Identify the target owning module and single Provider role, and assign a stable namespaced ID and semantic version;
-2. Implement the module's public `Protocol` and Descriptor (including options schema and self-check method);
-3. Verify valid inputs, invalid inputs, unit boundaries, and determinism using the module's contract test suite;
-4. Register the candidate Provider in the composition root and verify dependency resolution and partial-failure rollback;
-5. Prove via end-to-end tests that integration succeeds without modifying API, assembly, or frontend type maps.
+1. Choose the extension category (declarative `ies.device-model` YAML, one of the five `ies.algorithm-plugin` kinds, or an internal storage adapter) and assign a stable namespaced ID (plus three-part semver for plugins);
+2. Author `plugin.yaml` (declaring `consumes`/`produces`, `parameters_schema`, and network-free `tests` fixtures) and implement the entrypoint against public `pies-sdk` only;
+3. Run `pies-sdk validate` and `pies-sdk pack` to verify archive safety, I/O contracts, unit boundaries, and deterministic offline self-tests;
+4. Import offline into a local instance or submit to the public market (passing `job_runner`'s controlled build and `--network=none` self-test gate);
+5. Verify via end-to-end tasks that replacement or parallel evaluation works without modifying backend scheduling, API routes, or frontend UI code.
