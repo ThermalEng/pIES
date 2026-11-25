@@ -266,7 +266,7 @@
       "payments_applied": [
         {
           "amount": "1000.0",
-          "ratio": 1.0,
+          "ratio": "1",
           "t": 0
         }
       ],
@@ -309,6 +309,13 @@
             "last_usable_year": 1,
             "rule": "cit",
             "vintage_id": "v0",
+            "year": 1
+          },
+          {
+            "amount": "0",
+            "last_usable_year": 3,
+            "rule": "cit",
+            "vintage_id": "v1",
             "year": 1
           }
         ],

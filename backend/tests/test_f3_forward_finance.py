@@ -59,6 +59,10 @@ _MONEY_TOL = 1e-6
 
 def _assert_eval_close(actual: Any, expected: Any, *, path: str = "root") -> None:
     """Recursively assert exact literals and numerically equal Decimal money strings."""
+    if path.startswith("root.payments_applied[") and path.endswith("].ratio"):
+        # F3 preserves canonical string payment.ratio ("1", "0.4") while 1.1.5 emits JSON float.
+        assert Decimal(str(actual)) == Decimal(str(expected)), f"{path}: {actual!r} != {expected!r}"
+        return
     if isinstance(expected, dict):
         assert isinstance(actual, dict), f"{path}: expected dict, got {type(actual).__name__}"
         assert set(actual.keys()) == set(expected.keys()), (
@@ -762,8 +766,8 @@ def _complex_finance_case(
         operation_years=2,
         discount_rate=0.08,
         construction_payments=(
-            ConstructionPayment(t=0, ratio=0.4),
-            ConstructionPayment(t=1, ratio=0.6),
+            ConstructionPayment(t=0, ratio="0.4"),
+            ConstructionPayment(t=1, ratio="0.6"),
         ),
         maintenance_expenses=(
             MaintenanceExpense(
@@ -979,7 +983,7 @@ def test_pure_forward_finance_synthetic_solution_without_highs() -> None:
                 "cap_v": {"device_ref": "g", "parameter": "cap_kw", "unit": "kW"},
             },
             "construction_units": {
-                "u_g": {"device_ref": "g", "mode": "mandatory", "scales": ["cap_v"]},
+                "u_g": {"device_ref": "g", "mode": "mandatory", "scales": {"cap_v": {}}},
             },
             "constraints": {},
         },
@@ -1018,23 +1022,30 @@ def test_pure_forward_finance_synthetic_solution_without_highs() -> None:
         "system_series": {},
     }
 
-    evaluation = EvaluationInput(
-        evaluation_years=1,
-        construction_period=0,
-        operation_years=1,
-        discount_rate=0.0,
-        construction_payments=(ConstructionPayment(t=0, ratio=1.0),),
-        maintenance_expenses=(),
+    # Use canonical frozen evaluation dict with string ratio via parse_evaluation_input
+    from iesplan.tasks.contracts import parse_evaluation_input
+
+    parsed_eval = parse_evaluation_input(
+        {
+            "evaluation_years": 1,
+            "construction_period": 0,
+            "operation_years": 1,
+            "discount_rate": 0.0,
+            "construction_payments": [{"t": 0, "ratio": 1}],
+            "maintenance_expenses": [],
+        }
     )
+    assert parsed_eval.construction_payments[0].ratio == "1"
 
     out = evaluate_forward_finance(
         solution,
         artifact=assembly_doc,
         finance=finance,
-        evaluation=evaluation,
+        evaluation=parsed_eval,
     )
     # Construction = 200 + 80 * 10 = 1000
     assert Decimal(out["construction_total"]) == Decimal("1000")
+    assert out["payments_applied"] == [{"t": 0, "ratio": "1", "amount": "1000.0"}]
     assert Decimal(out["annual_fixed_om"]) == Decimal("30")
     # Energy = 8760 * 1 = 8760; Variable OM = 876; Fixed OM = 30; Demand = 12 * 2 = 24
     op0 = out["annual_operation"][0]
@@ -1054,9 +1065,384 @@ def test_pure_forward_finance_synthetic_solution_without_highs() -> None:
     assert len(out["monthly_demand"]) == 12
     assert all(Decimal(row["peak_power"]) == Decimal("1") for row in out["monthly_demand"])
 
+    # Also verify non-validating frozen dict reconstruction works with string ratio
+    frozen_eval = {
+        "evaluation_years": 1,
+        "construction_period": 0,
+        "operation_years": 1,
+        "discount_rate": 0.0,
+        "construction_payments": [{"t": 0, "ratio": "1"}],
+        "maintenance_expenses": [],
+    }
+    out_frozen = evaluate_forward_finance(
+        solution,
+        artifact=assembly_doc,
+        finance=finance.to_dict(),
+        evaluation=frozen_eval,
+    )
+    assert out_frozen["payments_applied"] == out["payments_applied"]
+    assert out_frozen["annual_net_flows"] == out["annual_net_flows"]
+
+    # Omission of planned variable / construction unit must raise, never fall back to property default
+    missing_scale_sol = deepcopy(solution)
+    missing_scale_sol["construction_units"][0]["scales"] = []
+    with pytest.raises(KeyError, match="cap_v"):
+        evaluate_forward_finance(
+            missing_scale_sol, artifact=assembly_doc, finance=finance, evaluation=parsed_eval
+        )
+
+    missing_unit_sol = deepcopy(solution)
+    missing_unit_sol["construction_units"] = []
+    with pytest.raises(KeyError, match="u_g"):
+        evaluate_forward_finance(
+            missing_unit_sol, artifact=assembly_doc, finance=finance, evaluation=parsed_eval
+        )
+
+    # Truncated hourly series must raise, never silently undercount annual operation
+    truncated_sol = deepcopy(solution)
+    truncated_sol["series"]["g.out_e"]["values"] = [1.0]
+    with pytest.raises(ValueError, match="8760"):
+        evaluate_forward_finance(
+            truncated_sol, artifact=assembly_doc, finance=finance, evaluation=parsed_eval
+        )
+
     # Infeasible solution rejected explicitly
     bad_sol = deepcopy(solution)
     bad_sol["solver_summary"]["has_feasible_solution"] = False
     bad_sol["solver_summary"]["math_status"] = "infeasible"
     with pytest.raises(ValueError, match="仅支持可行"):
-        evaluate_forward_finance(bad_sol, artifact=assembly_doc, finance=finance, evaluation=evaluation)
+        evaluate_forward_finance(bad_sol, artifact=assembly_doc, finance=finance, evaluation=parsed_eval)
+
+
+def test_forward_finance_reconciles_zero_realized_loss_sign_crossing_base(tmp_path: Path) -> None:
+    """Sign-crossing taxable base (base_lo < 0, realized base > 0) retains zero-balance v0 like 1.1.5."""
+    init_registry()
+    device_contribs = {}
+    for dev_doc in list_devices():
+        built_dev = build_math_contribution(dev_doc)
+        assert built_dev.ok, (dev_doc.device.id, built_dev.diagnostics)
+        device_contribs[dev_doc.device.id] = built_dev.contribution
+
+    profile_payload = {
+        "schema": "ies.finance-profile",
+        "schema_version": "1.0.0",
+        "profile": {
+            "id": "zero-loss-sign-cross",
+            "region": "CN-North",
+            "currency": "CNY",
+            "base_year": 2025,
+            "price_basis": "tax_inclusive",
+            "cost_method": "fixed_plus_linear",
+        },
+        "finance_types": {
+            "grid_ft": {
+                "upfront_capex": {"linear": {"cap": {"unit_cost": _money("10", "CNY/kW")}}},
+                "annual_fixed_om": {"fixed": _money("50", "CNY/a")},
+            },
+        },
+        "energy_prices": {
+            "elec_sell": {
+                "carrier": "electricity",
+                "direction": "sale",
+                "kind": "constant",
+                "value": _money("1.0", "CNY/kWh"),
+            }
+        },
+        "demand_charges": {},
+        "taxes": {
+            "income_tag": {
+                "display_name": "CIT",
+                "tax_type": "income_tax",
+                "applies_to": "grid_ft.upfront_capex",
+            }
+        },
+        "credit_pools": {},
+        "tax_rules": {
+            "cit": {
+                "kind": "income_tax",
+                "label_ref": "income_tag",
+                "rate": _money("0.25", "1"),
+                "revenue": ["elec_sell"],
+                "energy_cost": [],
+                "annual_om": ["grid_ft.annual_fixed_om"],
+                "variable_om": [],
+                "deductible_maintenance": {"mode": "explicit_items", "items": []},
+                "depreciation": [],
+                "loss_carryforward_years": 2,
+                "opening_losses": [],
+            }
+        },
+        "net_cashflows": {},
+    }
+    finance = merge_effective(
+        FinanceProfile.from_dict(profile_payload), _empty_overrides("zero-loss-sign-cross")
+    )
+    assembly_yaml = """schema: ies.assembly
+schema_version: "1.0.0"
+assembly:
+  id: zero_loss_sign_cross
+  name: Zero Loss Sign Cross
+project_baseline:
+  resolution: 1h
+  start_year: 2025
+  scenario_mode: single
+devices:
+  grid:
+    definition:
+      id: ies.device.grid_connection
+    asset_origin: new
+    properties:
+      max_import_power_kw:
+        value: 0
+        unit: kW
+      max_export_power_kw:
+        value: 20
+        unit: kW
+    predefined_interfaces: {}
+  load:
+    definition:
+      id: ies.device.electric_load
+    asset_origin: existing
+    properties:
+      peak_power_kw:
+        value: 10
+        unit: kW
+    predefined_interfaces:
+      electricity_demand:
+        mode: constant
+        value: 5
+connections:
+  e_export:
+    from: load.electricity_in
+    to: grid.electricity_export
+finance:
+  ref:
+    kind: object
+    object_id: fin:zero-cross
+  profile_id: zero-loss-sign-cross
+finance_binding:
+  instances:
+    grid:
+      type: costed
+      finance_type: grid_ft
+      drivers:
+        cap:
+          property: max_export_power_kw
+    load:
+      type: none
+tariff_bindings:
+  sell_e:
+    instance: grid
+    interface: electricity_export
+    aggregation: integrate_positive
+    price: elec_sell
+demand_bindings: {}
+planning:
+  objective:
+    sense: maximize
+    expression: system.after_tax_npv
+  variables:
+    v_cap:
+      device_ref: grid
+      parameter: max_export_power_kw
+      unit: kW
+      lower_bound: "10"
+      upper_bound: "10"
+  construction_units:
+    u_grid:
+      device_ref: grid
+      mode: mandatory
+      scales:
+        v_cap:
+          active_lower_bound: "10"
+          active_upper_bound: "10"
+  constraints: {}
+outputs:
+  series:
+    - grid.electricity_export
+  metrics: []
+extensions: {}
+"""
+    # Replace fixed load with expandable PV ([0, 10] kWp) so base_lo < 0 (-50 fixed OM)
+    # while optimal realized taxable_base > 0 (+~87k sale revenue), matching 1.1.5 v0 retention.
+    pv_yaml = (
+        assembly_yaml.replace(
+            """  load:
+    definition:
+      id: ies.device.electric_load
+    asset_origin: existing
+    properties:
+      peak_power_kw:
+        value: 10
+        unit: kW
+    predefined_interfaces:
+      electricity_demand:
+        mode: constant
+        value: 5
+connections:
+  e_export:
+    from: load.electricity_in
+    to: grid.electricity_export""",
+            """  pv1:
+    definition:
+      id: ies.device.pv
+    asset_origin: new
+    properties:
+      rated_capacity_kwp:
+        value: 10
+        unit: kWp
+    predefined_interfaces:
+      solar_irradiance:
+        mode: constant
+        value: 1000
+      ambient_temperature:
+        mode: constant
+        value: 25
+connections:
+  e_export:
+    from: pv1.electric_out
+    to: grid.electricity_export""",
+        )
+        .replace(
+            """    load:
+      type: none""",
+            """    pv1:
+      type: none""",
+        )
+        .replace(
+            """    v_cap:
+      device_ref: grid
+      parameter: max_export_power_kw
+      unit: kW
+      lower_bound: "10"
+      upper_bound: "10"
+  construction_units:
+    u_grid:
+      device_ref: grid
+      mode: mandatory
+      scales:
+        v_cap:
+          active_lower_bound: "10"
+          active_upper_bound: "10\"""",
+            """    v_cap:
+      device_ref: grid
+      parameter: max_export_power_kw
+      unit: kW
+      lower_bound: "10"
+      upper_bound: "10"
+    v_pv:
+      device_ref: pv1
+      parameter: rated_capacity_kwp
+      unit: kWp
+      lower_bound: "0"
+      upper_bound: "10"
+  construction_units:
+    u_grid:
+      device_ref: grid
+      mode: mandatory
+      scales:
+        v_cap:
+          active_lower_bound: "10"
+          active_upper_bound: "10"
+    u_pv:
+      device_ref: pv1
+      mode: mandatory
+      scales:
+        v_pv:
+          active_lower_bound: "0"
+          active_upper_bound: "10\"""",
+        )
+    )
+    res = validate_assembly_text(pv_yaml, finance_snapshots={"fin:zero-cross": finance})
+    assert res.artifact is not None, res.diagnostics
+    artifact = res.artifact
+    models = {
+        "grid": device_contribs["ies.device.grid_connection"],
+        "pv1": device_contribs["ies.device.pv"],
+    }
+    materialized = MaterializedSet(
+        operation_years=1,
+        series=(
+            MaterializedSeries(
+                device="pv1",
+                interface="solar_irradiance",
+                mode="constant",
+                resolution="1h",
+                point_count=8760,
+                values=(1000.0,) * 8760,
+                source={"kind": "constant"},
+            ),
+            MaterializedSeries(
+                device="pv1",
+                interface="ambient_temperature",
+                mode="constant",
+                resolution="1h",
+                point_count=8760,
+                values=(25.0,) * 8760,
+                source={"kind": "constant"},
+            ),
+        ),
+        prices=(),
+    )
+    from iesplan.tasks.contracts import parse_evaluation_input
+
+    evaluation = parse_evaluation_input(
+        {
+            "evaluation_years": 1,
+            "construction_period": 0,
+            "operation_years": 1,
+            "discount_rate": 0.08,
+            "construction_payments": [{"t": 0, "ratio": 1}],
+            "maintenance_expenses": [],
+        }
+    )
+    target_bundle = generate_target_highs_bundle(
+        artifact, models, materialized, finance, _target_campus_config(), evaluation
+    )
+    solution = _solve_target_bundle_to_solution(target_bundle, tmp_path / "t")
+    legacy_cfg = _campus_inputs()[4]
+    expected = _run_legacy_115_evaluation(
+        artifact, models, materialized, finance, legacy_cfg, evaluation, tmp_path / "l"
+    )
+    actual = evaluate_forward_finance(
+        solution,
+        artifact=artifact,
+        finance=finance,
+        evaluation=evaluation,
+        materialized=materialized,
+        device_models=models,
+    )
+    assert Decimal(actual["tax_cash"]["income"][0]["taxable_base"]) > Decimal("0")
+    assert Decimal(actual["tax_cash"]["income"][0]["loss_generated"]) == Decimal("0")
+    assert expected["tax_cash"]["loss_balances"] == [
+        {
+            "rule": "cit",
+            "vintage_id": "v0",
+            "year": 1,
+            "last_usable_year": 3,
+            "amount": "0.0",
+        }
+    ]
+    _assert_eval_close(actual, expected)
+
+
+def test_finance_package_has_no_assembly_or_domain_imports() -> None:
+    """Architecture check: iesplan.finance must not import assembly/computation/modeling/devices."""
+    import ast
+
+    finance_dir = Path(__file__).resolve().parent.parent / "iesplan" / "finance"
+    forbidden = ("assembly", "computation", "modeling", "devices", "planning", "tasks", "results")
+    for py_file in sorted(finance_dir.glob("*.py")):
+        tree = ast.parse(py_file.read_text(encoding="utf-8"), filename=str(py_file))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    for mod in forbidden:
+                        assert not alias.name.startswith(f"iesplan.{mod}"), (
+                            f"{py_file.name}: forbidden import {alias.name}"
+                        )
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                for mod in forbidden:
+                    assert not node.module.startswith(f"iesplan.{mod}"), (
+                        f"{py_file.name}: forbidden import from {node.module}"
+                    )

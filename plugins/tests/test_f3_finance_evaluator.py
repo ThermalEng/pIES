@@ -214,7 +214,7 @@ def _evaluation_to_dict(ev: EvaluationInput) -> dict[str, Any]:
         "construction_period": ev.construction_period,
         "operation_years": ev.operation_years,
         "discount_rate": ev.discount_rate,
-        "construction_payments": [{"t": p.t, "ratio": p.ratio} for p in ev.construction_payments],
+        "construction_payments": [{"t": p.t, "ratio": str(p.ratio)} for p in ev.construction_payments],
         "maintenance_expenses": [],
         "comparison": ev.comparison.to_dict(),
     }
@@ -268,6 +268,9 @@ def test_gate4_evaluator_finance_zero_forbidden_deps_and_zero_sha256() -> None:
         source = py_file.read_text(encoding="utf-8")
         assert "sha256" not in source.lower(), f"Forbidden SHA-256 reference in {py_file}"
         assert "hashlib" not in source, f"Forbidden hashlib usage in {py_file}"
+        assert "validate_assembly_text" not in source, (
+            f"Frozen evaluator stage must not repeat submission validation in {py_file}"
+        )
 
         tree = ast.parse(source, filename=str(py_file))
         for node in ast.walk(tree):
@@ -606,5 +609,82 @@ def test_f3_rejects_infeasible_solution_and_missing_frozen_inputs(tmp_path: Path
             manifest_path=EVAL_FINANCE_MANIFEST,
             work_in=missing_in,
             work_out=missing_out,
+            pies_version="1.2.0",
+        )
+
+
+def test_f3_rejects_omitted_truncated_or_unit_mismatched_solution_and_loads_frozen_yaml(
+    tmp_path: Path,
+) -> None:
+    """Reject incomplete/truncated/mismatched solutions at boundary; load frozen assembly.yaml."""
+    from pies_sdk import dump_safe_yaml
+
+    minimal_in = EVAL_FINANCE_DIR / "tests" / "minimal" / "in"
+    base_sol = read_json_file(minimal_in / "solution.json")
+    expected = read_json_file(EVAL_FINANCE_DIR / "tests" / "minimal" / "expected" / "result.json")
+
+    def _run_case(name: str, mutate_sol: Any, *, use_yaml: bool = False) -> None:
+        in_dir = tmp_path / f"{name}_in"
+        out_dir = tmp_path / f"{name}_out"
+        in_dir.mkdir()
+        for fname in ("finance.json", "evaluation.json"):
+            shutil.copy(minimal_in / fname, in_dir / fname)
+        if use_yaml:
+            (in_dir / "assembly.yaml").write_text(
+                dump_safe_yaml(read_json_file(minimal_in / "assembly.json")),
+                encoding="utf-8",
+            )
+        else:
+            shutil.copy(minimal_in / "assembly.json", in_dir / "assembly.json")
+        sol = deepcopy(base_sol)
+        mutate_sol(sol)
+        write_engineering_solution(in_dir / "solution.json", sol)
+        run_plugin(
+            manifest_path=EVAL_FINANCE_MANIFEST,
+            work_in=in_dir,
+            work_out=out_dir,
+            pies_version="1.2.0",
+        )
+        if use_yaml:
+            assert read_compute_result(out_dir).to_dict()["outputs"] == expected["outputs"]
+
+    # 0) Frozen assembly.yaml loads without repeating submission validation
+    _run_case("frozen_yaml", lambda _s: None, use_yaml=True)
+
+    # 1) Omitted required construction_unit
+    with pytest.raises(StageIOError, match="construction_units mismatch"):
+        _run_case("missing_unit", lambda s: s.__setitem__("construction_units", []))
+
+    # 2) Omitted required planning scale inside construction_unit
+    with pytest.raises(StageIOError, match="planning variables mismatch"):
+        _run_case("missing_scale", lambda s: s["construction_units"][0].__setitem__("scales", []))
+
+    # 3) Omitted required financial series
+    with pytest.raises(StageIOError, match="missing required financial series"):
+        _run_case("missing_series", lambda s: s.__setitem__("series", {}))
+
+    # 4) Truncated horizon series (1 step instead of 8760)
+    with pytest.raises(StageIOError, match="expected_steps"):
+        _run_case(
+            "truncated_series",
+            lambda s: s["series"]["g.out_e"].__setitem__("values", [1.0]),
+        )
+
+    # 5) Device interface unit mismatch when device_models is provided
+    bad_unit_in = tmp_path / "bad_unit_in"
+    bad_unit_out = tmp_path / "bad_unit_out"
+    bad_unit_in.mkdir()
+    for fname in ("assembly.json", "finance.json", "evaluation.json"):
+        shutil.copy(minimal_in / fname, bad_unit_in / fname)
+    write_json_file(
+        bad_unit_in / "device_models.json",
+        {"g": {"interfaces": {"out_e": {"unit": "MW"}}}},
+    )
+    write_engineering_solution(bad_unit_in / "solution.json", base_sol)
+    with pytest.raises(StageIOError, match="unit mismatch"):
+        run_plugin(
+            manifest_path=EVAL_FINANCE_MANIFEST,
+            work_in=bad_unit_in,
+            work_out=bad_unit_out,
             pies_version="1.2.0",
         )

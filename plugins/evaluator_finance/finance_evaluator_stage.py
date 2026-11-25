@@ -3,19 +3,32 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import fields, is_dataclass
 from pathlib import Path
 from typing import Any
 
-from iesplan.assembly import ValidatedAssemblyArtifact, validate_assembly_text
-from iesplan.finance import EffectiveFinanceConfig, EvaluationInput, evaluate_forward_finance
+from iesplan.assembly import ValidatedAssemblyArtifact
+from iesplan.core.contracts import horizon_point_count
+from iesplan.finance import (
+    EffectiveFinanceConfig,
+    EvaluationInput,
+    evaluate_forward_finance,
+)
+from iesplan.finance.triplet import AmountReference
 from pies_sdk import (
     ComputeResultPayload,
+    EngineeringSolutionExpectation,
+    EngineeringSolutionPayload,
+    ExpectedConstructionUnit,
+    ExpectedDeviceSeries,
+    ExpectedSystemSeries,
     StageContext,
     StageIOError,
     load_safe_yaml,
     read_engineering_solution,
     read_json_file,
+    validate_engineering_solution_completeness,
 )
 
 from pies_builtin_plugins.stage_io import (
@@ -45,13 +58,10 @@ def _load_artifact(
 
     yaml_path = work_in / "assembly.yaml"
     if yaml_path.is_file():
-        validated = validate_assembly_text(
-            yaml_path.read_text(encoding="utf-8"),
-            package_dir=work_in,
-        )
-        if not validated.ok or validated.artifact is None:
-            raise StageIOError("evaluator_finance /work/in assembly.yaml failed validation")
-        return validated.artifact
+        parsed = load_safe_yaml(yaml_path.read_text(encoding="utf-8"))
+        if not isinstance(parsed, Mapping):
+            raise StageIOError("evaluator_finance /work/in assembly.yaml must be a mapping")
+        return parsed
 
     raise KeyError(
         "evaluator_finance /work/in missing 'artifact' in request.json, "
@@ -59,14 +69,178 @@ def _load_artifact(
     )
 
 
-def _artifact_resolution(artifact: ValidatedAssemblyArtifact | Mapping[str, Any]) -> str:
+def _artifact_doc(artifact: ValidatedAssemblyArtifact | Mapping[str, Any]) -> Mapping[str, Any]:
     if isinstance(artifact, ValidatedAssemblyArtifact):
-        doc = json.loads(artifact.canonical_text)
-    elif "canonical_text" in artifact:
-        doc = json.loads(str(artifact["canonical_text"]))
-    else:
-        doc = artifact
-    return str(doc["project_baseline"]["resolution"])
+        return json.loads(artifact.canonical_text)
+    if "canonical_text" in artifact:
+        return json.loads(str(artifact["canonical_text"]))
+    return artifact
+
+
+def _iter_system_series_refs(node: object) -> Iterable[AmountReference]:
+    if isinstance(node, AmountReference):
+        if node.kind == "system_series":
+            yield node
+        return
+    if is_dataclass(node):
+        for dc_field in fields(node):
+            yield from _iter_system_series_refs(getattr(node, dc_field.name))
+        return
+    if isinstance(node, Mapping):
+        for val in node.values():
+            yield from _iter_system_series_refs(val)
+        return
+    if isinstance(node, (tuple, list)):
+        for item in node:
+            yield from _iter_system_series_refs(item)
+
+
+def _predefined_series_keys(
+    materialized: Any,
+    device_series: Any,
+) -> set[tuple[str, str]]:
+    keys: set[tuple[str, str]] = set()
+    if materialized is not None:
+        for entry in getattr(materialized, "series", ()) or ():
+            keys.add((str(entry.device), str(entry.interface)))
+    if isinstance(device_series, Mapping):
+        for key in device_series:
+            if isinstance(key, tuple) and len(key) == 2:
+                keys.add((str(key[0]), str(key[1])))
+    elif isinstance(device_series, Sequence) and not isinstance(device_series, (str, bytes)):
+        for entry in device_series:
+            if isinstance(entry, Mapping):
+                keys.add((str(entry["device"]), str(entry["interface"])))
+            else:
+                keys.add((str(entry.device), str(entry.interface)))
+    return keys
+
+
+def _device_interface_units(raw_models: Mapping[str, Any] | None) -> dict[tuple[str, str], str]:
+    units: dict[tuple[str, str], str] = {}
+    if not raw_models:
+        return units
+    for inst, contrib in raw_models.items():
+        if not isinstance(contrib, Mapping):
+            continue
+        interfaces = contrib.get("interfaces") or {}
+        if not isinstance(interfaces, Mapping):
+            continue
+        for iface, meta in interfaces.items():
+            if isinstance(meta, Mapping) and meta.get("unit"):
+                units[(str(inst), str(iface))] = str(meta["unit"])
+    return units
+
+
+def _validate_solution_against_frozen_context(
+    solution: EngineeringSolutionPayload,
+    *,
+    doc: Mapping[str, Any],
+    finance: EffectiveFinanceConfig,
+    evaluation: EvaluationInput,
+    materialized: Any,
+    device_series: Any,
+    raw_models: Mapping[str, Any] | None,
+) -> None:
+    """Check solution completeness once at plugin boundary against frozen domain expectations."""
+    baseline = doc["project_baseline"]
+    expected_steps = horizon_point_count(
+        str(baseline["resolution"]),
+        int(baseline["start_year"]),
+        evaluation.operation_years,
+    )
+
+    planning = doc.get("planning") or {}
+    plan_vars = planning.get("variables") or {}
+    raw_units = planning.get("construction_units") or {}
+    expected_units: list[ExpectedConstructionUnit] = []
+    for unit_id, unit_spec in sorted(raw_units.items()):
+        raw_scales = unit_spec.get("scales") or ()
+        scale_ids = list(raw_scales.keys()) if isinstance(raw_scales, Mapping) else list(raw_scales)
+        pvar_units = {str(pvar): str(plan_vars[pvar]["unit"]) for pvar in scale_ids}
+        expected_units.append(
+            ExpectedConstructionUnit(
+                unit_id=str(unit_id),
+                instance_id=str(unit_spec["device_ref"]),
+                mode=str(unit_spec["mode"]),
+                planning_variable_units=pvar_units,
+            )
+        )
+
+    predefined = _predefined_series_keys(materialized, device_series)
+    iface_units = _device_interface_units(raw_models)
+
+    required_device_series: set[tuple[str, str]] = set()
+    for binding in (doc.get("tariff_bindings") or {}).values():
+        required_device_series.add((str(binding["instance"]), str(binding["interface"])))
+    for binding in (doc.get("demand_bindings") or {}).values():
+        required_device_series.add((str(binding["instance"]), str(binding["interface"])))
+    fb_instances = (doc.get("finance_binding") or {}).get("instances") or {}
+    for inst, binding in fb_instances.items():
+        if not isinstance(binding, Mapping) or binding.get("type") != "costed":
+            continue
+        for driver in (binding.get("drivers") or {}).values():
+            if isinstance(driver, Mapping) and "interface" in driver:
+                required_device_series.add((str(inst), str(driver["interface"])))
+
+    actual_series = solution.series or {}
+    by_device_iface = {
+        (entry.instance_id, entry.variable_id): entry for entry in actual_series.values()
+    }
+    for inst, iface in sorted(required_device_series - predefined):
+        entry = by_device_iface.get((inst, iface))
+        if entry is None:
+            raise StageIOError(
+                f"EngineeringSolution missing required financial series {inst}.{iface}"
+            )
+        expected_unit = iface_units.get((inst, iface))
+        if expected_unit is not None and entry.unit != expected_unit:
+            raise StageIOError(
+                f"EngineeringSolution series {inst}.{iface} unit mismatch: "
+                f"expected {expected_unit!r}, got {entry.unit!r}"
+            )
+
+    actual_sys = solution.system_series or {}
+    by_sys_key = {(entry.block, entry.variable): entry for entry in actual_sys.values()}
+    for ref in _iter_system_series_refs(finance):
+        if ref.block is None or ref.variable is None:
+            continue
+        entry = by_sys_key.get((ref.block, ref.variable))
+        if entry is None:
+            raise StageIOError(
+                f"EngineeringSolution missing required system_series {ref.block}.{ref.variable}"
+            )
+        if ref.unit_ref is not None and entry.unit != ref.unit_ref:
+            raise StageIOError(
+                f"EngineeringSolution system_series {ref.block}.{ref.variable} unit mismatch: "
+                f"expected {ref.unit_ref!r}, got {entry.unit!r}"
+            )
+
+    exp_series = {
+        sid: ExpectedDeviceSeries(
+            instance_id=entry.instance_id,
+            variable_id=entry.variable_id,
+            unit=iface_units.get((entry.instance_id, entry.variable_id), entry.unit),
+        )
+        for sid, entry in actual_series.items()
+    }
+    exp_sys = {
+        sid: ExpectedSystemSeries(
+            block=entry.block,
+            variable=entry.variable,
+            unit=entry.unit,
+        )
+        for sid, entry in actual_sys.items()
+    }
+    validate_engineering_solution_completeness(
+        solution,
+        EngineeringSolutionExpectation(
+            expected_steps=expected_steps,
+            construction_units=tuple(expected_units),
+            series=exp_series,
+            system_series=exp_sys,
+        ),
+    )
 
 
 def _load_finance(work_in: Path, request: Mapping[str, Any]) -> EffectiveFinanceConfig:
@@ -133,7 +307,8 @@ def evaluate(ctx: StageContext) -> None:
     if prediction_payload is None:
         prediction_payload = _read_optional_json(ctx.work_in / "prediction.json")
 
-    resolution = _artifact_resolution(artifact)
+    doc = _artifact_doc(artifact)
+    resolution = str(doc["project_baseline"]["resolution"])
 
     materialized = None
     prices = None
@@ -176,6 +351,16 @@ def evaluate(ctx: StageContext) -> None:
             device_series = request_raw.get("device_series")
             if device_series is None:
                 device_series = _read_optional_json(ctx.work_in / "device_series.json")
+
+    _validate_solution_against_frozen_context(
+        solution,
+        doc=doc,
+        finance=finance,
+        evaluation=evaluation,
+        materialized=materialized,
+        device_series=device_series,
+        raw_models=raw_models,
+    )
 
     fin_eval = evaluate_forward_finance(
         solution.to_dict(),
