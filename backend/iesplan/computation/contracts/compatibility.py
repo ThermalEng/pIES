@@ -18,11 +18,15 @@ PLUGIN_KINDS = ("predictor", "generator", "solver", "evaluator", "algorithm")
 
 STAGE_INPUT_CONTRACT = "ies.stage-input@1.0.0"
 PREDICTION_OUTPUT_CONTRACT = "ies.prediction-output@1.0.0"
+SOLVER_BUNDLE_CONTRACT_PREFIX = "ies.solver-bundle."
 SOLVER_BUNDLE_MPS_CONTRACT = "ies.solver-bundle.mps@1.0.0"
 PRIMAL_SOLUTION_CONTRACT = "ies.primal-solution@1.0.0"
 ENGINEERING_SOLUTION_CONTRACT = "ies.engineering-solution@1.0.0"
 FINANCIAL_EVALUATION_CONTRACT = "ies.financial-evaluation@1.0.0"
 EVALUATION_REPORT_CONTRACT = "ies.evaluation-report@1.0.0"
+SUPPORTED_EVALUATOR_OUTPUT_CONTRACTS = frozenset(
+    {FINANCIAL_EVALUATION_CONTRACT, EVALUATION_REPORT_CONTRACT}
+)
 
 
 def _freeze_contract_list(values: object, name: str) -> tuple[str, ...]:
@@ -160,9 +164,20 @@ def _check_companions(spec: StagePluginSpec, config: TargetCalculationConfig) ->
 
 
 def _check_mode_and_precision(
+    core_spec: StagePluginSpec,
     selected_specs: list[StagePluginSpec],
     config: TargetCalculationConfig,
 ) -> None:
+    if not core_spec.modes:
+        raise ComputationUnavailableError(
+            f"核心计算插件 {core_spec.ref!r} 未声明支持的 modes",
+            reason="incompatible-mode",
+        )
+    if not core_spec.precisions:
+        raise ComputationUnavailableError(
+            f"核心计算插件 {core_spec.ref!r} 未声明支持的 precisions",
+            reason="incompatible-precision",
+        )
     for spec in selected_specs:
         if spec.modes and config.mode not in spec.modes:
             raise ComputationUnavailableError(
@@ -176,6 +191,32 @@ def _check_mode_and_precision(
             )
 
 
+def _check_supported_outputs(
+    core_spec: StagePluginSpec,
+    eval_specs: list[StagePluginSpec],
+    config: TargetCalculationConfig,
+) -> None:
+    if not core_spec.outputs:
+        raise ComputationUnavailableError(
+            f"核心计算插件 {core_spec.ref!r} 未声明支持的 outputs",
+            reason="incompatible-outputs",
+        )
+    supported_outputs = set(core_spec.outputs)
+    for ev_spec in eval_specs:
+        if not ev_spec.outputs:
+            raise ComputationUnavailableError(
+                f"评价器 {ev_spec.ref!r} 未声明支持的 outputs",
+                reason="incompatible-outputs",
+            )
+        supported_outputs.update(ev_spec.outputs)
+    unsupported = tuple(out for out in config.outputs if out not in supported_outputs)
+    if unsupported:
+        raise ComputationUnavailableError(
+            f"所选插件组合不支持 outputs: {unsupported!r}",
+            reason="incompatible-outputs",
+        )
+
+
 def validate_stage_compatibility(
     config: TargetCalculationConfig,
     plugins: Mapping[str, StagePluginSpec],
@@ -183,19 +224,19 @@ def validate_stage_compatibility(
     """Verify static consumes/produces compatibility, capabilities, and per-stage parameters_schema."""
     selected_specs: list[StagePluginSpec] = []
 
-    # 1. Resolve predictors and validate each prediction entry's parameters_schema.
+    # 1. Resolve predictors and validate each prediction entry's contracts & parameters_schema.
     for idx, pred in enumerate(config.predictions):
         pred_ref = str(pred["algorithm"])
         pred_spec = _resolve_plugin(plugins, pred_ref, "predictor")
         selected_specs.append(pred_spec)
-        if pred_spec.consumes and STAGE_INPUT_CONTRACT not in pred_spec.consumes:
+        if STAGE_INPUT_CONTRACT not in pred_spec.consumes:
             raise ComputationUnavailableError(
-                f"预测插件 {pred_ref!r} 不接受阶段输入契约 {STAGE_INPUT_CONTRACT!r}",
+                f"预测插件 {pred_ref!r} 须声明消费阶段输入契约 {STAGE_INPUT_CONTRACT!r}",
                 reason="incompatible-contracts",
             )
-        if not pred_spec.produces:
+        if PREDICTION_OUTPUT_CONTRACT not in pred_spec.produces:
             raise ComputationUnavailableError(
-                f"预测插件 {pred_ref!r} 未声明 produces 数据契约",
+                f"预测插件 {pred_ref!r} 须声明产出 {PREDICTION_OUTPUT_CONTRACT!r}",
                 reason="incompatible-contracts",
             )
         check_parameters_against_schema(
@@ -209,9 +250,9 @@ def validate_stage_compatibility(
         assert config.algorithm is not None
         core_spec = _resolve_plugin(plugins, config.algorithm, "algorithm")
         selected_specs.append(core_spec)
-        if core_spec.consumes and STAGE_INPUT_CONTRACT not in core_spec.consumes:
+        if STAGE_INPUT_CONTRACT not in core_spec.consumes:
             raise ComputationUnavailableError(
-                f"一体化算法 {core_spec.ref!r} 不接受阶段输入契约 {STAGE_INPUT_CONTRACT!r}",
+                f"一体化算法 {core_spec.ref!r} 须声明消费阶段输入契约 {STAGE_INPUT_CONTRACT!r}",
                 reason="incompatible-contracts",
             )
         if ENGINEERING_SOLUTION_CONTRACT not in core_spec.produces:
@@ -232,17 +273,20 @@ def validate_stage_compatibility(
         core_spec = gen_spec
         selected_specs.extend([gen_spec, sol_spec])
 
-        if gen_spec.consumes and STAGE_INPUT_CONTRACT not in gen_spec.consumes:
+        if STAGE_INPUT_CONTRACT not in gen_spec.consumes:
             raise ComputationUnavailableError(
-                f"生成器 {gen_spec.ref!r} 不接受阶段输入契约 {STAGE_INPUT_CONTRACT!r}",
+                f"生成器 {gen_spec.ref!r} 须声明消费阶段输入契约 {STAGE_INPUT_CONTRACT!r}",
                 reason="incompatible-contracts",
             )
-        if not gen_spec.produces:
+        bundle_produces = {
+            c for c in gen_spec.produces if c.startswith(SOLVER_BUNDLE_CONTRACT_PREFIX)
+        }
+        if not bundle_produces:
             raise ComputationUnavailableError(
-                f"生成器 {gen_spec.ref!r} 未声明 produces 求解包契约",
+                f"生成器 {gen_spec.ref!r} 须声明产出标准求解包契约 ({SOLVER_BUNDLE_CONTRACT_PREFIX}*)",
                 reason="incompatible-contracts",
             )
-        if not sol_spec.consumes or not (set(gen_spec.produces) & set(sol_spec.consumes)):
+        if not (bundle_produces & set(sol_spec.consumes)):
             raise ComputationUnavailableError(
                 f"生成器 {gen_spec.ref!r} produces={list(gen_spec.produces)!r} "
                 f"与求解器 {sol_spec.ref!r} consumes={list(sol_spec.consumes)!r} 不匹配",
@@ -273,15 +317,18 @@ def validate_stage_compatibility(
         ev_spec = _resolve_plugin(plugins, ev_ref, "evaluator")
         selected_specs.append(ev_spec)
         eval_specs.append(ev_spec)
-        if not ev_spec.consumes or not (set(ev_spec.consumes) & downstream_available_contracts):
+        if ENGINEERING_SOLUTION_CONTRACT not in ev_spec.consumes or not (
+            set(ev_spec.consumes) & downstream_available_contracts
+        ):
             raise ComputationUnavailableError(
                 f"评价器 {ev_ref!r} consumes={list(ev_spec.consumes)!r} "
                 f"与上游产出 {sorted(downstream_available_contracts)!r} 不匹配",
                 reason="incompatible-contracts",
             )
-        if not ev_spec.produces:
+        if not (set(ev_spec.produces) & SUPPORTED_EVALUATOR_OUTPUT_CONTRACTS):
             raise ComputationUnavailableError(
-                f"评价器 {ev_ref!r} 未声明 produces 评价输出契约",
+                f"评价器 {ev_ref!r} produces={list(ev_spec.produces)!r} "
+                f"不支持标准评价输出契约 ({sorted(SUPPORTED_EVALUATOR_OUTPUT_CONTRACTS)!r})",
                 reason="incompatible-contracts",
             )
         check_parameters_against_schema(
@@ -290,17 +337,8 @@ def validate_stage_compatibility(
             location_label=f"evaluators/{idx}/parameters",
         )
 
-    # 4. Check mode, precision, outputs, and optional companions constraints.
-    _check_mode_and_precision(selected_specs, config)
-    if core_spec.outputs:
-        supported_outputs = set(core_spec.outputs)
-        for ev_spec in eval_specs:
-            supported_outputs.update(ev_spec.outputs)
-        unsupported = tuple(out for out in config.outputs if out not in supported_outputs)
-        if unsupported:
-            raise ComputationUnavailableError(
-                f"所选插件组合不支持 outputs: {unsupported!r}",
-                reason="incompatible-outputs",
-            )
+    # 4. Check explicit mode, precision, outputs, and optional companions constraints.
+    _check_mode_and_precision(core_spec, selected_specs, config)
+    _check_supported_outputs(core_spec, eval_specs, config)
     for spec in selected_specs:
         _check_companions(spec, config)

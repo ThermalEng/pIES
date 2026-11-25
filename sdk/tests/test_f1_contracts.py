@@ -7,6 +7,7 @@ from copy import deepcopy
 from pathlib import Path
 
 import pytest
+from jsonschema import Draft202012Validator
 
 from pies_sdk import (
     ENGINEERING_SOLUTION_SCHEMA,
@@ -16,9 +17,12 @@ from pies_sdk import (
     PRIMAL_SOLUTION_SCHEMA,
     PRIMAL_SOLUTION_VERSION,
     VARIABLE_MAP_RECORD_TAGS,
+    VARIABLE_MAP_SCHEMA,
+    VARIABLE_MAP_VERSION,
     ConstructionScale,
     ConstructionUnit,
     DeviceSeries,
+    EngineeringSolutionExpectation,
     EngineeringSolutionPayload,
     EvaluationChart,
     EvaluationChartSeries,
@@ -26,6 +30,9 @@ from pies_sdk import (
     EvaluationReportPayload,
     EvaluationTable,
     EvaluationTableColumn,
+    ExpectedConstructionUnit,
+    ExpectedDeviceSeries,
+    ExpectedSystemSeries,
     PrimalSolutionHeader,
     PrimalSolutionPayload,
     SolverSummary,
@@ -34,12 +41,18 @@ from pies_sdk import (
     SystemSeries,
     VariableMapHeader,
     VariableMapWriter,
+    apply_linear_conversion,
     iter_primal_solution_values,
     iter_variable_map_records,
+    load_engineering_solution_schema,
+    load_evaluation_report_schema,
+    load_primal_solution_schema,
+    load_variable_map_header_schema,
     read_engineering_solution,
     read_evaluation_report,
     read_primal_solution,
     read_variable_map,
+    validate_engineering_solution_completeness,
     validate_plugin_manifest,
     write_engineering_solution,
     write_evaluation_report,
@@ -139,11 +152,14 @@ def _engineering_feasible_dict() -> dict:
 
 def _variable_map_header_dict(column_count: int = 4) -> dict:
     return {
+        "schema": VARIABLE_MAP_SCHEMA,
+        "schema_version": VARIABLE_MAP_VERSION,
         "assembly": {"id": "asm-1", "schema_version": "1.0.0"},
         "generator": "ies.generator.highs_milp@1.0.0",
         "records": "input/parameters.jsonl",
         "column_count": column_count,
         "objective_offset": 100.0,
+        "objective_scale": 0.001,
         "objective_unit": "CNY",
         "outputs": ["solution", "metrics"],
         "precision": "medium",
@@ -173,7 +189,12 @@ def _evaluation_report_dict() -> dict:
                 "chart_type": "line",
                 "x_values": [0, 1, 2],
                 "series": [
-                    {"id": "grid", "label": "Grid Import", "unit": "kgCO2", "values": [10.0, 12.5, 8.0]}
+                    {
+                        "id": "grid",
+                        "label": "Grid Import",
+                        "unit": "kgCO2",
+                        "values": [10.0, 12.5, 8.0],
+                    }
                 ],
             }
         ],
@@ -200,52 +221,66 @@ def _evaluation_report_dict() -> dict:
 
 
 def test_primal_solution_roundtrip_and_streaming(tmp_path: Path) -> None:
-    payload = PrimalSolutionPayload.from_dict(_primal_feasible_dict())
+    payload_dict = _primal_feasible_dict()
+    Draft202012Validator(load_primal_solution_schema()).validate(payload_dict)
+    payload = PrimalSolutionPayload.from_dict(payload_dict)
     out_path = write_primal_solution(tmp_path / "primal_solution.json", payload)
     loaded = read_primal_solution(out_path)
     assert loaded == payload
     assert loaded.values == (1.5, 0.0, 42.25)
 
-    # Large streaming write & read (O(1) memory) with 5000 columns
+    # Large streaming write & read (O(1) memory) crossing 65,536-char buffer boundaries
+    col_count = 32752
     stream_path = tmp_path / "stream_primal.json"
     header = PrimalSolutionHeader(
         math_status="feasible",
         termination_reason="time_limit",
         has_feasible_solution=True,
-        column_count=5000,
+        column_count=col_count,
         objective_value=999.0,
         best_bound=None,
         relative_gap=None,
         receipt={"solver": "acme.solver.cbc@1.0.0"},
     )
-    write_primal_solution_streaming(stream_path, header, (float(i) * 0.5 for i in range(5000)))
+    write_primal_solution_streaming(
+        stream_path, header, (float(i) * 0.125 for i in range(col_count))
+    )
     hdr, val_iter = iter_primal_solution_values(stream_path)
-    assert hdr.column_count == 5000
+    assert hdr.column_count == col_count
     assert hdr.best_bound is None
     streamed_vals = list(val_iter)
-    assert len(streamed_vals) == 5000
+    assert len(streamed_vals) == col_count
     assert streamed_vals[0] == 0.0
-    assert streamed_vals[4999] == 2499.5
+    assert streamed_vals[-1] == (col_count - 1) * 0.125
 
-    # Key-order independence: 'values' before metadata keys
-    reordered_path = tmp_path / "reordered.json"
-    reordered_doc = {
-        "values": [2.0, 4.0, 6.0],
-        "schema": PRIMAL_SOLUTION_SCHEMA,
-        "schema_version": PRIMAL_SOLUTION_VERSION,
-        "math_status": "solved",
-        "termination_reason": "optimal",
-        "has_feasible_solution": True,
-        "column_count": 3,
-        "objective_value": 12.0,
-        "best_bound": 12.0,
-        "relative_gap": 0.0,
-        "receipt": {"solver": "ies.solver.highs@1.7.2"},
-    }
-    reordered_path.write_text(json.dumps(reordered_doc), encoding="utf-8")
-    r_hdr, r_iter = iter_primal_solution_values(reordered_path)
-    assert r_hdr.column_count == 3
-    assert list(r_iter) == [2.0, 4.0, 6.0]
+    # Explicit chunk-boundary regression: numbers crossing char 65,536 both in 'values'
+    # AND in metadata placed AFTER 'values'
+    boundary_path = tmp_path / "chunk_boundary_primal.json"
+    prefix_vals = ", ".join("1.0" for _ in range(13100))
+    prefix_json = '{"values": [' + prefix_vals + ", "
+    # Pad inside the array whitespace so a fractional float crosses 65,536 exactly
+    pad_len = max(0, 65533 - len(prefix_json))
+    values_section = prefix_json + (" " * pad_len) + "123.456789]"
+    # Put metadata right after values, with another number straddling 2*65,536
+    after_prefix = (
+        values_section
+        + ', "schema": "ies.primal-solution", "schema_version": "1.0.0"'
+        + ', "math_status": "solved", "termination_reason": "optimal"'
+        + ', "has_feasible_solution": true, "column_count": 13101'
+        + ', "best_bound": 987.654321, "relative_gap": 0.0'
+        + ', "receipt": {"solver": "ies.solver.highs@1.7.2"}'
+        + ', "objective_value": '
+    )
+    pad_meta = max(0, (2 * 65536 - 3) - len(after_prefix))
+    full_text = after_prefix + (" " * pad_meta) + "12345.6789}\n"
+    assert len(full_text) > 2 * 65536
+    boundary_path.write_text(full_text, encoding="utf-8")
+
+    b_hdr, b_iter = iter_primal_solution_values(boundary_path)
+    b_vals = list(b_iter)
+    assert b_hdr.objective_value == pytest.approx(12345.6789)
+    assert len(b_vals) == 13101
+    assert b_vals[-1] == pytest.approx(123.456789)
 
     # Non-feasible primal solution
     inf_path = write_primal_solution(tmp_path / "infeasible.json", _primal_infeasible_dict())
@@ -257,29 +292,17 @@ def test_primal_solution_roundtrip_and_streaming(tmp_path: Path) -> None:
 def test_primal_solution_rejects_invalid_fixtures(tmp_path: Path) -> None:
     bad_unknown = _primal_feasible_dict()
     bad_unknown["extra"] = 1
-    with pytest.raises(StageIOError, match="Additional properties"):
+    with pytest.raises(StageIOError, match="unknown fields"):
         PrimalSolutionPayload.from_dict(bad_unknown)
 
     bad_bool = _primal_feasible_dict()
     bad_bool["values"] = [True, 0.0, 1.0]
-    with pytest.raises(StageIOError, match="not of type 'number'"):
-        PrimalSolutionPayload.from_dict(bad_bool)
     with pytest.raises(StageIOError, match="finite number"):
-        PrimalSolutionPayload(
-            math_status="solved",
-            termination_reason="optimal",
-            has_feasible_solution=True,
-            column_count=1,
-            values=(True,),  # type: ignore[arg-type]
-            objective_value=1.0,
-            best_bound=1.0,
-            relative_gap=0.0,
-            receipt={"solver": "ies.solver.highs@1.7.2"},
-        )
+        PrimalSolutionPayload.from_dict(bad_bool)
 
     bad_bool_col = _primal_feasible_dict()
     bad_bool_col["column_count"] = True
-    with pytest.raises(StageIOError):
+    with pytest.raises(StageIOError, match="integer"):
         PrimalSolutionPayload.from_dict(bad_bool_col)
 
     bad_nan = _primal_feasible_dict()
@@ -304,7 +327,7 @@ def test_primal_solution_rejects_invalid_fixtures(tmp_path: Path) -> None:
 
     bad_receipt = _primal_feasible_dict()
     bad_receipt["receipt"]["unknown"] = "x"
-    with pytest.raises(StageIOError, match="Additional properties"):
+    with pytest.raises(StageIOError, match="unknown fields"):
         PrimalSolutionPayload.from_dict(bad_receipt)
 
     nan_file = tmp_path / "nan_primal.json"
@@ -321,12 +344,15 @@ def test_primal_solution_rejects_invalid_fixtures(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_engineering_solution_dual_state_roundtrip(tmp_path: Path) -> None:
-    feasible = EngineeringSolutionPayload.from_dict(_engineering_feasible_dict())
+def test_engineering_solution_dual_state_roundtrip_and_completeness(tmp_path: Path) -> None:
+    eng_dict = _engineering_feasible_dict()
+    eng_validator = Draft202012Validator(load_engineering_solution_schema())
+    eng_validator.validate(eng_dict)
+
+    feasible = EngineeringSolutionPayload.from_dict(eng_dict)
     path = write_engineering_solution(tmp_path / "solution.json", feasible)
     assert read_engineering_solution(path) == feasible
 
-    # Construct directly from typed dataclasses
     direct = EngineeringSolutionPayload(
         solver_summary=SolverSummary(
             termination_reason="optimal",
@@ -347,13 +373,32 @@ def test_engineering_solution_dual_state_roundtrip(tmp_path: Path) -> None:
             ),
         ),
         series={"pv1.power_out": DeviceSeries("pv1", "power_out", "kW", (0.0, 50.0, 75.0))},
-        system_series={"sys.reserve": SystemSeries("reserve_balance", "margin", "kW", (10.0, 10.0, 10.0))},
+        system_series={
+            "sys.reserve": SystemSeries("reserve_balance", "margin", "kW", (10.0, 10.0, 10.0))
+        },
         metrics={"num_variables": 3},
         model_sources={"schema": "ies.model-sources", "schema_version": "1.0.0"},
     )
     assert direct == feasible
 
-    # Non-feasible: omits construction_units/series/system_series OR allows empty
+    # Completeness boundary check against frozen expectation
+    expectation = EngineeringSolutionExpectation(
+        expected_steps=3,
+        objective_unit="CNY",
+        construction_units=(
+            ExpectedConstructionUnit(
+                unit_id="unit_pv1",
+                instance_id="pv1",
+                mode="optional",
+                planning_variable_units={"capacity": "kW"},
+            ),
+        ),
+        series={"pv1.power_out": ExpectedDeviceSeries("pv1", "power_out", "kW")},
+        system_series={"sys.reserve": ExpectedSystemSeries("reserve_balance", "margin", "kW")},
+    )
+    assert validate_engineering_solution_completeness(feasible, expectation) == feasible
+
+    # Non-feasible: preserves exemption against frozen expectation
     non_feasible_omitted = EngineeringSolutionPayload.from_dict(
         {
             "schema": ENGINEERING_SOLUTION_SCHEMA,
@@ -369,32 +414,15 @@ def test_engineering_solution_dual_state_roundtrip(tmp_path: Path) -> None:
             },
         }
     )
+    eng_validator.validate(non_feasible_omitted.to_dict())
     assert non_feasible_omitted.construction_units is None
     assert non_feasible_omitted.series is None
-
-    non_feasible_empty = EngineeringSolutionPayload.from_dict(
-        {
-            "schema": ENGINEERING_SOLUTION_SCHEMA,
-            "schema_version": ENGINEERING_SOLUTION_VERSION,
-            "solver_summary": {
-                "termination_reason": "time_limit",
-                "math_status": "not_solved",
-                "has_feasible_solution": False,
-                "objective_value": None,
-                "objective_unit": None,
-                "best_bound": None,
-                "relative_gap": None,
-            },
-            "construction_units": [],
-            "series": {},
-            "system_series": {},
-        }
+    assert validate_engineering_solution_completeness(non_feasible_omitted, expectation) == (
+        non_feasible_omitted
     )
-    assert non_feasible_empty.construction_units == ()
-    assert non_feasible_empty.series == {}
 
 
-def test_engineering_solution_rejects_invalid_fixtures() -> None:
+def test_engineering_solution_rejects_invalid_and_incomplete_fixtures() -> None:
     missing_units = _engineering_feasible_dict()
     del missing_units["construction_units"]
     with pytest.raises(StageIOError, match="construction_units"):
@@ -402,8 +430,20 @@ def test_engineering_solution_rejects_invalid_fixtures() -> None:
 
     missing_series = _engineering_feasible_dict()
     missing_series["series"] = None
-    with pytest.raises(StageIOError):
+    with pytest.raises(StageIOError, match="series"):
         EngineeringSolutionPayload.from_dict(missing_series)
+
+    # Unequal continuous step counts (3-step device series vs 1-step system series)
+    unequal_steps = _engineering_feasible_dict()
+    unequal_steps["system_series"]["sys.reserve"]["values"] = [10.0]
+    with pytest.raises(StageIOError, match="equal continuous step count"):
+        EngineeringSolutionPayload.from_dict(unequal_steps)
+
+    # Empty series values rejected
+    empty_vals = _engineering_feasible_dict()
+    empty_vals["series"]["pv1.power_out"]["values"] = []
+    with pytest.raises(StageIOError, match="non-empty list"):
+        EngineeringSolutionPayload.from_dict(empty_vals)
 
     duplicate_sid = _engineering_feasible_dict()
     duplicate_sid["system_series"]["pv1.power_out"] = {
@@ -434,30 +474,74 @@ def test_engineering_solution_rejects_invalid_fixtures() -> None:
 
     bad_mode = _engineering_feasible_dict()
     bad_mode["construction_units"][0]["mode"] = "invalid_mode"
-    with pytest.raises(StageIOError):
+    with pytest.raises(StageIOError, match="mode"):
         EngineeringSolutionPayload.from_dict(bad_mode)
 
     bad_bool_scale = _engineering_feasible_dict()
     bad_bool_scale["construction_units"][0]["scales"][0]["value"] = False
-    with pytest.raises(StageIOError, match="not of type 'number'"):
-        EngineeringSolutionPayload.from_dict(bad_bool_scale)
     with pytest.raises(StageIOError, match="finite number"):
-        ConstructionScale("cap", False, "kW")  # type: ignore[arg-type]
+        EngineeringSolutionPayload.from_dict(bad_bool_scale)
 
     bad_extra = _engineering_feasible_dict()
     bad_extra["unexpected"] = 1
-    with pytest.raises(StageIOError, match="Additional properties"):
+    with pytest.raises(StageIOError, match="unknown fields"):
         EngineeringSolutionPayload.from_dict(bad_extra)
 
+    # Expectation completeness failures
+    feasible = EngineeringSolutionPayload.from_dict(_engineering_feasible_dict())
+    wrong_steps = EngineeringSolutionExpectation(
+        expected_steps=4,
+        objective_unit="CNY",
+        construction_units=(
+            ExpectedConstructionUnit("unit_pv1", "pv1", "optional", {"capacity": "kW"}),
+        ),
+        series={"pv1.power_out": ExpectedDeviceSeries("pv1", "power_out", "kW")},
+        system_series={"sys.reserve": ExpectedSystemSeries("reserve_balance", "margin", "kW")},
+    )
+    with pytest.raises(StageIOError, match="expected_steps"):
+        validate_engineering_solution_completeness(feasible, wrong_steps)
+
+    missing_expected_unit = EngineeringSolutionExpectation(
+        expected_steps=3,
+        objective_unit="CNY",
+        construction_units=(
+            ExpectedConstructionUnit("unit_pv1", "pv1", "optional", {"capacity": "kW"}),
+            ExpectedConstructionUnit("unit_bat1", "bat1", "optional", {"capacity": "kWh"}),
+        ),
+        series={"pv1.power_out": ExpectedDeviceSeries("pv1", "power_out", "kW")},
+        system_series={"sys.reserve": ExpectedSystemSeries("reserve_balance", "margin", "kW")},
+    )
+    with pytest.raises(StageIOError, match="construction_units mismatch"):
+        validate_engineering_solution_completeness(feasible, missing_expected_unit)
+
+    wrong_series_unit = EngineeringSolutionExpectation(
+        expected_steps=3,
+        objective_unit="CNY",
+        construction_units=(
+            ExpectedConstructionUnit("unit_pv1", "pv1", "optional", {"capacity": "kW"}),
+        ),
+        series={"pv1.power_out": ExpectedDeviceSeries("pv1", "power_out", "MW")},
+        system_series={"sys.reserve": ExpectedSystemSeries("reserve_balance", "margin", "kW")},
+    )
+    with pytest.raises(StageIOError, match="identity/unit mismatch"):
+        validate_engineering_solution_completeness(feasible, wrong_series_unit)
+
 
 # ---------------------------------------------------------------------------
-# Universal variable_map tests (all 19 documented record tags)
+# Universal variable_map tests (all 19 documented record tags + linear units)
 # ---------------------------------------------------------------------------
 
 
-def test_variable_map_all_documented_tags_and_streaming(tmp_path: Path) -> None:
+def test_variable_map_all_documented_tags_linear_units_and_streaming(tmp_path: Path) -> None:
     bundle_dir = tmp_path / "bundle"
-    header = VariableMapHeader.from_dict(_variable_map_header_dict(column_count=4))
+    hdr_dict = _variable_map_header_dict(column_count=4)
+    Draft202012Validator(load_variable_map_header_schema()).validate(hdr_dict)
+    header = VariableMapHeader.from_dict(hdr_dict)
+
+    assert apply_linear_conversion(5000.0, scale=header.objective_scale, offset=header.objective_offset) == (
+        pytest.approx(105.0)
+    )
+
     records = [
         ["column_names", ["c0", "c1"]],
         ["column_names", ["c2", "c3"]],
@@ -468,18 +552,34 @@ def test_variable_map_all_documented_tags_and_streaming(tmp_path: Path) -> None:
         ["expression", 0, 10.0],
         ["terms", [[0, 1.5], [3, -2.0]]],
         ["expression_end"],
-        ["units", [[0, "kW"], [1, "kW"], [3, "kWh"]]],
+        ["units", [[0, "kW", 0.001, 0.0], [1, "kW", 0.001, 0.0], [3, "kWh", 1.0, 5.0]]],
         ["component", "upfront_capex", "CNY", "gross", 0],
         ["facts", {"currency": "CNY", "construction_total": {"expression": 0}}],
-        ["series", {
-            "series_id": "pv1.power_out",
-            "instance_id": "pv1",
-            "variable_id": "power_out",
-            "unit": "kW",
-        }],
+        [
+            "series",
+            {
+                "series_id": "pv1.power_out",
+                "instance_id": "pv1",
+                "variable_id": "power_out",
+                "unit": "kW",
+                "scale": 0.001,
+                "offset": 0.0,
+            },
+        ],
         ["positions", [1, 2]],
         ["series_end"],
-        ["series", {"series_id": "sys.reserve", "block": "res", "variable": "margin", "unit": "kW"}],
+        [
+            "series",
+            {
+                "series_id": "sys.reserve",
+                "block": "res",
+                "variable": "margin",
+                "unit": "kW",
+                "scale": 0.001,
+                "offset": 1.0,
+                "extensions": {"acme.source": "reserve"},
+            },
+        ],
         ["positions", [3]],
         ["series_end"],
         ["sources", {"schema": "ies.model-sources", "schema_version": "1.0.0", "sources": {}, "outputs": []}],
@@ -502,30 +602,60 @@ def test_variable_map_all_documented_tags_and_streaming(tmp_path: Path) -> None:
     assert loaded_records == records
 
     # Streaming iteration directly
-    streamed = list(iter_variable_map_records(bundle_dir / "input" / "parameters.jsonl", column_count=4))
+    streamed = list(
+        iter_variable_map_records(bundle_dir / "input" / "parameters.jsonl", column_count=4)
+    )
     assert len(streamed) == len(records)
 
 
-def test_variable_map_rejects_invalid_headers_and_records(tmp_path: Path) -> None:
+def test_variable_map_rejects_invalid_headers_fallbacks_and_records(tmp_path: Path) -> None:
+    missing_schema = _variable_map_header_dict()
+    del missing_schema["schema"]
+    with pytest.raises(StageIOError, match="missing required fields"):
+        VariableMapHeader.from_dict(missing_schema)
+
+    zero_scale = _variable_map_header_dict()
+    zero_scale["objective_scale"] = 0.0
+    with pytest.raises(StageIOError, match="non-zero"):
+        VariableMapHeader.from_dict(zero_scale)
+
     bad_hdr = _variable_map_header_dict()
     bad_hdr["column_count"] = True
-    with pytest.raises(StageIOError):
+    with pytest.raises(StageIOError, match="integer"):
         VariableMapHeader.from_dict(bad_hdr)
 
     bad_hdr_nan = _variable_map_header_dict()
     bad_hdr_nan["objective_offset"] = float("inf")
-    with pytest.raises(StageIOError):
+    with pytest.raises(StageIOError, match="non-finite"):
         VariableMapHeader.from_dict(bad_hdr_nan)
 
     bad_hdr_path = _variable_map_header_dict()
     bad_hdr_path["records"] = "../escape.jsonl"
-    with pytest.raises(StageIOError):
+    with pytest.raises(StageIOError, match="escapes"):
         VariableMapHeader.from_dict(bad_hdr_path)
 
     bad_hdr_extra = _variable_map_header_dict()
     bad_hdr_extra["solver"] = "ies.solver.highs@1.7.2"
-    with pytest.raises(StageIOError, match="Additional properties"):
+    with pytest.raises(StageIOError, match="unknown fields"):
         VariableMapHeader.from_dict(bad_hdr_extra)
+
+    # No silent alternate-path fallback when canonical input/parameters.json or declared records is missing
+    fallback_dir = tmp_path / "fallback_bundle"
+    fallback_dir.mkdir()
+    (fallback_dir / "parameters.json").write_text(
+        json.dumps(_variable_map_header_dict()), encoding="utf-8"
+    )
+    with pytest.raises(StageIOError, match="does not exist"):
+        read_variable_map(fallback_dir)
+
+    missing_rec_dir = tmp_path / "missing_rec_bundle"
+    (missing_rec_dir / "input").mkdir(parents=True)
+    (missing_rec_dir / "input" / "parameters.json").write_text(
+        json.dumps(_variable_map_header_dict()), encoding="utf-8"
+    )
+    (missing_rec_dir / "parameters.jsonl").write_text('["column_names", ["x"]]\n', encoding="utf-8")
+    with pytest.raises(StageIOError, match="does not exist"):
+        read_variable_map(missing_rec_dir)
 
     # Bad NDJSON records
     invalid_cases = [
@@ -534,8 +664,39 @@ def test_variable_map_rejects_invalid_headers_and_records(tmp_path: Path) -> Non
         (["epigraph", True], "must be an integer"),
         (["expression", 1, 0.0], "strictly 0-based sequential"),
         (["terms", [[0, 1.0]]], "open 'expression' block"),
+        (["units", [[0, "kW"]]], "4-tuple"),
+        (["units", [[0, "kW", 0.0, 0.0]]], "non-zero"),
         (["component", "c", "CNY", "gross", 0], "undefined expression"),
-        (["series", {"series_id": "s1", "unit": "kW"}], "either"),
+        (["series", {"series_id": "s1", "unit": "kW"}], "either device keys"),
+        (
+            [
+                "series",
+                {
+                    "series_id": "s1",
+                    "instance_id": "pv1",
+                    "variable_id": "p",
+                    "unit": "kW",
+                    "scale": 1.0,
+                    "offset": 0.0,
+                    "unexpected_core": 123,
+                },
+            ],
+            "unknown core fields",
+        ),
+        (
+            [
+                "series",
+                {
+                    "series_id": "s1",
+                    "instance_id": "pv1",
+                    "variable_id": "p",
+                    "unit": "kW",
+                    "scale": 0.0,
+                    "offset": 0.0,
+                },
+            ],
+            "non-zero",
+        ),
     ]
     for rec, msg in invalid_cases:
         p = tmp_path / "bad.jsonl"
@@ -584,7 +745,9 @@ def test_variable_map_rejects_invalid_headers_and_records(tmp_path: Path) -> Non
 
 
 def test_evaluation_report_roundtrip_and_dataclasses(tmp_path: Path) -> None:
-    report = EvaluationReportPayload.from_dict(_evaluation_report_dict())
+    rep_dict = _evaluation_report_dict()
+    Draft202012Validator(load_evaluation_report_schema()).validate(rep_dict)
+    report = EvaluationReportPayload.from_dict(rep_dict)
     out = write_evaluation_report(tmp_path / "evaluation_report.json", report)
     assert read_evaluation_report(out) == report
 
@@ -629,15 +792,13 @@ def test_evaluation_report_roundtrip_and_dataclasses(tmp_path: Path) -> None:
 def test_evaluation_report_rejects_invalid_fixtures() -> None:
     bad_extra = _evaluation_report_dict()
     bad_extra["extra"] = True
-    with pytest.raises(StageIOError, match="Additional properties"):
+    with pytest.raises(StageIOError, match="unknown fields"):
         EvaluationReportPayload.from_dict(bad_extra)
 
     bad_bool_metric = deepcopy(_evaluation_report_dict())
     bad_bool_metric["metrics"][0]["value"] = True
-    with pytest.raises(StageIOError, match="not of type 'number'"):
-        EvaluationReportPayload.from_dict(bad_bool_metric)
     with pytest.raises(StageIOError, match="boolean"):
-        EvaluationMetric("m1", "Metric", True, "1")  # type: ignore[arg-type]
+        EvaluationReportPayload.from_dict(bad_bool_metric)
 
     bad_dup_metric = deepcopy(_evaluation_report_dict())
     bad_dup_metric["metrics"].append(deepcopy(bad_dup_metric["metrics"][0]))

@@ -123,6 +123,7 @@ def _stepped_plugin_catalog() -> dict[str, StagePluginSpec]:
             "consumes": [ENGINEERING_SOLUTION_CONTRACT],
             "produces": [FINANCIAL_EVALUATION_CONTRACT],
             "parameters_schema": _empty_object_schema(),
+            "extensions": {"supported_outputs": ["metrics"]},
         }
     )
     carbon_eval = StagePluginSpec.from_manifest(
@@ -139,6 +140,7 @@ def _stepped_plugin_catalog() -> dict[str, StagePluginSpec]:
                 "required": ["grid_factor"],
                 "properties": {"grid_factor": {"type": "number", "exclusiveMinimum": 0}},
             },
+            "extensions": {"supported_outputs": ["metrics"]},
         }
     )
     algorithm = StagePluginSpec.from_manifest(
@@ -343,11 +345,14 @@ EXPECTED_INVALID_SB = {
     "absolute-input-path.json": "inputs/0",
     "duplicate-input-path.json": "重复",
     "escaping-output-path.json": "outputs/0",
+    "input-outside-input-dir.json": "inputs/0",
     "legacy-bundle-solver-rejected.json": "solver",
     "legacy-command-rejected.json": "command",
     "legacy-result-adapter-rejected.json": "result_adapter",
     "missing-contract-field.json": "contract",
     "missing-primal-solution-output.json": "primal_solution.json",
+    "output-outside-output-dir.json": "outputs/0",
+    "reserved-manifest-input-path.json": "inputs/0",
     "unknown-top-level-key.json": "calculation",
 }
 
@@ -358,6 +363,44 @@ def test_invalid_solver_bundle_fixtures_rejected() -> None:
         with pytest.raises(ValueError) as exc_info:
             validate_target_bundle(_load_json(SB_INVALID / name))
         assert marker in str(exc_info.value), f"{name}: {exc_info.value}"
+
+    # Direct dataclass construction must also block reserved manifest collisions and cross-dir paths.
+    with pytest.raises(ValueError, match="保留清单路径"):
+        TargetSolverBundleManifest(
+            bundle={
+                "generator": "ies.generator.highs_milp@1.0.0",
+                "contract": SOLVER_BUNDLE_MPS_CONTRACT,
+            },
+            inputs=[{"path": "bundle.yaml", "media_type": "application/yaml"}],
+            outputs=[
+                {"path": PRIMAL_SOLUTION_OUTPUT_PATH, "media_type": "application/json", "required": True}
+            ],
+            extensions={},
+        )
+    with pytest.raises(ValueError, match="'input/'"):
+        TargetSolverBundleManifest(
+            bundle={
+                "generator": "ies.generator.highs_milp@1.0.0",
+                "contract": SOLVER_BUNDLE_MPS_CONTRACT,
+            },
+            inputs=[{"path": "output/problem.mps", "media_type": "application/mps"}],
+            outputs=[
+                {"path": PRIMAL_SOLUTION_OUTPUT_PATH, "media_type": "application/json", "required": True}
+            ],
+            extensions={},
+        )
+    with pytest.raises(ValueError, match="'output/'"):
+        TargetSolverBundleManifest(
+            bundle={
+                "generator": "ies.generator.highs_milp@1.0.0",
+                "contract": SOLVER_BUNDLE_MPS_CONTRACT,
+            },
+            inputs=[{"path": "input/problem.mps", "media_type": "application/mps"}],
+            outputs=[
+                {"path": "input/primal_solution.json", "media_type": "application/json", "required": True}
+            ],
+            extensions={},
+        )
 
 
 def test_solver_bundle_binding_and_file_set_checks() -> None:
@@ -503,6 +546,9 @@ def test_stage_compatibility_consumes_produces_and_slotted_parameters() -> None:
         consumes=(STAGE_INPUT_CONTRACT,),
         produces=(SOLVER_BUNDLE_MPS_CONTRACT,),
         parameters_schema=_empty_object_schema(),
+        modes=("planning",),
+        precisions=("low", "medium", "high"),
+        outputs=("solution",),
         companions={"solver": "acme.solver.special@1.0.0"},
     )
     with pytest.raises(ComputationUnavailableError) as exc_info:
@@ -511,6 +557,153 @@ def test_stage_compatibility_consumes_produces_and_slotted_parameters() -> None:
             {**catalog, companion_gen.ref: companion_gen},
         )
     assert exc_info.value.reason == "incompatible-companion"
+
+
+def test_stage_compatibility_rejects_missing_capabilities_and_unsupported_contracts() -> None:
+    catalog = _stepped_plugin_catalog()
+    stepped_full = validate_target_calculation_config(_load_json(CC_VALID / "stepped-full.json"))
+    stepped_minimal = validate_target_calculation_config(_load_json(CC_VALID / "stepped-minimal.json"))
+    unified_minimal = validate_target_calculation_config(_load_json(CC_VALID / "unified-minimal.json"))
+
+    # Empty consumes must NOT bypass stage-input contract check for predictor / generator / algorithm.
+    for role_ref, kwargs in (
+        (
+            "ies.predictor.naive@1.0.0",
+            {
+                "plugin_id": "ies.predictor.naive",
+                "version": "1.0.0",
+                "kind": "predictor",
+                "consumes": (),
+                "produces": (PREDICTION_OUTPUT_CONTRACT,),
+                "parameters_schema": _empty_object_schema(),
+            },
+        ),
+        (
+            "ies.generator.highs_milp@1.0.0",
+            {
+                "plugin_id": "ies.generator.highs_milp",
+                "version": "1.0.0",
+                "kind": "generator",
+                "consumes": (),
+                "produces": (SOLVER_BUNDLE_MPS_CONTRACT,),
+                "parameters_schema": _empty_object_schema(),
+                "modes": ("planning",),
+                "precisions": ("medium",),
+                "outputs": ("solution",),
+            },
+        ),
+        (
+            "acme.algorithm.capacity_search@1.2.0",
+            {
+                "plugin_id": "acme.algorithm.capacity_search",
+                "version": "1.2.0",
+                "kind": "algorithm",
+                "consumes": (),
+                "produces": (ENGINEERING_SOLUTION_CONTRACT,),
+                "parameters_schema": catalog["acme.algorithm.capacity_search@1.2.0"].parameters_schema,
+                "modes": ("planning",),
+                "precisions": ("medium",),
+                "outputs": ("solution", "metrics"),
+            },
+        ),
+    ):
+        cfg = unified_minimal if kwargs["kind"] == "algorithm" else stepped_full
+        bad_spec = StagePluginSpec(**kwargs)
+        with pytest.raises(ComputationUnavailableError) as exc_info:
+            validate_stage_compatibility(cfg, {**catalog, role_ref: bad_spec})
+        assert exc_info.value.reason == "incompatible-contracts"
+
+    # Unsupported predictor / generator / evaluator produces contracts must be rejected.
+    bad_pred_out = StagePluginSpec(
+        plugin_id="ies.predictor.naive",
+        version="1.0.0",
+        kind="predictor",
+        consumes=(STAGE_INPUT_CONTRACT,),
+        produces=("acme.unreadable@1.0.0",),
+        parameters_schema=_empty_object_schema(),
+    )
+    with pytest.raises(ComputationUnavailableError) as exc_info:
+        validate_stage_compatibility(stepped_full, {**catalog, bad_pred_out.ref: bad_pred_out})
+    assert exc_info.value.reason == "incompatible-contracts"
+
+    bad_eval_out = StagePluginSpec(
+        plugin_id="ies.evaluator.finance",
+        version="1.0.0",
+        kind="evaluator",
+        consumes=(ENGINEERING_SOLUTION_CONTRACT,),
+        produces=("acme.unrenderable@1.0.0",),
+        parameters_schema=_empty_object_schema(),
+        outputs=("metrics",),
+    )
+    with pytest.raises(ComputationUnavailableError) as exc_info:
+        validate_stage_compatibility(unified_minimal, {**catalog, bad_eval_out.ref: bad_eval_out})
+    assert exc_info.value.reason == "incompatible-contracts"
+
+    bad_gen_out = StagePluginSpec(
+        plugin_id="ies.generator.highs_milp",
+        version="1.0.0",
+        kind="generator",
+        consumes=(STAGE_INPUT_CONTRACT,),
+        produces=("acme.unstructured@1.0.0",),
+        parameters_schema=_empty_object_schema(),
+        modes=("planning",),
+        precisions=("medium",),
+        outputs=("solution",),
+    )
+    bad_sol_match = StagePluginSpec(
+        plugin_id="ies.solver.highs",
+        version="1.7.2",
+        kind="solver",
+        consumes=("acme.unstructured@1.0.0",),
+        produces=(PRIMAL_SOLUTION_CONTRACT,),
+        parameters_schema=_empty_object_schema(),
+    )
+    with pytest.raises(ComputationUnavailableError) as exc_info:
+        validate_stage_compatibility(
+            stepped_minimal,
+            {**catalog, bad_gen_out.ref: bad_gen_out, bad_sol_match.ref: bad_sol_match},
+        )
+    assert exc_info.value.reason == "incompatible-contracts"
+
+    # Empty modes, precisions, or outputs declarations must be rejected (no silent bypass).
+    for field_name, reason in (
+        ("modes", "incompatible-mode"),
+        ("precisions", "incompatible-precision"),
+        ("outputs", "incompatible-outputs"),
+    ):
+        base_kwargs: dict[str, Any] = {
+            "plugin_id": "ies.generator.highs_milp",
+            "version": "1.0.0",
+            "kind": "generator",
+            "consumes": (STAGE_INPUT_CONTRACT,),
+            "produces": (SOLVER_BUNDLE_MPS_CONTRACT,),
+            "parameters_schema": _empty_object_schema(),
+            "modes": ("planning",),
+            "precisions": ("medium",),
+            "outputs": ("solution",),
+        }
+        base_kwargs[field_name] = ()
+        with pytest.raises(ComputationUnavailableError) as exc_info:
+            validate_stage_compatibility(
+                stepped_minimal, {**catalog, "ies.generator.highs_milp@1.0.0": StagePluginSpec(**base_kwargs)}
+            )
+        assert exc_info.value.reason == reason
+
+    # Evaluator with empty outputs capability must also be rejected.
+    empty_eval_outputs = StagePluginSpec(
+        plugin_id="ies.evaluator.finance",
+        version="1.0.0",
+        kind="evaluator",
+        consumes=(ENGINEERING_SOLUTION_CONTRACT,),
+        produces=(FINANCIAL_EVALUATION_CONTRACT,),
+        parameters_schema=_empty_object_schema(),
+        outputs=(),
+    )
+    with pytest.raises(ComputationUnavailableError) as exc_info:
+        validate_stage_compatibility(
+            unified_minimal, {**catalog, empty_eval_outputs.ref: empty_eval_outputs}
+        )
+    assert exc_info.value.reason == "incompatible-outputs"
 
 
 def test_alignment_with_sdk_f1_contract_payloads() -> None:

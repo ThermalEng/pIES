@@ -10,8 +10,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, NoReturn
 
-from jsonschema import Draft202012Validator
-
 from pies_sdk.contracts import (
     MATH_STATUSES,
     check_finite_json,
@@ -45,6 +43,35 @@ _SCHEMA_DIR = Path(__file__).parent / "schema"
 _PROVIDER_REF_RE = re.compile(r"^[A-Za-z0-9_-]+(\.[A-Za-z0-9_-]+)*@[0-9]+\.[0-9]+\.[0-9]+$")
 _FEASIBLE_MATH_STATUSES = frozenset(("solved", "feasible"))
 
+_PRIMAL_REQUIRED_KEYS = frozenset(
+    (
+        "schema",
+        "schema_version",
+        "math_status",
+        "termination_reason",
+        "has_feasible_solution",
+        "column_count",
+        "values",
+        "objective_value",
+        "best_bound",
+        "relative_gap",
+        "receipt",
+    )
+)
+_PRIMAL_HEADER_REQUIRED_KEYS = _PRIMAL_REQUIRED_KEYS - frozenset(("values",))
+_PRIMAL_HEADER_ALLOWED_KEYS = _PRIMAL_HEADER_REQUIRED_KEYS | frozenset(("extensions",))
+_PRIMAL_ALLOWED_KEYS = _PRIMAL_REQUIRED_KEYS | frozenset(("extensions",))
+
+_ENG_REQUIRED_KEYS = frozenset(("schema", "schema_version", "solver_summary"))
+_ENG_ALLOWED_KEYS = _ENG_REQUIRED_KEYS | frozenset(
+    ("construction_units", "series", "system_series", "metrics", "model_sources", "extensions")
+)
+
+_REPORT_REQUIRED_KEYS = frozenset(
+    ("schema", "schema_version", "title", "evaluator", "metrics", "charts", "tables")
+)
+_REPORT_ALLOWED_KEYS = _REPORT_REQUIRED_KEYS | frozenset(("summary", "extensions"))
+
 
 def load_primal_solution_schema() -> dict[str, Any]:
     return json.loads((_SCHEMA_DIR / "primal-solution-1.0.0.schema.json").read_text(encoding="utf-8"))
@@ -64,15 +91,6 @@ def load_evaluation_report_schema() -> dict[str, Any]:
 
 def _reject_json_constant(token: str) -> NoReturn:
     raise StageIOError(f"Non-finite JSON constant is forbidden: {token!r}")
-
-
-def _validate_schema(schema: dict[str, Any], payload: dict[str, Any], label: str) -> None:
-    validator = Draft202012Validator(schema)
-    errors = sorted(validator.iter_errors(payload), key=lambda e: list(e.absolute_path))
-    if errors:
-        first = errors[0]
-        loc = "/".join(str(p) for p in first.absolute_path) or "<root>"
-        raise StageIOError(f"{label} invalid [{loc}]: {first.message}")
 
 
 def _require_non_empty_str(value: object, name: str) -> str:
@@ -154,6 +172,54 @@ def _validate_primal_receipt(receipt: object) -> dict[str, Any]:
     return out
 
 
+def _validate_primal_metadata(
+    *,
+    schema: str,
+    schema_version: str,
+    math_status: str,
+    termination_reason: str,
+    has_feasible_solution: bool,
+    column_count: int,
+    objective_value: float | None,
+    best_bound: float | None,
+    relative_gap: float | None,
+    receipt: Mapping[str, Any],
+    extensions: Mapping[str, Any],
+) -> tuple[float | None, float | None, float | None, dict[str, Any], dict[str, Any]]:
+    if schema != PRIMAL_SOLUTION_SCHEMA:
+        raise StageIOError(f"Invalid PrimalSolution schema: {schema!r}")
+    if schema_version != PRIMAL_SOLUTION_VERSION:
+        raise StageIOError(f"Invalid PrimalSolution schema_version: {schema_version!r}")
+    if math_status not in MATH_STATUSES:
+        raise StageIOError(f"Invalid PrimalSolution math_status: {math_status!r}")
+    if termination_reason not in SOLVER_TERMINATION_REASONS:
+        raise StageIOError(f"Invalid PrimalSolution termination_reason: {termination_reason!r}")
+    if not isinstance(has_feasible_solution, bool):
+        raise StageIOError("PrimalSolution.has_feasible_solution must be a boolean")
+    _require_non_bool_int(column_count, "PrimalSolution.column_count", minimum=0)
+
+    obj = _require_optional_finite_number(objective_value, "PrimalSolution.objective_value")
+    bound = _require_optional_finite_number(best_bound, "PrimalSolution.best_bound")
+    gap = _require_optional_finite_number(relative_gap, "PrimalSolution.relative_gap")
+
+    if has_feasible_solution:
+        if math_status not in _FEASIBLE_MATH_STATUSES:
+            raise StageIOError(
+                "has_feasible_solution=True requires math_status in "
+                f"('solved', 'feasible'), got {math_status!r}"
+            )
+        if obj is None:
+            raise StageIOError("has_feasible_solution=True requires non-null objective_value")
+    elif math_status in _FEASIBLE_MATH_STATUSES:
+        raise StageIOError(f"has_feasible_solution=False forbids math_status={math_status!r}")
+
+    norm_receipt = _validate_primal_receipt(receipt)
+    if not isinstance(extensions, Mapping):
+        raise StageIOError("PrimalSolution.extensions must be a JSON object")
+    check_finite_json(extensions, "PrimalSolution.extensions")
+    return obj, bound, gap, norm_receipt, dict(extensions)
+
+
 # ---------------------------------------------------------------------------
 # 1. ies.primal-solution@1.0.0
 # ---------------------------------------------------------------------------
@@ -176,48 +242,24 @@ class PrimalSolutionHeader:
     extensions: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        if self.schema != PRIMAL_SOLUTION_SCHEMA:
-            raise StageIOError(f"Invalid PrimalSolution schema: {self.schema!r}")
-        if self.schema_version != PRIMAL_SOLUTION_VERSION:
-            raise StageIOError(f"Invalid PrimalSolution schema_version: {self.schema_version!r}")
-        if self.math_status not in MATH_STATUSES:
-            raise StageIOError(f"Invalid PrimalSolution math_status: {self.math_status!r}")
-        if self.termination_reason not in SOLVER_TERMINATION_REASONS:
-            raise StageIOError(
-                f"Invalid PrimalSolution termination_reason: {self.termination_reason!r}"
-            )
-        if not isinstance(self.has_feasible_solution, bool):
-            raise StageIOError("PrimalSolution.has_feasible_solution must be a boolean")
-        _require_non_bool_int(self.column_count, "PrimalSolution.column_count", minimum=0)
-
-        obj = _require_optional_finite_number(self.objective_value, "PrimalSolution.objective_value")
-        bound = _require_optional_finite_number(self.best_bound, "PrimalSolution.best_bound")
-        gap = _require_optional_finite_number(self.relative_gap, "PrimalSolution.relative_gap")
+        obj, bound, gap, norm_receipt, norm_ext = _validate_primal_metadata(
+            schema=self.schema,
+            schema_version=self.schema_version,
+            math_status=self.math_status,
+            termination_reason=self.termination_reason,
+            has_feasible_solution=self.has_feasible_solution,
+            column_count=self.column_count,
+            objective_value=self.objective_value,
+            best_bound=self.best_bound,
+            relative_gap=self.relative_gap,
+            receipt=self.receipt,
+            extensions=self.extensions,
+        )
         object.__setattr__(self, "objective_value", obj)
         object.__setattr__(self, "best_bound", bound)
         object.__setattr__(self, "relative_gap", gap)
-
-        if self.has_feasible_solution:
-            if self.math_status not in _FEASIBLE_MATH_STATUSES:
-                raise StageIOError(
-                    "has_feasible_solution=True requires math_status in "
-                    f"('solved', 'feasible'), got {self.math_status!r}"
-                )
-            if obj is None:
-                raise StageIOError("has_feasible_solution=True requires non-null objective_value")
-        else:
-            if self.math_status in _FEASIBLE_MATH_STATUSES:
-                raise StageIOError(
-                    f"has_feasible_solution=False forbids math_status={self.math_status!r}"
-                )
-
-        norm_receipt = _validate_primal_receipt(self.receipt)
         object.__setattr__(self, "receipt", norm_receipt)
-
-        if not isinstance(self.extensions, Mapping):
-            raise StageIOError("PrimalSolution.extensions must be a JSON object")
-        check_finite_json(self.extensions, "PrimalSolution.extensions")
-        object.__setattr__(self, "extensions", dict(self.extensions))
+        object.__setattr__(self, "extensions", norm_ext)
 
     @property
     def expected_values_count(self) -> int:
@@ -244,36 +286,12 @@ class PrimalSolutionHeader:
     def from_dict(cls, data: Mapping[str, Any]) -> PrimalSolutionHeader:
         if not isinstance(data, Mapping):
             raise StageIOError("PrimalSolution header must be a JSON object")
-        allowed = {
-            "schema",
-            "schema_version",
-            "math_status",
-            "termination_reason",
-            "has_feasible_solution",
-            "column_count",
-            "objective_value",
-            "best_bound",
-            "relative_gap",
-            "receipt",
-            "extensions",
-        }
-        extra = sorted(k for k in data if k not in allowed)
+        extra = sorted(k for k in data if k not in _PRIMAL_HEADER_ALLOWED_KEYS)
         if extra:
             raise StageIOError(f"PrimalSolution contains unknown fields: {extra!r}")
-        for req in (
-            "schema",
-            "schema_version",
-            "math_status",
-            "termination_reason",
-            "has_feasible_solution",
-            "column_count",
-            "objective_value",
-            "best_bound",
-            "relative_gap",
-            "receipt",
-        ):
-            if req not in data:
-                raise StageIOError(f"PrimalSolution missing required field: {req}")
+        missing = sorted(k for k in _PRIMAL_HEADER_REQUIRED_KEYS if k not in data)
+        if missing:
+            raise StageIOError(f"PrimalSolution missing required fields: {missing!r}")
         return cls(
             schema=data["schema"],
             schema_version=data["schema_version"],
@@ -307,7 +325,7 @@ class PrimalSolutionPayload:
     extensions: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        hdr = PrimalSolutionHeader(
+        obj, bound, gap, norm_receipt, norm_ext = _validate_primal_metadata(
             schema=self.schema,
             schema_version=self.schema_version,
             math_status=self.math_status,
@@ -320,11 +338,11 @@ class PrimalSolutionPayload:
             receipt=self.receipt,
             extensions=self.extensions,
         )
-        object.__setattr__(self, "objective_value", hdr.objective_value)
-        object.__setattr__(self, "best_bound", hdr.best_bound)
-        object.__setattr__(self, "relative_gap", hdr.relative_gap)
-        object.__setattr__(self, "receipt", hdr.receipt)
-        object.__setattr__(self, "extensions", hdr.extensions)
+        object.__setattr__(self, "objective_value", obj)
+        object.__setattr__(self, "best_bound", bound)
+        object.__setattr__(self, "relative_gap", gap)
+        object.__setattr__(self, "receipt", norm_receipt)
+        object.__setattr__(self, "extensions", norm_ext)
 
         if isinstance(self.values, (str, bytes)) or not isinstance(self.values, (list, tuple)):
             raise StageIOError("PrimalSolution.values must be a list or tuple of finite numbers")
@@ -332,31 +350,32 @@ class PrimalSolutionPayload:
             _require_finite_number(val, f"PrimalSolution.values[{idx}]")
             for idx, val in enumerate(self.values)
         )
-        expected = hdr.expected_values_count
+        expected = self.column_count if self.has_feasible_solution else 0
         if len(norm_values) != expected:
             raise StageIOError(
                 f"PrimalSolution.values length ({len(norm_values)}) must equal {expected}"
             )
         object.__setattr__(self, "values", norm_values)
 
-    @property
-    def header(self) -> PrimalSolutionHeader:
-        return PrimalSolutionHeader(
-            schema=self.schema,
-            schema_version=self.schema_version,
-            math_status=self.math_status,
-            termination_reason=self.termination_reason,
-            has_feasible_solution=self.has_feasible_solution,
-            column_count=self.column_count,
-            objective_value=self.objective_value,
-            best_bound=self.best_bound,
-            relative_gap=self.relative_gap,
-            receipt=self.receipt,
-            extensions=self.extensions,
-        )
+    def to_metadata_dict(self) -> dict[str, Any]:
+        out: dict[str, Any] = {
+            "schema": self.schema,
+            "schema_version": self.schema_version,
+            "math_status": self.math_status,
+            "termination_reason": self.termination_reason,
+            "has_feasible_solution": self.has_feasible_solution,
+            "column_count": self.column_count,
+            "objective_value": self.objective_value,
+            "best_bound": self.best_bound,
+            "relative_gap": self.relative_gap,
+            "receipt": dict(self.receipt),
+        }
+        if self.extensions:
+            out["extensions"] = dict(self.extensions)
+        return out
 
     def to_dict(self) -> dict[str, Any]:
-        out = self.header.to_metadata_dict()
+        out = self.to_metadata_dict()
         out["values"] = list(self.values)
         return out
 
@@ -364,8 +383,12 @@ class PrimalSolutionPayload:
     def from_dict(cls, data: Mapping[str, Any]) -> PrimalSolutionPayload:
         if not isinstance(data, Mapping):
             raise StageIOError("PrimalSolution payload must be a JSON object")
-        check_finite_json(data, "PrimalSolution")
-        _validate_schema(load_primal_solution_schema(), dict(data), "PrimalSolution")
+        extra = sorted(k for k in data if k not in _PRIMAL_ALLOWED_KEYS)
+        if extra:
+            raise StageIOError(f"PrimalSolution contains unknown fields: {extra!r}")
+        missing = sorted(k for k in _PRIMAL_REQUIRED_KEYS if k not in data)
+        if missing:
+            raise StageIOError(f"PrimalSolution missing required fields: {missing!r}")
         return cls(
             schema=data["schema"],
             schema_version=data["schema_version"],
@@ -373,7 +396,7 @@ class PrimalSolutionPayload:
             termination_reason=data["termination_reason"],
             has_feasible_solution=data["has_feasible_solution"],
             column_count=data["column_count"],
-            values=tuple(data["values"]),
+            values=data["values"],
             objective_value=data["objective_value"],
             best_bound=data["best_bound"],
             relative_gap=data["relative_gap"],
@@ -382,18 +405,15 @@ class PrimalSolutionPayload:
         )
 
 
-def write_primal_solution_streaming(
+def _write_primal_stream(
     path: Path,
-    header: PrimalSolutionHeader | Mapping[str, Any],
+    meta: Mapping[str, Any],
+    expected_count: int,
     values: Iterable[float],
 ) -> Path:
-    """Stream primal_solution.json to disk without materializing all column values in memory."""
-    hdr = header if isinstance(header, PrimalSolutionHeader) else PrimalSolutionHeader.from_dict(header)
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
     tmp_target = target.with_name(f".{target.name}.tmp")
-    meta = hdr.to_metadata_dict()
-    expected = hdr.expected_values_count
     try:
         with tmp_target.open("w", encoding="utf-8", newline="\n") as handle:
             handle.write("{\n")
@@ -410,9 +430,10 @@ def write_primal_solution_streaming(
                     handle.write(", ")
                 handle.write(repr(num))
                 count += 1
-            if count != expected:
+            if count != expected_count:
                 raise StageIOError(
-                    f"PrimalSolution streamed values count ({count}) does not match expected ({expected})"
+                    f"PrimalSolution streamed values count ({count}) "
+                    f"does not match expected ({expected_count})"
                 )
             handle.write("]\n}\n")
         tmp_target.replace(target)
@@ -420,6 +441,45 @@ def write_primal_solution_streaming(
         tmp_target.unlink(missing_ok=True)
         raise
     return target
+
+
+def write_primal_solution_streaming(
+    path: Path,
+    header: PrimalSolutionHeader | Mapping[str, Any],
+    values: Iterable[float],
+) -> Path:
+    """Stream primal_solution.json to disk without materializing all column values in memory."""
+    hdr = header if isinstance(header, PrimalSolutionHeader) else PrimalSolutionHeader.from_dict(header)
+    return _write_primal_stream(path, hdr.to_metadata_dict(), hdr.expected_values_count, values)
+
+
+def _decode_complete_json_token(
+    decoder: json.JSONDecoder,
+    handle: Any,
+    buf: str,
+    pos: int,
+    eof: bool,
+    label: str,
+) -> tuple[Any, str, int, bool]:
+    """Decode one JSON token, refilling across chunk boundaries so numbers cannot truncate."""
+    while True:
+        try:
+            val, next_pos = decoder.raw_decode(buf, pos)
+        except json.JSONDecodeError as exc:
+            if not eof:
+                more = handle.read(65536)
+                if more:
+                    buf += more
+                    continue
+                eof = True
+            raise StageIOError(f"Invalid {label}: {exc}") from exc
+        if next_pos == len(buf) and not eof:
+            more = handle.read(65536)
+            if more:
+                buf += more
+                continue
+            eof = True
+        return val, buf, next_pos, eof
 
 
 def _scan_primal_json_offsets(raw_path: Path) -> tuple[dict[str, Any], int]:
@@ -459,20 +519,11 @@ def _scan_primal_json_offsets(raw_path: Path) -> tuple[dict[str, Any], int]:
 
         def _decode_next(label: str) -> Any:
             nonlocal buf, pos, eof
-            while True:
-                _refill()
-                try:
-                    val, next_pos = decoder.raw_decode(buf, pos)
-                    pos = next_pos
-                    return val
-                except json.JSONDecodeError as exc:
-                    if not eof:
-                        more = handle.read(65536)
-                        if more:
-                            buf += more
-                            continue
-                        eof = True
-                    raise StageIOError(f"Invalid PrimalSolution {label}: {exc}") from exc
+            _refill()
+            val, buf, pos, eof = _decode_complete_json_token(
+                decoder, handle, buf, pos, eof, f"PrimalSolution {label}"
+            )
+            return val
 
         def _skip_array() -> None:
             nonlocal pos
@@ -566,10 +617,8 @@ def iter_primal_solution_values(path: Path) -> tuple[PrimalSolutionHeader, Itera
 
     def _stream() -> Iterator[float]:
         decoder = json.JSONDecoder(parse_constant=_reject_json_constant)
-        buf = ""
         count = 0
         with target.open("r", encoding="utf-8") as handle:
-            # Skip up to values '[' character
             remaining = values_char_offset
             while remaining > 0:
                 chunk = handle.read(min(65536, remaining))
@@ -606,21 +655,14 @@ def iter_primal_solution_values(path: Path) -> tuple[PrimalSolutionHeader, Itera
                     if count > 0:
                         raise StageIOError("Trailing comma in PrimalSolution.values")
                     break
-                while True:
-                    try:
-                        val, next_pos = decoder.raw_decode(buf, pos)
-                        pos = next_pos
-                        break
-                    except json.JSONDecodeError as exc:
-                        if not eof:
-                            more = handle.read(65536)
-                            if more:
-                                buf += more
-                                continue
-                            eof = True
-                        raise StageIOError(
-                            f"Malformed number at PrimalSolution.values[{count}]: {exc}"
-                        ) from exc
+                val, buf, pos, eof = _decode_complete_json_token(
+                    decoder,
+                    handle,
+                    buf,
+                    pos,
+                    eof,
+                    f"PrimalSolution.values[{count}]",
+                )
                 yield _require_finite_number(val, f"PrimalSolution.values[{count}]")
                 count += 1
                 _ensure_data()
@@ -632,7 +674,6 @@ def iter_primal_solution_values(path: Path) -> tuple[PrimalSolutionHeader, Itera
                     raise StageIOError("Unexpected EOF inside PrimalSolution.values")
                 if buf[pos] == ",":
                     pos += 1
-                    # Require an element after comma
                     _ensure_data()
                     while pos < len(buf) and buf[pos] in " \t\r\n":
                         pos += 1
@@ -674,7 +715,9 @@ class SolverSummary:
 
     def __post_init__(self) -> None:
         if self.termination_reason not in SOLVER_TERMINATION_REASONS:
-            raise StageIOError(f"Invalid solver_summary.termination_reason: {self.termination_reason!r}")
+            raise StageIOError(
+                f"Invalid solver_summary.termination_reason: {self.termination_reason!r}"
+            )
         if self.math_status not in MATH_STATUSES:
             raise StageIOError(f"Invalid solver_summary.math_status: {self.math_status!r}")
         if not isinstance(self.has_feasible_solution, bool):
@@ -700,11 +743,10 @@ class SolverSummary:
                 raise StageIOError("has_feasible_solution=True requires non-null objective_value")
             if self.objective_unit is None:
                 raise StageIOError("has_feasible_solution=True requires non-null objective_unit")
-        else:
-            if self.math_status in _FEASIBLE_MATH_STATUSES:
-                raise StageIOError(
-                    f"has_feasible_solution=False forbids math_status={self.math_status!r}"
-                )
+        elif self.math_status in _FEASIBLE_MATH_STATUSES:
+            raise StageIOError(
+                f"has_feasible_solution=False forbids math_status={self.math_status!r}"
+            )
 
         if self.solver_diagnostics is not None:
             if not isinstance(self.solver_diagnostics, Mapping):
@@ -818,6 +860,14 @@ class ConstructionUnit:
             s if isinstance(s, ConstructionScale) else ConstructionScale.from_dict(s)
             for s in self.scales
         )
+        seen_pvars: set[str] = set()
+        for scale in norm_scales:
+            if scale.planning_variable_id in seen_pvars:
+                raise StageIOError(
+                    f"Duplicate planning_variable_id {scale.planning_variable_id!r} "
+                    f"in construction_unit {self.unit_id!r}"
+                )
+            seen_pvars.add(scale.planning_variable_id)
         object.__setattr__(self, "scales", norm_scales)
 
     def to_dict(self) -> dict[str, Any]:
@@ -855,8 +905,12 @@ class DeviceSeries:
         _require_non_empty_str(self.instance_id, "series.instance_id")
         _require_non_empty_str(self.variable_id, "series.variable_id")
         _require_non_empty_str(self.unit, "series.unit")
-        if isinstance(self.values, (str, bytes)) or not isinstance(self.values, (list, tuple)):
-            raise StageIOError("series.values must be a list of numbers")
+        if (
+            isinstance(self.values, (str, bytes))
+            or not isinstance(self.values, (list, tuple))
+            or not self.values
+        ):
+            raise StageIOError("series.values must be a non-empty list of numbers")
         norm = tuple(
             _require_finite_number(v, f"series.values[{idx}]")
             for idx, v in enumerate(self.values)
@@ -896,8 +950,12 @@ class SystemSeries:
         _require_non_empty_str(self.block, "system_series.block")
         _require_non_empty_str(self.variable, "system_series.variable")
         _require_non_empty_str(self.unit, "system_series.unit")
-        if isinstance(self.values, (str, bytes)) or not isinstance(self.values, (list, tuple)):
-            raise StageIOError("system_series.values must be a list of numbers")
+        if (
+            isinstance(self.values, (str, bytes))
+            or not isinstance(self.values, (list, tuple))
+            or not self.values
+        ):
+            raise StageIOError("system_series.values must be a non-empty list of numbers")
         norm = tuple(
             _require_finite_number(v, f"system_series.values[{idx}]")
             for idx, v in enumerate(self.values)
@@ -964,6 +1022,13 @@ class EngineeringSolutionPayload:
                 u if isinstance(u, ConstructionUnit) else ConstructionUnit.from_dict(u)
                 for u in self.construction_units
             )
+            seen_units: set[str] = set()
+            for unit in norm_units:
+                if unit.unit_id in seen_units:
+                    raise StageIOError(
+                        f"Duplicate unit_id in construction_units: {unit.unit_id!r}"
+                    )
+                seen_units.add(unit.unit_id)
         object.__setattr__(self, "construction_units", norm_units)
 
         norm_series: dict[str, DeviceSeries] | None = None
@@ -988,9 +1053,7 @@ class EngineeringSolutionPayload:
 
         if summary.has_feasible_solution:
             if norm_units is None:
-                raise StageIOError(
-                    "Feasible EngineeringSolution requires 'construction_units'"
-                )
+                raise StageIOError("Feasible EngineeringSolution requires 'construction_units'")
             if norm_series is None:
                 raise StageIOError("Feasible EngineeringSolution requires 'series'")
             if norm_sys is None:
@@ -999,6 +1062,16 @@ class EngineeringSolutionPayload:
             if overlap:
                 raise StageIOError(
                     f"series and system_series share duplicate series_id keys: {overlap!r}"
+                )
+            step_lengths: dict[str, int] = {
+                **{sid: len(entry.values) for sid, entry in norm_series.items()},
+                **{sid: len(entry.values) for sid, entry in norm_sys.items()},
+            }
+            unique_lengths = set(step_lengths.values())
+            if len(unique_lengths) > 1:
+                raise StageIOError(
+                    "Feasible EngineeringSolution requires equal continuous step count across all "
+                    f"series and system_series, got {step_lengths!r}"
                 )
         else:
             if norm_units:
@@ -1051,8 +1124,12 @@ class EngineeringSolutionPayload:
     def from_dict(cls, data: Mapping[str, Any]) -> EngineeringSolutionPayload:
         if not isinstance(data, Mapping):
             raise StageIOError("EngineeringSolution payload must be a JSON object")
-        check_finite_json(data, "EngineeringSolution")
-        _validate_schema(load_engineering_solution_schema(), dict(data), "EngineeringSolution")
+        extra = sorted(k for k in data if k not in _ENG_ALLOWED_KEYS)
+        if extra:
+            raise StageIOError(f"EngineeringSolution contains unknown fields: {extra!r}")
+        missing = sorted(k for k in _ENG_REQUIRED_KEYS if k not in data)
+        if missing:
+            raise StageIOError(f"EngineeringSolution missing required fields: {missing!r}")
         return cls(
             schema=data["schema"],
             schema_version=data["schema_version"],
@@ -1064,6 +1141,181 @@ class EngineeringSolutionPayload:
             model_sources=data.get("model_sources"),
             extensions=data.get("extensions", {}),
         )
+
+
+@dataclass(frozen=True, slots=True)
+class ExpectedConstructionUnit:
+    """Frozen expected construction unit and planning variables for completeness checks."""
+
+    unit_id: str
+    instance_id: str
+    mode: str
+    planning_variable_units: Mapping[str, str] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        _require_non_empty_str(self.unit_id, "expected_unit.unit_id")
+        _require_non_empty_str(self.instance_id, "expected_unit.instance_id")
+        if self.mode not in CONSTRUCTION_UNIT_MODES:
+            raise StageIOError(f"Invalid expected_unit.mode: {self.mode!r}")
+        if not isinstance(self.planning_variable_units, Mapping):
+            raise StageIOError("expected_unit.planning_variable_units must be a mapping")
+        for pvar, unit in self.planning_variable_units.items():
+            _require_non_empty_str(pvar, "expected_unit.planning_variable_id")
+            _require_non_empty_str(unit, f"expected_unit.{pvar}.unit")
+        object.__setattr__(self, "planning_variable_units", dict(self.planning_variable_units))
+
+
+@dataclass(frozen=True, slots=True)
+class ExpectedDeviceSeries:
+    """Frozen expected device step series identity and business unit."""
+
+    instance_id: str
+    variable_id: str
+    unit: str
+
+    def __post_init__(self) -> None:
+        _require_non_empty_str(self.instance_id, "expected_series.instance_id")
+        _require_non_empty_str(self.variable_id, "expected_series.variable_id")
+        _require_non_empty_str(self.unit, "expected_series.unit")
+
+
+@dataclass(frozen=True, slots=True)
+class ExpectedSystemSeries:
+    """Frozen expected system equation series identity and business unit."""
+
+    block: str
+    variable: str
+    unit: str
+
+    def __post_init__(self) -> None:
+        _require_non_empty_str(self.block, "expected_system_series.block")
+        _require_non_empty_str(self.variable, "expected_system_series.variable")
+        _require_non_empty_str(self.unit, "expected_system_series.unit")
+
+
+@dataclass(frozen=True, slots=True)
+class EngineeringSolutionExpectation:
+    """Frozen expectation against which a feasible EngineeringSolutionPayload is checked."""
+
+    expected_steps: int
+    construction_units: tuple[ExpectedConstructionUnit, ...] = ()
+    series: Mapping[str, ExpectedDeviceSeries] = field(default_factory=dict)
+    system_series: Mapping[str, ExpectedSystemSeries] = field(default_factory=dict)
+    objective_unit: str | None = None
+
+    def __post_init__(self) -> None:
+        _require_non_bool_int(self.expected_steps, "expectation.expected_steps", minimum=1)
+        if self.objective_unit is not None:
+            _require_non_empty_str(self.objective_unit, "expectation.objective_unit")
+        seen_units: set[str] = set()
+        for unit in self.construction_units:
+            if unit.unit_id in seen_units:
+                raise StageIOError(f"Duplicate expected construction unit_id: {unit.unit_id!r}")
+            seen_units.add(unit.unit_id)
+        overlap = sorted(set(self.series) & set(self.system_series))
+        if overlap:
+            raise StageIOError(f"Expected series and system_series overlap: {overlap!r}")
+
+
+def validate_engineering_solution_completeness(
+    solution: EngineeringSolutionPayload,
+    expectation: EngineeringSolutionExpectation,
+) -> EngineeringSolutionPayload:
+    """Validate feasible EngineeringSolutionPayload completeness against frozen expectations.
+
+    Preserves the ``has_feasible_solution: false`` exemption without requiring
+    construction_units or series.
+    """
+    if not isinstance(solution, EngineeringSolutionPayload):
+        raise StageIOError("solution must be EngineeringSolutionPayload")
+    if not isinstance(expectation, EngineeringSolutionExpectation):
+        raise StageIOError("expectation must be EngineeringSolutionExpectation")
+    if not solution.solver_summary.has_feasible_solution:
+        return solution
+
+    if (
+        expectation.objective_unit is not None
+        and solution.solver_summary.objective_unit != expectation.objective_unit
+    ):
+        raise StageIOError(
+            f"Expected objective_unit {expectation.objective_unit!r}, "
+            f"got {solution.solver_summary.objective_unit!r}"
+        )
+
+    actual_units = {u.unit_id: u for u in (solution.construction_units or ())}
+    expected_units = {u.unit_id: u for u in expectation.construction_units}
+    if set(actual_units) != set(expected_units):
+        missing_u = sorted(set(expected_units) - set(actual_units))
+        extra_u = sorted(set(actual_units) - set(expected_units))
+        raise StageIOError(
+            f"construction_units mismatch: missing={missing_u!r}, extra={extra_u!r}"
+        )
+    for uid, exp_u in expected_units.items():
+        act_u = actual_units[uid]
+        if act_u.instance_id != exp_u.instance_id or act_u.mode != exp_u.mode:
+            raise StageIOError(
+                f"construction_unit {uid!r} metadata mismatch: "
+                f"expected ({exp_u.instance_id!r}, {exp_u.mode!r}), "
+                f"got ({act_u.instance_id!r}, {act_u.mode!r})"
+            )
+        act_scales = {s.planning_variable_id: s for s in act_u.scales}
+        if set(act_scales) != set(exp_u.planning_variable_units):
+            missing_p = sorted(set(exp_u.planning_variable_units) - set(act_scales))
+            extra_p = sorted(set(act_scales) - set(exp_u.planning_variable_units))
+            raise StageIOError(
+                f"construction_unit {uid!r} planning variables mismatch: "
+                f"missing={missing_p!r}, extra={extra_p!r}"
+            )
+        for pvar, exp_punit in exp_u.planning_variable_units.items():
+            if act_scales[pvar].unit != exp_punit:
+                raise StageIOError(
+                    f"construction_unit {uid!r} variable {pvar!r} unit mismatch: "
+                    f"expected {exp_punit!r}, got {act_scales[pvar].unit!r}"
+                )
+
+    actual_series = dict(solution.series or {})
+    if set(actual_series) != set(expectation.series):
+        missing_s = sorted(set(expectation.series) - set(actual_series))
+        extra_s = sorted(set(actual_series) - set(expectation.series))
+        raise StageIOError(f"series mismatch: missing={missing_s!r}, extra={extra_s!r}")
+    for sid, exp_s in expectation.series.items():
+        act_s = actual_series[sid]
+        if (
+            act_s.instance_id != exp_s.instance_id
+            or act_s.variable_id != exp_s.variable_id
+            or act_s.unit != exp_s.unit
+        ):
+            raise StageIOError(f"series {sid!r} identity/unit mismatch against frozen expectation")
+        if len(act_s.values) != expectation.expected_steps:
+            raise StageIOError(
+                f"series {sid!r} length ({len(act_s.values)}) "
+                f"does not match expected_steps ({expectation.expected_steps})"
+            )
+
+    actual_sys = dict(solution.system_series or {})
+    if set(actual_sys) != set(expectation.system_series):
+        missing_ss = sorted(set(expectation.system_series) - set(actual_sys))
+        extra_ss = sorted(set(actual_sys) - set(expectation.system_series))
+        raise StageIOError(
+            f"system_series mismatch: missing={missing_ss!r}, extra={extra_ss!r}"
+        )
+    for sid, exp_ss in expectation.system_series.items():
+        act_ss = actual_sys[sid]
+        if (
+            act_ss.block != exp_ss.block
+            or act_ss.variable != exp_ss.variable
+            or act_ss.unit != exp_ss.unit
+        ):
+            raise StageIOError(
+                f"system_series {sid!r} identity/unit mismatch against frozen expectation"
+            )
+        if len(act_ss.values) != expectation.expected_steps:
+            raise StageIOError(
+                f"system_series {sid!r} length ({len(act_ss.values)}) "
+                f"does not match expected_steps ({expectation.expected_steps})"
+            )
+
+    return solution
 
 
 # ---------------------------------------------------------------------------
@@ -1452,8 +1704,12 @@ class EvaluationReportPayload:
     def from_dict(cls, data: Mapping[str, Any]) -> EvaluationReportPayload:
         if not isinstance(data, Mapping):
             raise StageIOError("EvaluationReport payload must be a JSON object")
-        check_finite_json(data, "EvaluationReport")
-        _validate_schema(load_evaluation_report_schema(), dict(data), "EvaluationReport")
+        extra = sorted(k for k in data if k not in _REPORT_ALLOWED_KEYS)
+        if extra:
+            raise StageIOError(f"EvaluationReport contains unknown fields: {extra!r}")
+        missing = sorted(k for k in _REPORT_REQUIRED_KEYS if k not in data)
+        if missing:
+            raise StageIOError(f"EvaluationReport missing required fields: {missing!r}")
         return cls(
             schema=data["schema"],
             schema_version=data["schema_version"],
@@ -1503,7 +1759,8 @@ def write_primal_solution(
         if isinstance(payload, PrimalSolutionPayload)
         else PrimalSolutionPayload.from_dict(payload)
     )
-    return write_primal_solution_streaming(path, model.header, model.values)
+    expected = model.column_count if model.has_feasible_solution else 0
+    return _write_primal_stream(path, model.to_metadata_dict(), expected, model.values)
 
 
 def read_engineering_solution(path: Path) -> EngineeringSolutionPayload:

@@ -46,7 +46,8 @@ def validate_parameters_schema(
     """Validate and freeze a plugin Draft 2020-12 parameters_schema object."""
     if not isinstance(schema, Mapping):
         raise TypeError(f"{field_name} 须为完整 JSON Schema 对象，得到 {type(schema).__name__}")
-    raw = dict(schema)
+    raw = thaw_json_value(schema)
+    assert isinstance(raw, dict)
     if raw.get("type") != "object":
         raise ValueError(f"{field_name} 根 schema 必须描述 object")
     if raw.get("additionalProperties") is not False:

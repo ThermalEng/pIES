@@ -22,6 +22,9 @@ from iesplan.core.yamlmini import dump as _yaml_dump
 
 TARGET_SOLVER_BUNDLE_SCHEMA = "ies.solver-bundle"
 TARGET_SOLVER_BUNDLE_VERSION = "1.0.0"
+RESERVED_MANIFEST_PATHS = frozenset({"bundle.yaml"})
+INPUT_PATH_PREFIX = "input/"
+OUTPUT_PATH_PREFIX = "output/"
 PRIMAL_SOLUTION_OUTPUT_PATH = "output/primal_solution.json"
 
 TARGET_SOLVER_BUNDLE_SCHEMA_PATH = (
@@ -71,6 +74,11 @@ def _freeze_io_entries(entries: object, name: str) -> tuple[Mapping[str, object]
             if req_key not in entry:
                 raise ValueError(f"{name} 条目缺必需字段: {req_key}")
         rel_path = check_relative_path(entry["path"], f"{name}.path")
+        if rel_path in RESERVED_MANIFEST_PATHS:
+            raise ValueError(f"{name}.path 禁止占用保留清单路径: {rel_path!r}")
+        expected_prefix = INPUT_PATH_PREFIX if name == "inputs" else OUTPUT_PATH_PREFIX
+        if not rel_path.startswith(expected_prefix) or rel_path == expected_prefix:
+            raise ValueError(f"{name}.path 须归属 {expected_prefix!r} 目录: {rel_path!r}")
         if rel_path in seen_paths:
             raise ValueError(f"{name}.path 不得重复: {rel_path!r}")
         seen_paths.add(rel_path)

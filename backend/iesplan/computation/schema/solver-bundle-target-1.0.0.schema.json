@@ -28,28 +28,28 @@
     },
     "inputs": {
       "type": "array",
-      "description": "只读输入文件声明。",
+      "description": "只读输入文件声明（限定于 input/ 目录下，禁止覆盖保留清单 bundle.yaml）。",
       "minItems": 1,
       "items": {
         "type": "object",
         "required": ["path", "media_type"],
         "additionalProperties": false,
         "properties": {
-          "path": { "$ref": "#/$defs/relative_path" },
+          "path": { "$ref": "#/$defs/input_relative_path" },
           "media_type": { "type": "string", "minLength": 1 }
         }
       }
     },
     "outputs": {
       "type": "array",
-      "description": "允许写入的输出清单（须声明 output/primal_solution.json）。",
+      "description": "允许写入的输出清单（限定于 output/ 目录下，须声明 output/primal_solution.json）。",
       "minItems": 1,
       "items": {
         "type": "object",
         "required": ["path", "media_type", "required"],
         "additionalProperties": false,
         "properties": {
-          "path": { "$ref": "#/$defs/relative_path" },
+          "path": { "$ref": "#/$defs/output_relative_path" },
           "media_type": { "type": "string", "minLength": 1 },
           "required": { "type": "boolean" }
         }
@@ -66,10 +66,15 @@
       "description": "<稳定ID>@<语义化版本>；稳定 ID 由点号分隔的非空段组成，段内仅字母、数字、下划线与短横线。",
       "pattern": "^[A-Za-z0-9_-]+(\\.[A-Za-z0-9_-]+)*@[0-9]+\\.[0-9]+\\.[0-9]+$"
     },
-    "relative_path": {
+    "input_relative_path": {
       "type": "string",
-      "description": "Bundle 内相对路径：非空，不以 / 开头，不含反斜杠、空段或 .. 路径段。",
-      "pattern": "^(?!/)(?!.*\\\\)(?!.*/$)(?!.*//)(?!.*(^|/)\\.\\.(/|$)).+$"
+      "description": "Bundle 输入相对路径：须位于 input/ 下，不含反斜杠、空段或 .. 路径段。",
+      "pattern": "^input/(?!.*\\\\)(?!.*/$)(?!.*//)(?!.*(^|/)\\.\\.(/|$)).+$"
+    },
+    "output_relative_path": {
+      "type": "string",
+      "description": "Bundle 输出相对路径：须位于 output/ 下，不含反斜杠、空段或 .. 路径段。",
+      "pattern": "^output/(?!.*\\\\)(?!.*/$)(?!.*//)(?!.*(^|/)\\.\\.(/|$)).+$"
     }
   }
 }

@@ -4,12 +4,11 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, NoReturn
-
-from jsonschema import Draft202012Validator
 
 from pies_sdk.contracts import check_finite_json, check_relative_path, read_json_file, write_json_file
 from pies_sdk.errors import StageIOError
@@ -42,7 +41,31 @@ VARIABLE_MAP_RECORD_TAGS = (
 )
 
 _HEADER_SCHEMA_PATH = Path(__file__).parent / "schema" / "variable-map-header-1.0.0.schema.json"
+_PROVIDER_REF_RE = re.compile(r"^[A-Za-z0-9_-]+(\.[A-Za-z0-9_-]+)*@[0-9]+\.[0-9]+\.[0-9]+$")
 _PRECISIONS = frozenset(("low", "medium", "high"))
+_DEVICE_SERIES_CORE_KEYS = frozenset(
+    ("series_id", "instance_id", "variable_id", "unit", "scale", "offset")
+)
+_SYSTEM_SERIES_CORE_KEYS = frozenset(
+    ("series_id", "block", "variable", "unit", "scale", "offset")
+)
+_HEADER_REQUIRED_KEYS = frozenset(
+    (
+        "schema",
+        "schema_version",
+        "assembly",
+        "generator",
+        "records",
+        "column_count",
+        "objective_offset",
+        "objective_scale",
+        "objective_unit",
+        "outputs",
+        "precision",
+        "seed",
+    )
+)
+_HEADER_ALLOWED_KEYS = _HEADER_REQUIRED_KEYS | frozenset(("extensions",))
 
 
 def load_variable_map_header_schema() -> dict[str, Any]:
@@ -71,9 +94,31 @@ def _require_finite_number(value: object, name: str) -> float:
     return result
 
 
+def _require_nonzero_finite_scale(value: object, name: str) -> float:
+    scale = _require_finite_number(value, name)
+    if scale == 0.0:
+        raise StageIOError(f"{name} must be non-zero, got {value!r}")
+    return scale
+
+
+def apply_linear_conversion(raw_value: float, *, scale: float, offset: float = 0.0) -> float:
+    """Apply explicit affine unit conversion: business_value = scale * raw_value + offset."""
+    raw = _require_finite_number(raw_value, "raw_value")
+    sc = _require_nonzero_finite_scale(scale, "scale")
+    off = _require_finite_number(offset, "offset")
+    converted = sc * raw + off
+    if not math.isfinite(converted):
+        raise StageIOError("Linear unit conversion produced non-finite value")
+    return converted
+
+
 @dataclass(frozen=True, slots=True)
 class VariableMapHeader:
-    """Metadata header (input/parameters.json) for universal variable_map."""
+    """Metadata header (input/parameters.json) for universal variable_map.
+
+    Linear objective conversion semantics:
+    ``business_objective = objective_scale * raw_objective + objective_offset``.
+    """
 
     assembly: Mapping[str, Any]
     generator: str
@@ -83,15 +128,16 @@ class VariableMapHeader:
     outputs: tuple[str, ...]
     precision: str
     seed: int | None
+    objective_scale: float = 1.0
     records: str = VARIABLE_MAP_RECORDS_PATH
-    schema: str | None = None
-    schema_version: str | None = None
+    schema: str = VARIABLE_MAP_SCHEMA
+    schema_version: str = VARIABLE_MAP_VERSION
     extensions: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        if self.schema is not None and self.schema != VARIABLE_MAP_SCHEMA:
+        if self.schema != VARIABLE_MAP_SCHEMA:
             raise StageIOError(f"Invalid variable_map schema: {self.schema!r}")
-        if self.schema_version is not None and self.schema_version != VARIABLE_MAP_VERSION:
+        if self.schema_version != VARIABLE_MAP_VERSION:
             raise StageIOError(f"Invalid variable_map schema_version: {self.schema_version!r}")
         if not isinstance(self.assembly, Mapping):
             raise StageIOError("variable_map 'assembly' must be a JSON object")
@@ -109,16 +155,24 @@ class VariableMapHeader:
             raise StageIOError("variable_map.assembly.schema_version must be a non-empty string")
         object.__setattr__(self, "assembly", {"id": asm_id, "schema_version": asm_ver})
 
-        if not isinstance(self.generator, str) or not self.generator:
-            raise StageIOError("variable_map requires non-empty 'generator'")
+        if not isinstance(self.generator, str) or not _PROVIDER_REF_RE.fullmatch(self.generator):
+            raise StageIOError(
+                f"variable_map.generator must match '<id>@<semver>', got {self.generator!r}"
+            )
         check_relative_path(self.records, "variable_map.records")
         _require_non_bool_int(self.column_count, "variable_map.column_count", minimum=0)
         offset = _require_finite_number(self.objective_offset, "variable_map.objective_offset")
+        scale = _require_nonzero_finite_scale(self.objective_scale, "variable_map.objective_scale")
         object.__setattr__(self, "objective_offset", offset)
+        object.__setattr__(self, "objective_scale", scale)
         if not isinstance(self.objective_unit, str) or not self.objective_unit:
             raise StageIOError("variable_map requires non-empty 'objective_unit'")
 
-        if isinstance(self.outputs, str) or not isinstance(self.outputs, (list, tuple)) or not self.outputs:
+        if (
+            isinstance(self.outputs, str)
+            or not isinstance(self.outputs, (list, tuple))
+            or not self.outputs
+        ):
             raise StageIOError("variable_map requires non-empty 'outputs' list")
         norm_outputs: list[str] = []
         for idx, item in enumerate(self.outputs):
@@ -137,30 +191,21 @@ class VariableMapHeader:
         check_finite_json(self.extensions, "variable_map.extensions")
         object.__setattr__(self, "extensions", dict(self.extensions))
 
-        raw_dict = self.to_dict()
-        validator = Draft202012Validator(load_variable_map_header_schema())
-        errors = sorted(validator.iter_errors(raw_dict), key=lambda e: list(e.absolute_path))
-        if errors:
-            first = errors[0]
-            loc = "/".join(str(p) for p in first.absolute_path) or "<root>"
-            raise StageIOError(f"variable_map header invalid [{loc}]: {first.message}")
-
     def to_dict(self) -> dict[str, Any]:
         out: dict[str, Any] = {
+            "schema": self.schema,
+            "schema_version": self.schema_version,
             "assembly": dict(self.assembly),
             "generator": self.generator,
             "records": self.records,
             "column_count": self.column_count,
             "objective_offset": self.objective_offset,
+            "objective_scale": self.objective_scale,
             "objective_unit": self.objective_unit,
             "outputs": list(self.outputs),
             "precision": self.precision,
             "seed": self.seed,
         }
-        if self.schema is not None:
-            out["schema"] = self.schema
-        if self.schema_version is not None:
-            out["schema_version"] = self.schema_version
         if self.extensions:
             out["extensions"] = dict(self.extensions)
         return out
@@ -169,31 +214,31 @@ class VariableMapHeader:
     def from_dict(cls, data: Mapping[str, Any]) -> VariableMapHeader:
         if not isinstance(data, Mapping):
             raise StageIOError("variable_map header must be a JSON object")
-        check_finite_json(data, "variable_map")
-        validator = Draft202012Validator(load_variable_map_header_schema())
-        errors = sorted(validator.iter_errors(dict(data)), key=lambda e: list(e.absolute_path))
-        if errors:
-            first = errors[0]
-            loc = "/".join(str(p) for p in first.absolute_path) or "<root>"
-            raise StageIOError(f"variable_map header invalid [{loc}]: {first.message}")
+        extra = sorted(k for k in data if k not in _HEADER_ALLOWED_KEYS)
+        if extra:
+            raise StageIOError(f"variable_map header contains unknown fields: {extra!r}")
+        missing = sorted(k for k in _HEADER_REQUIRED_KEYS if k not in data)
+        if missing:
+            raise StageIOError(f"variable_map header missing required fields: {missing!r}")
         return cls(
+            schema=data["schema"],
+            schema_version=data["schema_version"],
             assembly=data["assembly"],
             generator=data["generator"],
             records=data["records"],
             column_count=data["column_count"],
             objective_offset=data["objective_offset"],
+            objective_scale=data["objective_scale"],
             objective_unit=data["objective_unit"],
-            outputs=tuple(data["outputs"]),
+            outputs=data["outputs"],
             precision=data["precision"],
             seed=data["seed"],
-            schema=data.get("schema"),
-            schema_version=data.get("schema_version"),
             extensions=data.get("extensions", {}),
         )
 
 
 class _RecordStreamValidator:
-    """O(1)-memory state machine validating NDJSON record order and 0-based indices."""
+    """O(1)-memory state machine validating NDJSON record order, linear units, and 0-based indices."""
 
     def __init__(self, *, column_count: int | None = None) -> None:
         if column_count is not None:
@@ -316,16 +361,22 @@ class _RecordStreamValidator:
             self._advance_stage(4, tag)
             self._expect_len(record, 2, tag)
             if not isinstance(record[1], list):
-                raise StageIOError("units payload must be a list of [col, unit] pairs")
+                raise StageIOError(
+                    "units payload must be a list of [col, unit, scale, offset] entries"
+                )
             norm_units: list[list[Any]] = []
-            for idx, pair in enumerate(record[1]):
-                if not isinstance(pair, (list, tuple)) or len(pair) != 2:
-                    raise StageIOError(f"units[{idx}] must be a [col, unit] pair")
-                col = self._check_col(pair[0], f"units[{idx}][0]")
-                unit = pair[1]
+            for idx, entry in enumerate(record[1]):
+                if not isinstance(entry, (list, tuple)) or len(entry) != 4:
+                    raise StageIOError(
+                        f"units[{idx}] must be a 4-tuple [col, unit, scale, offset]"
+                    )
+                col = self._check_col(entry[0], f"units[{idx}][0]")
+                unit = entry[1]
                 if not isinstance(unit, str) or not unit:
                     raise StageIOError(f"units[{idx}][1] must be a non-empty unit string")
-                norm_units.append([col, unit])
+                scale = _require_nonzero_finite_scale(entry[2], f"units[{idx}][2] (scale)")
+                offset = _require_finite_number(entry[3], f"units[{idx}][3] (offset)")
+                norm_units.append([col, unit, scale, offset])
             return ["units", norm_units]
 
         if tag == "component":
@@ -363,22 +414,45 @@ class _RecordStreamValidator:
                 raise StageIOError("series.series_id must be a non-empty string")
             if sid in self.seen_series_ids:
                 raise StageIOError(f"Duplicate series_id in variable_map: {sid!r}")
-            unit = meta.get("unit")
-            if not isinstance(unit, str) or not unit:
-                raise StageIOError(f"series {sid!r} requires non-empty 'unit'")
-            is_system = "block" in meta or "variable" in meta
-            is_device = "instance_id" in meta or "variable_id" in meta
-            if is_system == is_device:
+
+            has_system_keys = "block" in meta or "variable" in meta
+            has_device_keys = "instance_id" in meta or "variable_id" in meta
+            if has_system_keys == has_device_keys:
                 raise StageIOError(
-                    f"series {sid!r} must declare either (instance_id, variable_id) or (block, variable)"
+                    f"series {sid!r} must declare either device keys (instance_id, variable_id) "
+                    "or system keys (block, variable)"
                 )
-            req = ("block", "variable") if is_system else ("instance_id", "variable_id")
-            for k in req:
-                if not isinstance(meta.get(k), str) or not meta[k]:
+            expected_core = _SYSTEM_SERIES_CORE_KEYS if has_system_keys else _DEVICE_SERIES_CORE_KEYS
+            allowed_keys = expected_core | {"extensions"}
+            extra = sorted(k for k in meta if k not in allowed_keys)
+            if extra:
+                raise StageIOError(f"series {sid!r} contains unknown core fields: {extra!r}")
+            missing = sorted(k for k in expected_core if k not in meta)
+            if missing:
+                raise StageIOError(f"series {sid!r} missing required fields: {missing!r}")
+
+            str_keys = (
+                ("block", "variable", "unit")
+                if has_system_keys
+                else ("instance_id", "variable_id", "unit")
+            )
+            for k in str_keys:
+                if not isinstance(meta[k], str) or not meta[k]:
                     raise StageIOError(f"series {sid!r} requires non-empty {k!r}")
+            norm_scale = _require_nonzero_finite_scale(meta["scale"], f"series.{sid}.scale")
+            norm_offset = _require_finite_number(meta["offset"], f"series.{sid}.offset")
+            if "extensions" in meta:
+                ext = meta["extensions"]
+                if not isinstance(ext, Mapping):
+                    raise StageIOError(f"series.{sid}.extensions must be a JSON object")
+                for ext_k in ext:
+                    if not isinstance(ext_k, str) or not ext_k:
+                        raise StageIOError(f"series.{sid}.extensions keys must be non-empty strings")
+
+            norm_meta = {**meta, "scale": norm_scale, "offset": norm_offset}
             self.seen_series_ids.add(sid)
             self.block = "series"
-            return ["series", dict(meta)]
+            return ["series", norm_meta]
 
         if tag == "positions":
             if self.block != "series":
@@ -589,15 +663,13 @@ def write_variable_map_header(
 
 
 def read_variable_map(bundle_dir: Path) -> tuple[VariableMapHeader, list[list[Any]]]:
-    """Read variable_map header + validated NDJSON records from a bundle directory."""
-    root = Path(bundle_dir)
+    """Read canonical variable_map header (input/parameters.json) and declared records."""
+    root = Path(bundle_dir).resolve()
     header_path = root / "input" / VARIABLE_MAP_HEADER_FILENAME
-    if not header_path.is_file():
-        header_path = root / VARIABLE_MAP_HEADER_FILENAME
     header = read_variable_map_header(header_path)
-    records_path = root / header.records
-    if not records_path.is_file() and (root / Path(header.records).name).is_file():
-        records_path = root / Path(header.records).name
+    records_path = (root / header.records).resolve()
+    if records_path != root and root not in records_path.parents:
+        raise StageIOError(f"variable_map.records escapes bundle directory: {header.records!r}")
     records = list(iter_variable_map_records(records_path, column_count=header.column_count))
     return header, records
 
@@ -608,11 +680,12 @@ def write_variable_map(
     records: Iterable[Sequence[Any]],
 ) -> tuple[Path, Path]:
     """Write variable_map header (input/parameters.json) and stream NDJSON records."""
-    root = Path(bundle_dir)
+    root = Path(bundle_dir).resolve()
     model = header if isinstance(header, VariableMapHeader) else VariableMapHeader.from_dict(header)
     header_path = write_variable_map_header(root / "input" / VARIABLE_MAP_HEADER_FILENAME, model)
-    records_rel = Path(model.records)
-    records_path = root / records_rel
+    records_path = (root / model.records).resolve()
+    if records_path != root and root not in records_path.parents:
+        raise StageIOError(f"variable_map.records escapes bundle directory: {model.records!r}")
     with VariableMapWriter(records_path, column_count=model.column_count) as writer:
         writer.write_records(records)
     return header_path, records_path
