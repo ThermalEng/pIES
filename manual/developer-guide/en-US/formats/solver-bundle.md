@@ -60,7 +60,7 @@ All input and output files inside a Bundle adhere to a repeatable, read-only chu
 
 ## Universal Variable Mapping and Parameter Records
 
-`generator` plugins and `backend`'s bounded-subprocess restoration layer exchange 0-based solver column positions and variable/provenance declarations via a lightweight metadata header `input/parameters.json` (holding assembly identity, objective offset and unit, column count, requested outputs, seed, and relative record file path) paired with an ordered NDJSON record stream `input/parameters.jsonl`.
+`generator` plugins and `backend`'s bounded-subprocess restoration layer exchange 0-based solver column positions, explicit linear unit conversions, and variable/provenance declarations via a metadata header `input/parameters.json` (declaring `schema: ies.variable-map`, `schema_version: "1.0.0"`, assembly identity, objective `objective_scale` / `objective_offset` and unit, column count, requested outputs, precision, seed, and relative record file path; uniformly applying `business_value = scale * raw_value + offset` with finite non-zero `scale`) paired with an ordered NDJSON record stream `input/parameters.jsonl` (the `1.1.5` built-in chain retains its built-in mapping format until atomic cutover).
 
 `input/parameters.jsonl` emits JSON array records strictly in the following order (all positions and expression IDs index from `0` by internal slot order; homogeneous record groups MUST NOT reorder):
 
@@ -69,19 +69,19 @@ All input and output files inside a Bundle adhere to a repeatable, read-only chu
 | `column_names, [name, ...]` / `row_names, [name, ...]` | Batched solver column/row name tables in actual matrix order |
 | `epigraph, peak_position` / `epigraph_flows, [col, ...]` / `epigraph_end` | Emitted only when continuous demand upper envelopes are active; records monthly peak column and same-month flow columns for tightness verification |
 | `expression, id, constant` / `terms, [[col, coeff], ...]` / `expression_end` | Frozen affine expressions (adapter evaluates terms in exact order, sharing one result across consumers) |
-| `units, [[col, unit], ...]` | Business units and solver column positions for publishable variables |
+| `units, [[col, unit, scale, offset], ...]` | Solver column positions, business units, and explicit linear conversion coefficients (`business_value = scale * primal + offset`) for publishable variables |
 | `component, identity, unit, caliber, expression_id` | Links financial components to shared expressions |
 | `facts, object` | Structured financial facts skeleton (monetary nodes reference `{expression: id}`) |
-| `series, object` / `positions, [col, ...]` / `series_end` | Device or system step-series metadata and column positions across contiguous `step` indices |
+| `series, object` / `positions, [col, ...]` / `series_end` | Exact device or system step-series metadata (including linear `scale` and `offset`) and column positions across contiguous `step` indices |
 | `sources, object` / `source_group, ...` / `targets` / `indices` / `source_group_end` | Model source table and compressed row/column provenance mappings |
 
 ## Step Series Result Mapping
 
-When creating variables, companion generators register device series metadata `{series_id, instance_id, variable_id, unit}` alongside solver column positions ordered across `step=0..n-1`. `series_id` is a unique opaque identifier within the Bundle; `ResultAdapter` restores `ComputeResult.outputs.series` in business units strictly from this metadata rather than guessing instances or steps from column names.
+When creating variables, companion generators register exact device series metadata `{series_id, instance_id, variable_id, unit, scale, offset}` (only allowing optional `extensions` and rejecting unknown core fields) alongside solver column positions ordered across `step=0..n-1`. `series_id` is a unique opaque identifier within the Bundle; `ResultAdapter` restores `ComputeResult.outputs.series` in business units strictly from this metadata rather than guessing instances or steps from column names.
 
 ## System Series Mapping
 
-When assembly declares `outputs.system_series`, the generator registers `{series_id, block, variable, unit}` and column positions via the same record mechanism (sharing the unique `series_id` namespace with device series); the adapter restores `ComputeResult.outputs.system_series`, distinguished cleanly via `kind: "system"` in catalogs and exports (see [Step Series Reading](../contracts.md#step-series-reading)).
+When assembly declares `outputs.system_series`, the generator registers `{series_id, block, variable, unit, scale, offset}` (only allowing optional `extensions`) and column positions via the same record mechanism (sharing the unique `series_id` namespace with device series); the adapter restores `ComputeResult.outputs.system_series`, distinguished cleanly via `kind: "system"` in catalogs and exports (see [Step Series Reading](../contracts.md#step-series-reading)).
 
 ## Same-Solve Financial Fact Mapping
 

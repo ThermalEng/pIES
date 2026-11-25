@@ -60,7 +60,7 @@ Bundle 内输入与输出文件统一采用可重复按块读取的只读内容�
 
 ## 通用变量映射与参数记录
 
-`generator` 与 `backend` 受限子进程还原层通过轻量元数据头 `input/parameters.json`（保存汇编标识、目标偏移与单位、列数、请求输出、种子及记录文件相对路径）和有序 NDJSON 记录文件 `input/parameters.jsonl` 传递 0-based 求解列位置与变量/来源声明。
+`generator` 与 `backend` 受限子进程还原层通过元数据头 `input/parameters.json`（声明 `schema: ies.variable-map`、`schema_version: "1.0.0"`，保存汇编标识、目标线性换算 `objective_scale` 与 `objective_offset` 及单位、列数、请求输出、精度、种子及记录文件相对路径；统一按 `business_value = scale * raw_value + offset` 执行显式线性单位换算，`scale` 为非零有限数）和有序 NDJSON 记录文件 `input/parameters.jsonl` 传递 0-based 求解列位置与变量/来源声明（`1.1.5` 内置链路仍维持原有内置映射形态直至统一切换）。
 
 `input/parameters.jsonl` 按以下顺序写出 JSON 数组记录（所有位置与表达式 ID 从 `0` 起按内部槽位索引，同类记录不可交换顺序）：
 
@@ -69,19 +69,19 @@ Bundle 内输入与输出文件统一采用可重复按块读取的只读内容�
 | `column_names, [name, ...]` / `row_names, [name, ...]` | 按实际求解列/行顺序分批记录名称表 |
 | `epigraph, peak_position` / `epigraph_flows, [col, ...]` / `epigraph_end` | 仅在启用连续需量上包络时输出，记录月峰与同月流量求解列位置供紧度校验 |
 | `expression, id, constant` / `terms, [[col, coeff], ...]` / `expression_end` | 冻结仿射表达式（适配器按项原顺序求值，一份结果供多处复用） |
-| `units, [[col, unit], ...]` | 可发布变量的业务单位与求解列位置 |
+| `units, [[col, unit, scale, offset], ...]` | 可发布变量的求解列位置、业务单位及显式线性换算系数（`business_value = scale * primal + offset`） |
 | `component, identity, unit, caliber, expression_id` | 财务分量与共享表达式关联 |
 | `facts, object` | 结构化财务事实骨架（金额节点以 `{expression: id}` 引用） |
-| `series, object` / `positions, [col, ...]` / `series_end` | 设备或系统步序列元数据与完整连续 `step` 对应列位置 |
+| `series, object` / `positions, [col, ...]` / `series_end` | 设备或系统步序列精确元数据（含线性换算 `scale` 与 `offset`）与完整连续 `step` 对应列位置 |
 | `sources, object` / `source_group, ...` / `targets` / `indices` / `source_group_end` | 模型来源表与按分组压缩的行列索引映射 |
 
 ## 步序列结果映射
 
-配套生成器在建立变量时登记设备序列元数据 `{series_id, instance_id, variable_id, unit}` 及按 `step=0..n-1` 排列的实际求解列位置。`series_id` 为本次 Bundle 共享的唯一不透明标识；`ResultAdapter` 据此恢复业务单位的 `ComputeResult.outputs.series`，不按列名反向猜测实例或时步。
+配套生成器在建立变量时登记设备序列精确元数据 `{series_id, instance_id, variable_id, unit, scale, offset}`（仅允许可选 `extensions` 扩展对象，拒绝未知核心字段）及按 `step=0..n-1` 排列的实际求解列位置。`series_id` 为本次 Bundle 共享的唯一不透明标识；`ResultAdapter` 据此恢复业务单位的 `ComputeResult.outputs.series`，不按列名反向猜测实例或时步。
 
 ## 系统序列映射
 
-装配声明 `outputs.system_series` 时，生成器通过相同记录机制声明 `{series_id, block, variable, unit}` 及列位置（与设备序列共享 `series_id` 唯一命名空间）；适配器恢复为 `ComputeResult.outputs.system_series`，在公共目录及导出中通过 `kind: "system"` 明确区分（参见[求解步序列读取](../contracts.md#求解步序列读取)）。
+装配声明 `outputs.system_series` 时，生成器通过相同记录机制声明 `{series_id, block, variable, unit, scale, offset}`（仅允许可选 `extensions` 扩展对象）及列位置（与设备序列共享 `series_id` 唯一命名空间）；适配器恢复为 `ComputeResult.outputs.system_series`，在公共目录及导出中通过 `kind: "system"` 明确区分（参见[求解步序列读取](../contracts.md#求解步序列读取)）。
 
 ## 同次解财务事实映射
 

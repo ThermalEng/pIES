@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "ies.variable-map/1.0.0",
+  "title": "ies.variable-map 1.0.0 Header Contract",
+  "description": "Metadata header (input/parameters.json) paired with streaming 0-based NDJSON records (input/parameters.jsonl).",
+  "type": "object",
+  "required": [
+    "schema",
+    "schema_version",
+    "assembly",
+    "generator",
+    "records",
+    "column_count",
+    "objective_offset",
+    "objective_scale",
+    "objective_unit",
+    "outputs",
+    "precision",
+    "seed"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": { "const": "ies.variable-map" },
+    "schema_version": { "const": "1.0.0" },
+    "assembly": {
+      "type": "object",
+      "required": ["id", "schema_version"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": ["string", "null"], "minLength": 1 },
+        "schema_version": { "type": "string", "minLength": 1 }
+      }
+    },
+    "generator": { "$ref": "#/$defs/provider_ref" },
+    "records": { "$ref": "#/$defs/relative_path" },
+    "column_count": { "type": "integer", "minimum": 0 },
+    "objective_offset": { "type": "number" },
+    "objective_scale": { "type": "number", "not": { "const": 0 } },
+    "objective_unit": { "type": "string", "minLength": 1 },
+    "outputs": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "precision": { "enum": ["low", "medium", "high"] },
+    "seed": { "type": ["integer", "null"] },
+    "extensions": { "type": "object" }
+  },
+  "$defs": {
+    "provider_ref": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]+(\\.[A-Za-z0-9_-]+)*@[0-9]+\\.[0-9]+\\.[0-9]+$"
+    },
+    "relative_path": {
+      "type": "string",
+      "pattern": "^(?!/)(?!.*(^|/)\\.\\.(/|$)).+$"
+    }
+  }
+}

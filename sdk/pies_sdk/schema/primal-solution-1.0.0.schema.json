@@ -1,0 +1,75 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "ies.primal-solution/1.0.0",
+  "title": "ies.primal-solution 1.0.0 Contract",
+  "description": "Solver-neutral canonical primal solution strictly in 0-based original input model column order.",
+  "type": "object",
+  "required": [
+    "schema",
+    "schema_version",
+    "math_status",
+    "termination_reason",
+    "has_feasible_solution",
+    "column_count",
+    "values",
+    "objective_value",
+    "best_bound",
+    "relative_gap",
+    "receipt"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": { "const": "ies.primal-solution" },
+    "schema_version": { "const": "1.0.0" },
+    "math_status": {
+      "enum": [
+        "solved",
+        "feasible",
+        "infeasible",
+        "unbounded",
+        "numeric_failure",
+        "not_solved"
+      ]
+    },
+    "termination_reason": {
+      "enum": [
+        "optimal",
+        "time_limit",
+        "infeasible",
+        "unbounded",
+        "not_solved"
+      ]
+    },
+    "has_feasible_solution": { "type": "boolean" },
+    "column_count": { "type": "integer", "minimum": 0 },
+    "values": {
+      "type": "array",
+      "items": { "type": "number" }
+    },
+    "objective_value": { "type": ["number", "null"] },
+    "best_bound": { "type": ["number", "null"] },
+    "relative_gap": { "type": ["number", "null"] },
+    "receipt": {
+      "type": "object",
+      "required": ["solver"],
+      "additionalProperties": false,
+      "properties": {
+        "solver": { "$ref": "#/$defs/provider_ref" },
+        "started_at": { "type": "string", "minLength": 1 },
+        "ended_at": { "type": "string", "minLength": 1 },
+        "elapsed_seconds": { "type": "number", "minimum": 0 },
+        "solve_domain": { "enum": ["original", "valid_relaxation", "restricted"] },
+        "original_model_verified": { "type": "boolean" },
+        "solver_diagnostics": { "type": "object" },
+        "extensions": { "type": "object" }
+      }
+    },
+    "extensions": { "type": "object" }
+  },
+  "$defs": {
+    "provider_ref": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]+(\\.[A-Za-z0-9_-]+)*@[0-9]+\\.[0-9]+\\.[0-9]+$"
+    }
+  }
+}

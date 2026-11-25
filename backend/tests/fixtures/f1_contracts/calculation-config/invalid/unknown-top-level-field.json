@@ -1,0 +1,16 @@
+{
+  "schema": "ies.calculation-config",
+  "schema_version": "1.0.0",
+  "mode": "planning",
+  "predictions": [],
+  "generator": "ies.generator.highs_milp@1.0.0",
+  "solver": "ies.solver.highs@1.7.2",
+  "algorithm": null,
+  "evaluators": [],
+  "precision": "medium",
+  "time_limit_seconds": 600,
+  "options": {},
+  "seed": 42,
+  "outputs": ["solution"],
+  "discretization": { "steps": 24 }
+}

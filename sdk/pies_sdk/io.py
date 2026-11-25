@@ -20,6 +20,17 @@ from pies_sdk.contracts import (
 from pies_sdk.errors import StageIOError
 from pies_sdk.iteration import ITERATION_LOG_FILENAME, IterationWriter
 from pies_sdk.manifest import PLUGIN_KINDS, PluginManifest
+from pies_sdk.solution_contracts import (
+    EngineeringSolutionPayload,
+    EvaluationReportPayload,
+    PrimalSolutionPayload,
+    read_engineering_solution,
+    read_evaluation_report,
+    read_primal_solution,
+    write_engineering_solution,
+    write_evaluation_report,
+    write_primal_solution,
+)
 from pies_sdk.yaml_safe import dump_safe_yaml, load_safe_yaml
 
 DEFAULT_WORK_IN = Path("/work/in")
@@ -407,3 +418,27 @@ class StageContext:
 
     def write_result(self, result: ComputeResultPayload | Mapping[str, Any]) -> Path:
         return write_compute_result(self.work_out, result)
+
+    def write_primal_solution(
+        self, payload: PrimalSolutionPayload | Mapping[str, Any]
+    ) -> Path:
+        return write_primal_solution(self.work_out / "primal_solution.json", payload)
+
+    def read_primal_solution(self) -> PrimalSolutionPayload:
+        return read_primal_solution(self.work_in / "primal_solution.json")
+
+    def write_engineering_solution(
+        self, payload: EngineeringSolutionPayload | Mapping[str, Any]
+    ) -> Path:
+        return write_engineering_solution(self.work_out / "solution.json", payload)
+
+    def read_engineering_solution(self) -> EngineeringSolutionPayload:
+        return read_engineering_solution(self.work_in / "solution.json")
+
+    def write_evaluation_report(
+        self, payload: EvaluationReportPayload | Mapping[str, Any]
+    ) -> Path:
+        return write_evaluation_report(self.work_out / "evaluation_report.json", payload)
+
+    def read_evaluation_report(self) -> EvaluationReportPayload:
+        return read_evaluation_report(self.work_in / "evaluation_report.json")
