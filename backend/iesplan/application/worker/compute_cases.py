@@ -986,7 +986,7 @@ def adapt_result(
     try:
         stage_result = plane.stage_runner.run_stage(
             StageExecutionSpec(
-                attempt_id=receipt.attempt_id,
+                attempt_id=str(claim.attempt_id),
                 stage_id=f"evaluate-r{number}",
                 fencing_token=str(claim.lease_token),
                 image=eval_stage.image,

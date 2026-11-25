@@ -39,6 +39,9 @@ jobs:
       frontend_tests: ${{ steps.plan.outputs.frontend_tests }}
       startup_run: ${{ steps.plan.outputs.startup_run }}
       pg_run: ${{ steps.plan.outputs.pg_run }}
+      sdk_run: ${{ steps.plan.outputs.sdk_run }}
+      job_runner_run: ${{ steps.plan.outputs.job_runner_run }}
+      plugins_run: ${{ steps.plan.outputs.plugins_run }}
       special_device: ${{ steps.plan.outputs.special_device }}
     steps:
       - uses: actions/checkout@v4
@@ -292,10 +295,74 @@ jobs:
           docker compose -f docker-compose.yml -f .github/ci/docker-compose.yml \
             down --remove-orphans --rmi local
 
+  sdk_tests:
+    name: SDK Tests (Docker)
+    needs: select
+    if: needs.select.outputs.sdk_run == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run standalone pies-sdk checks and tests in Docker
+        run: |
+          docker run --rm \
+            -v "$PWD/sdk:/src/sdk:ro" \
+            python:3.12-slim \
+            sh -c 'cp -a /src/sdk /tmp/sdk && cd /tmp/sdk && pip install --no-cache-dir ".[dev]" && ruff check . && pytest -vv -ra tests'
+
+  job_runner_tests:
+    name: Job Runner Tests (Docker)
+    needs: select
+    if: needs.select.outputs.job_runner_run == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run job_runner unit and real Docker integration tests
+        run: |
+          JR_DATA_DIR="$RUNNER_TEMP/pies-jr-${{ github.run_id }}"
+          mkdir -p "$JR_DATA_DIR"
+          docker build -t "pies-job-runner-ci:${{ github.run_id }}" job_runner
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -v "$JR_DATA_DIR:/data" \
+            -v "$PWD/job_runner/tests:/app/tests:ro" \
+            -v "$PWD/job_runner/pyproject.toml:/app/pyproject.toml:ro" \
+            -e PIES_RUN_DOCKER_TESTS=1 \
+            -e PIES_TEST_CONTAINER_ROOT=/data \
+            -e PIES_TEST_HOST_ROOT="$JR_DATA_DIR" \
+            "pies-job-runner-ci:${{ github.run_id }}" \
+            sh -c 'pip install --no-cache-dir "pytest>=8.2" "httpx>=0.27" "ruff>=0.5" && ruff check --no-cache /app && pytest -vv -ra -p no:cacheprovider /app/tests'
+      - name: Remove job_runner CI test image and temp data
+        if: always()
+        run: |
+          docker rmi -f "pies-job-runner-ci:${{ github.run_id }}" || true
+          rm -rf "$RUNNER_TEMP/pies-jr-${{ github.run_id }}" || true
+
+  plugins_tests:
+    name: Built-in Stage Plugins Tests (Docker)
+    needs: select
+    if: needs.select.outputs.plugins_run == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build builtin stages image and run plugins tests in Docker
+        run: |
+          docker build -f plugins/Dockerfile -t "pies-builtin-stages-ci:${{ github.run_id }}" .
+          docker run --rm -u 0 \
+            -v "$PWD:/repo:ro" \
+            -w /repo/plugins \
+            "pies-builtin-stages-ci:${{ github.run_id }}" \
+            sh -c 'pip install --no-cache-dir "pytest>=8.2" "ruff>=0.5" && ruff check --no-cache . && pytest -vv -ra -p no:cacheprovider tests'
+      - name: Remove plugins CI test image
+        if: always()
+        run: docker rmi -f "pies-builtin-stages-ci:${{ github.run_id }}" || true
+
   gate:
     name: CI Gate
     if: always()
-    needs: [select, cold_start, pg_concurrency, frontend_logic, backend, browser]
+    needs: [select, cold_start, pg_concurrency, frontend_logic, backend, browser, sdk_tests, job_runner_tests, plugins_tests]
     runs-on: ubuntu-latest
     steps:
       - name: Require every selected check and tolerate intentional skips
@@ -311,6 +378,12 @@ jobs:
           BACKEND_RESULT: ${{ needs.backend.result }}
           BROWSER_REQUIRED: ${{ needs.select.outputs.browser_run }}
           BROWSER_RESULT: ${{ needs.browser.result }}
+          SDK_REQUIRED: ${{ needs.select.outputs.sdk_run }}
+          SDK_RESULT: ${{ needs.sdk_tests.result }}
+          JR_REQUIRED: ${{ needs.select.outputs.job_runner_run }}
+          JR_RESULT: ${{ needs.job_runner_tests.result }}
+          PLUGINS_REQUIRED: ${{ needs.select.outputs.plugins_run }}
+          PLUGINS_RESULT: ${{ needs.plugins_tests.result }}
         run: |
           [[ "$SELECT" == "success" ]] || { echo "::error::Test selection failed: $SELECT"; exit 1; }
           check() {
@@ -333,5 +406,8 @@ jobs:
           # GitHub's needs.browser.result aggregates the matrix: all selected
           # lanes must succeed, while browser_run=false skips the entire job.
           check "Browser matrix (all selected lanes)" "$BROWSER_REQUIRED" "$BROWSER_RESULT"
+          check "SDK Tests (Docker)" "$SDK_REQUIRED" "$SDK_RESULT"
+          check "Job Runner Tests (Docker)" "$JR_REQUIRED" "$JR_RESULT"
+          check "Plugins Tests (Docker)" "$PLUGINS_REQUIRED" "$PLUGINS_RESULT"
           echo "All required jobs passed; intentionally omitted jobs were skipped."
 

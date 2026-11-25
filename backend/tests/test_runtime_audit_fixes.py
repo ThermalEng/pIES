@@ -1105,3 +1105,503 @@ def test_embedded_scheduler_stop_never_blocks_past_timeout(
         assert elapsed < 1.0, f"scheduler.stop blocked past timeout: {elapsed:.2f}s"
     finally:
         unblock_task.set()
+
+
+# ---------------------------------------------------------------------------
+# Round-2 closeout: P1 adapt_result attempt_id + P2 checkpoint residual cleanup
+# ---------------------------------------------------------------------------
+
+
+def test_adapt_result_uses_current_claim_attempt_id_when_reusing_older_receipt(
+    memory_db: tuple[Engine, sessionmaker[Session]],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _eng, factory = memory_db
+    monkeypatch.setattr(settings, "data_dir", tmp_path)
+    with factory() as db:
+        _user, proj, task = _create_project_and_task(
+            db, username="eval_attempt_user", idempotency_key="eval-attempt-1"
+        )
+        task_new = tasks_domain.create_task(
+            db,
+            project_id=proj.id,
+            type="calc",
+            idempotency_key="eval-attempt-2",
+            requested_by=_user.id,
+        )
+        db.commit()
+        old_claim = worker_app.acquire_attempt(db, task.id, "w-old")
+        assert old_claim is not None
+        new_claim = worker_app.acquire_attempt(db, task_new.id, "w-new")
+        assert new_claim is not None
+        assert new_claim.attempt_id != old_claim.attempt_id
+
+    stage_root = tmp_path / "stages"
+    captured_start: dict[str, Any] = {}
+    staged_receipt_attempt: list[str] = []
+
+    valid_result = {
+        "schema": "ies.compute-result",
+        "schema_version": "1.0.0",
+        "bundle_id": "b-old",
+        "receipt_id": "r-old",
+        "execution_status": "completed",
+        "math_status": "solved",
+        "outputs": {"solution": {"objective_value": 10.0, "variables": []}},
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content.decode()) if request.content else None
+        if request.method == "GET" and request.url.path == "/v1/stages":
+            return httpx.Response(200, json={"items": [], "total": 0})
+        if request.method == "POST" and request.url.path == "/v1/stages/start":
+            captured_start.update(body)
+            ws_dir = stage_root / body["workspace_rel"]
+            staged = json.loads((ws_dir / "in" / "receipt.json").read_text(encoding="utf-8"))
+            staged_receipt_attempt.append(str(staged["attempt_id"]))
+            out_dir = ws_dir / "out"
+            out_dir.mkdir(parents=True, exist_ok=True)
+            (out_dir / "result.json").write_text(json.dumps(valid_result), encoding="utf-8")
+            return httpx.Response(
+                200,
+                json=_stage_payload(
+                    stage_execution_id=body["stage_execution_id"],
+                    attempt_id=body["attempt_id"],
+                    stage_id=body["stage_id"],
+                    fencing_token=body["fencing_token"],
+                    status="exited",
+                    running=False,
+                    exit_code=0,
+                    termination_reason="normal",
+                    output_files=["result.json"],
+                ),
+            )
+        if request.method == "GET" and request.url.path.startswith("/v1/stages/"):
+            seid = request.url.path.split("/")[-1]
+            return httpx.Response(
+                200,
+                json=_stage_payload(
+                    stage_execution_id=seid,
+                    attempt_id=seid.split("--", 1)[0],
+                    stage_id=seid.split("--", 1)[-1],
+                    fencing_token=str(new_claim.lease_token),
+                    status="exited",
+                    running=False,
+                    exit_code=0,
+                    termination_reason="normal",
+                    output_files=["result.json"],
+                ),
+            )
+        if request.method == "POST" and request.url.path.endswith("/cleanup"):
+            seid = request.url.path.split("/")[-2]
+            return httpx.Response(
+                200,
+                json={
+                    "stage_execution_id": seid,
+                    "status": "cleaned",
+                    "container_removed": True,
+                    "workspace_removed": True,
+                },
+            )
+        raise AssertionError(f"Unexpected request: {request.method} {request.url}")
+
+    client = JobRunnerClient(
+        "http://job_runner:8090",
+        client=httpx.Client(base_url="http://job_runner:8090", transport=httpx.MockTransport(handler)),
+    )
+    sr = ContainerStageRunner(client, stage_root=stage_root, policy=_default_policy(), poll_interval=0.01)
+    plane = worker_app.ComputeExecutionPlane(
+        generator_registry=build_registry((HIGHS_MILP_PROVIDER,)),
+        predictor_registry=build_predictor_registry((NAIVE_PREDICTOR,)),
+        stage_runner=sr,
+        stage_catalog=BuiltinStageCatalog(
+            tuple(build_builtin_stage_catalog("pies-builtin-stages:1.1.5").snapshot())
+        ),
+    )
+    manifest = SolverBundleManifest(
+        bundle={"generator": "ies.generator.highs_milp@1.0.0", "solver": "ies.solver.highs@1.7.2"},
+        inputs=[{"path": "input/problem.mps", "media_type": "text/plain"}],
+        command={
+            "executor": "ies.executor.local_process@1.0.0",
+            "executable": "ies.solver.highs@1.7.2",
+            "arguments": ["input/problem.mps"],
+            "timeout_seconds": 30,
+            "network": False,
+        },
+        outputs=[{"path": "output/solution.sol", "media_type": "text/plain", "required": True}],
+        result_adapter="ies.result-adapter.highs@1.0.0",
+    )
+    bundle = SolverBundle(manifest, {"input/problem.mps": MemoryContent(b"NAME X\nENDATA\n")})
+    old_receipt = ExecutionReceipt(
+        receipt_id="r-old",
+        bundle_id="b-old",
+        assembly_id="a-1",
+        calculation_config_id="c-1",
+        attempt_id=str(old_claim.attempt_id),
+        generator_ref="ies.generator.highs_milp@1.0.0",
+        solver_ref="ies.solver.highs@1.7.2",
+        executor_ref="ies.executor.local_process@1.0.0",
+        executable_ref="ies.solver.highs@1.7.2",
+        result_adapter_ref="ies.result-adapter.highs@1.0.0",
+        status="succeeded",
+        exit_code=0,
+        termination_reason="exited",
+        started_at="2026-11-24T08:00:00Z",
+        ended_at="2026-11-24T08:00:01Z",
+    )
+    fake_finance = SimpleNamespace(to_dict=lambda: {"profile_id": "p"})
+    fake_snapshot = SimpleNamespace(
+        assembly_receipt={"schema": "ies.validation-receipt"},
+        device_models={},
+        evaluation={"evaluation_years": 1},
+    )
+
+    evaluated = worker_app.adapt_result(
+        plane,
+        bundle,
+        old_receipt,
+        {"output/solution.sol": MemoryContent(b"HIGHS_SOLUTION_V1\n")},
+        claim=new_claim,
+        number=1,
+        finance=fake_finance,  # type: ignore[arg-type]
+        snapshot=fake_snapshot,
+        session_factory=factory,
+        save_checkpoint=save_evaluation_checkpoint,
+    )
+    assert evaluated.result.receipt_id == "r-old"
+    assert captured_start["attempt_id"] == str(new_claim.attempt_id)
+    assert captured_start["fencing_token"] == str(new_claim.lease_token)
+    assert captured_start["stage_execution_id"] == f"{new_claim.attempt_id}--evaluate-r1"
+    assert staged_receipt_attempt == [str(old_claim.attempt_id)]
+
+
+def test_stage_runner_cleanup_completed_stages_cleans_exact_and_prefix(tmp_path: Path) -> None:
+    stage_root = tmp_path / "stages"
+    for name in (
+        "42--generate-r1",
+        "42--predict-r1-0",
+        "42--predict-r1-1",
+        "42--predict-r1-2",
+        "42--predict-r10",
+    ):
+        (stage_root / name / "out").mkdir(parents=True, exist_ok=True)
+
+    cleaned_requests: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path == "/v1/stages":
+            assert request.url.params.get("attempt_id") == "42"
+            return httpx.Response(
+                200,
+                json={
+                    "items": [
+                        _stage_payload(
+                            stage_execution_id="42--predict-r1-0",
+                            attempt_id="42",
+                            stage_id="predict-r1-0",
+                            fencing_token="tok-42",
+                            status="exited",
+                            running=False,
+                            exit_code=0,
+                            termination_reason="normal",
+                        ),
+                        _stage_payload(
+                            stage_execution_id="42--predict-r1-2",
+                            attempt_id="42",
+                            stage_id="predict-r1-2",
+                            fencing_token="tok-42",
+                            status="running",
+                            running=True,
+                            exit_code=None,
+                            termination_reason=None,
+                        ),
+                        _stage_payload(
+                            stage_execution_id="42--predict-r10",
+                            attempt_id="42",
+                            stage_id="predict-r10",
+                            fencing_token="tok-42",
+                            status="exited",
+                            running=False,
+                            exit_code=0,
+                            termination_reason="normal",
+                        ),
+                    ],
+                    "total": 3,
+                },
+            )
+        if request.method == "POST" and request.url.path.endswith("/cleanup"):
+            seid = request.url.path.split("/")[-2]
+            cleaned_requests.append(seid)
+            return httpx.Response(
+                200,
+                json={
+                    "stage_execution_id": seid,
+                    "status": "cleaned",
+                    "container_removed": True,
+                    "workspace_removed": True,
+                },
+            )
+        raise AssertionError(f"Unexpected request: {request.method} {request.url}")
+
+    client = JobRunnerClient(
+        "http://job_runner:8090",
+        client=httpx.Client(base_url="http://job_runner:8090", transport=httpx.MockTransport(handler)),
+    )
+    sr = ContainerStageRunner(client, stage_root=stage_root, policy=_default_policy(), poll_interval=0.01)
+
+    assert sr.cleanup_completed_stages(attempt_id="42", stage_id="generate-r1") == ["42--generate-r1"]
+    assert sr.cleanup_completed_stages(attempt_id="42", stage_id_prefix="predict-r1") == [
+        "42--predict-r1-0",
+        "42--predict-r1-1",
+    ]
+    assert cleaned_requests == ["42--generate-r1", "42--predict-r1-0", "42--predict-r1-1"]
+
+
+def test_runner_checkpoint_hits_cleanup_residual_stages_and_fresh_run_skips(
+    memory_db: tuple[Engine, sessionmaker[Session]],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _eng, factory = memory_db
+    from test_config_revisions import PROFILE_PAYLOAD
+
+    from iesplan import configuration as config_domain
+    from iesplan.application import configuration as config_cases
+
+    with factory() as db:
+        _user, proj, algo_task = _create_project_and_task(
+            db, username="ckpt_clean_user", task_type="calc", idempotency_key="ckpt-clean-1"
+        )
+        cfg = config_domain.create_calculation_config(
+            db,
+            project_id=proj.id,
+            content={
+                "schema": "ies.calculation-config",
+                "schema_version": "1.0.0",
+                "mode": "planning",
+                "predictions": [],
+                "generator": None,
+                "solver": None,
+                "algorithm": "acme.algorithm.demo@1.0.0",
+                "evaluator": None,
+                "precision": "medium",
+                "convergence": None,
+                "time_limit_seconds": 30,
+                "options": {},
+                "seed": 7,
+                "outputs": ["solution"],
+            },
+            created_by=_user.id,
+        )
+        config_cases.register_finance_profile(db, dict(PROFILE_PAYLOAD), _user.id)
+        _, eff, _ = config_cases.set_project_finance_profile(
+            db, proj.id, PROFILE_PAYLOAD["profile"]["id"], _user.id
+        )
+        ver = project_domain.create_version(
+            db,
+            project_id=proj.id,
+            content_object_id=put_object(db, b"{}", "application/json", "project").id,
+            name="v1",
+            reason="manual",
+            created_by=_user.id,
+        )
+        snap = tasks_domain.create_snapshot(
+            db,
+            project_version_id=ver.id,
+            dataset_version_ids=[],
+            calc_config_snapshot={
+                **cfg.content,
+                "config_ref": {"project_id": proj.id, "revision": cfg.version},
+            },
+            random_seed=7,
+            schema_version="1.0.0",
+            result_adapter="ies.result-adapter.highs@1.0.0",
+            executor="ies.executor.local_process@1.0.0",
+            device_models={},
+            evaluation={
+                "evaluation_years": 1,
+                "construction_period": 0,
+                "operation_years": 1,
+                "discount_rate": 0.08,
+                "construction_payments": [],
+                "maintenance_expenses": [],
+            },
+            canonical_assembly_text=json.dumps(
+                {
+                    "schema": "ies.assembly",
+                    "schema_version": "1.0.0",
+                    "assembly": {"id": "asm-clean"},
+                    "project_baseline": {"resolution": "1h", "start_year": 2026},
+                    "devices": {},
+                }
+            ),
+            assembly_receipt={
+                "schema": "ies.validation-receipt",
+                "schema_version": "1.0.0",
+                "validator": {"id": "v", "version": "1.0.0"},
+                "canonical_algorithm": {"id": "c", "version": "1.0.0"},
+                "dependencies": {},
+                "resources": {},
+                "finance_snapshot": {"profile_id": eff.profile_id, "revision": eff.revision},
+                "planning": {},
+                "system_equations": {},
+                "diagnostics": [],
+            },
+            created_by=_user.id,
+        )
+        algo_task = tasks_domain.create_task(
+            db,
+            project_id=proj.id,
+            type="calc",
+            idempotency_key="ckpt-clean-algo",
+            requested_by=_user.id,
+            calc_snapshot_id=snap.id,
+        )
+        db.commit()
+        claim = worker_app.acquire_attempt(db, algo_task.id, "w-clean")
+        assert claim is not None
+        save_algorithm_checkpoint(
+            db,
+            claim,
+            {
+                "schema": "ies.compute-result",
+                "schema_version": "1.0.0",
+                "bundle_id": f"snapshot-{snap.id}:attempt-{claim.attempt_id}",
+                "receipt_id": "rcpt-algo-clean",
+                "execution_status": "completed",
+                "math_status": "solved",
+                "outputs": {"solution": {"objective_value": 5.0, "variables": []}},
+            },
+        )
+        db.commit()
+
+    cleanup_calls: list[dict[str, Any]] = []
+
+    class RecordingStageRunner:
+        def cleanup_completed_stages(self, **kwargs: Any) -> list[str]:
+            cleanup_calls.append(kwargs)
+            return []
+
+    plane = SimpleNamespace(stage_runner=RecordingStageRunner())
+    cfg_obj = CalculationConfig(
+        mode="planning",
+        algorithm="acme.algorithm.demo@1.0.0",
+        precision="medium",
+        time_limit_seconds=30,
+        outputs=("solution",),
+    )
+    empty_set = MaterializedSet(1, (), (), ())
+    monkeypatch.setattr(
+        worker_app,
+        "load_compute_inputs",
+        lambda *_a, **_k: (SimpleNamespace(), {}, empty_set, SimpleNamespace(), cfg_obj, {}),
+    )
+    assert runner.run_task(factory, claim, worker_id="w-clean", compute=plane) == "completed"
+    assert cleanup_calls == [
+        {"attempt_id": str(claim.attempt_id), "stage_id": "algorithm-r1", "stage_id_prefix": None}
+    ]
+
+    # _predict_round / _predict_selected_round / _solve_round checkpoint hit vs fresh miss
+    cleanup_calls.clear()
+    ctx = SimpleNamespace(
+        claim=SimpleNamespace(attempt_id=99, lease_token="tok-99"),
+        session_factory=factory,
+        task=SimpleNamespace(project_id=1),
+        prediction_artifacts={},
+        stop_reason=None,
+        detach_event=None,
+        checkpoint=lambda *_a, **_k: None,
+        progress=lambda *_a, **_k: None,
+        update_stage_resources=lambda *_a, **_k: None,
+    )
+    monkeypatch.setattr(
+        worker_app, "run_worker_transaction", lambda _sf, fn, *args, **_k: fn(*args)
+    )
+    monkeypatch.setattr(worker_app, "load_prediction_checkpoint", lambda _c, _n: ((), (), {}))
+    runner._predict_round(ctx, plane, snap, None)
+    runner._predict_selected_round(ctx, plane, snap, (), None, 2)
+    assert cleanup_calls == [
+        {"attempt_id": "99", "stage_id": None, "stage_id_prefix": "predict-r1"},
+        {"attempt_id": "99", "stage_id": None, "stage_id_prefix": "predict-r2"},
+    ]
+
+    cleanup_calls.clear()
+    fake_receipt = SimpleNamespace(
+        receipt_id="rcpt-99",
+        status="succeeded",
+        resource_usage={},
+    )
+    saved_round = SimpleNamespace(
+        bundle=SimpleNamespace(),
+        generated_id="gen-99",
+        bundle_id="b-99",
+        files={"bundle_files": {}, "solution": {}},
+        receipt=fake_receipt,
+        outputs={},
+    )
+    fake_eval = SimpleNamespace(
+        resources={},
+        result=SimpleNamespace(execution_status="completed", math_status="solved"),
+    )
+    monkeypatch.setattr(worker_app, "restore_round", lambda _c, _n: saved_round)
+    monkeypatch.setattr(worker_app, "load_evaluation_checkpoint", lambda _c, _n: fake_eval)
+    monkeypatch.setattr(worker_app, "business_outcome_for", lambda _r: "normal_completion")
+    attempt_ctx = AttemptContext("99", "b-init", "a-1", "c-1")
+    runner._solve_round(
+        ctx,
+        plane,
+        snap,
+        SimpleNamespace(),
+        {},
+        empty_set,
+        SimpleNamespace(),
+        cfg_obj,
+        SimpleNamespace(),
+        attempt_ctx,
+        number=1,
+    )
+    assert cleanup_calls == [
+        {"attempt_id": "99", "stage_id": "generate-r1", "stage_id_prefix": None},
+        {"attempt_id": "99", "stage_id": "solve-r1", "stage_id_prefix": None},
+        {"attempt_id": "99", "stage_id": "evaluate-r1", "stage_id_prefix": None},
+    ]
+
+    # Fresh miss path must NOT invoke checkpoint cleanup
+    cleanup_calls.clear()
+    miss_round = SimpleNamespace(
+        bundle=SimpleNamespace(),
+        generated_id="gen-99",
+        bundle_id="b-99",
+        files={"bundle_files": {}, "solution": {}},
+        receipt=None,
+        outputs={},
+    )
+    restore_calls = 0
+
+    def _restore_miss_then_bundle(_c: Any, _n: int) -> Any:
+        nonlocal restore_calls
+        restore_calls += 1
+        return None if restore_calls == 1 else miss_round
+
+    monkeypatch.setattr(worker_app, "restore_round", _restore_miss_then_bundle)
+    monkeypatch.setattr(worker_app, "generate_bundle", lambda *_a, **_k: (1, {}))
+    monkeypatch.setattr(
+        worker_app, "execute_saved_bundle", lambda **_k: (fake_receipt, {}, {})
+    )
+    monkeypatch.setattr(worker_app, "load_evaluation_checkpoint", lambda _c, _n: None)
+    monkeypatch.setattr(worker_app, "adapt_result", lambda *_a, **_k: fake_eval)
+    runner._solve_round(
+        ctx,
+        plane,
+        snap,
+        SimpleNamespace(),
+        {},
+        empty_set,
+        SimpleNamespace(),
+        cfg_obj,
+        SimpleNamespace(),
+        attempt_ctx,
+        number=1,
+    )
+    assert cleanup_calls == []

@@ -13,6 +13,7 @@ Enforces the ADR-0016 container stage lifecycle through ``JobRunnerClient``:
 
 from __future__ import annotations
 
+import logging
 import os
 import threading
 import time
@@ -35,6 +36,7 @@ if TYPE_CHECKING:
 _OUTPUT_READ_CHUNK_BYTES = 65_536
 _TERMINAL_CONTAINER_STATUSES = frozenset(("exited", "dead"))
 _VALID_STAGE_KINDS = frozenset(("predictor", "generator", "solver", "evaluator", "algorithm"))
+logger = logging.getLogger(__name__)
 
 
 class ControlPlaneDetached(Exception):
@@ -289,6 +291,68 @@ class ContainerStageRunner:
 
     def cleanup_stage(self, stage_execution_id: str, *, force: bool = False) -> CleanupStageResult:
         return self.client.cleanup_stage(stage_execution_id, force=force)
+
+    def cleanup_completed_stages(
+        self,
+        *,
+        attempt_id: str,
+        stage_id: str | None = None,
+        stage_id_prefix: str | None = None,
+    ) -> list[str]:
+        """Best-effort cleanup for exited stage containers/workspaces after checkpoint hits."""
+        if (stage_id is None) == (stage_id_prefix is None):
+            raise ValueError("Specify exactly one of stage_id or stage_id_prefix")
+
+        cleaned: list[str] = []
+        if stage_id is not None:
+            eid = f"{attempt_id}--{stage_id}"
+            try:
+                res = self.client.cleanup_stage(eid, force=False)
+                if res.container_removed or res.workspace_removed:
+                    cleaned.append(eid)
+            except Exception:  # noqa: BLE001 - best-effort residual cleanup
+                logger.warning("Failed to cleanup checkpointed stage %s", eid, exc_info=True)
+            return cleaned
+
+        assert stage_id_prefix is not None
+        try:
+            stages = self.client.list_stages(attempt_id=attempt_id, include_stats=False)
+        except Exception:  # noqa: BLE001 - best-effort residual cleanup
+            logger.warning(
+                "Failed to list stages during checkpoint cleanup for attempt %s",
+                attempt_id,
+                exc_info=True,
+            )
+            return cleaned
+
+        running_ids = {stage.stage_execution_id for stage in stages if stage.running}
+        candidates: set[str] = {
+            stage.stage_execution_id
+            for stage in stages
+            if not stage.running
+            and (
+                stage.stage_id == stage_id_prefix
+                or stage.stage_id.startswith(f"{stage_id_prefix}-")
+            )
+        }
+        prefix_dir = f"{attempt_id}--{stage_id_prefix}"
+        if self.stage_root.is_dir():
+            for entry in self.stage_root.iterdir():
+                if (
+                    entry.is_dir()
+                    and (entry.name == prefix_dir or entry.name.startswith(f"{prefix_dir}-"))
+                    and entry.name not in running_ids
+                ):
+                    candidates.add(entry.name)
+
+        for eid in sorted(candidates):
+            try:
+                res = self.client.cleanup_stage(eid, force=False)
+                if res.container_removed or res.workspace_removed:
+                    cleaned.append(eid)
+            except Exception:  # noqa: BLE001 - best-effort residual cleanup
+                logger.warning("Failed to cleanup checkpointed stage %s", eid, exc_info=True)
+        return cleaned
 
     def run_stage(
         self,

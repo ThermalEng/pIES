@@ -439,6 +439,9 @@ def pick(changed: list[str], full: bool = False) -> dict[str, str]:
     frontend_all = backend_all
     startup = backend_all
     pg_concurrency = backend_all
+    sdk_run = full or "__FULL__" in changed
+    job_runner_run = sdk_run
+    plugins_run = sdk_run
 
     for path in changed:
         if path == "__FULL__":
@@ -447,6 +450,10 @@ def pick(changed: list[str], full: bool = False) -> dict[str, str]:
             backend.add(SMOKE_BACKEND)
             browser.add(SMOKE_BROWSER)
             frontend.add("task_selection.test.mjs")
+            if path in (".github/workflows/docker-ci.yml", ".github/ci/select_tests.py"):
+                sdk_run = True
+                job_runner_run = True
+                plugins_run = True
             if path == ".github/ci/select_tests.py":
                 browser.update(BASIC_SPECS)  # exercise all six real @basic cases after selector edits
             # Infrastructure validations are expensive and independent of
@@ -460,11 +467,30 @@ def pick(changed: list[str], full: bool = False) -> dict[str, str]:
                 startup = True
             elif path == ".github/ci/verify-pg-init-concurrency.sh":
                 pg_concurrency = True
+        elif path.startswith("sdk/"):
+            sdk_run = True
+            job_runner_run = True
+            plugins_run = True
+            backend.update((SMOKE_BACKEND, "test_bootstrap.py"))
+            startup = True
+        elif path.startswith("job_runner/"):
+            job_runner_run = True
+            backend.update((SMOKE_BACKEND, "test_bootstrap.py", "test_runtime_audit_fixes.py"))
+            browser.add(SMOKE_BROWSER)
+            startup = True
+        elif path.startswith("plugins/"):
+            plugins_run = True
+            backend.update((SMOKE_BACKEND, "test_bootstrap.py"))
+            browser.add(SMOKE_BROWSER)
+            startup = True
         elif path in ("docker-compose.yml", "backend/Dockerfile", "backend/pyproject.toml"):
             backend.update((SMOKE_BACKEND, "test_bootstrap.py"))
             browser.add(SMOKE_BROWSER)
             startup = True
             pg_concurrency = True
+            if path == "docker-compose.yml":
+                job_runner_run = True
+                plugins_run = True
         elif path.startswith("backend/tests/"):
             name = path.rsplit("/", 1)[-1]
             if name == "p2_mutex_measurement.py":
@@ -484,6 +510,16 @@ def pick(changed: list[str], full: bool = False) -> dict[str, str]:
             elif path.endswith(".py"):
                 backend_all = True
         elif path.startswith("backend/iesplan/"):
+            if path.startswith(
+                (
+                    "backend/iesplan/computation/",
+                    "backend/iesplan/finance/",
+                    "backend/iesplan/modeling/",
+                    "backend/iesplan/assembly/",
+                    "backend/iesplan/devices/",
+                )
+            ):
+                plugins_run = True
             if path == "backend/iesplan/db.py":
                 # PostgreSQL initialization belongs to the cold-start x3 gate.
                 # Keep fast backend contract tests scoped; no 125-file sweep.
@@ -655,6 +691,9 @@ def pick(changed: list[str], full: bool = False) -> dict[str, str]:
         "frontend_tests": " ".join(sorted(frontend)),
         "startup_run": str(startup).lower(),
         "pg_run": str(pg_concurrency).lower(),
+        "sdk_run": str(sdk_run).lower(),
+        "job_runner_run": str(job_runner_run).lower(),
+        "plugins_run": str(plugins_run).lower(),
         "special_device": str(special).lower(),
     }
 
@@ -936,6 +975,15 @@ def self_test() -> None:
     assert "basic-operations.spec.ts" in pick(["frontend/src/styles.css"])["browser_specs"]
     assert "frontend_run" in pick(["frontend/tests/auth_admin_contracts.test.mjs"])
     assert pick(["frontend/tests/auth_admin_contracts.test.mjs"])["frontend_tests"] == "auth_admin_contracts.test.mjs"
+    sdk_sel = pick(["sdk/pies_sdk/runner.py"])
+    assert sdk_sel["sdk_run"] == "true" and sdk_sel["job_runner_run"] == "true" and sdk_sel["plugins_run"] == "true"
+    jr_sel = pick(["job_runner/pies_job_runner/docker_ops.py"])
+    assert jr_sel["job_runner_run"] == "true" and jr_sel["sdk_run"] == "false" and jr_sel["plugins_run"] == "false"
+    plg_sel = pick(["plugins/solver_highs/solver_stage.py"])
+    assert plg_sel["plugins_run"] == "true" and plg_sel["sdk_run"] == "false" and plg_sel["job_runner_run"] == "false"
+    doc_sel = pick(["docs/readme.md"])
+    assert doc_sel["sdk_run"] == "false" and doc_sel["job_runner_run"] == "false" and doc_sel["plugins_run"] == "false"
+    assert all_specs["sdk_run"] == "true" and all_specs["job_runner_run"] == "true" and all_specs["plugins_run"] == "true"
     print("Selector self-test passed")
 
 

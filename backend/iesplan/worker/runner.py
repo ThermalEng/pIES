@@ -86,6 +86,19 @@ def _stop_probe(ctx: RunContext):
     return ctx.stop_reason
 
 
+def _cleanup_checkpointed_stage(
+    plane: Any,
+    attempt_id: int | str,
+    *,
+    stage_id: str | None = None,
+    stage_id_prefix: str | None = None,
+) -> None:
+    stage_runner = getattr(plane, "stage_runner", None)
+    cleanup = getattr(stage_runner, "cleanup_completed_stages", None)
+    if cleanup is not None:
+        cleanup(attempt_id=str(attempt_id), stage_id=stage_id, stage_id_prefix=stage_id_prefix)
+
+
 def _raise_for_receipt_status(receipt: Any) -> None:
     """回执分流：取消、超时、隔离各自独立；成功直接通过。
 
@@ -119,6 +132,7 @@ def _predict_round(
         ctx.claim, 1,
     )
     if saved is not None:
+        _cleanup_checkpointed_stage(plane, ctx.claim.attempt_id, stage_id_prefix="predict-r1")
         ctx.prediction_artifacts[1] = saved[2]
         return saved[:2]
     series, predicted, artifacts = worker_app.predict_round_stage(
@@ -150,6 +164,9 @@ def _predict_selected_round(
         ctx.claim, number,
     )
     if saved is not None:
+        _cleanup_checkpointed_stage(
+            plane, ctx.claim.attempt_id, stage_id_prefix=f"predict-r{number}"
+        )
         ctx.prediction_artifacts[number] = saved[2]
         return saved[:2]
     series, predicted, artifacts = worker_app.predict_round_stage(
@@ -197,12 +214,15 @@ def _solve_round(
             ctx.session_factory, worker_app.restore_round,
             ctx.claim, number,
         )
+    else:
+        _cleanup_checkpointed_stage(plane, ctx.claim.attempt_id, stage_id=f"generate-r{number}")
     bundle = saved.bundle
     generated_id = saved.generated_id
     bundle_refs = saved.files["bundle_files"]
     attempt = replace(attempt, bundle_id=saved.bundle_id)
     ctx.progress(40.0, "generate", None)
     if saved.receipt is not None:
+        _cleanup_checkpointed_stage(plane, ctx.claim.attempt_id, stage_id=f"solve-r{number}")
         receipt, collected = saved.receipt, saved.outputs
         solution_refs = saved.files["solution"]
     else:
@@ -227,6 +247,8 @@ def _solve_round(
             stop=_stop_probe(ctx),
             detach=ctx.detach_event,
         )
+    else:
+        _cleanup_checkpointed_stage(plane, ctx.claim.attempt_id, stage_id=f"evaluate-r{number}")
     ctx.update_stage_resources(evaluated.resources)
     result = evaluated.result
     outcome = worker_app.business_outcome_for(result)
@@ -345,6 +367,8 @@ def _execute_compute(ctx: RunContext) -> tuple[dict, dict]:
                 stop=_stop_probe(ctx),
                 detach=ctx.detach_event,
             )
+        else:
+            _cleanup_checkpointed_stage(plane, ctx.claim.attempt_id, stage_id="algorithm-r1")
         ctx.update_stage_resources(evaluated.resources)
         result = evaluated.result
         outcome = worker_app.business_outcome_for(result)
