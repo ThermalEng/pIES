@@ -21,8 +21,8 @@
 | `predictor` | `/work/in/request.json` 与历史序列 | `/work/out/prediction.json` 与训练产物 | 可前置衔接 `generator` 或一体化 `algorithm` |
 | `generator` | `/work/in/` 冻结装配、序列、财务与计算配置 | `/work/out/bundle/` 标准 `Solver Bundle` | 必须与选定 `solver` 契约及媒体类型兼容 |
 | `solver` | `/work/in/bundle/`（只读 `Solver Bundle`） | `/work/out/solution.*` 声明输出 | 由选定 `generator` 声明兼容并在提交闸门核对 |
-| `evaluator` | `/work/in/bundle/`、原始解、回执与冻结财务/基准 | `/work/out/result.json`（`ComputeResult` 与财务评价事实） | 消费配套 `Bundle` 声明与回执，按公共结果契约输出 |
-| `algorithm` | `/work/in/` 标准化冻结计算输入包 | `/work/out/result.json`（标准结果文件） | 替代 `generator + solver` 拆分，可衔接默认 `evaluator` 或直接输出标准结果 |
+| `evaluator` | `/work/in/bundle/`（或 `algorithm` 标准解）、原始解、回执与冻结财务/基准 | `/work/out/result.json`（`ComputeResult` 与财务评价事实） | 消费配套上游声明与回执，按公共结果契约输出 |
+| `algorithm` | `/work/in/` 标准化冻结计算输入包 | `/work/out/result.json`（标准规划/调度结果文件） | 严格等价替代 `generator + solver` 拆分，不跨越上游 `predictor` 与下游 `evaluator` 边界（按配置独立衔接解耦的 `evaluator` 或在 `evaluator: null` 时直接作为结果） |
 
 ## ZIP 目录布局（简单优先、兼容复杂包）
 
@@ -136,7 +136,8 @@ iteration:
 
 ## 容器执行契约（`/work/in → /work/out`）与镜像构建
 
-- **安装期自动构建计算镜像**：导入或安装第三方插件时，由 `job_runner` 套用官方标准模板基于 `pies-plugin-base` 自动构建专属插件计算镜像 `pies-plugin/<plugin_id>:<version>`（不要求作者手写 Dockerfile；无额外依赖的插件直接复用基础层）。依赖安装阶段与运行阶段彻底分离；不可变约束针对冻结生成的 `/work/in` 输入文件、任务快照与持久化证据（用于可追溯），不强行要求一次即毁的临时容器运行环境或镜像不可变。
+- **安装期自动构建计算镜像与断网自检门禁**：导入或安装第三方插件时，由 `job_runner` 套用官方标准模板基于 `pies-plugin-base` 自动构建专属插件计算镜像 `pies-plugin/<plugin_id>:<version>`（支持管理员配置可选 pip 镜像/内网源，留空走默认源；不要求作者手写 Dockerfile；无额外依赖的插件直接零联网复用基础层）。若 `plugin.yaml` 声明了 `tests`，构建完成后强制在 `--network=none` 容器内通过全部自检样例后才标记插件可用。依赖安装阶段与运行阶段彻底分离；不可变约束针对冻结生成的 `/work/in` 输入文件、任务快照与持久化证据（用于可追溯），不强行要求一次即毁的临时容器运行环境或镜像不可变；管理员彻底卸载某插件版本时经 `job_runner` 白名单操作 `delete_plugin_image` 仅清理受管 `pies-plugin/*` 镜像。
+- **极简 `pies-sdk` 校验与打包**：五类插件（`predictor` / `generator` / `solver` / `evaluator` / `algorithm`）统一复用 `pies-sdk validate`（校验 `plugin.yaml`、目录安全与离线自检）与 `pies-sdk pack`（打包标准 `*.algorithm.zip` 并输出 `sha256`）。
 - **运行期断网隔离交接**：每次执行某一计算环节时，`backend` 将该环节的冻结只读输入写入独立作业目录并由 `job_runner` 拉起临时计算容器（`--network=none --read-only --cap-drop=ALL`，带硬资源限额）：
   - `/work/in`（只读挂载）：承载标准化冻结输入包（JSON/分块文件流）及参数/种子配置；
   - `/work/out`（可写挂载）：承载声明输出产物、结构化日志与可选 `/work/out/iterations.jsonl`。
