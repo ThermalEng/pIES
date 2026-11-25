@@ -58,6 +58,16 @@
         "sdk": { "type": "string", "minLength": 1 }
       }
     },
+    "consumes": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/contract_ref" },
+      "uniqueItems": true
+    },
+    "produces": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/contract_ref" },
+      "uniqueItems": true
+    },
     "runtime": {
       "type": "object",
       "required": ["language", "python"],
@@ -149,14 +159,28 @@
     "tests": {
       "type": "array",
       "items": {
-        "type": "object",
-        "required": ["id", "input", "expected"],
-        "additionalProperties": false,
-        "properties": {
-          "id": { "type": "string", "minLength": 1 },
-          "input": { "$ref": "#/$defs/relative_path" },
-          "expected": { "$ref": "#/$defs/relative_path" }
-        }
+        "oneOf": [
+          {
+            "type": "object",
+            "required": ["id", "input", "expected"],
+            "additionalProperties": false,
+            "properties": {
+              "id": { "type": "string", "minLength": 1 },
+              "input": { "$ref": "#/$defs/relative_path" },
+              "expected": { "$ref": "#/$defs/relative_path" }
+            }
+          },
+          {
+            "type": "object",
+            "required": ["id", "in", "expected"],
+            "additionalProperties": false,
+            "properties": {
+              "id": { "type": "string", "minLength": 1 },
+              "in": { "$ref": "#/$defs/relative_path" },
+              "expected": { "$ref": "#/$defs/relative_path" }
+            }
+          }
+        ]
       }
     },
     "extensions": {
@@ -167,6 +191,10 @@
     "semver": {
       "type": "string",
       "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"
+    },
+    "contract_ref": {
+      "type": "string",
+      "pattern": "^[a-z0-9_-]+(\\.[a-z0-9_-]+)+@[0-9]+\\.[0-9]+\\.[0-9]+$"
     },
     "provider_ref": {
       "type": "string",

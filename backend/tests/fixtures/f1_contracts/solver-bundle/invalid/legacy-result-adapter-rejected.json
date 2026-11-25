@@ -1,0 +1,16 @@
+{
+  "schema": "ies.solver-bundle",
+  "schema_version": "1.0.0",
+  "bundle": {
+    "generator": "ies.generator.highs_milp@1.0.0",
+    "contract": "ies.solver-bundle.mps@1.0.0"
+  },
+  "inputs": [
+    { "path": "input/problem.mps", "media_type": "application/mps" }
+  ],
+  "outputs": [
+    { "path": "output/primal_solution.json", "media_type": "application/json", "required": true }
+  ],
+  "result_adapter": "ies.result-adapter.highs@1.0.0",
+  "extensions": {}
+}

@@ -1,0 +1,40 @@
+{
+  "schema": "ies.calculation-config",
+  "schema_version": "1.0.0",
+  "mode": "planning",
+  "predictions": [
+    {
+      "target": { "instance": "pv1", "interface": "power_out" },
+      "algorithm": "ies.predictor.naive@1.0.0",
+      "parameters": {}
+    },
+    {
+      "target": { "instance": "load1", "interface": "demand_in" },
+      "algorithm": "ies.predictor.naive@1.0.0",
+      "parameters": { "window": 24 }
+    }
+  ],
+  "generator": "ies.generator.highs_milp@1.0.0",
+  "solver": "ies.solver.highs@1.7.2",
+  "algorithm": null,
+  "evaluators": [
+    {
+      "evaluator": "ies.evaluator.finance@1.0.0",
+      "parameters": {}
+    },
+    {
+      "evaluator": "acme.evaluator.carbon@1.0.0",
+      "parameters": { "grid_factor": 0.58 }
+    }
+  ],
+  "precision": "medium",
+  "time_limit_seconds": 43200,
+  "options": {
+    "generator": {
+      "acceleration": { "mode": "on_demand_mutex" }
+    },
+    "solver": {}
+  },
+  "seed": 42,
+  "outputs": ["solution", "metrics"]
+}

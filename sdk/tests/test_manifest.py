@@ -193,3 +193,108 @@ extensions: {}
     manifest = validate_plugin_manifest(parse_plugin_yaml(raw_yaml))
     assert manifest.plugin_id == "acme.algorithm.capacity_search"
     assert manifest.tests[0].id == "minimal"
+    assert manifest.tests[0].mode == "file"
+    assert manifest.tests[0].is_directory is False
+
+
+def test_consumes_produces_and_dual_mode_tests() -> None:
+    raw_yaml = """
+schema: ies.algorithm-plugin
+schema_version: "1.0.0"
+plugin_id: acme.solver.cbc_mps
+version: "1.0.0"
+kind: solver
+name:
+  zh_cn: CBC 求解器
+  en_us: CBC Solver
+description: Solves MPS models and emits primal_solution.json.
+license: MPL-2.0
+compatibility:
+  pies: ">=1.1.5,<2.0.0"
+consumes:
+  - ies.solver-bundle.mps@1.0.0
+produces:
+  - ies.primal-solution@1.0.0
+runtime:
+  language: python
+  python: "3.12"
+entrypoint: main:solve
+parameters_schema:
+  type: object
+  additionalProperties: false
+  properties: {}
+resources:
+  default:
+    cpu: 1
+    memory_mb: 512
+    timeout_seconds: 300
+    process_limit: 8
+  maximum:
+    cpu: 2
+    memory_mb: 1024
+    timeout_seconds: 600
+    process_limit: 16
+tests:
+  - id: simple_json
+    input: tests/simple_json/input.json
+    expected: tests/simple_json/expected.json
+  - id: minimal_dir
+    in: tests/minimal_dir/in
+    expected: tests/minimal_dir/expected
+extensions: {}
+"""
+    manifest = validate_plugin_manifest(parse_plugin_yaml(raw_yaml))
+    assert manifest.consumes == ("ies.solver-bundle.mps@1.0.0",)
+    assert manifest.produces == ("ies.primal-solution@1.0.0",)
+    assert len(manifest.tests) == 2
+    assert manifest.tests[0].mode == "file"
+    assert manifest.tests[0].is_directory is False
+    assert manifest.tests[0].to_dict() == {
+        "id": "simple_json",
+        "input": "tests/simple_json/input.json",
+        "expected": "tests/simple_json/expected.json",
+    }
+    assert manifest.tests[1].mode == "directory"
+    assert manifest.tests[1].is_directory is True
+    assert manifest.tests[1].to_dict() == {
+        "id": "minimal_dir",
+        "in": "tests/minimal_dir/in",
+        "expected": "tests/minimal_dir/expected",
+    }
+    roundtrip = validate_plugin_manifest(manifest.to_dict())
+    assert roundtrip == manifest
+
+
+def test_rejects_invalid_consumes_produces_and_tests() -> None:
+    bad_contract = _base_manifest("solver")
+    bad_contract["consumes"] = ["not-a-contract"]
+    with pytest.raises(PluginValidationError):
+        validate_plugin_manifest(bad_contract)
+
+    dup_produces = _base_manifest("solver")
+    dup_produces["produces"] = [
+        "ies.primal-solution@1.0.0",
+        "ies.primal-solution@1.0.0",
+    ]
+    with pytest.raises(PluginValidationError):
+        validate_plugin_manifest(dup_produces)
+
+    mixed_test_keys = _base_manifest("solver")
+    mixed_test_keys["tests"] = [
+        {
+            "id": "bad",
+            "input": "tests/a/input.json",
+            "in": "tests/a/in",
+            "expected": "tests/a/expected",
+        }
+    ]
+    with pytest.raises(PluginValidationError):
+        validate_plugin_manifest(mixed_test_keys)
+
+    dup_test_id = _base_manifest("solver")
+    dup_test_id["tests"] = [
+        {"id": "dup", "input": "tests/a/input.json", "expected": "tests/a/expected.json"},
+        {"id": "dup", "in": "tests/b/in", "expected": "tests/b/expected"},
+    ]
+    with pytest.raises(PluginValidationError, match="Duplicate plugin test id"):
+        validate_plugin_manifest(dup_test_id)

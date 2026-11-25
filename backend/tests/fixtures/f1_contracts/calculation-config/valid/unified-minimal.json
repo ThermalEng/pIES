@@ -1,0 +1,22 @@
+{
+  "schema": "ies.calculation-config",
+  "schema_version": "1.0.0",
+  "mode": "planning",
+  "predictions": [],
+  "generator": null,
+  "solver": null,
+  "algorithm": "acme.algorithm.capacity_search@1.2.0",
+  "evaluators": [
+    {
+      "evaluator": "ies.evaluator.finance@1.0.0",
+      "parameters": {}
+    }
+  ],
+  "precision": "medium",
+  "time_limit_seconds": 600,
+  "options": {
+    "algorithm": { "max_steps": 100 }
+  },
+  "seed": 42,
+  "outputs": ["solution", "metrics"]
+}

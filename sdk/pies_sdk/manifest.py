@@ -93,9 +93,25 @@ class PluginTestSpec:
     id: str
     input: str
     expected: str
+    mode: str = "file"
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.id, str) or not self.id:
+            raise PluginValidationError("Plugin test 'id' must be a non-empty string")
+        if self.mode not in ("file", "directory"):
+            raise PluginValidationError(f"Unsupported plugin test mode: {self.mode!r}")
+        if not isinstance(self.input, str) or not self.input:
+            raise PluginValidationError(f"Plugin test {self.id!r} requires non-empty input path")
+        if not isinstance(self.expected, str) or not self.expected:
+            raise PluginValidationError(f"Plugin test {self.id!r} requires non-empty expected path")
+
+    @property
+    def is_directory(self) -> bool:
+        return self.mode == "directory"
 
     def to_dict(self) -> dict[str, Any]:
-        return {"id": self.id, "input": self.input, "expected": self.expected}
+        input_key = "in" if self.mode == "directory" else "input"
+        return {"id": self.id, input_key: self.input, "expected": self.expected}
 
 
 @dataclass(frozen=True, slots=True)
@@ -115,6 +131,8 @@ class PluginManifest:
     parameters_schema: Mapping[str, Any]
     resources: ResourcesConfig
     license: str | None = None
+    consumes: tuple[str, ...] = ()
+    produces: tuple[str, ...] = ()
     advanced: Mapping[str, Any] | None = None
     iteration: IterationSpec | None = None
     tests: tuple[PluginTestSpec, ...] = ()
@@ -159,6 +177,10 @@ class PluginManifest:
         }
         if self.license is not None:
             out["license"] = self.license
+        if self.consumes:
+            out["consumes"] = list(self.consumes)
+        if self.produces:
+            out["produces"] = list(self.produces)
         if self.advanced is not None:
             out["advanced"] = dict(self.advanced)
         if self.iteration is not None:
@@ -401,10 +423,33 @@ def validate_plugin_manifest(
             progress_channel=raw_iter.get("progress_channel", "/work/out/iterations.jsonl"),
         )
 
-    tests = tuple(
-        PluginTestSpec(id=item["id"], input=item["input"], expected=item["expected"])
-        for item in data.get("tests", ())
-    )
+    raw_tests = data.get("tests", ())
+    seen_test_ids: set[str] = set()
+    parsed_tests: list[PluginTestSpec] = []
+    for item in raw_tests:
+        test_id = item["id"]
+        if test_id in seen_test_ids:
+            raise PluginValidationError(f"Duplicate plugin test id: {test_id!r}")
+        seen_test_ids.add(test_id)
+        if "in" in item:
+            parsed_tests.append(
+                PluginTestSpec(
+                    id=test_id,
+                    input=item["in"],
+                    expected=item["expected"],
+                    mode="directory",
+                )
+            )
+        else:
+            parsed_tests.append(
+                PluginTestSpec(
+                    id=test_id,
+                    input=item["input"],
+                    expected=item["expected"],
+                    mode="file",
+                )
+            )
+    tests = tuple(parsed_tests)
 
     manifest = PluginManifest(
         schema=data["schema"],
@@ -416,6 +461,8 @@ def validate_plugin_manifest(
         description=data["description"],
         license=data.get("license"),
         compatibility=dict(data["compatibility"]),
+        consumes=tuple(data.get("consumes", ())),
+        produces=tuple(data.get("produces", ())),
         runtime=runtime,
         entrypoint=data["entrypoint"],
         parameters_schema=dict(params_schema),
