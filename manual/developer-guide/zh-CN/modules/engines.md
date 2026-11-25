@@ -29,28 +29,27 @@ ValidatedAssemblyArtifact + CalculationConfig
 - **同层分组与多目标同源联合预测**：任务提交阶段按各预测插件自身的 `parameters_schema` 独立校验 `predictions[].parameters`。执行阶段在逻辑预测环节内部按所选 `predictor` 插件分组运行（路由至同一插件的多个关联目标在单次容器调用内联合预测，保留共享气温/日照潜变量相关性），全部完成后由框架合并为物化输入序列，不再设依赖求解结果的跨容器外循环。
 - **单容器内部循环接口（`iteration`）**：凡含内部迭代寻优（如元启发式搜索、仿真优化或单求解器内部多轮恢复）的插件，统一在**单个临时计算容器内部**自闭环执行，并通过 `/work/out/iterations.jsonl` 专用通道逐轮追加收敛度量记录（`iteration`、`metric`、`value`、`unit: "1"`），严格受单容器总超时约束。
 
-## 求解器内建结构加速
+## 求解器内建结构加速（官方内置 HiGHS 质量控制）
 
-面向大规模长周期规划算例，结构加速作为求解执行器的内建能力提供，通过冻结的 [CalculationConfig](../formats/calculation-config.md) `options` 控制开关与参数，不改变[计算生成](generators.md) → Solver Bundle → [求解运行时](solver-runtime.md) → `ResultAdapter` 的三段式隔离边界；非 HiGHS 求解路线继续沿既有 `GeneratorProvider`、`ExecutorProvider` 与 `ResultAdapterProvider` 公开契约扩展。
+面向大规模长周期规划算例，结构加速作为官方内置求解器（`ies.solver.highs`）的内建能力提供，通过冻结的 [CalculationConfig](../formats/calculation-config.md) `options.generator` 控制开关与参数，不改变[计算生成](generators.md) → [求解运行时](solver-runtime.md) → `backend` 受限子进程还原的职责隔离；第三方求解路线直接遵循 `ies.algorithm-plugin`（`generator` / `solver` / `algorithm`）公开容器契约接入。
 
-- **配置与隔离契约**：加速开关与策略随 `CalcSnapshot` 冻结并受公开 `options_schema` 约束；内置 `ies.generator.highs_milp@1.0.0` 默认开启无损结构加速（`acceleration.mode: "on_demand_mutex"`），显式设 `"off"` 时严格直通原始模型求解，开启时保持全部执行均处于同一隔离运行时约束内。
-- **合法结构松弛与原模型权威性**：[生成器](generators.md#求解加速结构元数据导出)仅随 Bundle 导出经编译期证明可安全松弛的独立辅助结构元数据，不越界启动求解；求解执行器可在迭代过程中对上述已证明结构暂时省略约束，但原始模型不可变且始终是最终可行性、列映射与状态证明的唯一权威依据（无法证明结构安全时必须退回原始求解路径），最终交付方案必须在完整全周期原模型上满足物理守恒、自然月需量、储能连续性与税务约束。
-- **时限、保解与状态诚实性**：全阶段严格遵守总时间预算不超限续发，并在预算耗尽前保全已核查通过的最佳合法可行解；`ResultAdapter` 仅在无损等价或合法松弛达容差最优且通过原模型约束核查时签发 `solved`，凡时限提前停止或任何搜索域受限的求解统一发布 `feasible` 且未经认证的原域全局 `best_bound` 与 `relative_gap` 置 `null`。
+- **配置与隔离契约**：加速开关与策略随 `CalcSnapshot` 冻结并受 `parameters_schema` 约束；内置 `ies.generator.highs_milp@1.0.0` 默认开启无损结构加速（`acceleration.mode: "on_demand_mutex"`），显式设 `"off"` 时严格直通原始模型求解。
+- **合法结构松弛与原模型权威性**：[生成器](generators.md#求解加速结构元数据导出)仅随模型导出经编译期证明可安全松弛的独立辅助结构元数据，不越界启动求解；内置 `ies-highs-solver` 可在迭代过程中暂时省略已证明约束，并在**求解器自身内部**执行原模型全量约束容差核查与连续需量上包络紧度核查（发现月峰值虚高未压紧时由求解器/内置校验按终止情形标记为 `not_solved` 或 `numeric_failure`）。
+- **时限、保解与状态诚实性**：全阶段严格遵守总时间预算不超限续发，并在截止前保全已通过原模型核查的最佳合法可行解；内置求解器仅在无损原域或合法松弛达容差最优且通过原模型全部约束核查时输出 `solved`，凡时限提前停止或搜索域受限统一输出 `feasible` 且未经认证的原域全局 `best_bound` 与 `relative_gap` 置 `null`。
 
-## 统一结果模型与适配器契约
+## 统一结果模型与受限子进程还原层契约
 
 `ComputeResult` 通过两个正交字段表达计算结局，避免进程状态与数学状态混为一谈：
 
 - **`execution_status`**：严格对应执行回执事实，取值为 `completed`、`rejected`（策略/输入拒收）、`failed`（非 OOM 进程错误）、`timed_out`、`cancelled`、`fenced`（租约撤销）、`resource_exhausted`（OOM/内存耗尽）与 `protocol_failed`（输出协议损坏或缺失）。
 - **`math_status`**：反映求解器数学结局，取值为 `solved`（容差内已证明最优）、`feasible`（存在可行解但未证明最优，如达到时限）、`infeasible`、`unbounded`、`numeric_failure` 与 `not_solved`。
 
-### ResultAdapter 规范与内置 HiGHS 适配器
+### `backend` 受限子进程还原层职责（`ResultAdapter`）
 
-- **注册与调用**：扩展适配器实现公开描述符与 `adapt(bundle, receipt, outputs)`，通过独立注册表按精确引用解析。
-- **状态与可行解判定（`ies.result-adapter.highs@1.0.0`）**：
-  - 适配器须综合求解器状态、实际求解域及原模型验证证明共同判定 `math_status`：仅在无损原域或合法松弛达 `kOptimal` 且原模型核查通过时映射 `solved`；搜索域受限时即便 `kOptimal` 亦映射 `feasible` 且未经认证的原域全局界与 Gap 置 `null`；正常 `kTimeLimit` 有完整可行解时映射 `feasible`，无可行解时映射 `not_solved`；`kInfeasible` / `kUnbounded` 映射同名状态；`kUnboundedOrInfeasible` 映射 `not_solved`；监督强制超时、取消、OOM 或进程错误保持原执行状态，不读取残留输出升级为成功。
-  - 启用连续需量上包络且求解未证明严格最小时，适配器在发布解前核对月峰值紧度，发现虚高时拒绝发布失真财务账单并按终止情形映射为 `not_solved` 或 `numeric_failure`。
-- **同次主解恢复**：`solved` 与 `feasible` 使用同一主解按列位置映射恢复规划变量、财务分量、设备/系统步序列、财务事实（`outputs.financial_facts`）与构模来源映射（`outputs.model_sources`），执行目标偏移还原与唯一反向物理单位换算。
+- **平台内置基础能力（无插件扩展注册表）**：`ResultAdapter` 是 `backend` 跨步骤协调的可信基础还原组件（在独立受限 `spawn` 子进程中流式运行，不设立外部适配器插件注册表，也不暴露 `adapt(...)` 扩展接口）。
+- **忠实解析、状态投影与反向单位换算**：
+  - 仅消费 `ExecutionReceipt`、按输入模型 **0-based 原始列顺序**排列的 `primal_solution.json` 与 `generator` 产出的 `variable_map`；监督强制超时、取消、OOM 或进程错误保持对应 `execution_status`，绝不读取残留输出升级为成功；
+  - 对 `solved` 与 `feasible` 状态，按 0-based 列位置忠实恢复规划建设单元状态与规模、设备/系统步序列及构模来源映射（`outputs.model_sources`），执行目标偏移还原与唯一反向物理单位换算，生成与 `algorithm` 完全同构的标准工程解；**不对第三方 `solver` 执行原模型重新验算**。
 
 ### 求解终止与最优性摘要
 
