@@ -87,34 +87,13 @@ def _expression_refs(node: object, register_expr: Any) -> object:
     return node
 
 
-def _attach_scale_conversions(fact_refs: Mapping[str, Any]) -> dict[str, Any]:
-    out = dict(fact_refs)
-    units = out.get("construction_units")
-    if isinstance(units, list):
-        enriched_units = []
-        for unit_entry in units:
-            if not isinstance(unit_entry, Mapping):
-                enriched_units.append(unit_entry)
-                continue
-            item = dict(unit_entry)
-            scales = item.get("scales")
-            if isinstance(scales, list):
-                enriched_scales = []
-                for sc_entry in scales:
-                    if not isinstance(sc_entry, Mapping):
-                        enriched_scales.append(sc_entry)
-                        continue
-                    sc_copy = dict(sc_entry)
-                    target_unit = sc_copy.get("unit")
-                    if isinstance(target_unit, str) and target_unit:
-                        sc_val, off_val = linear_conversion_for_unit(target_unit)
-                        sc_copy["scale"] = sc_val
-                        sc_copy["offset"] = off_val
-                    enriched_scales.append(sc_copy)
-                item["scales"] = enriched_scales
-            enriched_units.append(item)
-        out["construction_units"] = enriched_units
-    return out
+def _attach_scale_conversions(fact_refs: dict[str, Any]) -> dict[str, Any]:
+    for unit_entry in fact_refs.get("construction_units", ()):
+        for sc_entry in unit_entry["scales"]:
+            sc_val, off_val = linear_conversion_for_unit(sc_entry["unit"])
+            sc_entry["scale"] = sc_val
+            sc_entry["offset"] = off_val
+    return fact_refs
 
 
 def target_parameter_records(
@@ -151,12 +130,7 @@ def target_parameter_records(
         (name, decl["unit"], decl["caliber"], register_expr(decl))
         for name, decl in sorted(components.items())
     ]
-    raw_fact_refs = _expression_refs(facts, register_expr)
-    fact_refs = (
-        _attach_scale_conversions(raw_fact_refs)
-        if isinstance(raw_fact_refs, Mapping)
-        else raw_fact_refs
-    )
+    fact_refs = _attach_scale_conversions(_expression_refs(facts, register_expr))  # type: ignore[arg-type]
     for number, node in enumerate(expressions):
         yield ["expression", number, float(node["constant"])]
         for batch in _batches(node["terms"].items()):

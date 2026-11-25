@@ -7,6 +7,7 @@ import os
 import resource
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -863,8 +864,14 @@ def test_f2_subprocess_isolation_memory_timeout_and_cancellation(
             '{"schema":"ies.primal-solution","schema_version":"1.0.0","math_status":"solved",'
             '"termination_reason":"optimal","has_feasible_solution":true,"column_count":'
             f'{ncols},"objective_value":12.0,"best_bound":12.0,"relative_gap":0.0,'
-            '"receipt":{"solver":"acme.sol@1.0.0"},"values":['
+            '"receipt":{"solver":"acme.sol@1.0.0","solver_diagnostics":{"trace":['
         )
+        diag_chunk = ",".join("1" for _ in range(5000))
+        for start in range(0, 500_000, 5000):
+            if start > 0:
+                fh.write(",")
+            fh.write(diag_chunk)
+        fh.write(']}},"values":[')
         chunk = ",".join("1000.0" for _ in range(5000))
         for start in range(0, ncols, 5000):
             if start > 0:
@@ -888,9 +895,15 @@ def test_f2_subprocess_isolation_memory_timeout_and_cancellation(
     assert outcome.solution_content.size_bytes == sol_out.stat().st_size
     assert "engineering_solution" not in outcome.compute_result.outputs
     assert "series" not in outcome.compute_result.outputs
+    assert "solver_diagnostics" not in outcome.solver_summary
+    assert "solver_diagnostics" not in outcome.compute_result.outputs["solver_summary"]
     assert outcome.compute_result.outputs["engineering_solution_path"] == str(sol_out)
-    # Parent RSS growth remains bounded (< 16 MiB) when restoring 500,000 series points.
+    # Parent RSS growth remains bounded (< 16 MiB) for 500k series + 500k solver_diagnostics.
     assert (rss_after - rss_before) < 16 * 1024
+    assert (
+        len(outcome.load_engineering_solution()["solver_summary"]["solver_diagnostics"]["trace"])
+        == 500_000
+    )
 
     # 2. Invalid budgets raise ValueError, and real RLIMIT_AS failure + OOM surface cleanly.
     with pytest.raises(ValueError):
@@ -973,7 +986,16 @@ def test_f2_subprocess_isolation_memory_timeout_and_cancellation(
         )
     assert exc_mat_to.value.reason == "timed_out"
 
-    # 5. setrlimit failures, hard child timeout, and active child cancellation surface cleanly.
+    # 5. setrlimit failures, timeout, cancellation, and auto-allocated temp cleanup.
+    auto_tmp = tmp_path / "auto_out_tmp"
+    auto_tmp.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(auto_tmp))
+    bad_primal = tmp_path / "bad_primal.json"
+    bad_primal.write_text("{broken", encoding="utf-8")
+    with pytest.raises(ComputationUnavailableError):
+        restore_from_bundle_dir(bundle_dir, bad_primal, _succeeded_receipt())
+    assert list(auto_tmp.iterdir()) == []
+
     tests_dir = str(Path(__file__).resolve().parent)
     prev_pythonpath = os.environ.get("PYTHONPATH")
     monkeypatch.setenv(
@@ -986,10 +1008,10 @@ def test_f2_subprocess_isolation_memory_timeout_and_cancellation(
             bundle_dir,
             primal_path,
             _succeeded_receipt(),
-            solution_output_path=tmp_path / "rlimit.json",
             memory_limit_mb=512,
         )
     assert exc_rlimit.value.reason == "resource-limit-failed"
+    assert list(auto_tmp.iterdir()) == []
 
     monkeypatch.setattr(ta, "_subprocess_restore_entry", _slow_restore_stub)
     with pytest.raises(ComputationUnavailableError) as exc_to:
@@ -997,6 +1019,7 @@ def test_f2_subprocess_isolation_memory_timeout_and_cancellation(
             bundle_dir, primal_path, _succeeded_receipt(), timeout_seconds=0.15
         )
     assert exc_to.value.reason == "timed_out"
+    assert list(auto_tmp.iterdir()) == []
 
     calls = 0
 
@@ -1010,6 +1033,7 @@ def test_f2_subprocess_isolation_memory_timeout_and_cancellation(
             bundle_dir, primal_path, _succeeded_receipt(), stop=_cancel_after_two, timeout_seconds=5.0
         )
     assert exc_cancel.value.reason == "cancelled"
+    assert list(auto_tmp.iterdir()) == []
 
 
 def test_f2_planning_scale_explicit_conversions_and_no_unit_label_guessing(tmp_path: Path) -> None:

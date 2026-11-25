@@ -6,6 +6,7 @@ import json
 import math
 import multiprocessing
 import resource
+import shutil
 import tempfile
 import time
 from array import array
@@ -1160,12 +1161,15 @@ def _restore_in_current_process(
             solver_diagnostics=diagnostics or None,
         )
         size_bytes = _stream_engineering_solution_to_path(eng_sol, solution_out_path)
+        meta_summary = {
+            k: v for k, v in eng_sol["solver_summary"].items() if k != "solver_diagnostics"
+        }
         result_meta_path.write_text(
             json.dumps(
                 {
                     "math_status": math_status,
                     "has_feasible_solution": False,
-                    "solver_summary": eng_sol["solver_summary"],
+                    "solver_summary": meta_summary,
                     "solution_size_bytes": size_bytes,
                 },
                 ensure_ascii=False,
@@ -1197,7 +1201,7 @@ def _restore_in_current_process(
         raw_gap = primal_meta["relative_gap"]
         relative_gap = float(raw_gap) if raw_gap is not None else None
 
-    solver_summary: dict[str, Any] = {
+    scalar_summary: dict[str, Any] = {
         "termination_reason": termination_reason,
         "math_status": math_status,
         "has_feasible_solution": True,
@@ -1206,8 +1210,9 @@ def _restore_in_current_process(
         "best_bound": business_bound,
         "relative_gap": relative_gap,
     }
-    if diagnostics:
-        solver_summary["solver_diagnostics"] = diagnostics
+    solver_summary = (
+        {**scalar_summary, "solver_diagnostics": diagnostics} if diagnostics else dict(scalar_summary)
+    )
 
     recovered = _recover_variable_map_records(
         records_path,
@@ -1245,7 +1250,7 @@ def _restore_in_current_process(
     meta_out: dict[str, Any] = {
         "math_status": math_status,
         "has_feasible_solution": True,
-        "solver_summary": solver_summary,
+        "solver_summary": scalar_summary,
         "solution_size_bytes": size_bytes,
     }
     if metrics_out is not None:
@@ -1354,30 +1359,25 @@ def _stream_content_to_path(
     _check_stop_and_deadline(stop, deadline, "输入准备阶段")
 
 
-def _allocate_solution_path(solution_output_path: Path | None) -> Path:
+def _allocate_solution_path(solution_output_path: Path | None) -> tuple[Path, Path | None]:
     if solution_output_path is not None:
         sol_path = Path(solution_output_path)
         sol_path.parent.mkdir(parents=True, exist_ok=True)
-        return sol_path
+        return sol_path, None
     out_dir = Path(tempfile.mkdtemp(prefix="ies-eng-solution-"))
-    return out_dir / "engineering_solution.json"
+    return out_dir / "engineering_solution.json", out_dir
 
 
-def restore_from_bundle_dir(
+def _restore_from_bundle_dir_validated(
     bundle_dir: Path,
     primal_path: Path,
     receipt: ExecutionReceipt | Mapping[str, Any],
     *,
-    solution_output_path: Path | None = None,
-    memory_limit_mb: int | None = None,
-    timeout_seconds: float | None = None,
-    stop: StopProbe | None = None,
-    _deadline: float | None = None,
+    solution_output_path: Path | None,
+    memory_limit_mb: int,
+    deadline: float,
+    stop: StopProbe | None,
 ) -> RestorationOutcome:
-    """Restore ``ies.engineering-solution@1.0.0`` inside a bounded ``spawn`` child subprocess."""
-    eff_mem_mb, eff_timeout_s = _validate_resource_budgets(memory_limit_mb, timeout_seconds)
-    deadline = _deadline if _deadline is not None else (time.monotonic() + eff_timeout_s)
-
     bundle_id = receipt["bundle_id"] if isinstance(receipt, Mapping) else receipt.bundle_id
     receipt_id = receipt["receipt_id"] if isinstance(receipt, Mapping) else receipt.receipt_id
     receipt_status = receipt["status"] if isinstance(receipt, Mapping) else receipt.status
@@ -1390,101 +1390,129 @@ def restore_from_bundle_dir(
 
     _check_stop_and_deadline(stop, deadline, "启动前")
 
-    if receipt_status != "succeeded":
-        eng_sol = _non_feasible_solution(
-            math_status="not_solved",
-            termination_reason="not_solved",
-            objective_unit=None,
-        )
-        sol_path = _allocate_solution_path(solution_output_path)
-        size_bytes = _stream_engineering_solution_to_path(eng_sol, sol_path)
-        outputs_meta: dict[str, Any] = {
-            "solver_summary": dict(eng_sol["solver_summary"]),
-            "engineering_solution_path": str(sol_path),
-            "engineering_solution_size_bytes": size_bytes,
-        }
-        return RestorationOutcome(
-            compute_result=ComputeResult(
-                bundle_id=str(bundle_id),
-                receipt_id=str(receipt_id),
-                execution_status=exec_status,
+    sol_path, owned_tmp_dir = _allocate_solution_path(solution_output_path)
+    try:
+        if receipt_status != "succeeded":
+            eng_sol = _non_feasible_solution(
                 math_status="not_solved",
-                outputs=outputs_meta,
-            ),
-            solution_path=sol_path,
-            solution_content=FileContent(sol_path, size_bytes),
-            solver_summary=dict(eng_sol["solver_summary"]),
-            child_pid=None,
-        )
+                termination_reason="not_solved",
+                objective_unit=None,
+            )
+            size_bytes = _stream_engineering_solution_to_path(eng_sol, sol_path)
+            outputs_meta: dict[str, Any] = {
+                "solver_summary": dict(eng_sol["solver_summary"]),
+                "engineering_solution_path": str(sol_path),
+                "engineering_solution_size_bytes": size_bytes,
+            }
+            return RestorationOutcome(
+                compute_result=ComputeResult(
+                    bundle_id=str(bundle_id),
+                    receipt_id=str(receipt_id),
+                    execution_status=exec_status,
+                    math_status="not_solved",
+                    outputs=outputs_meta,
+                ),
+                solution_path=sol_path,
+                solution_content=FileContent(sol_path, size_bytes),
+                solver_summary=dict(eng_sol["solver_summary"]),
+                child_pid=None,
+            )
 
-    sol_path = _allocate_solution_path(solution_output_path)
-    with tempfile.TemporaryDirectory(prefix="ies-restore-") as tmp_dir:
-        meta_path = Path(tmp_dir) / "restore_meta.json"
-        ctx = multiprocessing.get_context("spawn")
-        proc = ctx.Process(
-            target=_subprocess_restore_entry,
-            args=(
-                str(bundle_dir),
-                str(primal_path),
-                str(sol_path),
-                str(meta_path),
-                eff_mem_mb,
-            ),
-            daemon=False,
-        )
-        proc.start()
-        child_pid = proc.pid
-        try:
-            while proc.is_alive():
-                stop_reason = read_stop_reason(stop)
-                if stop_reason is not None:
-                    _terminate_process(proc)
-                    raise ComputationUnavailableError(
-                        f"结果还原运行中被停止: {stop_reason}",
-                        reason=stop_reason,
-                    )
-                if time.monotonic() > deadline:
-                    _terminate_process(proc)
-                    raise ComputationUnavailableError("结果还原受限子进程超时", reason="timed_out")
-                proc.join(timeout=0.02)
-        except BaseException:
-            _terminate_process(proc)
-            raise
+        with tempfile.TemporaryDirectory(prefix="ies-restore-") as tmp_dir:
+            meta_path = Path(tmp_dir) / "restore_meta.json"
+            ctx = multiprocessing.get_context("spawn")
+            proc = ctx.Process(
+                target=_subprocess_restore_entry,
+                args=(
+                    str(bundle_dir),
+                    str(primal_path),
+                    str(sol_path),
+                    str(meta_path),
+                    memory_limit_mb,
+                ),
+                daemon=False,
+            )
+            proc.start()
+            child_pid = proc.pid
+            try:
+                while proc.is_alive():
+                    stop_reason = read_stop_reason(stop)
+                    if stop_reason is not None:
+                        _terminate_process(proc)
+                        raise ComputationUnavailableError(
+                            f"结果还原运行中被停止: {stop_reason}",
+                            reason=stop_reason,
+                        )
+                    if time.monotonic() > deadline:
+                        _terminate_process(proc)
+                        raise ComputationUnavailableError("结果还原受限子进程超时", reason="timed_out")
+                    proc.join(timeout=0.02)
+            except BaseException:
+                _terminate_process(proc)
+                raise
 
-        meta_doc: dict[str, Any] | None = None
-        if meta_path.is_file():
-            meta_doc = json.loads(meta_path.read_text(encoding="utf-8"))
-        if meta_doc is not None and "error" in meta_doc:
-            err_msg = str(meta_doc["error"])
-            err_reason = str(meta_doc.get("reason") or "result-protocol-failure")
-            if err_msg.startswith("结果还原失败: "):
-                raise ComputationUnavailableError(err_msg, reason=err_reason)
-            _fail(err_msg, reason=err_reason)
-        if proc.exitcode != 0 or meta_doc is None or not sol_path.is_file():
-            reason = "resource_exhausted" if proc.exitcode in (-9, -11) else "result-protocol-failure"
-            _fail(f"受限子进程异常退出 (exitcode={proc.exitcode})", reason=reason)
+            meta_doc: dict[str, Any] | None = None
+            if meta_path.is_file():
+                meta_doc = json.loads(meta_path.read_text(encoding="utf-8"))
+            if meta_doc is not None and "error" in meta_doc:
+                err_msg = str(meta_doc["error"])
+                err_reason = str(meta_doc.get("reason") or "result-protocol-failure")
+                if err_msg.startswith("结果还原失败: "):
+                    raise ComputationUnavailableError(err_msg, reason=err_reason)
+                _fail(err_msg, reason=err_reason)
+            if proc.exitcode != 0 or meta_doc is None or not sol_path.is_file():
+                reason = "resource_exhausted" if proc.exitcode in (-9, -11) else "result-protocol-failure"
+                _fail(f"受限子进程异常退出 (exitcode={proc.exitcode})", reason=reason)
 
-        sol_size = int(meta_doc.get("solution_size_bytes", sol_path.stat().st_size))
-        outputs_meta = {
-            "solver_summary": dict(meta_doc["solver_summary"]),
-            "engineering_solution_path": str(sol_path),
-            "engineering_solution_size_bytes": sol_size,
-        }
-        if "metrics" in meta_doc:
-            outputs_meta["metrics"] = dict(meta_doc["metrics"])
-        return RestorationOutcome(
-            compute_result=ComputeResult(
-                bundle_id=str(bundle_id),
-                receipt_id=str(receipt_id),
-                execution_status="completed",
-                math_status=str(meta_doc["math_status"]),
-                outputs=outputs_meta,
-            ),
-            solution_path=sol_path,
-            solution_content=FileContent(sol_path, sol_size),
-            solver_summary=dict(meta_doc["solver_summary"]),
-            child_pid=child_pid,
-        )
+            sol_size = int(meta_doc.get("solution_size_bytes", sol_path.stat().st_size))
+            outputs_meta = {
+                "solver_summary": dict(meta_doc["solver_summary"]),
+                "engineering_solution_path": str(sol_path),
+                "engineering_solution_size_bytes": sol_size,
+            }
+            if "metrics" in meta_doc:
+                outputs_meta["metrics"] = dict(meta_doc["metrics"])
+            return RestorationOutcome(
+                compute_result=ComputeResult(
+                    bundle_id=str(bundle_id),
+                    receipt_id=str(receipt_id),
+                    execution_status="completed",
+                    math_status=str(meta_doc["math_status"]),
+                    outputs=outputs_meta,
+                ),
+                solution_path=sol_path,
+                solution_content=FileContent(sol_path, sol_size),
+                solver_summary=dict(meta_doc["solver_summary"]),
+                child_pid=child_pid,
+            )
+    except BaseException:
+        if owned_tmp_dir is not None:
+            shutil.rmtree(owned_tmp_dir, ignore_errors=True)
+        raise
+
+
+def restore_from_bundle_dir(
+    bundle_dir: Path,
+    primal_path: Path,
+    receipt: ExecutionReceipt | Mapping[str, Any],
+    *,
+    solution_output_path: Path | None = None,
+    memory_limit_mb: int | None = None,
+    timeout_seconds: float | None = None,
+    stop: StopProbe | None = None,
+) -> RestorationOutcome:
+    """Restore ``ies.engineering-solution@1.0.0`` inside a bounded ``spawn`` child subprocess."""
+    eff_mem_mb, eff_timeout_s = _validate_resource_budgets(memory_limit_mb, timeout_seconds)
+    deadline = time.monotonic() + eff_timeout_s
+    return _restore_from_bundle_dir_validated(
+        bundle_dir,
+        primal_path,
+        receipt,
+        solution_output_path=solution_output_path,
+        memory_limit_mb=eff_mem_mb,
+        deadline=deadline,
+        stop=stop,
+    )
 
 
 class TargetResultAdapter:
@@ -1512,15 +1540,14 @@ class TargetResultAdapter:
 
         receipt_status = receipt["status"] if isinstance(receipt, Mapping) else receipt.status
         if receipt_status != "succeeded":
-            return restore_from_bundle_dir(
+            return _restore_from_bundle_dir_validated(
                 Path("."),
                 Path("."),
                 receipt,
                 solution_output_path=solution_output_path,
                 memory_limit_mb=eff_mem_mb,
-                timeout_seconds=eff_timeout_s,
+                deadline=deadline,
                 stop=stop,
-                _deadline=deadline,
             )
 
         primal_raw = outputs.get(PRIMAL_SOLUTION_OUTPUT_PATH)
@@ -1536,15 +1563,14 @@ class TargetResultAdapter:
                 _stream_content_to_path(content, root / rel_path, stop=stop, deadline=deadline)
             primal_path = root / PRIMAL_SOLUTION_OUTPUT_PATH
             _stream_content_to_path(primal_raw, primal_path, stop=stop, deadline=deadline)
-            return restore_from_bundle_dir(
+            return _restore_from_bundle_dir_validated(
                 root,
                 primal_path,
                 receipt,
                 solution_output_path=solution_output_path,
                 memory_limit_mb=eff_mem_mb,
-                timeout_seconds=eff_timeout_s,
+                deadline=deadline,
                 stop=stop,
-                _deadline=deadline,
             )
 
     def restore(
