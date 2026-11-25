@@ -357,6 +357,26 @@ class PrimalSolutionPayload:
             )
         object.__setattr__(self, "values", norm_values)
 
+    @classmethod
+    def _from_validated(
+        cls, header: PrimalSolutionHeader, values: tuple[float, ...]
+    ) -> PrimalSolutionPayload:
+        """Assemble PrimalSolutionPayload from already-validated header and streamed values."""
+        obj = object.__new__(cls)
+        object.__setattr__(obj, "schema", header.schema)
+        object.__setattr__(obj, "schema_version", header.schema_version)
+        object.__setattr__(obj, "math_status", header.math_status)
+        object.__setattr__(obj, "termination_reason", header.termination_reason)
+        object.__setattr__(obj, "has_feasible_solution", header.has_feasible_solution)
+        object.__setattr__(obj, "column_count", header.column_count)
+        object.__setattr__(obj, "values", values)
+        object.__setattr__(obj, "objective_value", header.objective_value)
+        object.__setattr__(obj, "best_bound", header.best_bound)
+        object.__setattr__(obj, "relative_gap", header.relative_gap)
+        object.__setattr__(obj, "receipt", header.receipt)
+        object.__setattr__(obj, "extensions", header.extensions)
+        return obj
+
     def to_metadata_dict(self) -> dict[str, Any]:
         out: dict[str, Any] = {
             "schema": self.schema,
@@ -410,6 +430,8 @@ def _write_primal_stream(
     meta: Mapping[str, Any],
     expected_count: int,
     values: Iterable[float],
+    *,
+    validate_values: bool,
 ) -> Path:
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -425,12 +447,16 @@ def _write_primal_stream(
             handle.write('  "values": [')
             count = 0
             for raw_val in values:
-                num = _require_finite_number(raw_val, f"values[{count}]")
+                num = (
+                    _require_finite_number(raw_val, f"values[{count}]")
+                    if validate_values
+                    else raw_val
+                )
                 if count > 0:
                     handle.write(", ")
                 handle.write(repr(num))
                 count += 1
-            if count != expected_count:
+            if validate_values and count != expected_count:
                 raise StageIOError(
                     f"PrimalSolution streamed values count ({count}) "
                     f"does not match expected ({expected_count})"
@@ -450,7 +476,13 @@ def write_primal_solution_streaming(
 ) -> Path:
     """Stream primal_solution.json to disk without materializing all column values in memory."""
     hdr = header if isinstance(header, PrimalSolutionHeader) else PrimalSolutionHeader.from_dict(header)
-    return _write_primal_stream(path, hdr.to_metadata_dict(), hdr.expected_values_count, values)
+    return _write_primal_stream(
+        path, hdr.to_metadata_dict(), hdr.expected_values_count, values, validate_values=True
+    )
+
+
+_JSON_NUM_CHARS = frozenset("-+0123456789.eE")
+_JSON_WORD_CHARS = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")
 
 
 def _decode_complete_json_token(
@@ -461,10 +493,33 @@ def _decode_complete_json_token(
     eof: bool,
     label: str,
 ) -> tuple[Any, str, int, bool]:
-    """Decode one JSON token, refilling across chunk boundaries so numbers cannot truncate."""
+    """Decode one JSON token, ensuring numbers/literals are complete across chunk boundaries."""
     while True:
+        if pos >= len(buf):
+            if not eof:
+                more = handle.read(65536)
+                if more:
+                    buf += more
+                    continue
+                eof = True
+            raise StageIOError(f"Unexpected EOF while reading {label}")
+        first = buf[pos]
+        if first in _JSON_NUM_CHARS or first in _JSON_WORD_CHARS:
+            token_chars = _JSON_NUM_CHARS if first in _JSON_NUM_CHARS else _JSON_WORD_CHARS
+            end = pos + 1
+            while True:
+                while end < len(buf) and buf[end] in token_chars:
+                    end += 1
+                if end == len(buf) and not eof:
+                    more = handle.read(65536)
+                    if more:
+                        buf += more
+                        continue
+                    eof = True
+                break
         try:
             val, next_pos = decoder.raw_decode(buf, pos)
+            return val, buf, next_pos, eof
         except json.JSONDecodeError as exc:
             if not eof:
                 more = handle.read(65536)
@@ -473,13 +528,6 @@ def _decode_complete_json_token(
                     continue
                 eof = True
             raise StageIOError(f"Invalid {label}: {exc}") from exc
-        if next_pos == len(buf) and not eof:
-            more = handle.read(65536)
-            if more:
-                buf += more
-                continue
-            eof = True
-        return val, buf, next_pos, eof
 
 
 def _scan_primal_json_offsets(raw_path: Path) -> tuple[dict[str, Any], int]:
@@ -935,7 +983,7 @@ class DeviceSeries:
             instance_id=data["instance_id"],
             variable_id=data["variable_id"],
             unit=data["unit"],
-            values=tuple(data["values"]),
+            values=data["values"],
         )
 
 
@@ -980,7 +1028,7 @@ class SystemSeries:
             block=data["block"],
             variable=data["variable"],
             unit=data["unit"],
-            values=tuple(data["values"]),
+            values=data["values"],
         )
 
 
@@ -1399,7 +1447,7 @@ class EvaluationChartSeries:
         return cls(
             id=data["id"],
             label=data["label"],
-            values=tuple(data["values"]),
+            values=data["values"],
             unit=data.get("unit"),
         )
 
@@ -1502,6 +1550,10 @@ class EvaluationChart:
         for req in ("id", "title", "x_label", "y_label", "y_unit", "series"):
             if req not in data:
                 raise StageIOError(f"EvaluationChart missing required field: {req}")
+        if "chart_type" in data and data["chart_type"] is None:
+            raise StageIOError("chart.chart_type cannot be null when present")
+        if "x_values" in data and data["x_values"] is None:
+            raise StageIOError("chart.x_values cannot be null when present")
         return cls(
             id=data["id"],
             title=data["title"],
@@ -1733,20 +1785,7 @@ def read_primal_solution(path: Path) -> PrimalSolutionPayload:
     target = Path(path)
     header, values_iter = iter_primal_solution_values(target)
     values = tuple(values_iter)
-    return PrimalSolutionPayload(
-        schema=header.schema,
-        schema_version=header.schema_version,
-        math_status=header.math_status,
-        termination_reason=header.termination_reason,
-        has_feasible_solution=header.has_feasible_solution,
-        column_count=header.column_count,
-        values=values,
-        objective_value=header.objective_value,
-        best_bound=header.best_bound,
-        relative_gap=header.relative_gap,
-        receipt=header.receipt,
-        extensions=header.extensions,
-    )
+    return PrimalSolutionPayload._from_validated(header, values)
 
 
 def write_primal_solution(
@@ -1760,7 +1799,9 @@ def write_primal_solution(
         else PrimalSolutionPayload.from_dict(payload)
     )
     expected = model.column_count if model.has_feasible_solution else 0
-    return _write_primal_stream(path, model.to_metadata_dict(), expected, model.values)
+    return _write_primal_stream(
+        path, model.to_metadata_dict(), expected, model.values, validate_values=False
+    )
 
 
 def read_engineering_solution(path: Path) -> EngineeringSolutionPayload:

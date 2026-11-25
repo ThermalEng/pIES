@@ -402,6 +402,28 @@ def test_invalid_solver_bundle_fixtures_rejected() -> None:
             extensions={},
         )
 
+    # Schema/API parity for immediate traversal segments under input/ and output/.
+    from jsonschema import Draft202012Validator
+
+    schema_validator = Draft202012Validator(load_target_bundle_schema())
+    base_bundle = _load_json(SB_VALID / "mps-minimal.json")
+    for bad_input in ("input/../escape.mps", "input/..", "input/sub/../escape.mps"):
+        payload = {**base_bundle, "inputs": [{"path": bad_input, "media_type": "application/mps"}]}
+        assert list(schema_validator.iter_errors(payload)), f"schema missed {bad_input}"
+        with pytest.raises(ValueError):
+            validate_target_bundle(payload)
+    for bad_output in ("output/../escape.json", "output/..", "output/sub/../escape.json"):
+        payload = {
+            **base_bundle,
+            "outputs": [
+                {"path": bad_output, "media_type": "application/json", "required": True},
+                {"path": PRIMAL_SOLUTION_OUTPUT_PATH, "media_type": "application/json", "required": True},
+            ],
+        }
+        assert list(schema_validator.iter_errors(payload)), f"schema missed {bad_output}"
+        with pytest.raises(ValueError):
+            validate_target_bundle(payload)
+
 
 def test_solver_bundle_binding_and_file_set_checks() -> None:
     catalog = _stepped_plugin_catalog()
@@ -639,29 +661,47 @@ def test_stage_compatibility_rejects_missing_capabilities_and_unsupported_contra
         validate_stage_compatibility(unified_minimal, {**catalog, bad_eval_out.ref: bad_eval_out})
     assert exc_info.value.reason == "incompatible-contracts"
 
-    bad_gen_out = StagePluginSpec(
+    # Matching custom namespace bundle contract between generator and solver must be accepted.
+    custom_gen = StagePluginSpec(
         plugin_id="ies.generator.highs_milp",
         version="1.0.0",
         kind="generator",
         consumes=(STAGE_INPUT_CONTRACT,),
-        produces=("acme.unstructured@1.0.0",),
+        produces=("acme.solver-bundle.custom@1.0.0",),
         parameters_schema=_empty_object_schema(),
         modes=("planning",),
         precisions=("medium",),
         outputs=("solution",),
     )
-    bad_sol_match = StagePluginSpec(
+    custom_sol = StagePluginSpec(
         plugin_id="ies.solver.highs",
         version="1.7.2",
         kind="solver",
-        consumes=("acme.unstructured@1.0.0",),
+        consumes=("acme.solver-bundle.custom@1.0.0",),
         produces=(PRIMAL_SOLUTION_CONTRACT,),
         parameters_schema=_empty_object_schema(),
+    )
+    validate_stage_compatibility(
+        stepped_minimal,
+        {**catalog, custom_gen.ref: custom_gen, custom_sol.ref: custom_sol},
+    )
+
+    # Empty generator produces must still be rejected.
+    empty_gen_produces = StagePluginSpec(
+        plugin_id="ies.generator.highs_milp",
+        version="1.0.0",
+        kind="generator",
+        consumes=(STAGE_INPUT_CONTRACT,),
+        produces=(),
+        parameters_schema=_empty_object_schema(),
+        modes=("planning",),
+        precisions=("medium",),
+        outputs=("solution",),
     )
     with pytest.raises(ComputationUnavailableError) as exc_info:
         validate_stage_compatibility(
             stepped_minimal,
-            {**catalog, bad_gen_out.ref: bad_gen_out, bad_sol_match.ref: bad_sol_match},
+            {**catalog, empty_gen_produces.ref: empty_gen_produces},
         )
     assert exc_info.value.reason == "incompatible-contracts"
 

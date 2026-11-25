@@ -18,7 +18,6 @@ PLUGIN_KINDS = ("predictor", "generator", "solver", "evaluator", "algorithm")
 
 STAGE_INPUT_CONTRACT = "ies.stage-input@1.0.0"
 PREDICTION_OUTPUT_CONTRACT = "ies.prediction-output@1.0.0"
-SOLVER_BUNDLE_CONTRACT_PREFIX = "ies.solver-bundle."
 SOLVER_BUNDLE_MPS_CONTRACT = "ies.solver-bundle.mps@1.0.0"
 PRIMAL_SOLUTION_CONTRACT = "ies.primal-solution@1.0.0"
 ENGINEERING_SOLUTION_CONTRACT = "ies.engineering-solution@1.0.0"
@@ -278,15 +277,12 @@ def validate_stage_compatibility(
                 f"生成器 {gen_spec.ref!r} 须声明消费阶段输入契约 {STAGE_INPUT_CONTRACT!r}",
                 reason="incompatible-contracts",
             )
-        bundle_produces = {
-            c for c in gen_spec.produces if c.startswith(SOLVER_BUNDLE_CONTRACT_PREFIX)
-        }
-        if not bundle_produces:
+        if not gen_spec.produces:
             raise ComputationUnavailableError(
-                f"生成器 {gen_spec.ref!r} 须声明产出标准求解包契约 ({SOLVER_BUNDLE_CONTRACT_PREFIX}*)",
+                f"生成器 {gen_spec.ref!r} 未声明 produces 求解包契约",
                 reason="incompatible-contracts",
             )
-        if not (bundle_produces & set(sol_spec.consumes)):
+        if not sol_spec.consumes or not (set(gen_spec.produces) & set(sol_spec.consumes)):
             raise ComputationUnavailableError(
                 f"生成器 {gen_spec.ref!r} produces={list(gen_spec.produces)!r} "
                 f"与求解器 {sol_spec.ref!r} consumes={list(sol_spec.consumes)!r} 不匹配",

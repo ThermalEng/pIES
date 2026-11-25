@@ -282,6 +282,38 @@ def test_primal_solution_roundtrip_and_streaming(tmp_path: Path) -> None:
     assert len(b_vals) == 13101
     assert b_vals[-1] == pytest.approx(123.456789)
 
+    # Chunk boundary splits immediately after '.', 'e', 'e+', 'e-', and 'E'
+    # both inside 'values' AND inside metadata placed after 'values'
+    for split_num, expected_num in (
+        ("1.25", 1.25),
+        ("1e25", 1e25),
+        ("1E+5", 1e5),
+        ("1e-25", 1e-25),
+    ):
+        for cut in (1, 2, 3):
+            if cut >= len(split_num):
+                continue
+            split_path = tmp_path / f"split_{expected_num}_{cut}.json"
+            base_arr = '{"values": [' + ", ".join("1.0" for _ in range(13100)) + ", "
+            pad_arr = " " * max(0, (65536 - cut) - len(base_arr))
+            after = (
+                base_arr
+                + pad_arr
+                + split_num
+                + '], "schema": "ies.primal-solution", "schema_version": "1.0.0"'
+                + ', "math_status": "solved", "termination_reason": "optimal"'
+                + ', "has_feasible_solution": true, "column_count": 13101'
+                + ', "best_bound": 1.0, "relative_gap": 0.0'
+                + ', "receipt": {"solver": "ies.solver.highs@1.7.2"}'
+                + ', "objective_value": '
+            )
+            pad_meta_num = " " * max(0, (2 * 65536 - cut) - len(after))
+            split_path.write_text(after + pad_meta_num + split_num + "}\n", encoding="utf-8")
+            s_hdr, s_iter = iter_primal_solution_values(split_path)
+            s_vals = list(s_iter)
+            assert s_hdr.objective_value == pytest.approx(expected_num)
+            assert s_vals[-1] == pytest.approx(expected_num)
+
     # Non-feasible primal solution
     inf_path = write_primal_solution(tmp_path / "infeasible.json", _primal_infeasible_dict())
     inf_loaded = read_primal_solution(inf_path)
@@ -819,6 +851,46 @@ def test_evaluation_report_rejects_invalid_fixtures() -> None:
     bad_nan_chart["charts"][0]["series"][0]["values"] = [float("nan"), 1.0, 2.0]
     with pytest.raises(StageIOError, match="non-finite"):
         EvaluationReportPayload.from_dict(bad_nan_chart)
+
+    # Parser/schema parity: raw types and explicit null on non-nullable optional fields
+    schema_validator = Draft202012Validator(load_evaluation_report_schema())
+    parity_invalid_cases = []
+
+    bad_series_str = deepcopy(_evaluation_report_dict())
+    bad_series_str["charts"][0]["series"][0]["values"] = ""
+    parity_invalid_cases.append(bad_series_str)
+
+    bad_series_dict = deepcopy(_evaluation_report_dict())
+    bad_series_dict["charts"][0]["series"][0]["values"] = {"a": 1}
+    parity_invalid_cases.append(bad_series_dict)
+
+    bad_null_chart_type = deepcopy(_evaluation_report_dict())
+    bad_null_chart_type["charts"][0]["chart_type"] = None
+    parity_invalid_cases.append(bad_null_chart_type)
+
+    bad_null_x_values = deepcopy(_evaluation_report_dict())
+    bad_null_x_values["charts"][0]["x_values"] = None
+    parity_invalid_cases.append(bad_null_x_values)
+
+    bad_null_extensions = deepcopy(_evaluation_report_dict())
+    bad_null_extensions["extensions"] = None
+    parity_invalid_cases.append(bad_null_extensions)
+
+    for bad_case in parity_invalid_cases:
+        assert not schema_validator.is_valid(bad_case)
+        with pytest.raises(StageIOError):
+            EvaluationReportPayload.from_dict(bad_case)
+
+    # Also verify DeviceSeries / SystemSeries preserve raw values types
+    bad_dev_series = _engineering_feasible_dict()
+    bad_dev_series["series"]["pv1.power_out"]["values"] = "12"
+    with pytest.raises(StageIOError, match="non-empty list"):
+        EngineeringSolutionPayload.from_dict(bad_dev_series)
+
+    bad_sys_series = _engineering_feasible_dict()
+    bad_sys_series["system_series"]["sys.reserve"]["values"] = {"a": 1.0}
+    with pytest.raises(StageIOError, match="non-empty list"):
+        EngineeringSolutionPayload.from_dict(bad_sys_series)
 
 
 def test_stage_context_f1_helpers(tmp_path: Path) -> None:
