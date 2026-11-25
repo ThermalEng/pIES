@@ -1,0 +1,75 @@
+{
+  "assembly": {
+    "id": "pure_synth",
+    "name": "Pure Synthetic"
+  },
+  "demand_bindings": {
+    "dem": {
+      "charge": "dc",
+      "instance": "g",
+      "interface": "out_e"
+    }
+  },
+  "devices": {
+    "g": {
+      "asset_origin": "new",
+      "properties": {
+        "cap_kw": {
+          "unit": "kW",
+          "value": 10.0
+        }
+      }
+    }
+  },
+  "finance_binding": {
+    "instances": {
+      "g": {
+        "drivers": {
+          "cap": {
+            "property": "cap_kw"
+          },
+          "energy": {
+            "aggregation": "integrate_positive",
+            "interface": "out_e"
+          }
+        },
+        "finance_type": "gen",
+        "type": "costed"
+      }
+    }
+  },
+  "planning": {
+    "constraints": {},
+    "construction_units": {
+      "u_g": {
+        "device_ref": "g",
+        "mode": "mandatory",
+        "scales": [
+          "cap_v"
+        ]
+      }
+    },
+    "variables": {
+      "cap_v": {
+        "device_ref": "g",
+        "parameter": "cap_kw",
+        "unit": "kW"
+      }
+    }
+  },
+  "project_baseline": {
+    "resolution": "1h",
+    "scenario_mode": "single_year",
+    "start_year": 2025
+  },
+  "schema": "ies.assembly",
+  "schema_version": "3.0.0",
+  "tariff_bindings": {
+    "sell": {
+      "aggregation": "integrate_positive",
+      "instance": "g",
+      "interface": "out_e",
+      "price": "grid_sell"
+    }
+  }
+}

@@ -1,0 +1,143 @@
+{
+  "amounts": {},
+  "assets": {},
+  "base_year": 2025,
+  "cash_movements": {},
+  "cost_method": "fixed_plus_linear",
+  "credit_pools": {},
+  "currency": "CNY",
+  "demand_charges": {
+    "dc": {
+      "rate": {
+        "unit": "CNY/kW",
+        "value": "2"
+      }
+    }
+  },
+  "energy_prices": {
+    "grid_sell": {
+      "carrier": "electricity",
+      "direction": "sale",
+      "kind": "constant",
+      "value": {
+        "unit": "CNY/kWh",
+        "value": "1.0"
+      }
+    }
+  },
+  "finance_types": {
+    "gen": {
+      "annual_fixed_om": {
+        "fixed": {
+          "unit": "CNY/a",
+          "value": "30"
+        }
+      },
+      "period_variable_om": {
+        "linear": {
+          "energy": {
+            "unit_cost": {
+              "unit": "CNY/kWh",
+              "value": "0.1"
+            }
+          }
+        }
+      },
+      "upfront_capex": {
+        "fixed": {
+          "unit": "CNY",
+          "value": "200"
+        },
+        "linear": {
+          "cap": {
+            "unit_cost": {
+              "unit": "CNY/kW",
+              "value": "10"
+            }
+          }
+        }
+      }
+    }
+  },
+  "net_cashflows": {
+    "end_bonus": {
+      "amount": {
+        "kind": "fixed",
+        "value": {
+          "unit": "CNY",
+          "value": "50"
+        }
+      },
+      "at": {
+        "kind": "evaluation_end"
+      },
+      "direction": "inflow"
+    }
+  },
+  "price_basis": "tax_inclusive",
+  "profile_id": "pure-fwd",
+  "schema": "ies.effective-finance-config",
+  "schema_version": "1.0.0",
+  "tax_rules": {
+    "cit": {
+      "annual_om": [
+        "gen.annual_fixed_om"
+      ],
+      "deductible_maintenance": {
+        "items": [],
+        "mode": "explicit_items"
+      },
+      "demand_cost": [
+        "dc"
+      ],
+      "depreciation": [
+        {
+          "base_from": {
+            "finance_type": "gen",
+            "kind": "upfront_capex_net",
+            "scope": {
+              "kind": "all_new_instances"
+            }
+          },
+          "first_year": 1,
+          "life_years": 2,
+          "method": "straight_line",
+          "residual": {
+            "unit": "1",
+            "value": "0"
+          }
+        }
+      ],
+      "energy_cost": [],
+      "kind": "income_tax",
+      "label_ref": "income_tag",
+      "loss_carryforward_years": 2,
+      "opening_losses": [
+        {
+          "amount": {
+            "unit": "CNY",
+            "value": "100"
+          },
+          "last_usable_year": 1
+        }
+      ],
+      "rate": {
+        "unit": "1",
+        "value": "0.25"
+      },
+      "revenue": [
+        "grid_sell"
+      ],
+      "variable_om": [
+        "gen.period_variable_om"
+      ]
+    }
+  },
+  "taxes": {
+    "income_tag": {
+      "applies_to": "gen.upfront_capex",
+      "display_name": "CIT",
+      "tax_type": "income_tax"
+    }
+  }
+}

@@ -1,0 +1,41 @@
+schema: ies.algorithm-plugin
+schema_version: "1.0.0"
+plugin_id: ies.evaluator.finance
+version: "1.0.0"
+kind: evaluator
+name:
+  zh_cn: 官方财务评价器
+  en_us: Official Financial Evaluator
+description: Official built-in financial evaluator computing project cash flows, taxes, monthly demand billing, and investment indicators from ies.engineering-solution@1.0.0.
+license: MPL-2.0
+compatibility:
+  pies: ">=1.2.0,<2.0.0"
+  sdk: ">=1.1.5,<2.0.0"
+consumes:
+  - ies.engineering-solution@1.0.0
+produces:
+  - ies.financial-evaluation@1.0.0
+runtime:
+  language: python
+  python: "3.12"
+entrypoint: finance_evaluator_stage:evaluate
+parameters_schema:
+  type: object
+  additionalProperties: false
+  properties: {}
+resources:
+  default:
+    cpu: 1
+    memory_mb: 1024
+    timeout_seconds: 600
+    process_limit: 16
+  maximum:
+    cpu: 4
+    memory_mb: 4096
+    timeout_seconds: 3600
+    process_limit: 32
+tests:
+  - id: minimal
+    in: tests/minimal/in
+    expected: tests/minimal/expected
+extensions: {}
