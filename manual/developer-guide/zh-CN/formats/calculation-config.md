@@ -75,3 +75,4 @@
 
 - **求解时限与外层监督**：内置 HiGHS 生成器将用户请求的 `time_limit_seconds` 原样传入求解器内部 `--time_limit`，并在外层容器/进程监督预留 `+600` 秒有界宽限（`command.timeout_seconds = time_limit_seconds + 600`）用于启动、MPS 读模与解写出；整体壁钟仍须在部署策略 `max_timeout_seconds` 允许范围内（超限在启动前拒绝）。
 - **静态能力与可组合检查**：配置保存与任务提交阶段校验 `mode`、`precision`、`outputs`、上下游插件公开数据契约标识（`produces` / `consumes` 匹配及可选 `companions` 限制），并分别按各插件 `parameters_schema` 独立校验 `predictions[].parameters`、`options` 子槽位与 `evaluators[].parameters`；不兼容组合在提交闸门直接拒绝，不在执行期猜测转换。
+- **`1.1.5` 至 `1.2.0` 一次性迁移与历史快照只读保护**：升级 `1.2.0` 前须先等待在途 `1.1.5` 运行任务结束（或由管理员取消）；升级时由版本化数据库迁移将项目已保存的可编辑 `CalculationConfig` 修订一次性转换为 13 字段新格式（移除 `convergence`；原 `evaluator` 映射为 `evaluators: [{"evaluator": "ies.evaluator.finance@1.0.0", "parameters": {}}]`；原 `options` 归入 `options.generator` 或 `options.algorithm`），运行期代码仅维护单一当前契约。历史已完成的 `1.1.5` 任务直接从已封存 `Evidence` 展示结果，历史冻结 `CalcSnapshot` 原样只读保留，严禁原地修改历史冻结数据。

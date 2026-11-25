@@ -7,24 +7,24 @@
 ## 五类插件种类（`kind`）与框架单向交接协议
 
 流水线拓扑固定为：
-`冻结输入 → [predictions[]: 同层按插件分组执行] → (generator → solver → 平台底座自动还原工程解 | algorithm) → [evaluators[]: 0..N 个评价器并联执行] → 最终封存结果`。
+`冻结输入 → [predictions[]: 同层按插件分组执行] → (generator → solver → backend 独立受限子进程自动还原工程解 | algorithm) → [evaluators[]: 0..N 个评价器并联执行] → 最终封存结果`。
 
-**框架负责跨环节只读交接**：第三方插件**绝不承担搬运无关上游文件的职责**；跨环节所需的只读不可变上下文（如冻结装配、物化序列/价格、财务/评价确认及 `generator` 产出的 `variable_map`）统一由 `backend` 调度框架通过硬链接（`os.link`）零拷贝组装进目标环节的只读 `/work/in` 目录，既维持每一环只读自身 `/work/in` 的清晰单向逻辑，又彻底消除插件漏传、篡改或重复校验问题：
+**单进单出容器与框架零拷贝交接**：临时容器仅运行单输入（`/work/in`）、单输出（`/work/out`）的可插拔计算插件，**绝不承担搬运无关上游文件的职责**；跨环节只读不可变上下文（冻结装配、物化序列/价格、财务/评价确认）统一由 `backend` 调度框架经硬链接（`os.link`）零拷贝组装进目标环节只读 `/work/in`，跨步骤的原变量查表还原由 `backend` 在独立受限子进程（`spawn` 流式文件读写，退出立即释放内存）内完成：
 
 | `kind` | `/work/in` 框架组装的只读输入 | `/work/out` 插件自身唯一产物 | 组合与契约标识（`consumes` / `produces`） |
 |---|---|---|---|
 | `predictor` | 分配给本插件的全部关联 `targets[]`、历史序列与各目标 `parameters` | `/work/out/prediction.json` 与训练产物 | 同层按所选插件分组执行；同插件多目标单趟同源联合预测（保留负荷与风光共享潜变量相关性），框架合并全部预测序列后送入下一环 |
-| `generator` | 冻结规范装配、完整物化序列、冻结财务/评价上下文与 `options.generator` | 求解模型文件（如 `problem.mps`）与声明式变量/单位映射 `variable_map`（内置为 `parameters.json` + `parameters.jsonl`） | 产出公开求解包契约（如 `ies.solver-bundle.mps@1.0.0`），执行唯一业务单位到求解内部单位的正向转换 |
-| `solver` | `generator` 产出的求解模型文件与 `options.solver`（无需传入财务或装配文件） | 求解器无关标准原变量解（`primal_solution.json`：统一状态枚举、目标值、列值序列与回执元数据），**不搬运 `variable_map` 或财务文件** | 消费匹配 `generator` 契约并产出 `ies.primal-solution@1.0.0`；运行结束后**由平台底座自动结合 `variable_map` 还原出业务单位标准工程解**，第三方 `.mps` 求解器可直接无感替换内置 HiGHS |
-| `algorithm` | 冻结规范装配、完整物化序列/价格、冻结财务/评价上下文与 `options.algorithm` | 业务单位标准工程解（`solution.json`：`ies.engineering-solution@1.0.0`） | 严格等价替代 `generator + solver`；产出与分步模式底座还原后**完全同构的标准工程解**（两种模式均支持 `evaluators: []`） |
-| `evaluator` | 标准工程解（`ies.engineering-solution@1.0.0`）+ 框架硬链接的完整只读冻结上下文（规范装配 `ValidatedAssemblyArtifact`、物化 `prices`、`EffectiveFinanceConfig`、`EvaluationInput`）+ 本评价器 `parameters` | 官方财务评价器输出标准 `ies.financial-evaluation@1.0.0`；第三方评价器输出自描述报告块 `evaluation_report.json`（`metrics` / `charts` / `tables`） | 支持 `0..N` 个评价器并联独立运行；自描述展示协议由前端通用组件自动渲染并支持导出为 Excel Sheet，新增评价器无需修改前端代码 |
+| `generator` | 冻结规范装配、完整物化序列、冻结财务/评价上下文与 `options.generator` | 求解模型文件（如 `problem.mps`）与通用公开映射表 `variable_map`（声明 0-based 列位置、目标变量身份与线性单位换算关系） | 产出公开求解包契约（如 `ies.solver-bundle.mps@1.0.0`），执行唯一业务单位到求解内部单位的正向转换 |
+| `solver` | `generator` 产出的求解模型文件与 `options.solver`（无需传入财务或装配文件） | 求解器无关标准原变量解（`primal_solution.json`：统一状态枚举、目标值、严格按输入模型 **0-based 原始列序**排列的列值序列与回执元数据），**禁止输出内部重排后的列序，不搬运 `variable_map` 或财务文件** | 消费匹配 `generator` 契约并产出 `ies.primal-solution@1.0.0`；退出后由 `backend` 受限子进程结合 `variable_map` 忠实还原为标准工程解（不替第三方求解器重验算），通吃任意兼容 `generator × solver` 组合 |
+| `algorithm` | 冻结规范装配、完整物化序列/价格、冻结财务/评价上下文与 `options.algorithm` | 业务单位标准工程解（`solution.json`：`ies.engineering-solution@1.0.0`） | 严格等价替代 `generator + solver`；产出与分步模式还原后**完全同构的标准工程解**（两种模式均支持 `evaluators: []`） |
+| `evaluator` | 已取得可行解的标准工程解（`ies.engineering-solution@1.0.0`）+ 框架硬链接的完整只读冻结上下文（规范装配 `ValidatedAssemblyArtifact`、物化 `prices`、`EffectiveFinanceConfig`、`EvaluationInput`）+ 本评价器 `parameters` | 官方财务评价器输出标准 `ies.financial-evaluation@1.0.0`；第三方评价器输出自描述报告块 `evaluation_report.json`（`metrics` / `charts` / `tables`） | 支持 `0..N` 个评价器并联独立运行与独立检查点；单个评价器失败不破坏已封存工程解与其他成功评价块，并支持单独重新启动该失败评价器 |
 
-### 标准工程解（`ies.engineering-solution@1.0.0`）与自描述评价块契约
+### 标准工程解（`ies.engineering-solution@1.0.0`）、无解豁免与并联评价发布规则
 
-- **标准工程解必填项**（供前端工程页签展示及下游任意 `evaluator` 正向计算）：
-  1. `construction_units`：装配中全部规划建设单元的 `built`（布尔值）与各 `planning_variable_id` 业务单位数值；
-  2. `series` / `system_series`：覆盖所有电表计费绑定（`meter_bindings`）、变动运维及命名金额引用的设备接口/变量与系统辅助变量完整连续 `step` 业务单位序列；
-  3. `solver_summary`（终止原因、`math_status`、可行解标记、目标值与单位等）及可选 `metrics`；缺失财务评价必需的建设单元或计费序列时明确报错，严禁静默补零。
+- **有可行解与无可行解双态规则**：
+  - 当核心求解取得可用解（`math_status` 为 `solved` 或 `feasible`，即 `has_feasible_solution: true`）时，必须完整提供：① `construction_units`（装配中全部规划建设单元的 `built` 布尔值与各 `planning_variable_id` 业务单位数值）；② `series` / `system_series`（覆盖所有电表计费绑定、变动运维及命名金额引用的完整连续 `step` 业务单位序列）；③ `solver_summary` 及可选 `metrics`（缺失必需项时明确报错，严禁静默补零）。
+  - 当核心求解无可用解（`infeasible` / `unbounded` / `not_solved` / `numeric_failure`，即 `has_feasible_solution: false`）时，仅要求提供 `solver_summary`（`construction_units` 与 `series` 缺省或为空，绝不将合法无解误判为缺字段协议错误），且调度器**直接跳过所有依赖可行工程解的下游 `evaluators[]`**。
+- **并联评价局部失败隔离与单点重试**：当核心工程解成功产出时，顶层任务的 `business_outcome` 仅反映核心求解状态（如 `solved → normal_completion`、`feasible → restricted_results`）；各 `evaluator` 拥有独立检查点与资源配额，任一附加评价器失败时保留已封存工程解与其余成功评价块，在结果页对应评价卡片标红展示结构化错误诊断，并提供**单评价器重试入口**（直接复用同一冻结 `CalcSnapshot` 与已封存标准工程解重新运行该失败评价器，无需重跑主求解）。
 - **评价器自描述报告块（`ies.evaluation-report@1.0.0`）**：第三方 `evaluator`（如碳排放、供电可靠性、㶲效率或海外 PPA 评价）输出自包含的标题、摘要指标列表 `metrics`（`{id, label, value, unit}`）、序列图表列表 `charts`（横纵轴标签、单位与序列数组）及二维明细表列表 `tables`（列定义、单位与行数组），与前端固定财务页签彻底解耦。
 
 ## ZIP 目录布局与双形态自检样例
@@ -120,8 +120,8 @@ extensions: {}
 
 ## 构建信任边界、断网自检与执行生命周期
 
-- **安装期构建信任边界与优先源回退策略**：
-  - 无 `requirements` 插件强制以 `--network=none` 直接基于 `pies-plugin-base` 构建；含 `requirements` 插件在 `job_runner` 内存受控上下文中构建（零宿主机业务目录挂载、零业务凭证注入、带硬构建超时）；若管理员配置了 `pip_index_url`，作为**优先源并允许回退默认公网 PyPI**（`--index-url <pip_index_url> --extra-index-url https://pypi.org/simple`，留空直接走默认 PyPI）；离线环境拉包失败时标记 `build_failed` 并弹窗提示所缺插件/依赖及联系管理员处理；
+- **安装期构建信任边界与单一指定源规则**：
+  - 无 `requirements` 插件强制以 `--network=none` 直接基于 `pies-plugin-base` 构建；含 `requirements` 插件在 `job_runner` 内存受控上下文中构建（零宿主机业务目录挂载、零业务凭证注入、带硬构建超时）；`pip_index_url` 留空时使用默认公网 PyPI，**非空时仅传 `--index-url <pip_index_url>`**（不拼接 `--extra-index-url`，避免 `pip` 多源无优先级混合选版与企业内网依赖混淆；上游缓存与公网代理回退由镜像服务端自身负责）；依赖安装失败时标记 `build_failed` 并明确弹窗提示所缺插件/依赖及联系管理员处理；
   - 构建完成后，声明的 `tests` 强制在 `--network=none` 容器内全部通过才转入 `ready`。`pies-sdk validate` 与 `pies-sdk pack` 统一覆盖全部五类插件。
 - **运行期隔离、同源财务评价与无状态并发安全卸载**：
   - 所有计算环节均以 `--network=none --read-only --cap-drop=ALL` 非 root 临时容器运行；内置财务评价器复用同源财务领域规则对标准工程解做正向全量评价（与内置生成器优化目标数学口径严格一致），**平台与自检门禁仅校验公开契约合法性，不复核插件物理最优性，也不为任何第三方插件的计算正确性背书**；

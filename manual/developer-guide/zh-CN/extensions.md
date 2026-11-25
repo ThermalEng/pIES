@@ -12,7 +12,7 @@ pIES 将“声明式业务内容”与“可执行计算能力”分开扩展：
 | 计算环节与算法插件（`1.1.5` / `1.2.0` 目标） | `computation` / `customization` | 统一 `ies.algorithm-plugin@1.0.0`（`plugin.yaml`），覆盖 `predictor`、`generator`、`solver`、`evaluator` 与 `algorithm` 五类，按 ID + 三段式语义版本固定 | 内置与第三方插件统一封装为计算镜像，由 `backend` 经 `job_runner` 拉起临时断网容器执行，永不热加载进控制面进程 |
 | 存储适配器 | `storage` | 命名空间 ID + 三段式语义版本 | 组合根注入，仅负责字节级存取与健康状态 |
 
-正式可执行 Provider 仅在进程启动时由组合根完成发现、依赖校验并一次性原子发布，不支持运行期热加载，亦不存在跨模块的全局注册表。
+受信任的平台基础能力（如存储适配器、`job_runner` 容器执行桥接与内置还原层）在进程启动时由组合根完成静态发现、校验与原子发布；而设备模型与五类 `ies.algorithm-plugin` 容器插件作为受管数据库与对象存储中的不可变记录管理，支持免服务重启动态安装与启停，控制面进程永不热加载用户代码，亦不存在跨模块的全局注册表。
 
 ## 边界划分与运行时模块化验收门禁
 
@@ -45,7 +45,7 @@ pIES 将“声明式业务内容”与“可执行计算能力”分开扩展：
 计算全流程通过清晰的容器阶段与平台还原层解耦数学构模、求解执行与多维评价（详见[算法插件包](formats/algorithm-plugin-package.md)与[模型与算法](customization-center.md)）：
 
 - **预测与核心求解插件（`predictor` / `generator` / `solver` / `algorithm`）**：`predictor` 按所选插件同层分组单趟执行（支持多目标同源联合预测）；`generator` 执行唯一业务单位到求解内部单位的正向转换并产出求解输入与 `variable_map`；`solver` 仅消费模型文件并输出求解器无关的标准原变量解；`algorithm` 跳过 `generator + solver` 拆分直接输出业务单位标准工程解。
-- **平台运行底座结果还原（`ResultAdapter`）**：在分步模式 `solver` 结束后自动结合 `variable_map` 与执行回执完成唯一反向单位换算，还原出与 `algorithm` 完全同构的业务单位标准工程解。
+- **`backend` 受限子进程结果还原（`ResultAdapter`）**：在分步模式 `solver` 结束后由 `backend` 在独立受限子进程中流式结合 `variable_map` 与执行回执完成唯一反向单位换算，忠实还原出与 `algorithm` 完全同构的业务单位标准工程解（退出即释放内存，不替第三方求解器做重新验算）。
 - **并联评价插件（`evaluator`）**：`0..N` 个独立评价器并联只读标准工程解及框架零拷贝硬链接的冻结上下文；官方内置财务评价器输出标准财务评价事实，第三方评价器按自描述 `metrics` / `charts` / `tables` 协议输出报告块并由前端通用渲染。
 
 各插件在 `plugin.yaml` 中显式声明 `consumes` / `produces` 公开数据契约标识、支持的模式/精度及专属 `parameters_schema`（Draft 2020-12），无需修改组合根代码或互相写死插件 ID 即可自由替换。

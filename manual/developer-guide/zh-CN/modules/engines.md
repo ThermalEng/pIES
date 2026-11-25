@@ -11,18 +11,18 @@
 ```text
 ValidatedAssemblyArtifact + CalculationConfig
   ↓ 序列物化（constant / data_repeat / data_full + predictions[] 同层按插件分组联合预测）
-  ├─ 分步模式：GeneratorProvider ──→ SolverRuntime ──→ 平台底座按 variable_map 自动还原标准工程解
+  ├─ 分步模式：GeneratorProvider ──→ SolverRuntime ──→ backend 独立受限子进程按 variable_map 还原标准工程解
   └─ 一体化模式：Algorithm 容器 ─────────────────────→ 直接产出标准工程解
                                                               ↓
-        最终封存结果 ←── evaluators[]（0..N 个独立评价器并联执行：内置财务评价 + 自描述扩展评价）
+        最终封存结果 ←── evaluators[]（仅在有可行解时运行；局部评价失败保留工程解并支持单点重试）
 ```
 
 | 子模块 | 职责 | 不负责 |
 |---|---|---|
 | 序列物化与前置预测 | 将静态来源与按插件同层分组执行的单趟预测结果合并为全周期对齐 `MaterializedSet` | 修改装配或跨容器往返循环 |
 | [生成器](generators.md) | 数学降级、正向单位换算并产出求解模型文件与 `variable_map` | 访问数据库、直接联网 |
-| [求解运行时](solver-runtime.md) | 经容器代理在隔离临时容器内执行求解并产出标准原变量解与 `ExecutionReceipt` | 解释设备语义、单位换算或搬运业务文件 |
-| 平台结果还原与并联评价 | 平台底座结合 `variable_map` 还原业务单位标准工程解；`0..N` 个 `evaluator` 并联生成标准财务评价或自描述报告块 | 重跑求解、读取当前草稿或复核第三方算法最优性 |
+| [求解运行时](solver-runtime.md) | 经容器代理在隔离临时容器内执行求解并产出 0-based 原列序标准原变量解与 `ExecutionReceipt` | 解释设备语义、单位换算或搬运业务文件 |
+| 受限子进程还原与并联评价 | `backend` 在独立受限子进程内流式结合 `variable_map` 忠实还原标准工程解；`0..N` 个 `evaluator` 并联运行并支持单评价器失败重试 | 重跑主求解、读取当前草稿或替第三方求解器重验算 |
 
 ## 同层分组预测与单容器内部循环接口
 

@@ -11,18 +11,18 @@ Under the `1.2.0` unidirectional pipeline architecture, prediction (`predictor`)
 ```text
 ValidatedAssemblyArtifact + CalculationConfig
   ↓ Series Materialization (constant / data_repeat / data_full + grouped joint predictions[])
-  ├─ Staged Mode:  GeneratorProvider ──→ SolverRuntime ──→ Platform Runtime Restores Canonical Engineering Solution
+  ├─ Staged Mode:  GeneratorProvider ──→ SolverRuntime ──→ backend Bounded Subprocess Restores Canonical Engineering Solution
   └─ Unified Mode: Algorithm Container ──────────────────→ Emits Canonical Engineering Solution Directly
                                                                   ↓
-        Sealed Result ←── evaluators[] (0..N independent evaluators in parallel: official finance + self-describing blocks)
+        Sealed Result ←── evaluators[] (runs only when feasible; partial evaluator failure preserves solution & supports retry)
 ```
 
 | Submodule | Responsibility | Non-Responsibility |
 |---|---|---|
 | Series Materialization & Prediction | Merges static sources and per-plugin grouped single-pass predictions into a full-horizon aligned `MaterializedSet` | Mutating assembly or cross-container loops |
 | [Generators](generators.md) | Math lowering, forward unit conversion, solver input & `variable_map` emission | Accessing databases or network |
-| [Solver Runtime](solver-runtime.md) | Executes solvers via the container proxy inside isolated ephemeral containers to emit canonical primal solutions and `ExecutionReceipt` | Interpreting device semantics, converting units, or relaying business files |
-| Runtime Restoration & Parallel Evaluators | Restores business-unit canonical engineering solutions via `variable_map`; runs `0..N` parallel `evaluator` plugins producing financial facts or self-describing report blocks | Re-running solvers, reading live drafts, or certifying third-party optimality |
+| [Solver Runtime](solver-runtime.md) | Executes solvers via the container proxy inside isolated ephemeral containers to emit 0-based original-column-order primal solutions and `ExecutionReceipt` | Interpreting device semantics, converting units, or relaying business files |
+| Bounded-Subprocess Restoration & Parallel Evaluators | `backend` faithfully restores canonical engineering solutions via `variable_map` in a bounded subprocess; runs `0..N` parallel `evaluator` plugins with per-evaluator retry | Re-running core solves, reading live drafts, or certifying third-party solvers |
 
 ## Per-Plugin Grouped Prediction and Intra-Container Loop Interface
 

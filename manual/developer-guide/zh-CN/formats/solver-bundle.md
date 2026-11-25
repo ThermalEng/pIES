@@ -16,7 +16,7 @@ solver-bundle/
 └── output/
 ```
 
-`bundle.yaml` 声明包元数据、规范输入相对路径清单、受控执行命令、允许写入的输出声明与配套结果适配器引用（`output/` 在生成期为空目录）。
+`bundle.yaml` 声明包元数据、产出的公开求解契约标识、规范输入相对路径清单与允许写入的输出声明（`output/` 在生成期为空目录，任意声明消费该公开契约的 `solver` 容器均可接入执行，不再写死特定求解器或适配器 ID）：
 
 ```yaml
 schema: ies.solver-bundle
@@ -24,7 +24,7 @@ schema_version: "1.0.0"
 
 bundle:
   generator: ies.generator.highs_milp@1.0.0
-  solver: ies.solver.highs@1.7.2
+  contract: ies.solver-bundle.mps@1.0.0
 
 inputs:
   - path: input/problem.mps
@@ -34,28 +34,11 @@ inputs:
   - path: input/parameters.jsonl
     media_type: application/x-ndjson
 
-command:
-  executor: ies.executor.local_process@1.0.0
-  executable: ies.solver.highs@1.7.2
-  arguments:
-    - input/problem.mps
-    - --solution_file
-    - output/solution.json
-  working_directory: .
-  environment: {}
-  timeout_seconds: 43200
-  memory_mib: 4096
-  cpu_cores: 4
-  network: false
-  success_exit_codes:
-    - 0
-
 outputs:
-  - path: output/solution.json
+  - path: output/primal_solution.json
     media_type: application/json
     required: true
 
-result_adapter: ies.result-adapter.highs@1.0.0
 extensions: {}
 ```
 
@@ -69,15 +52,15 @@ Bundle 内输入与输出文件统一采用可重复按块读取的只读内容�
 | 运行时 | 按块将输入从对象存储复制到隔离目录；进程结束后先通过持久化接收接口落盘执行检查点，确认后再清理临时目录 |
 | 结果适配与导出 | 通过同一只读内容协议读取解与回执；发布最终证据时复用既有对象引用 |
 
-## 结构化命令与运行时职责
+## 容器执行隔离与职责边界
 
-- **命令安全**：`command` 禁止 Shell 字符串与命令行拼接（禁止 `sh -c`、管道、重定向、通配符、`..` 路径逃逸）；`executable` 须命中部署 allowlist，`network` 默认为 `false`。
-- **执行回执（`ExecutionReceipt`）**：运行时无论成功或失败均记录 Bundle、尝试、执行器/求解器版本、起止时间、退出码或信号、施加的资源限制及采集到的 `stdout`/`stderr`/声明输出；进程退出码为 `0` 仅代表进程协议结束，数学最优性与可行解由 `ResultAdapter` 解释声明输出判定。
-- **求解器内建加速与可替换解交接**：内置 `ies.generator.highs_milp@1.0.0` 默认开启 `on_demand_mutex` 结构加速（可通过 [CalculationConfig](calculation-config.md) `options.generator.acceleration.mode = "off"` 显式关闭）；在 `1.2.0` 单向流水线中，`generator` 产出的求解模型文件与 `variable_map`（`input/parameters.json` + `input/parameters.jsonl`）按职责分流——任意声明消费 `ies.solver-bundle.mps@1.0.0` 的 `solver` 插件仅读取模型文件并输出求解器无关的标准原变量解（无需硬编码绑定特定求解器 ID），随后由平台底座结合框架硬链接的 `variable_map` 自动还原业务单位标准工程解并按无损最优与原模型容差核查结果裁决 `solved` 与 `feasible`（详见[计算生成与求解](../modules/engines.md#求解器内建结构加速)）。显式关闭时直接按原模型求解；全程禁止 Shell 串联与跨 Bundle 改写装配边界。
+- **断网容器与无 Shell 约束**：`solver` 容器经 `job_runner` 以 `--network=none --read-only --cap-drop=ALL` 非 root 身份拉起，禁止 Shell 字符串拼接、`..` 路径逃逸与任意命令注入。
+- **执行回执（`ExecutionReceipt`）与 0-based 列序契约**：无论成功或失败均记录尝试、求解插件版本、起止时间、退出码或信号及 cgroup 资源指标；进程退出码为 `0` 仅代表容器正常退出，求解器输出的 `primal_solution.json` 列值数组必须严格按 `input/problem.mps` 的 **0-based 原始列顺序**排列。
+- **内置 HiGHS 结构加速与通用还原边界区分**：内置 `ies.generator.highs_milp@1.0.0` 默认开启 `on_demand_mutex` 结构加速（可通过 [CalculationConfig](calculation-config.md) `options.generator.acceleration.mode = "off"` 显式关闭）；**松弛互斥后的原模型约束容差核查仅属于官方内置 `ies.solver.highs`（`ies-highs-solver`）自身的内部求解质量控制**（详见[计算生成与求解](../modules/engines.md#求解器内建结构加速)）。`backend` 受限子进程中的通用 `ResultAdapter` 只负责按 `variable_map`（`input/parameters.json` + `input/parameters.jsonl`）忠实还原业务单位标准工程解，**不对第三方 `solver` 执行重新验算**。
 
-## 内置配套参数记录
+## 通用变量映射与参数记录
 
-内置 `ies.generator.highs_milp@1.0.0` 与 `ies.result-adapter.highs@1.0.0` 通过轻量元数据头 `input/parameters.json`（保存汇编标识、目标偏移与单位、列数、请求输出、种子及记录文件相对路径）和有序 NDJSON 记录文件 `input/parameters.jsonl` 传递求解列位置与财务/来源声明。
+`generator` 与 `backend` 受限子进程还原层通过轻量元数据头 `input/parameters.json`（保存汇编标识、目标偏移与单位、列数、请求输出、种子及记录文件相对路径）和有序 NDJSON 记录文件 `input/parameters.jsonl` 传递 0-based 求解列位置与变量/来源声明。
 
 `input/parameters.jsonl` 按以下顺序写出 JSON 数组记录（所有位置与表达式 ID 从 `0` 起按内部槽位索引，同类记录不可交换顺序）：
 

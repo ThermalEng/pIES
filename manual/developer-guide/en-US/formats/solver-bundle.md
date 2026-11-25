@@ -16,7 +16,7 @@ solver-bundle/
 └── output/
 ```
 
-`bundle.yaml` declares bundle metadata, relative input manifest paths, controlled command specification, allowed output declarations, and the matching result adapter ref (`output/` starts empty during generation).
+`bundle.yaml` declares bundle metadata, the produced public bundle contract ID, relative input manifest paths, and allowed output declarations (`output/` starts empty during generation; any `solver` container declaring consumption of that contract can execute it without hardcoding solver or adapter IDs):
 
 ```yaml
 schema: ies.solver-bundle
@@ -24,7 +24,7 @@ schema_version: "1.0.0"
 
 bundle:
   generator: ies.generator.highs_milp@1.0.0
-  solver: ies.solver.highs@1.7.2
+  contract: ies.solver-bundle.mps@1.0.0
 
 inputs:
   - path: input/problem.mps
@@ -34,28 +34,11 @@ inputs:
   - path: input/parameters.jsonl
     media_type: application/x-ndjson
 
-command:
-  executor: ies.executor.local_process@1.0.0
-  executable: ies.solver.highs@1.7.2
-  arguments:
-    - input/problem.mps
-    - --solution_file
-    - output/solution.json
-  working_directory: .
-  environment: {}
-  timeout_seconds: 43200
-  memory_mib: 4096
-  cpu_cores: 4
-  network: false
-  success_exit_codes:
-    - 0
-
 outputs:
-  - path: output/solution.json
+  - path: output/primal_solution.json
     media_type: application/json
     required: true
 
-result_adapter: ies.result-adapter.highs@1.0.0
 extensions: {}
 ```
 
@@ -69,15 +52,15 @@ All input and output files inside a Bundle adhere to a repeatable, read-only chu
 | Runtime | Streams inputs in chunks from object storage into the isolated workdir; once the process exits, persists execution checkpoints through the storage receiver before cleaning temporary directories |
 | Adaptation & Export | Reads solutions and receipts through the same read-only content protocol; final evidence publication reuses existing object references |
 
-## Structured Commands and Runtime Responsibilities
+## Container Isolation and Responsibility Boundaries
 
-- **Command security**: `command` prohibits shell command strings and shell composition (`sh -c`, pipes, redirection, wildcards, `..` traversal); `executable` MUST match the deployment allowlist, and `network` defaults to `false`.
-- **Execution receipt (`ExecutionReceipt`)**: Regardless of success or failure, the runtime records bundle/attempt/executor/solver versions, start/end timestamps, exit code or signal, applied resource limits, and captured `stdout`/`stderr`/declared outputs; exit code `0` reflects protocol completion only—mathematical optimality and feasibility are determined by `ResultAdapter` interpreting declared outputs.
-- **Solver-embedded acceleration and replaceable solution handoff**: Built-in `ies.generator.highs_milp@1.0.0` enables `on_demand_mutex` structural acceleration by default (explicitly disable via [CalculationConfig](calculation-config.md) `options.generator.acceleration.mode = "off"`); under the `1.2.0` unidirectional pipeline, solver model files and `variable_map` (`input/parameters.json` + `input/parameters.jsonl`) route cleanly by role—any `solver` plugin consuming `ies.solver-bundle.mps@1.0.0` reads only the model files and emits a solver-neutral canonical primal solution (without hardcoding solver IDs), after which the platform runtime combines the framework-hardlinked `variable_map` to restore the canonical business-unit engineering solution and adjudicates `solved` vs. `feasible` against lossless optimality and original-model tolerance checks (see [Computation Generation and Solving](../modules/engines.md#solver-embedded-structural-acceleration)). When explicitly disabled, execution reads the original model directly without shell chaining or cross-Bundle assembly mutations.
+- **Network-disabled containers & shell-free execution**: `solver` containers launch via `job_runner` as non-root with `--network=none --read-only --cap-drop=ALL`, prohibiting shell string composition, `..` traversal, and arbitrary command injection.
+- **Execution receipt (`ExecutionReceipt`) & 0-based column order**: Regardless of success or failure, the runtime records attempt/solver plugin versions, start/end timestamps, exit code or signal, and cgroup resource metrics; exit code `0` indicates clean container exit only, and `primal_solution.json` column values MUST strictly follow the **0-based original column order** of `input/problem.mps`.
+- **Distinguishing built-in HiGHS acceleration checks from universal restoration**: Built-in `ies.generator.highs_milp@1.0.0` enables `on_demand_mutex` structural acceleration by default (disable via [CalculationConfig](calculation-config.md) `options.generator.acceleration.mode = "off"`); **original-model constraint tolerance verification under relaxed mutexes belongs strictly to official built-in `ies.solver.highs` (`ies-highs-solver`) internal quality control** (see [Computation Generation and Solving](../modules/engines.md#solver-embedded-structural-acceleration)). The universal `ResultAdapter` inside `backend`'s bounded subprocess solely restores the canonical business-unit engineering solution from `variable_map` (`input/parameters.json` + `input/parameters.jsonl`) faithfully and **never re-solves or certifies third-party `solver` plugins**.
 
-## Built-In Companion Parameter Records
+## Universal Variable Mapping and Parameter Records
 
-Built-in `ies.generator.highs_milp@1.0.0` and `ies.result-adapter.highs@1.0.0` transfer solver column positions and financial/provenance declarations via a lightweight metadata header `input/parameters.json` (holding assembly identity, objective offset and unit, column count, requested outputs, seed, and relative record file path) paired with an ordered NDJSON record stream `input/parameters.jsonl`.
+`generator` plugins and `backend`'s bounded-subprocess restoration layer exchange 0-based solver column positions and variable/provenance declarations via a lightweight metadata header `input/parameters.json` (holding assembly identity, objective offset and unit, column count, requested outputs, seed, and relative record file path) paired with an ordered NDJSON record stream `input/parameters.jsonl`.
 
 `input/parameters.jsonl` emits JSON array records strictly in the following order (all positions and expression IDs index from `0` by internal slot order; homogeneous record groups MUST NOT reorder):
 
