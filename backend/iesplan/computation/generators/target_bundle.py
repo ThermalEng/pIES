@@ -87,6 +87,36 @@ def _expression_refs(node: object, register_expr: Any) -> object:
     return node
 
 
+def _attach_scale_conversions(fact_refs: Mapping[str, Any]) -> dict[str, Any]:
+    out = dict(fact_refs)
+    units = out.get("construction_units")
+    if isinstance(units, list):
+        enriched_units = []
+        for unit_entry in units:
+            if not isinstance(unit_entry, Mapping):
+                enriched_units.append(unit_entry)
+                continue
+            item = dict(unit_entry)
+            scales = item.get("scales")
+            if isinstance(scales, list):
+                enriched_scales = []
+                for sc_entry in scales:
+                    if not isinstance(sc_entry, Mapping):
+                        enriched_scales.append(sc_entry)
+                        continue
+                    sc_copy = dict(sc_entry)
+                    target_unit = sc_copy.get("unit")
+                    if isinstance(target_unit, str) and target_unit:
+                        sc_val, off_val = linear_conversion_for_unit(target_unit)
+                        sc_copy["scale"] = sc_val
+                        sc_copy["offset"] = off_val
+                    enriched_scales.append(sc_copy)
+                item["scales"] = enriched_scales
+            enriched_units.append(item)
+        out["construction_units"] = enriched_units
+    return out
+
+
 def target_parameter_records(
     model: SparseModel,
     unit_map: Mapping[str, str],
@@ -121,24 +151,20 @@ def target_parameter_records(
         (name, decl["unit"], decl["caliber"], register_expr(decl))
         for name, decl in sorted(components.items())
     ]
-    fact_refs = _expression_refs(facts, register_expr)
+    raw_fact_refs = _expression_refs(facts, register_expr)
+    fact_refs = (
+        _attach_scale_conversions(raw_fact_refs)
+        if isinstance(raw_fact_refs, Mapping)
+        else raw_fact_refs
+    )
     for number, node in enumerate(expressions):
         yield ["expression", number, float(node["constant"])]
         for batch in _batches(node["terms"].items()):
             yield ["terms", [[model.column_position(name), float(coeff)] for name, coeff in batch]]
         yield ["expression_end"]
 
-    unit_cache: dict[str, tuple[float, float]] = {}
-
-    def conv(unit: str) -> tuple[float, float]:
-        cached = unit_cache.get(unit)
-        if cached is None:
-            cached = linear_conversion_for_unit(unit)
-            unit_cache[unit] = cached
-        return cached
-
     unit_entries = (
-        [model.column_position(name), unit, *conv(unit)]
+        [model.column_position(name), unit, *linear_conversion_for_unit(unit)]
         for name, unit in sorted(unit_map.items())
     )
     for batch in _batches(unit_entries):
@@ -149,7 +175,7 @@ def target_parameter_records(
     yield ["facts", fact_refs]
 
     for entry in series:
-        scale, offset = conv(str(entry["unit"]))
+        scale, offset = linear_conversion_for_unit(str(entry["unit"]))
         meta = {key: value for key, value in entry.items() if key != "columns"}
         meta["scale"] = scale
         meta["offset"] = offset

@@ -252,15 +252,8 @@ def _stream_v1_solution_to_primal_json(
                     raise StageIOError(
                         f"Non-sequential 0-based primal index: expected {expected_idx}, got {pos}"
                     )
-                val = float(val_str.strip())
-                if not math.isfinite(val):
-                    raise StageIOError(f"Non-finite primal value at column {pos}: {val_str!r}")
                 expected_idx += 1
-                yield val
-            if expected_idx != column_count:
-                raise StageIOError(
-                    f"Expected {column_count} primal values, got {expected_idx}"
-                )
+                yield float(val_str.strip())
 
         return write_primal_solution_streaming(out_path, header, _iter_primals())
 

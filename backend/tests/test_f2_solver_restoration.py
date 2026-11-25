@@ -44,7 +44,13 @@ from iesplan.computation.result_adapters.target_adapter import (
     TargetResultAdapter,
     restore_from_bundle_dir,
 )
-from iesplan.core.content import MemoryContent, read_content
+from iesplan.core.content import GeneratedContent, MemoryContent, read_content
+
+
+def _read_restored(res: Any) -> dict[str, Any]:
+    sol_path = Path(str(res.outputs["engineering_solution_path"]))
+    assert sol_path.is_file()
+    return json.loads(sol_path.read_text(encoding="utf-8"))
 
 HIGHS_EXECUTABLE = Path("/usr/local/bin/ies-highs-solver")
 
@@ -283,14 +289,21 @@ def test_f2_target_generator_and_highs_e2e_equivalence(tmp_path: Path) -> None:
     primal_payload = _v1_sol_to_primal_json(sol_text)
 
     adapter = TargetResultAdapter()
+    sol_out = tmp_path / "campus_eng_solution.json"
     outcome = adapter.restore_with_outcome(
         target_bundle,
         _succeeded_receipt(),
         {PRIMAL_SOLUTION_OUTPUT_PATH: json.dumps(primal_payload).encode("utf-8")},
+        solution_output_path=sol_out,
     )
     assert outcome.child_pid is not None and outcome.child_pid != os.getpid()
+    assert outcome.solution_path == sol_out
+    assert "engineering_solution" not in outcome.compute_result.outputs
+    assert "series" not in outcome.compute_result.outputs
+    assert outcome.compute_result.outputs["engineering_solution_path"] == str(sol_out)
 
-    eng = dict(outcome.engineering_solution)
+    eng = json.loads(b"".join(outcome.solution_content.iter_chunks()).decode("utf-8"))
+    assert eng == outcome.load_engineering_solution()
     assert eng["schema"] == ENGINEERING_SOLUTION_SCHEMA
     assert eng["schema_version"] == ENGINEERING_SOLUTION_VERSION
     if sdk_schema_dir is not None:
@@ -351,7 +364,7 @@ def test_f2_epigraphs_emitted_when_monthly_demand_present() -> None:
     }
 
 
-def test_f2_dual_state_statuses_and_receipt_failures() -> None:
+def test_f2_dual_state_statuses_and_receipt_failures(tmp_path: Path) -> None:
     """Verify feasible/time_limit/infeasible/unbounded and non-succeeded receipt handling."""
     bundle = _minimal_bundle(
         columns=["cap_kw", "p_t0", "p_t1"],
@@ -412,10 +425,14 @@ def test_f2_dual_state_statuses_and_receipt_failures() -> None:
         "extensions": {},
     }
     res_rest = adapter.restore(
-        bundle, _succeeded_receipt(), {PRIMAL_SOLUTION_OUTPUT_PATH: json.dumps(primal_restricted).encode()}
+        bundle,
+        _succeeded_receipt(),
+        {PRIMAL_SOLUTION_OUTPUT_PATH: json.dumps(primal_restricted).encode()},
+        solution_output_path=tmp_path / "rest.json",
     )
     assert res_rest.math_status == "feasible"
-    eng_rest = res_rest.outputs["engineering_solution"]
+    assert "engineering_solution" not in res_rest.outputs
+    eng_rest = _read_restored(res_rest)
     assert eng_rest["solver_summary"]["objective_value"] == 210.0
     assert eng_rest["solver_summary"]["best_bound"] is None
     assert eng_rest["solver_summary"]["relative_gap"] is None
@@ -432,10 +449,14 @@ def test_f2_dual_state_statuses_and_receipt_failures() -> None:
         },
     }
     res_orig = adapter.restore(
-        bundle, _succeeded_receipt(), {PRIMAL_SOLUTION_OUTPUT_PATH: json.dumps(primal_tl_orig).encode()}
+        bundle,
+        _succeeded_receipt(),
+        {PRIMAL_SOLUTION_OUTPUT_PATH: json.dumps(primal_tl_orig).encode()},
+        solution_output_path=tmp_path / "orig.json",
     )
-    assert res_orig.outputs["engineering_solution"]["solver_summary"]["best_bound"] == 190.0
-    assert res_orig.outputs["engineering_solution"]["solver_summary"]["relative_gap"] == 0.1
+    eng_orig = _read_restored(res_orig)
+    assert eng_orig["solver_summary"]["best_bound"] == 190.0
+    assert eng_orig["solver_summary"]["relative_gap"] == 0.1
 
     # 3. infeasible / unbounded / not_solved / numeric_failure -> solver_summary only
     for math_st, term in (
@@ -459,10 +480,13 @@ def test_f2_dual_state_statuses_and_receipt_failures() -> None:
             "extensions": {},
         }
         res_fail = adapter.restore(
-            bundle, _succeeded_receipt(), {PRIMAL_SOLUTION_OUTPUT_PATH: json.dumps(primal_fail).encode()}
+            bundle,
+            _succeeded_receipt(),
+            {PRIMAL_SOLUTION_OUTPUT_PATH: json.dumps(primal_fail).encode()},
+            solution_output_path=tmp_path / f"fail_{math_st}.json",
         )
         assert res_fail.math_status == math_st
-        eng_fail = res_fail.outputs["engineering_solution"]
+        eng_fail = _read_restored(res_fail)
         assert eng_fail["solver_summary"]["has_feasible_solution"] is False
         assert "construction_units" not in eng_fail
         assert "series" not in eng_fail
@@ -503,13 +527,14 @@ def test_f2_dual_state_statuses_and_receipt_failures() -> None:
             bundle,
             ExecutionReceipt(**receipt_kwargs),
             {PRIMAL_SOLUTION_OUTPUT_PATH: corrupt_bytes},
+            solution_output_path=tmp_path / f"err_{status}_{reason}.json",
         )
         assert res_err.execution_status == expected_exec
         assert res_err.math_status == "not_solved"
         assert res_err.outputs["solver_summary"]["has_feasible_solution"] is False
 
 
-def test_f2_affine_conversions_streaming_boundary_and_strict_errors() -> None:
+def test_f2_affine_conversions_streaming_boundary_and_strict_errors(tmp_path: Path) -> None:
     """Test affine scale/offset (e.g. Kelvin->Celsius), 64KiB boundary token split, and strict errors."""
     bundle = _minimal_bundle(
         columns=["temp_k", "sys_w"],
@@ -574,9 +599,12 @@ def test_f2_affine_conversions_streaming_boundary_and_strict_errors() -> None:
     )
     adapter = TargetResultAdapter()
     res = adapter.restore(
-        bundle, _succeeded_receipt(), {PRIMAL_SOLUTION_OUTPUT_PATH: primal_text.encode("utf-8")}
+        bundle,
+        _succeeded_receipt(),
+        {PRIMAL_SOLUTION_OUTPUT_PATH: primal_text.encode("utf-8")},
+        solution_output_path=tmp_path / "affine.json",
     )
-    eng = res.outputs["engineering_solution"]
+    eng = _read_restored(res)
     assert eng["solver_summary"]["objective_value"] == pytest.approx(22.5)
     assert eng["series"]["dev.t"]["values"][0] == pytest.approx(25.0)
     assert eng["system_series"]["sys.p"]["values"][0] == pytest.approx(2.5)
@@ -605,12 +633,18 @@ def test_f2_affine_conversions_streaming_boundary_and_strict_errors() -> None:
             no_facts_bundle,
             _succeeded_receipt(),
             {PRIMAL_SOLUTION_OUTPUT_PATH: json.dumps(primal_1).encode()},
+            solution_output_path=tmp_path / "nofacts.json",
         )
 
     # Non-finite values must fail explicitly.
     bad_nan = json.dumps({**primal_1, "values": [1.0]}).replace('"values": [1.0]', '"values": [NaN]', 1)
     with pytest.raises(ComputationUnavailableError, match="非有限"):
-        adapter.restore(bundle, _succeeded_receipt(), {PRIMAL_SOLUTION_OUTPUT_PATH: bad_nan.encode()})
+        adapter.restore(
+            bundle,
+            _succeeded_receipt(),
+            {PRIMAL_SOLUTION_OUTPUT_PATH: bad_nan.encode()},
+            solution_output_path=tmp_path / "nan.json",
+        )
 
 
 def test_f2_third_party_mps_solver_replacement_and_no_reverification(tmp_path: Path) -> None:
@@ -742,9 +776,10 @@ out_path.write_text(json.dumps({
         bundle,
         _succeeded_receipt(),
         {PRIMAL_SOLUTION_OUTPUT_PATH: MemoryContent(primal_file.read_bytes())},
+        solution_output_path=tmp_path / "third_party_eng.json",
     )
     assert res.math_status == "solved"
-    eng = res.outputs["engineering_solution"]
+    eng = _read_restored(res)
     assert eng["solver_summary"]["objective_value"] == 20.0
     assert eng["series"]["gen1.p"]["values"] == [0.01, 0.0]
     assert eng["construction_units"][0]["scales"][0]["value"] == 0.01
@@ -754,14 +789,35 @@ def _slow_restore_stub(*_args: Any) -> None:
     time.sleep(5.0)
 
 
+def _rlimit_hard_capped_entry(
+    bundle_dir_str: str,
+    primal_path_str: str,
+    solution_out_str: str,
+    result_meta_str: str,
+    memory_limit_mb: int,
+) -> None:
+    import iesplan.computation.result_adapters.target_adapter as ta
+
+    _soft, _hard = resource.getrlimit(resource.RLIMIT_AS)
+    tiny_hard = 64 * 1024 * 1024
+    resource.setrlimit(resource.RLIMIT_AS, (tiny_hard, tiny_hard))
+    ta._subprocess_restore_entry(
+        bundle_dir_str,
+        primal_path_str,
+        solution_out_str,
+        result_meta_str,
+        memory_limit_mb,
+    )
+
+
 def test_f2_subprocess_isolation_memory_timeout_and_cancellation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Verify spawn PID isolation, parent RSS boundedness, hard timeout, and active stop cancellation."""
+    """Verify spawn PID isolation, streamed large output RSS bound, limits, and cancellation."""
     import iesplan.computation.result_adapters.target_adapter as ta
 
-    # 1. Large 100,000-column streaming restoration runs in spawn child and leaves parent RSS bounded.
-    ncols = 100_000
+    # 1. Restore 500,000 series points (>3.5 MiB JSON) in spawn child with bounded parent RSS.
+    ncols = 500_000
     bundle_dir = tmp_path / "large_bundle"
     (bundle_dir / "input").mkdir(parents=True)
     (bundle_dir / "output").mkdir(parents=True)
@@ -786,17 +842,20 @@ def test_f2_subprocess_isolation_memory_timeout_and_cancellation(
             fh.write(json.dumps(["column_names", names]) + "\n")
         fh.write(json.dumps(["units", [[0, "kW", 0.001, 0.0], [ncols - 1, "kW", 0.001, 0.0]]]) + "\n")
         fh.write(json.dumps(["facts", {"construction_units": []}]) + "\n")
-        series_meta = {
-            "series_id": "s1",
-            "instance_id": "d1",
-            "variable_id": "p",
-            "unit": "kW",
-            "scale": 0.001,
-            "offset": 0.0,
-        }
-        fh.write(json.dumps(["series", series_meta]) + "\n")
-        fh.write(json.dumps(["positions", [0, ncols - 1]]) + "\n")
-        fh.write(json.dumps(["series_end"]) + "\n")
+        for s_idx in range(5):
+            series_meta = {
+                "series_id": f"s{s_idx}",
+                "instance_id": "d1",
+                "variable_id": f"p{s_idx}",
+                "unit": "kW",
+                "scale": 0.001,
+                "offset": 0.0,
+            }
+            fh.write(json.dumps(["series", series_meta]) + "\n")
+            base = s_idx * 100_000
+            for start in range(base, base + 100_000, 2000):
+                fh.write(json.dumps(["positions", list(range(start, start + 2000))]) + "\n")
+            fh.write(json.dumps(["series_end"]) + "\n")
 
     primal_path = bundle_dir / "output" / "primal_solution.json"
     with primal_path.open("w", encoding="utf-8") as fh:
@@ -806,7 +865,11 @@ def test_f2_subprocess_isolation_memory_timeout_and_cancellation(
             f'{ncols},"objective_value":12.0,"best_bound":12.0,"relative_gap":0.0,'
             '"receipt":{"solver":"acme.sol@1.0.0"},"values":['
         )
-        fh.write(",".join("1000.0" for _ in range(ncols)))
+        chunk = ",".join("1000.0" for _ in range(5000))
+        for start in range(0, ncols, 5000):
+            if start > 0:
+                fh.write(",")
+            fh.write(chunk)
         fh.write("]}\n")
 
     rss_before = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
@@ -817,29 +880,117 @@ def test_f2_subprocess_isolation_memory_timeout_and_cancellation(
         _succeeded_receipt(),
         solution_output_path=sol_out,
         memory_limit_mb=512,
-        timeout_seconds=30.0,
+        timeout_seconds=60.0,
     )
     rss_after = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
     assert outcome.child_pid is not None and outcome.child_pid != os.getpid()
-    assert outcome.engineering_solution["series"]["s1"]["values"] == [1.0, 1.0]
-    assert sol_out.is_file()
-    # Parent RSS growth remains small (< 16 MiB) because the 100k primal array stayed in child.
+    assert sol_out.is_file() and sol_out.stat().st_size > 2_000_000
+    assert outcome.solution_content.size_bytes == sol_out.stat().st_size
+    assert "engineering_solution" not in outcome.compute_result.outputs
+    assert "series" not in outcome.compute_result.outputs
+    assert outcome.compute_result.outputs["engineering_solution_path"] == str(sol_out)
+    # Parent RSS growth remains bounded (< 16 MiB) when restoring 500,000 series points.
     assert (rss_after - rss_before) < 16 * 1024
 
-    # 2. Pre-spawn stop probe aborts without starting child process.
+    # 2. Invalid budgets raise ValueError, and real RLIMIT_AS failure + OOM surface cleanly.
+    with pytest.raises(ValueError):
+        restore_from_bundle_dir(bundle_dir, primal_path, _succeeded_receipt(), memory_limit_mb=0)
+    with pytest.raises(ValueError):
+        restore_from_bundle_dir(bundle_dir, primal_path, _succeeded_receipt(), timeout_seconds=0.0)
+    with pytest.raises(ValueError):
+        restore_from_bundle_dir(
+            bundle_dir, primal_path, _succeeded_receipt(), timeout_seconds=float("nan")
+        )
+
+    with pytest.raises(ComputationUnavailableError) as exc_oom:
+        restore_from_bundle_dir(
+            bundle_dir,
+            primal_path,
+            _succeeded_receipt(),
+            solution_output_path=tmp_path / "oom.json",
+            memory_limit_mb=1,
+            timeout_seconds=30.0,
+        )
+    assert exc_oom.value.reason == "resource_exhausted"
+
+    # 3. Pre-spawn stop probe aborts without starting child process.
     with pytest.raises(ComputationUnavailableError) as exc_pre:
         restore_from_bundle_dir(
             bundle_dir, primal_path, _succeeded_receipt(), stop=lambda: "cancelled"
         )
     assert exc_pre.value.reason == "cancelled"
 
-    # 3. Hard timeout terminates stalled spawn child cleanly.
+    # 4. Cancellation and single shared timeout cover streaming input materialization.
+    small_bundle = _minimal_bundle(
+        columns=["x0"],
+        records=[["column_names", ["x0"]], ["units", [[0, "kW", 0.001, 0.0]]]],
+    )
+    primal_small = json.dumps(
+        {
+            "schema": PRIMAL_SOLUTION_SCHEMA,
+            "schema_version": PRIMAL_SOLUTION_VERSION,
+            "math_status": "solved",
+            "termination_reason": "optimal",
+            "has_feasible_solution": True,
+            "column_count": 1,
+            "values": [1.0],
+            "objective_value": 1.0,
+            "best_bound": 1.0,
+            "relative_gap": 0.0,
+            "receipt": {"solver": "acme.sol@1.0.0"},
+            "extensions": {},
+        }
+    ).encode("utf-8")
+    cancel_state = {"stopped": False}
+
+    def _slow_chunks() -> Any:
+        yield b'{"schema":'
+        cancel_state["stopped"] = True
+        yield b'"ies.primal-solution"}'
+
+    with pytest.raises(ComputationUnavailableError) as exc_mat_cancel:
+        TargetResultAdapter().restore_with_outcome(
+            small_bundle,
+            _succeeded_receipt(),
+            {PRIMAL_SOLUTION_OUTPUT_PATH: GeneratedContent(_slow_chunks)},
+            solution_output_path=tmp_path / "mat_cancel.json",
+            stop=lambda: "cancelled" if cancel_state["stopped"] else None,
+        )
+    assert exc_mat_cancel.value.reason == "cancelled"
+
+    def _timeout_chunks() -> Any:
+        yield b" "
+        time.sleep(0.25)
+        yield primal_small
+
+    with pytest.raises(ComputationUnavailableError) as exc_mat_to:
+        TargetResultAdapter().restore_with_outcome(
+            small_bundle,
+            _succeeded_receipt(),
+            {PRIMAL_SOLUTION_OUTPUT_PATH: GeneratedContent(_timeout_chunks)},
+            solution_output_path=tmp_path / "mat_to.json",
+            timeout_seconds=0.1,
+        )
+    assert exc_mat_to.value.reason == "timed_out"
+
+    # 5. setrlimit failures, hard child timeout, and active child cancellation surface cleanly.
     tests_dir = str(Path(__file__).resolve().parent)
     prev_pythonpath = os.environ.get("PYTHONPATH")
     monkeypatch.setenv(
         "PYTHONPATH",
         f"{tests_dir}{os.pathsep}{prev_pythonpath}" if prev_pythonpath else tests_dir,
     )
+    monkeypatch.setattr(ta, "_subprocess_restore_entry", _rlimit_hard_capped_entry)
+    with pytest.raises(ComputationUnavailableError) as exc_rlimit:
+        restore_from_bundle_dir(
+            bundle_dir,
+            primal_path,
+            _succeeded_receipt(),
+            solution_output_path=tmp_path / "rlimit.json",
+            memory_limit_mb=512,
+        )
+    assert exc_rlimit.value.reason == "resource-limit-failed"
+
     monkeypatch.setattr(ta, "_subprocess_restore_entry", _slow_restore_stub)
     with pytest.raises(ComputationUnavailableError) as exc_to:
         restore_from_bundle_dir(
@@ -847,7 +998,6 @@ def test_f2_subprocess_isolation_memory_timeout_and_cancellation(
         )
     assert exc_to.value.reason == "timed_out"
 
-    # 4. Active cancellation during child execution kills child cleanly.
     calls = 0
 
     def _cancel_after_two() -> str | None:
@@ -860,3 +1010,295 @@ def test_f2_subprocess_isolation_memory_timeout_and_cancellation(
             bundle_dir, primal_path, _succeeded_receipt(), stop=_cancel_after_two, timeout_seconds=5.0
         )
     assert exc_cancel.value.reason == "cancelled"
+
+
+def test_f2_planning_scale_explicit_conversions_and_no_unit_label_guessing(tmp_path: Path) -> None:
+    """Planning scales require explicit or unit-matched conversions; never infer from unit labels."""
+    from iesplan.computation.generators.linear import LinearExpression, LinearModel, LinearVariable
+    from iesplan.computation.generators.matrix import SparseModel
+    from iesplan.computation.generators.target_bundle import target_parameter_records
+
+    # 1. target_parameter_records attaches explicit scale/offset on every construction_units[*].scales[*].
+    lin = LinearModel(
+        variables=(LinearVariable("cap_w", lower=0.0),),
+        constraints=(),
+        objective=LinearExpression(terms=((("cap_w", 0), 1.0),), constant=0.0),
+    )
+    sparse = SparseModel.from_public(lin)
+    records_with_val = list(
+        target_parameter_records(
+            sparse,
+            {"cap_w": "W"},
+            {},
+            (),
+            {
+                "construction_units": [
+                    {
+                        "unit_id": "u1",
+                        "instance_id": "pv1",
+                        "mode": "optional",
+                        "built": {"constant": 1.0, "terms": {}},
+                        "scales": [
+                            {
+                                "planning_variable_id": "cap",
+                                "value": {"constant": 0.0, "terms": {"cap_w": 1.0}},
+                                "unit": "kW",
+                            }
+                        ],
+                    }
+                ]
+            },
+            {"groups": []},
+        )
+    )
+    facts_doc = next(rec[1] for rec in records_with_val if rec[0] == "facts")
+    sc_emitted = facts_doc["construction_units"][0]["scales"][0]
+    assert sc_emitted["scale"] == pytest.approx(0.001)
+    assert sc_emitted["offset"] == pytest.approx(0.0)
+
+    generated_bundle = _minimal_bundle(columns=["cap_w"], records=records_with_val)
+
+    primal_1 = json.dumps(
+        {
+            "schema": PRIMAL_SOLUTION_SCHEMA,
+            "schema_version": PRIMAL_SOLUTION_VERSION,
+            "math_status": "solved",
+            "termination_reason": "optimal",
+            "has_feasible_solution": True,
+            "column_count": 1,
+            "values": [1000.0],
+            "objective_value": 100.0,
+            "best_bound": 100.0,
+            "relative_gap": 0.0,
+            "receipt": {"solver": "acme.sol@1.0.0"},
+            "extensions": {},
+        }
+    ).encode("utf-8")
+
+    res_gen = TargetResultAdapter().restore(
+        generated_bundle,
+        _succeeded_receipt(),
+        {PRIMAL_SOLUTION_OUTPUT_PATH: primal_1},
+        solution_output_path=tmp_path / "gen_explicit.json",
+    )
+    assert _read_restored(res_gen)["construction_units"][0]["scales"] == [
+        {"planning_variable_id": "cap", "value": pytest.approx(1.0), "unit": "kW"}
+    ]
+
+    # 2. Mismatched column unit [0, "W", 1, 0] with fact unit "kW" and no explicit scale must fail.
+    mismatched_bundle = _minimal_bundle(
+        columns=["x0"],
+        records=[
+            ["column_names", ["x0"]],
+            ["expression", 0, 0.0],
+            ["terms", [[0, 1.0]]],
+            ["expression_end"],
+            ["expression", 1, 1.0],
+            ["expression_end"],
+            ["units", [[0, "W", 1.0, 0.0]]],
+            [
+                "facts",
+                {
+                    "construction_units": [
+                        {
+                            "unit_id": "u1",
+                            "instance_id": "pv1",
+                            "mode": "optional",
+                            "built": {"expression": 1},
+                            "scales": [
+                                {"planning_variable_id": "cap", "value": {"expression": 0}, "unit": "kW"}
+                            ],
+                        }
+                    ]
+                },
+            ],
+        ],
+    )
+    with pytest.raises(ComputationUnavailableError, match="显式 scale/offset"):
+        TargetResultAdapter().restore(
+            mismatched_bundle,
+            _succeeded_receipt(),
+            {PRIMAL_SOLUTION_OUTPUT_PATH: primal_1},
+            solution_output_path=tmp_path / "mismatch.json",
+        )
+
+    # 3. Same unit label "kW" with distinct explicit conversions obeys each quantity's own coefficients.
+    explicit_bundle = _minimal_bundle(
+        columns=["x0"],
+        records=[
+            ["column_names", ["x0"]],
+            ["expression", 0, 0.0],
+            ["terms", [[0, 1.0]]],
+            ["expression_end"],
+            ["expression", 1, 1.0],
+            ["expression_end"],
+            ["units", [[0, "kW", 10.0, 0.0]]],
+            [
+                "facts",
+                {
+                    "construction_units": [
+                        {
+                            "unit_id": "u1",
+                            "instance_id": "pv1",
+                            "mode": "optional",
+                            "built": {"expression": 1},
+                            "scales": [
+                                {
+                                    "planning_variable_id": "cap_a",
+                                    "value": {"expression": 0},
+                                    "unit": "kW",
+                                    "scale": 0.001,
+                                    "offset": 0.0,
+                                },
+                                {
+                                    "planning_variable_id": "cap_b",
+                                    "value": {"expression": 0},
+                                    "unit": "kW",
+                                    "scale": 2.0,
+                                    "offset": 5.0,
+                                },
+                            ],
+                        }
+                    ]
+                },
+            ],
+        ],
+    )
+    res_exp = TargetResultAdapter().restore(
+        explicit_bundle,
+        _succeeded_receipt(),
+        {PRIMAL_SOLUTION_OUTPUT_PATH: primal_1},
+        solution_output_path=tmp_path / "explicit.json",
+    )
+    eng_exp = _read_restored(res_exp)
+    assert eng_exp["construction_units"][0]["scales"] == [
+        {"planning_variable_id": "cap_a", "value": 1.0, "unit": "kW"},
+        {"planning_variable_id": "cap_b", "value": 2005.0, "unit": "kW"},
+    ]
+
+
+def test_f2_f1_boundary_validation_rejects_malformed_inputs(tmp_path: Path) -> None:
+    """Enforce canonical F1 header, record-order, series-identity, and primal field validation."""
+    adapter = TargetResultAdapter()
+    valid_bundle = _minimal_bundle(
+        columns=["x0"],
+        records=[
+            ["column_names", ["x0"]],
+            ["units", [[0, "kW", 0.001, 0.0]]],
+            ["facts", {"construction_units": []}],
+        ],
+    )
+    valid_primal = {
+        "schema": PRIMAL_SOLUTION_SCHEMA,
+        "schema_version": PRIMAL_SOLUTION_VERSION,
+        "math_status": "solved",
+        "termination_reason": "optimal",
+        "has_feasible_solution": True,
+        "column_count": 1,
+        "values": [1.0],
+        "objective_value": 1.0,
+        "best_bound": 1.0,
+        "relative_gap": 0.0,
+        "receipt": {"solver": "acme.solver@1.0.0"},
+        "extensions": {},
+    }
+    valid_primal_bytes = json.dumps(valid_primal).encode("utf-8")
+
+    # 1. Invalid variable_map headers (unknown field, bad generator ref, array extensions).
+    base_header = json.loads(read_content(valid_bundle.files["input/parameters.json"]))
+    for bad_header in (
+        {**base_header, "unknown_key": 1},
+        {**base_header, "generator": "not-a-semver-ref"},
+        {**base_header, "extensions": []},
+        {**base_header, "assembly": {"id": "asm-1"}},
+    ):
+        bad_b = TargetSolverBundle(
+            manifest=valid_bundle.manifest,
+            files={
+                **dict(valid_bundle.files),
+                "input/parameters.json": MemoryContent(json.dumps(bad_header).encode("utf-8")),
+            },
+        )
+        with pytest.raises(ComputationUnavailableError):
+            adapter.restore(
+                bad_b,
+                _succeeded_receipt(),
+                {PRIMAL_SOLUTION_OUTPUT_PATH: valid_primal_bytes},
+                solution_output_path=tmp_path / "bad_hdr.json",
+            )
+
+    # 2. Invalid variable_map records (mixed device+system series, unknown core key, wrong order).
+    bad_record_sets = (
+        [
+            ["column_names", ["x0"]],
+            ["facts", {"construction_units": []}],
+            [
+                "series",
+                {
+                    "series_id": "s1",
+                    "instance_id": "d1",
+                    "variable_id": "p",
+                    "block": "grid",
+                    "variable": "net",
+                    "unit": "kW",
+                    "scale": 0.001,
+                    "offset": 0.0,
+                },
+            ],
+            ["positions", [0]],
+            ["series_end"],
+        ],
+        [
+            ["column_names", ["x0"]],
+            ["facts", {"construction_units": []}],
+            [
+                "series",
+                {
+                    "series_id": "s1",
+                    "instance_id": "d1",
+                    "variable_id": "p",
+                    "unit": "kW",
+                    "scale": 0.001,
+                    "offset": 0.0,
+                    "extra_core": 1,
+                },
+            ],
+            ["positions", [0]],
+            ["series_end"],
+        ],
+        [
+            ["column_names", ["x0"]],
+            ["facts", {"construction_units": []}],
+            ["units", [[0, "kW", 0.001, 0.0]]],
+        ],
+    )
+    for rec_list in bad_record_sets:
+        jsonl = "".join(json.dumps(r) + "\n" for r in rec_list).encode("utf-8")
+        bad_b = TargetSolverBundle(
+            manifest=valid_bundle.manifest,
+            files={**dict(valid_bundle.files), "input/parameters.jsonl": MemoryContent(jsonl)},
+        )
+        with pytest.raises(ComputationUnavailableError):
+            adapter.restore(
+                bad_b,
+                _succeeded_receipt(),
+                {PRIMAL_SOLUTION_OUTPUT_PATH: valid_primal_bytes},
+                solution_output_path=tmp_path / "bad_rec.json",
+            )
+
+    # 3. Invalid primal_solution fields (bool obj, string bound/gap, malformed receipt, list extensions).
+    for bad_primal in (
+        {**valid_primal, "objective_value": True},
+        {**valid_primal, "best_bound": "1.0"},
+        {**valid_primal, "relative_gap": "0.0"},
+        {**valid_primal, "receipt": {"solver": "bad-ref"}},
+        {**valid_primal, "receipt": {"solver": "acme.solver@1.0.0", "extra": 1}},
+        {**valid_primal, "extensions": []},
+    ):
+        with pytest.raises(ComputationUnavailableError):
+            adapter.restore(
+                valid_bundle,
+                _succeeded_receipt(),
+                {PRIMAL_SOLUTION_OUTPUT_PATH: json.dumps(bad_primal).encode("utf-8")},
+                solution_output_path=tmp_path / "bad_primal.json",
+            )

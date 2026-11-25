@@ -9,9 +9,8 @@ import resource
 import tempfile
 import time
 from array import array
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
-from decimal import Decimal
 from pathlib import Path
 from typing import Any, NoReturn
 
@@ -22,19 +21,16 @@ from iesplan.computation.contracts import (
 )
 from iesplan.computation.errors import ComputationUnavailableError
 from iesplan.computation.generators.highs_milp import PARAMETERS_PATH
-from iesplan.computation.generators.target_bundle import (
-    VARIABLE_MAP_SCHEMA,
-    VARIABLE_MAP_VERSION,
-    linear_conversion_for_unit,
-)
+from iesplan.computation.generators.target_bundle import VARIABLE_MAP_SCHEMA, VARIABLE_MAP_VERSION
 from iesplan.computation.protocols import (
     MATH_STATUSES,
     ComputeResult,
     ExecutionReceipt,
     StopProbe,
+    check_provider_ref,
     read_stop_reason,
 )
-from iesplan.core.content import Content, MemoryContent, freeze_owned_json
+from iesplan.core.content import CHUNK_BYTES, Content, MemoryContent, SizedContent, json_chunks
 
 PRIMAL_SOLUTION_SCHEMA = "ies.primal-solution"
 PRIMAL_SOLUTION_VERSION = "1.0.0"
@@ -42,29 +38,120 @@ PRIMAL_SOLUTION_VERSION = "1.0.0"
 ENGINEERING_SOLUTION_SCHEMA = "ies.engineering-solution"
 ENGINEERING_SOLUTION_VERSION = "1.0.0"
 
+DEFAULT_MEMORY_LIMIT_MB = 1024
+DEFAULT_TIMEOUT_SECONDS = 300.0
+
+_PRECISIONS = frozenset(("low", "medium", "high"))
+_SOLVE_DOMAINS = frozenset(("original", "valid_relaxation", "restricted"))
 _SOLVER_TERMINATION_REASONS = frozenset(
     ("optimal", "time_limit", "infeasible", "unbounded", "not_solved")
 )
-_FULL_FINANCIAL_KEYS = frozenset(
+_VARIABLE_MAP_RECORD_TAGS = frozenset(
     (
-        "currency",
-        "construction_total",
-        "annual_fixed_om",
-        "payments_applied",
-        "net_cashflows",
-        "annual_operation",
-        "tax_cash",
-        "monthly_demand",
-        "annual_net_flows",
-        "construction_units",
-        "cost_items",
-        "amounts",
-        "cash_movements",
-        "assets",
-        "comparison",
+        "column_names",
+        "row_names",
+        "epigraph",
+        "epigraph_flows",
+        "epigraph_end",
+        "expression",
+        "terms",
+        "expression_end",
+        "units",
+        "component",
+        "facts",
+        "series",
+        "positions",
+        "series_end",
+        "sources",
+        "source_group",
+        "targets",
+        "indices",
+        "source_group_end",
     )
 )
-_STREAM_CHUNK_BYTES = 65_536
+_HEADER_REQUIRED_KEYS = frozenset(
+    (
+        "schema",
+        "schema_version",
+        "assembly",
+        "generator",
+        "records",
+        "column_count",
+        "objective_offset",
+        "objective_scale",
+        "objective_unit",
+        "outputs",
+        "precision",
+        "seed",
+    )
+)
+_HEADER_ALLOWED_KEYS = _HEADER_REQUIRED_KEYS | frozenset(("extensions",))
+_PRIMAL_REQUIRED_KEYS = frozenset(
+    (
+        "schema",
+        "schema_version",
+        "math_status",
+        "termination_reason",
+        "has_feasible_solution",
+        "column_count",
+        "objective_value",
+        "best_bound",
+        "relative_gap",
+        "receipt",
+    )
+)
+_PRIMAL_ALLOWED_KEYS = _PRIMAL_REQUIRED_KEYS | frozenset(("extensions",))
+_PRIMAL_RECEIPT_ALLOWED_KEYS = frozenset(
+    (
+        "solver",
+        "started_at",
+        "ended_at",
+        "elapsed_seconds",
+        "solve_domain",
+        "original_model_verified",
+        "solver_diagnostics",
+        "extensions",
+    )
+)
+_DEVICE_SERIES_CORE_KEYS = frozenset(
+    ("series_id", "instance_id", "variable_id", "unit", "scale", "offset")
+)
+_SYSTEM_SERIES_CORE_KEYS = frozenset(
+    ("series_id", "block", "variable", "unit", "scale", "offset")
+)
+_UNIT_ENTRY_ALLOWED_KEYS = frozenset(("unit_id", "instance_id", "mode", "built", "scales"))
+_SCALE_ENTRY_ALLOWED_KEYS = frozenset(("planning_variable_id", "value", "unit", "scale", "offset"))
+_STREAM_CHUNK_BYTES = CHUNK_BYTES
+_JSON_NUM_CHARS = frozenset("-+0123456789.eE")
+_JSON_WORD_CHARS = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")
+
+
+@dataclass(frozen=True, slots=True)
+class FileContent:
+    """Lazy chunk-streaming ``SizedContent`` backed by a durable filesystem path."""
+
+    path: Path
+    size_bytes: int
+
+    def iter_chunks(self) -> Iterator[bytes]:
+        with self.path.open("rb") as handle:
+            while chunk := handle.read(CHUNK_BYTES):
+                yield chunk
+
+
+@dataclass(frozen=True, slots=True)
+class RestorationOutcome:
+    """Outcome from bounded-subprocess restoration carrying durable references."""
+
+    compute_result: ComputeResult
+    solution_path: Path
+    solution_content: SizedContent
+    solver_summary: Mapping[str, Any]
+    child_pid: int | None
+
+    def load_engineering_solution(self) -> dict[str, Any]:
+        """Explicit convenience reader for tests/callers inspecting small solutions."""
+        return json.loads(self.solution_path.read_text(encoding="utf-8"))
 
 
 def _fail(message: str, *, reason: str = "result-protocol-failure") -> NoReturn:
@@ -83,6 +170,12 @@ def _require_non_bool_int(value: object, label: str, *, minimum: int | None = No
     return value
 
 
+def _require_non_empty_str(value: object, label: str) -> str:
+    if not isinstance(value, str) or not value:
+        _fail(f"{label} 须为非空字符串，得到 {value!r}")
+    return value
+
+
 def _require_finite_float(value: object, label: str) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         _fail(f"{label} 须为有限数值，得到 {value!r}")
@@ -92,6 +185,12 @@ def _require_finite_float(value: object, label: str) -> float:
     return num
 
 
+def _require_optional_finite_float(value: object, label: str) -> float | None:
+    if value is None:
+        return None
+    return _require_finite_float(value, label)
+
+
 def _require_nonzero_scale(value: object, label: str) -> float:
     scale = _require_finite_float(value, label)
     if scale == 0.0:
@@ -99,11 +198,46 @@ def _require_nonzero_scale(value: object, label: str) -> float:
     return scale
 
 
+def _require_provider_ref(value: object, label: str) -> str:
+    try:
+        return check_provider_ref(value, label)
+    except ValueError as exc:
+        _fail(str(exc))
+
+
+def _check_relative_path(path: object, label: str) -> str:
+    text = _require_non_empty_str(path, label)
+    if text.startswith("/") or "\\" in text:
+        _fail(f"{label} 路径非法: {path!r}")
+    segments = text.split("/")
+    if any(seg in ("", ".", "..") for seg in segments):
+        _fail(f"{label} 路径非法: {path!r}")
+    return text
+
+
 def _apply_affine(raw_value: float, *, scale: float, offset: float, label: str) -> float:
     val = scale * raw_value + offset
     if not math.isfinite(val):
         _fail(f"{label} 线性换算后非有限")
     return val
+
+
+def _validate_resource_budgets(
+    memory_limit_mb: int | None,
+    timeout_seconds: float | None,
+) -> tuple[int, float]:
+    mem = DEFAULT_MEMORY_LIMIT_MB if memory_limit_mb is None else memory_limit_mb
+    if isinstance(mem, bool) or not isinstance(mem, int) or mem <= 0:
+        raise ValueError(f"memory_limit_mb 须为正整数，得到 {memory_limit_mb!r}")
+    tmo = DEFAULT_TIMEOUT_SECONDS if timeout_seconds is None else timeout_seconds
+    if (
+        isinstance(tmo, bool)
+        or not isinstance(tmo, (int, float))
+        or not math.isfinite(float(tmo))
+        or float(tmo) <= 0.0
+    ):
+        raise ValueError(f"timeout_seconds 须为有限正数，得到 {timeout_seconds!r}")
+    return int(mem), float(tmo)
 
 
 def _execution_status_from_receipt(status: str, termination_reason: str) -> str:
@@ -153,6 +287,16 @@ def _non_feasible_solution(
     }
 
 
+def _check_json_mapping(value: object, label: str) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        _fail(f"{label} 须为 JSON 对象")
+    try:
+        check_finite_json(value, label)
+    except ValueError as exc:
+        _fail(str(exc))
+    return dict(value)
+
+
 def _read_header(parameters_path: Path) -> dict[str, Any]:
     try:
         doc = json.loads(parameters_path.read_text(encoding="utf-8"), parse_constant=_reject_json_constant)
@@ -160,42 +304,44 @@ def _read_header(parameters_path: Path) -> dict[str, Any]:
         _fail(f"读取参数头 {parameters_path} 失败: {exc}")
     if not isinstance(doc, Mapping):
         _fail("parameters.json 须为 JSON 对象")
-    required = {
-        "schema",
-        "schema_version",
-        "assembly",
-        "generator",
-        "records",
-        "column_count",
-        "objective_offset",
-        "objective_scale",
-        "objective_unit",
-        "outputs",
-        "precision",
-        "seed",
-    }
-    missing = sorted(required - set(doc))
+
+    extra = sorted(set(doc) - _HEADER_ALLOWED_KEYS)
+    if extra:
+        _fail(f"parameters.json 含未知字段: {extra!r}")
+    missing = sorted(_HEADER_REQUIRED_KEYS - set(doc))
     if missing:
         _fail(f"parameters.json 缺必需字段: {missing!r}")
     if doc["schema"] != VARIABLE_MAP_SCHEMA or doc["schema_version"] != VARIABLE_MAP_VERSION:
         _fail(f"parameters.json schema 非法: {doc.get('schema')!r}@{doc.get('schema_version')!r}")
-    col_count = _require_non_bool_int(doc["column_count"], "column_count", minimum=0)
-    obj_offset = _require_finite_float(doc["objective_offset"], "objective_offset")
-    obj_scale = _require_nonzero_scale(doc["objective_scale"], "objective_scale")
-    obj_unit = doc["objective_unit"]
-    if not isinstance(obj_unit, str) or not obj_unit:
-        _fail("parameters.json.objective_unit 须为非空字符串")
-    records_rel = doc["records"]
-    if (
-        not isinstance(records_rel, str)
-        or not records_rel
-        or records_rel.startswith("/")
-        or ".." in records_rel.split("/")
-    ):
-        _fail(f"parameters.json.records 路径非法: {records_rel!r}")
+
+    asm = doc["assembly"]
+    if not isinstance(asm, Mapping) or set(asm) != {"id", "schema_version"}:
+        _fail("parameters.json.assembly 须仅含 ['id', 'schema_version']")
+    if asm["id"] is not None:
+        _require_non_empty_str(asm["id"], "parameters.json.assembly.id")
+    _require_non_empty_str(asm["schema_version"], "parameters.json.assembly.schema_version")
+
+    _require_provider_ref(doc["generator"], "parameters.json.generator")
+    records_rel = _check_relative_path(doc["records"], "parameters.json.records")
+    col_count = _require_non_bool_int(doc["column_count"], "parameters.json.column_count", minimum=0)
+    obj_offset = _require_finite_float(doc["objective_offset"], "parameters.json.objective_offset")
+    obj_scale = _require_nonzero_scale(doc["objective_scale"], "parameters.json.objective_scale")
+    obj_unit = _require_non_empty_str(doc["objective_unit"], "parameters.json.objective_unit")
+
     outputs = doc["outputs"]
-    if not isinstance(outputs, list) or not outputs or any(not isinstance(o, str) or not o for o in outputs):
+    if (
+        not isinstance(outputs, list)
+        or not outputs
+        or any(not isinstance(item, str) or not item for item in outputs)
+    ):
         _fail("parameters.json.outputs 须为非空字符串数组")
+    if doc["precision"] not in _PRECISIONS:
+        _fail(f"parameters.json.precision 非法: {doc['precision']!r}")
+    if doc["seed"] is not None:
+        _require_non_bool_int(doc["seed"], "parameters.json.seed")
+    if "extensions" in doc:
+        _check_json_mapping(doc["extensions"], "parameters.json.extensions")
+
     return {
         "column_count": col_count,
         "objective_offset": obj_offset,
@@ -206,12 +352,110 @@ def _read_header(parameters_path: Path) -> dict[str, Any]:
     }
 
 
-_JSON_NUM_CHARS = frozenset("-+0123456789.eE")
-_JSON_WORD_CHARS = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")
+def _refill_stream(
+    handle: Any,
+    buf: str,
+    pos: int,
+    eof: bool,
+    *,
+    min_avail: int = 4096,
+) -> tuple[str, int, bool]:
+    if pos > 32768:
+        buf = buf[pos:]
+        pos = 0
+    while not eof and len(buf) - pos < min_avail:
+        chunk = handle.read(_STREAM_CHUNK_BYTES)
+        if not chunk:
+            eof = True
+            break
+        buf += chunk
+    return buf, pos, eof
+
+
+def _skip_ws(handle: Any, buf: str, pos: int, eof: bool) -> tuple[str, int, bool]:
+    while True:
+        buf, pos, eof = _refill_stream(handle, buf, pos, eof, min_avail=1)
+        while pos < len(buf) and buf[pos] in " \t\r\n":
+            pos += 1
+        if pos < len(buf) or eof:
+            return buf, pos, eof
+
+
+def _decode_token(
+    handle: Any,
+    buf: str,
+    pos: int,
+    eof: bool,
+    label: str,
+) -> tuple[Any, str, int, bool]:
+    buf, pos, eof = _skip_ws(handle, buf, pos, eof)
+    if pos >= len(buf):
+        _fail(f"{label} 遇到意外文件结束")
+    decoder = json.JSONDecoder(parse_constant=_reject_json_constant)
+    if buf[pos] in _JSON_NUM_CHARS or buf[pos] in _JSON_WORD_CHARS:
+        token_chars = _JSON_NUM_CHARS if buf[pos] in _JSON_NUM_CHARS else _JSON_WORD_CHARS
+        scan = pos
+        while True:
+            while scan < len(buf) and buf[scan] in token_chars:
+                scan += 1
+            if scan < len(buf) or eof:
+                break
+            chunk = handle.read(_STREAM_CHUNK_BYTES)
+            if not chunk:
+                eof = True
+                break
+            buf += chunk
+        try:
+            val, end = decoder.raw_decode(buf, pos)
+            return val, buf, end, eof
+        except json.JSONDecodeError as exc:
+            _fail(f"{label} JSON 解析失败: {exc}")
+    while True:
+        try:
+            val, end = decoder.raw_decode(buf, pos)
+            return val, buf, end, eof
+        except json.JSONDecodeError as exc:
+            if eof:
+                _fail(f"{label} JSON 解析失败: {exc}")
+            chunk = handle.read(_STREAM_CHUNK_BYTES)
+            if not chunk:
+                eof = True
+                _fail(f"{label} JSON 解析失败: {exc}")
+            buf += chunk
+
+
+def _validate_primal_receipt(receipt_obj: object) -> Mapping[str, Any]:
+    if not isinstance(receipt_obj, Mapping):
+        _fail("primal_solution.receipt 须为 JSON 对象")
+    extra = sorted(set(receipt_obj) - _PRIMAL_RECEIPT_ALLOWED_KEYS)
+    if extra:
+        _fail(f"primal_solution.receipt 含未知字段: {extra!r}")
+    _require_provider_ref(receipt_obj.get("solver"), "primal_solution.receipt.solver")
+
+    for ts_key in ("started_at", "ended_at"):
+        if ts_key in receipt_obj:
+            _require_non_empty_str(receipt_obj[ts_key], f"primal_solution.receipt.{ts_key}")
+    if "elapsed_seconds" in receipt_obj:
+        elapsed = _require_finite_float(
+            receipt_obj["elapsed_seconds"],
+            "primal_solution.receipt.elapsed_seconds",
+        )
+        if elapsed < 0.0:
+            _fail("primal_solution.receipt.elapsed_seconds 须 >= 0")
+    if "solve_domain" in receipt_obj and receipt_obj["solve_domain"] not in _SOLVE_DOMAINS:
+        _fail(f"primal_solution.receipt.solve_domain 非法: {receipt_obj['solve_domain']!r}")
+    if "original_model_verified" in receipt_obj and not isinstance(
+        receipt_obj["original_model_verified"], bool
+    ):
+        _fail("primal_solution.receipt.original_model_verified 须为布尔值")
+    for obj_key in ("solver_diagnostics", "extensions"):
+        if obj_key in receipt_obj:
+            _check_json_mapping(receipt_obj[obj_key], f"primal_solution.receipt.{obj_key}")
+    return receipt_obj
 
 
 def _stream_primal_solution(primal_path: Path, expected_columns: int) -> tuple[dict[str, Any], array]:
-    """Stream ``primal_solution.json`` without double-copying large values arrays."""
+    """Stream ``primal_solution.json`` directly into compact ``array('d')``."""
     try:
         raw_size = primal_path.stat().st_size
     except OSError as exc:
@@ -219,133 +463,72 @@ def _stream_primal_solution(primal_path: Path, expected_columns: int) -> tuple[d
     if raw_size <= 0:
         _fail("primal_solution.json 不能为空")
 
-    # Stream token-by-token through json.JSONDecoder over a sliding buffer so multi-million
-    # values arrays land directly in compact array('d') rather than a Python float list.
-    decoder = json.JSONDecoder(parse_constant=_reject_json_constant)
     meta: dict[str, Any] = {}
     primals = array("d")
     saw_values = False
 
-    def _refill(handle: Any, buf: str, pos: int, eof: bool, min_avail: int = 4096) -> tuple[str, int, bool]:
-        if pos > 32768:
-            buf = buf[pos:]
-            pos = 0
-        while not eof and len(buf) - pos < min_avail:
-            more = handle.read(_STREAM_CHUNK_BYTES)
-            if more:
-                buf += more
-            else:
-                eof = True
-        return buf, pos, eof
-
-    def _decode_token(handle: Any, buf: str, pos: int, eof: bool, label: str) -> tuple[Any, str, int, bool]:
-        while True:
-            if pos >= len(buf):
-                if not eof:
-                    more = handle.read(_STREAM_CHUNK_BYTES)
-                    if more:
-                        buf += more
-                        continue
-                    eof = True
-                _fail(f"{label} 遇到意外文件结束")
-            first = buf[pos]
-            if first in _JSON_NUM_CHARS or first in _JSON_WORD_CHARS:
-                token_chars = _JSON_NUM_CHARS if first in _JSON_NUM_CHARS else _JSON_WORD_CHARS
-                end = pos + 1
-                while True:
-                    while end < len(buf) and buf[end] in token_chars:
-                        end += 1
-                    if end == len(buf) and not eof:
-                        more = handle.read(_STREAM_CHUNK_BYTES)
-                        if more:
-                            buf += more
-                            continue
-                        eof = True
-                    break
-            try:
-                val, next_pos = decoder.raw_decode(buf, pos)
-                return val, buf, next_pos, eof
-            except json.JSONDecodeError as exc:
-                if not eof:
-                    more = handle.read(_STREAM_CHUNK_BYTES)
-                    if more:
-                        buf += more
-                        continue
-                    eof = True
-                    continue
-                _fail(f"{label} JSON 解析失败: {exc}")
-
     try:
         with primal_path.open("r", encoding="utf-8") as handle:
-            buf = handle.read(_STREAM_CHUNK_BYTES)
-            pos = 0
-            eof = not buf
-
-            def skip_ws() -> None:
-                nonlocal buf, pos, eof
-                while True:
-                    buf, pos, eof = _refill(handle, buf, pos, eof)
-                    while pos < len(buf) and buf[pos] in " \t\r\n":
-                        pos += 1
-                    if pos < len(buf) or eof:
-                        return
-
-            skip_ws()
+            buf, pos, eof = "", 0, False
+            buf, pos, eof = _skip_ws(handle, buf, pos, eof)
             if pos >= len(buf) or buf[pos] != "{":
                 _fail("primal_solution.json 须为 JSON 对象")
             pos += 1
-            skip_ws()
+            buf, pos, eof = _skip_ws(handle, buf, pos, eof)
             if pos < len(buf) and buf[pos] == "}":
                 _fail("primal_solution.json 不能为空对象")
 
             while True:
-                key, buf, pos, eof = _decode_token(handle, buf, pos, eof, "primal_solution key")
+                key, buf, pos, eof = _decode_token(handle, buf, pos, eof, "primal_solution.key")
                 if not isinstance(key, str):
-                    _fail("primal_solution.json 键须为字符串")
-                if key in meta or (key == "values" and saw_values):
-                    _fail(f"primal_solution.json 存在重复键: {key!r}")
-                skip_ws()
+                    _fail(f"primal_solution.json 键须为字符串: {key!r}")
+                buf, pos, eof = _skip_ws(handle, buf, pos, eof)
                 if pos >= len(buf) or buf[pos] != ":":
                     _fail(f"primal_solution.json 键 {key!r} 后缺少 ':'")
                 pos += 1
-                skip_ws()
+                buf, pos, eof = _skip_ws(handle, buf, pos, eof)
+
                 if key == "values":
+                    if saw_values:
+                        _fail("primal_solution.json 存在重复 'values'")
                     saw_values = True
                     if pos >= len(buf) or buf[pos] != "[":
-                        _fail("primal_solution.values 须为 JSON 数组")
+                        _fail("primal_solution.values 须为数组")
                     pos += 1
-                    skip_ws()
+                    buf, pos, eof = _skip_ws(handle, buf, pos, eof)
                     if pos < len(buf) and buf[pos] == "]":
                         pos += 1
                     else:
                         while True:
-                            val, buf, pos, eof = _decode_token(
+                            num, buf, pos, eof = _decode_token(
                                 handle, buf, pos, eof, f"primal_solution.values[{len(primals)}]"
                             )
                             primals.append(
-                                _require_finite_float(val, f"primal_solution.values[{len(primals)}]")
+                                _require_finite_float(num, f"primal_solution.values[{len(primals)}]")
                             )
-                            skip_ws()
+                            buf, pos, eof = _skip_ws(handle, buf, pos, eof)
                             if pos < len(buf) and buf[pos] == ",":
                                 pos += 1
-                                skip_ws()
+                                buf, pos, eof = _skip_ws(handle, buf, pos, eof)
                                 continue
                             if pos < len(buf) and buf[pos] == "]":
                                 pos += 1
                                 break
                             _fail("primal_solution.values 期望 ',' 或 ']'")
                 else:
+                    if key in meta:
+                        _fail(f"primal_solution.json 存在重复字段 {key!r}")
                     val, buf, pos, eof = _decode_token(handle, buf, pos, eof, f"primal_solution.{key}")
                     meta[key] = val
 
-                skip_ws()
+                buf, pos, eof = _skip_ws(handle, buf, pos, eof)
                 if pos < len(buf) and buf[pos] == ",":
                     pos += 1
-                    skip_ws()
+                    buf, pos, eof = _skip_ws(handle, buf, pos, eof)
                     continue
                 if pos < len(buf) and buf[pos] == "}":
                     pos += 1
-                    skip_ws()
+                    buf, pos, eof = _skip_ws(handle, buf, pos, eof)
                     if pos < len(buf):
                         _fail("primal_solution.json 存在尾随内容")
                     break
@@ -355,23 +538,10 @@ def _stream_primal_solution(primal_path: Path, expected_columns: int) -> tuple[d
 
     if not saw_values:
         _fail("primal_solution.json 缺少必需字段: 'values'")
-    required = {
-        "schema",
-        "schema_version",
-        "math_status",
-        "termination_reason",
-        "has_feasible_solution",
-        "column_count",
-        "objective_value",
-        "best_bound",
-        "relative_gap",
-        "receipt",
-    }
-    allowed = required | {"extensions"}
-    extra = sorted(set(meta) - allowed)
+    extra = sorted(set(meta) - _PRIMAL_ALLOWED_KEYS)
     if extra:
         _fail(f"primal_solution.json 含未知字段: {extra!r}")
-    missing = sorted(required - set(meta))
+    missing = sorted(_PRIMAL_REQUIRED_KEYS - set(meta))
     if missing:
         _fail(f"primal_solution.json 缺必需字段: {missing!r}")
     if meta["schema"] != PRIMAL_SOLUTION_SCHEMA or meta["schema_version"] != PRIMAL_SOLUTION_VERSION:
@@ -385,6 +555,17 @@ def _stream_primal_solution(primal_path: Path, expected_columns: int) -> tuple[d
     primal_cols = _require_non_bool_int(meta["column_count"], "primal_solution.column_count", minimum=0)
     if primal_cols != expected_columns:
         _fail(f"primal_solution.column_count ({primal_cols}) 与 variable_map ({expected_columns}) 不一致")
+
+    meta["objective_value"] = _require_optional_finite_float(
+        meta["objective_value"], "primal_solution.objective_value"
+    )
+    meta["best_bound"] = _require_optional_finite_float(
+        meta["best_bound"], "primal_solution.best_bound"
+    )
+    meta["relative_gap"] = _require_optional_finite_float(
+        meta["relative_gap"], "primal_solution.relative_gap"
+    )
+
     has_feasible = meta["has_feasible_solution"]
     if has_feasible != (meta["math_status"] in ("solved", "feasible")):
         _fail("primal_solution.has_feasible_solution 与 math_status 矛盾")
@@ -396,29 +577,73 @@ def _stream_primal_solution(primal_path: Path, expected_columns: int) -> tuple[d
     elif len(primals) != 0:
         _fail("无可行解时 primal_solution.values 须为空数组")
 
-    check_finite_json(meta, "primal_solution")
-    receipt_obj = meta["receipt"]
-    if (
-        not isinstance(receipt_obj, Mapping)
-        or not isinstance(receipt_obj.get("solver"), str)
-        or not receipt_obj["solver"]
-    ):
-        _fail("primal_solution.receipt 缺少合法 solver 引用")
+    _validate_primal_receipt(meta["receipt"])
+    if "extensions" in meta:
+        _check_json_mapping(meta["extensions"], "primal_solution.extensions")
     return meta, primals
+
+
+class _RecordStreamValidator:
+    """Canonical F1 NDJSON state machine validating section order, field sets, and 0-based bounds."""
+
+    def __init__(self, column_count: int) -> None:
+        self.column_count = column_count
+        self.stage = 0
+        self.block: str | None = None
+        self.col_names_count = 0
+        self.row_names_count = 0
+        self.expr_count = 0
+        self.facts_seen = False
+        self.sources_seen = False
+        self.seen_series_ids: set[str] = set()
+        self.group_role: str | None = None
+        self.group_compressed = False
+
+    def check_col(self, value: object, context: str) -> int:
+        col = _require_non_bool_int(value, context, minimum=0)
+        if col >= self.column_count:
+            _fail(f"{context} 列索引越界: {col} >= {self.column_count}")
+        return col
+
+    def check_row(self, value: object, context: str) -> int:
+        row = _require_non_bool_int(value, context, minimum=0)
+        if self.row_names_count > 0 and row >= self.row_names_count:
+            _fail(f"{context} 行索引越界: {row} >= {self.row_names_count}")
+        return row
+
+    def advance_stage(self, target_stage: int, tag: str) -> None:
+        if self.block is not None:
+            _fail(f"记录 {tag!r} 不得出现在未闭合块 {self.block!r} 内")
+        if target_stage < self.stage:
+            _fail(f"记录 {tag!r} 违反 F1 规范节顺序")
+        self.stage = target_stage
+
+    @staticmethod
+    def expect_len(record: Sequence[Any], expected: int, tag: str) -> None:
+        if len(record) != expected:
+            _fail(f"记录 {tag!r} 期望 {expected} 个元素，得到 {len(record)}")
+
+    def finalize(self) -> None:
+        if self.block is not None:
+            _fail(f"parameters.jsonl 存在未闭合块: {self.block!r}")
+        if self.col_names_count > 0 and self.col_names_count != self.column_count:
+            _fail(
+                f"variable_map column_names 数量 ({self.col_names_count}) "
+                f"与 header column_count ({self.column_count}) 不一致"
+            )
 
 
 def _recover_variable_map_records(
     records_path: Path,
     primals: array,
     *,
-    include_solution: bool,
+    expected_columns: int,
 ) -> dict[str, Any]:
+    validator = _RecordStreamValidator(expected_columns)
     expressions: list[float] = []
     expr_single_col: dict[int, int] = {}
-    variables: list[dict[str, Any]] = []
     col_conv: dict[int, tuple[str, float, float]] = {}
-    unit_conv_by_name: dict[str, tuple[float, float]] = {}
-    components: dict[str, dict[str, Any]] = {}
+    unit_var_count = 0
     device_series: dict[str, dict[str, Any]] = {}
     system_series: dict[str, dict[str, Any]] = {}
     facts: Any = None
@@ -433,7 +658,6 @@ def _recover_variable_map_records(
     single_coeff = 0.0
     current_series: dict[str, Any] | None = None
     current_group: dict[str, Any] | None = None
-    seen_series_ids: set[str] = set()
 
     def resolve_fact_node(node: Any) -> Any:
         if isinstance(node, Mapping):
@@ -447,23 +671,30 @@ def _recover_variable_map_records(
             return [resolve_fact_node(item) for item in node]
         return node
 
-    def resolve_scale_expr(raw_node: Any, unit: str, label: str) -> tuple[float, float]:
+    def resolve_scale_value(scale_entry: Mapping[str, Any], unit: str, label: str) -> float:
+        raw_node = scale_entry["value"]
+        has_scale = "scale" in scale_entry
+        has_offset = "offset" in scale_entry
+        if has_scale != has_offset:
+            _fail(f"{label} 须同时提供 scale 与 offset")
+        if has_scale:
+            raw_val = _require_finite_float(resolve_fact_node(raw_node), label)
+            sc = _require_nonzero_scale(scale_entry["scale"], f"{label}.scale")
+            off = _require_finite_float(scale_entry["offset"], f"{label}.offset")
+            return _apply_affine(raw_val, scale=sc, offset=off, label=label)
+
+        # Without explicit scale/offset on the fact, only a single-column reference
+        # whose declared variable unit strictly matches the requested unit is valid.
         if isinstance(raw_node, Mapping) and "expression" in raw_node and len(raw_node) == 1:
             eid = _require_non_bool_int(raw_node["expression"], f"{label}.expression", minimum=0)
             if eid >= len(expressions):
                 _fail(f"{label} 引用未定义表达式 ID: {eid}")
-            raw_val = expressions[eid]
             col = expr_single_col.get(eid)
-            if col is not None and col in col_conv:
-                _, scale, offset = col_conv[col]
-                return _apply_affine(raw_val, scale=scale, offset=offset, label=label), raw_val
-        else:
-            raw_val = _require_finite_float(resolve_fact_node(raw_node), label)
-        if unit in unit_conv_by_name:
-            scale, offset = unit_conv_by_name[unit]
-        else:
-            scale, offset = linear_conversion_for_unit(unit)
-        return _apply_affine(raw_val, scale=scale, offset=offset, label=label), raw_val
+            if col is not None and col in col_conv and col_conv[col][0] == unit:
+                _, sc, off = col_conv[col]
+                return _apply_affine(expressions[eid], scale=sc, offset=off, label=label)
+
+        _fail(f"{label} 缺少匹配目标单位 {unit!r} 的显式 scale/offset")
 
     try:
         with records_path.open("r", encoding="utf-8") as handle:
@@ -478,109 +709,162 @@ def _recover_variable_map_records(
                 if not isinstance(record, list) or not record:
                     _fail(f"{records_path}:{lineno} 记录须为非空数组")
                 tag = record[0]
+                if not isinstance(tag, str) or tag not in _VARIABLE_MAP_RECORD_TAGS:
+                    _fail(f"未知参数记录标签: {tag!r}")
+                try:
+                    check_finite_json(record, f"variable_map[{tag}]")
+                except ValueError as exc:
+                    _fail(str(exc))
+
                 if tag == "column_names":
+                    validator.advance_stage(0, tag)
+                    validator.expect_len(record, 2, tag)
+                    if not isinstance(record[1], list) or any(
+                        not isinstance(n, str) or not n for n in record[1]
+                    ):
+                        _fail("column_names 须为非空字符串数组")
+                    validator.col_names_count += len(record[1])
                     column_names.extend(record[1])
                 elif tag == "row_names":
-                    if include_solution:
-                        row_names.extend(record[1])
-                elif tag in ("epigraph", "epigraph_flows", "epigraph_end"):
-                    # ResultAdapter does not re-verify solver math or epigraph tightness.
-                    continue
+                    validator.advance_stage(1, tag)
+                    validator.expect_len(record, 2, tag)
+                    if not isinstance(record[1], list) or any(
+                        not isinstance(n, str) or not n for n in record[1]
+                    ):
+                        _fail("row_names 须为非空字符串数组")
+                    validator.row_names_count += len(record[1])
+                    row_names.extend(record[1])
+                elif tag == "epigraph":
+                    validator.advance_stage(2, tag)
+                    validator.expect_len(record, 2, tag)
+                    validator.check_col(record[1], "epigraph.peak_position")
+                    validator.block = "epigraph"
+                elif tag == "epigraph_flows":
+                    if validator.block != "epigraph":
+                        _fail("epigraph_flows 缺少前置 epigraph")
+                    validator.expect_len(record, 2, tag)
+                    if not isinstance(record[1], list):
+                        _fail("epigraph_flows 须为数组")
+                    for idx, pos in enumerate(record[1]):
+                        validator.check_col(pos, f"epigraph_flows[{idx}]")
+                elif tag == "epigraph_end":
+                    if validator.block != "epigraph":
+                        _fail("epigraph_end 缺少前置 epigraph")
+                    validator.expect_len(record, 1, tag)
+                    validator.block = None
                 elif tag == "expression":
+                    validator.advance_stage(3, tag)
+                    validator.expect_len(record, 3, tag)
                     current_expr_id = _require_non_bool_int(record[1], "expression.id", minimum=0)
-                    if current_expr_id != len(expressions):
-                        _fail(f"expression.id 须从 0 递增: 期望 {len(expressions)}, 得到 {current_expr_id}")
+                    if current_expr_id != validator.expr_count:
+                        _fail(
+                            "expression.id 须从 0 递增: "
+                            f"期望 {validator.expr_count}, 得到 {current_expr_id}"
+                        )
                     total = _require_finite_float(record[2], "expression.constant")
                     term_count = 0
                     single_col = None
                     single_coeff = 0.0
+                    validator.block = "expression"
                 elif tag == "terms":
-                    if current_expr_id is None:
+                    if validator.block != "expression" or current_expr_id is None:
                         _fail("terms 缺少前置 expression")
-                    for pos, coeff in record[1]:
-                        col = _require_non_bool_int(pos, "terms.col", minimum=0)
-                        try:
-                            raw_x = primals[col]
-                        except IndexError:
-                            _fail(f"表达式列索引越界: {col}")
-                        c_val = _require_finite_float(coeff, "terms.coeff")
-                        total += c_val * raw_x
+                    validator.expect_len(record, 2, tag)
+                    if not isinstance(record[1], list):
+                        _fail("terms 须为 [col, coeff] 对数组")
+                    for idx, pair in enumerate(record[1]):
+                        if not isinstance(pair, list) or len(pair) != 2:
+                            _fail(f"terms[{idx}] 须为 [col, coeff] 二元组")
+                        col = validator.check_col(pair[0], f"terms[{idx}][0]")
+                        c_val = _require_finite_float(pair[1], f"terms[{idx}][1]")
+                        total += c_val * primals[col]
                         if term_count == 0:
                             single_col = col
                             single_coeff = c_val
                         term_count += 1
                 elif tag == "expression_end":
-                    if current_expr_id is None:
+                    if validator.block != "expression" or current_expr_id is None:
                         _fail("expression_end 缺少前置 expression")
+                    validator.expect_len(record, 1, tag)
                     if not math.isfinite(total):
                         _fail(f"表达式 {current_expr_id} 求值非有限")
                     if term_count == 1 and single_col is not None and single_coeff == 1.0:
                         expr_single_col[current_expr_id] = single_col
                     expressions.append(total)
+                    validator.expr_count += 1
+                    validator.block = None
                     current_expr_id = None
                 elif tag == "units":
-                    for entry in record[1]:
+                    validator.advance_stage(4, tag)
+                    validator.expect_len(record, 2, tag)
+                    if not isinstance(record[1], list):
+                        _fail("units 须为 [col, unit, scale, offset] 四元组数组")
+                    for idx, entry in enumerate(record[1]):
                         if not isinstance(entry, list) or len(entry) != 4:
-                            _fail(f"units 条目须为 [col, unit, scale, offset] 四元组: {entry!r}")
-                        col = _require_non_bool_int(entry[0], "units.col", minimum=0)
-                        unit = entry[1]
-                        if not isinstance(unit, str) or not unit:
-                            _fail(f"units.unit 须为非空字符串: {unit!r}")
-                        scale = _require_nonzero_scale(entry[2], "units.scale")
-                        offset = _require_finite_float(entry[3], "units.offset")
-                        try:
-                            raw_x = primals[col]
-                            col_name = column_names[col]
-                        except IndexError:
-                            _fail(f"units 列索引越界: {col}")
-                        val = _apply_affine(raw_x, scale=scale, offset=offset, label=f"units[{col}]")
+                            _fail(f"units[{idx}] 须为 [col, unit, scale, offset] 四元组: {entry!r}")
+                        col = validator.check_col(entry[0], f"units[{idx}].col")
+                        unit = _require_non_empty_str(entry[1], f"units[{idx}].unit")
+                        scale = _require_nonzero_scale(entry[2], f"units[{idx}].scale")
+                        offset = _require_finite_float(entry[3], f"units[{idx}].offset")
+                        _apply_affine(primals[col], scale=scale, offset=offset, label=f"units[{col}]")
                         col_conv[col] = (unit, scale, offset)
-                        unit_conv_by_name.setdefault(unit, (scale, offset))
-                        variables.append({"name": col_name, "unit": unit, "value": val})
+                        unit_var_count += 1
                 elif tag == "component":
-                    _, identity, unit, caliber, expr_id = record
-                    eid = _require_non_bool_int(expr_id, "component.expression_id", minimum=0)
+                    validator.advance_stage(5, tag)
+                    validator.expect_len(record, 5, tag)
+                    for idx, label in ((1, "identity"), (2, "unit"), (3, "caliber")):
+                        _require_non_empty_str(record[idx], f"component.{label}")
+                    eid = _require_non_bool_int(record[4], "component.expression_id", minimum=0)
                     if eid >= len(expressions):
-                        _fail(f"component {identity!r} 引用未定义表达式 {eid}")
-                    components[identity] = {
-                        "unit": unit,
-                        "caliber": caliber,
-                        "raw_total": expressions[eid],
-                    }
+                        _fail(f"component {record[1]!r} 引用未定义表达式 {eid}")
                 elif tag == "facts":
-                    if include_solution:
-                        raw_facts = record[1]
-                        if not isinstance(raw_facts, Mapping):
-                            _fail("facts 须为 JSON 对象")
-                        facts = _resolve_facts_payload(
-                            raw_facts,
-                            resolve_fact_node=resolve_fact_node,
-                            resolve_scale_expr=resolve_scale_expr,
-                        )
+                    validator.advance_stage(6, tag)
+                    if validator.facts_seen:
+                        _fail("parameters.jsonl 不得包含多个 facts 记录")
+                    validator.expect_len(record, 2, tag)
+                    validator.facts_seen = True
+                    raw_facts = record[1]
+                    if not isinstance(raw_facts, Mapping):
+                        _fail("facts 须为 JSON 对象")
+                    facts = _resolve_facts_payload(
+                        raw_facts,
+                        resolve_fact_node=resolve_fact_node,
+                        resolve_scale_value=resolve_scale_value,
+                    )
                 elif tag == "series":
+                    validator.advance_stage(7, tag)
+                    validator.expect_len(record, 2, tag)
                     meta = record[1]
                     if not isinstance(meta, Mapping):
                         _fail("series 元数据须为 JSON 对象")
-                    sid = meta.get("series_id")
-                    if not isinstance(sid, str) or not sid or sid in seen_series_ids:
-                        _fail(f"series_id 非法或重复: {sid!r}")
-                    seen_series_ids.add(sid)
-                    scale = _require_nonzero_scale(meta.get("scale"), f"series.{sid}.scale")
-                    offset = _require_finite_float(meta.get("offset"), f"series.{sid}.offset")
-                    unit = meta.get("unit")
-                    if not isinstance(unit, str) or not unit:
-                        _fail(f"series.{sid}.unit 须为非空字符串")
-                    is_system = "block" in meta or "variable" in meta
-                    if is_system:
-                        block = meta.get("block")
-                        variable = meta.get("variable")
-                        if (
-                            not isinstance(block, str)
-                            or not block
-                            or not isinstance(variable, str)
-                            or not variable
-                        ):
-                            _fail(f"系统序列 {sid!r} 缺少 block/variable")
+                    sid = _require_non_empty_str(meta.get("series_id"), "series.series_id")
+                    if sid in validator.seen_series_ids:
+                        _fail(f"series_id 重复: {sid!r}")
+                    has_system = "block" in meta or "variable" in meta
+                    has_device = "instance_id" in meta or "variable_id" in meta
+                    if has_system == has_device:
+                        _fail(
+                            f"序列 {sid!r} 须严格声明设备身份(instance_id, variable_id)"
+                            "或系统身份(block, variable)之一"
+                        )
+                    expected_core = _SYSTEM_SERIES_CORE_KEYS if has_system else _DEVICE_SERIES_CORE_KEYS
+                    allowed_keys = expected_core | {"extensions"}
+                    extra_keys = sorted(set(meta) - allowed_keys)
+                    if extra_keys:
+                        _fail(f"序列 {sid!r} 含未知核心字段: {extra_keys!r}")
+                    missing_keys = sorted(expected_core - set(meta))
+                    if missing_keys:
+                        _fail(f"序列 {sid!r} 缺少必需字段: {missing_keys!r}")
+                    unit = _require_non_empty_str(meta["unit"], f"series.{sid}.unit")
+                    scale = _require_nonzero_scale(meta["scale"], f"series.{sid}.scale")
+                    offset = _require_finite_float(meta["offset"], f"series.{sid}.offset")
+                    if "extensions" in meta:
+                        ext = _check_json_mapping(meta["extensions"], f"series.{sid}.extensions")
+                        if any(not ext_k for ext_k in ext):
+                            _fail(f"series.{sid}.extensions 键须为非空字符串")
+                    if has_system:
+                        block = _require_non_empty_str(meta["block"], f"series.{sid}.block")
+                        variable = _require_non_empty_str(meta["variable"], f"series.{sid}.variable")
                         current_series = {
                             "kind": "system",
                             "series_id": sid,
@@ -592,10 +876,8 @@ def _recover_variable_map_records(
                             "values": array("d"),
                         }
                     else:
-                        inst = meta.get("instance_id")
-                        var = meta.get("variable_id")
-                        if not isinstance(inst, str) or not inst or not isinstance(var, str) or not var:
-                            _fail(f"设备序列 {sid!r} 缺少 instance_id/variable_id")
+                        inst = _require_non_empty_str(meta["instance_id"], f"series.{sid}.instance_id")
+                        var = _require_non_empty_str(meta["variable_id"], f"series.{sid}.variable_id")
                         current_series = {
                             "kind": "device",
                             "series_id": sid,
@@ -606,86 +888,146 @@ def _recover_variable_map_records(
                             "offset": offset,
                             "values": array("d"),
                         }
+                    validator.seen_series_ids.add(sid)
+                    validator.block = "series"
                 elif tag == "positions":
-                    if current_series is None:
+                    if validator.block != "series" or current_series is None:
                         _fail("positions 缺少前置 series")
-                    if include_solution:
-                        sc = current_series["scale"]
-                        off = current_series["offset"]
-                        sid = current_series["series_id"]
-                        vals = current_series["values"]
-                        for pos in record[1]:
-                            col = _require_non_bool_int(pos, f"series.{sid}.positions", minimum=0)
-                            try:
-                                raw_x = primals[col]
-                            except IndexError:
-                                _fail(f"序列 {sid!r} 列索引越界: {col}")
-                            vals.append(
-                                _apply_affine(raw_x, scale=sc, offset=off, label=f"series.{sid}[{col}]")
-                            )
-                elif tag == "series_end":
-                    if current_series is None:
-                        _fail("series_end 缺少前置 series")
+                    validator.expect_len(record, 2, tag)
+                    if not isinstance(record[1], list):
+                        _fail("positions 须为列索引数组")
+                    sc = current_series["scale"]
+                    off = current_series["offset"]
                     sid = current_series["series_id"]
-                    values_list = list(current_series["values"])
-                    if include_solution and not values_list:
+                    vals: array = current_series["values"]
+                    for idx, pos in enumerate(record[1]):
+                        col = validator.check_col(pos, f"series.{sid}.positions[{idx}]")
+                        vals.append(
+                            _apply_affine(primals[col], scale=sc, offset=off, label=f"series.{sid}[{col}]")
+                        )
+                elif tag == "series_end":
+                    if validator.block != "series" or current_series is None:
+                        _fail("series_end 缺少前置 series")
+                    validator.expect_len(record, 1, tag)
+                    sid = current_series["series_id"]
+                    vals_arr: array = current_series["values"]
+                    if not vals_arr:
                         _fail(f"序列 {sid!r} 不能为空")
                     if current_series["kind"] == "system":
                         system_series[sid] = {
                             "block": current_series["block"],
                             "variable": current_series["variable"],
                             "unit": current_series["unit"],
-                            "values": values_list,
+                            "values": vals_arr,
                         }
                     else:
                         device_series[sid] = {
                             "instance_id": current_series["instance_id"],
                             "variable_id": current_series["variable_id"],
                             "unit": current_series["unit"],
-                            "values": values_list,
+                            "values": vals_arr,
                         }
+                    validator.block = None
                     current_series = None
                 elif tag == "sources":
-                    if include_solution:
-                        sources = dict(record[1], groups=[])
+                    validator.advance_stage(8, tag)
+                    if validator.sources_seen:
+                        _fail("parameters.jsonl 不得包含多个 sources 记录")
+                    validator.expect_len(record, 2, tag)
+                    if not isinstance(record[1], Mapping):
+                        _fail("sources 须为 JSON 对象")
+                    validator.sources_seen = True
+                    sources = dict(record[1], groups=[])
                 elif tag == "source_group":
-                    if include_solution:
-                        current_group = dict(
-                            record[1], targets=[], indices=record[2] if record[2] is not None else []
+                    validator.advance_stage(8, tag)
+                    if not validator.sources_seen or sources is None:
+                        _fail("source_group 缺少前置 sources")
+                    validator.expect_len(record, 3, tag)
+                    meta, compressed = record[1], record[2]
+                    if not isinstance(meta, Mapping):
+                        _fail("source_group 元数据须为 JSON 对象")
+                    for req_key in ("source", "role", "axis"):
+                        _require_non_empty_str(meta.get(req_key), f"source_group.{req_key}")
+                    role = str(meta["role"])
+                    if not role.startswith(("column:", "row:")):
+                        _fail(f"source_group.role 须以 column:/row: 开头: {role!r}")
+                    if compressed is not None:
+                        if not isinstance(compressed, Mapping) or set(compressed) != {
+                            "start",
+                            "stride",
+                            "count",
+                        }:
+                            _fail("source_group compressed indices 非法")
+                        _require_non_bool_int(compressed["start"], "source_group.indices.start")
+                        _require_non_bool_int(compressed["stride"], "source_group.indices.stride")
+                        _require_non_bool_int(
+                            compressed["count"], "source_group.indices.count", minimum=0
                         )
+                    validator.block = "source_group"
+                    validator.group_role = role
+                    validator.group_compressed = compressed is not None
+                    current_group = dict(
+                        meta,
+                        targets=[],
+                        indices=dict(compressed) if compressed is not None else [],
+                    )
                 elif tag == "targets":
-                    if include_solution and current_group is not None:
-                        names = column_names if current_group["role"].startswith("column:") else row_names
+                    if (
+                        validator.block != "source_group"
+                        or current_group is None
+                        or validator.group_role is None
+                    ):
+                        _fail("targets 缺少前置 source_group")
+                    validator.expect_len(record, 2, tag)
+                    if not isinstance(record[1], list):
+                        _fail("targets 须为索引数组")
+                    names = column_names if validator.group_role.startswith("column:") else row_names
+                    is_col_role = validator.group_role.startswith("column:")
+                    for idx, pos in enumerate(record[1]):
+                        checked = (
+                            validator.check_col(pos, f"targets[{idx}]")
+                            if is_col_role
+                            else validator.check_row(pos, f"targets[{idx}]")
+                        )
                         try:
-                            current_group["targets"].extend(names[pos] for pos in record[1])
+                            current_group["targets"].append(names[checked])
                         except IndexError:
-                            _fail("source_group targets 索引越界")
+                            _fail(f"source_group targets 索引越界: {checked}")
                 elif tag == "indices":
-                    if include_solution and current_group is not None:
-                        current_group["indices"].extend(record[1])
+                    if validator.block != "source_group" or current_group is None:
+                        _fail("indices 缺少前置 source_group")
+                    if validator.group_compressed:
+                        _fail("压缩索引 source_group 不得出现 indices 记录")
+                    validator.expect_len(record, 2, tag)
+                    if not isinstance(record[1], list):
+                        _fail("indices 须为整数数组")
+                    for idx, item in enumerate(record[1]):
+                        current_group["indices"].append(
+                            _require_non_bool_int(item, f"indices[{idx}]")
+                        )
                 elif tag == "source_group_end":
-                    if include_solution and sources is not None and current_group is not None:
-                        sources["groups"].append(current_group)
+                    if validator.block != "source_group" or current_group is None or sources is None:
+                        _fail("source_group_end 缺少前置 source_group")
+                    validator.expect_len(record, 1, tag)
+                    sources["groups"].append(current_group)
+                    validator.block = None
+                    validator.group_role = None
+                    validator.group_compressed = False
                     current_group = None
-                else:
-                    _fail(f"未知参数记录标签: {tag!r}")
     except (OSError, UnicodeDecodeError) as exc:
         _fail(f"读取 {records_path} 失败: {exc}")
 
-    if current_expr_id is not None or current_series is not None or current_group is not None:
-        _fail("parameters.jsonl 存在未闭合块")
+    validator.finalize()
 
-    if include_solution:
-        lengths = {
-            **{sid: len(entry["values"]) for sid, entry in device_series.items()},
-            **{sid: len(entry["values"]) for sid, entry in system_series.items()},
-        }
-        if len(set(lengths.values())) > 1:
-            _fail(f"所有设备与系统步序列长度必须一致: {lengths!r}")
+    lengths = {
+        **{sid: len(entry["values"]) for sid, entry in device_series.items()},
+        **{sid: len(entry["values"]) for sid, entry in system_series.items()},
+    }
+    if len(set(lengths.values())) > 1:
+        _fail(f"所有设备与系统步序列长度必须一致: {lengths!r}")
 
     return {
-        "variables": variables,
-        "components": components,
+        "unit_var_count": unit_var_count,
         "facts": facts,
         "series": device_series,
         "system_series": system_series,
@@ -697,7 +1039,7 @@ def _resolve_facts_payload(
     raw_facts: Mapping[str, Any],
     *,
     resolve_fact_node: Any,
-    resolve_scale_expr: Any,
+    resolve_scale_value: Any,
 ) -> dict[str, Any]:
     if "construction_units" not in raw_facts or not isinstance(raw_facts["construction_units"], list):
         _fail("facts 缺少必需字段 construction_units")
@@ -707,42 +1049,52 @@ def _resolve_facts_payload(
     for unit_entry in raw_facts["construction_units"]:
         if not isinstance(unit_entry, Mapping):
             _fail("facts.construction_units 条目须为 JSON 对象")
-        uid = unit_entry.get("unit_id")
-        inst = unit_entry.get("instance_id")
-        mode = unit_entry.get("mode")
-        if not isinstance(uid, str) or not uid or uid in seen_unit_ids:
-            _fail(f"construction_units unit_id 非法或重复: {uid!r}")
+        extra_u = sorted(set(unit_entry) - _UNIT_ENTRY_ALLOWED_KEYS)
+        if extra_u:
+            _fail(f"construction_units 含未知字段: {extra_u!r}")
+        for req in ("unit_id", "instance_id", "mode", "built", "scales"):
+            if req not in unit_entry:
+                _fail(f"construction_units 缺少必需字段: {req!r}")
+        uid = _require_non_empty_str(unit_entry["unit_id"], "construction_units.unit_id")
+        if uid in seen_unit_ids:
+            _fail(f"construction_units unit_id 重复: {uid!r}")
         seen_unit_ids.add(uid)
-        if not isinstance(inst, str) or not inst or mode not in ("mandatory", "optional"):
-            _fail(f"construction_units[{uid!r}] instance_id 或 mode 非法")
+        inst = _require_non_empty_str(
+            unit_entry["instance_id"], f"construction_units[{uid!r}].instance_id"
+        )
+        mode = unit_entry["mode"]
+        if mode not in ("mandatory", "optional"):
+            _fail(f"construction_units[{uid!r}].mode 非法: {mode!r}")
+
         built_raw = _require_finite_float(resolve_fact_node(unit_entry["built"]), f"{uid}.built")
         rounded = round(built_raw)
         if rounded not in (0, 1) or abs(built_raw - rounded) > 1e-6:
             _fail(f"建设状态 {uid!r}.built 不属于整数 0/1: {built_raw!r}")
 
-        if not isinstance(unit_entry.get("scales"), list):
+        if not isinstance(unit_entry["scales"], list):
             _fail(f"construction_units[{uid!r}].scales 须为数组")
         scales_out: list[dict[str, Any]] = []
         seen_pvars: set[str] = set()
         for scale_entry in unit_entry["scales"]:
             if not isinstance(scale_entry, Mapping):
                 _fail(f"construction_units[{uid!r}].scales 条目须为对象")
-            pname = scale_entry.get("planning_variable_id")
-            unit = scale_entry.get("unit")
-            if not isinstance(pname, str) or not pname or pname in seen_pvars:
-                _fail(f"construction_units[{uid!r}] planning_variable_id 非法或重复: {pname!r}")
+            extra_s = sorted(set(scale_entry) - _SCALE_ENTRY_ALLOWED_KEYS)
+            if extra_s:
+                _fail(f"construction_units[{uid!r}].scales 含未知字段: {extra_s!r}")
+            for req in ("planning_variable_id", "value", "unit"):
+                if req not in scale_entry:
+                    _fail(f"construction_units[{uid!r}].scales 缺少字段: {req!r}")
+            pname = _require_non_empty_str(
+                scale_entry["planning_variable_id"],
+                f"construction_units[{uid!r}].planning_variable_id",
+            )
+            if pname in seen_pvars:
+                _fail(f"construction_units[{uid!r}] planning_variable_id 重复: {pname!r}")
             seen_pvars.add(pname)
-            if not isinstance(unit, str) or not unit:
-                _fail(f"construction_units[{uid!r}].{pname}.unit 须为非空字符串")
-            if "scale" in scale_entry and "offset" in scale_entry:
-                raw_val = _require_finite_float(
-                    resolve_fact_node(scale_entry["value"]), f"{uid}.{pname}"
-                )
-                sc = _require_nonzero_scale(scale_entry["scale"], f"{uid}.{pname}.scale")
-                off = _require_finite_float(scale_entry["offset"], f"{uid}.{pname}.offset")
-                biz_val = _apply_affine(raw_val, scale=sc, offset=off, label=f"{uid}.{pname}")
-            else:
-                biz_val, _ = resolve_scale_expr(scale_entry["value"], unit, f"{uid}.{pname}")
+            unit = _require_non_empty_str(
+                scale_entry["unit"], f"construction_units[{uid!r}].{pname}.unit"
+            )
+            biz_val = resolve_scale_value(scale_entry, unit, f"{uid}.{pname}")
             scales_out.append({"planning_variable_id": pname, "value": biz_val, "unit": unit})
 
         resolved_units.append(
@@ -755,222 +1107,20 @@ def _resolve_facts_payload(
             }
         )
 
-    out: dict[str, Any] = {"construction_units": resolved_units}
-    if _FULL_FINANCIAL_KEYS <= set(raw_facts):
-        resolved_full = resolve_fact_node(raw_facts)
-        out["financial_facts"] = _recover_full_financial_facts(resolved_full, resolved_units)
-    elif "currency" in raw_facts:
-        missing = sorted(_FULL_FINANCIAL_KEYS - set(raw_facts))
-        _fail(f"完整财务事实缺少必需字段: {missing!r}")
-    return out
+    return {"construction_units": resolved_units}
 
 
-def _facts_amount(total: float, label: str) -> str:
-    if not math.isfinite(total):
-        _fail(f"财务事实 {label} 非有限")
-    return str(Decimal(str(total)))
-
-
-def _recover_full_financial_facts(
-    decl: Mapping[str, Any],
-    construction_units: list[dict[str, Any]],
-) -> dict[str, Any]:
-    def amt(val: float, label: str) -> str:
-        return _facts_amount(float(val), label)
-
-    out: dict[str, Any] = {
-        "currency": decl["currency"],
-        "construction_total": amt(decl["construction_total"], "construction_total"),
-        "annual_fixed_om": amt(decl["annual_fixed_om"], "annual_fixed_om"),
-        "payments_applied": [
-            {"t": e["t"], "ratio": e["ratio"], "amount": amt(e["amount"], "payments_applied")}
-            for e in decl["payments_applied"]
-        ],
-        "net_cashflows": [
-            {
-                "id": e["id"],
-                "t": e["t"],
-                "direction": e["direction"],
-                "amount": amt(e["amount"], "net_cashflows"),
-            }
-            for e in decl["net_cashflows"]
-        ],
-        "annual_operation": [
-            {
-                "financial_year": e["financial_year"],
-                "energy_net": amt(e["energy_net"], "annual_operation.energy_net"),
-                "variable_om": amt(e["variable_om"], "annual_operation.variable_om"),
-                "fixed_om": amt(e["fixed_om"], "annual_operation.fixed_om"),
-                "maintenance": amt(e["maintenance"], "annual_operation.maintenance"),
-                "demand_charge": amt(e["demand_charge"], "annual_operation.demand_charge"),
-                "net": amt(e["net"], "annual_operation.net"),
-            }
-            for e in decl["annual_operation"]
-        ],
-        "tax_cash": {
-            "vat": [
-                {
-                    "pool": e["pool"],
-                    "month": e["month"],
-                    "paid": amt(e["paid"], "tax_cash.vat"),
-                    "refund_claimed": amt(e["refund_claimed"], "tax_cash.vat"),
-                    "refund_arrived": amt(e["refund_arrived"], "tax_cash.vat"),
-                    "carry": amt(e["carry"], "tax_cash.vat"),
-                    "receivable": amt(e["receivable"], "tax_cash.vat"),
-                }
-                for e in decl["tax_cash"]["vat"]
-            ],
-            "vat_rules": [
-                {
-                    "rule": e["rule"],
-                    "pool": e["pool"],
-                    "month": e["month"],
-                    "output_tax": amt(e["output_tax"], "tax_cash.vat_rules"),
-                    "deductible_input": amt(e["deductible_input"], "tax_cash.vat_rules"),
-                }
-                for e in decl["tax_cash"]["vat_rules"]
-            ],
-            "refunds": [
-                {
-                    "pool": e["pool"],
-                    "period": e["period"],
-                    "arrival_period": e["arrival_period"],
-                    "amount": amt(e["amount"], "tax_cash.refunds"),
-                }
-                for e in decl["tax_cash"]["refunds"]
-            ],
-            "income": [
-                {
-                    "rule": e["rule"],
-                    "year": e["year"],
-                    "taxable_base": amt(e["taxable_base"], "tax_cash.income"),
-                    "loss_used": amt(e["loss_used"], "tax_cash.income"),
-                    "loss_generated": amt(e["loss_generated"], "tax_cash.income"),
-                    "loss_expired": amt(e["loss_expired"], "tax_cash.income"),
-                    "assessed": amt(e["assessed"], "tax_cash.income"),
-                    "tax": amt(e["tax"], "tax_cash.income"),
-                }
-                for e in decl["tax_cash"]["income"]
-            ],
-            "depreciation": [
-                {
-                    "rule": e["rule"],
-                    "base_from": dict(e["base_from"]),
-                    "year": e["year"],
-                    "amount": amt(e["amount"], "tax_cash.depreciation"),
-                }
-                for e in decl["tax_cash"]["depreciation"]
-            ],
-            "loss_balances": [
-                {
-                    "rule": e["rule"],
-                    "vintage_id": e["vintage_id"],
-                    "year": e["year"],
-                    "last_usable_year": e["last_usable_year"],
-                    "amount": amt(e["amount"], "tax_cash.loss_balances"),
-                }
-                for e in decl["tax_cash"]["loss_balances"]
-            ],
-            "derived": [
-                {
-                    "rule": e["rule"],
-                    "axis": e["axis"],
-                    "period": e["period"],
-                    "assessed": amt(e["assessed"], "tax_cash.derived"),
-                    "payment_period": e["payment_period"],
-                    "paid": amt(e["paid"], "tax_cash.derived"),
-                }
-                for e in decl["tax_cash"]["derived"]
-            ],
-        },
-        "monthly_demand": [
-            {
-                "billing_id": e["billing_id"],
-                "charge_id": e["charge_id"],
-                "calendar_year": e["calendar_year"],
-                "calendar_month": e["calendar_month"],
-                "financial_year": e["financial_year"],
-                "peak_power": amt(e["peak_power"], "monthly_demand.peak_power"),
-                "peak_unit": e["peak_unit"],
-                "rate": dict(e["rate"]),
-                "charge": amt(e["charge"], "monthly_demand.charge"),
-            }
-            for e in decl["monthly_demand"]
-        ],
-        "annual_net_flows": [amt(node, "annual_net_flows") for node in decl["annual_net_flows"]],
-        "construction_units": construction_units,
-        "cost_items": [
-            {
-                **{
-                    k: e[k]
-                    for k in ("instance_id", "finance_type", "component", "item_id", "axis", "period", "unit")
-                },
-                **{
-                    k: amt(e[k], f"cost_items.{k}")
-                    for k in ("raw", "gross", "deductible_input", "net_basis")
-                },
-            }
-            for e in decl["cost_items"]
-        ],
-        "amounts": [
-            {
-                "id": e["id"],
-                "axis": e["axis"],
-                "unit": e["unit"],
-                "values": [
-                    {"period": item["period"], "value": amt(item["value"], f"amounts.{e['id']}")}
-                    for item in e["values"]
-                ],
-            }
-            for e in decl["amounts"]
-        ],
-        "cash_movements": [
-            {
-                **{k: e[k] for k in ("id", "axis", "period", "direction", "price_basis")},
-                **{
-                    k: amt(e[k], f"cash_movements.{e['id']}.{k}")
-                    for k in (
-                        "raw",
-                        "gross",
-                        "deductible_input",
-                        "net_basis",
-                        "output_tax",
-                        "net_revenue",
-                        "end_unpaid",
-                    )
-                },
-                "payments": [
-                    {
-                        "at": dict(p["at"]),
-                        "ratio": p["ratio"],
-                        "amount": amt(p["amount"], "cash_movements.payment"),
-                    }
-                    for p in e["payments"]
-                ],
-            }
-            for e in decl["cash_movements"]
-        ],
-        "assets": [
-            {
-                "id": e["id"],
-                "basis": amt(e["basis"], f"assets.{e['id']}.basis"),
-                "capitalized_at": dict(e["capitalized_at"]),
-                "available_from": e["available_from"],
-                "book_values": [
-                    {"year": v["year"], "value": amt(v["value"], f"assets.{e['id']}.book_values")}
-                    for v in e["book_values"]
-                ],
-            }
-            for e in decl["assets"]
-        ],
-    }
-    comparison = dict(decl["comparison"])
-    if comparison["mode"] == "difference":
-        comparison["evaluation_net_flows"] = [
-            amt(node, "comparison.evaluation_net_flows") for node in comparison["evaluation_net_flows"]
-        ]
-    out["comparison"] = comparison
-    return out
+def _stream_engineering_solution_to_path(eng_sol: Mapping[str, Any], path: Path) -> int:
+    """Write ``eng_sol`` (including ``array('d')`` series) directly to disk in 64KiB chunks."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    size_bytes = 0
+    with path.open("wb") as handle:
+        for chunk in json_chunks(eng_sol):
+            handle.write(chunk)
+            size_bytes += len(chunk)
+        handle.write(b"\n")
+        size_bytes += 1
+    return size_bytes
 
 
 def _restore_in_current_process(
@@ -1009,16 +1159,14 @@ def _restore_in_current_process(
             objective_unit=header["objective_unit"],
             solver_diagnostics=diagnostics or None,
         )
-        solution_out_path.write_text(
-            json.dumps(eng_sol, ensure_ascii=False, allow_nan=False) + "\n",
-            encoding="utf-8",
-        )
+        size_bytes = _stream_engineering_solution_to_path(eng_sol, solution_out_path)
         result_meta_path.write_text(
             json.dumps(
                 {
                     "math_status": math_status,
                     "has_feasible_solution": False,
-                    "extra_outputs": {"solver_summary": eng_sol["solver_summary"]},
+                    "solver_summary": eng_sol["solver_summary"],
+                    "solution_size_bytes": size_bytes,
                 },
                 ensure_ascii=False,
                 allow_nan=False,
@@ -1061,17 +1209,14 @@ def _restore_in_current_process(
     if diagnostics:
         solver_summary["solver_diagnostics"] = diagnostics
 
-    include_solution = "solution" in header["outputs"]
-    recovered = _recover_variable_map_records(records_path, primals, include_solution=True)
+    recovered = _recover_variable_map_records(
+        records_path,
+        primals,
+        expected_columns=header["column_count"],
+    )
     facts_payload = recovered["facts"]
     if not isinstance(facts_payload, Mapping) or "construction_units" not in facts_payload:
         _fail("有可行解时 variable_map 缺少 facts.construction_units")
-
-    components_out: dict[str, Any] = {}
-    for ident, decl in recovered["components"].items():
-        scale, offset = linear_conversion_for_unit(decl["unit"])
-        val = _apply_affine(decl["raw_total"], scale=scale, offset=offset, label=f"component.{ident}")
-        components_out[ident] = {"value": val, "unit": decl["unit"], "caliber": decl["caliber"]}
 
     eng_sol: dict[str, Any] = {
         "schema": ENGINEERING_SOLUTION_SCHEMA,
@@ -1085,47 +1230,28 @@ def _restore_in_current_process(
     if recovered["model_sources"] is not None:
         eng_sol["model_sources"] = recovered["model_sources"]
 
-    extra_outputs: dict[str, Any] = {"solver_summary": solver_summary}
+    metrics_out: dict[str, Any] | None = None
     if "metrics" in header["outputs"]:
-        metrics = {
+        metrics_out = {
             "termination_reason": termination_reason,
             "math_status": math_status,
             "objective_value": business_obj,
             "objective_unit": header["objective_unit"],
-            "num_variables": len(recovered["variables"]),
+            "num_variables": recovered["unit_var_count"],
         }
-        eng_sol["metrics"] = metrics
-        extra_outputs["metrics"] = metrics
+        eng_sol["metrics"] = metrics_out
 
-    if include_solution:
-        extra_outputs["solution"] = {
-            "objective_value": business_obj,
-            "objective_unit": header["objective_unit"],
-            "variables": recovered["variables"],
-            "components": components_out,
-        }
-        extra_outputs["series"] = recovered["series"]
-        extra_outputs["system_series"] = recovered["system_series"]
-        if recovered["model_sources"] is not None:
-            extra_outputs["model_sources"] = recovered["model_sources"]
-        if "financial_facts" in facts_payload:
-            extra_outputs["financial_facts"] = facts_payload["financial_facts"]
-
-    solution_out_path.write_text(
-        json.dumps(eng_sol, ensure_ascii=False, allow_nan=False) + "\n",
-        encoding="utf-8",
-    )
+    size_bytes = _stream_engineering_solution_to_path(eng_sol, solution_out_path)
+    meta_out: dict[str, Any] = {
+        "math_status": math_status,
+        "has_feasible_solution": True,
+        "solver_summary": solver_summary,
+        "solution_size_bytes": size_bytes,
+    }
+    if metrics_out is not None:
+        meta_out["metrics"] = metrics_out
     result_meta_path.write_text(
-        json.dumps(
-            {
-                "math_status": math_status,
-                "has_feasible_solution": True,
-                "extra_outputs": extra_outputs,
-            },
-            ensure_ascii=False,
-            allow_nan=False,
-        )
-        + "\n",
+        json.dumps(meta_out, ensure_ascii=False, allow_nan=False) + "\n",
         encoding="utf-8",
     )
 
@@ -1148,21 +1274,27 @@ def _subprocess_restore_entry(
     primal_path_str: str,
     solution_out_str: str,
     result_meta_str: str,
-    memory_limit_mb: int | None,
+    memory_limit_mb: int,
 ) -> None:
-    """Spawned child-process entrypoint (only lightweight path strings cross IPC)."""
-    if memory_limit_mb is not None and memory_limit_mb > 0:
-        limit_bytes = int(memory_limit_mb) * 1024 * 1024
-        # Add limit_bytes above pre-mapped extension virtual arenas (e.g. OpenBLAS/HiGHS)
-        # so RLIMIT_AS bounds restoration growth rather than failing at import baseline.
-        baseline_vm = _current_vm_bytes() or 0
-        requested_as = baseline_vm + limit_bytes
-        try:
-            _soft, hard = resource.getrlimit(resource.RLIMIT_AS)
-            target = requested_as if hard == resource.RLIM_INFINITY else min(requested_as, hard)
-            resource.setrlimit(resource.RLIMIT_AS, (target, hard))
-        except (ValueError, OSError):
-            pass
+    """Spawned child-process entrypoint enforcing ``RLIMIT_AS`` strictly."""
+    limit_bytes = int(memory_limit_mb) * 1024 * 1024
+    baseline_vm = _current_vm_bytes() or 0
+    requested_as = baseline_vm + limit_bytes
+    try:
+        _soft, hard = resource.getrlimit(resource.RLIMIT_AS)
+        if hard != resource.RLIM_INFINITY and requested_as > hard:
+            raise OSError(f"requested RLIMIT_AS ({requested_as}) exceeds hard limit ({hard})")
+        resource.setrlimit(resource.RLIMIT_AS, (requested_as, hard))
+    except (ValueError, OSError) as exc:
+        Path(result_meta_str).write_text(
+            json.dumps(
+                {"error": f"建立受限子进程内存配额失败: {exc}", "reason": "resource-limit-failed"},
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        return
+
     try:
         _restore_in_current_process(
             Path(bundle_dir_str),
@@ -1194,21 +1326,41 @@ def _terminate_process(proc: multiprocessing.Process) -> None:
         proc.join(timeout=1.0)
 
 
-@dataclass(frozen=True, slots=True)
-class RestorationOutcome:
-    """Outcome from bounded-subprocess restoration including child PID for isolation tests."""
+def _check_stop_and_deadline(
+    stop: StopProbe | None,
+    deadline: float,
+    phase: str,
+) -> None:
+    stop_reason = read_stop_reason(stop)
+    if stop_reason is not None:
+        raise ComputationUnavailableError(f"结果还原{phase}已停止: {stop_reason}", reason=stop_reason)
+    if time.monotonic() > deadline:
+        raise ComputationUnavailableError(f"结果还原{phase}超时", reason="timed_out")
 
-    compute_result: ComputeResult
-    engineering_solution: Mapping[str, Any]
-    child_pid: int | None
 
-
-def _stream_content_to_path(content: Content | bytes, dest: Path) -> None:
+def _stream_content_to_path(
+    content: Content | bytes,
+    dest: Path,
+    *,
+    stop: StopProbe | None,
+    deadline: float,
+) -> None:
     dest.parent.mkdir(parents=True, exist_ok=True)
     raw = MemoryContent(content) if isinstance(content, bytes) else content
     with dest.open("wb") as handle:
         for chunk in raw.iter_chunks():
+            _check_stop_and_deadline(stop, deadline, "输入准备阶段")
             handle.write(chunk)
+    _check_stop_and_deadline(stop, deadline, "输入准备阶段")
+
+
+def _allocate_solution_path(solution_output_path: Path | None) -> Path:
+    if solution_output_path is not None:
+        sol_path = Path(solution_output_path)
+        sol_path.parent.mkdir(parents=True, exist_ok=True)
+        return sol_path
+    out_dir = Path(tempfile.mkdtemp(prefix="ies-eng-solution-"))
+    return out_dir / "engineering_solution.json"
 
 
 def restore_from_bundle_dir(
@@ -1220,8 +1372,12 @@ def restore_from_bundle_dir(
     memory_limit_mb: int | None = None,
     timeout_seconds: float | None = None,
     stop: StopProbe | None = None,
+    _deadline: float | None = None,
 ) -> RestorationOutcome:
     """Restore ``ies.engineering-solution@1.0.0`` inside a bounded ``spawn`` child subprocess."""
+    eff_mem_mb, eff_timeout_s = _validate_resource_budgets(memory_limit_mb, timeout_seconds)
+    deadline = _deadline if _deadline is not None else (time.monotonic() + eff_timeout_s)
+
     bundle_id = receipt["bundle_id"] if isinstance(receipt, Mapping) else receipt.bundle_id
     receipt_id = receipt["receipt_id"] if isinstance(receipt, Mapping) else receipt.receipt_id
     receipt_status = receipt["status"] if isinstance(receipt, Mapping) else receipt.status
@@ -1230,42 +1386,40 @@ def restore_from_bundle_dir(
         if isinstance(receipt, Mapping)
         else receipt.termination_reason
     )
-
     exec_status = _execution_status_from_receipt(str(receipt_status), term_reason)
+
+    _check_stop_and_deadline(stop, deadline, "启动前")
+
     if receipt_status != "succeeded":
         eng_sol = _non_feasible_solution(
             math_status="not_solved",
             termination_reason="not_solved",
             objective_unit=None,
         )
-        if solution_output_path is not None:
-            solution_output_path.parent.mkdir(parents=True, exist_ok=True)
-            solution_output_path.write_text(
-                json.dumps(eng_sol, ensure_ascii=False, allow_nan=False) + "\n",
-                encoding="utf-8",
-            )
+        sol_path = _allocate_solution_path(solution_output_path)
+        size_bytes = _stream_engineering_solution_to_path(eng_sol, sol_path)
+        outputs_meta: dict[str, Any] = {
+            "solver_summary": dict(eng_sol["solver_summary"]),
+            "engineering_solution_path": str(sol_path),
+            "engineering_solution_size_bytes": size_bytes,
+        }
         return RestorationOutcome(
             compute_result=ComputeResult(
                 bundle_id=str(bundle_id),
                 receipt_id=str(receipt_id),
                 execution_status=exec_status,
                 math_status="not_solved",
-                outputs=freeze_owned_json({"solver_summary": dict(eng_sol["solver_summary"])}),
+                outputs=outputs_meta,
             ),
-            engineering_solution=eng_sol,
+            solution_path=sol_path,
+            solution_content=FileContent(sol_path, size_bytes),
+            solver_summary=dict(eng_sol["solver_summary"]),
             child_pid=None,
         )
 
-    pre_stop = read_stop_reason(stop)
-    if pre_stop is not None:
-        raise ComputationUnavailableError(f"结果还原启动前已停止: {pre_stop}", reason=pre_stop)
-
+    sol_path = _allocate_solution_path(solution_output_path)
     with tempfile.TemporaryDirectory(prefix="ies-restore-") as tmp_dir:
-        tmp = Path(tmp_dir)
-        sol_path = solution_output_path or (tmp / "solution.json")
-        sol_path.parent.mkdir(parents=True, exist_ok=True)
-        meta_path = tmp / "restore_meta.json"
-
+        meta_path = Path(tmp_dir) / "restore_meta.json"
         ctx = multiprocessing.get_context("spawn")
         proc = ctx.Process(
             target=_subprocess_restore_entry,
@@ -1274,11 +1428,10 @@ def restore_from_bundle_dir(
                 str(primal_path),
                 str(sol_path),
                 str(meta_path),
-                memory_limit_mb,
+                eff_mem_mb,
             ),
             daemon=False,
         )
-        started = time.monotonic()
         proc.start()
         child_pid = proc.pid
         try:
@@ -1290,7 +1443,7 @@ def restore_from_bundle_dir(
                         f"结果还原运行中被停止: {stop_reason}",
                         reason=stop_reason,
                     )
-                if timeout_seconds is not None and (time.monotonic() - started) > timeout_seconds:
+                if time.monotonic() > deadline:
                     _terminate_process(proc)
                     raise ComputationUnavailableError("结果还原受限子进程超时", reason="timed_out")
                 proc.join(timeout=0.02)
@@ -1309,24 +1462,27 @@ def restore_from_bundle_dir(
             _fail(err_msg, reason=err_reason)
         if proc.exitcode != 0 or meta_doc is None or not sol_path.is_file():
             reason = "resource_exhausted" if proc.exitcode in (-9, -11) else "result-protocol-failure"
-            _fail(
-                f"受限子进程异常退出 (exitcode={proc.exitcode})",
-                reason=reason,
-            )
+            _fail(f"受限子进程异常退出 (exitcode={proc.exitcode})", reason=reason)
 
-        sol_text = sol_path.read_text(encoding="utf-8")
-        eng_sol = json.loads(sol_text)
-        extra_outputs = dict(meta_doc["extra_outputs"])
-        extra_outputs["engineering_solution"] = json.loads(sol_text)
+        sol_size = int(meta_doc.get("solution_size_bytes", sol_path.stat().st_size))
+        outputs_meta = {
+            "solver_summary": dict(meta_doc["solver_summary"]),
+            "engineering_solution_path": str(sol_path),
+            "engineering_solution_size_bytes": sol_size,
+        }
+        if "metrics" in meta_doc:
+            outputs_meta["metrics"] = dict(meta_doc["metrics"])
         return RestorationOutcome(
             compute_result=ComputeResult(
                 bundle_id=str(bundle_id),
                 receipt_id=str(receipt_id),
                 execution_status="completed",
                 math_status=str(meta_doc["math_status"]),
-                outputs=freeze_owned_json(extra_outputs),
+                outputs=outputs_meta,
             ),
-            engineering_solution=eng_sol,
+            solution_path=sol_path,
+            solution_content=FileContent(sol_path, sol_size),
+            solver_summary=dict(meta_doc["solver_summary"]),
             child_pid=child_pid,
         )
 
@@ -1342,22 +1498,29 @@ class TargetResultAdapter:
         receipt: ExecutionReceipt | Mapping[str, Any],
         outputs: Mapping[str, object],
         *,
+        solution_output_path: Path | None = None,
         memory_limit_mb: int | None = None,
         timeout_seconds: float | None = None,
         stop: StopProbe | None = None,
     ) -> RestorationOutcome:
-        """Materialize streamed bundle inputs/outputs to temp dir and run bounded spawn restoration."""
+        """Materialize streamed inputs/outputs under one budget and run bounded spawn restoration."""
         if not isinstance(bundle, TargetSolverBundle):
             raise TypeError(f"bundle 须为 TargetSolverBundle，得到 {type(bundle).__name__}")
+        eff_mem_mb, eff_timeout_s = _validate_resource_budgets(memory_limit_mb, timeout_seconds)
+        deadline = time.monotonic() + eff_timeout_s
+        _check_stop_and_deadline(stop, deadline, "启动前")
+
         receipt_status = receipt["status"] if isinstance(receipt, Mapping) else receipt.status
         if receipt_status != "succeeded":
             return restore_from_bundle_dir(
                 Path("."),
                 Path("."),
                 receipt,
-                memory_limit_mb=memory_limit_mb,
-                timeout_seconds=timeout_seconds,
+                solution_output_path=solution_output_path,
+                memory_limit_mb=eff_mem_mb,
+                timeout_seconds=eff_timeout_s,
                 stop=stop,
+                _deadline=deadline,
             )
 
         primal_raw = outputs.get(PRIMAL_SOLUTION_OUTPUT_PATH)
@@ -1369,16 +1532,19 @@ class TargetResultAdapter:
             for rel_path, content in bundle.files.items():
                 if rel_path.endswith((".mps", "acceleration.json", "epigraphs.json")):
                     continue
-                _stream_content_to_path(content, root / rel_path)
+                _check_stop_and_deadline(stop, deadline, "输入准备阶段")
+                _stream_content_to_path(content, root / rel_path, stop=stop, deadline=deadline)
             primal_path = root / PRIMAL_SOLUTION_OUTPUT_PATH
-            _stream_content_to_path(primal_raw, primal_path)
+            _stream_content_to_path(primal_raw, primal_path, stop=stop, deadline=deadline)
             return restore_from_bundle_dir(
                 root,
                 primal_path,
                 receipt,
-                memory_limit_mb=memory_limit_mb,
-                timeout_seconds=timeout_seconds,
+                solution_output_path=solution_output_path,
+                memory_limit_mb=eff_mem_mb,
+                timeout_seconds=eff_timeout_s,
                 stop=stop,
+                _deadline=deadline,
             )
 
     def restore(
@@ -1387,15 +1553,17 @@ class TargetResultAdapter:
         receipt: ExecutionReceipt | Mapping[str, Any],
         outputs: Mapping[str, object],
         *,
+        solution_output_path: Path | None = None,
         memory_limit_mb: int | None = None,
         timeout_seconds: float | None = None,
         stop: StopProbe | None = None,
     ) -> ComputeResult:
-        """Restore ``ComputeResult`` containing ``ies.engineering-solution@1.0.0``."""
+        """Restore ``ComputeResult`` referencing durable ``ies.engineering-solution@1.0.0``."""
         return self.restore_with_outcome(
             bundle,
             receipt,
             outputs,
+            solution_output_path=solution_output_path,
             memory_limit_mb=memory_limit_mb,
             timeout_seconds=timeout_seconds,
             stop=stop,
@@ -1403,8 +1571,11 @@ class TargetResultAdapter:
 
 
 __all__ = [
+    "DEFAULT_MEMORY_LIMIT_MB",
+    "DEFAULT_TIMEOUT_SECONDS",
     "ENGINEERING_SOLUTION_SCHEMA",
     "ENGINEERING_SOLUTION_VERSION",
+    "FileContent",
     "PRIMAL_SOLUTION_SCHEMA",
     "PRIMAL_SOLUTION_VERSION",
     "RestorationOutcome",

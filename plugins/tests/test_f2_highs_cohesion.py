@@ -21,6 +21,7 @@ from iesplan.finance import EvaluationInput, effective_from_yaml
 from iesplan.modeling import build_math_contribution, contribution_to_dict
 from pies_sdk import (
     StageContext,
+    StageIOError,
     iter_variable_map_records,
     load_plugin_manifest,
     read_primal_solution,
@@ -599,3 +600,108 @@ def test_generate_f2_and_solve_f2_campus_end_to_end(tmp_path: Path) -> None:
     assert primal.has_feasible_solution is True
     assert primal.column_count == vmap_header.column_count
     assert len(primal.values) == vmap_header.column_count
+
+
+def test_original_lp_verified_without_epigraph_file_and_slot_to_solution_text(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    solver_mod = _load_solver_module()
+
+    # 1) VerifiedIncumbentSlot.to_solution_text serializes model_num_columns & epigraph_verified
+    slot = solver_mod.VerifiedIncumbentSlot(
+        sense="minimize",
+        epigraphs=[(0, [1, 2])],
+        model_num_columns=3,
+    )
+    recorded = slot.record(
+        objective_value=5.0,
+        primals=[3.0, 2.0, 3.0],
+        model_status="HighsModelStatus.kOptimal",
+        best_bound=5.0,
+        relative_gap=0.0,
+        solve_domain="valid_relaxation",
+        original_model_verified=True,
+    )
+    assert recorded is True
+    text = slot.to_solution_text()
+    assert "model_num_columns: 3\n" in text
+    assert "epigraph_verified: true\n" in text
+
+    # 2) _cmd_solve with --report_model_columns true (no --epigraph_file) verifies original LP
+    mps_path = tmp_path / "lp.mps"
+    mps_path.write_text(_build_epigraph_mps(peak_lb=0.0, peak_cost=0.5), encoding="utf-8")
+    sol_path = tmp_path / "violated.sol"
+
+    orig_extract = solver_mod._extract_solution_data
+
+    def _tampered_extract(handle: Any, status: Any):
+        feasible, obj, bound, gap, primals = orig_extract(handle, status)
+        # Violate row `peak - flow1 >= 0` (`0.0 - 3.0 = -3.0`) even though HiGHS returned kOptimal
+        bad = list(primals)
+        bad[0] = 0.0
+        return feasible, obj, bound, gap, bad
+
+    monkeypatch.setattr(solver_mod, "_extract_solution_data", _tampered_extract)
+    monkeypatch.chdir(tmp_path)
+    rc = solver_mod._cmd_solve(
+        [
+            "lp.mps",
+            "--solution_file",
+            "violated.sol",
+            "--time_limit",
+            "30",
+            "--random_seed",
+            "0",
+            "--report_model_columns",
+            "true",
+        ]
+    )
+    assert rc == 0
+    facts, primal = _parse_v1(sol_path)
+    assert facts["has_feasible_solution"] == "false"
+    assert facts["original_model_verified"] == "false"
+    assert facts["model_num_columns"] == "3"
+    assert "epigraph_verified" not in facts
+    assert primal == {}
+
+    primal_out = _stream_v1_solution_to_primal_json(
+        sol_path,
+        tmp_path / "primal_solution.json",
+        started_at="2026-01-01T00:00:00Z",
+        ended_at="2026-01-01T00:00:01Z",
+        elapsed_seconds=0.1,
+    )
+    payload = read_primal_solution(primal_out)
+    assert payload.math_status == "numeric_failure"
+    assert payload.has_feasible_solution is False
+    assert payload.column_count == 3
+
+    # 3) Non-finite primal values & truncated count still rejected at canonical streaming boundary
+    bad_sol = tmp_path / "nan.sol"
+    bad_sol.write_text(
+        "\n".join(
+            [
+                "HIGHS_SOLUTION_V1",
+                "model_status: HighsModelStatus.kOptimal",
+                "has_feasible_solution: true",
+                "objective_value: 1.0",
+                "best_bound: 1.0",
+                "relative_gap: 0.0",
+                "num_columns: 2",
+                "model_num_columns: 2",
+                "primal:",
+                "0: 1.0",
+                "1: nan",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises((StageIOError, ValueError)):
+        _stream_v1_solution_to_primal_json(
+            bad_sol,
+            tmp_path / "bad_primal.json",
+            started_at="2026-01-01T00:00:00Z",
+            ended_at="2026-01-01T00:00:01Z",
+            elapsed_seconds=0.1,
+        )

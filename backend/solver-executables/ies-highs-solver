@@ -1770,6 +1770,8 @@ def _format_solution_v1(
     subdomain_status: str | None = None,
     subdomain_best_bound: float | None = None,
     subdomain_relative_gap: float | None = None,
+    model_num_columns: int | None = None,
+    epigraph_verified: bool | None = None,
 ) -> str:
     return "".join(
         _iter_solution_v1_lines(
@@ -1784,6 +1786,8 @@ def _format_solution_v1(
             subdomain_status=subdomain_status,
             subdomain_best_bound=subdomain_best_bound,
             subdomain_relative_gap=subdomain_relative_gap,
+            model_num_columns=model_num_columns,
+            epigraph_verified=epigraph_verified,
         )
     )
 
@@ -1906,17 +1910,22 @@ def _cmd_solve(args: list[str]) -> int:
                 threads=threads,
             )
             num_col = int(handle.getNumCol())
-            model_num_columns = num_col if (report_model_columns or epigraph_file is not None) else None
-            if epigraph_file is not None:
+            verify_original = report_model_columns or epigraph_file is not None
+            model_num_columns = num_col if verify_original else None
+            if verify_original:
                 lp = handle.getLp()
-                epigraphs = _load_epigraph_metadata(epigraph_file, expected_num_col=num_col)
+                epigraphs = (
+                    _load_epigraph_metadata(epigraph_file, expected_num_col=num_col)
+                    if epigraph_file is not None
+                    else None
+                )
                 feasible, objective, best_bound, gap, primals = _extract_solution_data(
                     handle, model_status
                 )
                 if feasible:
                     lp_ok = verify_primal_against_lp(lp, primals)
-                    epi_ok = verify_epigraphs(primals, epigraphs)
-                    if not (lp_ok and epi_ok):
+                    epi_ok = verify_epigraphs(primals, epigraphs) if epigraphs is not None else None
+                    if not (lp_ok and (epi_ok if epi_ok is not None else True)):
                         _atomic_write_solution_v1(
                             sol_path,
                             model_status=model_status,
@@ -1942,7 +1951,7 @@ def _cmd_solve(args: list[str]) -> int:
                         solve_domain="original",
                         original_model_verified=True,
                         model_num_columns=model_num_columns,
-                        epigraph_verified=True,
+                        epigraph_verified=epi_ok,
                     )
                     return 0
                 _atomic_write_solution_v1(
@@ -1956,15 +1965,10 @@ def _cmd_solve(args: list[str]) -> int:
                     solve_domain="original",
                     original_model_verified=True,
                     model_num_columns=model_num_columns,
-                    epigraph_verified=True,
+                    epigraph_verified=True if epigraphs is not None else None,
                 )
                 return 0
-            _write_solution(
-                handle,
-                model_status,
-                sol_path,
-                model_num_columns=model_num_columns,
-            )
+            _write_solution(handle, model_status, sol_path)
         else:
             _run_accelerated_solve(
                 mps_path,
