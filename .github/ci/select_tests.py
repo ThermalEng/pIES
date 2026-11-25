@@ -510,8 +510,9 @@ def pick(changed: list[str], full: bool = False) -> dict[str, str]:
             elif path.endswith(".py"):
                 backend_all = True
         elif path.startswith("backend/iesplan/"):
-            if path.startswith(
+            if path == "backend/iesplan/__init__.py" or path.startswith(
                 (
+                    "backend/iesplan/core/",
                     "backend/iesplan/computation/",
                     "backend/iesplan/finance/",
                     "backend/iesplan/modeling/",
@@ -556,6 +557,11 @@ def pick(changed: list[str], full: bool = False) -> dict[str, str]:
             ):
                 backend.update(GENERATOR_PROJECT_CONSUMERS)
                 browser.update(("tax-chain.spec.ts", "result-planning-solution.spec.ts", "system-equations.spec.ts"))
+        elif path.startswith("backend/solver-executables/"):
+            plugins_run = True
+            backend.update((SMOKE_BACKEND, "test_bootstrap.py", "test_highs_readiness.py", "test_solver_runtime.py"))
+            browser.add(SMOKE_BROWSER)
+            startup = True
         elif path in ("frontend/Dockerfile", "frontend/package.json", "frontend/package-lock.json"):
             browser.update((SMOKE_BROWSER, "page-loading.spec.ts", *BASIC_SPECS))
             frontend_all = True
@@ -981,6 +987,9 @@ def self_test() -> None:
     assert jr_sel["job_runner_run"] == "true" and jr_sel["sdk_run"] == "false" and jr_sel["plugins_run"] == "false"
     plg_sel = pick(["plugins/solver_highs/solver_stage.py"])
     assert plg_sel["plugins_run"] == "true" and plg_sel["sdk_run"] == "false" and plg_sel["job_runner_run"] == "false"
+    assert pick(["backend/iesplan/core/units.py"])["plugins_run"] == "true"
+    assert pick(["backend/iesplan/__init__.py"])["plugins_run"] == "true"
+    assert pick(["backend/solver-executables/ies-highs-solver"])["plugins_run"] == "true"
     doc_sel = pick(["docs/readme.md"])
     assert doc_sel["sdk_run"] == "false" and doc_sel["job_runner_run"] == "false" and doc_sel["plugins_run"] == "false"
     assert all_specs["sdk_run"] == "true" and all_specs["job_runner_run"] == "true" and all_specs["plugins_run"] == "true"
