@@ -211,7 +211,7 @@ export function buildAnnualOperationChartData(fin: FinancialEvaluationBlock): {
   categories: string[]
   series: CategorySeries[]
 } {
-  const annual = fin.annual_operation
+  const annual = Array.isArray(fin?.annual_operation) ? fin.annual_operation : []
   if (annual.length === 0) return { categories: [], series: [] }
   const categories = annual.map((a) => `t=${a.financial_year}`)
   return {
@@ -239,7 +239,7 @@ export function buildMonthlyDemandChartData(
   peakSeries: CategorySeries[]
   chargeSeries: CategorySeries[]
 } {
-  const all = fin.monthly_demand
+  const all = Array.isArray(fin?.monthly_demand) ? fin.monthly_demand : []
   if (all.length === 0) {
     return { billingIds: [], activeBillingId: null, peakUnit: '', categories: [], peakSeries: [], chargeSeries: [] }
   }
@@ -285,7 +285,7 @@ export function buildVatPoolChartData(
   categories: string[]
   series: CategorySeries[]
 } {
-  const vat = fin.tax_cash.vat
+  const vat = Array.isArray(fin?.tax_cash?.vat) ? fin.tax_cash.vat : []
   if (vat.length === 0) {
     return { pools: [], activePool: null, categories: [], series: [] }
   }
@@ -316,7 +316,7 @@ export function buildIncomeTaxChartData(
   categories: string[]
   series: CategorySeries[]
 } {
-  const income = fin.tax_cash.income
+  const income = Array.isArray(fin?.tax_cash?.income) ? fin.tax_cash.income : []
   if (income.length === 0) {
     return { rules: [], activeRule: null, categories: [], series: [] }
   }
@@ -348,7 +348,7 @@ export function buildDepreciationChartData(fin: FinancialEvaluationBlock): {
   categories: string[]
   series: CategorySeries[]
 } {
-  const dep = fin.tax_cash.depreciation
+  const dep = Array.isArray(fin?.tax_cash?.depreciation) ? fin.tax_cash.depreciation : []
   if (dep.length === 0) return { categories: [], series: [] }
   const years = Array.from(new Set(dep.map((r) => r.year))).sort((a, b) => a - b)
   const categories = years.map((y) => `y=${y}`)
@@ -383,16 +383,17 @@ export function buildComparisonChartData(fin: FinancialEvaluationBlock): {
   categories: string[]
   series: CategorySeries[]
 } {
-  if (fin.comparison.mode !== 'difference') return { categories: [], series: [] }
-  const len = fin.annual_net_flows.length
+  if (fin?.comparison?.mode !== 'difference') return { categories: [], series: [] }
+  const netFlows = Array.isArray(fin.annual_net_flows) ? fin.annual_net_flows : []
+  const len = netFlows.length
   if (len === 0) return { categories: [], series: [] }
   const categories = Array.from({ length: len }, (_, i) => `t=${i}`)
   return {
     categories,
     series: [
-      { key: 'candidate', label: 'candidate', color: 'var(--ies-primary)', ...toSeriesData(fin.annual_net_flows) },
-      { key: 'baseline', label: 'baseline', color: 'var(--ies-neutral)', dashed: true, ...toSeriesData(fin.comparison.baseline_net_flows) },
-      { key: 'difference', label: 'difference', color: 'var(--ies-success)', ...toSeriesData(fin.comparison.evaluation_net_flows) },
+      { key: 'candidate', label: 'candidate', color: 'var(--ies-primary)', ...toSeriesData(netFlows) },
+      { key: 'baseline', label: 'baseline', color: 'var(--ies-neutral)', dashed: true, ...toSeriesData(Array.isArray(fin.comparison.baseline_net_flows) ? fin.comparison.baseline_net_flows : []) },
+      { key: 'difference', label: 'difference', color: 'var(--ies-success)', ...toSeriesData(Array.isArray(fin.comparison.evaluation_net_flows) ? fin.comparison.evaluation_net_flows : []) },
     ],
   }
 }
@@ -402,17 +403,17 @@ export function buildAssetBookValueChartData(fin: FinancialEvaluationBlock): {
   categories: string[]
   series: CategorySeries[]
 } {
-  const assets = fin.assets
+  const assets = Array.isArray(fin?.assets) ? fin.assets : []
   if (assets.length === 0) return { categories: [], series: [] }
   const yearsSet = new Set<number>()
   for (const asset of assets) {
-    for (const bv of asset.book_values) yearsSet.add(bv.year)
+    for (const bv of Array.isArray(asset.book_values) ? asset.book_values : []) yearsSet.add(bv.year)
   }
   const years = Array.from(yearsSet).sort((a, b) => a - b)
   if (years.length === 0) return { categories: [], series: [] }
   const categories = years.map((yr) => `y=${yr}`)
   const series: CategorySeries[] = assets.map((asset, idx) => {
-    const byYear = new Map(asset.book_values.map((bv) => [bv.year, bv.value]))
+    const byYear = new Map((Array.isArray(asset.book_values) ? asset.book_values : []).map((bv) => [bv.year, bv.value]))
     const rawValues = years.map((yr) => byYear.get(yr) ?? null)
     return {
       key: asset.id,

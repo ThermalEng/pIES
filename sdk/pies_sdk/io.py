@@ -323,6 +323,43 @@ def read_algorithm_request(work_in: Path = DEFAULT_WORK_IN) -> dict[str, Any]:
     return data
 
 
+_FIN_EVAL_INT_MINS: tuple[tuple[str, int], ...] = (
+    ("evaluation_years", 1),
+    ("operation_years", 1),
+    ("construction_period", 0),
+    ("base_year", 1),
+)
+_FIN_EVAL_STR_FIELDS: tuple[str, ...] = (
+    "status",
+    "currency",
+    "price_basis",
+    "construction_total",
+    "construction_total_unit",
+    "annual_fixed_om",
+)
+_FIN_EVAL_LIST_FIELDS: tuple[str, ...] = (
+    "payments_applied",
+    "net_cashflows",
+    "cost_items",
+    "amounts",
+    "cash_movements",
+    "assets",
+    "construction_units",
+    "annual_operation",
+    "monthly_demand",
+    "annual_net_flows",
+)
+_FIN_EVAL_TAX_LIST_FIELDS: tuple[str, ...] = (
+    "depreciation",
+    "derived",
+    "income",
+    "loss_balances",
+    "refunds",
+    "vat",
+    "vat_rules",
+)
+
+
 def _validate_financial_evaluation_mapping(data: Any) -> dict[str, Any]:
     if not isinstance(data, Mapping):
         raise StageIOError("FinancialEvaluation payload must be a JSON object")
@@ -332,9 +369,58 @@ def _validate_financial_evaluation_mapping(data: Any) -> dict[str, Any]:
         raise StageIOError(
             f"Invalid FinancialEvaluation schema_version: {data.get('schema_version')!r}"
         )
-    status = data.get("status")
-    if not isinstance(status, str) or not status:
-        raise StageIOError("FinancialEvaluation requires non-empty string 'status'")
+
+    for key in _FIN_EVAL_STR_FIELDS:
+        val = data.get(key)
+        if not isinstance(val, str) or not val:
+            raise StageIOError(f"FinancialEvaluation requires non-empty string {key!r}")
+    if not isinstance(data.get("profile_id"), str):
+        raise StageIOError("FinancialEvaluation requires string 'profile_id'")
+
+    for key, minimum in _FIN_EVAL_INT_MINS:
+        val = data.get(key)
+        if isinstance(val, bool) or not isinstance(val, int) or val < minimum:
+            raise StageIOError(
+                f"FinancialEvaluation requires integer {key!r} >= {minimum}, got {val!r}"
+            )
+
+    discount_rate = data.get("discount_rate")
+    if isinstance(discount_rate, bool) or not isinstance(discount_rate, (int, float)):
+        raise StageIOError(
+            f"FinancialEvaluation requires finite number 'discount_rate', got {discount_rate!r}"
+        )
+
+    for key in _FIN_EVAL_LIST_FIELDS:
+        if not isinstance(data.get(key), list):
+            raise StageIOError(f"FinancialEvaluation requires list {key!r}")
+
+    comparison = data.get("comparison")
+    if (
+        not isinstance(comparison, Mapping)
+        or not isinstance(comparison.get("mode"), str)
+        or not comparison["mode"]
+    ):
+        raise StageIOError("FinancialEvaluation requires 'comparison' object with non-empty 'mode'")
+
+    tax_cash = data.get("tax_cash")
+    if not isinstance(tax_cash, Mapping):
+        raise StageIOError("FinancialEvaluation requires 'tax_cash' object")
+    for key in _FIN_EVAL_TAX_LIST_FIELDS:
+        if not isinstance(tax_cash.get(key), list):
+            raise StageIOError(f"FinancialEvaluation.tax_cash requires list {key!r}")
+
+    evaluation = data.get("evaluation")
+    if not isinstance(evaluation, Mapping):
+        raise StageIOError("FinancialEvaluation requires 'evaluation' object")
+    if not isinstance(evaluation.get("rows"), list):
+        raise StageIOError("FinancialEvaluation.evaluation requires list 'rows'")
+    if (
+        "npv" not in evaluation
+        or not isinstance(evaluation.get("irr_status"), str)
+        or not evaluation["irr_status"]
+    ):
+        raise StageIOError("FinancialEvaluation.evaluation requires 'npv' and non-empty 'irr_status'")
+
     check_finite_json(data, "FinancialEvaluation")
     return dict(data)
 

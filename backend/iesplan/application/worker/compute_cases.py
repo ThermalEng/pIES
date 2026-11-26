@@ -62,10 +62,13 @@ from iesplan.computation import (
     SolverBundle,
     SolverBundleManifest,
     StopProbe,
-    check_finite_json,
     collect_resource_ids,
     materialize_non_predictive_series,
     thaw_json_value,
+)
+from iesplan.computation.contracts.outputs import (
+    validate_evaluation_report_doc,
+    validate_financial_evaluation_doc,
 )
 from iesplan.computation.result_adapters import (
     FileContent,
@@ -1010,19 +1013,7 @@ def _parse_evaluator_outputs(
             read_content(stage_outputs["financial_evaluation.json"]).decode("utf-8"),
             parse_constant=_reject_eval_json_constant,
         )
-        if not isinstance(raw_doc, Mapping):
-            raise ValueError("financial_evaluation.json 须为 JSON 对象")
-        if raw_doc.get("schema") != "ies.financial-evaluation":
-            raise ValueError(f"financial_evaluation.json schema 非法: {raw_doc.get('schema')!r}")
-        if raw_doc.get("schema_version") != "1.0.0":
-            raise ValueError(
-                f"financial_evaluation.json schema_version 非法: {raw_doc.get('schema_version')!r}"
-            )
-        status = raw_doc.get("status")
-        if not isinstance(status, str) or not status:
-            raise ValueError("financial_evaluation.json 缺少非空字符串 status")
-        check_finite_json(raw_doc, "financial_evaluation.json")
-        return FINANCIAL_EVALUATION_CONTRACT, None, dict(raw_doc)
+        return FINANCIAL_EVALUATION_CONTRACT, None, validate_financial_evaluation_doc(raw_doc)
 
     if EVALUATION_REPORT_CONTRACT in declared_produces:
         if "evaluation_report.json" not in stage_outputs:
@@ -1031,27 +1022,8 @@ def _parse_evaluator_outputs(
             read_content(stage_outputs["evaluation_report.json"]).decode("utf-8"),
             parse_constant=_reject_eval_json_constant,
         )
-        if not isinstance(raw_doc, Mapping):
-            raise ValueError("evaluation_report.json 须为 JSON 对象")
-        if raw_doc.get("schema") != "ies.evaluation-report":
-            raise ValueError(f"evaluation_report.json schema 非法: {raw_doc.get('schema')!r}")
-        if raw_doc.get("schema_version") != "1.0.0":
-            raise ValueError(
-                f"evaluation_report.json schema_version 非法: {raw_doc.get('schema_version')!r}"
-            )
-        title = raw_doc.get("title")
-        if not isinstance(title, str) or not title:
-            raise ValueError("evaluation_report.json 缺少非空字符串 title")
-        declared_eval = raw_doc.get("evaluator")
-        if declared_eval is not None and declared_eval != evaluator_ref:
-            raise ValueError(
-                f"evaluation_report.json evaluator 不匹配: {declared_eval!r} != {evaluator_ref!r}"
-            )
-        for list_field in ("metrics", "charts", "tables"):
-            if list_field in raw_doc and not isinstance(raw_doc[list_field], list):
-                raise ValueError(f"evaluation_report.json.{list_field} 须为数组")
-        check_finite_json(raw_doc, "evaluation_report.json")
-        return EVALUATION_REPORT_CONTRACT, {"evaluator": evaluator_ref, **dict(raw_doc)}, None
+        validated_report = validate_evaluation_report_doc(raw_doc, expected_evaluator=evaluator_ref)
+        return EVALUATION_REPORT_CONTRACT, validated_report, None
 
     raise ValueError(f"评价器 {evaluator_ref!r} 未声明受支持的输出契约: {declared_produces!r}")
 

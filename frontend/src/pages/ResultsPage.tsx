@@ -1135,46 +1135,61 @@ export default function ResultsPage() {
                 {evaluationReports.length > 0 ? (
                   <Card title={t('ies.result.eval_reports_title')} className="ies-section">
                     <div className="ies-stack">
-                      {evaluationReports.map((rep) => {
-                        const repMetrics = Array.isArray(rep.metrics) ? rep.metrics : []
-                        const repCharts = Array.isArray(rep.charts) ? rep.charts : []
-                        const repTables = Array.isArray(rep.tables) ? rep.tables : []
-                        return (
-                        <div key={`${rep.evaluator}-${rep.title}`}>
-                          <h3 className="ies-section-subtitle">
-                            {rep.title || rep.evaluator}{' '}
-                            <span className="ies-text-note">
-                              ({rep.evaluator} · {rep.schema}@{rep.schema_version})
-                            </span>
-                          </h3>
-                          {repMetrics.length > 0 ? (
-                            <dl className="ies-kv">
-                              {repMetrics.map((m, idx) => (
-                                <span key={String(m.id ?? idx)} style={{ display: 'contents' }}>
-                                  <dt>{String(m.label ?? m.id ?? idx)}</dt>
-                                  <dd>
-                                    {m.value === null || m.value === undefined
-                                      ? '—'
-                                      : typeof m.value === 'object'
-                                        ? JSON.stringify(m.value)
-                                        : String(m.value)}
-                                    {m.unit ? ` ${String(m.unit)}` : ''}
-                                  </dd>
-                                </span>
-                              ))}
-                            </dl>
-                          ) : null}
-                          {repCharts.length > 0 || repTables.length > 0 ? (
-                            <p className="ies-text-note" style={{ marginTop: 'var(--ies-space-1)' }}>
-                              {t('ies.result.eval_report_charts_tables', {
-                                charts: repCharts.length,
-                                tables: repTables.length,
-                              })}
-                            </p>
-                          ) : null}
-                        </div>
+                      {evaluationReports
+                        .filter(
+                          (rep): rep is EvaluationReportBlock =>
+                            rep !== null && typeof rep === 'object' && !Array.isArray(rep),
                         )
-                      })}
+                        .map((rep, repIdx) => {
+                          const repMetrics = (Array.isArray(rep.metrics) ? rep.metrics : []).filter(
+                            (m): m is Record<string, unknown> =>
+                              m !== null && typeof m === 'object' && !Array.isArray(m),
+                          )
+                          const repCharts = Array.isArray(rep.charts) ? rep.charts : []
+                          const repTables = Array.isArray(rep.tables) ? rep.tables : []
+                          return (
+                            <div key={`${String(rep.evaluator ?? repIdx)}-${String(rep.title ?? repIdx)}`}>
+                              <h3 className="ies-section-subtitle">
+                                {rep.title || rep.evaluator}{' '}
+                                <span className="ies-text-note">
+                                  ({rep.evaluator} · {rep.schema}@{rep.schema_version})
+                                </span>
+                              </h3>
+                              {repMetrics.length > 0 ? (
+                                <dl className="ies-kv">
+                                  {repMetrics.map((m, idx) => {
+                                    const rawLabel = m.label ?? m.id ?? idx
+                                    const labelText =
+                                      typeof rawLabel === 'object' && rawLabel !== null
+                                        ? JSON.stringify(rawLabel)
+                                        : String(rawLabel)
+                                    return (
+                                      <span key={`${idx}-${String(m.id ?? '')}`} style={{ display: 'contents' }}>
+                                        <dt>{labelText}</dt>
+                                        <dd>
+                                          {m.value === null || m.value === undefined
+                                            ? '—'
+                                            : typeof m.value === 'object'
+                                              ? JSON.stringify(m.value)
+                                              : String(m.value)}
+                                          {m.unit ? ` ${String(m.unit)}` : ''}
+                                        </dd>
+                                      </span>
+                                    )
+                                  })}
+                                </dl>
+                              ) : null}
+                              {repCharts.length > 0 || repTables.length > 0 ? (
+                                <p className="ies-text-note" style={{ marginTop: 'var(--ies-space-1)' }}>
+                                  {t('ies.result.eval_report_charts_tables', {
+                                    charts: repCharts.length,
+                                    tables: repTables.length,
+                                  })}
+                                </p>
+                              ) : null}
+                            </div>
+                          )
+                        })}
                     </div>
                   </Card>
                 ) : null}

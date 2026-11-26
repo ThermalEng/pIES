@@ -1126,7 +1126,43 @@ def test_adapt_result_uses_current_claim_attempt_id_when_reusing_older_receipt(
     captured_start: dict[str, Any] = {}
     staged_receipt_attempt: list[str] = []
 
-    valid_fin = {"schema": "ies.financial-evaluation", "schema_version": "1.0.0", "status": "evaluated"}
+    valid_fin = {
+        "schema": "ies.financial-evaluation",
+        "schema_version": "1.0.0",
+        "status": "evaluated",
+        "evaluation_years": 1,
+        "construction_period": 0,
+        "operation_years": 1,
+        "currency": "CNY",
+        "price_basis": "tax_inclusive",
+        "base_year": 2025,
+        "profile_id": "p",
+        "discount_rate": 0.08,
+        "construction_total": "0",
+        "construction_total_unit": "CNY",
+        "annual_fixed_om": "0",
+        "payments_applied": [],
+        "net_cashflows": [],
+        "cost_items": [],
+        "amounts": [],
+        "cash_movements": [],
+        "assets": [],
+        "construction_units": [],
+        "annual_operation": [],
+        "monthly_demand": [],
+        "tax_cash": {
+            "depreciation": [],
+            "derived": [],
+            "income": [],
+            "loss_balances": [],
+            "refunds": [],
+            "vat": [],
+            "vat_rules": [],
+        },
+        "annual_net_flows": ["0", "0"],
+        "comparison": {"mode": "absolute"},
+        "evaluation": {"rows": [], "npv": "0", "irr_status": "no_solution"},
+    }
 
     def handler(request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content.decode()) if request.content else None

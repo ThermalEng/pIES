@@ -737,7 +737,6 @@ def test_unified_algorithm_mode_pipeline_and_checkpoint_recovery(tmp_path: Path)
         eng_sol = {
             "schema": "ies.engineering-solution",
             "schema_version": "1.0.0",
-            "assembly": {"id": "campus", "schema_version": "1.0.0"},
             "solver_summary": {
                 "math_status": "solved",
                 "termination_reason": "optimal",
@@ -1382,6 +1381,146 @@ def test_codex_f4_predictor_group_checkpoint_recovery_and_retry_cleanup(
                 idempotency_key="retry-while-running",
             )
         _ = (MemoryContent, ev_claim)
+    finally:
+        env["db"].close()
+        env["engine"].dispose()
+
+
+def test_codex_r2_rejects_malformed_evaluator_outputs_and_contradictory_solution(
+    tmp_path: Path,
+) -> None:
+    """Codex Round 2 R1/R2: strict canonical evaluator & engineering-solution contracts."""
+    from iesplan.computation import ComputationUnavailableError
+    from iesplan.computation.contracts.outputs import (
+        validate_engineering_solution_doc,
+        validate_evaluation_report_doc,
+        validate_financial_evaluation_doc,
+    )
+    from iesplan.computation.result_adapters import project_engineering_solution
+    from iesplan.core.content import MemoryContent
+
+    # R1: malformed nested evaluation_report (metrics: [null]) and bare financial_evaluation fail.
+    with pytest.raises(ValueError):
+        validate_evaluation_report_doc(
+            {
+                "schema": "ies.evaluation-report",
+                "schema_version": "1.0.0",
+                "title": "Bad Metrics",
+                "evaluator": "acme.evaluator.bad@1.0.0",
+                "metrics": [None],
+                "charts": [],
+                "tables": [],
+            },
+            expected_evaluator="acme.evaluator.bad@1.0.0",
+        )
+    with pytest.raises(ValueError):
+        validate_financial_evaluation_doc(
+            {"schema": "ies.financial-evaluation", "schema_version": "1.0.0", "status": "evaluated"}
+        )
+
+    # R2: contradictory solved + has_feasible_solution=false rejected at both validator and spawn child.
+    contradictory = {
+        "schema": "ies.engineering-solution",
+        "schema_version": "1.0.0",
+        "solver_summary": {
+            "termination_reason": "optimal",
+            "math_status": "solved",
+            "has_feasible_solution": False,
+            "objective_value": None,
+            "objective_unit": None,
+            "best_bound": None,
+            "relative_gap": None,
+        },
+        "extensions": {},
+    }
+    with pytest.raises(ValueError, match="has_feasible_solution=false"):
+        validate_engineering_solution_doc(contradictory)
+
+    sol_out = tmp_path / "projected.json"
+    with pytest.raises(ComputationUnavailableError) as exc_info:
+        project_engineering_solution(
+            MemoryContent(json.dumps(contradictory).encode("utf-8")),
+            bundle_id="b-r2",
+            receipt_id="r-r2",
+            outputs=("solution", "metrics"),
+            solution_output_path=sol_out,
+        )
+    assert exc_info.value.reason == "result-protocol-failure"
+
+    # R1 end-to-end isolation: evaluator producing metrics:[null] fails cleanly as EVAL-PROTOCOL-001.
+    from iesplan.computation import (
+        EVALUATION_REPORT_CONTRACT,
+        StagePluginSpec,
+        build_evaluator_registry,
+    )
+
+    bad_ref = "acme.evaluator.bad_report@1.0.0"
+
+    def _bad_report_handler(_work_in: Path, work_out: Path) -> None:
+        (work_out / "evaluation_report.json").write_text(
+            json.dumps(
+                {
+                    "schema": "ies.evaluation-report",
+                    "schema_version": "1.0.0",
+                    "title": "Malformed Report",
+                    "evaluator": bad_ref,
+                    "metrics": [None],
+                    "charts": [],
+                    "tables": [],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    bad_spec = StagePluginSpec(
+        plugin_id="acme.evaluator.bad_report",
+        version="1.0.0",
+        kind="evaluator",
+        consumes=("ies.engineering-solution@1.0.0",),
+        produces=(EVALUATION_REPORT_CONTRACT,),
+        outputs=("solution", "metrics"),
+        parameters_schema={"type": "object", "additionalProperties": False},
+    )
+    bad_stage = BuiltinStageDescriptor(
+        plugin_id="acme.evaluator.bad_report",
+        version="1.0.0",
+        kind="evaluator",
+        image="pies-plugin/eval:1.0.0",
+        entrypoint="eval:run",
+        manifest_path=f"test://{bad_ref}",
+    )
+    env = _setup_pipeline_env(tmp_path / "e2e_r1", extra_evaluators=(bad_spec,))
+    try:
+        eval_reg = build_evaluator_registry((BUILTIN_EVALUATOR_FINANCE_SPEC, bad_spec))
+        catalog = build_test_stage_catalog(extra_descriptors=(bad_stage,))
+        plane = build_test_compute_plane(
+            tmp_path / "stages_r1",
+            evaluator_registry=eval_reg,
+            stage_catalog=catalog,
+            evaluator_handlers={f"test://{bad_ref}": _bad_report_handler},
+        )
+        cfg = _valid_13_config(
+            evaluators=[
+                {"evaluator": bad_ref, "parameters": {}},
+                {"evaluator": "ies.evaluator.finance@1.0.0", "parameters": {}},
+            ]
+        )
+        task_id = _save_and_submit(env, cfg, idempotency_key="f4-r1-malformed-report")
+        claim = _claim(env["db"], task_id)
+        assert _run(env["engine"], claim, plane) == "completed"
+        headers = login_headers(env["client"], env["user"])
+        res = env["client"].get(
+            f"/api/projects/{env['pid']}/tasks/{task_id}/result",
+            headers=headers,
+        )
+        assert res.status_code == 200
+        result_view = res.json()["result"]
+        assert result_view["financial_evaluation"] is not None
+        assert result_view["evaluation_reports"] == []
+        by_eval = {item["evaluator"]: item for item in result_view["evaluator_results"]}
+        assert by_eval[bad_ref]["status"] == "failed"
+        assert by_eval[bad_ref]["error"]["code"] == "EVAL-PROTOCOL-001"
+        assert by_eval["ies.evaluator.finance@1.0.0"]["status"] == "succeeded"
     finally:
         env["db"].close()
         env["engine"].dispose()

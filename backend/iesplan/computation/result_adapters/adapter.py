@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, NoReturn
 
 from iesplan.computation.bundle import PRIMAL_SOLUTION_OUTPUT_PATH
+from iesplan.computation.contracts.outputs import validate_engineering_solution_doc
 from iesplan.computation.errors import ComputationUnavailableError
 from iesplan.computation.generators.highs_milp import (
     PARAMETERS_PATH,
@@ -1377,27 +1378,12 @@ def _validate_and_project_solution_file(
         doc = json.loads(solution_path.read_text(encoding="utf-8"), parse_constant=_reject_json_constant)
     except (OSError, json.JSONDecodeError) as exc:
         _fail(f"读取工程解失败: {exc}")
-    if not isinstance(doc, Mapping):
-        _fail("solution.json 须为 JSON 对象")
-    if (
-        doc.get("schema") != ENGINEERING_SOLUTION_SCHEMA
-        or doc.get("schema_version") != ENGINEERING_SOLUTION_VERSION
-    ):
-        _fail(f"solution.json schema 非法: {doc.get('schema')!r}@{doc.get('schema_version')!r}")
-    summary = doc.get("solver_summary")
-    if not isinstance(summary, Mapping):
-        _fail("solution.json 缺少 solver_summary 对象")
-    math_status = _require_non_empty_str(summary.get("math_status"), "solver_summary.math_status")
-    if not isinstance(summary.get("has_feasible_solution"), bool):
-        _fail("solver_summary.has_feasible_solution 须为布尔值")
+    validate_engineering_solution_doc(doc, on_error=_fail)
+    summary = doc["solver_summary"]
+    math_status = str(summary["math_status"])
     has_feasible = bool(summary["has_feasible_solution"])
-    check_finite_json(doc, "solution.json")
 
     if has_feasible:
-        if not isinstance(doc.get("construction_units"), list):
-            _fail("有可行解时 solution.json 缺少 construction_units 数组")
-        if not isinstance(doc.get("series"), Mapping) or not isinstance(doc.get("system_series"), Mapping):
-            _fail("有可行解时 solution.json 缺少 series/system_series 对象")
         planning_vars, hourly_meta, hourly_size_bytes = _extract_solution_projections_and_hourly(
             doc, hourly_out_path
         )

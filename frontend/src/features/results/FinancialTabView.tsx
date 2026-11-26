@@ -82,6 +82,10 @@ export function FinancialTabView({
     difference: t('ies.result.comparison_diff'),
   }
 
+  const paymentsApplied = Array.isArray(fin?.payments_applied) ? fin.payments_applied : []
+  const netCashflows = Array.isArray(fin?.net_cashflows) ? fin.net_cashflows : []
+  const annualOperation = Array.isArray(fin?.annual_operation) ? fin.annual_operation : []
+
   const cfRowCount = fin
     ? Math.max(fin.evaluation?.rows?.length ?? 0, fin.annual_net_flows?.length ?? 0)
     : 0
@@ -133,7 +137,7 @@ export function FinancialTabView({
                   size="sm"
                   onClick={() => onOpenDetail('operation')}
                 >
-                  {t('ies.result.view_detail_data', { count: fin.annual_operation.length })}
+                  {t('ies.result.view_detail_data', { count: annualOperation.length })}
                 </Button>
               }
               className="ies-section"
@@ -155,10 +159,10 @@ export function FinancialTabView({
                 <h3 className="ies-section-subtitle">
                   {t('ies.result.fin_payments')}
                 </h3>
-                {fin.payments_applied.length > 0 ? (
+                {paymentsApplied.length > 0 ? (
                   <table className="ies-metric-table">
                     <tbody>
-                      {fin.payments_applied.map((p, index) => (
+                      {paymentsApplied.map((p, index) => (
                         <tr key={`${p.t}-${index}`}>
                           <td>{t('ies.result.fin_t_payment', { year: p.t })}</td>
                           <td>
@@ -178,10 +182,10 @@ export function FinancialTabView({
                 <h3 className="ies-section-subtitle">
                   {t('ies.result.fin_net_cashflows')}
                 </h3>
-                {fin.net_cashflows.length > 0 ? (
+                {netCashflows.length > 0 ? (
                   <table className="ies-metric-table">
                     <tbody>
-                      {fin.net_cashflows.map((item) => (
+                      {netCashflows.map((item) => (
                         <tr key={`${item.t}-${item.id}`}>
                           <td>
                             {item.id} / CF[t={item.t}] / {t(`ies.result.fin_net_${item.direction}`)}
@@ -205,7 +209,7 @@ export function FinancialTabView({
           <Card
             title={t('ies.result.comparison')}
             actions={
-              fin.comparison.mode !== 'absolute' ? (
+              fin.comparison && fin.comparison.mode !== 'absolute' ? (
                 <Button
                   variant="secondary"
                   size="sm"
@@ -218,15 +222,15 @@ export function FinancialTabView({
             className="ies-section"
           >
             <p className="ies-text-secondary" style={{ marginBottom: 'var(--ies-space-2)' }}>
-              {fin.comparison.mode}
+              {fin.comparison?.mode ?? 'absolute'}
             </p>
-            {fin.comparison.mode !== 'absolute' ? (
+            {fin.comparison && fin.comparison.mode !== 'absolute' ? (
               <>
                 <p className="ies-text-note">
-                  {fin.comparison.comparability.service_basis}
+                  {fin.comparison.comparability?.service_basis}
                 </p>
                 <p className="ies-text-note" style={{ marginBottom: 'var(--ies-space-3)' }}>
-                  {fin.comparison.comparability.differences}
+                  {fin.comparison.comparability?.differences}
                 </p>
                 {cmpChart && cmpChart.categories.length > 0 ? (
                   <CategoryLineChart

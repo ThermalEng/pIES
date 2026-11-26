@@ -136,21 +136,90 @@ def test_generator_solver_evaluator_stage_io(tmp_path: Path) -> None:
 
     # Evaluators emit canonical financial_evaluation.json or evaluation_report.json (no result.json)
     eval_out = tmp_path / "eval_out"
-    write_financial_evaluation(
-        eval_out / "financial_evaluation.json",
-        {
-            "schema": "ies.financial-evaluation",
-            "schema_version": "1.0.0",
-            "status": "evaluated",
-            "profile_id": "pure-fwd",
+    sample_fin_eval = {
+        "schema": "ies.financial-evaluation",
+        "schema_version": "1.0.0",
+        "status": "evaluated",
+        "evaluation_years": 1,
+        "construction_period": 0,
+        "operation_years": 1,
+        "currency": "CNY",
+        "price_basis": "tax_inclusive",
+        "base_year": 2025,
+        "profile_id": "pure-fwd",
+        "discount_rate": 0.0,
+        "construction_total": "1000.0",
+        "construction_total_unit": "CNY",
+        "annual_fixed_om": "30.0",
+        "payments_applied": [],
+        "net_cashflows": [],
+        "cost_items": [],
+        "amounts": [],
+        "cash_movements": [],
+        "assets": [],
+        "construction_units": [],
+        "annual_operation": [],
+        "monthly_demand": [],
+        "tax_cash": {
+            "depreciation": [],
+            "derived": [],
+            "income": [],
+            "loss_balances": [],
+            "refunds": [],
+            "vat": [],
+            "vat_rules": [],
         },
-    )
+        "annual_net_flows": ["-1000.0", "6072.5"],
+        "comparison": {"mode": "absolute"},
+        "evaluation": {
+            "schema": "ies.project-evaluation",
+            "schema_version": "1.0.0",
+            "npv": "5072.5",
+            "irr_status": "defined",
+            "rows": [],
+        },
+    }
+    write_financial_evaluation(eval_out / "financial_evaluation.json", sample_fin_eval)
     validate_stage_outputs(
         "evaluator",
         eval_out,
         produces=("ies.financial-evaluation@1.0.0",),
     )
     assert read_financial_evaluation(eval_out / "financial_evaluation.json")["status"] == "evaluated"
+
+    bare_fin_out = tmp_path / "bare_fin_out"
+    write_json_file(
+        bare_fin_out / "financial_evaluation.json",
+        {"schema": "ies.financial-evaluation", "schema_version": "1.0.0", "status": "evaluated"},
+    )
+    with pytest.raises(StageIOError, match="requires"):
+        validate_stage_outputs("evaluator", bare_fin_out, produces=("ies.financial-evaluation@1.0.0",))
+
+    bad_tax_out = tmp_path / "bad_tax_out"
+    bad_tax = {**sample_fin_eval, "tax_cash": {"income": []}}
+    write_json_file(bad_tax_out / "financial_evaluation.json", bad_tax)
+    with pytest.raises(StageIOError, match="tax_cash"):
+        validate_stage_outputs("evaluator", bad_tax_out, produces=("ies.financial-evaluation@1.0.0",))
+
+    bad_report_out = tmp_path / "bad_report_out"
+    write_json_file(
+        bad_report_out / "evaluation_report.json",
+        {
+            "schema": "ies.evaluation-report",
+            "schema_version": "1.0.0",
+            "title": "Bad",
+            "evaluator": "acme.evaluator.carbon@1.0.0",
+            "metrics": [None],
+            "charts": [],
+            "tables": [],
+        },
+    )
+    with pytest.raises(StageIOError, match="EvaluationMetric"):
+        validate_stage_outputs(
+            "evaluator",
+            bad_report_out,
+            produces=("ies.evaluation-report@1.0.0",),
+        )
 
     legacy_only = tmp_path / "legacy_eval_out"
     write_json_file(legacy_only / "result.json", {"schema": "ies.compute-result", "schema_version": "1.0.0"})

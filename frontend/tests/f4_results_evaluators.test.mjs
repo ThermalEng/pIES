@@ -12,7 +12,9 @@ const { api } = await import('../src/api/client.ts')
 const { mapResultViewDtoToModel } = await import('../src/features/results/mappers.ts')
 const {
   FinancialAbsenceAlert,
+  FinancialTabView,
   SealedFinancialCore,
+  TaxDetailsTabView,
   buildCashflowChartData,
   formatEvaluatorDetail,
 } = await import('../src/features/results/index.ts')
@@ -169,7 +171,7 @@ assert.equal(
   '{"exit_code":1,"termination_reason":"failed"}',
 )
 
-// 5. Partial financial block renders safely without crashing
+// 5. Partial financial block renders safely without crashing (ResultsPage/FinancialTabView/TaxDetailsTabView)
 {
   const partialFin = {}
   const coreHtml = renderToStaticMarkup(
@@ -181,6 +183,34 @@ assert.equal(
   )
   assert.equal(coreHtml, '')
   assert.deepEqual(buildCashflowChartData(partialFin), { categories: [], bars: [], lines: [] })
+  const finHtml = renderToStaticMarkup(
+    createElement(
+      I18nProvider,
+      null,
+      createElement(FinancialTabView, {
+        fin: partialFin,
+        finAbsence: null,
+        outcome: 'normal_completion',
+        metrics: null,
+        currency: 'CNY',
+        onOpenDetail: () => {},
+      }),
+    ),
+  )
+  assert.ok(finHtml.length > 0)
+  const taxHtml = renderToStaticMarkup(
+    createElement(
+      I18nProvider,
+      null,
+      createElement(TaxDetailsTabView, {
+        fin: partialFin,
+        finAbsence: null,
+        outcome: 'normal_completion',
+        onOpenDetail: () => {},
+      }),
+    ),
+  )
+  assert.ok(taxHtml.length > 0)
 }
 
 console.log('ALL F4 RESULTS/EVALUATOR CHECKS PASSED')

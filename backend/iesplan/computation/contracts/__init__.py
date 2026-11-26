@@ -20,6 +20,11 @@ from iesplan.computation.contracts.compatibility import (
     StagePluginSpec,
     validate_stage_compatibility,
 )
+from iesplan.computation.contracts.outputs import (
+    validate_engineering_solution_doc,
+    validate_evaluation_report_doc,
+    validate_financial_evaluation_doc,
+)
 from iesplan.computation.protocols import (
     CALCULATION_CONFIG_FIELDS,
     CALCULATION_CONFIG_SCHEMA,
@@ -56,6 +61,9 @@ __all__ = [
     "check_parameters_against_schema",
     "check_relative_path",
     "validate_against_schema",
+    "validate_engineering_solution_doc",
+    "validate_evaluation_report_doc",
+    "validate_financial_evaluation_doc",
     "validate_parameters_schema",
     "validate_stage_compatibility",
 ]

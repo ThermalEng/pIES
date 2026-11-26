@@ -86,7 +86,7 @@ def run_plugin(
     in_dir = Path(work_in)
     out_dir = Path(work_out)
 
-    raw_params = manifest.validate_parameters(extract_stage_parameters(in_dir))
+    raw_params = extract_stage_parameters(in_dir)
 
     out_dir.mkdir(parents=True, exist_ok=True)
     ctx = StageContext(
