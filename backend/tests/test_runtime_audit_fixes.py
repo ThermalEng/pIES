@@ -1481,8 +1481,37 @@ def test_runner_checkpoint_hits_cleanup_residual_stages_and_fresh_run_skips(
                 "receipt_id": "rcpt-algo-clean",
                 "execution_status": "completed",
                 "math_status": "solved",
-                "outputs": {"solution": {"objective_value": 5.0, "variables": []}},
+                "outputs": {
+                    "solver_summary": {
+                        "math_status": "solved",
+                        "termination_reason": "optimal",
+                        "has_feasible_solution": True,
+                        "objective_value": 5.0,
+                        "objective_unit": "CNY",
+                        "best_bound": 5.0,
+                        "relative_gap": 0.0,
+                    }
+                },
             },
+            solution_content=json.dumps(
+                {
+                    "schema": "ies.engineering-solution",
+                    "schema_version": "1.0.0",
+                    "solver_summary": {
+                        "math_status": "solved",
+                        "termination_reason": "optimal",
+                        "has_feasible_solution": True,
+                        "objective_value": 5.0,
+                        "objective_unit": "CNY",
+                        "best_bound": 5.0,
+                        "relative_gap": 0.0,
+                    },
+                    "construction_units": [],
+                    "series": {},
+                    "system_series": {},
+                    "extensions": {},
+                }
+            ).encode("utf-8"),
         )
         db.commit()
 
@@ -1517,6 +1546,35 @@ def test_runner_checkpoint_hits_cleanup_residual_stages_and_fresh_run_skips(
     assert cleanup_calls == [
         {"attempt_id": str(claim.attempt_id), "stage_id": "algorithm-r1", "stage_id_prefix": None}
     ]
+
+    # Failed/timed-out algorithm checkpoint with solution_ref=None and outputs={} must not KeyError.
+    with factory() as db:
+        fail_task = tasks_domain.create_task(
+            db,
+            project_id=proj.id,
+            type="calc",
+            idempotency_key="ckpt-clean-algo-failed",
+            requested_by=_user.id,
+            calc_snapshot_id=snap.id,
+        )
+        db.commit()
+        fail_claim = worker_app.acquire_attempt(db, fail_task.id, "w-clean-fail")
+        assert fail_claim is not None
+        save_algorithm_checkpoint(
+            db,
+            fail_claim,
+            {
+                "schema": "ies.compute-result",
+                "schema_version": "1.0.0",
+                "bundle_id": f"snapshot-{snap.id}:attempt-{fail_claim.attempt_id}",
+                "receipt_id": "rcpt-algo-fail",
+                "execution_status": "failed",
+                "math_status": "not_solved",
+                "outputs": {},
+            },
+        )
+        db.commit()
+    assert runner.run_task(factory, fail_claim, worker_id="w-clean-fail", compute=plane) == "failed"
 
     # _predict_round / _solve_round checkpoint hit vs fresh miss
     cleanup_calls.clear()

@@ -428,8 +428,8 @@ def _execute_compute(ctx: RunContext) -> tuple[dict, dict | None]:
             number=1,
             config=config,
             has_feasible_solution=(
-                bool(result.outputs["solver_summary"]["has_feasible_solution"])
-                and solution_ref is not None
+                solution_ref is not None
+                and bool(result.outputs["solver_summary"]["has_feasible_solution"])
             ),
             solution_ref=solution_ref,
             snapshot=snapshot,
