@@ -19,6 +19,7 @@ import {
   assess as assessResult,
   select as selectResult,
   readHourly,
+  retryEvaluator,
 } from '../features/results'
 import {
   exportPackage,
@@ -58,6 +59,7 @@ export const api = {
     assess: assessResult,
     select: selectResult,
     hourly: readHourly,
+    retryEvaluator,
   },
 
   exports: {

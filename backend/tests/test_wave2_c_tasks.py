@@ -12,6 +12,7 @@ from __future__ import annotations
 import os
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 from uuid import UUID
 
 # 单文件运行时的安全网: 固定 SQLite + 内存队列, 避免误连部署 Postgres/Redis
@@ -102,9 +103,15 @@ def _user(db: Session, name: str):
     return rec
 
 
-def _registry(client: TestClient):
-    """组合根已发布的生成器目录(随 app lifespan 装配; 测试只消费, 不组装)。"""
-    return client.app.state.bootstrap_context.generator_registry
+def _registries(client: TestClient) -> dict[str, Any]:
+    """组合根已发布的目录集合(随 app lifespan 装配; 测试只消费, 不组装)。"""
+    ctx = client.app.state.bootstrap_context
+    return {
+        "generator_registry": ctx.generator_registry,
+        "solver_registry": ctx.solver_registry,
+        "evaluator_registry": ctx.evaluator_registry,
+        "algorithm_registry": ctx.algorithm_registry,
+    }
 
 
 def _project(client: TestClient, user, name: str) -> int:
@@ -155,7 +162,7 @@ def test_submit_report_task_commits_and_repeatable(
     assert (old.type, old.status, old.calc_snapshot_id) == (task.type, task.status, task.calc_snapshot_id)
 
 
-#: 计算配置正文(14 字段契约; 与 test_http_contract._CALC_PAYLOAD 同构)。
+#: 计算配置正文(13 字段契约; 与 test_http_contract._CALC_PAYLOAD 同构)。
 _CONFIG_BODY: dict = {
     "schema": "ies.calculation-config",
     "schema_version": "1.0.0",
@@ -164,11 +171,10 @@ _CONFIG_BODY: dict = {
     "generator": "ies.generator.highs_milp@1.0.0",
     "solver": "ies.solver.highs@1.7.2",
     "algorithm": None,
-    "evaluator": None,
+    "evaluators": [],
     "precision": "medium",
-    "convergence": None,
     "time_limit_seconds": 600,
-    "options": {},
+    "options": {"generator": {}, "solver": {}},
     "seed": None,
     "outputs": ["solution"],
 }
@@ -275,7 +281,7 @@ def test_submit_compute_task_snapshot_replay_and_reuse(
     owner = _user(db, "w2c_owner_opt")
     pid = _project(client, owner, "w2c-proj-opt")
     _declare_optimization_ready(client, db, owner, pid)
-    saved = save_calculation_config_case(db, owner, pid, dict(_CONFIG_BODY), None, generator_registry=_registry(client))
+    saved = save_calculation_config_case(db, owner, pid, dict(_CONFIG_BODY), None, **_registries(client))
     rev = saved["revision"]
 
     task, flags = tasks_uc.submit_task(
@@ -286,7 +292,7 @@ def test_submit_compute_task_snapshot_replay_and_reuse(
                 "construction_payments": [{"t": 0, "ratio": 1}],
                 "maintenance_expenses": [],
             }, idempotency_key="w2c-opt-1",
-        generator_registry=_registry(client),
+        **_registries(client),
     )
     assert flags == {"replay": False}
     assert task.calc_snapshot_id is not None
@@ -299,7 +305,7 @@ def test_submit_compute_task_snapshot_replay_and_reuse(
                 "construction_payments": [{"t": 0, "ratio": 1}],
                 "maintenance_expenses": [],
             }, idempotency_key="w2c-opt-1",
-        generator_registry=_registry(client),
+        **_registries(client),
     )
     assert rflags == {"replay": True}
     assert replay.id == task.id
@@ -313,7 +319,7 @@ def test_submit_compute_task_snapshot_replay_and_reuse(
                 "construction_payments": [{"t": 0, "ratio": 1}],
                 "maintenance_expenses": [],
             }, idempotency_key="w2c-opt-2",
-        generator_registry=_registry(client),
+        **_registries(client),
     )
     assert oflags == {"replay": False}
     assert other.id != task.id
@@ -340,7 +346,7 @@ def test_submit_without_frozen_refs_fails_explicitly(
 
     owner = _user(db, "w2c_owner_noref")
     pid = _project(client, owner, "w2c-proj-noref")
-    saved = save_calculation_config_case(db, owner, pid, dict(_CONFIG_BODY), None, generator_registry=_registry(client))
+    saved = save_calculation_config_case(db, owner, pid, dict(_CONFIG_BODY), None, **_registries(client))
     rev = saved["revision"]
     with pytest.raises(InvalidRequestError):
         tasks_uc.submit_task(
@@ -351,7 +357,7 @@ def test_submit_without_frozen_refs_fails_explicitly(
                 "construction_payments": [{"t": 0, "ratio": 1}],
                 "maintenance_expenses": [],
             }, idempotency_key="w2c-noref-1",
-        generator_registry=_registry(client),
+        **_registries(client),
         )
 
     from test_config_revisions import PROFILE_PAYLOAD
@@ -372,7 +378,7 @@ def test_submit_without_frozen_refs_fails_explicitly(
                 "construction_payments": [{"t": 0, "ratio": 1}],
                 "maintenance_expenses": [],
             }, idempotency_key="w2c-noref-2",
-        generator_registry=_registry(client),
+        **_registries(client),
         )
 
 
@@ -399,7 +405,7 @@ def test_restore_version_keeps_frozen_pins(client: TestClient, db: Session) -> N
     device_ref, _ = _declare_optimization_ready(client, db, owner, pid)
     from iesplan.application.configuration.calc_config import save_calculation_config_case
 
-    saved = save_calculation_config_case(db, owner, pid, dict(_CONFIG_BODY), None, generator_registry=_registry(client))
+    saved = save_calculation_config_case(db, owner, pid, dict(_CONFIG_BODY), None, **_registries(client))
     task, _ = tasks_uc.submit_task(
         db, owner, pid, "optimization",
         config={"config_revision": saved["revision"]}, evaluation={
@@ -408,7 +414,7 @@ def test_restore_version_keeps_frozen_pins(client: TestClient, db: Session) -> N
                 "construction_payments": [{"t": 0, "ratio": 1}],
                 "maintenance_expenses": [],
             }, idempotency_key="w2c-restore-1",
-        generator_registry=_registry(client),
+        **_registries(client),
     )
     assert task.calc_snapshot_id is not None
     snap1 = tasks_domain.get_snapshot(db, task.calc_snapshot_id)
@@ -483,7 +489,7 @@ def test_restore_version_keeps_frozen_pins(client: TestClient, db: Session) -> N
                 "construction_payments": [{"t": 0, "ratio": 1}],
                 "maintenance_expenses": [],
             }, idempotency_key="w2c-restore-2",
-        generator_registry=_registry(client),
+        **_registries(client),
     )
     assert task2.calc_snapshot_id is not None
     snap2 = tasks_domain.get_snapshot(db, task2.calc_snapshot_id)
@@ -573,7 +579,7 @@ def test_restore_version_without_finance_clears_pointers(
 
     from iesplan.application.configuration.calc_config import save_calculation_config_case
 
-    saved = save_calculation_config_case(db, owner, pid, dict(_CONFIG_BODY), None, generator_registry=_registry(client))
+    saved = save_calculation_config_case(db, owner, pid, dict(_CONFIG_BODY), None, **_registries(client))
     # 引用合法但财务/规划引用已清空 → 仍明确失败(装配门禁, 非绑定问题)
     with pytest.raises(InvalidRequestError):
         tasks_uc.submit_task(
@@ -584,7 +590,7 @@ def test_restore_version_without_finance_clears_pointers(
                 "construction_payments": [{"t": 0, "ratio": 1}],
                 "maintenance_expenses": [],
             }, idempotency_key="w2c-early-1",
-        generator_registry=_registry(client),
+        **_registries(client),
         )
 
 
@@ -738,7 +744,7 @@ def test_retry_terminal_task_consistent(client: TestClient, db: Session, engine:
     owner = _user(db, "w2c_owner_retry")
     pid = _project(client, owner, "w2c-proj-retry")
     _declare_optimization_ready(client, db, owner, pid)
-    saved = save_calculation_config_case(db, owner, pid, dict(_CONFIG_BODY), None, generator_registry=_registry(client))
+    saved = save_calculation_config_case(db, owner, pid, dict(_CONFIG_BODY), None, **_registries(client))
     rev = saved["revision"]
 
     t1, _ = tasks_uc.submit_task(
@@ -749,7 +755,7 @@ def test_retry_terminal_task_consistent(client: TestClient, db: Session, engine:
                 "construction_payments": [{"t": 0, "ratio": 1}],
                 "maintenance_expenses": [],
             }, idempotency_key="w2c-t1",
-        generator_registry=_registry(client),
+        **_registries(client),
     )
     snap = t1.calc_snapshot_id
     _fail(db, t1.id)
@@ -766,7 +772,7 @@ def test_retry_terminal_task_consistent(client: TestClient, db: Session, engine:
                 "construction_payments": [{"t": 0, "ratio": 1}],
                 "maintenance_expenses": [],
             }, idempotency_key="w2c-t2",
-        generator_registry=_registry(client),
+        **_registries(client),
     )
     _fail(db, t2.id)
     old_retried = tasks_uc.retry_task(db, owner, t2.id)

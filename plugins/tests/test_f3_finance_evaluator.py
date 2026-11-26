@@ -15,48 +15,30 @@ from typing import Any
 import pytest
 from iesplan.assembly import validate_assembly_text
 from iesplan.computation import (
-    HIGHS_ADAPTER,
-    HIGHS_ADAPTER_PATH,
     HIGHS_EXECUTABLE_REF,
-    HIGHS_MILP_PROVIDER,
-    HIGHS_VERSION,
-    AttemptContext,
+    PRIMAL_SOLUTION_OUTPUT_PATH,
     CalculationConfig,
-    DeploymentPolicy,
-    ExecutableReadiness,
     ExecutionReceipt,
-    ExecutorDescriptor,
-    LocalExecutable,
-    LocalProcessProvider,
-    SolverRuntime,
-    build_executor_registry,
+    SolverBundle,
+    generate_highs_bundle,
     materialize_non_predictive_series,
 )
-from iesplan.computation.contracts import (
-    PRIMAL_SOLUTION_OUTPUT_PATH,
-    TargetCalculationConfig,
-    TargetSolverBundle,
-)
 from iesplan.computation.generators.highs_milp import EXECUTOR_REF
-from iesplan.computation.generators.target_bundle import generate_target_highs_bundle
-from iesplan.computation.result_adapters.target_adapter import TargetResultAdapter
+from iesplan.computation.result_adapters import ResultAdapter
 from iesplan.devices import init_registry, list_devices
-from iesplan.finance import EvaluationInput, effective_from_yaml
+from iesplan.finance import EvaluationInput, effective_from_yaml, evaluate_forward_finance
 from iesplan.modeling import build_math_contribution, contribution_to_dict
 from pies_sdk import (
-    StageContext,
     StageIOError,
     check_compatibility,
     load_plugin_manifest,
-    read_compute_result,
     read_engineering_solution,
+    read_financial_evaluation,
     read_json_file,
     write_engineering_solution,
     write_json_file,
 )
-from pies_sdk.runner import resolve_entrypoint, run_plugin
-
-from pies_builtin_plugins.stage_io import build_financial_evaluation_payload
+from pies_sdk.runner import run_plugin
 
 PLUGINS_ROOT = Path(__file__).resolve().parent.parent
 REPO_ROOT = PLUGINS_ROOT.parent
@@ -248,11 +230,10 @@ def test_evaluator_finance_manifest_and_offline_minimal_fixture(tmp_path: Path) 
         work_out=work_out,
         pies_version="1.2.0",
     )
-    actual = read_compute_result(work_out).to_dict()
-    expected = read_json_file(EVAL_FINANCE_DIR / test_spec.expected / "result.json")
-    assert actual == expected
+    fin_eval = read_financial_evaluation(work_out / "financial_evaluation.json")
+    expected = read_json_file(EVAL_FINANCE_DIR / test_spec.expected / "financial_evaluation.json")
+    assert fin_eval == expected
 
-    fin_eval = actual["outputs"]["financial_evaluation"]
     assert fin_eval["schema"] == "ies.financial-evaluation"
     assert fin_eval["schema_version"] == "1.0.0"
     assert Decimal(fin_eval["construction_total"]) == Decimal("1000")
@@ -292,76 +273,11 @@ def test_gate4_evaluator_finance_zero_forbidden_deps_and_zero_sha256() -> None:
     assert not (installed & _FORBIDDEN_PACKAGES)
 
 
-def test_f3_campus_full_parity_with_115_evaluator(tmp_path: Path) -> None:
-    """F2 generate_f2 -> solve_f2 -> restore -> evaluator_finance matches 1.1.5 evaluation."""
+def test_f3_campus_full_parity_with_forward_evaluator(tmp_path: Path) -> None:
+    """Canonical generate -> solve -> ResultAdapter -> evaluator_finance matches direct evaluation."""
     artifact, models, materialized, finance, evaluation, _resources = _load_campus_frozen_inputs()
 
-    # 1) 1.1.5 direct reference financial evaluation
-    legacy_cfg = CalculationConfig(
-        mode="planning",
-        generator="ies.generator.highs_milp@1.0.0",
-        solver="ies.solver.highs@1.7.2",
-        evaluator=HIGHS_ADAPTER.ref,
-        precision="medium",
-        time_limit_seconds=120,
-        outputs=("solution", "metrics"),
-        seed=7,
-    )
-    legacy_bundle = HIGHS_MILP_PROVIDER.generate(
-        artifact, models, materialized, finance, legacy_cfg, evaluation
-    )
-    executor_id, _, executor_version = EXECUTOR_REF.rpartition("@")
-    runtime = SolverRuntime(
-        build_executor_registry(
-            [
-                LocalProcessProvider(
-                    ExecutorDescriptor(
-                        executor_id=executor_id,
-                        version=executor_version,
-                        executables=(HIGHS_EXECUTABLE_REF,),
-                    ),
-                    (
-                        LocalExecutable(
-                            ref=HIGHS_EXECUTABLE_REF,
-                            path=HIGHS_ADAPTER_PATH,
-                            readiness=ExecutableReadiness(
-                                version=HIGHS_VERSION,
-                                self_test=("--self-test",),
-                                output_path="self-test.sol",
-                            ),
-                        ),
-                    ),
-                    base_environ={},
-                )
-            ]
-        ),
-        DeploymentPolicy(
-            executables=(HIGHS_EXECUTABLE_REF,),
-            environment_vars=(),
-            max_timeout_seconds=1200,
-            max_memory_mib=4096,
-            max_cpu_cores=4,
-            allow_network=False,
-        ),
-    )
-    receipt, outputs = runtime.run(
-        legacy_bundle,
-        AttemptContext(
-            attempt_id="f3-parity-1",
-            bundle_id="f3-bundle-1",
-            assembly_id="campus_demo",
-            calculation_config_id="f3-cfg-1",
-        ),
-    )
-    assert receipt.status == "succeeded"
-    legacy_result = HIGHS_ADAPTER.adapt(legacy_bundle, receipt, outputs)
-    expected_eval = build_financial_evaluation_payload(
-        _evaluation_to_dict(evaluation), finance, legacy_result
-    )
-    assert expected_eval is not None
-
-    # 2) F2 generate_f2 -> solve_f2 -> TargetResultAdapter -> ies.engineering-solution@1.0.0
-    target_cfg = TargetCalculationConfig(
+    target_cfg = CalculationConfig(
         mode="planning",
         predictions=(),
         generator="ies.generator.highs_milp@1.0.0",
@@ -374,7 +290,7 @@ def test_f3_campus_full_parity_with_115_evaluator(tmp_path: Path) -> None:
         seed=7,
         outputs=("solution", "metrics"),
     )
-    gen_in = tmp_path / "f2_gen_in"
+    gen_in = tmp_path / "gen_in"
     gen_in.mkdir()
     write_json_file(
         gen_in / "request.json",
@@ -387,38 +303,31 @@ def test_f3_campus_full_parity_with_115_evaluator(tmp_path: Path) -> None:
             "evaluation": _evaluation_to_dict(evaluation),
         },
     )
-    generate_f2 = resolve_entrypoint("f2_generator:generate_f2", PLUGINS_ROOT / "generator_highs_milp")
-    f2_gen_out = tmp_path / "f2_bundle_out"
-    f2_gen_out.mkdir()
-    generate_f2(
-        StageContext(
-            manifest=load_plugin_manifest(
-                PLUGINS_ROOT / "generator_highs_milp" / "plugin.yaml", check_compat=False
-            ),
-            work_in=gen_in,
-            work_out=f2_gen_out,
-            parameters={},
-        )
+    gen_out = tmp_path / "bundle_out"
+    run_plugin(
+        manifest_path=PLUGINS_ROOT / "generator_highs_milp" / "plugin.yaml",
+        work_in=gen_in,
+        work_out=gen_out,
+        pies_version="1.2.0",
     )
 
-    f2_solver_in = tmp_path / "f2_solver_in"
-    f2_solver_out = tmp_path / "f2_solver_out"
-    f2_solver_in.mkdir()
-    f2_solver_out.mkdir()
-    (f2_solver_in / "bundle").symlink_to(f2_gen_out / "bundle")
-    write_json_file(f2_solver_in / "request.json", {"time_limit_seconds": 120, "seed": 7})
-    solve_f2 = resolve_entrypoint("f2_solver:solve_f2", PLUGINS_ROOT / "solver_highs")
-    solve_f2(
-        StageContext(
-            manifest=load_plugin_manifest(PLUGINS_ROOT / "solver_highs" / "plugin.yaml", check_compat=False),
-            work_in=f2_solver_in,
-            work_out=f2_solver_out,
-            parameters={"threads": 1},
-        )
+    solver_in = tmp_path / "solver_in"
+    solver_out = tmp_path / "solver_out"
+    solver_in.mkdir()
+    (solver_in / "bundle").symlink_to(gen_out / "bundle")
+    write_json_file(
+        solver_in / "request.json",
+        {"time_limit_seconds": 120, "seed": 7, "parameters": {"threads": 1}},
+    )
+    run_plugin(
+        manifest_path=PLUGINS_ROOT / "solver_highs" / "plugin.yaml",
+        work_in=solver_in,
+        work_out=solver_out,
+        pies_version="1.2.0",
     )
 
-    bundle = generate_target_highs_bundle(artifact, models, materialized, finance, target_cfg, evaluation)
-    assert isinstance(bundle, TargetSolverBundle)
+    bundle = generate_highs_bundle(artifact, models, materialized, finance, target_cfg, evaluation)
+    assert isinstance(bundle, SolverBundle)
     sol_json_out = tmp_path / "restored_solution.json"
     exec_receipt = ExecutionReceipt(
         receipt_id="f3-rec-1",
@@ -430,22 +339,33 @@ def test_f3_campus_full_parity_with_115_evaluator(tmp_path: Path) -> None:
         solver_ref="ies.solver.highs@1.7.2",
         executor_ref=EXECUTOR_REF,
         executable_ref=HIGHS_EXECUTABLE_REF,
-        result_adapter_ref="ies.result-adapter.target@1.0.0",
+        result_adapter_ref=None,
         status="succeeded",
         exit_code=0,
         termination_reason="exited",
         started_at="2026-01-01T00:00:00Z",
         ended_at="2026-01-01T00:00:01Z",
     )
-    outcome = TargetResultAdapter().restore_with_outcome(
+    outcome = ResultAdapter().restore_with_outcome(
         bundle,
         exec_receipt,
-        {PRIMAL_SOLUTION_OUTPUT_PATH: (f2_solver_out / "primal_solution.json").read_bytes()},
+        {PRIMAL_SOLUTION_OUTPUT_PATH: (solver_out / "primal_solution.json").read_bytes()},
         solution_output_path=sol_json_out,
     )
     assert outcome.compute_result.math_status == "solved"
+    restored_sol = read_engineering_solution(sol_json_out)
+    assert restored_sol.solver_summary.objective_value == pytest.approx(850_051.6, abs=1e-5)
 
-    # 3) Run F3 `ies.evaluator.finance@1.0.0` via `run_plugin` with ONLY solution.json + frozen context
+    expected_eval = evaluate_forward_finance(
+        restored_sol.to_dict(),
+        artifact=artifact,
+        finance=finance,
+        evaluation=evaluation,
+        materialized=materialized,
+        device_models=models,
+    )
+
+    # Run `ies.evaluator.finance@1.0.0` via `run_plugin` with ONLY solution.json + frozen context
     # (NO SolverBundle, NO problem.mps, NO variable_map/parameters.json*)
     eval_in = tmp_path / "f3_eval_in"
     eval_out = tmp_path / "f3_eval_out"
@@ -463,10 +383,8 @@ def test_f3_campus_full_parity_with_115_evaluator(tmp_path: Path) -> None:
         work_out=eval_out,
         pies_version="1.2.0",
     )
-    result = read_compute_result(eval_out)
-    assert result.execution_status == "completed"
-    assert result.math_status == "solved"
-    actual_eval = result.outputs["financial_evaluation"]
+    actual_eval = read_financial_evaluation(eval_out / "financial_evaluation.json")
+    assert actual_eval["status"] == "evaluated"
     _assert_eval_close(actual_eval, expected_eval)
 
 
@@ -478,8 +396,13 @@ def test_f3_independent_algorithm_to_evaluator_without_bundle(tmp_path: Path) ->
     ref_out = tmp_path / "ref_out"
     ref_in.mkdir()
     shutil.copy(ref_dir / "tests" / "minimal" / "input.json", ref_in / "request.json")
-    run_plugin(manifest_path=ref_dir / "plugin.yaml", work_in=ref_in, work_out=ref_out)
-    assert read_compute_result(ref_out).math_status == "solved"
+    run_plugin(
+        manifest_path=ref_dir / "plugin.yaml",
+        work_in=ref_in,
+        work_out=ref_out,
+        pies_version="1.2.0",
+    )
+    assert read_engineering_solution(ref_out / "solution.json").solver_summary.math_status == "solved"
 
     # Now run an inline standalone F1 `algorithm` plugin emitting ies.engineering-solution@1.0.0
     alg_dir = tmp_path / "alg_plugin"
@@ -518,19 +441,10 @@ def test_f3_independent_algorithm_to_evaluator_without_bundle(tmp_path: Path) ->
     (alg_dir / "alg_main.py").write_text(
         "\n".join(
             [
-                "from pies_sdk import ComputeResultPayload, StageContext, write_engineering_solution",
+                "from pies_sdk import StageContext, write_engineering_solution",
                 "def solve(ctx: StageContext) -> None:",
                 "    req = ctx.read_request()",
                 "    write_engineering_solution(ctx.work_out / 'solution.json', req['solution'])",
-                "    ctx.write_result(",
-                "        ComputeResultPayload(",
-                "            bundle_id='alg-standalone',",
-                "            receipt_id='alg-rec-1',",
-                "            execution_status='completed',",
-                "            math_status='solved',",
-                "            outputs={'solver_summary': req['solution']['solver_summary']},",
-                "        )",
-                "    )",
                 "",
             ]
         ),
@@ -558,11 +472,11 @@ def test_f3_independent_algorithm_to_evaluator_without_bundle(tmp_path: Path) ->
         work_out=eval_out,
         pies_version="1.2.0",
     )
-    res = read_compute_result(eval_out)
-    assert res.execution_status == "completed"
-    assert res.math_status == "solved"
-    expected = read_json_file(EVAL_FINANCE_DIR / "tests" / "minimal" / "expected" / "result.json")
-    assert res.to_dict()["outputs"] == expected["outputs"]
+    actual = read_financial_evaluation(eval_out / "financial_evaluation.json")
+    expected = read_json_file(
+        EVAL_FINANCE_DIR / "tests" / "minimal" / "expected" / "financial_evaluation.json"
+    )
+    assert actual == expected
 
 
 def test_f3_rejects_infeasible_solution_and_missing_frozen_inputs(tmp_path: Path) -> None:
@@ -621,7 +535,9 @@ def test_f3_rejects_omitted_truncated_or_unit_mismatched_solution_and_loads_froz
 
     minimal_in = EVAL_FINANCE_DIR / "tests" / "minimal" / "in"
     base_sol = read_json_file(minimal_in / "solution.json")
-    expected = read_json_file(EVAL_FINANCE_DIR / "tests" / "minimal" / "expected" / "result.json")
+    expected = read_json_file(
+        EVAL_FINANCE_DIR / "tests" / "minimal" / "expected" / "financial_evaluation.json"
+    )
 
     def _run_case(name: str, mutate_sol: Any, *, use_yaml: bool = False) -> None:
         in_dir = tmp_path / f"{name}_in"
@@ -646,7 +562,7 @@ def test_f3_rejects_omitted_truncated_or_unit_mismatched_solution_and_loads_froz
             pies_version="1.2.0",
         )
         if use_yaml:
-            assert read_compute_result(out_dir).to_dict()["outputs"] == expected["outputs"]
+            assert read_financial_evaluation(out_dir / "financial_evaluation.json") == expected
 
     # 0) Frozen assembly.yaml loads without repeating submission validation
     _run_case("frozen_yaml", lambda _s: None, use_yaml=True)
@@ -745,8 +661,8 @@ def test_f3_complex_tax_serialized_device_models_and_system_quantity_unit_mismat
         work_out=tax_out,
         pies_version="1.2.0",
     )
-    tax_res = read_compute_result(tax_out)
-    assert Decimal(tax_res.outputs["financial_evaluation"]["evaluation"]["npv"]) == Decimal("5072.5")
+    tax_eval = read_financial_evaluation(tax_out / "financial_evaluation.json")
+    assert Decimal(tax_eval["evaluation"]["npv"]) == Decimal("5072.5")
 
     # 2) system_quantity in active consumption closure expects unit from frozen system_equations,
     # while unused amounts outside the closure do not require extra system_series
@@ -817,11 +733,9 @@ def test_f3_complex_tax_serialized_device_models_and_system_quantity_unit_mismat
         work_out=sys_ok_out,
         pies_version="1.2.0",
     )
-    sys_ok_res = read_compute_result(sys_ok_out)
-    assert sys_ok_res.math_status == "solved"
-    assert Decimal(sys_ok_res.outputs["financial_evaluation"]["evaluation"]["npv"]) == Decimal(
-        "13832.5"
-    )
+    sys_ok_eval = read_financial_evaluation(sys_ok_out / "financial_evaluation.json")
+    assert sys_ok_eval["status"] == "evaluated"
+    assert Decimal(sys_ok_eval["evaluation"]["npv"]) == Decimal("13832.5")
 
     # Spoofed unit ("kWh" when system_equations declares "kW") must be rejected
     bad_sys_sol = deepcopy(sys_sol)
@@ -855,5 +769,83 @@ def test_f3_complex_tax_serialized_device_models_and_system_quantity_unit_mismat
             manifest_path=EVAL_FINANCE_MANIFEST,
             work_in=miss_sys_in,
             work_out=miss_sys_out,
+            pies_version="1.2.0",
+        )
+
+
+def test_f3_standalone_planning_variables_without_construction_units(tmp_path: Path) -> None:
+    """Allow standalone planning.variables with empty construction_units and enforce completeness."""
+    minimal_in = EVAL_FINANCE_DIR / "tests" / "minimal" / "in"
+    base_doc = read_json_file(minimal_in / "assembly.json")
+    base_fin = read_json_file(minimal_in / "finance.json")
+    base_eval = read_json_file(minimal_in / "evaluation.json")
+    base_sol = read_json_file(minimal_in / "solution.json")
+
+    standalone_doc = deepcopy(base_doc)
+    standalone_doc["planning"] = {
+        "variables": {
+            "hp_cap": {
+                "device_ref": "g",
+                "parameter": "rated_capacity_kw",
+                "unit": "kW",
+            }
+        }
+    }
+
+    ok_sol = deepcopy(base_sol)
+    ok_sol["construction_units"] = []
+    ok_sol["planning_variables"] = [
+        {"planning_variable_id": "hp_cap", "value": 10.0, "unit": "kW"}
+    ]
+
+    ok_in = tmp_path / "standalone_ok_in"
+    ok_out = tmp_path / "standalone_ok_out"
+    ok_in.mkdir()
+    write_json_file(ok_in / "assembly.json", standalone_doc)
+    write_json_file(ok_in / "finance.json", base_fin)
+    write_json_file(ok_in / "evaluation.json", base_eval)
+    write_engineering_solution(ok_in / "solution.json", ok_sol)
+    run_plugin(
+        manifest_path=EVAL_FINANCE_MANIFEST,
+        work_in=ok_in,
+        work_out=ok_out,
+        pies_version="1.2.0",
+    )
+    ok_eval = read_financial_evaluation(ok_out / "financial_evaluation.json")
+    assert ok_eval["status"] == "evaluated"
+
+    miss_sol = deepcopy(base_sol)
+    miss_sol["construction_units"] = []
+    miss_in = tmp_path / "standalone_miss_in"
+    miss_out = tmp_path / "standalone_miss_out"
+    miss_in.mkdir()
+    write_json_file(miss_in / "assembly.json", standalone_doc)
+    write_json_file(miss_in / "finance.json", base_fin)
+    write_json_file(miss_in / "evaluation.json", base_eval)
+    write_engineering_solution(miss_in / "solution.json", miss_sol)
+    with pytest.raises(StageIOError, match="missing required planning variable 'hp_cap'"):
+        run_plugin(
+            manifest_path=EVAL_FINANCE_MANIFEST,
+            work_in=miss_in,
+            work_out=miss_out,
+            pies_version="1.2.0",
+        )
+
+    bad_unit_sol = deepcopy(ok_sol)
+    bad_unit_sol["planning_variables"] = [
+        {"planning_variable_id": "hp_cap", "value": 10.0, "unit": "MW"}
+    ]
+    bad_in = tmp_path / "standalone_bad_unit_in"
+    bad_out = tmp_path / "standalone_bad_unit_out"
+    bad_in.mkdir()
+    write_json_file(bad_in / "assembly.json", standalone_doc)
+    write_json_file(bad_in / "finance.json", base_fin)
+    write_json_file(bad_in / "evaluation.json", base_eval)
+    write_engineering_solution(bad_in / "solution.json", bad_unit_sol)
+    with pytest.raises(StageIOError, match="unit mismatch"):
+        run_plugin(
+            manifest_path=EVAL_FINANCE_MANIFEST,
+            work_in=bad_in,
+            work_out=bad_out,
             pies_version="1.2.0",
         )

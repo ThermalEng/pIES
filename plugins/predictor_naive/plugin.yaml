@@ -9,8 +9,12 @@ name:
 description: Official deterministic naive carry-forward predictor (last finite historical value across horizon).
 license: MPL-2.0
 compatibility:
-  pies: ">=1.1.5,<2.0.0"
-  sdk: ">=1.1.5,<2.0.0"
+  pies: ">=1.2.0,<2.0.0"
+  sdk: ">=1.2.0,<2.0.0"
+consumes:
+  - ies.stage-input@1.0.0
+produces:
+  - ies.prediction-output@1.0.0
 runtime:
   language: python
   python: "3.12"
@@ -31,7 +35,6 @@ resources:
     timeout_seconds: 1800
     process_limit: 32
 advanced:
-  depends_on_solve_result: false
   extensions:
     accepts_any_target_type: true
     needs_history: true

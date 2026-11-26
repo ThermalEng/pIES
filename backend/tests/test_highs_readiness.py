@@ -18,15 +18,24 @@ import threading
 from pathlib import Path
 
 import pytest
-from bundle_testkit import fixture_files, materialized_file, mps_columns
+from bundle_testkit import materialized_file
+from legacy_solve_testkit import (
+    PROBLEM_PATH,
+    SOLUTION_PATH,
+    make_minimal_highs_bundle,
+    restore_bundle_solution,
+)
+from legacy_solve_testkit import (
+    succeeded_receipt as _synthetic_ok_receipt,
+)
 
 from iesplan.assembly import validate_assembly_text
 from iesplan.computation import (
-    HIGHS_ADAPTER,
     HIGHS_ADAPTER_PATH,
     HIGHS_EXECUTABLE_REF,
     HIGHS_MILP_PROVIDER,
     HIGHS_VERSION,
+    SOLVER_BUNDLE_MPS_CONTRACT,
     AttemptContext,
     CalculationConfig,
     ComputationUnavailableError,
@@ -37,20 +46,13 @@ from iesplan.computation import (
     LocalExecutable,
     LocalProcessProvider,
     SolverBundle,
-    SolverBundleManifest,
     SolverRuntime,
     build_executor_registry,
     build_registry,
     materialize_non_predictive_series,
 )
 from iesplan.computation.generators.highs_milp import (
-    ADAPTER_REF,
-    EXECUTOR_REF,
     GENERATOR_REF,
-    PARAMETERS_PATH,
-    PROBLEM_PATH,
-    PROCESS_IO_GRACE_SECONDS,
-    SOLUTION_PATH,
     SOLVER_REF,
 )
 from iesplan.computation.generators.linear import (
@@ -65,12 +67,50 @@ from iesplan.devices import init_registry, list_devices
 from iesplan.finance import effective_from_yaml
 from iesplan.modeling import build_math_contribution
 
+EXECUTOR_ID = "ies.executor.local_process"
+EXECUTOR_VERSION = "1.0.0"
+LOCAL_EXECUTOR_REF = f"{EXECUTOR_ID}@{EXECUTOR_VERSION}"
+ADAPTER_REF = "ies.backend.result_adapter@1.0.0"
+PROCESS_IO_GRACE_SECONDS = 600
+
+
+def _adapt(bundle: SolverBundle, receipt: ExecutionReceipt, outputs: dict) -> object:
+    from types import SimpleNamespace
+
+    cr, eng_sol = restore_bundle_solution(bundle, receipt, outputs)
+    out = dict(cr.outputs)
+    if eng_sol:
+        out.update(eng_sol)
+        summary = eng_sol.get("solver_summary") or {}
+        if summary.get("has_feasible_solution"):
+            out["solution"] = {"objective_value": summary.get("objective_value")}
+    return SimpleNamespace(execution_status=cr.execution_status, math_status=cr.math_status, outputs=out)
+
+
+def _command(*, time_limit: int = 5, timeout_seconds: int = 10, arguments=None) -> dict[str, object]:
+    return {
+        "executor": LOCAL_EXECUTOR_REF,
+        "executable": HIGHS_EXECUTABLE_REF,
+        "arguments": arguments
+        if arguments is not None
+        else [
+            PROBLEM_PATH,
+            "--solution_file",
+            SOLUTION_PATH,
+            "--time_limit",
+            str(time_limit),
+            "--random_seed",
+            "0",
+        ],
+        "working_directory": ".",
+        "timeout_seconds": timeout_seconds,
+        "network": False,
+        "success_exit_codes": [0],
+    }
+
 HERE = Path(__file__).resolve().parent
 BACKEND_ROOT = HERE.parent
 SAMPLES = BACKEND_ROOT / "iesplan" / "assembly" / "samples"
-
-EXECUTOR_ID = "ies.executor.local_process"
-EXECUTOR_VERSION = "1.0.0"
 
 
 def _campus_inputs():
@@ -152,8 +192,10 @@ def _readiness(**kwargs) -> ExecutableReadiness:
 
 
 def _binding(**kwargs) -> LocalExecutable:
+    from legacy_solve_testkit import install_highs_stage_wrapper
+
     kwargs.setdefault("ref", HIGHS_EXECUTABLE_REF)
-    kwargs.setdefault("path", HIGHS_ADAPTER_PATH)
+    kwargs.setdefault("path", install_highs_stage_wrapper())
     kwargs.setdefault("readiness", _readiness())
     return LocalExecutable(**kwargs)
 
@@ -228,7 +270,7 @@ def test_readiness_available_and_atomic_reject() -> None:
     """就绪通过则注册；版本不符或路径缺失则原子拒绝。"""
     assert _provider().available() is True
     registry = build_executor_registry([_provider()])
-    assert registry.resolve(EXECUTOR_REF, HIGHS_EXECUTABLE_REF).ref == EXECUTOR_REF
+    assert registry.resolve(LOCAL_EXECUTOR_REF, HIGHS_EXECUTABLE_REF).ref == LOCAL_EXECUTOR_REF
     bad_version = LocalProcessProvider(
         _descriptor(),
         (
@@ -322,32 +364,50 @@ def test_end_to_end_campus_bundle() -> None:
     """campus 真实 Bundle 经受控执行产出声明 solution 文件。"""
     bundle = _campus_bundle()
     manifest = bundle.manifest
-    assert manifest.command["executable"] == HIGHS_EXECUTABLE_REF
+    assert manifest.bundle["contract"] == SOLVER_BUNDLE_MPS_CONTRACT
     mps_bytes = materialized_file(bundle, PROBLEM_PATH)
     assert mps_bytes.startswith(b"NAME") and len(mps_bytes) > 100
-    receipt, outputs = _runtime().run(bundle, _attempt())
+    cmd = _command(
+        time_limit=600,
+        timeout_seconds=1200,
+        arguments=[
+            PROBLEM_PATH,
+            "--solution_file",
+            SOLUTION_PATH,
+            "--time_limit",
+            "600",
+            "--random_seed",
+            "0",
+            "--acceleration_mode",
+            "on_demand_mutex",
+            "--acceleration_file",
+            "input/acceleration.json",
+        ],
+    )
+    receipt, outputs = _runtime().run(bundle, _attempt(), command=cmd)
     if receipt.status != "succeeded":
         logging.getLogger("pies.ci.highs_readiness").warning(
             "CI_SOLVER readiness status=%s reason=%s stdout_head=%r stdout_tail=%r stderr=%r",
             receipt.status, receipt.termination_reason,
             receipt.stdout[:1500], receipt.stdout[-6500:], receipt.stderr[-1500:],
         )
+    from iesplan.computation import PRIMAL_SOLUTION_OUTPUT_PATH
+
     assert receipt.status == "succeeded"
-    assert receipt.executor_ref == EXECUTOR_REF
+    assert receipt.executor_ref == LOCAL_EXECUTOR_REF
     assert receipt.executable_ref == HIGHS_EXECUTABLE_REF
     assert receipt.exit_code == 0
     assert receipt.signal_number is None
     assert receipt.termination_reason == "exited"
-    assert set(outputs) == {SOLUTION_PATH}
-    content = read_content(outputs[SOLUTION_PATH]).decode("utf-8")
-    facts = _parse_solution(content)
-    assert facts["model_status"] == "HighsModelStatus.kOptimal"
-    objective = float(facts["objective_value"])
+    assert set(outputs) == {PRIMAL_SOLUTION_OUTPUT_PATH}
+    primal_doc = json.loads(read_content(outputs[PRIMAL_SOLUTION_OUTPUT_PATH]).decode("utf-8"))
+    assert primal_doc["math_status"] == "solved"
+    objective = float(primal_doc["objective_value"])
     assert math.isfinite(objective)
-    assert int(facts["num_columns"]) > 0
-    assert len(facts["primals"]) == int(facts["num_columns"])
-    assert receipt.outputs[0]["path"] == SOLUTION_PATH
-    assert receipt.outputs[0]["size_bytes"] == len(read_content(outputs[SOLUTION_PATH]))
+    assert int(primal_doc["column_count"]) > 0
+    assert len(primal_doc["values"]) == int(primal_doc["column_count"])
+    assert receipt.outputs[0]["path"] == PRIMAL_SOLUTION_OUTPUT_PATH
+    assert receipt.outputs[0]["size_bytes"] == len(read_content(outputs[PRIMAL_SOLUTION_OUTPUT_PATH]))
     stage_records = _parse_stage_logs(receipt.stderr)
     assert [(r["stage"], r["event"]) for r in stage_records] == [
         ("read_model", "start"),
@@ -459,11 +519,12 @@ def test_real_shim_time_limit_without_incumbent_is_normal_exit(tmp_path):
         time_limit=1,
         timeout_seconds=1 + PROCESS_IO_GRACE_SECONDS,
     )
-    receipt = _synthetic_ok_receipt(bundle)
-    adapted = HIGHS_ADAPTER.adapt(bundle, receipt, {SOLUTION_PATH: sol_bytes})
+    receipt = _synthetic_ok_receipt(bundle=bundle)
+    adapted = _adapt(bundle, receipt, {SOLUTION_PATH: sol_bytes})
     assert adapted.execution_status == "completed"
     assert adapted.math_status == "not_solved"
-    assert set(adapted.outputs) == {"solver_summary"}
+    assert "solver_summary" in adapted.outputs
+    assert "solution" not in adapted.outputs
     assert adapted.outputs["solver_summary"]["termination_reason"] == "time_limit"
     assert adapted.outputs["solver_summary"]["has_feasible_solution"] is False
 
@@ -655,117 +716,9 @@ def _minimal_bundle(
     time_limit: int = 5,
     timeout_seconds: int = 10,
 ) -> SolverBundle:
-    """构造可由 SolverRuntime 与 HIGHS_ADAPTER 消费的最小合法 Bundle。"""
-    columns = mps_columns(mps_bytes)
-    zero = {"constant": 0.0, "terms": {}}
-    params = {
-        "assembly": {"id": "assembly-highs", "schema_version": "1.0.0"},
-        "components": {},
-        "financial_facts": {
-            "currency": "CNY",
-            "construction_total": dict(zero),
-            "annual_fixed_om": dict(zero),
-            "payments_applied": [],
-            "net_cashflows": [],
-            "construction_units": [],
-            "cost_items": [],
-            "amounts": [],
-            "cash_movements": [],
-            "assets": [],
-            "annual_operation": [],
-            "monthly_demand": [],
-            "tax_cash": {
-                "vat": [],
-                "vat_rules": [],
-                "refunds": [],
-                "income": [],
-                "depreciation": [],
-                "loss_balances": [],
-                "derived": [],
-            },
-            "annual_net_flows": [dict(zero)],
-            "comparison": {"mode": "absolute"},
-        },
-        "model_sources": {
-            "schema": "ies.model-sources",
-            "schema_version": "1.0.0",
-            "sources": {},
-            "groups": [],
-            "outputs": [],
-        },
-        "generator": GENERATOR_REF,
-        "objective_offset": 0.0,
-        "objective_unit": "CNY",
-        "outputs": ["solution", "metrics"],
-        "precision": "medium",
-        "result_adapter": ADAPTER_REF,
-        "seed": 0,
-        "solver": SOLVER_REF,
-        "step_series": [],
-        "system_series": [],
-        "unit_map": dict.fromkeys(columns, "kW"),
-    }
-    files = fixture_files(
-        {
-            PROBLEM_PATH: mps_bytes,
-            PARAMETERS_PATH: (json.dumps(params, sort_keys=True) + "\n").encode("utf-8"),
-        }
-    )
-    manifest = SolverBundleManifest(
-        bundle={"generator": GENERATOR_REF, "solver": SOLVER_REF},
-        inputs=[
-            {"path": PROBLEM_PATH, "media_type": "application/mps"},
-            {"path": PARAMETERS_PATH, "media_type": "application/json"},
-            {"path": "input/parameters.jsonl", "media_type": "application/x-ndjson"},
-        ],
-        command={
-            "executor": EXECUTOR_REF,
-            "executable": SOLVER_REF,
-            "arguments": [
-                PROBLEM_PATH,
-                "--solution_file",
-                SOLUTION_PATH,
-                "--time_limit",
-                str(time_limit),
-                "--random_seed",
-                "0",
-            ],
-            "working_directory": ".",
-            "timeout_seconds": timeout_seconds,
-            "network": False,
-            "success_exit_codes": [0],
-        },
-        outputs=[
-            {
-                "path": SOLUTION_PATH,
-                "media_type": "text/plain",
-                "required": True,
-            }
-        ],
-        result_adapter=ADAPTER_REF,
-        extensions={},
-    )
-    return SolverBundle(manifest=manifest, files=files)
-
-
-def _synthetic_ok_receipt(bundle: SolverBundle) -> ExecutionReceipt:
-    return ExecutionReceipt(
-        receipt_id="receipt-shim",
-        bundle_id="bundle-shim",
-        assembly_id="assembly-shim",
-        calculation_config_id="config-shim",
-        attempt_id="attempt-shim",
-        generator_ref=bundle.manifest.bundle["generator"],
-        solver_ref=bundle.manifest.bundle["solver"],
-        executor_ref=EXECUTOR_REF,
-        executable_ref=HIGHS_EXECUTABLE_REF,
-        result_adapter_ref=ADAPTER_REF,
-        status="succeeded",
-        exit_code=0,
-        termination_reason="exited",
-        started_at="2026-09-24T00:00:00Z",
-        ended_at="2026-09-24T00:00:01Z",
-    )
+    """构造可由 SolverRuntime 与 ResultAdapter 消费的最小合法 Bundle。"""
+    del time_limit, timeout_seconds
+    return make_minimal_highs_bundle(mps_bytes)
 
 
 def _make_delayed_wrapper(
@@ -831,6 +784,8 @@ if is_solve:
                     "primal:\\n"
                     "0: 0.0\\n"
                 )
+            with open("output/primal_solution.json", "w", encoding="utf-8") as pj:
+                pj.write('{{"schema":"ies.primal-solution","schema_version":"1.0.0","math_status":"solved","termination_reason":"optimal","has_feasible_solution":true,"column_count":1,"values":[0.0],"objective_value":0.0,"best_bound":0.0,"relative_gap":0.0,"receipt":{{"solver":"ies.solver.highs@1.7.2","solve_domain":"original","original_model_verified":true}},"extensions":{{}}}}')
         if {write_delay!r} > 0:
             time.sleep({write_delay!r})
         return orig_solution_text(handle, status)
@@ -838,7 +793,19 @@ if is_solve:
     highspy.Highs = _WrappedHighs
     mod._solution_text = _wrapped_solution_text
 
-sys.exit(mod.main(sys.argv[1:]))
+rc = mod.main(sys.argv[1:])
+if rc == 0 and "--solution_file" in sys.argv[1:]:
+    import json
+    from pathlib import Path
+    if {str(HERE)!r} not in sys.path:
+        sys.path.insert(0, {str(HERE)!r})
+    from legacy_solve_testkit import v1_sol_to_primal_json
+    sargs = sys.argv[1:]
+    sol_p = Path(sargs[sargs.index("--solution_file") + 1])
+    if sol_p.is_file():
+        primal_out = json.dumps(v1_sol_to_primal_json(sol_p.read_text(encoding="utf-8")))
+        Path("output/primal_solution.json").write_text(primal_out, encoding="utf-8")
+sys.exit(rc)
 """
     wrapper.write_text(script, encoding="utf-8")
     wrapper.chmod(0o755)
@@ -881,17 +848,17 @@ def test_deployment_policy_timeout_boundary_via_runtime(monkeypatch) -> None:
     provider = build_registry((HIGHS_MILP_PROVIDER,)).resolve(config)
     bundle = provider.generate(artifact, models, materialized, finance, config, _campus_evaluation())
     expected_timeout = 30 + PROCESS_IO_GRACE_SECONDS
-    assert bundle.manifest.command["timeout_seconds"] == expected_timeout == 630
-    args = list(bundle.manifest.command["arguments"])
-    assert args[args.index("--time_limit") + 1] == "30"
+    cmd = _command(time_limit=30, timeout_seconds=expected_timeout)
 
     # 边界放行：max_timeout_seconds == 630
     receipt_ok, outputs_ok = _runtime(policy=_policy(max_timeout_seconds=expected_timeout)).run(
-        bundle, _attempt()
+        bundle, _attempt(), command=cmd
     )
+    from iesplan.computation import PRIMAL_SOLUTION_OUTPUT_PATH
+
     assert receipt_ok.status == "succeeded"
     assert receipt_ok.exit_code == 0
-    assert SOLUTION_PATH in outputs_ok
+    assert PRIMAL_SOLUTION_OUTPUT_PATH in outputs_ok
 
     # 超限拒绝：max_timeout_seconds == 629，启动前拒绝，零 Popen 调用，不裁剪用户求解时限
     rej_runtime = _runtime(policy=_policy(max_timeout_seconds=expected_timeout - 1))
@@ -903,7 +870,7 @@ def test_deployment_policy_timeout_boundary_via_runtime(monkeypatch) -> None:
         return real_popen(*args_p, **kwargs_p)
 
     monkeypatch.setattr(subprocess, "Popen", _spy_popen)
-    receipt_rej, outputs_rej = rej_runtime.run(bundle, _attempt())
+    receipt_rej, outputs_rej = rej_runtime.run(bundle, _attempt(), command=cmd)
     assert receipt_rej.status == "policy_rejected"
     assert str(expected_timeout - 1) in receipt_rej.error
     assert outputs_rej == {}
@@ -1012,15 +979,17 @@ def test_delayed_read_and_write_consume_process_grace_while_keeping_solve_limit(
     tmp_path: Path,
 ) -> None:
     """可控读模和写解延迟占用外层宽限；求解器收到的 time_limit 仍保持原样。"""
+    from iesplan.computation import PRIMAL_SOLUTION_OUTPUT_PATH
+
     mps_bytes = _tiny_model(lower=1.0, upper=5.0, obj_coeff=2.0).encode("utf-8")
     bundle = _minimal_bundle(mps_bytes, time_limit=1, timeout_seconds=10)
     provider = _make_delayed_wrapper(tmp_path, read_delay=0.6, write_delay=0.6)
     receipt, outputs = _runtime(provider=provider, policy=_policy(max_timeout_seconds=10)).run(
-        bundle, _attempt()
+        bundle, _attempt(), command=_command(time_limit=1, timeout_seconds=10)
     )
     assert receipt.status == "succeeded", receipt.stderr
     assert receipt.exit_code == 0
-    assert SOLUTION_PATH in outputs
+    assert PRIMAL_SOLUTION_OUTPUT_PATH in outputs
     assert "test-wrapper: observed_time_limit=1.0" in receipt.stderr
 
     records = _parse_stage_logs(receipt.stderr)
@@ -1037,7 +1006,7 @@ def test_excessive_read_delay_triggers_outer_timeout_and_logs_stage(tmp_path: Pa
     bundle = _minimal_bundle(mps_bytes, time_limit=5, timeout_seconds=2)
     provider = _make_delayed_wrapper(tmp_path, read_delay=10.0)
     receipt, outputs = _runtime(provider=provider, policy=_policy(max_timeout_seconds=10)).run(
-        bundle, _attempt()
+        bundle, _attempt(), command=_command(time_limit=5, timeout_seconds=2)
     )
     assert receipt.status == "timed_out"
     assert receipt.termination_reason == "timeout"
@@ -1047,10 +1016,11 @@ def test_excessive_read_delay_triggers_outer_timeout_and_logs_stage(tmp_path: Pa
     assert ("read_model", "end") not in [(r["stage"], r["event"]) for r in records]
     assert all(r["stage"] != "run" for r in records)
 
-    adapted = HIGHS_ADAPTER.adapt(bundle, receipt, outputs)
+    adapted = _adapt(bundle, receipt, outputs)
     assert adapted.execution_status == "timed_out"
     assert adapted.math_status == "not_solved"
-    assert dict(adapted.outputs) == {}
+    assert "solution" not in adapted.outputs
+    assert adapted.outputs["solver_summary"]["has_feasible_solution"] is False
 
 
 def test_excessive_write_delay_with_residual_file_never_upgrades(tmp_path: Path) -> None:
@@ -1059,7 +1029,7 @@ def test_excessive_write_delay_with_residual_file_never_upgrades(tmp_path: Path)
     bundle = _minimal_bundle(mps_bytes, time_limit=5, timeout_seconds=2)
     provider = _make_delayed_wrapper(tmp_path, write_delay=10.0, write_residual=True)
     receipt, outputs = _runtime(provider=provider, policy=_policy(max_timeout_seconds=10)).run(
-        bundle, _attempt()
+        bundle, _attempt(), command=_command(time_limit=5, timeout_seconds=2)
     )
     assert receipt.status == "timed_out"
     assert receipt.termination_reason == "timeout"
@@ -1070,12 +1040,15 @@ def test_excessive_write_delay_with_residual_file_never_upgrades(tmp_path: Path)
     assert ("solution_write", "start") in events
     assert ("solution_write", "end") not in events
 
-    # 即便 SolverRuntime 采回磁盘上残存的 solution.sol，ResultAdapter 也不升级为成功。
-    assert SOLUTION_PATH in outputs
-    adapted = HIGHS_ADAPTER.adapt(bundle, receipt, outputs)
+    # 即便 SolverRuntime 采回磁盘上残存的解文件，ResultAdapter 也不升级为成功。
+    from iesplan.computation import PRIMAL_SOLUTION_OUTPUT_PATH
+
+    assert PRIMAL_SOLUTION_OUTPUT_PATH in outputs
+    adapted = _adapt(bundle, receipt, outputs)
     assert adapted.execution_status == "timed_out"
     assert adapted.math_status == "not_solved"
-    assert dict(adapted.outputs) == {}
+    assert "solution" not in adapted.outputs
+    assert adapted.outputs["solver_summary"]["has_feasible_solution"] is False
 
 
 @pytest.mark.parametrize("reason", ["cancelled", "fenced"])
@@ -1093,7 +1066,12 @@ def test_outer_cancel_or_fence_during_delayed_read_preserves_status_and_stage_lo
     try:
         receipt, outputs = _runtime(
             provider=provider, policy=_policy(max_timeout_seconds=30)
-        ).run(bundle, _attempt(), stop=lambda: reason if flag.is_set() else None)
+        ).run(
+            bundle,
+            _attempt(),
+            command=_command(time_limit=5, timeout_seconds=30),
+            stop=lambda: reason if flag.is_set() else None,
+        )
     finally:
         timer.cancel()
     assert receipt.status == reason
@@ -1103,10 +1081,11 @@ def test_outer_cancel_or_fence_during_delayed_read_preserves_status_and_stage_lo
     events = [(r["stage"], r["event"]) for r in records]
     assert ("read_model", "start") in events
     assert ("read_model", "end") not in events
-    adapted = HIGHS_ADAPTER.adapt(bundle, receipt, outputs)
+    adapted = _adapt(bundle, receipt, outputs)
     assert adapted.execution_status == reason
     assert adapted.math_status == "not_solved"
-    assert dict(adapted.outputs) == {}
+    assert "solution" not in adapted.outputs
+    assert adapted.outputs["solver_summary"]["has_feasible_solution"] is False
 
 
 def _knapsack_mps(*, n: int, m: int, rhs: float, seed: int) -> str:
@@ -1148,17 +1127,18 @@ def test_native_time_limit_with_incumbent_end_to_end_via_runtime() -> None:
     total_budget = 1 + PROCESS_IO_GRACE_SECONDS
     bundle = _minimal_bundle(mps_bytes, time_limit=1, timeout_seconds=total_budget)
     receipt, outputs = _runtime(policy=_policy(max_timeout_seconds=total_budget)).run(
-        bundle, _attempt()
+        bundle, _attempt(), command=_command(time_limit=1, timeout_seconds=total_budget)
     )
+    from iesplan.computation import PRIMAL_SOLUTION_OUTPUT_PATH
+
     assert receipt.status == "succeeded", receipt.stderr
     assert receipt.exit_code == 0
-    assert SOLUTION_PATH in outputs
-    sol_text = read_content(outputs[SOLUTION_PATH]).decode("utf-8")
-    facts = _parse_solution(sol_text)
-    assert facts["model_status"] == "HighsModelStatus.kTimeLimit"
-    assert facts["has_feasible_solution"] == "true"
+    assert PRIMAL_SOLUTION_OUTPUT_PATH in outputs
+    primal_doc = json.loads(read_content(outputs[PRIMAL_SOLUTION_OUTPUT_PATH]).decode("utf-8"))
+    assert primal_doc["termination_reason"] == "time_limit"
+    assert primal_doc["has_feasible_solution"] is True
 
-    adapted = HIGHS_ADAPTER.adapt(bundle, receipt, outputs)
+    adapted = _adapt(bundle, receipt, outputs)
     assert adapted.execution_status == "completed"
     assert adapted.math_status == "feasible"
     summary = adapted.outputs["solver_summary"]

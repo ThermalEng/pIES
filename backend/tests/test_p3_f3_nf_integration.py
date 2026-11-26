@@ -12,19 +12,32 @@ from types import SimpleNamespace
 
 import pytest
 from bundle_testkit import materialized_file
+from legacy_solve_testkit import (
+    SOLUTION_PATH,
+    evaluate_bundle_expressions,
+    read_bundle_records,
+    restore_bundle_solution,
+    succeeded_receipt,
+    with_planning_variable_units,
+)
 from test_finance_s2_execution import _money
 from test_p3_f2_execution import _relations
-from test_p3_network_boundaries import _solve
 from test_p3_port_network import _inputs
 from test_project_model import _finance_payload
 
 from iesplan.application.tasks.baselines import check_comparison_inputs
 from iesplan.application.tasks.finance_relations import check_financial_relation_inputs
-from iesplan.application.worker.compute_cases import build_financial_evaluation
 from iesplan.assembly import validate_assembly_doc
 from iesplan.computation import materialize_non_predictive_series
 from iesplan.computation.generators.highs_milp import HIGHS_MILP_PROVIDER
-from iesplan.finance import FinanceProfile, freeze_comparison, merge_effective, parse_comparison
+from iesplan.finance import (
+    EvaluationInput,
+    FinanceProfile,
+    evaluate_forward_finance,
+    freeze_comparison,
+    merge_effective,
+    parse_comparison,
+)
 from iesplan.tasks import parse_evaluation_input
 
 
@@ -156,21 +169,50 @@ def _case(efficiency, unit_price, comparison=None):
 
 
 def _run(inputs, directory):
+    import subprocess
+
     directory.mkdir()
-    bundle = HIGHS_MILP_PROVIDER.generate(*inputs)
-    result = _solve(bundle, directory)
-    assert result.math_status == "solved"
-    fin = build_financial_evaluation(
-        SimpleNamespace(
-            evaluation={
-                "construction_period": 0,
-                "operation_years": 2,
-                "evaluation_years": 2,
-                "discount_rate": 0.1,
-            }
-        ),
-        inputs[3],
-        result,
+    artifact, models, materialized, finance, config, _base_eval = inputs
+    evaluation = EvaluationInput(
+        construction_period=0,
+        operation_years=2,
+        evaluation_years=2,
+        discount_rate=0.1,
+        construction_payments=(),
+        maintenance_expenses=(),
+        comparison=_base_eval.comparison,
+    )
+    bundle = HIGHS_MILP_PROVIDER.generate(artifact, models, materialized, finance, config, evaluation)
+    (directory / "problem.mps").write_bytes(materialized_file(bundle, "input/problem.mps"))
+    process = subprocess.run(
+        ["/usr/local/bin/ies-highs-solver", "problem.mps", "--solution_file", "values.sol",
+         "--time_limit", "30", "--random_seed", "0"],
+        cwd=directory, capture_output=True, text=True, check=False,
+    )
+    assert process.returncode == 0, process.stderr
+    sol_bytes = (directory / "values.sol").read_bytes()
+    adapted, eng_sol = restore_bundle_solution(
+        bundle, succeeded_receipt(bundle=bundle), {SOLUTION_PATH: sol_bytes}, tmp_path=directory
+    )
+    assert adapted.math_status == "solved"
+    exprs = evaluate_bundle_expressions(bundle, {SOLUTION_PATH: sol_bytes})
+    result = SimpleNamespace(
+        math_status=adapted.math_status,
+        outputs={
+            **eng_sol,
+            "solution": {
+                "objective_value": eng_sol["solver_summary"]["objective_value"],
+                "variables": exprs["variables"],
+            },
+        },
+    )
+    fin = evaluate_forward_finance(
+        with_planning_variable_units(eng_sol, artifact, bundle, {SOLUTION_PATH: sol_bytes}),
+        artifact=artifact,
+        finance=finance,
+        evaluation=evaluation,
+        materialized=materialized,
+        device_models=models,
     )
     assert fin["status"] == "evaluated"
     return bundle, result, fin
@@ -308,7 +350,7 @@ def test_network_and_finance_share_physical_cash_tax_asset_and_frozen_baseline(t
     expected_npv = Decimal("-55") + Decimal("11.2396") / Decimal("1.1") + Decimal("11.362") / Decimal("1.21")
     assert float(fin["evaluation"]["npv"]) == pytest.approx(float(expected_npv))
     assert float(candidate.outputs["solution"]["objective_value"]) == pytest.approx(float(expected_npv))
-    sources = json.loads(materialized_file(bundle, "input/parameters.json"))["model_sources"]["sources"]
+    sources = read_bundle_records(bundle)["model_sources"]["sources"]
     buses = {tuple(source["inputs"]) for source in sources.values() if source["kind"] == "bus"}
     assert buses == {("route.power_in", "source.power_out"), ("load.electricity_in", "route.power_out")}
     assert (

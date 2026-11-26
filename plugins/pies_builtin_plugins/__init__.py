@@ -1,4 +1,4 @@
-"""Official built-in stage plugins and catalog for pIES 1.1.5."""
+"""Official built-in stage plugins and catalog for pIES 1.2.0."""
 
 from pies_builtin_plugins.catalog import (
     BUILTIN_STAGE_BY_REF,
@@ -9,7 +9,7 @@ from pies_builtin_plugins.catalog import (
     list_builtin_stages,
 )
 
-__version__ = "1.1.5"
+__version__ = "1.2.0"
 
 __all__ = [
     "BUILTIN_STAGES_IMAGE",

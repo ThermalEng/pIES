@@ -4,7 +4,8 @@ import json
 from copy import deepcopy
 
 import pytest
-from bundle_testkit import content_bytes, materialized_file
+from bundle_testkit import content_bytes
+from legacy_solve_testkit import read_bundle_records
 from test_p3_network_boundaries import BOUNDARIES, _case, _solve
 from test_p3_port_network import SOURCE, _inputs
 from test_project_model import LOAD_YAML, _evaluation_n
@@ -70,7 +71,7 @@ def test_delivery_binds_existing_ports_and_restores_independent_system_identity(
         "variable": "dispatch",
         "unit": "kW",
     }
-    params = json.loads(materialized_file(bundle, "input/parameters.json"))
+    params = read_bundle_records(bundle)
     location = params["model_sources"]["sources"]["technical:system:account.source_total"]["location"]
     assert location["block_id"] == "account" and "instance_id" not in location
     assert params["model_sources"]["sources"]["technical:system:account.source_total"]["inputs"] == [
@@ -256,10 +257,26 @@ def test_property_alias_bound_and_initial_share_planned_scale_and_blocks_are_ind
     assert checked.ok, checked.diagnostics
     new_inputs = (checked.artifact, *inputs[1:])
     builder = _new_builder(new_inputs[0], new_inputs[1], new_inputs[2], new_inputs[3], new_inputs[5])
-    independent_series = [entry for entry in builder.step_series() if "block" in entry]
+    independent_series = [
+        {
+            k: (list(v) if k == "columns" else v)
+            for k, v in entry.items()
+            if k != "series_id"
+        }
+        for entry in builder.step_series()
+        if "block" in entry
+    ]
     bundle = HIGHS_MILP_PROVIDER.generate(*new_inputs)
-    parameters = json.loads(materialized_file(bundle, "input/parameters.json"))
-    assert independent_series == parameters["system_series"]
+    parameters = read_bundle_records(bundle)
+    actual_system = [
+        {
+            k: (list(v) if k == "columns" else v)
+            for k, v in entry.items()
+            if k not in ("scale", "offset", "series_id")
+        }
+        for entry in parameters["system_series"]
+    ]
+    assert independent_series == actual_system
     result = _solve(bundle, tmp_path)
     assert result.math_status == "solved"
     assert set(result.outputs["system_series"]["system:account.memory"]["values"]) == {4}

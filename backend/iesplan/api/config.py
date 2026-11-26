@@ -34,10 +34,10 @@ config_router = APIRouter(prefix="/api/projects/{project_id}/config", tags=["con
 
 
 class CalculationConfigSaveRequest(BaseModel):
-    """保存请求: 14 字段 CalculationConfig 全文 + 自有链期望 revision。"""
+    """保存请求: 13 字段 CalculationConfig 全文 + 自有链期望 revision。"""
 
     calculation_config: dict[str, Any] = Field(
-        description="计算配置(14 字段 CalculationConfig 契约)"
+        description="计算配置(13 字段 CalculationConfig 契约)"
     )
     expected_revision: int | None = Field(
         default=None, ge=1, description="期望的当前 revision; 首次保存为 null"
@@ -58,17 +58,19 @@ def save_config_endpoint(
     user: CurrentUser,
     request: Request,
 ) -> dict:
-    """保存 CalculationConfig: 输入校验 422, revision 失配 409。
-
-    预测算法目录取组合根已发布实例(经 app.state 透传, 不自行发现/组装);
-    含预测目标而目录缺席时由用例可见报告不可用, 不猜测、不绕过。
-    """
+    """保存 CalculationConfig: 输入校验 422, revision 失配 409。"""
     bootstrap = getattr(request.app.state, "bootstrap_context", None)
     predictor_registry = (
         getattr(bootstrap, "predictor_registry", None) if bootstrap is not None else None
     )
     generator_registry = (
         getattr(bootstrap, "generator_registry", None) if bootstrap is not None else None
+    )
+    solver_registry = (
+        getattr(bootstrap, "solver_registry", None) if bootstrap is not None else None
+    )
+    evaluator_registry = (
+        getattr(bootstrap, "evaluator_registry", None) if bootstrap is not None else None
     )
     algorithm_registry = (
         getattr(bootstrap, "algorithm_registry", None) if bootstrap is not None else None
@@ -77,5 +79,7 @@ def save_config_endpoint(
         db, user, project_id, body.calculation_config, body.expected_revision,
         predictor_registry=predictor_registry,
         generator_registry=generator_registry,
+        solver_registry=solver_registry,
+        evaluator_registry=evaluator_registry,
         algorithm_registry=algorithm_registry,
     )

@@ -31,13 +31,20 @@ from sqlalchemy.engine import Engine  # noqa: E402
 from sqlalchemy.orm import Session, sessionmaker  # noqa: E402
 from sqlalchemy.pool import StaticPool  # noqa: E402
 
+from iesplan import tasks as tasks_domain  # noqa: E402
 from iesplan.api import projects as projects_api  # noqa: E402
 from iesplan.api import tasks as tasks_api  # noqa: E402
 from iesplan.api.config import config_router  # noqa: E402
-from iesplan import tasks as tasks_domain  # noqa: E402
 from iesplan.api.deps import get_request_db  # noqa: E402
 from iesplan.application import tasks as tasks_uc  # noqa: E402
-from iesplan.assembly import CANON_ALGORITHM_ID, CANON_ALGORITHM_VERSION, SCHEMA_ID, SCHEMA_VERSION, VALIDATOR_ID, VALIDATOR_VERSION  # noqa: E402
+from iesplan.assembly import (  # noqa: E402
+    CANON_ALGORITHM_ID,
+    CANON_ALGORITHM_VERSION,
+    SCHEMA_ID,
+    SCHEMA_VERSION,
+    VALIDATOR_ID,
+    VALIDATOR_VERSION,
+)
 from iesplan.config import settings  # noqa: E402
 from iesplan.core.diagnostics import (  # noqa: E402
     SEVERITY_ERROR,
@@ -47,12 +54,12 @@ from iesplan.core.diagnostics import (  # noqa: E402
     TASK_SOLVE_FAILED,
 )
 from iesplan.core.errors import NotFoundError  # noqa: E402
-from iesplan.db import Base  # noqa: E402
-from iesplan.main import create_app  # noqa: E402
-from iesplan.tasks.persistence import CalcSnapshot, ComputeSlot, Task, TaskLease, TaskProgress  # noqa: E402
 from iesplan.dataset.persistence import DatasetVersion  # noqa: E402,F401
+from iesplan.db import Base  # noqa: E402
 from iesplan.identity.persistence import User  # noqa: E402,F401
+from iesplan.main import create_app  # noqa: E402
 from iesplan.tasks import queue  # noqa: E402
+from iesplan.tasks.persistence import CalcSnapshot, ComputeSlot, Task, TaskLease, TaskProgress  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # 测试环境
@@ -256,7 +263,7 @@ def _prepare_project(
     client: TestClient, db: Session, user, *,
     dataset_size: int = 0, name: str = "任务测试项目", freeze: bool = True,
 ) -> int:
-    """准备可提交计算任务的项目: 建项目 + 显式财务/装配声明 + 显式计算声明 + (可选)数据集 + 绑定 + 固化版本。"""
+    """准备可提交计算任务的项目: 建项目 + 显式财务/装配/计算声明 + 可选数据集 + 绑定 + 固化。"""
     pid = _create_project(client, user, name)
     _declare_finance(db, user, pid)
     device_ref, revision = _declare_device_and_planning(client, db, user, pid)
@@ -272,7 +279,7 @@ def _prepare_project(
     return pid
 
 
-#: 计算配置正文(14 字段契约; 与 test_http_contract._CALC_PAYLOAD 同构)。
+#: 计算配置正文(13 字段 1.2.0 单一契约形态)。
 _CONFIG_BODY: dict[str, Any] = {
     "schema": "ies.calculation-config",
     "schema_version": "1.0.0",
@@ -281,11 +288,10 @@ _CONFIG_BODY: dict[str, Any] = {
     "generator": "ies.generator.highs_milp@1.0.0",
     "solver": "ies.solver.highs@1.7.2",
     "algorithm": None,
-    "evaluator": None,
+    "evaluators": [],
     "precision": "medium",
-    "convergence": None,
     "time_limit_seconds": 600,
-    "options": {},
+    "options": {"generator": {}, "solver": {}},
     "seed": None,
     "outputs": ["solution"],
 }
@@ -600,8 +606,8 @@ def test_submit_accepts_tax_rules_with_capable_generator(
     snapshot = db.execute(
         select(CalcSnapshot).where(CalcSnapshot.id == body["task"]["calc_snapshot_id"])
     ).scalar_one()
-    assert snapshot.result_adapter == "ies.result-adapter.highs@1.0.0"
-    assert snapshot.executor == "ies.executor.local_process@1.0.0"
+    assert snapshot.result_adapter == "ies.backend.result_adapter@1.0.0"
+    assert snapshot.executor == "ies.executor.container@1.0.0"
     assert snapshot.calc_config_snapshot["generator"] == "ies.generator.highs_milp@1.0.0"
     assert db.execute(select(func.count(Task.id))).scalar() == 1
     config_cases.set_project_finance_profile(db, pid, "cn-north-demo", owner.id)
@@ -656,8 +662,8 @@ def test_submit_accepts_pool_only_with_capable_generator(
     snapshot = db.execute(
         select(CalcSnapshot).where(CalcSnapshot.id == body["task"]["calc_snapshot_id"])
     ).scalar_one()
-    assert snapshot.result_adapter == "ies.result-adapter.highs@1.0.0"
-    assert snapshot.executor == "ies.executor.local_process@1.0.0"
+    assert snapshot.result_adapter == "ies.backend.result_adapter@1.0.0"
+    assert snapshot.executor == "ies.executor.container@1.0.0"
     assert db.execute(select(func.count(Task.id))).scalar() == 1
 
 
@@ -703,7 +709,7 @@ def test_submit_legacy_path_freezes_and_new_cashflow_is_accepted(
     assert cashflow_snapshot is not None
     assert cashflow_snapshot.schema_version == "1.0.0"  # CalcSnapshot remains independent
     assert cashflow_snapshot.calc_config_snapshot["generator"] == "ies.generator.highs_milp@1.0.0"
-    assert cashflow_snapshot.result_adapter == "ies.result-adapter.highs@1.0.0"
+    assert cashflow_snapshot.result_adapter == "ies.backend.result_adapter@1.0.0"
     assert cashflow_snapshot.canonical_assembly_text
     assert db.execute(select(func.count(Task.id))).scalar() == 2
     assert db.execute(select(func.count(CalcSnapshot.id))).scalar() == 2
@@ -724,6 +730,11 @@ def test_submit_rejects_tax_rules_without_provider_capabilities(
     from test_config_revisions import _tax_profile_payload
 
     from iesplan.application import configuration as config_cases
+    from iesplan.computation import build_evaluator_registry, build_solver_registry
+    from iesplan.computation.config import (
+        BUILTIN_EVALUATOR_FINANCE_SPEC,
+        BUILTIN_SOLVER_HIGHS_SPEC,
+    )
     from iesplan.computation.generators.descriptor import GeneratorDescriptor
     from iesplan.computation.generators.registry import GeneratorRegistry
 
@@ -738,7 +749,6 @@ def test_submit_rejects_tax_rules_without_provider_capabilities(
         precisions=("medium",),
         solvers=("ies.solver.highs@1.7.2",),
         executors=("ies.executor.local_process@1.0.0",),
-        result_adapter="ies.result-adapter.highs@1.0.0",
         unit_system="SI",
         seed_semantics="测试合成 provider，无税务能力标记",
     )
@@ -758,6 +768,9 @@ def test_submit_rejects_tax_rules_without_provider_capabilities(
         app.state.bootstrap_context = SimpleNamespace(
             generator_registry=GeneratorRegistry({stub_ref: SimpleNamespace(descriptor=stub_descriptor)}),
             predictor_registry=None,
+            solver_registry=build_solver_registry((BUILTIN_SOLVER_HIGHS_SPEC,)),
+            evaluator_registry=build_evaluator_registry((BUILTIN_EVALUATOR_FINANCE_SPEC,)),
+            algorithm_registry=None,
         )
         owner = make_user(db, "owner_stubgate")
         pid = _create_project(stub_client, owner, "任务测试项目")
@@ -803,13 +816,22 @@ def test_submit_rejects_tax_rules_without_provider_capabilities(
 ])
 def test_submit_construction_capabilities_from_selected_descriptor(client, db, missing):
     """公开提交：逐项撤去能力不建任务／快照；换名完整 provider 与空关系放行。"""
+    import json
     from copy import deepcopy
     from dataclasses import replace
-    import json
     from types import SimpleNamespace
 
     from test_config_revisions import PROFILE_PAYLOAD
+
     from iesplan.application import configuration as config_cases
+    from iesplan.computation import (
+        build_evaluator_registry,
+        build_solver_registry,
+    )
+    from iesplan.computation.config import (
+        BUILTIN_EVALUATOR_FINANCE_SPEC,
+        BUILTIN_SOLVER_HIGHS_SPEC,
+    )
     from iesplan.computation.generators.highs_milp import DESCRIPTOR
     from iesplan.computation.generators.registry import GeneratorRegistry
 
@@ -828,6 +850,9 @@ def test_submit_construction_capabilities_from_selected_descriptor(client, db, m
     client.app.state.bootstrap_context = SimpleNamespace(
         generator_registry=GeneratorRegistry({descriptor.ref: SimpleNamespace(descriptor=descriptor)}),
         predictor_registry=None,
+        solver_registry=build_solver_registry((BUILTIN_SOLVER_HIGHS_SPEC,)),
+        evaluator_registry=build_evaluator_registry((BUILTIN_EVALUATOR_FINANCE_SPEC,)),
+        algorithm_registry=None,
     )
     owner = make_user(db, "construction_gate_owner")
     pid = _create_project(client, owner, "能力闸门合成项目")

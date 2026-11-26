@@ -6,13 +6,12 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
-from iesplan.computation.contracts.calculation_config import TargetCalculationConfig
 from iesplan.computation.contracts.common import (
     check_parameters_against_schema,
     validate_parameters_schema,
 )
 from iesplan.computation.errors import ComputationUnavailableError
-from iesplan.computation.protocols import check_provider_ref, freeze_json_value
+from iesplan.computation.protocols import CalculationConfig, check_provider_ref, freeze_json_value
 
 PLUGIN_KINDS = ("predictor", "generator", "solver", "evaluator", "algorithm")
 
@@ -76,7 +75,7 @@ class StagePluginSpec:
             raise TypeError("companions 须为 Mapping")
         normalized_companions: dict[str, str] = {}
         for role, ref in self.companions.items():
-            if role not in ("predictor", "generator", "solver", "evaluator", "result_adapter"):
+            if role not in ("predictor", "generator", "solver", "evaluator"):
                 raise ValueError(f"companions 角色非法: {role!r}")
             normalized_companions[role] = check_provider_ref(ref, f"companions.{role}")
         object.__setattr__(self, "companions", freeze_json_value(normalized_companions))
@@ -128,7 +127,7 @@ def _resolve_plugin(
     return spec
 
 
-def _check_companions(spec: StagePluginSpec, config: TargetCalculationConfig) -> None:
+def _check_companions(spec: StagePluginSpec, config: CalculationConfig) -> None:
     companions = spec.companions
     if not companions:
         return
@@ -165,7 +164,7 @@ def _check_companions(spec: StagePluginSpec, config: TargetCalculationConfig) ->
 def _check_mode_and_precision(
     core_spec: StagePluginSpec,
     selected_specs: list[StagePluginSpec],
-    config: TargetCalculationConfig,
+    config: CalculationConfig,
 ) -> None:
     if not core_spec.modes:
         raise ComputationUnavailableError(
@@ -193,7 +192,7 @@ def _check_mode_and_precision(
 def _check_supported_outputs(
     core_spec: StagePluginSpec,
     eval_specs: list[StagePluginSpec],
-    config: TargetCalculationConfig,
+    config: CalculationConfig,
 ) -> None:
     if not core_spec.outputs:
         raise ComputationUnavailableError(
@@ -204,7 +203,7 @@ def _check_supported_outputs(
     for ev_spec in eval_specs:
         if not ev_spec.outputs:
             raise ComputationUnavailableError(
-                f"评价器 {ev_spec.ref!r} 未声明支持的 outputs",
+                f"评价器插件 {ev_spec.ref!r} 未声明支持的 outputs",
                 reason="incompatible-outputs",
             )
         supported_outputs.update(ev_spec.outputs)
@@ -217,7 +216,7 @@ def _check_supported_outputs(
 
 
 def validate_stage_compatibility(
-    config: TargetCalculationConfig,
+    config: CalculationConfig,
     plugins: Mapping[str, StagePluginSpec],
 ) -> None:
     """Verify static consumes/produces compatibility, capabilities, and per-stage parameters_schema."""

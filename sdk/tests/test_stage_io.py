@@ -9,20 +9,24 @@ import pytest
 from pies_sdk.contracts import ComputeResultPayload, PredictionOutputPayload
 from pies_sdk.errors import StageIOError
 from pies_sdk.io import (
-    list_solver_solutions,
+    extract_stage_parameters,
     read_algorithm_request,
-    read_compute_result,
-    read_evaluator_inputs,
+    read_engineering_solution,
+    read_evaluation_report,
+    read_financial_evaluation,
     read_generator_inputs,
     read_prediction_output,
     read_predictor_request,
+    read_primal_solution,
     read_solver_bundle,
     validate_stage_outputs,
-    write_compute_result,
+    write_engineering_solution,
+    write_evaluation_report,
+    write_financial_evaluation,
     write_json_file,
     write_prediction_output,
+    write_primal_solution,
     write_solver_bundle,
-    write_solver_solution,
 )
 from pies_sdk.iteration import IterationRecord, IterationWriter, read_iterations
 
@@ -33,20 +37,18 @@ def _sample_bundle_manifest() -> dict:
         "schema_version": "1.0.0",
         "bundle": {
             "generator": "ies.generator.highs_milp@1.0.0",
-            "solver": "ies.solver.highs@1.7.2",
+            "contract": "ies.solver-bundle.mps@1.0.0",
         },
         "inputs": [
             {"path": "input/problem.mps", "media_type": "application/mps"},
         ],
-        "command": {
-            "executor": "ies.executor.local_process@1.0.0",
-            "executable": "ies.solver.highs@1.7.2",
-            "arguments": ["input/problem.mps"],
-        },
         "outputs": [
-            {"path": "output/solution.json", "media_type": "application/json", "required": True},
+            {
+                "path": "output/primal_solution.json",
+                "media_type": "application/json",
+                "required": True,
+            },
         ],
-        "result_adapter": "ies.result-adapter.highs@1.0.0",
         "extensions": {},
     }
 
@@ -80,7 +82,7 @@ def test_generator_solver_evaluator_stage_io(tmp_path: Path) -> None:
     write_solver_bundle(gen_out, bundle_manifest, {"input/problem.mps": "NAME TEST\nENDATA\n"})
     validate_stage_outputs("generator", gen_out)
 
-    # Solver consumes frozen generator bundle directory
+    # Solver consumes frozen generator bundle directory and emits primal_solution.json
     solver_in = tmp_path / "solver_in"
     solver_out = tmp_path / "solver_out"
     (solver_in / "bundle" / "input").mkdir(parents=True)
@@ -92,39 +94,262 @@ def test_generator_solver_evaluator_stage_io(tmp_path: Path) -> None:
     loaded_manifest, _ = read_solver_bundle(solver_in)
     assert loaded_manifest["schema"] == "ies.solver-bundle"
 
-    write_solver_solution(solver_out, "solution.json", {"status": "optimal", "objective": 10.0})
+    write_primal_solution(
+        solver_out / "primal_solution.json",
+        {
+            "schema": "ies.primal-solution",
+            "schema_version": "1.0.0",
+            "math_status": "solved",
+            "termination_reason": "optimal",
+            "has_feasible_solution": True,
+            "column_count": 2,
+            "objective_value": 10.0,
+            "best_bound": 10.0,
+            "relative_gap": 0.0,
+            "values": [1.0, 2.0],
+            "receipt": {"solver": "ies.solver.highs@1.7.2"},
+        },
+    )
     validate_stage_outputs("solver", solver_out)
-    assert [p.name for p in list_solver_solutions(solver_out)] == ["solution.json"]
+    assert read_primal_solution(solver_out / "primal_solution.json").column_count == 2
 
-    # Evaluator consumes bundle + solution + receipt
-    eval_in = tmp_path / "eval_in"
+    # Algorithm emits ies.engineering-solution@1.0.0 (solution.json)
+    alg_out = tmp_path / "alg_out"
+    write_engineering_solution(
+        alg_out / "solution.json",
+        {
+            "schema": "ies.engineering-solution",
+            "schema_version": "1.0.0",
+            "solver_summary": {
+                "math_status": "infeasible",
+                "termination_reason": "infeasible",
+                "has_feasible_solution": False,
+                "objective_value": None,
+                "objective_unit": None,
+                "best_bound": None,
+                "relative_gap": None,
+            },
+        },
+    )
+    validate_stage_outputs("algorithm", alg_out)
+    assert read_engineering_solution(alg_out / "solution.json").solver_summary.math_status == "infeasible"
+
+    # Evaluators emit canonical financial_evaluation.json or evaluation_report.json (no result.json)
     eval_out = tmp_path / "eval_out"
-    (eval_in / "bundle" / "input").mkdir(parents=True)
-    (eval_in / "bundle" / "bundle.yaml").write_text(
-        (gen_out / "bundle" / "bundle.yaml").read_text(encoding="utf-8"),
-        encoding="utf-8",
-    )
-    (eval_in / "bundle" / "input" / "problem.mps").write_text("NAME TEST\nENDATA\n", encoding="utf-8")
-    (eval_in / "solution.json").write_text(
-        (solver_out / "solution.json").read_text(encoding="utf-8"),
-        encoding="utf-8",
-    )
-    write_json_file(eval_in / "receipt.json", {"receipt_id": "rcpt-1", "status": "succeeded"})
-    ev = read_evaluator_inputs(eval_in)
-    assert ev["receipt"]["receipt_id"] == "rcpt-1"
-
-    write_compute_result(
+    sample_fin_eval = {
+        "schema": "ies.financial-evaluation",
+        "schema_version": "1.0.0",
+        "status": "evaluated",
+        "evaluation_years": 1,
+        "construction_period": 0,
+        "operation_years": 1,
+        "currency": "CNY",
+        "price_basis": "tax_inclusive",
+        "base_year": 2025,
+        "profile_id": "pure-fwd",
+        "discount_rate": 0.0,
+        "construction_total": "1000.0",
+        "construction_total_unit": "CNY",
+        "annual_fixed_om": "30.0",
+        "payments_applied": [],
+        "net_cashflows": [],
+        "cost_items": [],
+        "amounts": [],
+        "cash_movements": [],
+        "assets": [],
+        "construction_units": [],
+        "annual_operation": [],
+        "monthly_demand": [],
+        "tax_cash": {
+            "depreciation": [],
+            "derived": [],
+            "income": [],
+            "loss_balances": [],
+            "refunds": [],
+            "vat": [],
+            "vat_rules": [],
+        },
+        "annual_net_flows": ["-1000.0", "6072.5"],
+        "comparison": {"mode": "absolute"},
+        "evaluation": {
+            "schema": "ies.project-evaluation",
+            "schema_version": "1.0.0",
+            "npv": "5072.5",
+            "irr_status": "defined",
+            "rows": [],
+        },
+    }
+    write_financial_evaluation(eval_out / "financial_evaluation.json", sample_fin_eval)
+    validate_stage_outputs(
+        "evaluator",
         eval_out,
-        ComputeResultPayload(
-            bundle_id="bnd-1",
-            receipt_id="rcpt-1",
-            execution_status="completed",
-            math_status="solved",
-            outputs={"objective": 10.0},
-        ),
+        produces=("ies.financial-evaluation@1.0.0",),
     )
-    validate_stage_outputs("evaluator", eval_out)
-    assert read_compute_result(eval_out).math_status == "solved"
+    assert read_financial_evaluation(eval_out / "financial_evaluation.json")["status"] == "evaluated"
+
+    bare_fin_out = tmp_path / "bare_fin_out"
+    write_json_file(
+        bare_fin_out / "financial_evaluation.json",
+        {"schema": "ies.financial-evaluation", "schema_version": "1.0.0", "status": "evaluated"},
+    )
+    with pytest.raises(StageIOError, match="requires"):
+        validate_stage_outputs("evaluator", bare_fin_out, produces=("ies.financial-evaluation@1.0.0",))
+
+    bad_tax_out = tmp_path / "bad_tax_out"
+    bad_tax = {**sample_fin_eval, "tax_cash": {"income": []}}
+    write_json_file(bad_tax_out / "financial_evaluation.json", bad_tax)
+    with pytest.raises(StageIOError, match="tax_cash"):
+        validate_stage_outputs("evaluator", bad_tax_out, produces=("ies.financial-evaluation@1.0.0",))
+
+    for field, bad_val, match in (
+        ("annual_operation", [None], "annual_operation\\[0\\]"),
+        ("payments_applied", [{"t": 0}], "payments_applied\\[0\\]"),
+        ("annual_net_flows", [None], "annual_net_flows"),
+        ("construction_units", [{"unit_id": "u1"}], "construction_units\\[0\\]"),
+    ):
+        bad_nested_out = tmp_path / f"bad_nested_{field}"
+        write_json_file(bad_nested_out / "financial_evaluation.json", {**sample_fin_eval, field: bad_val})
+        with pytest.raises(StageIOError, match=match):
+            validate_stage_outputs(
+                "evaluator", bad_nested_out, produces=("ies.financial-evaluation@1.0.0",)
+            )
+
+    bad_eval_rows = tmp_path / "bad_eval_rows"
+    write_json_file(
+        bad_eval_rows / "financial_evaluation.json",
+        {**sample_fin_eval, "evaluation": {**sample_fin_eval["evaluation"], "rows": [None]}},
+    )
+    with pytest.raises(StageIOError, match="evaluation.rows\\[0\\]"):
+        validate_stage_outputs("evaluator", bad_eval_rows, produces=("ies.financial-evaluation@1.0.0",))
+
+    for bad_token in ("NaN", "Infinity", "-Infinity", "not-a-number", " 1.0 ", "1_000"):
+        bad_flow_out = tmp_path / f"bad_flow_{abs(hash(bad_token))}"
+        write_json_file(
+            bad_flow_out / "financial_evaluation.json",
+            {**sample_fin_eval, "annual_net_flows": [bad_token, "6072.5"]},
+        )
+        with pytest.raises(StageIOError, match="annual_net_flows"):
+            validate_stage_outputs(
+                "evaluator", bad_flow_out, produces=("ies.financial-evaluation@1.0.0",)
+            )
+
+        bad_op_out = tmp_path / f"bad_op_{abs(hash(bad_token))}"
+        write_json_file(
+            bad_op_out / "financial_evaluation.json",
+            {
+                **sample_fin_eval,
+                "annual_operation": [
+                    {
+                        "financial_year": 1,
+                        "energy_net": "0",
+                        "variable_om": "0",
+                        "fixed_om": "0",
+                        "maintenance": "0",
+                        "demand_charge": "0",
+                        "net": bad_token,
+                    }
+                ],
+            },
+        )
+        with pytest.raises(StageIOError, match="annual_operation\\[0\\]"):
+            validate_stage_outputs(
+                "evaluator", bad_op_out, produces=("ies.financial-evaluation@1.0.0",)
+            )
+
+    for top_field, bad_top_val in (
+        ("construction_total", "NaN"),
+        ("construction_total", 1000),
+        ("annual_fixed_om", "NaN"),
+        ("annual_fixed_om", 30.0),
+    ):
+        bad_top = tmp_path / f"bad_top_{top_field}_{type(bad_top_val).__name__}"
+        write_json_file(
+            bad_top / "financial_evaluation.json",
+            {**sample_fin_eval, top_field: bad_top_val},
+        )
+        with pytest.raises(StageIOError, match=top_field):
+            validate_stage_outputs("evaluator", bad_top, produces=("ies.financial-evaluation@1.0.0",))
+
+    bad_npv = tmp_path / "bad_npv"
+    write_json_file(
+        bad_npv / "financial_evaluation.json",
+        {**sample_fin_eval, "evaluation": {**sample_fin_eval["evaluation"], "npv": "Infinity"}},
+    )
+    with pytest.raises(StageIOError, match="evaluation"):
+        validate_stage_outputs("evaluator", bad_npv, produces=("ies.financial-evaluation@1.0.0",))
+
+    bad_irr = tmp_path / "bad_irr"
+    write_json_file(
+        bad_irr / "financial_evaluation.json",
+        {**sample_fin_eval, "evaluation": {**sample_fin_eval["evaluation"], "irr": "NaN"}},
+    )
+    with pytest.raises(StageIOError, match="evaluation.irr"):
+        validate_stage_outputs("evaluator", bad_irr, produces=("ies.financial-evaluation@1.0.0",))
+
+    bad_report_out = tmp_path / "bad_report_out"
+    write_json_file(
+        bad_report_out / "evaluation_report.json",
+        {
+            "schema": "ies.evaluation-report",
+            "schema_version": "1.0.0",
+            "title": "Bad",
+            "evaluator": "acme.evaluator.carbon@1.0.0",
+            "metrics": [None],
+            "charts": [],
+            "tables": [],
+        },
+    )
+    with pytest.raises(StageIOError, match="EvaluationMetric"):
+        validate_stage_outputs(
+            "evaluator",
+            bad_report_out,
+            produces=("ies.evaluation-report@1.0.0",),
+        )
+
+    legacy_only = tmp_path / "legacy_eval_out"
+    write_json_file(legacy_only / "result.json", {"schema": "ies.compute-result", "schema_version": "1.0.0"})
+    with pytest.raises(StageIOError, match="missing 'evaluation_report.json' or 'financial_evaluation.json'"):
+        validate_stage_outputs("evaluator", legacy_only)
+
+    report_out = tmp_path / "report_out"
+    write_evaluation_report(
+        report_out / "evaluation_report.json",
+        {
+            "schema": "ies.evaluation-report",
+            "schema_version": "1.0.0",
+            "title": "Carbon Report",
+            "evaluator": "acme.evaluator.carbon@1.0.0",
+            "metrics": [{"id": "co2", "label": "CO2", "value": 12.5, "unit": "t"}],
+            "charts": [],
+            "tables": [],
+        },
+    )
+    validate_stage_outputs(
+        "evaluator",
+        report_out,
+        produces=("ies.evaluation-report@1.0.0",),
+    )
+    assert read_evaluation_report(report_out / "evaluation_report.json").title == "Carbon Report"
+
+
+def test_extract_stage_parameters_reads_canonical_request_parameters_only(tmp_path: Path) -> None:
+    req_in = tmp_path / "req_params"
+    write_json_file(
+        req_in / "request.json",
+        {"parameters": {"threads": 4}, "options": {"threads": 1}},
+    )
+    write_json_file(req_in / "calculation_config.json", {"options": {"threads": 2}})
+    assert extract_stage_parameters(req_in) == {"threads": 4}
+
+    opts_only = tmp_path / "opts_only"
+    write_json_file(opts_only / "request.json", {"options": {"solver": {"threads": 4}}})
+    write_json_file(opts_only / "calculation_config.json", {"options": {"solver": {"threads": 2}}})
+    assert extract_stage_parameters(opts_only) == {}
+
+    bad_params = tmp_path / "bad_params"
+    write_json_file(bad_params / "request.json", {"parameters": ["not", "an", "object"]})
+    with pytest.raises(StageIOError, match="'parameters' must be a JSON object"):
+        extract_stage_parameters(bad_params)
 
 
 def test_algorithm_and_iterations_ndjson(tmp_path: Path) -> None:

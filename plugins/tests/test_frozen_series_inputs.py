@@ -13,7 +13,6 @@ from typing import Any
 import pytest
 from iesplan.assembly import validate_assembly_text
 from iesplan.computation import (
-    HIGHS_ADAPTER,
     HIGHS_MILP_PROVIDER,
     NAIVE_PREDICTOR,
     NAIVE_PREDICTOR_REF,
@@ -55,7 +54,7 @@ from pies_builtin_plugins.stage_io import (
 PLUGINS_ROOT = Path(__file__).resolve().parent.parent
 REPO_ROOT = PLUGINS_ROOT.parent
 IESPLAN_SAMPLES = REPO_ROOT / "backend" / "iesplan" / "assembly" / "samples"
-BUILTIN_STAGE_IMAGE = "pies-builtin-stages:1.1.5"
+BUILTIN_STAGE_IMAGE = "pies-builtin-stages:1.2.0"
 
 
 def _collect_resources(doc: dict[str, Any], samples_dir: Path) -> dict[str, bytes]:
@@ -235,11 +234,13 @@ def test_frozen_series_inputs_docker_equivalence(tmp_path: Path) -> None:
         predictions=(pred_entry,),
         generator=GENERATOR_REF,
         solver=SOLVER_REF,
-        evaluator=HIGHS_ADAPTER.ref,
+        algorithm=None,
+        evaluators=({"evaluator": "ies.evaluator.finance@1.0.0", "parameters": {}},),
         precision="medium",
         time_limit_seconds=600,
-        outputs=("solution", "metrics"),
+        options={"generator": {}, "solver": {}},
         seed=42,
+        outputs=("solution", "metrics"),
     )
 
     # 1) Direct in-process materialization + generation
@@ -371,11 +372,13 @@ def test_frozen_series_inputs_with_mounted_prediction_json(tmp_path: Path) -> No
         predictions=(pred_entry,),
         generator=GENERATOR_REF,
         solver=SOLVER_REF,
-        evaluator=HIGHS_ADAPTER.ref,
+        algorithm=None,
+        evaluators=({"evaluator": "ies.evaluator.finance@1.0.0", "parameters": {}},),
         precision="medium",
         time_limit_seconds=600,
-        outputs=("solution", "metrics"),
+        options={"generator": {}, "solver": {}},
         seed=42,
+        outputs=("solution", "metrics"),
     )
 
     base_mat = materialize_non_predictive_series(artifact, resources, operation_years=1)
@@ -521,13 +524,16 @@ def test_frozen_series_inputs_monthly_daily_price_equivalence(tmp_path: Path) ->
     expanded = expand_monthly_daily_prices(curves, resolution="1h", start_year=2026, operation_years=1)
     config = CalculationConfig(
         mode="planning",
+        predictions=(),
         generator=GENERATOR_REF,
         solver=SOLVER_REF,
-        evaluator=HIGHS_ADAPTER.ref,
+        algorithm=None,
+        evaluators=({"evaluator": "ies.evaluator.finance@1.0.0", "parameters": {}},),
         precision="medium",
         time_limit_seconds=600,
-        outputs=("solution", "metrics"),
+        options={"generator": {}, "solver": {}},
         seed=0,
+        outputs=("solution", "metrics"),
     )
 
     base_mat = materialize_non_predictive_series(artifact, resources, operation_years=1)
@@ -593,13 +599,16 @@ def test_frozen_series_inputs_missing_object_fails_visibly(tmp_path: Path) -> No
     artifact, models, _resources, finance, evaluation = _load_campus_inputs()
     config = CalculationConfig(
         mode="planning",
+        predictions=(),
         generator=GENERATOR_REF,
         solver=SOLVER_REF,
-        evaluator=HIGHS_ADAPTER.ref,
+        algorithm=None,
+        evaluators=({"evaluator": "ies.evaluator.finance@1.0.0", "parameters": {}},),
         precision="medium",
         time_limit_seconds=600,
-        outputs=("solution", "metrics"),
+        options={"generator": {}, "solver": {}},
         seed=0,
+        outputs=("solution", "metrics"),
     )
     gen_in = tmp_path / "gen_in"
     gen_out = tmp_path / "gen_out"

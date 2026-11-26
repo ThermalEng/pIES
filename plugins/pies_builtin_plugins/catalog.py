@@ -1,12 +1,12 @@
 """Catalog of official built-in pIES stage plugins and `/work/in -> /work/out` contracts.
 
 All four official computation stages are packaged in the shared runtime image
-``pies-builtin-stages:1.1.5`` and executed by ``backend`` via ``job_runner``
+``pies-builtin-stages:1.2.0`` and executed by ``backend`` via ``job_runner``
 as isolated ephemeral containers (`--network=none --read-only --cap-drop=ALL`):
 
 1. ``ies.predictor.naive@1.0.0`` (`kind="predictor"`):
    - `/work/in/request.json`:
-     `{"point_count": int, "seed": int | None, "previous": object | None, "targets": [...]}`
+     `{"point_count": int, "seed": int | None, "targets": [...]}`
      where each target has `instance`, `interface`, `target_type`, `history_object_id`,
      `parameters`, and either `history` (`[float, ...]`) or `history_csv_rel` (`str`)
    - `/work/out/prediction.json`: `ies.prediction-output@1.0.0` (`predictions`, `artifacts`)
@@ -14,32 +14,24 @@ as isolated ephemeral containers (`--network=none --read-only --cap-drop=ALL`):
 
 2. ``ies.generator.highs_milp@1.0.0`` (`kind="generator"`):
    - `/work/in/request.json` (or split `assembly.json`, `device_models.json`,
-     `sequences.json`, `finance.json`, `calculation_config.json`, `evaluation.json`,
-     plus optional `/work/in/prediction.json` handed off directly from Stage 1):
-     frozen `artifact`, `device_models`, `materialized`, `finance`, `calculation_config`, `evaluation`
-   - `/work/out/bundle/`: canonical `ies.solver-bundle@1.0.0` directory
+     `sequences.json` / `frozen_series_inputs`, `finance.json`, `calculation_config.json`,
+     `evaluation.json`, plus optional `/work/in/prediction.json`):
+     frozen `artifact`, `device_models`, `materialized`/`frozen_series_inputs`,
+     `finance`, `calculation_config`, `evaluation`
+   - `/work/out/bundle/`: canonical `ies.solver-bundle@1.0.0` directory (`ies.solver-bundle.mps@1.0.0`)
      (`bundle.yaml`, `input/problem.mps`, `input/parameters.json`,
-      `input/parameters.jsonl`, optional `input/acceleration.json`)
+      `input/parameters.jsonl`, optional `input/acceleration.json`, `input/epigraphs.json`)
 
 3. ``ies.solver.highs@1.7.2`` (`kind="solver"`):
-   - `/work/in/bundle/`: read-only `ies.solver-bundle@1.0.0` directory (direct handoff
-     from Stage 2 `/work/out/bundle/` without re-packing)
-   - optional `/work/in/request.json`: `{"parameters": {"threads": int}}`
-   - `/work/out/solution.sol`: `HIGHS_SOLUTION_V1` text produced by `/usr/local/bin/ies-highs-solver`
-   - `/work/out/solver_meta.json`: structured process timing/exit metadata
+   - `/work/in/bundle/`: read-only `ies.solver-bundle@1.0.0` directory (`ies.solver-bundle.mps@1.0.0`)
+   - optional `/work/in/request.json` / `calculation_config.json` (`time_limit_seconds`, `seed`, `threads`)
+   - `/work/out/primal_solution.json`: strictly 0-based `ies.primal-solution@1.0.0`
 
-4. ``ies.result-adapter.highs@1.0.0`` (`kind="evaluator"`):
-   - `/work/in/bundle/`: read-only `ies.solver-bundle@1.0.0` directory
-   - `/work/in/outputs/` (or `/work/in/solution.*` / `/work/in/bundle/output/solution.*`):
-     raw solver output directory handed off directly from Stage 3 `/work/out/`
-   - `/work/in/receipt.json` (or `/work/in/outputs/receipt.json` or `request.json["receipt"]`):
-     required real `ExecutionReceipt` JSON (never fabricated)
-   - `/work/in/request.json` (or split `finance.json`/`effective_finance.yaml` + `evaluation.json`):
-     optional frozen `finance` and `evaluation` for same-run financial evaluation
-   - `/work/out/result.json`: `ies.compute-result@1.0.0` (`ComputeResultPayload`) whose
-     `outputs` preserves `solver_summary`, `solution`, `series`, `system_series`,
-     `financial_facts`, `model_sources`, `metrics`, plus same-run `financial_evaluation`
-     (`ies.financial-evaluation@1.0.0`) and `hourly_series` when `solution` is solved/feasible.
+4. ``ies.evaluator.finance@1.0.0`` (`kind="evaluator"`):
+   - `/work/in/solution.json`: canonical `ies.engineering-solution@1.0.0`
+   - `/work/in/{assembly,device_models,sequences/frozen_series_inputs,finance,evaluation}.json`:
+     frozen read-only context hardlinked by `backend`
+   - `/work/out/financial_evaluation.json`: canonical `ies.financial-evaluation@1.0.0` JSON.
 """
 
 from __future__ import annotations
@@ -49,7 +41,7 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any
 
-BUILTIN_STAGES_IMAGE = "pies-builtin-stages:1.1.5"
+BUILTIN_STAGES_IMAGE = "pies-builtin-stages:1.2.0"
 CONTAINER_PLUGINS_ROOT = "/app/plugins"
 
 
@@ -72,7 +64,7 @@ class BuiltinStageDescriptor:
 
     @property
     def container_manifest_path(self) -> str:
-        """Absolute path to `plugin.yaml` inside `pies-builtin-stages:1.1.5`."""
+        """Absolute path to `plugin.yaml` inside `pies-builtin-stages:1.2.0`."""
         return f"{CONTAINER_PLUGINS_ROOT}/{self.manifest_rel}"
 
     @property
@@ -160,22 +152,21 @@ BUILTIN_STAGE_DESCRIPTORS: tuple[BuiltinStageDescriptor, ...] = (
         capabilities=(
             "solver.milp",
             "solver.lp",
-            "solver.highs_solution_v1",
+            "solver.primal_solution",
             "solver.on_demand_mutex",
         ),
     ),
     BuiltinStageDescriptor(
-        plugin_id="ies.result-adapter.highs",
+        plugin_id="ies.evaluator.finance",
         version="1.0.0",
         kind="evaluator",
         image=BUILTIN_STAGES_IMAGE,
-        entrypoint="evaluator_stage:evaluate",
-        manifest_rel="evaluator_highs/plugin.yaml",
+        entrypoint="finance_evaluator_stage:evaluate",
+        manifest_rel="evaluator_finance/plugin.yaml",
         capabilities=(
-            "evaluator.highs_solution_v1",
-            "evaluator.financial_facts",
+            "evaluator.engineering_solution",
+            "evaluator.financial_evaluation",
             "evaluator.project_investment",
-            "evaluator.hourly_series",
         ),
     ),
 )

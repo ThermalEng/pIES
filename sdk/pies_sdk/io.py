@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+import math
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
@@ -21,9 +23,12 @@ from pies_sdk.errors import StageIOError
 from pies_sdk.iteration import ITERATION_LOG_FILENAME, IterationWriter
 from pies_sdk.manifest import PLUGIN_KINDS, PluginManifest
 from pies_sdk.solution_contracts import (
+    EVALUATION_REPORT_SCHEMA,
+    EVALUATION_REPORT_VERSION,
     EngineeringSolutionPayload,
     EvaluationReportPayload,
     PrimalSolutionPayload,
+    iter_primal_solution_values,
     read_engineering_solution,
     read_evaluation_report,
     read_primal_solution,
@@ -32,6 +37,9 @@ from pies_sdk.solution_contracts import (
     write_primal_solution,
 )
 from pies_sdk.yaml_safe import dump_safe_yaml, load_safe_yaml
+
+FINANCIAL_EVALUATION_SCHEMA = "ies.financial-evaluation"
+FINANCIAL_EVALUATION_VERSION = "1.0.0"
 
 DEFAULT_WORK_IN = Path("/work/in")
 DEFAULT_WORK_OUT = Path("/work/out")
@@ -253,7 +261,7 @@ def list_solver_solutions(work_out: Path = DEFAULT_WORK_OUT) -> list[Path]:
 
 
 # ---------------------------------------------------------------------------
-# Stage 4: evaluator (/work/in/{bundle/,solution.*,receipt.json} -> /work/out/result.json)
+# Stage 4: evaluator (/work/out/{financial_evaluation.json | evaluation_report.json})
 # ---------------------------------------------------------------------------
 
 
@@ -305,7 +313,7 @@ def read_evaluator_inputs(work_in: Path = DEFAULT_WORK_IN) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# Stage 5: algorithm (/work/in/request.json -> /work/out/result.json)
+# Stage 5: algorithm (/work/in/request.json -> /work/out/solution.json)
 # ---------------------------------------------------------------------------
 
 
@@ -315,6 +323,313 @@ def read_algorithm_request(work_in: Path = DEFAULT_WORK_IN) -> dict[str, Any]:
     if not isinstance(data, dict):
         raise StageIOError("algorithm /work/in/request.json must be a JSON object")
     return data
+
+
+_FIN_EVAL_INT_MINS: tuple[tuple[str, int], ...] = (
+    ("evaluation_years", 1),
+    ("operation_years", 1),
+    ("construction_period", 0),
+    ("base_year", 1),
+)
+_FIN_EVAL_STR_FIELDS: tuple[str, ...] = (
+    "status",
+    "currency",
+    "price_basis",
+    "construction_total_unit",
+)
+_FIN_EVAL_NUM_FIELDS: tuple[str, ...] = (
+    "construction_total",
+    "annual_fixed_om",
+)
+# Row field type specs: "str" (non-empty str), "int" (non-bool int),
+# "num" (non-empty numeric/formatted str or finite number), "map" (Mapping)
+_FIN_EVAL_ROW_SPECS: dict[str, tuple[tuple[str, str], ...]] = {
+    "payments_applied": (("t", "int"), ("ratio", "num"), ("amount", "num")),
+    "net_cashflows": (("id", "str"), ("t", "int"), ("direction", "str"), ("amount", "num")),
+    "cost_items": (
+        ("instance_id", "str"),
+        ("finance_type", "str"),
+        ("component", "str"),
+        ("item_id", "str"),
+        ("axis", "str"),
+        ("period", "int"),
+        ("unit", "str"),
+        ("raw", "num"),
+        ("gross", "num"),
+        ("deductible_input", "num"),
+        ("net_basis", "num"),
+    ),
+    "amounts": (("id", "str"), ("axis", "str"), ("unit", "str")),
+    "cash_movements": (
+        ("id", "str"),
+        ("axis", "str"),
+        ("period", "int"),
+        ("direction", "str"),
+        ("price_basis", "str"),
+        ("raw", "num"),
+        ("gross", "num"),
+        ("deductible_input", "num"),
+        ("net_basis", "num"),
+        ("output_tax", "num"),
+        ("net_revenue", "num"),
+        ("end_unpaid", "num"),
+    ),
+    "assets": (("id", "str"), ("basis", "num"), ("capitalized_at", "map"), ("available_from", "int")),
+    "annual_operation": (
+        ("financial_year", "int"),
+        ("energy_net", "num"),
+        ("variable_om", "num"),
+        ("fixed_om", "num"),
+        ("maintenance", "num"),
+        ("demand_charge", "num"),
+        ("net", "num"),
+    ),
+    "monthly_demand": (
+        ("billing_id", "str"),
+        ("charge_id", "str"),
+        ("calendar_year", "int"),
+        ("calendar_month", "int"),
+        ("financial_year", "int"),
+        ("peak_power", "num"),
+        ("peak_unit", "str"),
+        ("rate", "map"),
+        ("charge", "num"),
+    ),
+}
+_FIN_EVAL_TAX_ROW_SPECS: dict[str, tuple[tuple[str, str], ...]] = {
+    "vat": (
+        ("pool", "str"),
+        ("month", "int"),
+        ("paid", "num"),
+        ("refund_claimed", "num"),
+        ("refund_arrived", "num"),
+        ("carry", "num"),
+        ("receivable", "num"),
+    ),
+    "vat_rules": (
+        ("rule", "str"),
+        ("pool", "str"),
+        ("month", "int"),
+        ("output_tax", "num"),
+        ("deductible_input", "num"),
+    ),
+    "refunds": (("pool", "str"), ("period", "int"), ("arrival_period", "int"), ("amount", "num")),
+    "income": (
+        ("rule", "str"),
+        ("year", "int"),
+        ("taxable_base", "num"),
+        ("loss_used", "num"),
+        ("loss_generated", "num"),
+        ("loss_expired", "num"),
+        ("assessed", "num"),
+        ("tax", "num"),
+    ),
+    "depreciation": (("rule", "str"), ("base_from", "map"), ("year", "int"), ("amount", "num")),
+    "loss_balances": (
+        ("rule", "str"),
+        ("vintage_id", "str"),
+        ("year", "int"),
+        ("last_usable_year", "int"),
+        ("amount", "num"),
+    ),
+    "derived": (
+        ("rule", "str"),
+        ("axis", "str"),
+        ("period", "int"),
+        ("assessed", "num"),
+        ("payment_period", "int"),
+        ("paid", "num"),
+    ),
+}
+_FIN_EVAL_ROW_FIELDS: tuple[tuple[str, str], ...] = (
+    ("year", "int"),
+    ("net", "num"),
+    ("discounted", "num"),
+    ("cumulative", "num"),
+    ("cumulative_discounted", "num"),
+)
+
+
+def _is_finite_decimal_str(value: Any) -> bool:
+    if not isinstance(value, str) or not value or value != value.strip() or "_" in value:
+        return False
+    try:
+        return Decimal(value).is_finite()
+    except InvalidOperation:
+        return False
+
+
+def _is_scalar_kind(value: Any, kind: str) -> bool:
+    if kind == "str":
+        return isinstance(value, str) and bool(value)
+    if kind == "int":
+        return not isinstance(value, bool) and isinstance(value, int)
+    if kind == "num":
+        if isinstance(value, str):
+            return _is_finite_decimal_str(value)
+        return (
+            not isinstance(value, bool)
+            and isinstance(value, (int, float))
+            and math.isfinite(value)
+        )
+    if kind == "map":
+        return isinstance(value, Mapping)
+    return False
+
+
+def _validate_fin_row_list(
+    rows: Any,
+    label: str,
+    field_specs: tuple[tuple[str, str], ...],
+) -> list[Any]:
+    if not isinstance(rows, list):
+        raise StageIOError(f"{label} requires list")
+    for idx, row in enumerate(rows):
+        if not isinstance(row, Mapping):
+            raise StageIOError(f"{label}[{idx}] must be a JSON object")
+        for key, kind in field_specs:
+            if not _is_scalar_kind(row.get(key), kind):
+                raise StageIOError(f"{label}[{idx}] missing or invalid {kind} field {key!r}")
+    return rows
+
+
+def _validate_financial_evaluation_mapping(data: Any) -> dict[str, Any]:
+    if not isinstance(data, Mapping):
+        raise StageIOError("FinancialEvaluation payload must be a JSON object")
+    if data.get("schema") != FINANCIAL_EVALUATION_SCHEMA:
+        raise StageIOError(f"Invalid FinancialEvaluation schema: {data.get('schema')!r}")
+    if data.get("schema_version") != FINANCIAL_EVALUATION_VERSION:
+        raise StageIOError(
+            f"Invalid FinancialEvaluation schema_version: {data.get('schema_version')!r}"
+        )
+
+    for key in _FIN_EVAL_STR_FIELDS:
+        if not _is_scalar_kind(data.get(key), "str"):
+            raise StageIOError(f"FinancialEvaluation requires non-empty string {key!r}")
+    for key in _FIN_EVAL_NUM_FIELDS:
+        if not _is_finite_decimal_str(data.get(key)):
+            raise StageIOError(f"FinancialEvaluation requires finite decimal string for {key!r}")
+    if not isinstance(data.get("profile_id"), str):
+        raise StageIOError("FinancialEvaluation requires string 'profile_id'")
+
+    for key, minimum in _FIN_EVAL_INT_MINS:
+        val = data.get(key)
+        if not _is_scalar_kind(val, "int") or val < minimum:
+            raise StageIOError(
+                f"FinancialEvaluation requires integer {key!r} >= {minimum}, got {val!r}"
+            )
+
+    discount_rate = data.get("discount_rate")
+    if isinstance(discount_rate, bool) or not isinstance(discount_rate, (int, float)):
+        raise StageIOError(
+            f"FinancialEvaluation requires finite number 'discount_rate', got {discount_rate!r}"
+        )
+
+    for key, specs in _FIN_EVAL_ROW_SPECS.items():
+        _validate_fin_row_list(data.get(key), f"FinancialEvaluation.{key}", specs)
+
+    for idx, amt in enumerate(data["amounts"]):
+        _validate_fin_row_list(
+            amt.get("values"),
+            f"FinancialEvaluation.amounts[{idx}].values",
+            (("period", "int"), ("value", "num")),
+        )
+    for idx, mov in enumerate(data["cash_movements"]):
+        _validate_fin_row_list(
+            mov.get("payments"),
+            f"FinancialEvaluation.cash_movements[{idx}].payments",
+            (("at", "map"), ("ratio", "num"), ("amount", "num")),
+        )
+    for idx, asset in enumerate(data["assets"]):
+        _validate_fin_row_list(
+            asset.get("book_values"),
+            f"FinancialEvaluation.assets[{idx}].book_values",
+            (("year", "int"), ("value", "num")),
+        )
+
+    units = data.get("construction_units")
+    if not isinstance(units, list):
+        raise StageIOError("FinancialEvaluation.construction_units requires list")
+    for idx, unit in enumerate(units):
+        if not isinstance(unit, Mapping):
+            raise StageIOError(f"FinancialEvaluation.construction_units[{idx}] must be a JSON object")
+        for key, kind in (("unit_id", "str"), ("instance_id", "str"), ("mode", "str")):
+            if not _is_scalar_kind(unit.get(key), kind):
+                raise StageIOError(
+                    f"FinancialEvaluation.construction_units[{idx}] invalid field {key!r}"
+                )
+        if not isinstance(unit.get("built"), bool):
+            raise StageIOError(f"FinancialEvaluation.construction_units[{idx}] requires bool 'built'")
+        _validate_fin_row_list(
+            unit.get("scales"),
+            f"FinancialEvaluation.construction_units[{idx}].scales",
+            (("planning_variable_id", "str"), ("unit", "str")),
+        )
+        for s_idx, scale in enumerate(unit["scales"]):
+            if not _is_scalar_kind(scale.get("value"), "num"):
+                raise StageIOError(
+                    f"FinancialEvaluation.construction_units[{idx}].scales[{s_idx}] invalid 'value'"
+                )
+
+    annual_flows = data.get("annual_net_flows")
+    if not isinstance(annual_flows, list) or not all(
+        _is_scalar_kind(v, "num") for v in annual_flows
+    ):
+        raise StageIOError("FinancialEvaluation.annual_net_flows requires list of numbers/strings")
+
+    comparison = data.get("comparison")
+    if not isinstance(comparison, Mapping) or not _is_scalar_kind(comparison.get("mode"), "str"):
+        raise StageIOError("FinancialEvaluation requires 'comparison' object with non-empty 'mode'")
+    if comparison["mode"] == "difference":
+        eval_flows = comparison.get("evaluation_net_flows")
+        if not isinstance(eval_flows, list) or not all(
+            _is_scalar_kind(v, "num") for v in eval_flows
+        ):
+            raise StageIOError(
+                "FinancialEvaluation.comparison requires 'evaluation_net_flows' in difference mode"
+            )
+
+    tax_cash = data.get("tax_cash")
+    if not isinstance(tax_cash, Mapping):
+        raise StageIOError("FinancialEvaluation requires 'tax_cash' object")
+    for key, specs in _FIN_EVAL_TAX_ROW_SPECS.items():
+        _validate_fin_row_list(tax_cash.get(key), f"FinancialEvaluation.tax_cash.{key}", specs)
+
+    evaluation = data.get("evaluation")
+    if not isinstance(evaluation, Mapping):
+        raise StageIOError("FinancialEvaluation requires 'evaluation' object")
+    _validate_fin_row_list(
+        evaluation.get("rows"),
+        "FinancialEvaluation.evaluation.rows",
+        _FIN_EVAL_ROW_FIELDS,
+    )
+    if not _is_scalar_kind(evaluation.get("npv"), "num") or not _is_scalar_kind(
+        evaluation.get("irr_status"), "str"
+    ):
+        raise StageIOError(
+            "FinancialEvaluation.evaluation requires finite 'npv' and non-empty 'irr_status'"
+        )
+    for opt_num in ("discount_rate", "irr", "static_payback", "dynamic_payback"):
+        if opt_num in evaluation and evaluation[opt_num] is not None and not _is_scalar_kind(
+            evaluation[opt_num], "num"
+        ):
+            raise StageIOError(
+                f"FinancialEvaluation.evaluation.{opt_num} must be a finite numeric value"
+            )
+
+    check_finite_json(data, "FinancialEvaluation")
+    return dict(data)
+
+
+def write_financial_evaluation(path: Path, payload: Mapping[str, Any]) -> Path:
+    """Validate and write financial_evaluation.json (ies.financial-evaluation@1.0.0)."""
+    validated = _validate_financial_evaluation_mapping(payload)
+    return write_json_file(Path(path), validated)
+
+
+def read_financial_evaluation(path: Path) -> dict[str, Any]:
+    """Read and validate financial_evaluation.json (ies.financial-evaluation@1.0.0)."""
+    return _validate_financial_evaluation_mapping(read_json_file(Path(path)))
 
 
 def write_compute_result(
@@ -338,8 +653,13 @@ def read_compute_result(work_out: Path = DEFAULT_WORK_OUT) -> ComputeResultPaylo
 # ---------------------------------------------------------------------------
 
 
-def validate_stage_outputs(kind: str, work_out: Path = DEFAULT_WORK_OUT) -> None:
-    """Validate that /work/out satisfies the stage output contract for `kind`."""
+def validate_stage_outputs(
+    kind: str,
+    work_out: Path = DEFAULT_WORK_OUT,
+    *,
+    produces: Sequence[str] = (),
+) -> None:
+    """Validate that /work/out satisfies the canonical stage output contract for `kind`."""
     if kind not in PLUGIN_KINDS:
         raise StageIOError(f"Unknown plugin kind: {kind!r}")
     root = Path(work_out)
@@ -350,37 +670,50 @@ def validate_stage_outputs(kind: str, work_out: Path = DEFAULT_WORK_OUT) -> None
     elif kind == "generator":
         validate_solver_bundle_dir(root / "bundle")
     elif kind == "solver":
-        if not list_solver_solutions(root):
-            raise StageIOError("solver /work/out missing 'solution.*' output file")
-    elif kind in ("evaluator", "algorithm"):
-        read_compute_result(root)
+        primal_path = root / "primal_solution.json"
+        if not primal_path.is_file():
+            raise StageIOError("solver /work/out missing 'primal_solution.json' output file")
+        _hdr, values_iter = iter_primal_solution_values(primal_path)
+        for _ in values_iter:
+            pass
+    elif kind == "algorithm":
+        read_engineering_solution(root / "solution.json")
+    elif kind == "evaluator":
+        report_path = root / "evaluation_report.json"
+        fin_path = root / "financial_evaluation.json"
+        fin_contract = f"{FINANCIAL_EVALUATION_SCHEMA}@{FINANCIAL_EVALUATION_VERSION}"
+        report_contract = f"{EVALUATION_REPORT_SCHEMA}@{EVALUATION_REPORT_VERSION}"
+        if fin_contract in produces:
+            if not fin_path.is_file():
+                raise StageIOError("evaluator /work/out missing 'financial_evaluation.json'")
+            read_financial_evaluation(fin_path)
+        elif report_contract in produces:
+            if not report_path.is_file():
+                raise StageIOError("evaluator /work/out missing 'evaluation_report.json'")
+            read_evaluation_report(report_path)
+        elif report_path.is_file():
+            read_evaluation_report(report_path)
+        elif fin_path.is_file():
+            read_financial_evaluation(fin_path)
+        else:
+            raise StageIOError(
+                "evaluator /work/out missing 'evaluation_report.json' or 'financial_evaluation.json'"
+            )
 
 
 def extract_stage_parameters(work_in: Path) -> dict[str, Any]:
-    """Extract parameters/options mapping from /work/in request or calculation config."""
+    """Extract stage parameters mapping from /work/in/request.json['parameters']."""
     root = Path(work_in)
     req_path = root / "request.json"
     if req_path.is_file():
         req = read_json_file(req_path)
-        if isinstance(req, Mapping):
-            if "parameters" in req:
-                params = req["parameters"]
-                if not isinstance(params, Mapping):
-                    raise StageIOError("request.json 'parameters' must be a JSON object")
-                return dict(params)
-            if "options" in req:
-                opts = req["options"]
-                if not isinstance(opts, Mapping):
-                    raise StageIOError("request.json 'options' must be a JSON object")
-                return dict(opts)
-    cfg_path = root / "calculation_config.json"
-    if cfg_path.is_file():
-        cfg = read_json_file(cfg_path)
-        if isinstance(cfg, Mapping) and "options" in cfg:
-            opts = cfg["options"]
-            if not isinstance(opts, Mapping):
-                raise StageIOError("calculation_config.json 'options' must be a JSON object")
-            return dict(opts)
+        if not isinstance(req, Mapping):
+            raise StageIOError("request.json must be a JSON object")
+        if "parameters" in req and req["parameters"] is not None:
+            params = req["parameters"]
+            if not isinstance(params, Mapping):
+                raise StageIOError("request.json 'parameters' must be a JSON object")
+            return dict(params)
     return {}
 
 
@@ -442,3 +775,9 @@ class StageContext:
 
     def read_evaluation_report(self) -> EvaluationReportPayload:
         return read_evaluation_report(self.work_in / "evaluation_report.json")
+
+    def write_financial_evaluation(self, payload: Mapping[str, Any]) -> Path:
+        return write_financial_evaluation(self.work_out / "financial_evaluation.json", payload)
+
+    def read_financial_evaluation(self) -> dict[str, Any]:
+        return read_financial_evaluation(self.work_in / "financial_evaluation.json")

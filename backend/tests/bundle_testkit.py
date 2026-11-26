@@ -153,7 +153,7 @@ def materialized_file(bundle, path):
         elif kind == "expression_end":
             expressions.append(entry)
         elif kind == "units":
-            doc["unit_map"].update((names[position], unit) for position, unit in record[1])
+            doc["unit_map"].update((names[item[0]], item[1]) for item in record[1])
         elif kind == "component":
             doc["components"][record[1]] = dict(expressions[record[4]], unit=record[2], caliber=record[3])
         elif kind == "facts":

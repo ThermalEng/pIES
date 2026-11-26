@@ -10,7 +10,7 @@ description: Official built-in financial evaluator computing project cash flows,
 license: MPL-2.0
 compatibility:
   pies: ">=1.2.0,<2.0.0"
-  sdk: ">=1.1.5,<2.0.0"
+  sdk: ">=1.2.0,<2.0.0"
 consumes:
   - ies.engineering-solution@1.0.0
 produces:

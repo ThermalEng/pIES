@@ -13,7 +13,7 @@ def test_parse_and_roundtrip_safe_yaml() -> None:
         "schema": "ies.algorithm-plugin",
         "schema_version": "1.0.0",
         "entrypoint": "main:solve",
-        "compatibility": {"pies": ">=1.1.5,<2.0.0"},
+        "compatibility": {"pies": ">=1.2.0,<2.0.0"},
         "flags": [True, False, None, 42, 3.14],
         "nested": [{"id": "a", "items": [1, 2]}, {"id": "b", "items": []}],
         "empty_map": {},

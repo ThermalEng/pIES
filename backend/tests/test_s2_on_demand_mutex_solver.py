@@ -28,10 +28,23 @@ from pathlib import Path
 import highspy
 import pytest
 from bundle_testkit import fixture_files
+from legacy_solve_testkit import (
+    PROBLEM_PATH,
+    make_minimal_highs_bundle,
+    restore_bundle_solution,
+)
+from legacy_solve_testkit import (
+    succeeded_receipt as _receipt,
+)
 from test_highs_milp_provider import _campus_inputs
-from test_highs_result_adapter import PARAMETERS_PATH, PROBLEM_PATH, _adapt, _parameters, _receipt
 
-from iesplan.computation import HIGHS_ADAPTER_PATH
+from iesplan.computation import (
+    HIGHS_ADAPTER_PATH,
+    SOLVER_BUNDLE_MPS_CONTRACT,
+    SolverBundle,
+    SolverBundleManifest,
+)
+from iesplan.computation.generators.highs_milp import GENERATOR_REF, PARAMETERS_PATH
 from iesplan.computation.generators.linear import (
     LinearConstraint,
     LinearExpression,
@@ -42,6 +55,74 @@ from iesplan.computation.generators.linear import (
 from iesplan.computation.generators.matrix import SparseModel
 from iesplan.computation.generators.mps import write_mps
 from iesplan.core.content import read_content
+
+
+def _parameters(*, unit_map=None, offset: float = 0.0):
+    from iesplan.computation.generators.highs_milp import VARIABLE_MAP_SCHEMA, VARIABLE_MAP_VERSION
+
+    return json.dumps({
+        "schema": VARIABLE_MAP_SCHEMA,
+        "schema_version": VARIABLE_MAP_VERSION,
+        "assembly": {"id": "asm-test", "schema_version": "1.0.0"},
+        "generator": GENERATOR_REF,
+        "objective_offset": float(offset),
+        "objective_scale": 1.0,
+        "objective_unit": "CNY",
+        "outputs": ["solution", "metrics"],
+        "precision": "medium",
+        "seed": 0,
+        "unit_map": dict(unit_map or {}),
+        "components": {},
+        "step_series": [],
+        "system_series": [],
+        "financial_facts": {"construction_units": []},
+        "model_sources": {
+            "schema": "ies.model-sources",
+            "schema_version": "1.0.0",
+            "outputs": [],
+            "sources": {},
+            "groups": [],
+        },
+    }).encode("utf-8")
+
+
+def _adapt(bundle_or_files, receipt, sol_bytes: bytes):
+    from types import SimpleNamespace
+
+    if isinstance(bundle_or_files, SolverBundle):
+        bundle = bundle_or_files
+    elif "input/parameters.jsonl" in bundle_or_files:
+        manifest = SolverBundleManifest(
+            bundle={"generator": GENERATOR_REF, "contract": SOLVER_BUNDLE_MPS_CONTRACT},
+            inputs=[{"path": path, "media_type": "application/octet-stream"} for path in bundle_or_files],
+            outputs=[{
+                "path": "output/primal_solution.json",
+                "media_type": "application/json",
+                "required": True,
+            }],
+        )
+        bundle = SolverBundle(manifest=manifest, files=bundle_or_files)
+    else:
+        mps_bytes = read_content(bundle_or_files[PROBLEM_PATH])
+        p = bundle_or_files.get(PARAMETERS_PATH)
+        if p is not None and not isinstance(p, dict):
+            p = json.loads(read_content(p).decode("utf-8"))
+        unit_map = p.get("unit_map") if isinstance(p, dict) else None
+        offset = float(p.get("offset", 0.0)) if isinstance(p, dict) else 0.0
+        bundle = make_minimal_highs_bundle(mps_bytes, unit_map=unit_map, offset=offset)
+
+    cr, eng_sol = restore_bundle_solution(bundle, receipt, {"output/solution.sol": sol_bytes})
+    outputs = dict(cr.outputs)
+    if eng_sol:
+        outputs.update(eng_sol)
+        summary = eng_sol.get("solver_summary") or {}
+        if summary.get("has_feasible_solution"):
+            outputs["solution"] = {"objective_value": summary.get("objective_value")}
+    return SimpleNamespace(
+        execution_status=cr.execution_status,
+        math_status=cr.math_status,
+        outputs=outputs,
+    )
 
 
 def _load_solver_module():
@@ -283,7 +364,7 @@ def test_zero_conflict_one_round_lossless_convergence(
     bundle_files = fixture_files(
         {
             PROBLEM_PATH: mps_bytes,
-            PARAMETERS_PATH: _parameters(unit_map={}),
+            PARAMETERS_PATH: _parameters(unit_map={}, offset=1.5),
         }
     )
     result = _adapt(bundle_files, _receipt(), sol_bytes)
@@ -374,7 +455,7 @@ def test_multi_round_double_positive_conflict_recovery(
     bundle_files = fixture_files(
         {
             PROBLEM_PATH: mps_bytes,
-            PARAMETERS_PATH: _parameters(unit_map={}),
+            PARAMETERS_PATH: _parameters(unit_map={}, offset=1.5),
         }
     )
     result = _adapt(bundle_files, _receipt(), sol_bytes)
@@ -661,9 +742,15 @@ def test_cli_subprocess_and_campus_model_integration(tmp_path: Path) -> None:
     from iesplan.computation.generators import HIGHS_MILP_PROVIDER
 
     artifact, models, materialized, finance, base_config, evaluation = _campus_inputs(seed=0)
-    config_off = replace(base_config, time_limit_seconds=60, options={"acceleration": {"mode": "off"}})
+    config_off = replace(
+        base_config,
+        time_limit_seconds=60,
+        options={"generator": {"acceleration": {"mode": "off"}}, "solver": {}},
+    )
     config_on = replace(
-        base_config, time_limit_seconds=60, options={"acceleration": {"mode": "on_demand_mutex"}}
+        base_config,
+        time_limit_seconds=60,
+        options={"generator": {"acceleration": {"mode": "on_demand_mutex"}}, "solver": {}},
     )
     bundle_off = HIGHS_MILP_PROVIDER.generate(
         artifact, models, materialized, finance, config_off, evaluation
@@ -684,10 +771,19 @@ def test_cli_subprocess_and_campus_model_integration(tmp_path: Path) -> None:
     (campus_dir / "input" / "problem.mps").write_bytes(campus_mps)
     (campus_dir / "input" / "acceleration.json").write_bytes(campus_accel)
 
+    base_args = [
+        "input/problem.mps",
+        "--solution_file",
+        "output/solution.sol",
+        "--time_limit",
+        "60",
+        "--random_seed",
+        "0",
+    ]
     proc_off = subprocess.run(
         [
             HIGHS_ADAPTER_PATH,
-            *bundle_off.manifest.command["arguments"],
+            *base_args,
             "--threads",
             "2",
         ],
@@ -703,7 +799,11 @@ def test_cli_subprocess_and_campus_model_integration(tmp_path: Path) -> None:
     proc_on = subprocess.run(
         [
             HIGHS_ADAPTER_PATH,
-            *bundle_on.manifest.command["arguments"],
+            *base_args,
+            "--acceleration_mode",
+            "on_demand_mutex",
+            "--acceleration_file",
+            "input/acceleration.json",
             "--threads",
             "2",
         ],
@@ -1140,7 +1240,7 @@ def test_verification_failure_never_publishes_unverified_primals(
     bundle_files = fixture_files(
         {
             PROBLEM_PATH: mps_bytes,
-            PARAMETERS_PATH: _parameters(unit_map={}),
+            PARAMETERS_PATH: _parameters(unit_map={}, offset=1.5),
         }
     )
 

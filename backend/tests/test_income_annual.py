@@ -120,7 +120,11 @@ def _gen_finance_payload(*, opening=(), carry_years=INC_CARRY_YEARS):
                 "deductible_maintenance": {"mode": "explicit_items", "items": []},
                 "depreciation": [
                     {
-                        "base_from": {"kind": "upfront_capex_net", "finance_type": "gen_choice", "scope": {"kind": "all_new_instances"}},
+                        "base_from": {
+                            "kind": "upfront_capex_net",
+                            "finance_type": "gen_choice",
+                            "scope": {"kind": "all_new_instances"},
+                        },
                         "method": "straight_line",
                         "life_years": DEPR_LIFE,
                         "residual": {"value": "0", "unit": "CNY"},
@@ -562,7 +566,11 @@ def _mix_payload():
         },
         "depreciation": [
             {
-                "base_from": {"kind": "upfront_capex_net", "finance_type": "sys1", "scope": {"kind": "all_new_instances"}},
+                "base_from": {
+                    "kind": "upfront_capex_net",
+                    "finance_type": "sys1",
+                    "scope": {"kind": "all_new_instances"},
+                },
                 "method": "straight_line",
                 "life_years": 20,
                 "residual": {"value": "0", "unit": "CNY"},
@@ -996,9 +1004,8 @@ def test_income_depreciation_excess_residual_rejected(tmp_path) -> None:
     """
     import subprocess
 
+    from legacy_solve_testkit import parse_highs_solution as _parse_solution
     from test_vat_monthly import HIGHS_ADAPTER_PATH
-
-    from iesplan.computation.result_adapters.highs import _parse_solution
 
     payload = _residual_payload(_mix_payload, "100000")
     bundle = HIGHS_MILP_PROVIDER.generate(*_inputs(payload=payload))

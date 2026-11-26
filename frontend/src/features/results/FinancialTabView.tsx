@@ -3,7 +3,7 @@
  */
 
 import { BarChart, CategoryLineChart, ComboChart } from '../../components/charts'
-import { Alert, Button, Card } from '../../components/ui'
+import { Button, Card } from '../../components/ui'
 import { useI18n } from '../../i18n'
 import type {
   Currency,
@@ -13,12 +13,14 @@ import type {
   TaskOutcome,
 } from '../../types'
 import {
+  asObjectArray,
   buildAnnualOperationChartData,
   buildCashflowChartData,
   buildComparisonChartData,
 } from './chartMappers'
 import type { ResultDetail } from './chartMappers'
 import {
+  FinancialAbsenceAlert,
   irrStatusToKey,
   MetricGroup,
   MetricTable,
@@ -54,7 +56,7 @@ export function FinancialTabView({
     /opex|o&m|running.?cost/i,
   ])
   const cashflowMetrics = pickMetrics(metrics, [/cashflow|cf_/i])
-  const irrKey = fin ? irrStatusToKey(fin.evaluation.irr_status) : null
+  const irrKey = fin?.evaluation?.irr_status ? irrStatusToKey(fin.evaluation.irr_status) : null
 
   const cfChart = fin ? buildCashflowChartData(fin) : null
   const cfLabelMap: Record<string, string> = {
@@ -81,8 +83,21 @@ export function FinancialTabView({
     difference: t('ies.result.comparison_diff'),
   }
 
+  const paymentsApplied = asObjectArray<FinancialEvaluationBlock['payments_applied'][number]>(
+    fin?.payments_applied,
+  )
+  const netCashflows = asObjectArray<FinancialEvaluationBlock['net_cashflows'][number]>(
+    fin?.net_cashflows,
+  )
+  const annualOperation = asObjectArray<FinancialEvaluationBlock['annual_operation'][number]>(
+    fin?.annual_operation,
+  )
+  const evalRows = asObjectArray<FinancialEvaluationBlock['evaluation']['rows'][number]>(
+    fin?.evaluation?.rows,
+  )
+
   const cfRowCount = fin
-    ? Math.max(fin.evaluation.rows.length, fin.annual_net_flows.length)
+    ? Math.max(evalRows.length, Array.isArray(fin.annual_net_flows) ? fin.annual_net_flows.length : 0)
     : 0
 
   return (
@@ -96,7 +111,7 @@ export function FinancialTabView({
           {cfChart && cfChart.categories.length > 0 ? (
             <Card
               title={
-                fin.evaluation.rows.length > 0
+                evalRows.length > 0
                   ? t('ies.result.fin_cf_table')
                   : t('ies.result.fin_tax_flows')
               }
@@ -116,8 +131,8 @@ export function FinancialTabView({
                 bars={cfChart.bars.map((b) => ({ ...b, label: cfLabelMap[b.key] ?? b.label }))}
                 lines={cfChart.lines.map((l) => ({ ...l, label: cfLabelMap[l.key] ?? l.label }))}
                 ariaLabel={t('ies.result.fin_cf_table')}
-                yLabel={fin.currency}
-                unit={fin.currency}
+                yLabel={fin.currency ?? ''}
+                unit={fin.currency ?? ''}
                 hoverHint={t('ies.result.chart_hover_hint')}
               />
             </Card>
@@ -132,7 +147,7 @@ export function FinancialTabView({
                   size="sm"
                   onClick={() => onOpenDetail('operation')}
                 >
-                  {t('ies.result.view_detail_data', { count: fin.annual_operation.length })}
+                  {t('ies.result.view_detail_data', { count: annualOperation.length })}
                 </Button>
               }
               className="ies-section"
@@ -141,8 +156,8 @@ export function FinancialTabView({
                 categories={opChart.categories}
                 series={opChart.series.map((s) => ({ ...s, label: opLabelMap[s.key] ?? s.label }))}
                 ariaLabel={t('ies.result.fin_yearly')}
-                yLabel={fin.currency}
-                unit={fin.currency}
+                yLabel={fin.currency ?? ''}
+                unit={fin.currency ?? ''}
                 hoverHint={t('ies.result.chart_hover_hint')}
               />
             </Card>
@@ -154,14 +169,14 @@ export function FinancialTabView({
                 <h3 className="ies-section-subtitle">
                   {t('ies.result.fin_payments')}
                 </h3>
-                {fin.payments_applied.length > 0 ? (
+                {paymentsApplied.length > 0 ? (
                   <table className="ies-metric-table">
                     <tbody>
-                      {fin.payments_applied.map((p, index) => (
-                        <tr key={`${p.t}-${index}`}>
-                          <td>{t('ies.result.fin_t_payment', { year: p.t })}</td>
+                      {paymentsApplied.map((p, index) => (
+                        <tr key={`${p.t ?? index}-${index}`}>
+                          <td>{t('ies.result.fin_t_payment', { year: p.t ?? '—' })}</td>
                           <td>
-                            {p.ratio} × C = {p.amount} {fin.currency}
+                            {p.ratio ?? '—'} × C = {p.amount ?? '—'} {fin.currency ?? ''}
                           </td>
                         </tr>
                       ))}
@@ -177,16 +192,19 @@ export function FinancialTabView({
                 <h3 className="ies-section-subtitle">
                   {t('ies.result.fin_net_cashflows')}
                 </h3>
-                {fin.net_cashflows.length > 0 ? (
+                {netCashflows.length > 0 ? (
                   <table className="ies-metric-table">
                     <tbody>
-                      {fin.net_cashflows.map((item) => (
-                        <tr key={`${item.t}-${item.id}`}>
+                      {netCashflows.map((item, index) => (
+                        <tr key={`${item.t ?? index}-${item.id ?? index}`}>
                           <td>
-                            {item.id} / CF[t={item.t}] / {t(`ies.result.fin_net_${item.direction}`)}
+                            {item.id ?? '—'} / CF[t={item.t ?? '—'}] /{' '}
+                            {item.direction === 'inflow' || item.direction === 'outflow'
+                              ? t(`ies.result.fin_net_${item.direction}`)
+                              : (item.direction ?? '—')}
                           </td>
                           <td>
-                            {item.amount} {fin.currency}
+                            {item.amount ?? '—'} {fin.currency ?? ''}
                           </td>
                         </tr>
                       ))}
@@ -204,7 +222,7 @@ export function FinancialTabView({
           <Card
             title={t('ies.result.comparison')}
             actions={
-              fin.comparison.mode !== 'absolute' ? (
+              fin.comparison && fin.comparison.mode && fin.comparison.mode !== 'absolute' ? (
                 <Button
                   variant="secondary"
                   size="sm"
@@ -217,23 +235,23 @@ export function FinancialTabView({
             className="ies-section"
           >
             <p className="ies-text-secondary" style={{ marginBottom: 'var(--ies-space-2)' }}>
-              {fin.comparison.mode}
+              {fin.comparison?.mode || '—'}
             </p>
-            {fin.comparison.mode !== 'absolute' ? (
+            {fin.comparison && fin.comparison.mode && fin.comparison.mode !== 'absolute' ? (
               <>
                 <p className="ies-text-note">
-                  {fin.comparison.comparability.service_basis}
+                  {fin.comparison.comparability?.service_basis}
                 </p>
                 <p className="ies-text-note" style={{ marginBottom: 'var(--ies-space-3)' }}>
-                  {fin.comparison.comparability.differences}
+                  {fin.comparison.comparability?.differences}
                 </p>
                 {cmpChart && cmpChart.categories.length > 0 ? (
                   <CategoryLineChart
                     categories={cmpChart.categories}
                     series={cmpChart.series.map((s) => ({ ...s, label: cmpLabelMap[s.key] ?? s.label }))}
                     ariaLabel={t('ies.result.comparison')}
-                    yLabel={fin.currency}
-                    unit={fin.currency}
+                    yLabel={fin.currency ?? ''}
+                    unit={fin.currency ?? ''}
                     showAllLabel={t('ies.result.show_all_series')}
                     hoverHint={t('ies.result.chart_hover_hint')}
                   />
@@ -243,15 +261,7 @@ export function FinancialTabView({
           </Card>
         </>
       ) : finAbsence ? (
-        <div className="ies-section">
-          <Alert variant="warning">
-            {finAbsence === 'outcome_not_normal'
-              ? t('ies.result.fin_absence_outcome_not_normal', { outcome: outcome ?? '—' })
-              : finAbsence === 'solution_not_requested'
-                ? t('ies.result.fin_absence_solution_not_requested')
-                : t('ies.result.fin_absence_missing_unknown')}
-          </Alert>
-        </div>
+        <FinancialAbsenceAlert finAbsence={finAbsence} outcome={outcome} />
       ) : null}
 
       {metrics && (finMetrics.length > 0 || cashflowMetrics.length > 0) ? (

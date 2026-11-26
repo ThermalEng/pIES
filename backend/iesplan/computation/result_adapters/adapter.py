@@ -15,19 +15,21 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, NoReturn
 
-from iesplan.computation.contracts import (
-    PRIMAL_SOLUTION_OUTPUT_PATH,
-    TargetSolverBundle,
-    check_finite_json,
-)
+from iesplan.computation.bundle import PRIMAL_SOLUTION_OUTPUT_PATH
+from iesplan.computation.contracts.outputs import validate_engineering_solution_doc
 from iesplan.computation.errors import ComputationUnavailableError
-from iesplan.computation.generators.highs_milp import PARAMETERS_PATH
-from iesplan.computation.generators.target_bundle import VARIABLE_MAP_SCHEMA, VARIABLE_MAP_VERSION
+from iesplan.computation.generators.highs_milp import (
+    PARAMETERS_PATH,
+    VARIABLE_MAP_SCHEMA,
+    VARIABLE_MAP_VERSION,
+)
 from iesplan.computation.protocols import (
     MATH_STATUSES,
     ComputeResult,
     ExecutionReceipt,
+    SolverBundle,
     StopProbe,
+    check_finite_json,
     check_provider_ref,
     read_stop_reason,
 )
@@ -149,6 +151,10 @@ class RestorationOutcome:
     solution_content: SizedContent
     solver_summary: Mapping[str, Any]
     child_pid: int | None
+    planning_variables: tuple[Mapping[str, Any], ...] = ()
+    hourly_path: Path | None = None
+    hourly_content: SizedContent | None = None
+    hourly_meta: Mapping[str, Any] | None = None
 
     def load_engineering_solution(self) -> dict[str, Any]:
         """Explicit convenience reader for tests/callers inspecting small solutions."""
@@ -1036,6 +1042,38 @@ def _recover_variable_map_records(
     }
 
 
+def _resolve_scale_entries(
+    raw_entries: Sequence[Any],
+    *,
+    label: str,
+    value_prefix: str,
+    resolve_scale_value: Any,
+) -> list[dict[str, Any]]:
+    """Validate and convert scale entries into business-unit EngineeringSolution items."""
+    scales_out: list[dict[str, Any]] = []
+    seen_pvars: set[str] = set()
+    for scale_entry in raw_entries:
+        if not isinstance(scale_entry, Mapping):
+            _fail(f"{label} 条目须为对象")
+        extra_s = sorted(set(scale_entry) - _SCALE_ENTRY_ALLOWED_KEYS)
+        if extra_s:
+            _fail(f"{label} 含未知字段: {extra_s!r}")
+        for req in ("planning_variable_id", "value", "unit"):
+            if req not in scale_entry:
+                _fail(f"{label} 缺少字段: {req!r}")
+        pname = _require_non_empty_str(
+            scale_entry["planning_variable_id"],
+            f"{label}.planning_variable_id",
+        )
+        if pname in seen_pvars:
+            _fail(f"{label} planning_variable_id 重复: {pname!r}")
+        seen_pvars.add(pname)
+        unit = _require_non_empty_str(scale_entry["unit"], f"{label}.{pname}.unit")
+        biz_val = resolve_scale_value(scale_entry, unit, f"{value_prefix}.{pname}")
+        scales_out.append({"planning_variable_id": pname, "value": biz_val, "unit": unit})
+    return scales_out
+
+
 def _resolve_facts_payload(
     raw_facts: Mapping[str, Any],
     *,
@@ -1074,29 +1112,12 @@ def _resolve_facts_payload(
 
         if not isinstance(unit_entry["scales"], list):
             _fail(f"construction_units[{uid!r}].scales 须为数组")
-        scales_out: list[dict[str, Any]] = []
-        seen_pvars: set[str] = set()
-        for scale_entry in unit_entry["scales"]:
-            if not isinstance(scale_entry, Mapping):
-                _fail(f"construction_units[{uid!r}].scales 条目须为对象")
-            extra_s = sorted(set(scale_entry) - _SCALE_ENTRY_ALLOWED_KEYS)
-            if extra_s:
-                _fail(f"construction_units[{uid!r}].scales 含未知字段: {extra_s!r}")
-            for req in ("planning_variable_id", "value", "unit"):
-                if req not in scale_entry:
-                    _fail(f"construction_units[{uid!r}].scales 缺少字段: {req!r}")
-            pname = _require_non_empty_str(
-                scale_entry["planning_variable_id"],
-                f"construction_units[{uid!r}].planning_variable_id",
-            )
-            if pname in seen_pvars:
-                _fail(f"construction_units[{uid!r}] planning_variable_id 重复: {pname!r}")
-            seen_pvars.add(pname)
-            unit = _require_non_empty_str(
-                scale_entry["unit"], f"construction_units[{uid!r}].{pname}.unit"
-            )
-            biz_val = resolve_scale_value(scale_entry, unit, f"{uid}.{pname}")
-            scales_out.append({"planning_variable_id": pname, "value": biz_val, "unit": unit})
+        scales_out = _resolve_scale_entries(
+            unit_entry["scales"],
+            label=f"construction_units[{uid!r}].scales",
+            value_prefix=uid,
+            resolve_scale_value=resolve_scale_value,
+        )
 
         resolved_units.append(
             {
@@ -1108,7 +1129,17 @@ def _resolve_facts_payload(
             }
         )
 
-    return {"construction_units": resolved_units}
+    resolved_out: dict[str, Any] = {"construction_units": resolved_units}
+    if "planning_variables" in raw_facts and raw_facts["planning_variables"] is not None:
+        if not isinstance(raw_facts["planning_variables"], list):
+            _fail("facts.planning_variables 须为数组")
+        resolved_out["planning_variables"] = _resolve_scale_entries(
+            raw_facts["planning_variables"],
+            label="planning_variables",
+            value_prefix="planning_variables",
+            resolve_scale_value=resolve_scale_value,
+        )
+    return resolved_out
 
 
 def _stream_engineering_solution_to_path(eng_sol: Mapping[str, Any], path: Path) -> int:
@@ -1124,11 +1155,77 @@ def _stream_engineering_solution_to_path(eng_sol: Mapping[str, Any], path: Path)
     return size_bytes
 
 
+def _extract_solution_projections_and_hourly(
+    eng_sol: Mapping[str, Any],
+    hourly_out_path: Path | None,
+) -> tuple[list[dict[str, Any]], dict[str, Any] | None, int]:
+    """Extract compact planning variables + hourly metadata (and stream hourly JSON to disk)."""
+    summary = eng_sol.get("solver_summary") or {}
+    if not summary.get("has_feasible_solution", False):
+        return [], None, 0
+
+    planning_vars: list[dict[str, Any]] = []
+    seen_pvars: set[str] = set()
+    for unit in eng_sol.get("construction_units") or ():
+        for sc in unit.get("scales") or ():
+            pvar_id = sc.get("planning_variable_id")
+            if pvar_id and str(pvar_id) not in seen_pvars:
+                seen_pvars.add(str(pvar_id))
+                planning_vars.append(
+                    {"name": str(pvar_id), "value": sc["value"], "unit": sc.get("unit", "")}
+                )
+    for sc in eng_sol.get("planning_variables") or ():
+        pvar_id = sc.get("planning_variable_id")
+        if pvar_id and str(pvar_id) not in seen_pvars:
+            seen_pvars.add(str(pvar_id))
+            planning_vars.append(
+                {"name": str(pvar_id), "value": sc["value"], "unit": sc.get("unit", "")}
+            )
+
+    identities: dict[str, dict[str, Any]] = {}
+    units: dict[str, str] = {}
+    data: dict[str, Any] = {}
+    for kind, key in (("device", "series"), ("system", "system_series")):
+        entries = eng_sol.get(key) or {}
+        for sid in sorted(entries):
+            entry = entries[sid]
+            identities[sid] = {
+                "series_id": sid,
+                "kind": kind,
+                **{k: v for k, v in entry.items() if k != "values"},
+            }
+            units[sid] = str(entry["unit"])
+            if hourly_out_path is not None:
+                data[sid] = entry["values"]
+
+    if not identities:
+        return planning_vars, None, 0
+
+    ordered_ids = sorted(identities)
+    first_src = (
+        (eng_sol.get("series") or {}).get(ordered_ids[0])
+        or (eng_sol.get("system_series") or {}).get(ordered_ids[0])
+        or {}
+    )
+    rows = len(first_src.get("values") or ())
+    hourly_meta: dict[str, Any] = {
+        "fields": ordered_ids,
+        "rows": rows,
+        "series": [identities[sid] for sid in ordered_ids],
+    }
+    hourly_size_bytes = 0
+    if hourly_out_path is not None:
+        hourly_payload = {"data": data, "meta": {"units": units, "series": identities}}
+        hourly_size_bytes = _stream_engineering_solution_to_path(hourly_payload, hourly_out_path)
+    return planning_vars, hourly_meta, hourly_size_bytes
+
+
 def _restore_in_current_process(
     bundle_dir: Path,
     primal_path: Path,
     solution_out_path: Path,
     result_meta_path: Path,
+    hourly_out_path: Path | None = None,
 ) -> None:
     """Execute streaming variable_map + primal_solution restoration and write solution.json."""
     header = _read_header(bundle_dir / PARAMETERS_PATH)
@@ -1232,6 +1329,8 @@ def _restore_in_current_process(
         "system_series": recovered["system_series"],
         "extensions": {},
     }
+    if "planning_variables" in facts_payload:
+        eng_sol["planning_variables"] = facts_payload["planning_variables"]
     if recovered["model_sources"] is not None:
         eng_sol["model_sources"] = recovered["model_sources"]
 
@@ -1247,14 +1346,62 @@ def _restore_in_current_process(
         eng_sol["metrics"] = metrics_out
 
     size_bytes = _stream_engineering_solution_to_path(eng_sol, solution_out_path)
+    planning_vars, hourly_meta, hourly_size_bytes = _extract_solution_projections_and_hourly(
+        eng_sol, hourly_out_path
+    )
     meta_out: dict[str, Any] = {
         "math_status": math_status,
         "has_feasible_solution": True,
         "solver_summary": scalar_summary,
         "solution_size_bytes": size_bytes,
+        "planning_variables": planning_vars,
     }
+    if hourly_meta is not None:
+        meta_out["hourly_meta"] = hourly_meta
+        meta_out["hourly_size_bytes"] = hourly_size_bytes
     if metrics_out is not None:
         meta_out["metrics"] = metrics_out
+    result_meta_path.write_text(
+        json.dumps(meta_out, ensure_ascii=False, allow_nan=False) + "\n",
+        encoding="utf-8",
+    )
+
+
+def _validate_and_project_solution_file(
+    solution_path: Path,
+    hourly_out_path: Path | None,
+    outputs: Sequence[str],
+    result_meta_path: Path,
+) -> None:
+    """Validate canonical ``ies.engineering-solution@1.0.0`` and project metadata in child process."""
+    try:
+        doc = json.loads(solution_path.read_text(encoding="utf-8"), parse_constant=_reject_json_constant)
+    except (OSError, json.JSONDecodeError) as exc:
+        _fail(f"读取工程解失败: {exc}")
+    validate_engineering_solution_doc(doc, on_error=_fail)
+    summary = doc["solver_summary"]
+    math_status = str(summary["math_status"])
+    has_feasible = bool(summary["has_feasible_solution"])
+
+    if has_feasible:
+        planning_vars, hourly_meta, hourly_size_bytes = _extract_solution_projections_and_hourly(
+            doc, hourly_out_path
+        )
+    else:
+        planning_vars, hourly_meta, hourly_size_bytes = [], None, 0
+
+    meta_out: dict[str, Any] = {
+        "math_status": math_status,
+        "has_feasible_solution": has_feasible,
+        "solver_summary": dict(summary),
+        "solution_size_bytes": solution_path.stat().st_size,
+        "planning_variables": planning_vars,
+    }
+    if hourly_meta is not None:
+        meta_out["hourly_meta"] = hourly_meta
+        meta_out["hourly_size_bytes"] = hourly_size_bytes
+    if "metrics" in outputs and isinstance(doc.get("metrics"), Mapping):
+        meta_out["metrics"] = dict(doc["metrics"])
     result_meta_path.write_text(
         json.dumps(meta_out, ensure_ascii=False, allow_nan=False) + "\n",
         encoding="utf-8",
@@ -1274,14 +1421,7 @@ def _current_vm_bytes() -> int | None:
     return None
 
 
-def _subprocess_restore_entry(
-    bundle_dir_str: str,
-    primal_path_str: str,
-    solution_out_str: str,
-    result_meta_str: str,
-    memory_limit_mb: int,
-) -> None:
-    """Spawned child-process entrypoint enforcing ``RLIMIT_AS`` strictly."""
+def _apply_child_rlimit_as(memory_limit_mb: int, result_meta_str: str) -> bool:
     limit_bytes = int(memory_limit_mb) * 1024 * 1024
     baseline_vm = _current_vm_bytes() or 0
     requested_as = baseline_vm + limit_bytes
@@ -1290,6 +1430,7 @@ def _subprocess_restore_entry(
         if hard != resource.RLIM_INFINITY and requested_as > hard:
             raise OSError(f"requested RLIMIT_AS ({requested_as}) exceeds hard limit ({hard})")
         resource.setrlimit(resource.RLIMIT_AS, (requested_as, hard))
+        return True
     except (ValueError, OSError) as exc:
         Path(result_meta_str).write_text(
             json.dumps(
@@ -1298,6 +1439,19 @@ def _subprocess_restore_entry(
             ),
             encoding="utf-8",
         )
+        return False
+
+
+def _subprocess_restore_entry(
+    bundle_dir_str: str,
+    primal_path_str: str,
+    solution_out_str: str,
+    result_meta_str: str,
+    memory_limit_mb: int,
+    hourly_out_str: str | None = None,
+) -> None:
+    """Spawned child-process entrypoint enforcing ``RLIMIT_AS`` strictly."""
+    if not _apply_child_rlimit_as(memory_limit_mb, result_meta_str):
         return
 
     try:
@@ -1305,6 +1459,40 @@ def _subprocess_restore_entry(
             Path(bundle_dir_str),
             Path(primal_path_str),
             Path(solution_out_str),
+            Path(result_meta_str),
+            Path(hourly_out_str) if hourly_out_str else None,
+        )
+    except ComputationUnavailableError as exc:
+        Path(result_meta_str).write_text(
+            json.dumps({"error": str(exc), "reason": exc.reason}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+    except MemoryError as exc:
+        Path(result_meta_str).write_text(
+            json.dumps(
+                {"error": f"受限子进程内存超限: {exc}", "reason": "resource_exhausted"},
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+
+
+def _subprocess_project_entry(
+    solution_path_str: str,
+    hourly_out_str: str | None,
+    outputs: tuple[str, ...],
+    result_meta_str: str,
+    memory_limit_mb: int,
+) -> None:
+    """Spawned child-process entrypoint validating and projecting ``solution.json``."""
+    if not _apply_child_rlimit_as(memory_limit_mb, result_meta_str):
+        return
+
+    try:
+        _validate_and_project_solution_file(
+            Path(solution_path_str),
+            Path(hourly_out_str) if hourly_out_str else None,
+            outputs,
             Path(result_meta_str),
         )
     except ComputationUnavailableError as exc:
@@ -1368,12 +1556,101 @@ def _allocate_solution_path(solution_output_path: Path | None) -> tuple[Path, Pa
     return out_dir / "engineering_solution.json", out_dir
 
 
+def _run_bounded_subprocess(
+    target: Any,
+    args: tuple[Any, ...],
+    *,
+    meta_path: Path,
+    deadline: float,
+    stop: StopProbe | None,
+) -> tuple[dict[str, Any], int | None]:
+    """Run a spawn child under deadline/stop monitoring and return decoded compact metadata."""
+    ctx = multiprocessing.get_context("spawn")
+    proc = ctx.Process(target=target, args=args, daemon=False)
+    proc.start()
+    child_pid = proc.pid
+    try:
+        while proc.is_alive():
+            stop_reason = read_stop_reason(stop)
+            if stop_reason is not None:
+                _terminate_process(proc)
+                raise ComputationUnavailableError(
+                    f"结果还原运行中被停止: {stop_reason}",
+                    reason=stop_reason,
+                )
+            if time.monotonic() > deadline:
+                _terminate_process(proc)
+                raise ComputationUnavailableError("结果还原受限子进程超时", reason="timed_out")
+            proc.join(timeout=0.02)
+    except BaseException:
+        _terminate_process(proc)
+        raise
+
+    meta_doc: dict[str, Any] | None = None
+    if meta_path.is_file():
+        meta_doc = json.loads(meta_path.read_text(encoding="utf-8"))
+    if meta_doc is not None and "error" in meta_doc:
+        err_msg = str(meta_doc["error"])
+        err_reason = str(meta_doc.get("reason") or "result-protocol-failure")
+        if err_msg.startswith("结果还原失败: "):
+            raise ComputationUnavailableError(err_msg, reason=err_reason)
+        _fail(err_msg, reason=err_reason)
+    if proc.exitcode != 0 or meta_doc is None:
+        reason = "resource_exhausted" if proc.exitcode in (-9, -11) else "result-protocol-failure"
+        _fail(f"受限子进程异常退出 (exitcode={proc.exitcode})", reason=reason)
+    return meta_doc, child_pid
+
+
+def _outcome_from_meta_doc(
+    *,
+    meta_doc: Mapping[str, Any],
+    bundle_id: object,
+    receipt_id: object,
+    sol_path: Path,
+    hourly_path: Path | None,
+    child_pid: int | None,
+) -> RestorationOutcome:
+    sol_size = int(meta_doc.get("solution_size_bytes", sol_path.stat().st_size))
+    outputs_meta: dict[str, Any] = {
+        "solver_summary": dict(meta_doc["solver_summary"]),
+        "engineering_solution_path": str(sol_path),
+        "engineering_solution_size_bytes": sol_size,
+    }
+    if "metrics" in meta_doc:
+        outputs_meta["metrics"] = dict(meta_doc["metrics"])
+    hourly_meta = meta_doc.get("hourly_meta")
+    resolved_hourly_path: Path | None = None
+    resolved_hourly_content: SizedContent | None = None
+    if hourly_meta is not None and hourly_path is not None and hourly_path.is_file():
+        hourly_size = int(meta_doc.get("hourly_size_bytes", hourly_path.stat().st_size))
+        resolved_hourly_path = hourly_path
+        resolved_hourly_content = FileContent(hourly_path, hourly_size)
+    return RestorationOutcome(
+        compute_result=ComputeResult(
+            bundle_id=str(bundle_id),
+            receipt_id=str(receipt_id),
+            execution_status="completed",
+            math_status=str(meta_doc["math_status"]),
+            outputs=outputs_meta,
+        ),
+        solution_path=sol_path,
+        solution_content=FileContent(sol_path, sol_size),
+        solver_summary=dict(meta_doc["solver_summary"]),
+        child_pid=child_pid,
+        planning_variables=tuple(meta_doc.get("planning_variables") or ()),
+        hourly_path=resolved_hourly_path,
+        hourly_content=resolved_hourly_content,
+        hourly_meta=dict(hourly_meta) if isinstance(hourly_meta, Mapping) else None,
+    )
+
+
 def _restore_from_bundle_dir_validated(
     bundle_dir: Path,
     primal_path: Path,
     receipt: ExecutionReceipt | Mapping[str, Any],
     *,
     solution_output_path: Path | None,
+    hourly_output_path: Path | None = None,
     memory_limit_mb: int,
     deadline: float,
     stop: StopProbe | None,
@@ -1420,69 +1697,79 @@ def _restore_from_bundle_dir_validated(
 
         with tempfile.TemporaryDirectory(prefix="ies-restore-") as tmp_dir:
             meta_path = Path(tmp_dir) / "restore_meta.json"
-            ctx = multiprocessing.get_context("spawn")
-            proc = ctx.Process(
-                target=_subprocess_restore_entry,
-                args=(
+            hourly_str = str(hourly_output_path) if hourly_output_path is not None else None
+            meta_doc, child_pid = _run_bounded_subprocess(
+                _subprocess_restore_entry,
+                (
                     str(bundle_dir),
                     str(primal_path),
                     str(sol_path),
                     str(meta_path),
                     memory_limit_mb,
+                    hourly_str,
                 ),
-                daemon=False,
+                meta_path=meta_path,
+                deadline=deadline,
+                stop=stop,
             )
-            proc.start()
-            child_pid = proc.pid
-            try:
-                while proc.is_alive():
-                    stop_reason = read_stop_reason(stop)
-                    if stop_reason is not None:
-                        _terminate_process(proc)
-                        raise ComputationUnavailableError(
-                            f"结果还原运行中被停止: {stop_reason}",
-                            reason=stop_reason,
-                        )
-                    if time.monotonic() > deadline:
-                        _terminate_process(proc)
-                        raise ComputationUnavailableError("结果还原受限子进程超时", reason="timed_out")
-                    proc.join(timeout=0.02)
-            except BaseException:
-                _terminate_process(proc)
-                raise
+            if not sol_path.is_file():
+                _fail("受限子进程未产出 solution.json")
+            return _outcome_from_meta_doc(
+                meta_doc=meta_doc,
+                bundle_id=bundle_id,
+                receipt_id=receipt_id,
+                sol_path=sol_path,
+                hourly_path=hourly_output_path,
+                child_pid=child_pid,
+            )
+    except BaseException:
+        if owned_tmp_dir is not None:
+            shutil.rmtree(owned_tmp_dir, ignore_errors=True)
+        raise
 
-            meta_doc: dict[str, Any] | None = None
-            if meta_path.is_file():
-                meta_doc = json.loads(meta_path.read_text(encoding="utf-8"))
-            if meta_doc is not None and "error" in meta_doc:
-                err_msg = str(meta_doc["error"])
-                err_reason = str(meta_doc.get("reason") or "result-protocol-failure")
-                if err_msg.startswith("结果还原失败: "):
-                    raise ComputationUnavailableError(err_msg, reason=err_reason)
-                _fail(err_msg, reason=err_reason)
-            if proc.exitcode != 0 or meta_doc is None or not sol_path.is_file():
-                reason = "resource_exhausted" if proc.exitcode in (-9, -11) else "result-protocol-failure"
-                _fail(f"受限子进程异常退出 (exitcode={proc.exitcode})", reason=reason)
 
-            sol_size = int(meta_doc.get("solution_size_bytes", sol_path.stat().st_size))
-            outputs_meta = {
-                "solver_summary": dict(meta_doc["solver_summary"]),
-                "engineering_solution_path": str(sol_path),
-                "engineering_solution_size_bytes": sol_size,
-            }
-            if "metrics" in meta_doc:
-                outputs_meta["metrics"] = dict(meta_doc["metrics"])
-            return RestorationOutcome(
-                compute_result=ComputeResult(
-                    bundle_id=str(bundle_id),
-                    receipt_id=str(receipt_id),
-                    execution_status="completed",
-                    math_status=str(meta_doc["math_status"]),
-                    outputs=outputs_meta,
+def project_engineering_solution(
+    solution_content: Content | bytes,
+    *,
+    bundle_id: str,
+    receipt_id: str,
+    outputs: Sequence[str] = ("solution", "metrics"),
+    solution_output_path: Path | None = None,
+    hourly_output_path: Path | None = None,
+    memory_limit_mb: int | None = None,
+    timeout_seconds: float | None = None,
+    stop: StopProbe | None = None,
+) -> RestorationOutcome:
+    """Validate and project canonical ``ies.engineering-solution@1.0.0`` inside a bounded spawn child."""
+    eff_mem_mb, eff_timeout_s = _validate_resource_budgets(memory_limit_mb, timeout_seconds)
+    deadline = time.monotonic() + eff_timeout_s
+    _check_stop_and_deadline(stop, deadline, "启动前")
+
+    sol_path, owned_tmp_dir = _allocate_solution_path(solution_output_path)
+    try:
+        _stream_content_to_path(solution_content, sol_path, stop=stop, deadline=deadline)
+        with tempfile.TemporaryDirectory(prefix="ies-project-") as tmp_dir:
+            meta_path = Path(tmp_dir) / "restore_meta.json"
+            hourly_str = str(hourly_output_path) if hourly_output_path is not None else None
+            meta_doc, child_pid = _run_bounded_subprocess(
+                _subprocess_project_entry,
+                (
+                    str(sol_path),
+                    hourly_str,
+                    tuple(outputs),
+                    str(meta_path),
+                    eff_mem_mb,
                 ),
-                solution_path=sol_path,
-                solution_content=FileContent(sol_path, sol_size),
-                solver_summary=dict(meta_doc["solver_summary"]),
+                meta_path=meta_path,
+                deadline=deadline,
+                stop=stop,
+            )
+            return _outcome_from_meta_doc(
+                meta_doc=meta_doc,
+                bundle_id=bundle_id,
+                receipt_id=receipt_id,
+                sol_path=sol_path,
+                hourly_path=hourly_output_path,
                 child_pid=child_pid,
             )
     except BaseException:
@@ -1497,6 +1784,7 @@ def restore_from_bundle_dir(
     receipt: ExecutionReceipt | Mapping[str, Any],
     *,
     solution_output_path: Path | None = None,
+    hourly_output_path: Path | None = None,
     memory_limit_mb: int | None = None,
     timeout_seconds: float | None = None,
     stop: StopProbe | None = None,
@@ -1509,31 +1797,33 @@ def restore_from_bundle_dir(
         primal_path,
         receipt,
         solution_output_path=solution_output_path,
+        hourly_output_path=hourly_output_path,
         memory_limit_mb=eff_mem_mb,
         deadline=deadline,
         stop=stop,
     )
 
 
-class TargetResultAdapter:
-    """Universal F2 ResultAdapter restoring ``ies.primal-solution@1.0.0`` via spawn subprocess."""
+class ResultAdapter:
+    """Universal 1.2.0 ResultAdapter restoring ``ies.primal-solution@1.0.0`` via spawn subprocess."""
 
     __slots__ = ()
 
     def restore_with_outcome(
         self,
-        bundle: TargetSolverBundle,
+        bundle: SolverBundle,
         receipt: ExecutionReceipt | Mapping[str, Any],
         outputs: Mapping[str, object],
         *,
         solution_output_path: Path | None = None,
+        hourly_output_path: Path | None = None,
         memory_limit_mb: int | None = None,
         timeout_seconds: float | None = None,
         stop: StopProbe | None = None,
     ) -> RestorationOutcome:
         """Materialize streamed inputs/outputs under one budget and run bounded spawn restoration."""
-        if not isinstance(bundle, TargetSolverBundle):
-            raise TypeError(f"bundle 须为 TargetSolverBundle，得到 {type(bundle).__name__}")
+        if not isinstance(bundle, SolverBundle):
+            raise TypeError(f"bundle 须为 SolverBundle，得到 {type(bundle).__name__}")
         eff_mem_mb, eff_timeout_s = _validate_resource_budgets(memory_limit_mb, timeout_seconds)
         deadline = time.monotonic() + eff_timeout_s
         _check_stop_and_deadline(stop, deadline, "启动前")
@@ -1545,6 +1835,7 @@ class TargetResultAdapter:
                 Path("."),
                 receipt,
                 solution_output_path=solution_output_path,
+                hourly_output_path=hourly_output_path,
                 memory_limit_mb=eff_mem_mb,
                 deadline=deadline,
                 stop=stop,
@@ -1568,6 +1859,7 @@ class TargetResultAdapter:
                 primal_path,
                 receipt,
                 solution_output_path=solution_output_path,
+                hourly_output_path=hourly_output_path,
                 memory_limit_mb=eff_mem_mb,
                 deadline=deadline,
                 stop=stop,
@@ -1575,7 +1867,7 @@ class TargetResultAdapter:
 
     def restore(
         self,
-        bundle: TargetSolverBundle,
+        bundle: SolverBundle,
         receipt: ExecutionReceipt | Mapping[str, Any],
         outputs: Mapping[str, object],
         *,
@@ -1596,6 +1888,30 @@ class TargetResultAdapter:
         ).compute_result
 
 
+def restore_bundle_outputs(
+    bundle: SolverBundle,
+    receipt: ExecutionReceipt | Mapping[str, Any],
+    outputs: Mapping[str, object],
+    *,
+    solution_output_path: Path | None = None,
+    hourly_output_path: Path | None = None,
+    memory_limit_mb: int | None = None,
+    timeout_seconds: float | None = None,
+    stop: StopProbe | None = None,
+) -> RestorationOutcome:
+    """Convenience entry calling ``ResultAdapter().restore_with_outcome``."""
+    return ResultAdapter().restore_with_outcome(
+        bundle,
+        receipt,
+        outputs,
+        solution_output_path=solution_output_path,
+        hourly_output_path=hourly_output_path,
+        memory_limit_mb=memory_limit_mb,
+        timeout_seconds=timeout_seconds,
+        stop=stop,
+    )
+
+
 __all__ = [
     "DEFAULT_MEMORY_LIMIT_MB",
     "DEFAULT_TIMEOUT_SECONDS",
@@ -1605,6 +1921,8 @@ __all__ = [
     "PRIMAL_SOLUTION_SCHEMA",
     "PRIMAL_SOLUTION_VERSION",
     "RestorationOutcome",
-    "TargetResultAdapter",
+    "ResultAdapter",
+    "project_engineering_solution",
+    "restore_bundle_outputs",
     "restore_from_bundle_dir",
 ]

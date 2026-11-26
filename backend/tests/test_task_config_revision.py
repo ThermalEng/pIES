@@ -139,7 +139,7 @@ def _prepare_project(client: TestClient, db: Session, owner, name: str = "绑定
 
 
 def _body(**overrides: Any) -> dict[str, Any]:
-    """合法计算配置正文(14 字段契约)。"""
+    """合法计算配置正文(13 字段 1.2.0 单一契约)。"""
     payload: dict[str, Any] = {
         "schema": "ies.calculation-config",
         "schema_version": "1.0.0",
@@ -148,11 +148,10 @@ def _body(**overrides: Any) -> dict[str, Any]:
         "generator": "ies.generator.highs_milp@1.0.0",
         "solver": "ies.solver.highs@1.7.2",
         "algorithm": None,
-        "evaluator": None,
+        "evaluators": [],
         "precision": "medium",
-        "convergence": None,
         "time_limit_seconds": 600,
-        "options": {},
+        "options": {"generator": {}, "solver": {}},
         "seed": None,
         "outputs": ["solution"],
     }
@@ -613,7 +612,7 @@ def test_snapshot_schema_version_written_and_scoped_to_reuse(
     assert snap.schema_version == "1.0.0"
     assert not hasattr(snap, "tolerances")
     frozen = jsonable(dict(snap.calc_config_snapshot))
-    assert frozen["convergence"] is None
+    assert "convergence" not in frozen
 
     status, second = _submit(client, pid, owner, {"config_revision": rev}, key="schemaver-2")
     assert status == 201, second
@@ -623,8 +622,8 @@ def test_snapshot_schema_version_written_and_scoped_to_reuse(
         dataset_ids=list(snap.dataset_version_ids or []),
         calc_config=frozen,
         evaluation=jsonable(dict(snap.evaluation or {})),
-        result_adapter="ies.result-adapter.highs@1.0.0",
-        executor="ies.executor.local_process@1.0.0",
+        result_adapter="ies.backend.result_adapter@1.0.0",
+        executor="ies.executor.container@1.0.0",
         program_version=snap.program_version or "",
         extensions=jsonable(dict(snap.extension_versions or {})),
         random_seed=snap.random_seed,
@@ -683,8 +682,8 @@ def test_execution_refs_frozen_from_descriptor(
     assert status == 201, body
     snap = tasks_domain.get_snapshot(factory(), body["task"]["calc_snapshot_id"])
     assert snap is not None
-    assert snap.result_adapter == "ies.result-adapter.highs@1.0.0"
-    assert snap.executor == "ies.executor.local_process@1.0.0"
+    assert snap.result_adapter == "ies.backend.result_adapter@1.0.0"
+    assert snap.executor == "ies.executor.container@1.0.0"
 
     same = dict(
         dataset_ids=list(snap.dataset_version_ids or []),
@@ -700,15 +699,15 @@ def test_execution_refs_frozen_from_descriptor(
     )
     assert (
         _snapshot_inputs_equal(
-            snap, result_adapter="ies.result-adapter.highs@1.0.0",
-            executor="ies.executor.local_process@1.0.0", **same,
+            snap, result_adapter="ies.backend.result_adapter@1.0.0",
+            executor="ies.executor.container@1.0.0", **same,
         )
         is True
     )
     assert (
         _snapshot_inputs_equal(
             snap, result_adapter="ies.result-adapter.other@2.0.0",
-            executor="ies.executor.local_process@1.0.0", **same,
+            executor="ies.executor.container@1.0.0", **same,
         )
         is False
     )
@@ -721,6 +720,8 @@ def test_ambiguous_executors_blocked_without_guessing() -> None:
     from iesplan.application.tasks.submissions import (  # noqa: E402
         _resolve_execution_refs,
     )
+    from iesplan.computation import build_solver_registry  # noqa: E402
+    from iesplan.computation.config import BUILTIN_SOLVER_HIGHS_SPEC  # noqa: E402
     from iesplan.computation.generators.descriptor import (  # noqa: E402
         GeneratorDescriptor,
     )
@@ -739,14 +740,14 @@ def test_ambiguous_executors_blocked_without_guessing() -> None:
         precisions=("medium",),
         solvers=("ies.solver.highs@1.7.2",),
         executors=("ies.executor.a@1.0.0", "ies.executor.b@1.0.0"),
-        result_adapter="ies.result-adapter.highs@1.0.0",
         unit_system="SI",
         seed_semantics="seed 解释见 descriptor",
     )
     registry = GeneratorRegistry({desc.ref: SimpleNamespace(descriptor=desc)})
+    solver_reg = build_solver_registry((BUILTIN_SOLVER_HIGHS_SPEC,))
     body = _body(generator="ies.generator.multi@1.0.0", solver="ies.solver.highs@1.7.2")
     try:
-        _resolve_execution_refs(body, registry, project_id=1)
+        _resolve_execution_refs(body, registry, project_id=1, solver_registry=solver_reg)
     except InvalidRequestError as exc:
         assert exc.code == "TASK-REQ-009"
     else:
@@ -994,15 +995,34 @@ def test_unified_algorithm_submit_freezes_14_field_snapshot(
             precisions=("medium",),
             outputs=("solution",),
             capabilities=("network.closed_ports",),
-            evaluators=("ies.result-adapter.highs@1.0.0", "custom.evaluator@1.0.0"),
+            evaluators=("ies.evaluator.finance@1.0.0", "custom.evaluator@1.0.0"),
             parameters_schema={"type": "object", "additionalProperties": False},
-            result_adapter="ies.result-adapter.highs@1.0.0",
         )
         ref = descriptor.ref
 
         def available(self) -> bool:
             return True
 
+    from iesplan.computation import (  # noqa: E402
+        EVALUATION_REPORT_CONTRACT,
+        StagePluginSpec,
+        build_evaluator_registry,
+        build_solver_registry,
+    )
+    from iesplan.computation.config import (  # noqa: E402
+        BUILTIN_EVALUATOR_FINANCE_SPEC,
+        BUILTIN_SOLVER_HIGHS_SPEC,
+    )
+
+    custom_eval = StagePluginSpec(
+        plugin_id="custom.evaluator",
+        version="1.0.0",
+        kind="evaluator",
+        consumes=("ies.engineering-solution@1.0.0",),
+        produces=(EVALUATION_REPORT_CONTRACT,),
+        outputs=("solution", "metrics"),
+        parameters_schema={"type": "object", "additionalProperties": False, "properties": {}},
+    )
     orig_ctx = client.app.state.bootstrap_context
     monkeypatch.setattr(
         client.app.state,
@@ -1010,6 +1030,10 @@ def test_unified_algorithm_submit_freezes_14_field_snapshot(
         SimpleNamespace(
             generator_registry=orig_ctx.generator_registry,
             predictor_registry=orig_ctx.predictor_registry,
+            solver_registry=build_solver_registry((BUILTIN_SOLVER_HIGHS_SPEC,)),
+            evaluator_registry=build_evaluator_registry(
+                (BUILTIN_EVALUATOR_FINANCE_SPEC, custom_eval)
+            ),
             algorithm_registry=build_algorithm_registry((_Algo(),)),
         ),
     )
@@ -1019,7 +1043,8 @@ def test_unified_algorithm_submit_freezes_14_field_snapshot(
         generator=None,
         solver=None,
         algorithm="test.algorithm.unified_submit@1.0.0",
-        evaluator="custom.evaluator@1.0.0",
+        evaluators=[{"evaluator": "custom.evaluator@1.0.0", "parameters": {}}],
+        options={"algorithm": {}},
     )
     rev = _save_config(client, pid, owner, unified)
     status, body = _submit(client, pid, owner, {"config_revision": rev}, key="unified-submit-1")
@@ -1027,41 +1052,65 @@ def test_unified_algorithm_submit_freezes_14_field_snapshot(
     snap_id = body["task"]["calc_snapshot_id"]
     snap = tasks_domain.get_snapshot(factory(), snap_id)
     assert snap is not None
-    assert snap.result_adapter == "custom.evaluator@1.0.0"
+    assert snap.result_adapter == ""
     frozen = jsonable(dict(snap.calc_config_snapshot))
     assert frozen["algorithm"] == "test.algorithm.unified_submit@1.0.0"
-    assert frozen["evaluator"] == "custom.evaluator@1.0.0"
+    assert frozen["evaluators"] == [{"evaluator": "custom.evaluator@1.0.0", "parameters": {}}]
     assert frozen["generator"] is None
     assert frozen["solver"] is None
 
 
 def test_submission_rejects_legacy_12_field_and_enforces_capabilities(monkeypatch) -> None:
-    """提交边界拒绝缺字段的旧 12 字段正文（无静默回退），不重跑输入校验，并执行能力门禁。"""
+    """提交边界拒绝缺字段的旧正文（无静默回退），不重跑输入校验，并执行能力门禁。"""
     from iesplan.application.tasks.submissions import _resolve_execution_refs
-    from iesplan.computation import CalculationConfig
+    from iesplan.computation import (
+        CalculationConfig,
+        build_evaluator_registry,
+        build_solver_registry,
+    )
+    from iesplan.computation.config import (
+        BUILTIN_EVALUATOR_FINANCE_SPEC,
+        BUILTIN_SOLVER_HIGHS_SPEC,
+    )
     from iesplan.computation.generators import HIGHS_MILP_PROVIDER, build_registry
     from iesplan.tasks.contracts import InvalidRequestError
 
     gen_reg = build_registry((HIGHS_MILP_PROVIDER,))
-    legacy_12 = {k: v for k, v in _body().items() if k not in ("algorithm", "evaluator")}
+    sol_reg = build_solver_registry((BUILTIN_SOLVER_HIGHS_SPEC,))
+    eval_reg = build_evaluator_registry((BUILTIN_EVALUATOR_FINANCE_SPEC,))
+    legacy_12 = {k: v for k, v in _body().items() if k not in ("algorithm", "evaluators")}
     with pytest.raises(KeyError):
-        _resolve_execution_refs(legacy_12, gen_reg, project_id=1)
+        _resolve_execution_refs(
+            legacy_12, gen_reg, project_id=1, solver_registry=sol_reg, evaluator_registry=eval_reg
+        )
 
     def _no_post_init(self) -> None:
         raise AssertionError("提交边界恢复已保存配置不得重跑 __post_init__ 输入校验")
 
     monkeypatch.setattr(CalculationConfig, "__post_init__", _no_post_init)
-    resolved = _resolve_execution_refs(_body(), gen_reg, project_id=1)
-    assert resolved[0] == "ies.result-adapter.highs@1.0.0"
+    resolved = _resolve_execution_refs(
+        _body(), gen_reg, project_id=1, solver_registry=sol_reg, evaluator_registry=eval_reg
+    )
+    assert resolved[0] == "ies.backend.result_adapter@1.0.0"
 
     for bad_override, expected_code, expected_field in (
         ({"mode": "unsupported"}, "TASK-REQ-007", "mode"),
         ({"precision": "low"}, "TASK-REQ-007", "precision"),
-        ({"evaluator": "missing.evaluator@1.0.0"}, "TASK-REQ-007", "evaluator"),
-        ({"options": {"unknown": 1}}, "TASK-REQ-007", "options"),
-        ({"solver": "other.solver@1.0.0"}, "TASK-REQ-008", "solver"),
+        (
+            {"evaluators": [{"evaluator": "missing.evaluator@1.0.0", "parameters": {}}]},
+            "TASK-REQ-007",
+            "evaluators",
+        ),
+        ({"options": {"generator": {"unknown": 1}}}, "TASK-REQ-007", "options"),
+        ({"solver": "other.solver@1.0.0"}, "TASK-REQ-007", "solver"),
     ):
         with pytest.raises(InvalidRequestError) as exc_info:
-            _resolve_execution_refs(_body(**bad_override), gen_reg, project_id=1)
+            _resolve_execution_refs(
+                _body(**bad_override),
+                gen_reg,
+                project_id=1,
+                solver_registry=sol_reg,
+                evaluator_registry=eval_reg,
+            )
         assert exc_info.value.code == expected_code
         assert exc_info.value.location["field"] == expected_field

@@ -51,7 +51,6 @@ from iesplan.computation import (
     GeneratorProvider,
     MaterializedSet,
     ProcessOutcome,
-    ResultAdapter,
     SolverBundle,
     SolverBundleManifest,
     get_algorithm,
@@ -95,16 +94,16 @@ def _manifest() -> SolverBundleManifest:
     return SolverBundleManifest(
         bundle={
             "generator": "acme.generator@1.0.0",
-            "solver": "ies.solver.highs@1.7.2",
+            "contract": "ies.solver-bundle.mps@1.0.0",
         },
         inputs=[{"path": "input/problem.mps", "media_type": "application/mps"}],
-        command={
-            "executor": "ies.executor.local_process@1.0.0",
-            "executable": "ies.solver.highs@1.7.2",
-            "arguments": ["input/problem.mps"],
-        },
-        outputs=[{"path": "output/solution.json", "media_type": "application/json", "required": True}],
-        result_adapter="acme.result-adapter@1.0.0",
+        outputs=[
+            {
+                "path": "output/primal_solution.json",
+                "media_type": "application/json",
+                "required": True,
+            }
+        ],
     )
 
 
@@ -169,7 +168,6 @@ class _GeneratorOnly:
             outputs=("solution",),
             precisions=("medium",),
             solvers=("ies.solver.highs@1.7.2",),
-            result_adapter="acme.result-adapter@1.0.0",
             resource_limits={},
             unit_system="SI",
             seed_semantics="test-only",
@@ -253,53 +251,21 @@ class _ExecutorOnly:
         raise ComputationUnavailableError(reason="no-executor")
 
 
-class _AdapterOnly:
-    """仅实现 ResultAdapter 的最小替身(无任何算法逻辑)。"""
-
-    @property
-    def descriptor(self):
-        from iesplan.computation import ResultAdapterDescriptor
-
-        return ResultAdapterDescriptor(adapter_id="t.adapter", version="1.0.0")
-
-    @property
-    def ref(self) -> str:
-        return "t.adapter@1.0.0"
-
-    def available(self) -> bool:
-        return True
-
-    def adapt(
-        self,
-        bundle: SolverBundle,
-        receipt: ExecutionReceipt,
-        outputs: Mapping[str, object],
-    ) -> ComputeResult:
-        raise ComputationUnavailableError(reason="no-result-adapter")
-
-
 def test_protocols_are_runtime_checkable_shapes() -> None:
-    """三协议为运行时 Protocol; 各自独立替身只通过自身结构判定。"""
+    """生成与执行协议为运行时 Protocol; 各自独立替身只通过自身结构判定。"""
     gen = _GeneratorOnly()
     exe = _ExecutorOnly()
-    adapter = _AdapterOnly()
     assert isinstance(gen, GeneratorProvider)
     assert not isinstance(gen, ExecutorProvider)
-    assert not isinstance(gen, ResultAdapter)
     assert isinstance(exe, ExecutorProvider)
     assert not isinstance(exe, GeneratorProvider)
-    assert not isinstance(exe, ResultAdapter)
     assert exe.descriptor.ref == exe.ref
-    assert isinstance(adapter, ResultAdapter)
-    assert not isinstance(adapter, GeneratorProvider)
-    assert not isinstance(adapter, ExecutorProvider)
     assert not isinstance(object(), GeneratorProvider)
     assert not isinstance(object(), ExecutorProvider)
-    assert not isinstance(object(), ResultAdapter)
 
 
 def test_protocol_methods_match_constitution_boundaries() -> None:
-    """宪法 §4.5 方法形状: generate/execute/adapt 的参数与产出符合边界。"""
+    """宪法 §4.5 方法形状: generate/execute 的参数与产出符合边界。"""
     import inspect
 
     assert list(inspect.signature(GeneratorProvider.generate).parameters) == [
@@ -308,12 +274,8 @@ def test_protocol_methods_match_constitution_boundaries() -> None:
     assert list(inspect.signature(ExecutorProvider.execute).parameters) == [
         "self", "command", "workdir", "stop",
     ]
-    assert list(inspect.signature(_AdapterOnly.adapt).parameters) == [
-        "self", "bundle", "receipt", "outputs",
-    ]
     assert isinstance(_GeneratorOnly(), GeneratorProvider)
     assert isinstance(_ExecutorOnly(), ExecutorProvider)
-    assert isinstance(_AdapterOnly(), ResultAdapter)
     assert _GeneratorOnly().descriptor.ref == _GeneratorOnly().ref
 
 
@@ -323,7 +285,7 @@ def test_unavailable_error_semantics() -> None:
     assert isinstance(err, RuntimeError)
     assert err.reason == "no-provider"
     assert str(err) == "计算能力不可用"
-    gen, adapter = _GeneratorOnly(), _AdapterOnly()
+    gen = _GeneratorOnly()
     config = _config(seed=42)
     with pytest.raises(ComputationUnavailableError):
         gen.generate(
@@ -331,9 +293,6 @@ def test_unavailable_error_semantics() -> None:
             MaterializedSet(operation_years=1, series=(), pending_predict=()),
             _finance(), config, _evaluation(),
         )
-    receipt = _receipt(status="process_failed")
-    with pytest.raises(ComputationUnavailableError):
-        adapter.adapt(_manifest(), receipt, {})
 
 
 def test_bundles_are_deeply_immutable_value_objects() -> None:
@@ -344,13 +303,13 @@ def test_bundles_are_deeply_immutable_value_objects() -> None:
         execution_status="completed",
         math_status="solved", outputs={"k": {"nested": [1]}},
     )
-    config = _config(seed=7, options={"gap": 0.01, "tags": ["a"]}, outputs=["out"])
+    config = _config(seed=7, options={"generator": {"gap": 0.01, "tags": ["a"]}}, outputs=["out"])
     assert config.outputs == ("out",)
     receipt = _receipt(stdout="ok")
     for obj in (manifest, result, config, receipt):
         assert dataclasses.is_dataclass(obj)
     with pytest.raises(dataclasses.FrozenInstanceError):
-        manifest.result_adapter = "other"  # type: ignore[misc]
+        manifest.bundle = {}  # type: ignore[misc]
     with pytest.raises(dataclasses.FrozenInstanceError):
         result.execution_status = "failed"  # type: ignore[misc]
     # 嵌套容器只读(映射不可写, 序列不可改, 条目不可写)
@@ -359,11 +318,11 @@ def test_bundles_are_deeply_immutable_value_objects() -> None:
     with pytest.raises(TypeError):
         manifest.inputs[0]["path"] = "x"  # type: ignore[index]
     with pytest.raises(TypeError):
-        manifest.command["executor"] = "sh -c"  # type: ignore[index]
+        manifest.bundle["contract"] = "other"  # type: ignore[index]
     with pytest.raises(TypeError):
         result.outputs["k"] = {}  # type: ignore[index]
     with pytest.raises(TypeError):
-        config.options["gap"] = 0.5  # type: ignore[index]
+        config.options["generator"] = {}  # type: ignore[index]
     with pytest.raises(TypeError):
         receipt.resource_usage["k"] = 1  # type: ignore[index]
     assert isinstance(manifest.inputs, tuple)
@@ -375,11 +334,11 @@ def test_carriers_ignore_later_caller_mutation() -> None:
     """构造后调用方改写原始结构不影响已冻结载体; to_dict 返回独立副本。"""
     raw_entries = [{"path": "input/a.mps", "media_type": "application/mps"}]
     manifest = SolverBundleManifest(
-        bundle={"generator": _GENERATOR, "solver": _SOLVER},
+        bundle={"generator": _GENERATOR, "contract": "ies.solver-bundle.mps@1.0.0"},
         inputs=raw_entries,
-        command={"executor": "e@1.0.0", "executable": "s@1.0.0", "arguments": ["a"]},
-        outputs=[{"path": "output/s.json", "media_type": "application/json", "required": True}],
-        result_adapter="r@1.0.0",
+        outputs=[
+            {"path": "output/primal_solution.json", "media_type": "application/json", "required": True}
+        ],
     )
     raw_entries[0]["path"] = "input/evil.mps"
     raw_entries.append({"path": "input/b.mps", "media_type": "application/mps"})
@@ -396,23 +355,25 @@ def test_carriers_ignore_later_caller_mutation() -> None:
     assert len(manifest.to_dict()["outputs"]) == 1
 
 
-def test_bundle_rejects_shell_command_and_escaping_paths() -> None:
-    """Bundle 只接受结构化命令与 Bundle 内相对路径。"""
-    with pytest.raises(TypeError):
+def test_bundle_rejects_escaping_paths_and_requires_primal_output() -> None:
+    """Bundle 只接受 Bundle 内相对路径且强制 output/primal_solution.json。"""
+    with pytest.raises(ValueError, match="primal_solution"):
         SolverBundleManifest(
-            bundle={"generator": _GENERATOR, "solver": _SOLVER},
+            bundle={"generator": _GENERATOR, "contract": "ies.solver-bundle.mps@1.0.0"},
             inputs=[{"path": "input/a.mps", "media_type": "application/mps"}],
-            command="solver input.mps",  # type: ignore[arg-type]
             outputs=[{"path": "output/s.json", "media_type": "application/json", "required": True}],
-            result_adapter="r@1.0.0",
         )
     with pytest.raises(ValueError, match="越界"):
         SolverBundleManifest(
-            bundle={"generator": _GENERATOR, "solver": _SOLVER},
+            bundle={"generator": _GENERATOR, "contract": "ies.solver-bundle.mps@1.0.0"},
             inputs=[{"path": "input/a.mps", "media_type": "application/mps"}],
-            command={"executor": "e@1.0.0", "executable": "s@1.0.0", "arguments": ["a"]},
-            outputs=[{"path": "../evil.json", "media_type": "application/json", "required": True}],
-            result_adapter="r@1.0.0",
+            outputs=[
+                {
+                    "path": "../evil.json",
+                    "media_type": "application/json",
+                    "required": True,
+                }
+            ],
         )
 
 
@@ -426,7 +387,7 @@ def test_config_schema_word_checked() -> None:
         _config(schema="ies.other")
     with pytest.raises(ValueError, match="版本"):
         _config(schema_version="9.9.9")
-    good = _config(seed=42, options={"gap_rel": 0.01})
+    good = _config(seed=42, options={"generator": {"gap_rel": 0.01}})
     assert good.seed == 42
     assert good.to_dict() == {
         "schema": CALCULATION_CONFIG_SCHEMA,
@@ -436,11 +397,10 @@ def test_config_schema_word_checked() -> None:
         "generator": _GENERATOR,
         "solver": _SOLVER,
         "algorithm": None,
-        "evaluator": None,
+        "evaluators": [],
         "precision": "medium",
-        "convergence": None,
         "time_limit_seconds": 600,
-        "options": {"gap_rel": 0.01},
+        "options": {"generator": {"gap_rel": 0.01}},
         "seed": 42,
         "outputs": ["solution"],
     }

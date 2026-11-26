@@ -1,18 +1,22 @@
 """S2 synthetic same-solve step constraints: solver rows, port identity, units and HiGHS."""
 from __future__ import annotations
 
-import json
 from copy import deepcopy
 
 import pytest
+from test_computation_chain import (
+    SAMPLES,
+    _adapt,
+    _attempt,
+    _campus_inputs,
+    _command,
+    _runtime,
+)
 
 from iesplan.assembly import parse_assembly_doc, validate_assembly_doc
 from iesplan.computation.generators.highs_milp import HIGHS_MILP_PROVIDER
-from iesplan.computation.generators.project import build_project_model_package
 from iesplan.computation.generators.mps import write_mps
-from test_computation_chain import (
-    SAMPLES, _adapt, _attempt, _campus_inputs, _runtime,
-)
+from iesplan.computation.generators.project import build_project_model_package
 
 
 @pytest.fixture(scope="module")
@@ -156,7 +160,7 @@ def test_same_type_instances_are_not_cross_wired(campus):
 
 def _solve(inputs, suffix):
     bundle = HIGHS_MILP_PROVIDER.generate(*inputs)
-    receipt, outputs = _runtime().run(bundle, _attempt(suffix))
+    receipt, outputs = _runtime().run(bundle, _attempt(suffix), command=_command())
     assert receipt.status == "succeeded", receipt
     return _adapt(bundle, receipt, outputs)
 
@@ -192,5 +196,7 @@ def test_true_highs_keeps_conflicting_rows_and_reports_infeasible(campus):
     result = _solve(inputs, "step-conflict")
     assert result.math_status == "infeasible"
     assert result.execution_status == "completed"
-    assert set(result.outputs) == {"solver_summary"}
+    assert "solver_summary" in result.outputs
+    assert "solution" not in result.outputs
+    assert result.outputs["solver_summary"]["has_feasible_solution"] is False
     assert result.outputs["solver_summary"]["termination_reason"] == "infeasible"

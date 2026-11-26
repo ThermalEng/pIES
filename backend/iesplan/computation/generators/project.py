@@ -5018,11 +5018,13 @@ class _ProjectBuilder:
                 "rate": row["rate"],
                 "charge": self._decl_affine(paid),
             })
+        unit_scale_names: set[str] = set()
         construction_units: list[dict[str, object]] = []
         for inst, cfg in sorted(self._construction_configs.items(),
                                 key=lambda item: item[1]["unit_id"]):
             scales = []
             for pname in sorted(cfg["scales"]):
+                unit_scale_names.add(pname)
                 spec = self.plan_vars[pname]
                 unit = spec.get("unit") or self.models[inst].variables[
                     spec["parameter"]
@@ -5039,7 +5041,19 @@ class _ProjectBuilder:
                 "built": self._decl_var(cfg["state"]),
                 "scales": scales,
             })
+        planning_variables: list[dict[str, object]] = []
+        for pname in sorted(self.plan_vars):
+            if pname in unit_scale_names:
+                continue
+            spec = self.plan_vars[pname]
+            unit = spec.get("unit") or self._bound_prop_unit(spec["device_ref"], spec["parameter"])
+            planning_variables.append({
+                "planning_variable_id": pname,
+                "value": self._decl_var(pname),
+                "unit": unit,
+            })
         out: dict[str, object] = {
+            **({"planning_variables": planning_variables} if planning_variables else {}),
             "currency": self.finance.currency,
             "monthly_demand": monthly_demand,
             "construction_total": self._decl_affine(self._fact_construction),

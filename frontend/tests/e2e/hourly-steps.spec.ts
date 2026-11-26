@@ -182,7 +182,7 @@ test.describe('R5/R6: 计算步序列闭环', () => {
     // 既有 API 会话, 不能在其后继续用旧 token 调 API。
     const cfgNow = await requestJson(apiCtx.request, 'GET', `/api/projects/${pid}/config`, undefined, userToken)
     await requestJson(apiCtx.request, 'PUT', `/api/projects/${pid}/config`, {
-      calculation_config: { ...cfgNow.calculation_config, outputs: ['metrics'] },
+      calculation_config: { ...cfgNow.calculation_config, evaluators: [], outputs: ['metrics'] },
       expected_revision: cfgNow.revision,
     }, userToken)
     const cfgAbsent = await requestJson(apiCtx.request, 'GET', `/api/projects/${pid}/config`, undefined, userToken)

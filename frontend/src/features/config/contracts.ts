@@ -5,7 +5,7 @@
  *   GET /api/projects/{pid}/config   最新计算配置 {calculation_config, revision}(未保存 404)
  *   PUT /api/projects/{pid}/config   保存 {calculation_config, expected_revision}(全文唯一校验)
  *
- * 配置正文本体为 14 字段 CalculationConfig(见 CalculationConfigBody, 与
+ * 配置正文本体为 13 字段 CalculationConfig(见 CalculationConfigBody, 与
  * formats/calculation-config.md 同形); 本文件只声明传输信封。
  *
  * 依赖方向: features/config/contracts → ../../types(共享领域类型);

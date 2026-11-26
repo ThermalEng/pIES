@@ -6,11 +6,22 @@
   "generator": null,
   "solver": null,
   "algorithm": "acme.algorithm.capacity_search@1.2.0",
-  "evaluator": "ies.result-adapter.highs@1.0.0",
+  "evaluators": [
+    {
+      "evaluator": "ies.evaluator.finance@1.0.0",
+      "parameters": {}
+    }
+  ],
   "precision": "medium",
-  "convergence": null,
   "time_limit_seconds": 600,
-  "options": { "max_steps": 100 },
+  "options": {
+    "algorithm": {
+      "population": 40
+    }
+  },
   "seed": 42,
-  "outputs": ["solution", "metrics"]
+  "outputs": [
+    "solution",
+    "metrics"
+  ]
 }

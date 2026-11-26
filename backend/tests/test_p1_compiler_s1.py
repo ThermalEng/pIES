@@ -19,15 +19,22 @@ from unittest.mock import patch
 import pytest
 from bundle_testkit import materialized_file
 from bundle_testkit import mps_columns as _mps_column_names
+from legacy_solve_testkit import (
+    SOLUTION_PATH,
+    evaluate_bundle_expressions,
+    read_bundle_records,
+    restore_bundle_solution,
+)
+from legacy_solve_testkit import (
+    succeeded_receipt as _receipt,
+)
 from test_highs_milp_provider import _campus_inputs
-from test_highs_result_adapter import _receipt
 from test_project_model import HEATER_YAML, POINTS, _contribution, _inputs
 
 from iesplan.assembly.contracts import ValidatedAssemblyArtifact, ValidationReceipt
 from iesplan.computation import MaterializedSet, build_registry, write_mps
 from iesplan.computation.generators import highs_milp as generator
 from iesplan.computation.generators import project
-from iesplan.computation.result_adapters.highs import HIGHS_ADAPTER
 from iesplan.computation.sequences import materialize_non_predictive_series
 from iesplan.finance import IncomeTaxRule
 
@@ -44,7 +51,7 @@ def measured_generate():
     memory_peaks = {"whole_generate": 0}
     original_new = project._new_builder
     original_build = generator.build_project_model_package
-    original_metadata = generator.HighsMilpProvider._metadata
+    original_metadata = generator._variable_map_header_bytes
 
     def capture_builder(*args, **kwargs):
         builder = original_new(*args, **kwargs)
@@ -98,7 +105,7 @@ def measured_generate():
             patch.object(project, "_new_builder", capture_builder),
             patch.object(generator, "build_project_model_package",
                          measure("model_and_recovery_declarations", original_build)),
-            patch.object(generator.HighsMilpProvider, "_metadata",
+            patch.object(generator, "_variable_map_header_bytes",
                          measure("metadata_serialization", original_metadata)),
         ):
             bundle = generator.HIGHS_MILP_PROVIDER.generate(*inputs)
@@ -237,7 +244,7 @@ def test_public_generate_adapter_reuses_one_bundle_mapping(measured_generate):
     """Synthetic full primal checks mapping only; actual solve stays in Docker integration tests."""
     bundle, _builder, _ = measured_generate
     names = _mps_column_names(materialized_file(bundle, generator.PROBLEM_PATH))
-    params = json.loads(materialized_file(bundle, generator.PARAMETERS_PATH))
+    params = read_bundle_records(bundle)
     series = next(s for s in params["step_series"] if s["columns"])
     first_column = series["columns"][0]
     values = [42.0 if name == first_column else 0.0 for name in names]
@@ -253,20 +260,19 @@ def test_public_generate_adapter_reuses_one_bundle_mapping(measured_generate):
         *(f"{i}: {value}" for i, value in enumerate(values)),
         "",
     ]).encode()
-    result = HIGHS_ADAPTER.adapt(
-        bundle, _receipt(), {generator.SOLUTION_PATH: solution},
+    cr, eng_sol = restore_bundle_solution(
+        bundle, _receipt(bundle=bundle), {SOLUTION_PATH: solution},
     )
-    assert result.math_status == "solved"
-    out = result.outputs
-    assert out["series"][series["series_id"]]["instance_id"] == series["instance_id"]
-    variable = next(v for v in out["solution"]["variables"]
-                    if v["name"] == first_column)
-    assert out["series"][series["series_id"]]["values"][0] == pytest.approx(
+    assert cr.math_status == "solved"
+    assert eng_sol["series"][series["series_id"]]["instance_id"] == series["instance_id"]
+    exprs = evaluate_bundle_expressions(bundle, {SOLUTION_PATH: solution})
+    variable = next(v for v in exprs["variables"] if v["name"] == first_column)
+    assert eng_sol["series"][series["series_id"]]["values"][0] == pytest.approx(
         variable["value"],
     )
-    assert "annual_net_flows" in out["financial_facts"]
-    assert "annual_operation" in out["financial_facts"]
-    assert result.to_dict()["outputs"]["model_sources"] == params["model_sources"]
+    assert "annual_net_flows" in params["financial_facts"]
+    assert "annual_operation" in params["financial_facts"]
+    assert eng_sol["model_sources"] == params["model_sources"]
 
 
 def test_two_instances_planned_initial_and_varying_steps():
@@ -314,7 +320,8 @@ def test_two_instances_planned_initial_and_varying_steps():
     builder = project._new_builder(art, models, series, finance, evaluation)
     model, _units, _objective_unit = builder.build()
     rows = {row.name: row for row in model.constraints}
-    coefficients = lambda row: {key[0]: value for key, value in row.expression.terms}
+    def coefficients(row):
+        return {key[0]: value for key, value in row.expression.terms}
     first = rows["tank1__soc_step__t0"]
     assert coefficients(first) == {
         "tank1__soc__t0": 1.0, "soc_plan": -1.0,
@@ -344,7 +351,7 @@ def test_two_instances_planned_initial_and_varying_steps():
     )
     mps_text, _offset = write_mps(model)
     assert materialized_file(bundle, generator.PROBLEM_PATH) == mps_text.encode("utf-8")
-    metadata = json.loads(materialized_file(bundle, generator.PARAMETERS_PATH))
+    metadata = read_bundle_records(bundle)
     assert "soc_plan" in metadata["unit_map"]
     assert len(next(s["columns"] for s in metadata["step_series"]
                     if s["series_id"] == "tank1.soc")) == POINTS

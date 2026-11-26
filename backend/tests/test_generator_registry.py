@@ -62,14 +62,12 @@ def _descriptor(**kwargs) -> GeneratorDescriptor:
     kwargs.setdefault("modes", ("planning",))
     kwargs.setdefault("precisions", ("low", "medium", "high"))
     kwargs.setdefault("outputs", ("solution", "metrics"))
-    kwargs.setdefault("solvers", (SOLVER,))
     kwargs.setdefault("options_schema", dict(_OPTIONS_SCHEMA))
     kwargs.setdefault("resource_limits", {"timeout_seconds": 600})
     kwargs.setdefault("unit_system", "SI")
     kwargs.setdefault("media_types", ("application/mps",))
     kwargs.setdefault("seed_semantics", "options.seed 为空时使用固定种子 0")
     kwargs.setdefault("assembly_schema_version", "1.0.0")
-    kwargs.setdefault("result_adapter", "acme.result-adapter@1.0.0")
     return GeneratorDescriptor(**kwargs)
 
 
@@ -110,25 +108,24 @@ def _provider(**kwargs) -> _FakeProvider:
 
 
 def test_descriptor_ref_and_solver_support() -> None:
-    """descriptor ref 为精确引用；solver 兼容可查询。"""
+    """descriptor ref 为精确引用；未声明 solvers allowlist 时兼容任意符合契约的求解器。"""
     desc = _descriptor()
     assert desc.ref == GENERATOR
-    assert desc.supports_solver(SOLVER) is True
-    assert desc.supports_solver("other.solver@9.9.9") is False
+    assert not hasattr(desc, "supports_solver")
+    assert not hasattr(desc, "result_adapter")
     dumped = desc.to_dict()
     assert dumped["generator_id"] == "acme.generator"
-    assert dumped["solvers"] == [SOLVER]
+    assert dumped["solvers"] == []
     assert dumped["outputs"] == ["solution", "metrics"]
+    assert "result_adapter" not in dumped
 
 
 def test_descriptor_rejects_bad_identity() -> None:
-    """非法 ID/版本/adapter ref 的 descriptor 即拒绝。"""
+    """非法 ID/版本/capabilities/outputs 的 descriptor 即拒绝。"""
     with pytest.raises(ValueError, match="generator"):
         _descriptor(generator_id="")
     with pytest.raises(ValueError, match="generator"):
         _descriptor(version="1.0")
-    with pytest.raises(ValueError, match="result_adapter"):
-        _descriptor(result_adapter="not-a-ref")
     with pytest.raises(ValueError, match="capabilities"):
         _descriptor(capabilities=("",))
     with pytest.raises(ValueError, match="outputs"):
@@ -209,17 +206,13 @@ def test_descriptor_rejects_missing_required_trio() -> None:
         with pytest.raises(ValueError, match="assembly_schema_version"):
             _descriptor(assembly_schema_version=alias)
     with pytest.raises(ValueError, match="solvers"):
-        _descriptor(solvers=())
-    with pytest.raises(ValueError, match="solvers"):
         _descriptor(solvers=("not-a-ref",))
-    with pytest.raises(ValueError, match="result_adapter"):
-        _descriptor(result_adapter="")
     valid = _descriptor(
         assembly_schema_version="1.0.0",
         solvers=(SOLVER, "other.solver@2.1.0"),
     )
     assert valid.assembly_schema_version == "1.0.0"
-    assert valid.supports_solver("other.solver@2.1.0") is True
+    assert valid.solvers == (SOLVER, "other.solver@2.1.0")
 
 
 def test_build_registry_is_atomic() -> None:
@@ -259,13 +252,11 @@ def test_resolve_returns_callable_provider() -> None:
 
 
 def test_resolve_checks_solver_compatibility() -> None:
-    """选中 provider 后 solver 不兼容即失败，不换另一生成器。"""
+    """GeneratorRegistry.resolve 不再按旧 solvers allowlist 阻断第三方求解器。"""
     registry = build_registry([_provider()])
     assert registry.resolve(_config()).ref == GENERATOR
-    bad_solver = _config(solver="other.solver@9.9.9")
-    with pytest.raises(ComputationUnavailableError) as exc_info:
-        registry.resolve(bad_solver)
-    assert exc_info.value.reason == "incompatible-solver"
+    third_party_solver = _config(solver="other.solver@9.9.9")
+    assert registry.resolve(third_party_solver).ref == GENERATOR
 
 
 def test_resolve_checks_mode_and_precision() -> None:
@@ -328,17 +319,17 @@ def test_schema_default_never_written_back() -> None:
 
 
 def test_resolve_options_gate() -> None:
-    """合法 options 通过；未知键/类型/范围错误抛 ValueError，不回退。"""
+    """合法分槽 options 通过；未知键/类型/范围错误抛 ValueError，不回退。"""
     registry = build_registry([_provider()])
-    assert registry.resolve(_config(options={"gap_rel": 0.01})).ref == GENERATOR
+    assert registry.resolve(_config(options={"generator": {"gap_rel": 0.01}})).ref == GENERATOR
     with pytest.raises(ValueError) as exc_info:
-        registry.resolve(_config(options={"unknown_opt": 1}))
+        registry.resolve(_config(options={"generator": {"unknown_opt": 1}}))
     assert "unknown_opt" in str(exc_info.value)
     with pytest.raises(ValueError) as exc_info:
-        registry.resolve(_config(options={"gap_rel": "0.01"}))
+        registry.resolve(_config(options={"generator": {"gap_rel": "0.01"}}))
     assert "gap_rel" in str(exc_info.value)
     with pytest.raises(ValueError) as exc_info:
-        registry.resolve(_config(options={"gap_rel": 0.5}))
+        registry.resolve(_config(options={"generator": {"gap_rel": 0.5}}))
     assert "gap_rel" in str(exc_info.value)
 
 
@@ -350,11 +341,10 @@ def test_invalid_options_not_unavailable_and_no_fallback() -> None:
         solvers=("other.solver@9.9.9",),
         modes=("planning",),
         precisions=("medium",),
-        result_adapter="other.adapter@1.0.0",
     )
     registry = build_registry([_FakeProvider(first), _FakeProvider(second)])
     with pytest.raises(ValueError):
-        registry.resolve(_config(options={"unknown_opt": 1}))
+        registry.resolve(_config(options={"generator": {"unknown_opt": 1}}))
     assert len(registry) == 2
 
 
@@ -423,7 +413,7 @@ def test_unified_algorithm_descriptor_and_registry_capability_checks() -> None:
         modes=("planning", "search"),
         precisions=("low", "medium"),
         outputs=("solution", "metrics"),
-        evaluators=("ies.result-adapter.highs@1.0.0",),
+        evaluators=("ies.evaluator.finance@1.0.0",),
         parameters_schema={
             "$schema": "https://json-schema.org/draft/2020-12/schema",
             "type": "object",
@@ -439,10 +429,10 @@ def test_unified_algorithm_descriptor_and_registry_capability_checks() -> None:
     good = CalculationConfig(
         mode="search",
         algorithm=algo_desc.ref,
-        evaluator="ies.result-adapter.highs@1.0.0",
+        evaluators=[{"evaluator": "ies.evaluator.finance@1.0.0", "parameters": {}}],
         precision="medium",
         time_limit_seconds=600,
-        options={"max_steps": 50},
+        options={"algorithm": {"max_steps": 50}},
         outputs=["solution"],
     )
     assert algo_registry.resolve(good).ref == algo_desc.ref
@@ -454,7 +444,7 @@ def test_unified_algorithm_descriptor_and_registry_capability_checks() -> None:
                 algorithm=algo_desc.ref,
                 precision="medium",
                 time_limit_seconds=600,
-                options={"max_steps": 50},
+                options={"algorithm": {"max_steps": 50}},
                 outputs=["solution"],
             )
         )
@@ -465,7 +455,7 @@ def test_unified_algorithm_descriptor_and_registry_capability_checks() -> None:
             CalculationConfig(
                 mode="planning",
                 algorithm=algo_desc.ref,
-                evaluator="other.evaluator@1.0.0",
+                evaluators=[{"evaluator": "other.evaluator@1.0.0", "parameters": {}}],
                 precision="medium",
                 time_limit_seconds=600,
                 options={},
@@ -481,7 +471,7 @@ def test_unified_algorithm_descriptor_and_registry_capability_checks() -> None:
                 algorithm=algo_desc.ref,
                 precision="medium",
                 time_limit_seconds=600,
-                options={"max_steps": 0},
+                options={"algorithm": {"max_steps": 0}},
                 outputs=["solution"],
             )
         )
@@ -492,38 +482,43 @@ def test_unified_algorithm_descriptor_and_registry_capability_checks() -> None:
                 algorithm=algo_desc.ref,
                 precision="medium",
                 time_limit_seconds=600,
-                options={"unknown": 1},
+                options={"algorithm": {"unknown": 1}},
                 outputs=["solution"],
             )
         )
 
     # 分步生成器目录不接受一体化配置，反之亦然
-    gen_registry = build_registry([_provider()])
+    gen_registry = build_registry([_provider(evaluators=("acme.result-adapter@1.0.0",))])
     with pytest.raises(ComputationUnavailableError) as exc_gen_ev:
-        gen_registry.resolve(_config(evaluator="missing.evaluator@1.0.0"))
+        gen_registry.resolve(
+            _config(evaluators=[{"evaluator": "missing.evaluator@1.0.0", "parameters": {}}])
+        )
     assert exc_gen_ev.value.reason == "incompatible-evaluator"
-    assert gen_registry.resolve(_config(evaluator="acme.result-adapter@1.0.0")).ref == GENERATOR
+    assert (
+        gen_registry.resolve(
+            _config(evaluators=[{"evaluator": "acme.result-adapter@1.0.0", "parameters": {}}])
+        ).ref
+        == GENERATOR
+    )
 
-    # 未声明 evaluators/result_adapter 的一体化算法拒绝任何显式 evaluator (fail-closed)
+    # 未声明 evaluators 的一体化算法放行任意注册表已知 evaluator，但若显式限制则按能力拒绝
     no_ev_algo = AlgorithmDescriptor(
         algorithm_id="acme.algorithm.no_ev",
         version="1.0.0",
         parameters_schema={"type": "object", "additionalProperties": False},
     )
     no_ev_reg = build_algorithm_registry([_FakeAlgorithmProvider(no_ev_algo)])
-    with pytest.raises(ComputationUnavailableError) as exc_no_ev:
-        no_ev_reg.resolve(
-            CalculationConfig(
-                mode="planning",
-                algorithm=no_ev_algo.ref,
-                evaluator="missing.evaluator@1.0.0",
-                precision="medium",
-                time_limit_seconds=600,
-                options={},
-                outputs=["solution"],
-            )
+    assert no_ev_reg.resolve(
+        CalculationConfig(
+            mode="planning",
+            algorithm=no_ev_algo.ref,
+            evaluators=[{"evaluator": "ies.evaluator.finance@1.0.0", "parameters": {}}],
+            precision="medium",
+            time_limit_seconds=600,
+            options={},
+            outputs=["solution"],
         )
-    assert exc_no_ev.value.reason == "incompatible-evaluator"
+    ).ref == no_ev_algo.ref
 
     with pytest.raises(ValueError, match="generator 为 None"):
         gen_registry.resolve(good)

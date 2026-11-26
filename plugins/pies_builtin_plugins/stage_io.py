@@ -16,17 +16,6 @@ from types import MappingProxyType
 from typing import Any, TypeVar
 
 from iesplan.assembly import ValidatedAssemblyArtifact, ValidationReceipt
-from iesplan.computation.protocols import (
-    EXECUTION_RECEIPT_SCHEMA,
-    EXECUTION_RECEIPT_VERSION,
-    SOLVER_BUNDLE_SCHEMA,
-    SOLVER_BUNDLE_VERSION,
-    ComputeResult,
-    ExecutionReceipt,
-    SolverBundle,
-    SolverBundleManifest,
-    thaw_json_value,
-)
 from iesplan.computation.sequences import (
     MaterializedPriceSeries,
     MaterializedSeries,
@@ -36,7 +25,6 @@ from iesplan.computation.sequences import (
 from iesplan.core.content import CHUNK_BYTES, Content
 from iesplan.core.diagnostics import Diagnostic
 from iesplan.finance import (
-    evaluate_project_investment,
     expand_monthly_daily_prices,
     read_trusted_price_values,
 )
@@ -481,65 +469,6 @@ def materialized_from_frozen(
         series=tuple(series),
         pending_predict=pending,
         prices=prices,
-    )
-
-
-def bundle_manifest_from_frozen(data: Mapping[str, Any]) -> SolverBundleManifest:
-    """Reconstruct `SolverBundleManifest` from trusted frozen YAML without revalidation."""
-    return _construct(
-        SolverBundleManifest,
-        schema=data.get("schema", SOLVER_BUNDLE_SCHEMA),
-        schema_version=data.get("schema_version", SOLVER_BUNDLE_VERSION),
-        bundle=_frozen_mapping(data["bundle"]),
-        inputs=tuple(_frozen_mapping(item) for item in data["inputs"]),
-        command=_frozen_mapping(data["command"]),
-        outputs=tuple(_frozen_mapping(item) for item in data["outputs"]),
-        result_adapter=data["result_adapter"],
-        extensions=_frozen_mapping(data.get("extensions", {})),
-    )
-
-
-def solver_bundle_from_frozen(
-    manifest: SolverBundleManifest, files: Mapping[str, Content]
-) -> SolverBundle:
-    """Reconstruct `SolverBundle` from trusted frozen manifest and streaming files."""
-    return _construct(
-        SolverBundle,
-        manifest=manifest,
-        files=MappingProxyType(dict(sorted(files.items()))),
-    )
-
-
-def execution_receipt_from_frozen(data: Mapping[str, Any]) -> ExecutionReceipt:
-    """Reconstruct `ExecutionReceipt` from trusted frozen JSON without revalidation."""
-    return _construct(
-        ExecutionReceipt,
-        schema=data.get("schema", EXECUTION_RECEIPT_SCHEMA),
-        schema_version=data.get("schema_version", EXECUTION_RECEIPT_VERSION),
-        receipt_id=data["receipt_id"],
-        bundle_id=data["bundle_id"],
-        assembly_id=data["assembly_id"],
-        calculation_config_id=data["calculation_config_id"],
-        attempt_id=data["attempt_id"],
-        generator_ref=data["generator_ref"],
-        solver_ref=data["solver_ref"],
-        executor_ref=data["executor_ref"],
-        executable_ref=data["executable_ref"],
-        result_adapter_ref=data["result_adapter_ref"],
-        status=data["status"],
-        exit_code=data.get("exit_code"),
-        signal_number=data.get("signal_number"),
-        termination_reason=data.get("termination_reason", ""),
-        started_at=data.get("started_at", ""),
-        ended_at=data.get("ended_at", ""),
-        error=data.get("error", ""),
-        stdout=data.get("stdout", ""),
-        stderr=data.get("stderr", ""),
-        stdout_truncated=bool(data.get("stdout_truncated", False)),
-        stderr_truncated=bool(data.get("stderr_truncated", False)),
-        outputs=tuple(_frozen_mapping(item) for item in data.get("outputs", ())),
-        policy_evaluated=_frozen_mapping(data.get("policy_evaluated", {})),
-        resource_usage=_frozen_mapping(data.get("resource_usage", {})),
     )
 
 
@@ -1048,116 +977,3 @@ def effective_finance_from_frozen(mapping: Mapping[str, Any]) -> EffectiveFinanc
             }
         ),
     )
-
-
-def build_hourly_series_payload(outputs: Mapping[str, Any]) -> dict[str, Any] | None:
-    """Build the canonical `hourly/series.json` payload from `ComputeResult.outputs`."""
-    merged: dict[str, dict[str, Any]] = {}
-    for kind, key in (("device", "series"), ("system", "system_series")):
-        group = outputs.get(key)
-        if not isinstance(group, Mapping):
-            continue
-        for identity, entry in group.items():
-            merged[str(identity)] = {"series_id": str(identity), "kind": kind, **dict(entry)}
-    if not merged:
-        return None
-
-    data: dict[str, list[float]] = {}
-    units: dict[str, str] = {}
-    identities: dict[str, dict[str, Any]] = {}
-    for series_id in sorted(merged):
-        entry = merged[series_id]
-        raw_values = entry["values"]
-        data[series_id] = list(raw_values) if isinstance(raw_values, Sequence) else raw_values
-        units[series_id] = str(entry["unit"])
-        identities[series_id] = {
-            k: thaw_json_value(v) for k, v in entry.items() if k != "values"
-        }
-    return {"data": data, "meta": {"units": units, "series": identities}}
-
-
-def build_financial_evaluation_payload(
-    evaluation_data: Mapping[str, Any],
-    finance_meta: Mapping[str, Any] | EffectiveFinanceConfig,
-    result: ComputeResult,
-) -> dict[str, Any] | None:
-    """Project same-run financial facts and run `evaluate_project_investment`."""
-    if result.math_status not in ("solved", "feasible"):
-        return None
-    if "solution" not in result.outputs:
-        return None
-
-    facts = result.outputs["financial_facts"]
-    period = int(evaluation_data["construction_period"])
-    operation = int(evaluation_data["operation_years"])
-    years = int(evaluation_data["evaluation_years"])
-    rate = float(evaluation_data["discount_rate"])
-
-    if isinstance(finance_meta, Mapping):
-        currency = str(finance_meta["currency"])
-        price_basis = str(finance_meta["price_basis"])
-        base_year = int(finance_meta["base_year"])
-        profile_id = str(finance_meta["profile_id"])
-    else:
-        currency = finance_meta.currency
-        price_basis = finance_meta.price_basis
-        base_year = finance_meta.base_year
-        profile_id = finance_meta.profile_id
-
-    tax_cash = thaw_json_value(facts["tax_cash"])
-    flows = list(facts["annual_net_flows"])
-    comparison = thaw_json_value(facts["comparison"])
-    evaluation_flows = (
-        comparison["evaluation_net_flows"] if comparison["mode"] == "difference" else flows
-    )
-    assessed = evaluate_project_investment(
-        [Decimal(value) for value in evaluation_flows],
-        rate,
-        years,
-        currency=currency,
-        price_basis=price_basis,
-        base_year=base_year,
-    )
-    return {
-        "schema": "ies.financial-evaluation",
-        "schema_version": "1.0.0",
-        "status": "evaluated",
-        "evaluation_years": years,
-        "construction_period": period,
-        "operation_years": operation,
-        "currency": currency,
-        "price_basis": price_basis,
-        "base_year": base_year,
-        "profile_id": profile_id,
-        "discount_rate": rate,
-        "construction_total": facts["construction_total"],
-        "construction_total_unit": currency,
-        "annual_fixed_om": facts["annual_fixed_om"],
-        "payments_applied": [
-            {"t": entry["t"], "ratio": entry["ratio"], "amount": entry["amount"]}
-            for entry in facts["payments_applied"]
-        ],
-        "net_cashflows": thaw_json_value(facts["net_cashflows"]),
-        "cost_items": thaw_json_value(facts["cost_items"]),
-        "amounts": thaw_json_value(facts["amounts"]),
-        "cash_movements": thaw_json_value(facts["cash_movements"]),
-        "assets": thaw_json_value(facts["assets"]),
-        "construction_units": thaw_json_value(facts["construction_units"]),
-        "annual_operation": [
-            {
-                "financial_year": entry["financial_year"],
-                "energy_net": entry["energy_net"],
-                "variable_om": entry["variable_om"],
-                "fixed_om": entry["fixed_om"],
-                "maintenance": entry["maintenance"],
-                "demand_charge": entry["demand_charge"],
-                "net": entry["net"],
-            }
-            for entry in facts["annual_operation"]
-        ],
-        "monthly_demand": thaw_json_value(facts["monthly_demand"]),
-        "tax_cash": tax_cash,
-        "annual_net_flows": flows,
-        "comparison": comparison,
-        "evaluation": assessed.to_dict(),
-    }

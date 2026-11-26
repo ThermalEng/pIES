@@ -5,12 +5,12 @@ from collections.abc import Mapping
 from types import SimpleNamespace
 
 import pytest
+from legacy_solve_testkit import build_financial_evaluation
 from test_finance_s2_execution import _income, _money, _vat_labels
 from test_issue06_s2 import _builder, _tiny_solve
 from test_p3_f1_contract import _amount
 from test_p3_f1_execution import _adapt
 
-from iesplan.application.worker.compute_cases import build_financial_evaluation
 from iesplan.computation.generators.highs_milp import DESCRIPTOR as HIGHS_DESCRIPTOR
 
 

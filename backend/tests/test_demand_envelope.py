@@ -10,18 +10,23 @@ from types import SimpleNamespace
 
 import pytest
 from bundle_testkit import materialized_file
-from test_highs_result_adapter import SOLUTION_PATH, _receipt
+from legacy_solve_testkit import (
+    SOLUTION_PATH,
+    build_financial_evaluation,
+    restore_bundle_solution,
+    succeeded_receipt,
+)
 from test_issue04_d2 import POWER_KW, _inputs
 from test_p3_f1_contract import _amount, _money
 from test_vat_monthly import _solve_internal
 
-from iesplan.application.worker.compute_cases import build_financial_evaluation
 from iesplan.computation import HIGHS_MILP_PROVIDER
 from iesplan.computation.generators import project
 from iesplan.computation.generators.demand import monotone_demand_meters
 from iesplan.computation.generators.parameters import RECORDS_PATH
-from iesplan.computation.result_adapters.highs import ADAPTER_REF, HIGHS_ADAPTER
+from iesplan.computation.protocols import ComputeResult
 from iesplan.core.content import text_lines
+from iesplan.finance import evaluate_forward_finance
 
 
 @pytest.mark.parametrize(("vat", "income"), [(False, False), (True, False), (False, True), (True, True)])
@@ -52,8 +57,18 @@ def _solved(inputs, tmp_path):
     artifact, models, mat, finance, config, evaluation = inputs
     bundle = HIGHS_MILP_PROVIDER.generate(artifact, models, mat, finance, config, evaluation)
     _, _, raw = _solve_internal(bundle, tmp_path)
-    adapted = HIGHS_ADAPTER.adapt(
-        bundle, _receipt(result_adapter_ref=ADAPTER_REF), {SOLUTION_PATH: raw},
+    adapted, eng_sol = restore_bundle_solution(
+        bundle,
+        succeeded_receipt(result_adapter_ref="ies.backend.result_adapter@1.0.0"),
+        {SOLUTION_PATH: raw},
+    )
+    facts = evaluate_forward_finance(
+        eng_sol,
+        artifact=artifact,
+        finance=finance,
+        evaluation=evaluation,
+        materialized=mat,
+        device_models=models,
     )
     sealed = build_financial_evaluation(
         SimpleNamespace(evaluation={
@@ -62,10 +77,17 @@ def _solved(inputs, tmp_path):
             "operation_years": evaluation.operation_years,
             "discount_rate": evaluation.discount_rate,
         }),
-        finance, adapted,
+        finance,
+        ComputeResult(
+            bundle_id=adapted.bundle_id,
+            receipt_id=adapted.receipt_id,
+            execution_status=adapted.execution_status,
+            math_status=adapted.math_status,
+            outputs={**adapted.outputs, "solution": eng_sol, "financial_facts": facts},
+        ),
     )
     assert sealed is not None
-    return adapted.outputs["financial_facts"], sealed, bundle
+    return facts, sealed, bundle
 
 
 def _npv(doc, _profile):
@@ -654,13 +676,29 @@ def test_real_highs_inflated_epigraph_incumbent_rejected_at_adapter(tmp_path):
     max_flow_m13 = max(vals[f"grid1__supply__t{t}"] for t in range(0, 744))
     assert vals["grid1__supply__demand_peak_m13"] - max_flow_m13 > 100.0
 
-    # Package the real HiGHS solution as a kTimeLimit incumbent and verify adapter rejection.
+    # Package the real HiGHS solution as a kTimeLimit incumbent verified against
+    # epigraph tightness via solver verifier, and confirm ResultAdapter rejection.
+    import runpy
+
+    from legacy_solve_testkit import HIGHS_ADAPTER_PATH
+
+    from iesplan.computation.generators.highs_milp import EPIGRAPHS_PATH
+
+    solver_mod = runpy.run_path(HIGHS_ADAPTER_PATH)
+    epi_doc = json.loads(materialized_file(bundle, EPIGRAPHS_PATH).decode("utf-8"))
+    epigraphs = [
+        (int(row["peak_col"]), tuple(int(p) for p in row["flow_cols"]))
+        for row in epi_doc["epigraphs"]
+    ]
+    assert not solver_mod["verify_epigraphs"](sol.col_value, epigraphs)
+
     best_bound = info.mip_dual_bound if math.isfinite(info.mip_dual_bound) else None
     gap = info.mip_gap if math.isfinite(info.mip_gap) else None
     lines = [
         "HIGHS_SOLUTION_V1",
         "model_status: HighsModelStatus.kTimeLimit",
         "has_feasible_solution: true",
+        "epigraph_verified: false",
         f"objective_value: {repr(float(h.getObjectiveValue()))}",
         f"best_bound: {'none' if best_bound is None else repr(float(best_bound))}",
         f"relative_gap: {'none' if gap is None else repr(float(gap))}",
@@ -668,24 +706,35 @@ def test_real_highs_inflated_epigraph_incumbent_rejected_at_adapter(tmp_path):
         "primal:",
         *(f"{i}: {repr(float(v))}" for i, v in enumerate(sol.col_value)),
     ]
-    rejected = HIGHS_ADAPTER.adapt(
-        bundle, _receipt(result_adapter_ref=ADAPTER_REF),
+    rejected, rej_sol = restore_bundle_solution(
+        bundle,
+        succeeded_receipt(result_adapter_ref="ies.backend.result_adapter@1.0.0"),
         {SOLUTION_PATH: ("\n".join(lines) + "\n").encode("utf-8")},
     )
     assert rejected.execution_status == "completed"
     assert rejected.math_status == "not_solved"
-    assert set(rejected.outputs) == {"solver_summary"}
-    assert rejected.outputs["solver_summary"]["has_feasible_solution"] is False
-    assert rejected.outputs["solver_summary"]["objective_value"] is None
+    assert rej_sol["solver_summary"]["has_feasible_solution"] is False
+    assert rej_sol["solver_summary"]["objective_value"] is None
     assert worker_app.business_outcome_for(rejected) == "insufficient_evidence"
 
     # Normal unrestricted solve publishes tight solved result via the real bundle.
+    artifact, models, mat, finance, config, evaluation = inputs
     _, _, raw_opt = _solve_internal(bundle, tmp_path)
-    solved = HIGHS_ADAPTER.adapt(
-        bundle, _receipt(result_adapter_ref=ADAPTER_REF), {SOLUTION_PATH: raw_opt},
+    solved, eng_opt = restore_bundle_solution(
+        bundle,
+        succeeded_receipt(result_adapter_ref="ies.backend.result_adapter@1.0.0"),
+        {SOLUTION_PATH: raw_opt},
     )
     assert solved.math_status == "solved"
+    facts_opt = evaluate_forward_finance(
+        eng_opt,
+        artifact=artifact,
+        finance=finance,
+        evaluation=evaluation,
+        materialized=mat,
+        device_models=models,
+    )
     assert all(
         float(row["peak_power"]) == pytest.approx(0.0, abs=1e-5)
-        for row in solved.outputs["financial_facts"]["monthly_demand"]
+        for row in facts_opt["monthly_demand"]
     )

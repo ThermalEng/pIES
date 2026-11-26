@@ -444,25 +444,45 @@ def _prepare_full_project(client: TestClient, db: Session, user, raw: bytes) -> 
     return pid
 
 
-def _yearly_served(variables: list[dict], prefix: str) -> tuple[float, float, int]:
-    """按 __t{step} 后缀分年汇总负荷服务功率；返回 (年一, 年二, 最大步数)。"""
-    year1 = 0.0
-    year2 = 0.0
-    max_step = -1
-    hits = 0
-    for item in variables:
-        name = str(item["name"])
-        if not name.startswith(prefix):
+def _yearly_served_from_series(values: list[float]) -> tuple[float, float, int]:
+    """按步索引分年汇总序列值；返回 (年一, 年二, 总步数)。"""
+    assert len(values) == FULL_STEPS, f"序列步数 {len(values)} != 全期步数 {FULL_STEPS}"
+    year1 = sum(float(v) for v in values[:YEAR1_STEPS])
+    year2 = sum(float(v) for v in values[YEAR1_STEPS:])
+    return year1, year2, len(values)
+
+
+def _eng_solution(db: Session, sealed: dict) -> dict:
+    return json.loads(
+        get_object(db, sealed["engineering_solution"]["solution.json"]["object_id"]).decode("utf-8")
+    )
+
+
+def _sealed_primal_var(db: Session, sealed: dict, name: str) -> float:
+    outputs = (sealed.get("compute_result") or {}).get("outputs") or {}
+    variables = (outputs.get("solution") or {}).get("variables")
+    if isinstance(variables, list):
+        return _solution_scalar(variables, name)
+    bundle_files = sealed.get("bundle_files") or {}
+    sol_files = sealed.get("solution") or {}
+    records_desc = bundle_files.get("input/parameters.jsonl")
+    primal_desc = sol_files.get("output/primal_solution.json")
+    assert records_desc is not None and primal_desc is not None, f"解文件缺失: {list(sealed)}"
+    col_names: list[str] = []
+    unit_conv: dict[int, tuple[float, float]] = {}
+    for line in get_object(db, int(records_desc["object_id"])).decode("utf-8").splitlines():
+        if not line:
             continue
-        step = int(name.rsplit("__t", 1)[1])
-        max_step = max(max_step, step)
-        hits += 1
-        if step < YEAR1_STEPS:
-            year1 += float(item["value"])
-        else:
-            year2 += float(item["value"])
-    assert hits == FULL_STEPS, f"负荷分步变量数 {hits} != 全期步数 {FULL_STEPS}"
-    return year1, year2, max_step + 1
+        row = json.loads(line)
+        if row[0] == "column_names":
+            col_names.extend(row[1])
+        elif row[0] == "units":
+            for col_idx, _unit, scale, offset in row[1]:
+                unit_conv[int(col_idx)] = (float(scale), float(offset))
+    primal_doc = json.loads(get_object(db, int(primal_desc["object_id"])).decode("utf-8"))
+    idx = col_names.index(name)
+    scale, offset = unit_conv.get(idx, (1.0, 0.0))
+    return float(primal_doc["values"][idx]) * scale + offset
 
 
 class TestFullHorizonTrueSolve:
@@ -507,9 +527,9 @@ class TestFullHorizonTrueSolve:
         evidence = results_store.latest_evidence_for_task(db, task_id)
         assert evidence is not None
         sealed = json.loads(get_object(db, evidence.object_id).decode("utf-8"))
-        solution = sealed["compute_result"]["outputs"]["solution"]
-        year1, year2, span = _yearly_served(
-            solution["variables"], "load1__electricity_in__t"
+        eng_sol = _eng_solution(db, sealed)
+        year1, year2, span = _yearly_served_from_series(
+            eng_sol["series"]["load1.electricity_in"]["values"]
         )
         assert span == FULL_STEPS
         assert year1 == pytest.approx(YEAR1_KW * YEAR1_STEPS, rel=1e-6)
@@ -845,106 +865,6 @@ class _ShortPredictor:
         )
 
 
-class TestPredictPhase2FullHorizon:
-    def test_two_year_phase2_solves_full_horizon_each_round(
-        self, client: TestClient, db: Session, engine: Engine, plane
-    ) -> None:
-        """N=2 阶段二多轮：快照评价年限驱动每轮完整 17544 步真求解。
-
-        双预测目标触发阶段二（上限 3 轮）；记录外壳证明三轮 generate
-        收到的第三项集合皆为完成态 17544 点；三轮目标值两两不同证明
-        每轮都解了新模型；终轮封存解分年汇总等于终轮预测值。
-        """
-        from sqlalchemy import select  # noqa: E402
-        from test_prediction_capability import (  # noqa: E402
-            CHASE_REF,
-            _ChasePredictor,
-            _save_calc_case,
-        )
-
-        from iesplan.application.tasks.submissions import submit_task  # noqa: E402
-        from iesplan.computation import build_registry  # noqa: E402
-        from iesplan.computation.predictors import (  # noqa: E402
-            build_predictor_registry,
-        )
-
-        user = make_user(db, "predict_n2_owner")
-        pid = _prepare_predict_n2(client, db, user)
-        body = dict(_CONFIG_BODY)
-        body["predictions"] = [
-            {
-                "target": {"instance": dev, "interface": "electricity_demand"},
-                "algorithm": CHASE_REF,
-                "parameters": {"scale": 10.0},
-            }
-            for dev in ("load1", "load2")
-        ]
-        body["convergence"] = {"tolerance": 0.001, "max_iterations": 3}
-        chase = _ChasePredictor()
-        recorder = _RecordingGenerator()
-        gene_registry = build_registry((recorder,))
-        pred_registry = build_predictor_registry((chase,))
-        rev = _save_calc_case(db, user, pid, body, pred_registry)
-        task, _flags = submit_task(
-            db, user, pid, "optimization", config={"config_revision": rev},
-            evaluation=_eval_k0(),
-            idempotency_key="predict-n2-phase2",
-            generator_registry=gene_registry,
-            predictor_registry=pred_registry,
-        )
-        from stage_testkit import build_test_compute_plane
-
-        n2_plane = build_test_compute_plane(
-            plane.stage_runner.stage_root,
-            generator_registry=gene_registry,
-            predictor_registry=pred_registry,
-        )
-        claim = claim_for_direct_run(db, task.id, "predict-n2-e2e")
-        assert claim is not None
-        db.commit()
-
-        def factory() -> Session:
-            return sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)()
-
-        assert runner.run_task(factory, claim, worker_id="predict-n2-e2e", compute=n2_plane) == "completed"
-        task_row = db.execute(select(Task).where(Task.id == task.id)).scalar_one()
-        assert task_row.status == "completed"
-        assert task_row.business_outcome == "normal_completion"
-        assert len(recorder.calls) == 3
-        for call in recorder.calls:
-            assert call["operation_years"] == YEARS
-            assert call["pending"] == 0
-            assert call["series_count"] == 2
-            assert call["point_counts"] == [FULL_STEPS]
-            assert call["evaluation"].operation_years == YEARS
-            assert call["evaluation"].construction_period == 0
-        first_eval = recorder.calls[0]["evaluation"]
-        assert all(call["evaluation"] == first_eval for call in recorder.calls)
-        evidence = results_store.latest_evidence_for_task(db, task.id)
-        assert evidence is not None
-        sealed = json.loads(get_object(db, evidence.object_id).decode("utf-8"))
-        prediction = sealed["prediction"]
-        assert prediction["predict_target_count"] == 2
-        assert prediction["prediction_rounds"] == 3
-        assert prediction["solve_rounds"] == 3
-        assert prediction["phase2_solve_rounds"] == 2
-        assert prediction["converged"] is False
-        solution = sealed["compute_result"]["outputs"]["solution"]
-        round_objectives = [
-            chase.calls[2]["previous_objective"],
-            chase.calls[4]["previous_objective"],
-            solution["objective_value"],
-        ]
-        assert len(set(round_objectives)) == 3
-        for dev, call in (("load1", chase.calls[4]), ("load2", chase.calls[5])):
-            year1, year2, span = _yearly_served(
-                solution["variables"], f"{dev}__electricity_in__t"
-            )
-            assert span == FULL_STEPS
-            assert year1 == pytest.approx(call["value"] * YEAR1_STEPS, rel=1e-6)
-            assert year2 == pytest.approx(call["value"] * YEAR2_STEPS, rel=1e-6)
-
-
 class TestGeneratorEmptySeriesHorizon:
     def test_empty_series_builds_two_year_model_and_bundle(self) -> None:
         """Generator 契约级空序列时域证明（非公开项目端到端）。
@@ -1039,7 +959,6 @@ class TestShortPredictionRejected:
             }
             for dev in ("load1", "load2")
         ]
-        assert body["convergence"] is None
         pred_registry = build_predictor_registry((_ShortPredictor(),))
         rev = _save_calc_case(db, user, pid, body, pred_registry)
         task, _flags = submit_task(
@@ -1047,6 +966,8 @@ class TestShortPredictionRejected:
             evaluation=_eval_k0(),
             idempotency_key="predict-n2-short",
             generator_registry=plane.generator_registry,
+            solver_registry=plane.solver_registry,
+            evaluator_registry=plane.evaluator_registry,
             predictor_registry=pred_registry,
         )
         from stage_testkit import build_test_compute_plane
@@ -1302,9 +1223,9 @@ class TestTimeVaryingPriceTrueSolve:
         evidence = results_store.latest_evidence_for_task(db, task_id)
         assert evidence is not None
         sealed = json.loads(get_object(db, evidence.object_id).decode("utf-8"))
-        solution = sealed["compute_result"]["outputs"]["solution"]
-        year1_kw, year2_kw, span = _yearly_served(
-            solution["variables"], "grid1__electricity_import__t"
+        eng_sol = _eng_solution(db, sealed)
+        year1_kw, year2_kw, span = _yearly_served_from_series(
+            eng_sol["series"]["grid1.electricity_import"]["values"]
         )
         assert span == FULL_STEPS
         energy1 = year1_kw * 1.0
@@ -1312,21 +1233,15 @@ class TestTimeVaryingPriceTrueSolve:
         expect1 = float(TOU_YEAR1_PRICE) * energy1
         expect2 = float(TOU_YEAR2_PRICE) * energy2
         assert expect1 != pytest.approx(expect2, rel=1e-3)
-        components = solution["components"]
-        purchase = components["grid_import__period_energy_purchase"]["value"]
-        sale = components["grid_export__period_energy_sale"]["value"]
-        assert purchase == pytest.approx(expect1 + expect2, rel=1e-6)
-        assert sale == pytest.approx(0.0, abs=1e-6)
-        assert solution["objective_value"] == pytest.approx(
-            expect1 + expect2, rel=1e-6
-        )
+        obj_val = eng_sol["solver_summary"]["objective_value"]
+        assert obj_val == pytest.approx(expect1 + expect2, rel=1e-6)
         total_energy = energy1 + energy2
-        assert purchase != pytest.approx(float(TOU_YEAR1_PRICE) * total_energy, rel=1e-3)
-        assert purchase != pytest.approx(float(TOU_YEAR2_PRICE) * total_energy, rel=1e-3)
+        assert obj_val != pytest.approx(float(TOU_YEAR1_PRICE) * total_energy, rel=1e-3)
+        assert obj_val != pytest.approx(float(TOU_YEAR2_PRICE) * total_energy, rel=1e-3)
         avg_price = (
             float(TOU_YEAR1_PRICE) * YEAR1_STEPS + float(TOU_YEAR2_PRICE) * YEAR2_STEPS
         ) / FULL_STEPS
-        assert purchase != pytest.approx(avg_price * total_energy, rel=1e-3)
+        assert obj_val != pytest.approx(avg_price * total_energy, rel=1e-3)
 
 
 #: 首年建设真求解场景：光伏自发自用，首年一次建设、全期在产。
@@ -1650,9 +1565,9 @@ class TestFirstYearBuildTrueSolve:
         evidence = results_store.latest_evidence_for_task(db, task_id)
         assert evidence is not None
         sealed = json.loads(get_object(db, evidence.object_id).decode("utf-8"))
-        solution = sealed["compute_result"]["outputs"]["solution"]
-        y0_import, y1_import, span = _yearly_served(
-            solution["variables"], "grid1__electricity_import__t"
+        eng_sol = _eng_solution(db, sealed)
+        y0_import, y1_import, span = _yearly_served_from_series(
+            eng_sol["series"]["grid1.electricity_import"]["values"]
         )
         assert span == FULL_STEPS
         assert y0_import == pytest.approx(ANNUAL_Y0_IMPORT, rel=1e-6)
@@ -1661,7 +1576,7 @@ class TestFirstYearBuildTrueSolve:
         assert (y0_import / YEAR1_STEPS) == pytest.approx(
             y1_import / YEAR2_STEPS, rel=1e-3
         )
-        assert _solution_scalar(solution["variables"], "pv_cap") == pytest.approx(
+        assert _sealed_primal_var(db, sealed, "pv_cap") == pytest.approx(
             ANNUAL_CAP_UPPER_KW, rel=1e-6
         )
 
@@ -1724,14 +1639,14 @@ class TestMandatoryFixedBuildTrueSolve:
         evidence = results_store.latest_evidence_for_task(db, task_id)
         assert evidence is not None
         sealed = json.loads(get_object(db, evidence.object_id).decode("utf-8"))
-        solution = sealed["compute_result"]["outputs"]["solution"]
-        y0_import, y1_import, span = _yearly_served(
-            solution["variables"], "grid1__electricity_import__t"
+        eng_sol = _eng_solution(db, sealed)
+        y0_import, y1_import, span = _yearly_served_from_series(
+            eng_sol["series"]["grid1.electricity_import"]["values"]
         )
         assert span == FULL_STEPS
         assert y0_import == pytest.approx(FIXED_Y0_IMPORT, rel=1e-6)
         assert y1_import == pytest.approx(FIXED_Y1_IMPORT, rel=1e-6)
-        assert _solution_scalar(solution["variables"], "pv_cap") == pytest.approx(
+        assert _sealed_primal_var(db, sealed, "pv_cap") == pytest.approx(
             FIXED_CAP_KW, rel=1e-6
         )
 
@@ -1946,14 +1861,14 @@ class TestFirstYearHeatPumpTrueSolve:
         evidence = results_store.latest_evidence_for_task(db, task_id)
         assert evidence is not None
         sealed = json.loads(get_object(db, evidence.object_id).decode("utf-8"))
-        solution = sealed["compute_result"]["outputs"]["solution"]
-        y0_import, y1_import, span = _yearly_served(
-            solution["variables"], "grid1__electricity_import__t"
+        eng_sol = _eng_solution(db, sealed)
+        y0_import, y1_import, span = _yearly_served_from_series(
+            eng_sol["series"]["grid1.electricity_import"]["values"]
         )
         assert span == FULL_STEPS
         assert y0_import == pytest.approx(HP_Y0_IMPORT, rel=1e-6)
         assert y1_import == pytest.approx(HP_Y1_IMPORT, rel=1e-6)
-        assert _solution_scalar(solution["variables"], "hp_cap") == pytest.approx(
+        assert _sealed_primal_var(db, sealed, "hp_cap") == pytest.approx(
             HP_CAP_UPPER, rel=1e-6
         )
 

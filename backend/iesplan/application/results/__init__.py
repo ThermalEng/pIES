@@ -11,6 +11,7 @@ from iesplan.application.results.endpoint_cases import (
     get_selection_diff,
     list_assessments_case,
     read_task_hourly,
+    retry_evaluator_case,
     select_task_result,
 )
 from iesplan.application.results.writes import (
@@ -82,6 +83,7 @@ __all__ = [
     "read_task_hourly",
     "refresh_result_index",
     "result_view",
+    "retry_evaluator_case",
     "run_assessment",
     "run_check_task",
     "select_result",

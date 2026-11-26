@@ -1,13 +1,18 @@
 """N2: complete port boundaries, same analysis/rows/source and public solves."""
 from __future__ import annotations
 
-import json
 import subprocess
 from copy import deepcopy
+from types import SimpleNamespace
 
 import pytest
 from bundle_testkit import content_bytes, materialized_file
-from test_highs_result_adapter import _receipt
+from legacy_solve_testkit import (
+    SOLUTION_PATH,
+    read_bundle_records,
+    restore_bundle_solution,
+    succeeded_receipt,
+)
 from test_p3_port_network import SOURCE
 from test_project_model import HEATER_YAML, LOAD_YAML, _evaluation_n, _finance_payload, _island_doc
 
@@ -19,7 +24,6 @@ from iesplan.assembly.schema import AssemblyDevice, AssemblyEdge, AssemblySpec
 from iesplan.computation import CalculationConfig, materialize_non_predictive_series
 from iesplan.computation.generators.highs_milp import DESCRIPTOR, HIGHS_MILP_PROVIDER
 from iesplan.computation.generators.project import _new_builder
-from iesplan.computation.result_adapters.highs import HIGHS_ADAPTER
 from iesplan.core.yamlmini import load as yaml_load
 from iesplan.devices.parser2 import parse_device_model_v2
 from iesplan.finance import FinanceProfile, merge_effective
@@ -100,8 +104,18 @@ def _solve(bundle, tmp_path):
         cwd=tmp_path, capture_output=True, text=True, check=False,
     )
     assert process.returncode == 0, process.stderr
-    return HIGHS_ADAPTER.adapt(
-        bundle, _receipt(), {"output/solution.sol": (tmp_path / "values.sol").read_bytes()},
+    adapted, eng_sol = restore_bundle_solution(
+        bundle,
+        succeeded_receipt(bundle=bundle),
+        {SOLUTION_PATH: (tmp_path / "values.sol").read_bytes()},
+        tmp_path=tmp_path,
+    )
+    return SimpleNamespace(
+        math_status=adapted.math_status,
+        outputs=eng_sol,
+        bundle_id=adapted.bundle_id,
+        receipt_id=adapted.receipt_id,
+        execution_status=adapted.execution_status,
     )
 
 
@@ -140,7 +154,7 @@ def test_unreferenced_ports_close_but_predefined_blind_and_state_do_not(tmp_path
         assert all(value == 0 for value in curves[f"unit.{name}"]["values"])
     assert curves["unit.count"]["values"][0] == 3
     assert curves["unit.count"]["values"][-1] == 8762
-    params = json.loads(materialized_file(bundle, "input/parameters.json"))
+    params = read_bundle_records(bundle)
     sources = params["model_sources"]["sources"]
     for op in operations:
         source = sources[f"relation:{op.identity}"]
@@ -166,7 +180,7 @@ def test_missing_external_supply_is_not_free_energy(tmp_path, carrier, external_
     if external_source:
         assert result.outputs["series"]["heater.electricity_in"]["values"][0] == pytest.approx(4 / 0.9)
     else:
-        sources = json.loads(materialized_file(bundle, "input/parameters.json"))["model_sources"]["sources"]
+        sources = read_bundle_records(bundle)["model_sources"]["sources"]
         assert sources["relation:network.closed.heater.electricity_in"]["location"]["binding_id"] == (
             "heater.electricity_in"
         )

@@ -45,17 +45,21 @@ import {
   buildResultSearchParams,
   DETAIL_PARENT_TAB,
   EngineeringTabView,
+  FinancialAbsenceAlert,
   FinancialTabView,
+  formatEvaluatorDetail,
   getResult,
   listAssessments,
   paginateItems,
   parseResultNavigation,
   readHourly,
   ResultDetailView,
+  retryEvaluator,
   SealedFinancialCore,
   select,
   TaxDetailsTabView,
 } from '../features/results'
+import { newSubmitNonce, stableHash } from '../features/tasks'
 import type { HourlySeriesMeta, ResultDetail, ResultTab } from '../features/results'
 import { exportTaskReport, isNoAssessmentError } from '../application/exportTaskReport'
 import { translateError, useI18n } from '../i18n'
@@ -67,6 +71,9 @@ import type {
   AssessmentDimension,
   AssessmentGrade,
   Currency,
+  EvaluationReportBlock,
+  EvaluatorResultEntry,
+  EvaluatorRunStatus,
   EvidenceCandidate,
   EvidencePackageSummary,
   ExcelExportInput,
@@ -96,6 +103,14 @@ const DIM_STATUS_META: Record<DimStatus, { variant: BadgeVariant; icon: IconName
   failed: { variant: 'danger', icon: 'cross' },
   na: { variant: 'neutral', icon: 'question' },
   insufficient: { variant: 'warning', icon: 'info' },
+}
+
+const EVAL_STATUS_META: Record<EvaluatorRunStatus, { variant: BadgeVariant; icon: IconName }> = {
+  succeeded: { variant: 'success', icon: 'check' },
+  failed: { variant: 'danger', icon: 'cross' },
+  timed_out: { variant: 'danger', icon: 'cross' },
+  cancelled: { variant: 'warning', icon: 'warning' },
+  skipped: { variant: 'neutral', icon: 'info' },
 }
 
 const TAB_LABEL_KEYS: Record<ResultTab, string> = {
@@ -194,6 +209,11 @@ export default function ResultsPage() {
   const [solverSummary, setSolverSummary] = useState<SolverSummary | null>(null)
   const [finEval, setFinEval] = useState<FinancialEvaluationBlock | null>(null)
   const [finAbsence, setFinAbsence] = useState<FinancialAbsence>(null)
+  const [evaluatorResults, setEvaluatorResults] = useState<EvaluatorResultEntry[]>([])
+  const [evaluationReports, setEvaluationReports] = useState<EvaluationReportBlock[]>([])
+  const [retryingEvaluator, setRetryingEvaluator] = useState<string | null>(null)
+  const [evalRetryOk, setEvalRetryOk] = useState<string | null>(null)
+  const [evalRetryError, setEvalRetryError] = useState<string | null>(null)
   const [noEvidence, setNoEvidence] = useState(false)
   const [assessments, setAssessments] = useState<ResultAssessment[]>([])
   const [assessPage, setAssessPage] = useState(1)
@@ -304,6 +324,11 @@ export default function ResultsPage() {
       setMetrics(null)
       setFinEval(null)
       setFinAbsence(null)
+      setEvaluatorResults([])
+      setEvaluationReports([])
+      setRetryingEvaluator(null)
+      setEvalRetryOk(null)
+      setEvalRetryError(null)
       setNoEvidence(false)
       setAssessments([])
       setHourly(null)
@@ -321,6 +346,11 @@ export default function ResultsPage() {
     setMetrics(null)
     setFinEval(null)
     setFinAbsence(null)
+    setEvaluatorResults([])
+    setEvaluationReports([])
+    setRetryingEvaluator(null)
+    setEvalRetryOk(null)
+    setEvalRetryError(null)
     setNoEvidence(false)
     setAssessments([])
     setHourly(null)
@@ -360,6 +390,8 @@ export default function ResultsPage() {
         setMetrics(res.metrics)
         setFinEval(res.financial)
         setFinAbsence(res.financialAbsence)
+        setEvaluatorResults(res.evaluatorResults)
+        setEvaluationReports(res.evaluationReports)
         setNoEvidence(res.evidence_status === 'no_evidence')
         setAssessments([...ass].sort((a, b) => b.created_at.localeCompare(a.created_at)))
         setCandList(res.candidates)
@@ -396,6 +428,8 @@ export default function ResultsPage() {
           setMetrics(null)
           setFinEval(null)
           setFinAbsence(null)
+          setEvaluatorResults([])
+          setEvaluationReports([])
           setCandList([])
           setPlanSolution(null)
           setSolverSummary(null)
@@ -615,6 +649,29 @@ export default function ResultsPage() {
       if (schemeFlight.current === flight) setSchemeBusy(false)
     }
   }, [projectId, planSolution, schemeBusy, schemeRevLoading, schemeRevision, selectedPkgId, pickedTaskId, refreshDetailed, t])
+
+  const handleRetryEvaluator = useCallback(
+    async (evaluatorRef: string) => {
+      if (!pickedTaskId || retryingEvaluator !== null) return
+      setEvalRetryOk(null)
+      setEvalRetryError(null)
+      setRetryingEvaluator(evaluatorRef)
+      try {
+        const key = `eval-retry-${pickedTaskId}-${stableHash(evaluatorRef)}-${newSubmitNonce()}`
+        const res = await retryEvaluator(projectId, pickedTaskId, {
+          evaluator: evaluatorRef,
+          idempotency_key: key,
+        })
+        setEvalRetryOk(res.hint ?? t('ies.result.evaluator_retry_ok', { evaluator: evaluatorRef }))
+        taskCtx.retry()
+      } catch (err) {
+        setEvalRetryError(translateError(err as ApiError))
+      } finally {
+        setRetryingEvaluator(null)
+      }
+    },
+    [pickedTaskId, projectId, retryingEvaluator, t, taskCtx],
+  )
 
   const submitAssessment = useCallback(async () => {
     if (!selectedPkgId) return
@@ -986,18 +1043,158 @@ export default function ResultsPage() {
                     ) : null}
                   </Card>
                 ) : finAbsence ? (
-                  <div className="ies-section">
-                    <Alert variant="warning">
-                      {finAbsence === 'outcome_not_normal'
-                        ? t('ies.result.fin_absence_outcome_not_normal', { outcome: outcome ?? '—' })
-                        : finAbsence === 'solution_not_requested'
-                          ? t('ies.result.fin_absence_solution_not_requested')
-                          : t('ies.result.fin_absence_missing_unknown')}
-                    </Alert>
-                  </div>
+                  <FinancialAbsenceAlert finAbsence={finAbsence} outcome={outcome} />
                 ) : null}
 
-                {!resultError && finEval ? (
+                {evaluatorResults.length > 0 ? (
+                  <Card title={t('ies.result.evaluators_title')} className="ies-section">
+                    {evalRetryOk ? (
+                      <div style={{ marginBottom: 'var(--ies-space-3)' }}>
+                        <Alert variant="success" closable onClose={() => setEvalRetryOk(null)}>
+                          {evalRetryOk}
+                        </Alert>
+                      </div>
+                    ) : null}
+                    {evalRetryError ? (
+                      <div style={{ marginBottom: 'var(--ies-space-3)' }}>
+                        <Alert variant="error" closable onClose={() => setEvalRetryError(null)}>
+                          {evalRetryError}
+                        </Alert>
+                      </div>
+                    ) : null}
+                    <ul className="ies-diag-list">
+                      {evaluatorResults.map((ev) => {
+                        const meta = EVAL_STATUS_META[ev.status]
+                        const canRetry =
+                          ev.status === 'failed' || ev.status === 'timed_out' || ev.status === 'cancelled'
+                        return (
+                          <li key={ev.evaluator} className="ies-diag">
+                            <div className="ies-diag__head">
+                              <strong>{ev.evaluator}</strong>
+                              <Badge
+                                variant={meta.variant}
+                                icon={meta.icon}
+                                label={t(`ies.result.evaluator_status_${ev.status}`)}
+                              />
+                              {ev.contract ? (
+                                <span className="ies-text-note">
+                                  {t('ies.result.evaluator_contract')}: {ev.contract}
+                                </span>
+                              ) : null}
+                              {ev.finished_at ? (
+                                <time className="ies-diag__time">
+                                  {t('ies.result.evaluator_finished_at')}: {formatDateTime(ev.finished_at)}
+                                </time>
+                              ) : null}
+                            </div>
+                            {ev.error ? (
+                              <div style={{ marginTop: 'var(--ies-space-2)' }}>
+                                <Alert variant={canRetry ? 'error' : 'warning'}>
+                                  <div>
+                                    <strong>
+                                      {typeof ev.error.code === 'string'
+                                        ? ev.error.code
+                                        : JSON.stringify(ev.error.code ?? '')}
+                                    </strong>
+                                    :{' '}
+                                    {typeof ev.error.message === 'string'
+                                      ? ev.error.message
+                                      : JSON.stringify(ev.error.message ?? '')}
+                                  </div>
+                                  {(() => {
+                                    const detailText = formatEvaluatorDetail(ev.error.detail)
+                                    return detailText ? (
+                                      <div className="ies-text-note" style={{ marginTop: 'var(--ies-space-1)' }}>
+                                        {detailText}
+                                      </div>
+                                    ) : null
+                                  })()}
+                                </Alert>
+                              </div>
+                            ) : null}
+                            {canRetry ? (
+                              <div style={{ marginTop: 'var(--ies-space-2)' }}>
+                                <Button
+                                  size="sm"
+                                  variant="secondary"
+                                  loading={retryingEvaluator === ev.evaluator}
+                                  disabled={retryingEvaluator !== null}
+                                  onClick={() => void handleRetryEvaluator(ev.evaluator)}
+                                >
+                                  {t('ies.result.evaluator_retry_btn')}
+                                </Button>
+                              </div>
+                            ) : null}
+                          </li>
+                        )
+                      })}
+                    </ul>
+                  </Card>
+                ) : null}
+
+                {evaluationReports.length > 0 ? (
+                  <Card title={t('ies.result.eval_reports_title')} className="ies-section">
+                    <div className="ies-stack">
+                      {evaluationReports
+                        .filter(
+                          (rep): rep is EvaluationReportBlock =>
+                            rep !== null && typeof rep === 'object' && !Array.isArray(rep),
+                        )
+                        .map((rep, repIdx) => {
+                          const repMetrics = (Array.isArray(rep.metrics) ? rep.metrics : []).filter(
+                            (m): m is Record<string, unknown> =>
+                              m !== null && typeof m === 'object' && !Array.isArray(m),
+                          )
+                          const repCharts = Array.isArray(rep.charts) ? rep.charts : []
+                          const repTables = Array.isArray(rep.tables) ? rep.tables : []
+                          return (
+                            <div key={`${String(rep.evaluator ?? repIdx)}-${String(rep.title ?? repIdx)}`}>
+                              <h3 className="ies-section-subtitle">
+                                {rep.title || rep.evaluator}{' '}
+                                <span className="ies-text-note">
+                                  ({rep.evaluator} · {rep.schema}@{rep.schema_version})
+                                </span>
+                              </h3>
+                              {repMetrics.length > 0 ? (
+                                <dl className="ies-kv">
+                                  {repMetrics.map((m, idx) => {
+                                    const rawLabel = m.label ?? m.id ?? idx
+                                    const labelText =
+                                      typeof rawLabel === 'object' && rawLabel !== null
+                                        ? JSON.stringify(rawLabel)
+                                        : String(rawLabel)
+                                    return (
+                                      <span key={`${idx}-${String(m.id ?? '')}`} style={{ display: 'contents' }}>
+                                        <dt>{labelText}</dt>
+                                        <dd>
+                                          {m.value === null || m.value === undefined
+                                            ? '—'
+                                            : typeof m.value === 'object'
+                                              ? JSON.stringify(m.value)
+                                              : String(m.value)}
+                                          {m.unit ? ` ${String(m.unit)}` : ''}
+                                        </dd>
+                                      </span>
+                                    )
+                                  })}
+                                </dl>
+                              ) : null}
+                              {repCharts.length > 0 || repTables.length > 0 ? (
+                                <p className="ies-text-note" style={{ marginTop: 'var(--ies-space-1)' }}>
+                                  {t('ies.result.eval_report_charts_tables', {
+                                    charts: repCharts.length,
+                                    tables: repTables.length,
+                                  })}
+                                </p>
+                              ) : null}
+                            </div>
+                          )
+                        })}
+                    </div>
+                  </Card>
+                ) : null}
+
+                {!resultError && finEval && Array.isArray(finEval.construction_units) ? (
                   <Card title={t('ies.result.fin_construction_units')} className="ies-section">
                     {finEval.construction_units.length === 0 ? (
                       <p className="ies-text-secondary">{t('ies.result.fin_construction_none')}</p>
@@ -1014,16 +1211,30 @@ export default function ResultsPage() {
                             </tr>
                           </thead>
                           <tbody>
-                            {finEval.construction_units.map((unit) => (
-                              <tr key={unit.unit_id}>
-                                <td>{unit.unit_id}</td>
-                                <td>{unit.instance_id}</td>
-                                <td>{t(`ies.result.fin_construction_${unit.mode}`)}</td>
+                            {finEval.construction_units
+                              .filter(
+                                (unit): unit is NonNullable<typeof unit> =>
+                                  unit !== null && typeof unit === 'object' && !Array.isArray(unit),
+                              )
+                              .map((unit, unitIdx) => (
+                              <tr key={unit.unit_id ?? unitIdx}>
+                                <td>{unit.unit_id ?? '—'}</td>
+                                <td>{unit.instance_id ?? '—'}</td>
+                                <td>
+                                  {unit.mode === 'mandatory' || unit.mode === 'optional'
+                                    ? t(`ies.result.fin_construction_${unit.mode}`)
+                                    : (unit.mode ?? '—')}
+                                </td>
                                 <td>{t(unit.built ? 'ies.result.fin_construction_yes' : 'ies.result.fin_construction_no')}</td>
                                 <td>
-                                  {unit.scales.map((scale) => (
-                                    <div key={scale.planning_variable_id}>
-                                      {scale.planning_variable_id}: {scale.value} {scale.unit}
+                                  {(Array.isArray(unit.scales) ? unit.scales : [])
+                                    .filter(
+                                      (scale): scale is NonNullable<typeof scale> =>
+                                        scale !== null && typeof scale === 'object' && !Array.isArray(scale),
+                                    )
+                                    .map((scale, scaleIdx) => (
+                                    <div key={scale.planning_variable_id ?? scaleIdx}>
+                                      {scale.planning_variable_id ?? '—'}: {scale.value ?? '—'} {scale.unit ?? ''}
                                     </div>
                                   ))}
                                 </td>

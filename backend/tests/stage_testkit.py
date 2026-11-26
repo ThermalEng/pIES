@@ -11,7 +11,6 @@ import csv
 import json
 import shutil
 import subprocess
-import sys
 import tempfile
 import threading
 from collections.abc import Mapping
@@ -24,20 +23,19 @@ import httpx
 from iesplan.application.worker import ComputeExecutionPlane
 from iesplan.assembly import ValidatedAssemblyArtifact, ValidationReceipt
 from iesplan.computation import (
-    HIGHS_ADAPTER,
     NAIVE_PREDICTOR,
+    PRIMAL_SOLUTION_OUTPUT_PATH,
     CalculationConfig,
-    ExecutionReceipt,
     MaterializedPriceSeries,
     MaterializedSeries,
     MaterializedSet,
-    SolverBundle,
-    SolverBundleManifest,
+    build_evaluator_registry,
     build_predictor_registry,
-    build_result_adapter_registry,
+    build_solver_registry,
     thaw_json_value,
 )
 from iesplan.computation.bundle import manifest_to_yaml_bytes
+from iesplan.computation.config import BUILTIN_EVALUATOR_FINANCE_SPEC, BUILTIN_SOLVER_HIGHS_SPEC
 from iesplan.computation.generators import HIGHS_MILP_PROVIDER, build_registry
 from iesplan.computation.runtime.job_runner_client import JobRunnerClient
 from iesplan.computation.runtime.stage_runner import (
@@ -50,7 +48,7 @@ from iesplan.computation.runtime.stage_runner import (
 from iesplan.core.content import Content
 from iesplan.core.diagnostics import Diagnostic
 from iesplan.core.yamlmini import load as yaml_load
-from iesplan.finance import EffectiveFinanceConfig, EvaluationInput
+from iesplan.finance import EffectiveFinanceConfig, EvaluationInput, evaluate_forward_finance
 from iesplan.modeling import contribution_from_dict
 
 
@@ -156,14 +154,15 @@ class MockJobRunnerBackend:
         predictor_registry: Any,
         stage_overrides: Mapping[str, str] | None = None,
         solver_argv_override: list[str] | None = None,
+        evaluator_handlers: Mapping[str, Any] | None = None,
         on_start: Any = None,
     ) -> None:
         self.stage_root = Path(stage_root)
         self.generator_registry = generator_registry
         self.predictor_registry = predictor_registry
-        self.adapter_registry = build_result_adapter_registry([HIGHS_ADAPTER])
         self.stage_overrides = dict(stage_overrides or {})
         self.solver_argv_override = list(solver_argv_override) if solver_argv_override else None
+        self.evaluator_handlers = dict(evaluator_handlers or {})
         self.on_start = on_start
         self._lock = threading.Lock()
         self._stages: dict[str, dict[str, Any]] = {}
@@ -212,8 +211,8 @@ class MockJobRunnerBackend:
                 self._exec_generate(work_in, work_out, stop_ev)
             elif kind == "solve":
                 self._exec_solve(stage_execution_id, work_in, work_out, stop_ev)
-            elif kind == "evaluate":
-                self._exec_evaluate(work_in, work_out)
+            elif kind in ("eval", "evaluate", "algorithm"):
+                self._exec_evaluate(work_in, work_out, body)
             else:
                 raise RuntimeError(f"Unknown mock stage kind: {kind!r}")
         except Exception:
@@ -247,7 +246,6 @@ class MockJobRunnerBackend:
         req = json.loads((work_in / "request.json").read_text(encoding="utf-8"))
         point_count = int(req["point_count"])
         seed = req.get("seed")
-        previous = req.get("previous")
         predictor = self.predictor_registry.get(algo_ref)
         artifacts_dir = work_out / "artifacts"
         artifacts_dir.mkdir(parents=True, exist_ok=True)
@@ -266,7 +264,6 @@ class MockJobRunnerBackend:
                 parameters=dict(target.get("parameters") or {}),
                 seed=seed,
                 point_count=point_count,
-                previous=previous,
             )
             art_rel = f"artifacts/{instance}__{interface}.json"
             (work_out / art_rel).write_bytes(predicted.artifact)
@@ -414,25 +411,39 @@ class MockJobRunnerBackend:
         work_out: Path,
         stop_ev: threading.Event,
     ) -> None:
+        from test_f2_solver_restoration import _v1_sol_to_primal_json
+
         bundle_dir = work_in / "bundle"
         manifest = yaml_load((bundle_dir / "bundle.yaml").read_text(encoding="utf-8"))
-        command = manifest["command"]
-        raw_args = [str(x) for x in command["arguments"]]
         outputs = manifest.get("outputs") or []
-        sol_rel = str(outputs[0]["path"]) if outputs else "output/solution.sol"
-        sol_name = Path(sol_rel).name
+        primal_rel = str(outputs[0]["path"]) if outputs else PRIMAL_SOLUTION_OUTPUT_PATH
+        req_path = work_in / "request.json"
+        req = json.loads(req_path.read_text(encoding="utf-8")) if req_path.is_file() else {}
+        time_limit = str(int(req.get("time_limit_seconds", 60)))
+        seed = str(int(req.get("seed", 0)))
 
         if self.solver_argv_override is not None:
             argv = list(self.solver_argv_override)
-        elif str(command.get("executable")) == "ies.solver.highs@1.7.2":
-            argv = ["/usr/local/bin/ies-highs-solver", *raw_args]
-            # Rewrite --solution_file argument to output/<sol_name>.
-            if "--solution_file" in argv:
-                idx = argv.index("--solution_file")
-                if idx + 1 < len(argv):
-                    argv[idx + 1] = f"output/{sol_name}"
         else:
-            argv = [sys.executable, *raw_args]
+            argv = [
+                "/usr/local/bin/ies-highs-solver",
+                "input/problem.mps",
+                "--solution_file",
+                "output/solution.sol",
+                "--time_limit",
+                time_limit,
+                "--random_seed",
+                seed,
+            ]
+            if (bundle_dir / "input" / "acceleration.json").is_file():
+                argv.extend([
+                    "--acceleration_mode",
+                    "on_demand_mutex",
+                    "--acceleration_file",
+                    "input/acceleration.json",
+                ])
+            if (bundle_dir / "input" / "epigraphs.json").is_file():
+                argv.extend(["--epigraph_file", "input/epigraphs.json"])
 
         run_dir = Path(tempfile.mkdtemp(prefix="ies-test-solve-"))
         started_at = _utc_now()
@@ -470,146 +481,134 @@ class MockJobRunnerBackend:
                     "ended_at": ended_at,
                     "stdout": stdout,
                     "stderr": stderr,
-                    "executable": str(command.get("executable") or "ies.solver.highs@1.7.2"),
+                    "executable": "ies.solver.highs@1.7.2",
                 }
             ),
             encoding="utf-8",
         )
-        success_codes = tuple(int(c) for c in command.get("success_exit_codes", [0]))
-        if proc.returncode not in success_codes:
+        if proc.returncode != 0:
             raise RuntimeError(f"solver exited with code {proc.returncode}: {stderr}")
+        primal_out = work_out / Path(primal_rel).name
+        if not primal_out.is_file():
+            sol_file = work_out / "solution.sol"
+            if not sol_file.is_file():
+                raise RuntimeError("mock solver did not produce solution.sol or primal_solution.json")
+            primal_doc = _v1_sol_to_primal_json(sol_file.read_text(encoding="utf-8"))
+            primal_out.write_text(json.dumps(primal_doc), encoding="utf-8")
 
-    def _exec_evaluate(self, work_in: Path, work_out: Path) -> None:
-        from decimal import Decimal
+    def _materialize_from_req(
+        self,
+        work_in: Path,
+        req: Mapping[str, Any],
+        artifact: ValidatedAssemblyArtifact,
+        finance: EffectiveFinanceConfig,
+        evaluation: EvaluationInput,
+    ) -> MaterializedSet:
+        from iesplan.computation import materialize_non_predictive_series
+        from iesplan.finance import expand_monthly_daily_prices, read_trusted_price_values
 
-        from iesplan.finance import evaluate_project_investment
-
-        bundle_dir = work_in / "bundle"
-        manifest_raw = yaml_load((bundle_dir / "bundle.yaml").read_text(encoding="utf-8"))
-        manifest = SolverBundleManifest(**manifest_raw)
-        bundle_files = {
-            str(entry["path"]): _FileContent(bundle_dir / str(entry["path"]))
-            for entry in manifest.inputs
+        if "frozen_series_inputs" not in req:
+            return _materialized_from_json(req["materialized"])
+        frozen = req["frozen_series_inputs"]
+        resources = {
+            str(oid): (work_in / str(rel)).read_bytes()
+            for oid, rel in (frozen.get("fixed_resources") or {}).items()
         }
-        bundle = SolverBundle(manifest, bundle_files)
-        raw_receipt = json.loads((work_in / "receipt.json").read_text(encoding="utf-8"))
-        receipt = ExecutionReceipt(**raw_receipt)
-
-        # Mirror Part 1 `plugins/evaluator_highs/evaluator_stage.py` non-recursive lookup.
-        solution_path: Path | None = None
-        for directory in (work_in / "outputs", work_in, work_in / "bundle" / "output"):
-            if directory.is_dir():
-                matches = sorted(
-                    p for p in directory.iterdir() if p.is_file() and p.name.startswith("solution.")
-                )
-                if matches:
-                    solution_path = matches[0]
-                    break
-        outputs_map: dict[str, Content] = {}
-        if solution_path is not None:
-            declared_sol_path = str(manifest.outputs[0]["path"])
-            outputs_map[declared_sol_path] = _FileContent(solution_path)
-
-        result = self.adapter_registry.resolve(receipt.result_adapter_ref).adapt(
-            bundle, receipt, outputs_map
+        base = materialize_non_predictive_series(
+            artifact,
+            resources,
+            operation_years=evaluation.operation_years,
         )
-        result_dict = result.to_dict()
-        outputs_payload = dict(result_dict["outputs"])
-
-        # Mirror Part 1 evaluator container hourly_series + financial_evaluation generation.
-        merged_series: dict[str, dict[str, Any]] = {}
-        for kind, key in (("device", "series"), ("system", "system_series")):
-            group = outputs_payload.get(key)
-            if isinstance(group, Mapping):
-                for identity, entry in group.items():
-                    merged_series[str(identity)] = {"series_id": str(identity), "kind": kind, **dict(entry)}
-        if merged_series:
-            data = {sid: list(merged_series[sid]["values"]) for sid in sorted(merged_series)}
-            units = {sid: str(merged_series[sid]["unit"]) for sid in sorted(merged_series)}
-            identities = {
-                sid: {k: v for k, v in merged_series[sid].items() if k != "values"}
-                for sid in sorted(merged_series)
-            }
-            outputs_payload["hourly_series"] = {
-                "data": data,
-                "meta": {"units": units, "series": identities},
-            }
-
-        req_path = work_in / "request.json"
-        req = json.loads(req_path.read_text(encoding="utf-8")) if req_path.is_file() else {}
-        finance_meta = req.get("finance")
-        eval_meta = req.get("evaluation")
-        if (
-            finance_meta is not None
-            and eval_meta is not None
-            and result.math_status in ("solved", "feasible")
-            and "solution" in result.outputs
-        ):
-            facts = result.outputs["financial_facts"]
-            years = int(eval_meta["evaluation_years"])
-            rate = float(eval_meta["discount_rate"])
-            tax_cash = thaw_json_value(facts["tax_cash"])
-            flows = list(facts["annual_net_flows"])
-            comparison = thaw_json_value(facts["comparison"])
-            evaluation_flows = (
-                comparison["evaluation_net_flows"] if comparison["mode"] == "difference" else flows
+        doc = json.loads(artifact.canonical_text)
+        baseline = doc["project_baseline"]
+        prices = []
+        seen_prices: set[str] = set()
+        for binding_id in sorted(doc.get("tariff_bindings") or {}):
+            price_id = (doc["tariff_bindings"][binding_id] or {}).get("price")
+            price = (finance.energy_prices or {}).get(price_id)
+            if (
+                price is None
+                or price_id in seen_prices
+                or price.kind not in ("time_series", "monthly_daily")
+            ):
+                continue
+            seen_prices.add(price_id)
+            if price.kind == "time_series":
+                assert price.ref is not None and price.series_meta is not None
+                vals = read_trusted_price_values(resources[price.ref])
+                meta = price.series_meta
+                source: dict[str, Any] = {"kind": "price_series", "object_id": price.ref}
+            else:
+                assert price.months is not None
+                curves = {
+                    m: read_trusted_price_values(resources[price.months[str(m)].ref])
+                    for m in range(1, 13)
+                }
+                vals = expand_monthly_daily_prices(
+                    curves,
+                    resolution=baseline["resolution"],
+                    start_year=baseline["start_year"],
+                    operation_years=evaluation.operation_years,
+                )
+                meta = price.months["1"].series_meta
+                source = {
+                    "kind": "monthly_daily",
+                    "months": {str(m): price.months[str(m)].ref for m in range(1, 13)},
+                }
+            prices.append(
+                MaterializedPriceSeries(
+                    price_id=price_id,
+                    point_count=len(vals),
+                    resolution=meta.resolution,
+                    unit=meta.unit,
+                    values=vals,
+                    source=source,
+                )
             )
-            assessed = evaluate_project_investment(
-                [Decimal(value) for value in evaluation_flows],
-                rate,
-                years,
-                currency=str(finance_meta["currency"]),
-                price_basis=str(finance_meta["price_basis"]),
-                base_year=int(finance_meta["base_year"]),
+        predicted = tuple(
+            MaterializedSeries(
+                device=entry["device"],
+                interface=entry["interface"],
+                mode=entry["mode"],
+                resolution=entry["resolution"],
+                point_count=entry["point_count"],
+                values=tuple(entry["values"]),
+                source=dict(entry["source"]),
             )
-            outputs_payload["financial_evaluation"] = {
-                "schema": "ies.financial-evaluation",
-                "schema_version": "1.0.0",
-                "status": "evaluated",
-                "evaluation_years": years,
-                "construction_period": int(eval_meta["construction_period"]),
-                "operation_years": int(eval_meta["operation_years"]),
-                "currency": str(finance_meta["currency"]),
-                "price_basis": str(finance_meta["price_basis"]),
-                "base_year": int(finance_meta["base_year"]),
-                "profile_id": str(finance_meta["profile_id"]),
-                "discount_rate": rate,
-                "construction_total": facts["construction_total"],
-                "construction_total_unit": str(finance_meta["currency"]),
-                "annual_fixed_om": facts["annual_fixed_om"],
-                "payments_applied": [
-                    {"t": entry["t"], "ratio": entry["ratio"], "amount": entry["amount"]}
-                    for entry in facts["payments_applied"]
-                ],
-                "net_cashflows": thaw_json_value(facts["net_cashflows"]),
-                "cost_items": thaw_json_value(facts["cost_items"]),
-                "amounts": thaw_json_value(facts["amounts"]),
-                "cash_movements": thaw_json_value(facts["cash_movements"]),
-                "assets": thaw_json_value(facts["assets"]),
-                "construction_units": thaw_json_value(facts["construction_units"]),
-                "annual_operation": [
-                    {
-                        "financial_year": entry["financial_year"],
-                        "energy_net": entry["energy_net"],
-                        "variable_om": entry["variable_om"],
-                        "fixed_om": entry["fixed_om"],
-                        "maintenance": entry["maintenance"],
-                        "demand_charge": entry["demand_charge"],
-                        "net": entry["net"],
-                    }
-                    for entry in facts["annual_operation"]
-                ],
-                "monthly_demand": thaw_json_value(facts["monthly_demand"]),
-                "tax_cash": tax_cash,
-                "annual_net_flows": flows,
-                "comparison": comparison,
-                "evaluation": assessed.to_dict(),
-            }
+            for entry in frozen.get("predicted_series") or ()
+        )
+        return MaterializedSet(
+            operation_years=base.operation_years,
+            series=tuple(base.series) + predicted,
+            pending_predict=(),
+            prices=tuple(prices),
+        )
 
-        result_dict["outputs"] = outputs_payload
-        (work_out / "result.json").write_text(
-            json.dumps(result_dict),
-            encoding="utf-8",
+    def _exec_evaluate(self, work_in: Path, work_out: Path, body: Mapping[str, Any]) -> None:
+        cmd = body.get("command") or []
+        manifest_path = str(cmd[cmd.index("--manifest") + 1]) if "--manifest" in cmd else ""
+        handler = self.evaluator_handlers.get(manifest_path)
+        if handler is not None:
+            handler(work_in, work_out)
+            return
+
+        solution = json.loads((work_in / "solution.json").read_text(encoding="utf-8"))
+        req = json.loads((work_in / "request.json").read_text(encoding="utf-8"))
+        artifact = _artifact_from_json(req["artifact"])
+        finance = EffectiveFinanceConfig.from_dict(req["finance"])
+        evaluation = EvaluationInput.from_frozen(req["evaluation"])
+        materialized = self._materialize_from_req(work_in, req, artifact, finance, evaluation)
+        raw_models = req.get("device_models")
+        fin_eval = evaluate_forward_finance(
+            solution,
+            artifact=artifact,
+            finance=finance,
+            evaluation=evaluation,
+            materialized=materialized,
+            device_models=raw_models,
+        )
+        (work_out / "financial_evaluation.json").write_text(
+            json.dumps(fin_eval), encoding="utf-8"
         )
 
     def handle(self, request: httpx.Request) -> httpx.Response:
@@ -730,7 +729,7 @@ class MockJobRunnerBackend:
 
 def build_test_stage_catalog(
     *,
-    builtin_image: str = "pies-builtin-stages:1.1.5",
+    builtin_image: str = "pies-builtin-stages:1.2.0",
     predictor_registry: Any | None = None,
     generator_registry: Any | None = None,
     extra_descriptors: tuple[BuiltinStageDescriptor, ...] = (),
@@ -779,21 +778,27 @@ def build_test_compute_plane(
     *,
     generator_registry: Any | None = None,
     predictor_registry: Any | None = None,
+    solver_registry: Any | None = None,
+    evaluator_registry: Any | None = None,
+    algorithm_registry: Any | None = None,
     stage_catalog: BuiltinStageCatalog | None = None,
     stage_overrides: Mapping[str, str] | None = None,
     solver_argv_override: list[str] | None = None,
+    evaluator_handlers: Mapping[str, Any] | None = None,
     policy: ContainerStagePolicy | None = None,
     poll_interval: float = 0.01,
     on_start: Any = None,
 ) -> ComputeExecutionPlane:
     gen_reg = generator_registry or build_registry((HIGHS_MILP_PROVIDER,))
     pred_reg = predictor_registry or build_predictor_registry((NAIVE_PREDICTOR,))
+    sol_reg = solver_registry or build_solver_registry((BUILTIN_SOLVER_HIGHS_SPEC,))
+    eval_reg = evaluator_registry or build_evaluator_registry((BUILTIN_EVALUATOR_FINANCE_SPEC,))
     catalog = stage_catalog or build_test_stage_catalog(
         predictor_registry=pred_reg,
         generator_registry=gen_reg,
     )
     resolved_policy = policy or ContainerStagePolicy(
-        builtin_image="pies-builtin-stages:1.1.5",
+        builtin_image="pies-builtin-stages:1.2.0",
         cpu_cores=8.0,
         memory_mb=16384,
         pids_limit=256,
@@ -808,6 +813,7 @@ def build_test_compute_plane(
         predictor_registry=pred_reg,
         stage_overrides=stage_overrides,
         solver_argv_override=solver_argv_override,
+        evaluator_handlers=evaluator_handlers,
         on_start=on_start,
     )
     http_client = httpx.Client(
@@ -826,6 +832,9 @@ def build_test_compute_plane(
         predictor_registry=pred_reg,
         stage_runner=runner,
         stage_catalog=catalog,
+        solver_registry=sol_reg,
+        evaluator_registry=eval_reg,
+        algorithm_registry=algorithm_registry,
     )
 
 

@@ -1,18 +1,17 @@
-"""预测输入冻结核对(提交闸门): 配置 predictions 与装配 data_predict 绑定双向匹配 + 依赖分流。
+"""预测输入冻结核对(提交闸门): 配置 predictions 与装配 data_predict 绑定双向匹配 + 算法相容。
 
-纯函数矩阵直接断言错误码，无数据库依赖。收敛要求按所选算法的
-依赖声明确定（任一耦合即必填），不按目标数量；目录缺席时 fail-closed。
+纯函数矩阵直接断言错误码，无数据库依赖；目录缺席时 fail-closed。
 """
 
 from __future__ import annotations
 
 import pytest
-from test_prediction_capability import CHASE_REF, _ChasePredictor
 
 from iesplan.application.tasks.submissions import _check_prediction_inputs
 from iesplan.computation import (
     NAIVE_PREDICTOR,
     NAIVE_PREDICTOR_REF,
+    PredictorDescriptor,
     build_predictor_registry,
 )
 from iesplan.core.errors import AppError
@@ -38,16 +37,27 @@ def _pred(dev: str, iface: str, alg: str, parameters: dict | None = None) -> dic
     }
 
 
-def _config(*preds: dict, convergence: dict | None = None) -> dict:
-    return {"predictions": list(preds), "convergence": convergence}
+def _config(*preds: dict) -> dict:
+    return {"predictions": list(preds)}
 
 
 def _naive_registry():
     return build_predictor_registry((NAIVE_PREDICTOR,))
 
 
-def _chase_registry():
-    return build_predictor_registry((_ChasePredictor(),))
+class _LoadOnlyPredictor:
+    @property
+    def descriptor(self):
+        return PredictorDescriptor(
+            ref="test.predictor.load-only@1.0.0",
+            depends_on_solve_result=False,
+            accepts_any_target_type=False,
+            target_types=("other_type",),
+            needs_history=True,
+        )
+
+    def validate_parameters(self, parameters):
+        return None
 
 
 class TestPredictionInputsFreeze:
@@ -58,7 +68,7 @@ class TestPredictionInputsFreeze:
         doc = _doc(("d1", "i1", "constant"), ("d1", "i2", "data_repeat"))
         assert _check_prediction_inputs(doc, _config(), 1) == 0
 
-    def test_matching_single_independent_passes_without_convergence(self) -> None:
+    def test_matching_single_independent_passes(self) -> None:
         doc = _doc(("pv1", "power_out", "data_predict"))
         assert (
             _check_prediction_inputs(
@@ -68,7 +78,7 @@ class TestPredictionInputsFreeze:
             == 1
         )
 
-    def test_two_independent_pass_without_convergence(self) -> None:
+    def test_two_independent_pass(self) -> None:
         doc = _doc(
             ("pv1", "power_out", "data_predict"),
             ("pv2", "power_out", "data_predict"),
@@ -79,24 +89,14 @@ class TestPredictionInputsFreeze:
         )
         assert _check_prediction_inputs(doc, cfg, 1, predictor_registry=_naive_registry()) == 2
 
-    def test_single_coupled_requires_convergence(self) -> None:
+    def test_unsupported_target_type_rejected(self) -> None:
         doc = _doc(("pv1", "power_out", "data_predict"))
-        cfg = _config(_pred("pv1", "power_out", CHASE_REF, {"scale": 10.0}))
+        cfg = _config(_pred("pv1", "power_out", "test.predictor.load-only@1.0.0"))
         with pytest.raises(InvalidRequestError) as exc_info:
-            _check_prediction_inputs(doc, cfg, 1, predictor_registry=_chase_registry())
-        assert exc_info.value.code == "TASK-REQ-012"
-        cfg["convergence"] = {"tolerance": 0.001, "max_iterations": 50}
-        assert _check_prediction_inputs(doc, cfg, 1, predictor_registry=_chase_registry()) == 1
-
-    def test_coupled_max_iterations_one_rejected(self) -> None:
-        doc = _doc(("pv1", "power_out", "data_predict"))
-        cfg = _config(
-            _pred("pv1", "power_out", CHASE_REF, {"scale": 10.0}),
-            convergence={"tolerance": 0.001, "max_iterations": 1},
-        )
-        with pytest.raises(InvalidRequestError) as exc_info:
-            _check_prediction_inputs(doc, cfg, 1, predictor_registry=_chase_registry())
-        assert exc_info.value.code == "TASK-REQ-012"
+            _check_prediction_inputs(
+                doc, cfg, 1, predictor_registry=build_predictor_registry((_LoadOnlyPredictor(),))
+            )
+        assert exc_info.value.code == "TASK-REQ-014"
 
     def test_registry_absent_unavailable(self) -> None:
         doc = _doc(("pv1", "power_out", "data_predict"))
@@ -105,27 +105,8 @@ class TestPredictionInputsFreeze:
                 doc, _config(_pred("pv1", "power_out", NAIVE_PREDICTOR_REF)), 1
             )
 
-    def test_registry_absent_without_predictions_null_passes(self) -> None:
+    def test_registry_absent_without_predictions_passes(self) -> None:
         assert _check_prediction_inputs(_doc(), _config(), 1) == 0
-
-    def test_registry_absent_without_predictions_non_null_rejected(self) -> None:
-        with pytest.raises(InvalidRequestError) as exc_info:
-            _check_prediction_inputs(
-                _doc(),
-                _config(convergence={"tolerance": 0.001, "max_iterations": 50}),
-                1,
-            )
-        assert exc_info.value.code == "TASK-REQ-012"
-
-    def test_independent_with_convergence_rejected(self) -> None:
-        doc = _doc(("pv1", "power_out", "data_predict"))
-        cfg = _config(
-            _pred("pv1", "power_out", NAIVE_PREDICTOR_REF),
-            convergence={"tolerance": 0.001, "max_iterations": 50},
-        )
-        with pytest.raises(InvalidRequestError) as exc_info:
-            _check_prediction_inputs(doc, cfg, 1, predictor_registry=_naive_registry())
-        assert exc_info.value.code == "TASK-REQ-012"
 
     def test_config_target_without_binding_rejected(self) -> None:
         with pytest.raises(InvalidRequestError) as exc_info:

@@ -60,6 +60,12 @@ class ApplicationContext:
     #: 已发布的预测算法目录(未装配该能力时为 None; 内置朴素 predictor
     #: 由组合根显式注册，未知引用选择时即明确不可用)
     predictor_registry: Any | None = None
+    #: 已发布的求解器目录(未装配该能力时为 None)
+    solver_registry: Any | None = None
+    #: 已发布的评价器目录(未装配该能力时为 None)
+    evaluator_registry: Any | None = None
+    #: 已发布的一体化算法目录(未装配该能力时为 None)
+    algorithm_registry: Any | None = None
     #: 内置计算阶段容器描述符目录
     builtin_stage_catalog: Any | None = None
     #: 临时计算容器执行策略(来自 pies.toml)
@@ -85,6 +91,9 @@ class ApplicationContext:
             predictor_registry=self.predictor_registry,
             stage_runner=self.stage_runner,
             stage_catalog=self.builtin_stage_catalog,
+            solver_registry=self.solver_registry,
+            evaluator_registry=self.evaluator_registry,
+            algorithm_registry=self.algorithm_registry,
         )
 
     def health(self) -> dict[str, str]:
@@ -303,7 +312,17 @@ def _assemble(
     #    动态发现或扫描; 任一候选不符即整体失败, 不发布半表)
     generator_registry: Any | None = None
     predictor_registry: Any | None = None
+    solver_registry: Any | None = None
+    evaluator_registry: Any | None = None
+    algorithm_registry: Any | None = None
     if with_generators:
+        from iesplan.computation.config import (
+            BUILTIN_EVALUATOR_FINANCE_SPEC,
+            BUILTIN_SOLVER_HIGHS_SPEC,
+            build_algorithm_registry,
+            build_evaluator_registry,
+            build_solver_registry,
+        )
         from iesplan.computation.generators import (
             HIGHS_MILP_PROVIDER,
             build_registry,
@@ -315,6 +334,9 @@ def _assemble(
 
         generator_registry = build_registry((HIGHS_MILP_PROVIDER,))
         predictor_registry = build_predictor_registry((NAIVE_PREDICTOR,))
+        solver_registry = build_solver_registry((BUILTIN_SOLVER_HIGHS_SPEC,))
+        evaluator_registry = build_evaluator_registry((BUILTIN_EVALUATOR_FINANCE_SPEC,))
+        algorithm_registry = build_algorithm_registry(())
     # 4. 容器化阶段目录与 job_runner 客户端(所有计算通过 job_runner 临时容器执行)
     builtin_stage_catalog: Any | None = None
     container_stage_policy: Any | None = None
@@ -343,6 +365,9 @@ def _assemble(
         device_registry=device_registry,
         generator_registry=generator_registry,
         predictor_registry=predictor_registry,
+        solver_registry=solver_registry,
+        evaluator_registry=evaluator_registry,
+        algorithm_registry=algorithm_registry,
         builtin_stage_catalog=builtin_stage_catalog,
         container_stage_policy=container_stage_policy,
         job_runner_client=job_runner_client,

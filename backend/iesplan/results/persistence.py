@@ -369,6 +369,16 @@ def list_assessments_for_task(db: Session, task_id: int) -> list[ResultAssessmen
 # ---------------------------------------------------------------------------
 
 
+def _lock_result_index_version(db: Session, project_version_id: int) -> None:
+    """Serialize latest-index updates per project_version_id on PostgreSQL."""
+    bind = db.get_bind()
+    if bind is not None and bind.dialect.name == "postgresql":
+        db.execute(
+            sa.text("SELECT pg_advisory_xact_lock(:ns, :key)"),
+            {"ns": 174963, "key": int(project_version_id) & 0x7FFFFFFF},
+        )
+
+
 def point_index_latest(
     db: Session,
     *,
@@ -378,6 +388,7 @@ def point_index_latest(
     assessment_id: int | None = None,
 ) -> ResultIndexRecord:
     """将版本索引指向新证据（同证据只更新评估指针；新证据则旧 latest 翻转后插入新行）。"""
+    _lock_result_index_version(db, project_version_id)
     existing = db.execute(
         select(ResultIndex).where(
             ResultIndex.project_version_id == project_version_id,
@@ -390,6 +401,7 @@ def point_index_latest(
         return _row_to_index(existing)
     if existing is not None:
         existing.is_latest = False
+        db.flush()
     row = ResultIndex(
         project_id=project_id,
         project_version_id=project_version_id,
@@ -501,6 +513,7 @@ def count_reports(db: Session) -> int:
 
 def flip_index_for_version(db: Session, project_version_id: int) -> int:
     """结果索引翻转：同版本旧 is_latest 行置 false（返回影响行数，不提交）。"""
+    _lock_result_index_version(db, project_version_id)
     result = db.execute(
         select(ResultIndex).where(
             ResultIndex.project_version_id == project_version_id,
@@ -522,6 +535,7 @@ def insert_index(
     assessment_id: int,
 ) -> int:
     """插入新结果索引行（is_latest=true；返回新行 id，不提交）。"""
+    _lock_result_index_version(db, project_version_id)
     row = ResultIndex(
         project_id=project_id,
         project_version_id=project_version_id,

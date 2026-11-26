@@ -57,8 +57,7 @@ class GeneratorDescriptor:
     solvers: tuple[str, ...] = ()
     executors: tuple[str, ...] = ()
     equation_contracts: tuple[str, ...] = ()
-    result_adapter: str = ""
-    evaluators: tuple[str, ...] | None = None
+    evaluators: tuple[str, ...] = ()
     deterministic: bool = True
     resource_limits: Mapping[str, object] = field(default_factory=dict)
     unit_system: str = ""
@@ -69,8 +68,6 @@ class GeneratorDescriptor:
         check_provider_ref(f"{self.generator_id}@{self.version}", "generator")
         _check_assembly_schema_version(self.assembly_schema_version)
         solvers = tuple(self.solvers)
-        if not solvers:
-            raise ValueError("solvers 不得为空：descriptor 必须声明兼容求解器")
         for solver_ref in solvers:
             check_provider_ref(solver_ref, "solvers")
         object.__setattr__(self, "solvers", solvers)
@@ -99,19 +96,9 @@ class GeneratorDescriptor:
         object.__setattr__(self, "precisions", precisions)
         if not self.outputs:
             raise ValueError("outputs 须为非空能力集合")
-        if not self.result_adapter:
-            raise ValueError(
-                "result_adapter 不得为空：descriptor 必须声明配套结果适配器"
-            )
-        check_provider_ref(self.result_adapter, "result_adapter")
-        if self.evaluators is None:
-            evaluators = (self.result_adapter,)
-        else:
-            evaluators = tuple(self.evaluators)
-            if not evaluators:
-                raise ValueError("evaluators 若显式声明则不得为空")
-            for ev_ref in evaluators:
-                check_provider_ref(ev_ref, "evaluators")
+        evaluators = tuple(self.evaluators or ())
+        for ev_ref in evaluators:
+            check_provider_ref(ev_ref, "evaluators")
         object.__setattr__(self, "evaluators", evaluators)
         if not isinstance(self.deterministic, bool):
             raise TypeError("deterministic 须为布尔值")
@@ -132,13 +119,29 @@ class GeneratorDescriptor:
         """生成器精确引用(``<稳定ID>@<语义化版本>``)。"""
         return f"{self.generator_id}@{self.version}"
 
-    def supports_solver(self, solver_ref: str) -> bool:
-        """该 provider 是否兼容给定 solver 精确引用。"""
-        return solver_ref in self.solvers
-
     def supports_evaluator(self, evaluator_ref: str) -> bool:
         """该 provider 是否兼容给定 evaluator 精确引用。"""
-        return evaluator_ref in (self.evaluators or ())
+        return evaluator_ref in self.evaluators
+
+    def to_stage_spec(self) -> Any:
+        """投影为统一阶段契约 ``StagePluginSpec``。"""
+        from iesplan.computation.contracts.compatibility import (
+            SOLVER_BUNDLE_MPS_CONTRACT,
+            STAGE_INPUT_CONTRACT,
+            StagePluginSpec,
+        )
+
+        return StagePluginSpec(
+            plugin_id=self.generator_id,
+            version=self.version,
+            kind="generator",
+            parameters_schema=self.options_schema,
+            consumes=(STAGE_INPUT_CONTRACT,),
+            produces=(SOLVER_BUNDLE_MPS_CONTRACT,),
+            modes=self.modes,
+            precisions=self.precisions,
+            outputs=self.outputs,
+        )
 
     def to_dict(self) -> dict[str, Any]:
         """序列化为 JSON 兼容独立副本。"""
@@ -153,8 +156,7 @@ class GeneratorDescriptor:
             "solvers": list(self.solvers),
             "executors": list(self.executors),
             "equation_contracts": list(self.equation_contracts),
-            "result_adapter": self.result_adapter,
-            "evaluators": list(self.evaluators or ()),
+            "evaluators": list(self.evaluators),
             "deterministic": self.deterministic,
             "options_schema": thaw_json_value(self.options_schema),
             "resource_limits": thaw_json_value(self.resource_limits),

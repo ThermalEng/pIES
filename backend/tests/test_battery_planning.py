@@ -361,7 +361,6 @@ def test_planned_capacity_capex_and_dated_maintenance_recover_from_one_solution(
     # 第 3 年未安排维护：不能把年度固定 O&M 误充 maintenance_expenses。
     from test_npv_objective import _finance_payload
 
-    from iesplan.computation.result_adapters.highs import _recover_financial_facts
     from iesplan.finance import (
         ConstructionPayment,
         CostComponentShareTerm,
@@ -370,6 +369,7 @@ def test_planned_capacity_capex_and_dated_maintenance_recover_from_one_solution(
         MaintenanceExpense,
         MaintenanceUnitCost,
         ScaleUnitCostTerm,
+        evaluate_forward_finance,
         merge_effective,
     )
 
@@ -415,7 +415,6 @@ def test_planned_capacity_capex_and_dated_maintenance_recover_from_one_solution(
     assert b.inventory.sealed
     assert len(b.analysis.relations("maintenance")) == 1
     assert len(b.analysis.relations("annual_cash")) == 2
-    # 复用生产 builder 的建设/维护同源仿射声明，不构造第二套财务算法。
     b._retain_maintenance()
     b._retain_operating_facts()
     declared = b.financial_facts()
@@ -424,9 +423,47 @@ def test_planned_capacity_capex_and_dated_maintenance_recover_from_one_solution(
 
     primal = _solve(b, tmp_path, demand_w=4000)
     assert primal["battery_size"] == pytest.approx(36_000_000, abs=1)
-    # 复用生产 HiGHS 适配器的财务事实恢复：列值来自上述同一次主解。
-    from bundle_testkit import evaluate_fact_expressions
-    restored = _recover_financial_facts(evaluate_fact_expressions(declared, primal))
+    # 复用生产 1.2.0 前向财务评估器恢复财务事实：容量值来自上述同一次主解。
+    doc_payload = dict(b.doc)
+    doc_payload["devices"] = b.devices
+    eng_sol = {
+        "schema": "ies.engineering-solution",
+        "schema_version": "1.0.0",
+        "solver_summary": {
+            "termination_reason": "optimal",
+            "math_status": "solved",
+            "has_feasible_solution": True,
+            "objective_value": 0.0,
+            "objective_unit": "CNY",
+            "best_bound": 0.0,
+            "relative_gap": 0.0,
+        },
+        "construction_units": [
+            {
+                "unit_id": "cu_cell",
+                "instance_id": "cell",
+                "mode": "mandatory",
+                "built": True,
+                "scales": [
+                    {
+                        "planning_variable_id": "battery_size",
+                        "value": primal["battery_size"] / 3_600_000.0,
+                        "unit": "kWh",
+                    }
+                ],
+            }
+        ],
+        "series": {},
+        "system_series": {},
+        "extensions": {},
+    }
+    restored = evaluate_forward_finance(
+        eng_sol,
+        artifact={"canonical_text": json.dumps(doc_payload)},
+        finance=b.finance,
+        evaluation=evaluation,
+        device_models=b.models,
+    )
     assert restored["currency"] == "CNY"
     assert float(restored["construction_total"]) == pytest.approx(500, abs=1e-5)
     assert restored["payments_applied"][0]["t"] == 0

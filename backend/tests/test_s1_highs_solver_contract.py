@@ -26,14 +26,10 @@ from pathlib import Path
 import highspy
 import numpy as np
 import pytest
-from bundle_testkit import fixture_files
-from test_highs_result_adapter import (
-    PARAMETERS_PATH,
-    PROBLEM_PATH,
-    TINY_MPS,
-    _adapt,
-    _parameters,
-    _receipt,
+from legacy_solve_testkit import (
+    make_minimal_highs_bundle,
+    restore_bundle_solution,
+    succeeded_receipt,
 )
 
 from iesplan.computation import HIGHS_ADAPTER_PATH
@@ -44,6 +40,21 @@ from iesplan.computation.generators.linear import (
     LinearVariable,
 )
 from iesplan.computation.generators.mps import write_mps
+
+TINY_MPS = (
+    "NAME          TINY\n"
+    "ROWS\n"
+    " N  OBJ\n"
+    " G  DEMAND\n"
+    "COLUMNS\n"
+    "    X         OBJ       1\n"
+    "    X         DEMAND    1\n"
+    "    Y         OBJ       10\n"
+    "    Y         DEMAND    2\n"
+    "RHS\n"
+    "    RHS1      DEMAND    3000\n"
+    "ENDATA\n"
+)
 
 
 def _load_solver_module():
@@ -838,17 +849,17 @@ def test_original_model_verification_and_formal_multistage_incumbent_publication
     assert facts["primals"] == pytest.approx([3000.0, 0.0])
 
     # ResultAdapter publishes completed + feasible with valid primals
-    bundle_files = fixture_files(
-        {
-            PROBLEM_PATH: TINY_MPS.encode("utf-8"),
-            PARAMETERS_PATH: _parameters(),
-        }
+    bundle = make_minimal_highs_bundle(TINY_MPS.encode("utf-8"), offset=1.5)
+    result, eng_sol = restore_bundle_solution(
+        bundle,
+        succeeded_receipt(bundle=bundle),
+        {"output/solution.sol": sol_bytes},
+        tmp_path=tmp_path,
     )
-    result = _adapt(bundle_files, _receipt(), sol_bytes)
     assert result.execution_status == "completed"
     assert result.math_status == "feasible"
-    assert result.outputs["solver_summary"]["has_feasible_solution"] is True
-    assert result.outputs["solution"]["objective_value"] == pytest.approx(3001.5)
+    assert eng_sol["solver_summary"]["has_feasible_solution"] is True
+    assert eng_sol["solver_summary"]["objective_value"] == pytest.approx(3001.5)
 
 
 def test_optional_additive_solution_headers_only_when_non_default() -> None:

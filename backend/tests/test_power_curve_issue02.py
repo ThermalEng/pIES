@@ -249,10 +249,12 @@ def test_fixed_capacity_hand_calculation_and_public_generation(capacity_kw: floa
             capacity_kw * SYNTHETIC_DAY[step % 24] * 1000
         )
         assert units[f"curve1__electric_out__t{step}"] == "kW"
+    from legacy_solve_testkit import read_bundle_records
+
     provider = build_registry((HIGHS_MILP_PROVIDER,)).resolve(config)
     bundle = provider.generate(artifact, models, materialized, finance, config, evaluation)
     assert b"curve1__electric_out__t1" in materialized_file(bundle, "input/problem.mps")
-    metadata = json.loads(materialized_file(bundle, "input/parameters.json").decode("utf-8"))
+    metadata = read_bundle_records(bundle)
     assert metadata["unit_map"]["curve1__electric_out__t1"] == "kW"
 
 

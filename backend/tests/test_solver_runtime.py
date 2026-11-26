@@ -64,35 +64,40 @@ def _outcome(
     )
 
 
+def _command(**command_overrides) -> dict[str, object]:
+    cmd: dict[str, object] = {
+        "executor": EXECUTOR,
+        "executable": EXE,
+        "arguments": ["--probe"],
+        "environment": {"T_SOLVER_THREADS": "2"},
+        "working_directory": ".",
+        "timeout_seconds": 30,
+        "memory_mib": 256,
+        "cpu_cores": 1,
+        "network": False,
+        "success_exit_codes": [0],
+    }
+    cmd.update(command_overrides)
+    return cmd
+
+
 def _manifest(
     input_paths: tuple[str, ...] = ("input/problem.mps",),
     **command_overrides,
 ) -> SolverBundleManifest:
-    command: dict[str, object] = {
-        "executor": EXECUTOR,
-        "executable": EXE,
-        "arguments": ["input/problem.mps"],
-        "environment": {"T_SOLVER_THREADS": "2"},
-        "timeout_seconds": 600,
-        "memory_mib": 4096,
-        "cpu_cores": 4,
-        "network": False,
-        "success_exit_codes": [0],
-    }
-    command.update(command_overrides)
+    del command_overrides
     return SolverBundleManifest(
         bundle={
             "generator": "acme.generator@1.0.0",
-            "solver": "ies.solver.highs@1.7.2",
+            "contract": "ies.solver-bundle.mps@1.0.0",
         },
         inputs=[
             {"path": path, "media_type": "application/mps"}
             for path in input_paths
         ],
-        command=command,
         outputs=[
             {
-                "path": "output/solution.json",
+                "path": "output/primal_solution.json",
                 "media_type": "application/json",
                 "required": True,
             },
@@ -102,7 +107,6 @@ def _manifest(
                 "required": False,
             },
         ],
-        result_adapter="acme.result-adapter@1.0.0",
     )
 
 
@@ -184,7 +188,7 @@ def _success_handler(probe: dict, write_optional: bool = True):
         probe["saw_command"] = command
         os.makedirs(os.path.join(workdir, "output"), exist_ok=True)
         with open(
-            os.path.join(workdir, "output/solution.json"), "wb"
+            os.path.join(workdir, "output/primal_solution.json"), "wb"
         ) as handle_out:
             handle_out.write(SOLUTION_BYTES)
         if write_optional:
@@ -211,8 +215,8 @@ def test_output_handoff_precedes_cleanup(fail):
     accepted = []
 
     def handoff(receipt, outputs):
-        assert os.path.exists(os.path.join(probe["workdir"], "output/solution.json"))
-        assert read_content(outputs["output/solution.json"]) == SOLUTION_BYTES
+        assert os.path.exists(os.path.join(probe["workdir"], "output/primal_solution.json"))
+        assert read_content(outputs["output/primal_solution.json"]) == SOLUTION_BYTES
         accepted.append(receipt.status)
         if fail:
             raise OSError("stage storage unavailable")
@@ -220,11 +224,15 @@ def test_output_handoff_precedes_cleanup(fail):
 
     if fail:
         with pytest.raises(OSError, match="stage storage unavailable"):
-            _runtime(provider).run(_bundle(), _attempt(), handoff=handoff)
+            _runtime(provider).run(
+                _bundle(), _attempt(), command=_command(), handoff=handoff
+            )
         assert os.path.exists(probe["workdir"])
         shutil.rmtree(probe["workdir"])  # 本测试创建且已确认归属的临时目录。
     else:
-        _runtime(provider).run(_bundle(), _attempt(), handoff=handoff)
+        _runtime(provider).run(
+            _bundle(), _attempt(), command=_command(), handoff=handoff
+        )
         assert not os.path.exists(probe["workdir"])
     assert accepted == ["succeeded"]
 
@@ -233,11 +241,17 @@ def test_success_collects_declared_outputs_and_receipt() -> None:
     """成功执行：声明输出收集完整，回执身份/时间/状态/refs 正确。"""
     probe: dict = {}
     runtime = _runtime(_FakeExecutor(handler=_success_handler(probe)))
-    receipt, outputs = runtime.run(_bundle(), _attempt())
+    receipt, outputs = runtime.run(
+        _bundle(),
+        _attempt(),
+        command=_command(),
+        solver_ref="ies.solver.highs@1.7.2",
+        result_adapter_ref="acme.result-adapter@1.0.0",
+    )
     assert probe["input_ok"] is True
     assert probe["input_dir_owner_writable"] is True
     assert {path: read_content(content) for path, content in outputs.items()} == {
-        "output/solution.json": SOLUTION_BYTES,
+        "output/primal_solution.json": SOLUTION_BYTES,
         "output/optional.json": b"{}",
     }
     assert isinstance(receipt, ExecutionReceipt)
@@ -264,7 +278,7 @@ def test_success_collects_declared_outputs_and_receipt() -> None:
     assert "policy_applied" not in receipt.to_dict()
     assert receipt.resource_usage == {}
     assert [e["path"] for e in receipt.outputs] == [
-        "output/solution.json",
+        "output/primal_solution.json",
         "output/optional.json",
     ]
     assert receipt.outputs[0]["size_bytes"] == len(SOLUTION_BYTES)
@@ -292,19 +306,19 @@ def test_non_dot_working_directory_uses_bundle_root() -> None:
             probe["input_ok"] = handle_in.read() == INPUT_BYTES
         os.makedirs(os.path.join(workdir, "output"), exist_ok=True)
         with open(
-            os.path.join(workdir, "output/solution.json"), "wb"
+            os.path.join(workdir, "output/primal_solution.json"), "wb"
         ) as handle_out:
             handle_out.write(SOLUTION_BYTES)
         return _outcome()
 
     receipt, outputs = _runtime(_FakeExecutor(handler=handle)).run(
-        _bundle(working_directory="run"), _attempt()
+        _bundle(), _attempt(), command=_command(working_directory="run")
     )
     assert receipt.status == "succeeded"
     assert probe["input_ok"] is True
     assert probe["run_owner_writable"] is True
     assert {path: read_content(content) for path, content in outputs.items()} == {
-        "output/solution.json": SOLUTION_BYTES,
+        "output/primal_solution.json": SOLUTION_BYTES,
     }
 
 
@@ -349,12 +363,12 @@ def test_optional_output_may_be_absent() -> None:
     runtime = _runtime(
         _FakeExecutor(handler=_success_handler(probe, write_optional=False))
     )
-    receipt, outputs = runtime.run(_bundle(), _attempt())
+    receipt, outputs = runtime.run(_bundle(), _attempt(), command=_command())
     assert receipt.status == "succeeded"
     assert {path: read_content(content) for path, content in outputs.items()} == {
-        "output/solution.json": SOLUTION_BYTES,
+        "output/primal_solution.json": SOLUTION_BYTES,
     }
-    assert [e["path"] for e in receipt.outputs] == ["output/solution.json"]
+    assert [e["path"] for e in receipt.outputs] == ["output/primal_solution.json"]
 
 
 def test_two_inputs_in_same_dir_are_written_read_and_cleaned() -> None:
@@ -368,19 +382,19 @@ def test_two_inputs_in_same_dir_are_written_read_and_cleaned() -> None:
         probe["workdir"] = workdir
         os.makedirs(os.path.join(workdir, "output"), exist_ok=True)
         with open(
-            os.path.join(workdir, "output/solution.json"), "wb"
+            os.path.join(workdir, "output/primal_solution.json"), "wb"
         ) as handle_out:
             handle_out.write(SOLUTION_BYTES)
         return _outcome()
 
     receipt, outputs = _runtime(_FakeExecutor(handler=handle)).run(
-        _bundle(("input/a.mps", "input/b.mps")), _attempt()
+        _bundle(("input/a.mps", "input/b.mps")), _attempt(), command=_command()
     )
     assert receipt.status == "succeeded"
     assert probe["input/a.mps"] == INPUT_BYTES
     assert probe["input/b.mps"] == INPUT_BYTES
     assert {path: read_content(content) for path, content in outputs.items()} == {
-        "output/solution.json": SOLUTION_BYTES,
+        "output/primal_solution.json": SOLUTION_BYTES,
     }
     outputs.close()
     assert not os.path.exists(probe["workdir"])
@@ -397,14 +411,18 @@ def test_registry_selects_exact_executor_without_fallback() -> None:
     )
     registry = build_executor_registry([first, second])
     runtime = SolverRuntime(registry, _policy())
-    bundle = _bundle(executor=OTHER_EXECUTOR, executable=OTHER_EXE)
-    receipt, _ = runtime.run(bundle, _attempt())
+    bundle = _bundle()
+    receipt, _ = runtime.run(
+        bundle, _attempt(), command=_command(executor=OTHER_EXECUTOR, executable=OTHER_EXE)
+    )
     assert receipt.status == "succeeded"
     assert receipt.executor_ref == OTHER_EXECUTOR
     assert len(second.calls) == 1
     assert first.calls == []
-    stray = _bundle(executor=EXECUTOR, executable=OTHER_EXE)
-    receipt, _ = runtime.run(stray, _attempt())
+    stray = _bundle()
+    receipt, _ = runtime.run(
+        stray, _attempt(), command=_command(executor=EXECUTOR, executable=OTHER_EXE)
+    )
     assert receipt.status == "policy_rejected"
     assert first.calls == []
 
@@ -414,7 +432,7 @@ def test_unknown_executor_is_rejected_without_calls() -> None:
     fake = _FakeExecutor(handler=_success_handler({}))
     runtime = _runtime(fake)
     receipt, outputs = runtime.run(
-        _bundle(executor="t.missing@1.0.0"), _attempt()
+        _bundle(), _attempt(), command=_command(executor="t.missing@1.0.0")
     )
     assert receipt.status == "policy_rejected"
     assert receipt.error
@@ -450,7 +468,7 @@ def test_policy_gates_reject_without_calls() -> None:
             build_executor_registry([first, second]), policy
         )
         receipt, outputs = runtime.run(
-            _bundle(**command_overrides), _attempt()
+            _bundle(), _attempt(), command=_command(**command_overrides)
         )
         assert receipt.status == "policy_rejected", command_overrides
         assert receipt.error, command_overrides
@@ -464,19 +482,19 @@ def test_nonzero_exit_is_process_failed_with_existing_outputs() -> None:
     def handle(command, workdir):
         os.makedirs(os.path.join(workdir, "output"), exist_ok=True)
         with open(
-            os.path.join(workdir, "output/solution.json"), "wb"
+            os.path.join(workdir, "output/primal_solution.json"), "wb"
         ) as handle_out:
             handle_out.write(SOLUTION_BYTES)
         return _outcome(exit_code=3, reason="exited", stderr=b"boom")
 
     receipt, outputs = _runtime(_FakeExecutor(handler=handle)).run(
-        _bundle(), _attempt()
+        _bundle(), _attempt(), command=_command()
     )
     assert receipt.status == "process_failed"
     assert receipt.exit_code == 3
     assert "3" in receipt.error
     assert {path: read_content(content) for path, content in outputs.items()} == {
-        "output/solution.json": SOLUTION_BYTES,
+        "output/primal_solution.json": SOLUTION_BYTES,
     }
     assert receipt.stderr == "boom"
 
@@ -488,7 +506,7 @@ def test_signaled_process_is_process_failed() -> None:
         return _outcome(exit_code=None, signal=9, reason="signaled")
 
     receipt, outputs = _runtime(_FakeExecutor(handler=handle)).run(
-        _bundle(), _attempt()
+        _bundle(), _attempt(), command=_command()
     )
     assert receipt.status == "process_failed"
     assert receipt.exit_code is None
@@ -504,10 +522,10 @@ def test_missing_required_output_is_protocol_failed() -> None:
         return _outcome()
 
     receipt, outputs = _runtime(_FakeExecutor(handler=handle)).run(
-        _bundle(), _attempt()
+        _bundle(), _attempt(), command=_command()
     )
     assert receipt.status == "output_protocol_failed"
-    assert "output/solution.json" in receipt.error
+    assert "output/primal_solution.json" in receipt.error
     assert outputs == {}
 
 
@@ -516,10 +534,10 @@ def test_workdir_is_unique_per_call_and_cleaned() -> None:
     probe_one: dict = {}
     probe_two: dict = {}
     runtime = _runtime(_FakeExecutor(handler=_success_handler(probe_one)))
-    runtime.run(_bundle(), _attempt())
+    runtime.run(_bundle(), _attempt(), command=_command())
     first_dir = probe_one["workdir"]
     runtime_two = _runtime(_FakeExecutor(handler=_success_handler(probe_two)))
-    runtime_two.run(_bundle(), _attempt())
+    runtime_two.run(_bundle(), _attempt(), command=_command())
     second_dir = probe_two["workdir"]
     assert first_dir != second_dir
     assert not os.path.exists(first_dir)
@@ -535,7 +553,9 @@ def test_executor_error_propagates_and_cleans_workdir() -> None:
         raise RuntimeError("boom")
 
     with pytest.raises(RuntimeError, match="boom"):
-        _runtime(_FakeExecutor(handler=handle)).run(_bundle(), _attempt())
+        _runtime(_FakeExecutor(handler=handle)).run(
+            _bundle(), _attempt(), command=_command()
+        )
     assert not os.path.exists(seen["workdir"])
 
 
@@ -546,14 +566,16 @@ def test_bad_outcome_type_propagates() -> None:
         return {"exit_code": 0}
 
     with pytest.raises(TypeError, match="ProcessOutcome"):
-        _runtime(_FakeExecutor(handler=handle)).run(_bundle(), _attempt())
+        _runtime(_FakeExecutor(handler=handle)).run(
+            _bundle(), _attempt(), command=_command()
+        )
 
 
 def test_receipts_are_unique_and_immutable() -> None:
     """回执唯一且深层不可变（顶层赋值与嵌套改写一律失败）。"""
     runtime = _runtime(_FakeExecutor(handler=_success_handler({})))
-    first, _ = runtime.run(_bundle(), _attempt())
-    second, _ = runtime.run(_bundle(), _attempt())
+    first, _ = runtime.run(_bundle(), _attempt(), command=_command())
+    second, _ = runtime.run(_bundle(), _attempt(), command=_command())
     assert first.receipt_id != second.receipt_id
     assert dataclasses.is_dataclass(first)
     with pytest.raises(dataclasses.FrozenInstanceError):
@@ -576,9 +598,9 @@ def test_constructor_and_input_types_are_checked() -> None:
         SolverRuntime(registry, object())  # type: ignore[arg-type]
     runtime = SolverRuntime(registry, policy)
     with pytest.raises(TypeError, match="SolverBundle"):
-        runtime.run(object(), _attempt())  # type: ignore[arg-type]
+        runtime.run(object(), _attempt(), command=_command())  # type: ignore[arg-type]
     with pytest.raises(TypeError, match="AttemptContext"):
-        runtime.run(_bundle(), object())  # type: ignore[arg-type]
+        runtime.run(_bundle(), object(), command=_command())  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="executables 不得为空"):
         DeploymentPolicy(
             max_timeout_seconds=1, max_memory_mib=1, max_cpu_cores=1,

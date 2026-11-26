@@ -1321,7 +1321,7 @@ def _assert_compose_topology(services: dict[str, dict[str, object]]) -> None:
     assert persistent == {"postgres", "redis", "job_runner", "backend", "web"}
     if "builtin_stages" in services:
         assert services["builtin_stages"].get("restart") == "no"
-        assert services["builtin_stages"].get("image") == "pies-builtin-stages:1.1.5"
+        assert services["builtin_stages"].get("image") == "pies-builtin-stages:1.2.0"
     assert "e2e" in services and services["e2e"]["profiles"] == ["e2e"]
 
     sock_services = [
@@ -1376,7 +1376,7 @@ services:
     image: redis:7-alpine
     restart: unless-stopped
   builtin_stages:
-    image: pies-builtin-stages:1.1.5
+    image: pies-builtin-stages:1.2.0
     command: ["python", "-c", "pass"]
     restart: "no"
   job_runner:

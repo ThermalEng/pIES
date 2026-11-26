@@ -116,7 +116,14 @@ def generate(ctx: StageContext) -> None:
 
     artifact = artifact_from_frozen(raw_artifact)
     models = {inst: contribution_from_dict(contrib) for inst, contrib in raw_models.items()}
-    config = CalculationConfig.from_frozen(raw_config)
+    if ctx.parameters:
+        merged_config = dict(raw_config)
+        merged_options = dict(merged_config.get("options") or {})
+        merged_options["generator"] = dict(ctx.parameters)
+        merged_config["options"] = merged_options
+        config = CalculationConfig.from_frozen(merged_config)
+    else:
+        config = CalculationConfig.from_frozen(raw_config)
     evaluation = EvaluationInput.from_frozen(raw_evaluation)
     resolution = str(json.loads(artifact.canonical_text)["project_baseline"]["resolution"])
 

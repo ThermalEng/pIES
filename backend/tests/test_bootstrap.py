@@ -24,9 +24,15 @@ def test_assemble_api_full_context(monkeypatch) -> None:
     assert ctx.storage is not None
     assert ctx.device_registry is not None
     assert ctx.generator_registry is not None
+    assert ctx.predictor_registry is not None
+    assert ctx.solver_registry is not None
+    assert ctx.evaluator_registry is not None
+    assert ctx.algorithm_registry is not None
     assert [d.ref for d in ctx.generator_registry.snapshot()] == [
         "ies.generator.highs_milp@1.0.0"
     ]
+    assert [s.ref for s in ctx.solver_registry.snapshot()] == ["ies.solver.highs@1.7.2"]
+    assert [e.ref for e in ctx.evaluator_registry.snapshot()] == ["ies.evaluator.finance@1.0.0"]
     assert len(ctx.generator_registry) == 1
     health = ctx.health()
     assert health["db"] == "ok"

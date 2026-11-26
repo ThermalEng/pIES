@@ -114,6 +114,14 @@ export function paginateItems<T>(
   }
 }
 
+/** 过滤出非 null、非数组的普通对象条目，防止历史或畸形负载中的 null/标量元素导致渲染崩溃。 */
+export function asObjectArray<T extends object>(value: unknown): T[] {
+  if (!Array.isArray(value)) return []
+  return value.filter(
+    (item): item is T => item !== null && typeof item === 'object' && !Array.isArray(item),
+  )
+}
+
 function toSeriesData(
   items: readonly (string | number | null | undefined)[],
 ): { values: (number | null)[]; rawValues: (string | null)[] } {
@@ -142,9 +150,9 @@ export function buildCashflowChartData(fin: FinancialEvaluationBlock): {
   bars: CategorySeries[]
   lines: CategorySeries[]
 } {
-  const rows = fin.evaluation.rows
+  const rows = asObjectArray<FinancialEvaluationBlock['evaluation']['rows'][number]>(fin?.evaluation?.rows)
   if (rows.length > 0) {
-    const categories = rows.map((r) => `t=${r.year}`)
+    const categories = rows.map((r) => `t=${r.year ?? '—'}`)
     const netData = toSeriesData(rows.map((r) => r.net))
     const discData = toSeriesData(rows.map((r) => r.discounted))
     const cumData = toSeriesData(rows.map((r) => r.cumulative))
@@ -184,9 +192,10 @@ export function buildCashflowChartData(fin: FinancialEvaluationBlock): {
       ],
     }
   }
-  if (fin.annual_net_flows.length > 0) {
-    const categories = fin.annual_net_flows.map((_, idx) => `t=${idx}`)
-    const netData = toSeriesData(fin.annual_net_flows)
+  const netFlows = Array.isArray(fin?.annual_net_flows) ? fin.annual_net_flows : []
+  if (netFlows.length > 0) {
+    const categories = netFlows.map((_, idx) => `t=${idx}`)
+    const netData = toSeriesData(netFlows)
     return {
       categories,
       bars: [
@@ -210,9 +219,9 @@ export function buildAnnualOperationChartData(fin: FinancialEvaluationBlock): {
   categories: string[]
   series: CategorySeries[]
 } {
-  const annual = fin.annual_operation
+  const annual = asObjectArray<FinancialEvaluationBlock['annual_operation'][number]>(fin?.annual_operation)
   if (annual.length === 0) return { categories: [], series: [] }
-  const categories = annual.map((a) => `t=${a.financial_year}`)
+  const categories = annual.map((a) => `t=${a.financial_year ?? '—'}`)
   return {
     categories,
     series: [
@@ -238,17 +247,25 @@ export function buildMonthlyDemandChartData(
   peakSeries: CategorySeries[]
   chargeSeries: CategorySeries[]
 } {
-  const all = fin.monthly_demand
+  const all = asObjectArray<FinancialEvaluationBlock['monthly_demand'][number]>(fin?.monthly_demand)
   if (all.length === 0) {
     return { billingIds: [], activeBillingId: null, peakUnit: '', categories: [], peakSeries: [], chargeSeries: [] }
   }
-  const billingIds = Array.from(new Set(all.map((r) => r.billing_id)))
+  const billingIds = Array.from(
+    new Set(all.map((r) => r.billing_id).filter((id): id is string => typeof id === 'string' && id.length > 0)),
+  )
   const activeBillingId =
-    preferredBindingId && billingIds.includes(preferredBindingId) ? preferredBindingId : billingIds[0]
-  const rows = all
-    .filter((r) => r.billing_id === activeBillingId)
-    .sort((a, b) => a.calendar_year - b.calendar_year || a.calendar_month - b.calendar_month)
-  const categories = rows.map((r) => `${r.calendar_year}-${String(r.calendar_month).padStart(2, '0')}`)
+    preferredBindingId && billingIds.includes(preferredBindingId) ? preferredBindingId : (billingIds[0] ?? null)
+  const rows =
+    activeBillingId !== null
+      ? all
+          .filter((r) => r.billing_id === activeBillingId)
+          .sort((a, b) => (a.calendar_year ?? 0) - (b.calendar_year ?? 0) || (a.calendar_month ?? 0) - (b.calendar_month ?? 0))
+      : []
+  const categories = rows.map(
+    (r) =>
+      `${r.calendar_year ?? '—'}-${r.calendar_month !== undefined && r.calendar_month !== null ? String(r.calendar_month).padStart(2, '0') : '—'}`,
+  )
   const peakUnit = rows[0]?.peak_unit ?? ''
   return {
     billingIds,
@@ -284,14 +301,19 @@ export function buildVatPoolChartData(
   categories: string[]
   series: CategorySeries[]
 } {
-  const vat = fin.tax_cash.vat
+  const vat = asObjectArray<FinancialEvaluationBlock['tax_cash']['vat'][number]>(fin?.tax_cash?.vat)
   if (vat.length === 0) {
     return { pools: [], activePool: null, categories: [], series: [] }
   }
-  const pools = Array.from(new Set(vat.map((r) => r.pool)))
-  const activePool = preferredPool && pools.includes(preferredPool) ? preferredPool : pools[0]
-  const rows = vat.filter((r) => r.pool === activePool).sort((a, b) => a.month - b.month)
-  const categories = rows.map((r) => `m=${r.month}`)
+  const pools = Array.from(
+    new Set(vat.map((r) => r.pool).filter((p): p is string => typeof p === 'string' && p.length > 0)),
+  )
+  const activePool = preferredPool && pools.includes(preferredPool) ? preferredPool : (pools[0] ?? null)
+  const rows =
+    activePool !== null
+      ? vat.filter((r) => r.pool === activePool).sort((a, b) => (a.month ?? 0) - (b.month ?? 0))
+      : []
+  const categories = rows.map((r) => `m=${r.month ?? '—'}`)
   return {
     pools,
     activePool,
@@ -315,14 +337,19 @@ export function buildIncomeTaxChartData(
   categories: string[]
   series: CategorySeries[]
 } {
-  const income = fin.tax_cash.income
+  const income = asObjectArray<FinancialEvaluationBlock['tax_cash']['income'][number]>(fin?.tax_cash?.income)
   if (income.length === 0) {
     return { rules: [], activeRule: null, categories: [], series: [] }
   }
-  const rules = Array.from(new Set(income.map((r) => r.rule)))
-  const activeRule = preferredRule && rules.includes(preferredRule) ? preferredRule : rules[0]
-  const rows = income.filter((r) => r.rule === activeRule).sort((a, b) => a.year - b.year)
-  const categories = rows.map((r) => `y=${r.year}`)
+  const rules = Array.from(
+    new Set(income.map((r) => r.rule).filter((r): r is string => typeof r === 'string' && r.length > 0)),
+  )
+  const activeRule = preferredRule && rules.includes(preferredRule) ? preferredRule : (rules[0] ?? null)
+  const rows =
+    activeRule !== null
+      ? income.filter((r) => r.rule === activeRule).sort((a, b) => (a.year ?? 0) - (b.year ?? 0))
+      : []
+  const categories = rows.map((r) => `y=${r.year ?? '—'}`)
   return {
     rules,
     activeRule,
@@ -337,9 +364,10 @@ export function buildIncomeTaxChartData(
 
 function depreciationSourceLabel(row: FinancialEvaluationBlock['tax_cash']['depreciation'][number]): string {
   const bf = row.base_from
-  if (bf.kind === 'upfront_capex_net') return `${row.rule}:${bf.finance_type}`
-  if (bf.kind === 'asset') return `${row.rule}:${bf.id}`
-  return `${row.rule}:y=${bf.year}#${bf.position}`
+  if (!bf || typeof bf !== 'object') return String(row.rule ?? '—')
+  if (bf.kind === 'upfront_capex_net') return `${row.rule ?? '—'}:${bf.finance_type ?? '—'}`
+  if (bf.kind === 'asset') return `${row.rule ?? '—'}:${bf.id ?? '—'}`
+  return `${row.rule ?? '—'}:y=${bf.year ?? '—'}#${bf.position ?? '—'}`
 }
 
 /** 构造计税折旧按身份分组的逐年柱状图数据（不跨资产或跨规则求和）。 */
@@ -347,7 +375,9 @@ export function buildDepreciationChartData(fin: FinancialEvaluationBlock): {
   categories: string[]
   series: CategorySeries[]
 } {
-  const dep = fin.tax_cash.depreciation
+  const dep = asObjectArray<FinancialEvaluationBlock['tax_cash']['depreciation'][number]>(
+    fin?.tax_cash?.depreciation,
+  ).filter((r) => typeof r.year === 'number')
   if (dep.length === 0) return { categories: [], series: [] }
   const years = Array.from(new Set(dep.map((r) => r.year))).sort((a, b) => a - b)
   const categories = years.map((y) => `y=${y}`)
@@ -382,16 +412,17 @@ export function buildComparisonChartData(fin: FinancialEvaluationBlock): {
   categories: string[]
   series: CategorySeries[]
 } {
-  if (fin.comparison.mode !== 'difference') return { categories: [], series: [] }
-  const len = fin.annual_net_flows.length
+  if (fin?.comparison?.mode !== 'difference') return { categories: [], series: [] }
+  const netFlows = Array.isArray(fin.annual_net_flows) ? fin.annual_net_flows : []
+  const len = netFlows.length
   if (len === 0) return { categories: [], series: [] }
   const categories = Array.from({ length: len }, (_, i) => `t=${i}`)
   return {
     categories,
     series: [
-      { key: 'candidate', label: 'candidate', color: 'var(--ies-primary)', ...toSeriesData(fin.annual_net_flows) },
-      { key: 'baseline', label: 'baseline', color: 'var(--ies-neutral)', dashed: true, ...toSeriesData(fin.comparison.baseline_net_flows) },
-      { key: 'difference', label: 'difference', color: 'var(--ies-success)', ...toSeriesData(fin.comparison.evaluation_net_flows) },
+      { key: 'candidate', label: 'candidate', color: 'var(--ies-primary)', ...toSeriesData(netFlows) },
+      { key: 'baseline', label: 'baseline', color: 'var(--ies-neutral)', dashed: true, ...toSeriesData(Array.isArray(fin.comparison.baseline_net_flows) ? fin.comparison.baseline_net_flows : []) },
+      { key: 'difference', label: 'difference', color: 'var(--ies-success)', ...toSeriesData(Array.isArray(fin.comparison.evaluation_net_flows) ? fin.comparison.evaluation_net_flows : []) },
     ],
   }
 }
@@ -401,21 +432,25 @@ export function buildAssetBookValueChartData(fin: FinancialEvaluationBlock): {
   categories: string[]
   series: CategorySeries[]
 } {
-  const assets = fin.assets
+  const assets = asObjectArray<FinancialEvaluationBlock['assets'][number]>(fin?.assets)
   if (assets.length === 0) return { categories: [], series: [] }
   const yearsSet = new Set<number>()
   for (const asset of assets) {
-    for (const bv of asset.book_values) yearsSet.add(bv.year)
+    for (const bv of asObjectArray<FinancialEvaluationBlock['assets'][number]['book_values'][number]>(asset.book_values)) {
+      if (typeof bv.year === 'number') yearsSet.add(bv.year)
+    }
   }
   const years = Array.from(yearsSet).sort((a, b) => a - b)
   if (years.length === 0) return { categories: [], series: [] }
   const categories = years.map((yr) => `y=${yr}`)
   const series: CategorySeries[] = assets.map((asset, idx) => {
-    const byYear = new Map(asset.book_values.map((bv) => [bv.year, bv.value]))
+    const validBv = asObjectArray<FinancialEvaluationBlock['assets'][number]['book_values'][number]>(asset.book_values)
+    const byYear = new Map(validBv.filter((bv) => typeof bv.year === 'number').map((bv) => [bv.year, bv.value]))
     const rawValues = years.map((yr) => byYear.get(yr) ?? null)
+    const label = asset.id ?? `#${idx}`
     return {
-      key: asset.id,
-      label: asset.id,
+      key: label,
+      label,
       color: CHART_COLORS[idx % CHART_COLORS.length],
       values: rawValues.map((v) => parseChartNumber(v)),
       rawValues,
@@ -433,9 +468,11 @@ export interface NamedAmountChartGroup {
 
 /** 按 (axis, unit) 分组构造命名金额可视化图数据，绝不跨单位或跨轴混算。 */
 export function buildNamedAmountChartGroups(amounts: readonly FinancialNamedAmount[]): NamedAmountChartGroup[] {
-  if (amounts.length === 0) return []
+  const validAmounts = asObjectArray<FinancialNamedAmount>(amounts)
+  if (validAmounts.length === 0) return []
   const byGroup = new Map<string, { axis: FinancialNamedAmount['axis']; unit: string; list: FinancialNamedAmount[] }>()
-  for (const a of amounts) {
+  for (const a of validAmounts) {
+    if (!a.axis || typeof a.unit !== 'string') continue
     const key = `${a.axis}\0${a.unit}`
     let g = byGroup.get(key)
     if (!g) {
@@ -447,8 +484,11 @@ export function buildNamedAmountChartGroups(amounts: readonly FinancialNamedAmou
   const groups: NamedAmountChartGroup[] = []
   for (const { axis, unit, list } of byGroup.values()) {
     if (axis === 'scalar') {
-      const categories = list.map((a) => a.id)
-      const rawValues = list.map((a) => a.values[0]?.value ?? null)
+      const categories = list.map((a, idx) => a.id ?? `#${idx}`)
+      const rawValues = list.map((a) => {
+        const vals = asObjectArray<FinancialNamedAmount['values'][number]>(a.values)
+        return vals[0]?.value ?? null
+      })
       groups.push({
         axis,
         unit,
@@ -465,15 +505,25 @@ export function buildNamedAmountChartGroups(amounts: readonly FinancialNamedAmou
       })
     } else {
       const prefix = axis === 'financial_year' ? 'y=' : 'm='
-      const periods = Array.from(new Set(list.flatMap((a) => a.values.map((v) => v.period)))).sort((a, b) => a - b)
+      const periods = Array.from(
+        new Set(
+          list.flatMap((a) =>
+            asObjectArray<FinancialNamedAmount['values'][number]>(a.values)
+              .map((v) => v.period)
+              .filter((p): p is number => typeof p === 'number'),
+          ),
+        ),
+      ).sort((a, b) => a - b)
       if (periods.length === 0) continue
       const categories = periods.map((p) => `${prefix}${p}`)
       const series: CategorySeries[] = list.map((a, idx) => {
-        const byPeriod = new Map(a.values.map((v) => [v.period, v.value]))
+        const vals = asObjectArray<FinancialNamedAmount['values'][number]>(a.values)
+        const byPeriod = new Map(vals.filter((v) => typeof v.period === 'number').map((v) => [v.period, v.value]))
         const rawValues = periods.map((p) => byPeriod.get(p) ?? null)
+        const label = a.id ?? `#${idx}`
         return {
-          key: a.id,
-          label: a.id,
+          key: label,
+          label,
           color: CHART_COLORS[idx % CHART_COLORS.length],
           values: rawValues.map((v) => parseChartNumber(v)),
           rawValues,
@@ -498,13 +548,15 @@ export function buildCostItemChartGroups(
   costItems: readonly FinancialCostItem[],
   maxBars = 30,
 ): CostItemChartGroup[] {
-  if (costItems.length === 0) return []
+  const validCostItems = asObjectArray<FinancialCostItem>(costItems)
+  if (validCostItems.length === 0) return []
   const byUnit = new Map<string, FinancialCostItem[]>()
-  for (const item of costItems) {
-    let arr = byUnit.get(item.unit)
+  for (const item of validCostItems) {
+    const unit = item.unit ?? ''
+    let arr = byUnit.get(unit)
     if (!arr) {
       arr = []
-      byUnit.set(item.unit, arr)
+      byUnit.set(unit, arr)
     }
     arr.push(item)
   }
@@ -512,7 +564,9 @@ export function buildCostItemChartGroups(
   for (const [unit, items] of byUnit.entries()) {
     const truncated = items.length > maxBars
     const visible = items.slice(0, maxBars)
-    const categories = visible.map((it) => `${it.instance_id}.${it.item_id}${it.axis === 'scalar' ? '' : `(${it.period})`}`)
+    const categories = visible.map(
+      (it) => `${it.instance_id ?? '—'}.${it.item_id ?? '—'}${it.axis === 'scalar' || it.axis === undefined ? '' : `(${it.period ?? '—'})`}`,
+    )
     out.push({
       unit,
       totalCount: items.length,

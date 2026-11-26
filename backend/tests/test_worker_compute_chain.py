@@ -245,7 +245,11 @@ def _submit_tax_calc_task(client: TestClient, db: Session) -> int:
     """含税则项目 → 保存配置 → 真实提交，返回 task_id（期望 201）。"""
     user = make_user(db, "chain_tax_owner")
     pid = _prepare_tax_loop(client, db, user)
-    rev = _save_config_body(client, pid, user, dict(_CONFIG_BODY))
+    cfg_body = {
+        **dict(_CONFIG_BODY),
+        "evaluators": [{"evaluator": "ies.evaluator.finance@1.0.0", "parameters": {}}],
+    }
+    rev = _save_config_body(client, pid, user, cfg_body)
     status, body = _submit_task(
         client, pid, user, config={"config_revision": rev}, idempotency_key="chain-tax-1"
     )
@@ -375,7 +379,7 @@ class TestComputeChainEndToEnd:
         claim = _claim(db, task_id)
         original_generate = worker_app.generate_bundle
         original_execute = worker_app.execute_saved_bundle
-        original_adapt = worker_app.adapt_result
+        original_restore = worker_app.restore_core_solution
         calls = {"generate": 0, "execute": 0, "adapt": 0}
         expected = []
         crashed = False
@@ -394,7 +398,7 @@ class TestComputeChainEndToEnd:
             calls["execute"] += 1
             return original_execute(**kwargs)
 
-        def adapt(*args, **kwargs):
+        def restore(*args, **kwargs):
             nonlocal crashed
             calls["adapt"] += 1
             if stage == "resource" and not crashed:
@@ -403,8 +407,8 @@ class TestComputeChainEndToEnd:
             if stage == "executed" and not crashed:
                 crashed = True
                 raise SystemExit("simulated worker exit before adaptation")
-            result = original_adapt(*args, **kwargs)
-            expected.append(result.to_dict())
+            result = original_restore(*args, **kwargs)
+            expected.append(result["compute_result"].to_dict())
             if stage == "adapted" and not crashed:
                 crashed = True
                 raise SystemExit("simulated worker exit after adaptation")
@@ -412,7 +416,7 @@ class TestComputeChainEndToEnd:
 
         monkeypatch.setattr(worker_app, "generate_bundle", generate)
         monkeypatch.setattr(worker_app, "execute_saved_bundle", execute)
-        monkeypatch.setattr(worker_app, "adapt_result", adapt)
+        monkeypatch.setattr(worker_app, "restore_core_solution", restore)
         if stage == "resource":
             assert streaming_run(claim) == "failed"
             assert worker_app.get_task_record(db, task_id).attempt_count == 1
@@ -498,8 +502,10 @@ class TestComputeChainEndToEnd:
         assert sealed["bundle_manifest"]["bundle"]["generator"] == ("ies.generator.highs_milp@1.0.0")
         snapshot = worker_app.get_snapshot_record(db, task.calc_snapshot_id)
         assert snapshot is not None
-        args = sealed["bundle_manifest"]["command"]["arguments"]
-        assert str(snapshot.random_seed) in [str(a) for a in args]
+        assert sealed["bundle_manifest"]["bundle"] == {
+            "generator": "ies.generator.highs_milp@1.0.0",
+            "contract": "ies.solver-bundle.mps@1.0.0",
+        }
         assert sealed["receipt"]["executor_ref"] == snapshot.executor
         assert sealed["receipt"]["result_adapter_ref"] == snapshot.result_adapter
         assert sealed["receipt"]["bundle_id"] == f"snapshot-{snapshot.id}:attempt-{claim.attempt_id}"
@@ -507,25 +513,20 @@ class TestComputeChainEndToEnd:
         assert sealed["receipt"]["calculation_config_id"].startswith("project-")
 
         solution = sealed["solution"]
-        assert set(solution) == {"output/solution.sol"}
-        entry = solution["output/solution.sol"]
+        assert set(solution) == {"output/primal_solution.json"}
+        entry = solution["output/primal_solution.json"]
         raw = get_object(db, entry["object_id"])
-        assert raw.startswith(b"HIGHS_SOLUTION_V1")
+        primal = json.loads(raw.decode("utf-8"))
+        assert primal["schema"] == "ies.primal-solution"
         assert entry["size_bytes"] == len(raw)
         for _path, descriptor in sorted(sealed["bundle_files"].items()):
             assert get_object(db, descriptor["object_id"]) is not None
 
     def test_tax_task_completes_with_sealed_financial_evaluation(
-        self, client: TestClient, db: Session, engine: Engine, plane, monkeypatch
+        self, client: TestClient, db: Session, engine: Engine, plane
     ) -> None:
         """含税则闭环(C3)：提交 201 → 真实求解 → 封存容器产出的 financial_evaluation。"""
-        monkeypatch.setattr(
-            worker_app,
-            "build_financial_evaluation",
-            lambda *_args, **_kwargs: (_ for _ in ()).throw(
-                AssertionError("financial evaluation must run in evaluator container, not backend")
-            ),
-        )
+        assert not hasattr(worker_app, "build_financial_evaluation")
         task_id = _submit_tax_calc_task(client, db)
         claim = _claim(db, task_id)
         assert _run(engine, claim, plane) == "completed"
@@ -535,7 +536,7 @@ class TestComputeChainEndToEnd:
         assert task.business_outcome == "normal_completion"
         snapshot = worker_app.get_snapshot_record(db, task.calc_snapshot_id)
         assert snapshot is not None
-        assert snapshot.result_adapter == "ies.result-adapter.highs@1.0.0"
+        assert snapshot.result_adapter == "ies.backend.result_adapter@1.0.0"
 
         evidence = results_store.latest_evidence_for_task(db, task_id)
         assert evidence is not None
@@ -585,7 +586,7 @@ class TestComputeChainEndToEnd:
         )
         assert len(fin["annual_net_flows"]) == 2
         # 评价 NPV 与同次解目标值同源一致（同一模型现金表达式）。
-        objective = sealed["compute_result"]["outputs"]["solution"]["objective_value"]
+        objective = sealed["compute_result"]["outputs"]["solver_summary"]["objective_value"]
         assert float(fin["evaluation"]["npv"]) == pytest.approx(float(objective), rel=1e-6)
 
     def test_prediction_required_fails_with_clear_reason(
@@ -631,7 +632,7 @@ class TestComputeChainEndToEnd:
             tuple(
                 BuiltinStageDescriptor(
                     plugin_id=d.plugin_id,
-                    version="0.0.0" if d.kind == "evaluator" else d.version,
+                    version="0.0.0" if d.kind == "solver" else d.version,
                     kind=d.kind,
                     image=d.image,
                     entrypoint=d.entrypoint,
@@ -645,12 +646,14 @@ class TestComputeChainEndToEnd:
             predictor_registry=plane.predictor_registry,
             stage_runner=plane.stage_runner,
             stage_catalog=mismatched_catalog,
+            solver_registry=plane.solver_registry,
+            evaluator_registry=plane.evaluator_registry,
         )
         assert _run(engine, claim, mismatched_plane) == "failed"
         diagnostics = (
             db.execute(select(TaskDiagnostic).where(TaskDiagnostic.task_id == task_id)).scalars().all()
         )
-        assert any("ies.result-adapter.highs@1.0.0" in (d.message or "") for d in diagnostics)
+        assert any("ies.solver.highs@1.7.2" in (d.message or "") for d in diagnostics)
 
     def test_fenced_receipt_abandons_without_cancel(
         self, client: TestClient, db: Session, engine: Engine, plane
@@ -814,12 +817,12 @@ class TestSingleUnitSeal:
             for d in decls
         }
         assert all(len(v) == ref["rows"] for v in hourly["data"].values())
-        varmap = {
-            v["name"]: v["value"]
-            for v in sealed["compute_result"]["outputs"]["solution"]["variables"]
-        }
+        eng_sol = json.loads(
+            get_object(db, sealed["engineering_solution"]["solution.json"]["object_id"]).decode("utf-8")
+        )
+        all_series = {**(eng_sol.get("series") or {}), **(eng_sol.get("system_series") or {})}
         for d in decls:
-            assert hourly["data"][d["series_id"]] == [varmap[c] for c in d["columns"]]
+            assert hourly["data"][d["series_id"]] == all_series[d["series_id"]]["values"]
         assert any(len(set(v)) > 1 for v in hourly["data"].values()), "应有非常恒真实序列"
         attached = list_refs(db, ref["object_id"])
         assert any(
@@ -937,17 +940,15 @@ class _ControlledGenerator:
                     raise ComputationUnavailableError("受控生成停止", reason=reason)
                 time.sleep(0.01)
         manifest = SolverBundleManifest(
-            bundle={"generator": self.ref, "solver": config.solver},
+            bundle={"generator": self.ref, "contract": "ies.solver-bundle.mps@1.0.0"},
             inputs=[{"path": "input/probe", "media_type": "text/plain"}],
-            command={
-                "executor": "ies.executor.local_process@1.0.0",
-                "executable": "test.solver.probe@1.0.0",
-                "arguments": [str(Path(__file__).with_name("local_exec_probe.py")), "sleep", "10"],
-                "timeout_seconds": self.timeout,
-                "network": False,
-            },
-            outputs=[{"path": "output/solution", "media_type": "text/plain", "required": True}],
-            result_adapter="ies.result-adapter.highs@1.0.0",
+            outputs=[
+                {
+                    "path": "output/primal_solution.json",
+                    "media_type": "application/json",
+                    "required": True,
+                }
+            ],
         )
         return SolverBundle(manifest=manifest, files={"input/probe": b"synthetic"})
 
@@ -956,6 +957,8 @@ class _ControlledGenerator:
 
 def _controlled_plane(plane, mode: str, started: threading.Event, timeout: float):
     """通过真实 ContainerStageRunner + MockJobRunnerBackend 控制阶段启动与超时。"""
+    import sys
+
     from stage_testkit import build_test_compute_plane, build_test_stage_catalog
 
     from iesplan.computation import GeneratorRegistry  # noqa: E402
@@ -971,7 +974,7 @@ def _controlled_plane(plane, mode: str, started: threading.Event, timeout: float
         plugin_id="test.solver.probe",
         version="1.0.0",
         kind="solver",
-        image="pies-builtin-stages:1.1.5",
+        image="pies-builtin-stages:1.2.0",
         entrypoint="probe:solve",
     )
     catalog = build_test_stage_catalog(
@@ -985,24 +988,46 @@ def _controlled_plane(plane, mode: str, started: threading.Event, timeout: float
         if mode == "solve" and str(body["stage_id"]).startswith("solve"):
             started.set()
 
+    solver_argv = (
+        [
+            sys.executable,
+            str(Path(__file__).with_name("local_exec_probe.py")),
+            "sleep",
+            "18" if timeout < 5.0 else str(timeout),
+        ]
+        if mode == "solve"
+        else None
+    )
     controlled = build_test_compute_plane(
         plane.stage_runner.stage_root,
         generator_registry=gen_reg,
         predictor_registry=plane.predictor_registry,
         stage_catalog=catalog,
+        solver_argv_override=solver_argv,
         policy=ContainerStagePolicy(
-            builtin_image="pies-builtin-stages:1.1.5",
+            builtin_image="pies-builtin-stages:1.2.0",
             cpu_cores=1.0,
             memory_mb=128,
             pids_limit=64,
             tmpfs_size_mb=64,
             stop_grace_seconds=1,
-            max_timeout_seconds=20.0,
+            max_timeout_seconds=1800.0,
             allowed_environment_vars=(),
         ),
         poll_interval=0.01,
         on_start=on_start,
     )
+    if mode == "solve" and timeout < 5.0:
+        import dataclasses
+
+        orig_run_stage = controlled.stage_runner.run_stage
+
+        def short_timeout_run_stage(spec, **kwargs):
+            if str(spec.stage_id).startswith("solve"):
+                spec = dataclasses.replace(spec, timeout_seconds=timeout)
+            return orig_run_stage(spec, **kwargs)
+
+        controlled.stage_runner.run_stage = short_timeout_run_stage  # type: ignore[method-assign]
     orig_stop = controlled.stage_runner.client.stop_stage
 
     def tracked_stop(stage_execution_id: str, **kwargs: Any):
@@ -1194,7 +1219,10 @@ def test_step_relation_real_task_freezes_ports_and_survives_later_draft(
     sealed = json.loads(sealed_bytes.decode("utf-8"))
     result = sealed["compute_result"]
     assert result["math_status"] == "solved"
-    sources = result["outputs"]["model_sources"]
+    eng_sol = json.loads(
+        get_object(db, sealed["engineering_solution"]["solution.json"]["object_id"]).decode("utf-8")
+    )
+    sources = eng_sol["model_sources"]
     from bundle_testkit import stored_parameters
     params = stored_parameters(db, sealed["bundle_files"])
     assert params["model_sources"] == sources
@@ -1210,7 +1238,7 @@ def test_step_relation_real_task_freezes_ports_and_survives_later_draft(
     assert sealed["bundle_manifest"]["bundle"]["generator"] == "ies.generator.highs_milp@1.0.0"
     # Port series is restored from the precise same MPS columns, not rewritten
     # after solve. Immutable sealed series remains attached to the old task.
-    series = result["outputs"]["series"]["bat1.electricity"]
+    series = eng_sol["series"]["bat1.electricity"]
     assert series["unit"] == "kW"
     assert len(series["values"]) > 0
     assert all(abs(value) <= 1e-5 for value in series["values"])
@@ -1261,3 +1289,63 @@ def test_unbounded_declared_capacity_uses_proven_technical_bounds(
     )
     assert response.status_code == 200, response.text
     assert response.json()["task"]["status"] == "completed"
+
+
+def test_standalone_planning_variables_flow_to_task_solution_and_finance(
+    client: TestClient, db: Session, engine: Engine, plane,
+):
+    """Standalone planning.variables without construction_units populate EngineeringSolution & task API."""
+    user = make_user(db, "standalone_pvar_owner")
+    pid = _prepare_with_planning(client, db, user, PLANNING_BODY)
+    revision = _save_config_body(
+        client,
+        pid,
+        user,
+        {
+            **dict(_CONFIG_BODY),
+            "evaluators": [{"evaluator": "ies.evaluator.finance@1.0.0", "parameters": {}}],
+        },
+    )
+    status, body = _submit_task(
+        client, pid, user, config={"config_revision": revision},
+        idempotency_key="standalone-pvar-task",
+    )
+    assert status == 201, body
+    task_id = int(body["task"]["id"])
+    claim = _claim(db, task_id)
+    assert _run(engine, claim, plane) == "completed"
+
+    evidence = results_store.latest_evidence_for_task(db, task_id)
+    assert evidence is not None
+    sealed = json.loads(get_object(db, evidence.object_id).decode("utf-8"))
+    eng_sol = json.loads(
+        get_object(db, sealed["engineering_solution"]["solution.json"]["object_id"]).decode("utf-8")
+    )
+    assert eng_sol["construction_units"] == []
+    assert [entry["planning_variable_id"] for entry in eng_sol["planning_variables"]] == ["cap"]
+    assert sealed["compute_result"]["outputs"]["solution"]["variables"] == [
+        {"name": "cap", "value": eng_sol["planning_variables"][0]["value"], "unit": "kW"}
+    ]
+    fin = sealed["financial_evaluation"]
+    assert fin["construction_units"] == []
+
+    response = client.get(
+        f"/api/projects/{pid}/tasks/{task_id}", headers=_h(client, user),
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["task"]["status"] == "completed"
+
+    result_res = client.get(
+        f"/api/projects/{pid}/tasks/{task_id}/result", headers=_h(client, user),
+    )
+    assert result_res.status_code == 200, result_res.text
+    result_json = result_res.json()["result"]
+    assert result_json["financial_evaluation"]["construction_units"] == []
+    planning_sol = result_json["planning_solution"]
+    assert planning_sol is not None
+    assert [(p["variable"], p["device_ref"], p["parameter"], p["unit"]) for p in planning_sol["params"]] == [
+        ("cap", "bat1", "rated_power_kw", "kW")
+    ]
+    assert planning_sol["params"][0]["value"] == pytest.approx(
+        eng_sol["planning_variables"][0]["value"]
+    )

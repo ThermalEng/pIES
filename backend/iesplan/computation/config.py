@@ -1,9 +1,9 @@
-"""CalculationConfig 公开契约入口与统一能力/选项校验边界。
+"""CalculationConfig 公开契约入口、阶段能力门禁与原子注册表。
 
 提供：
-- 配置 schema 文件加载与“schema 校验 → 不可变 14 字段载体”构造；
-- ``GeneratorDescriptor`` 与一体化 ``AlgorithmDescriptor`` 共用的静态能力与选项校验；
-- 一体化 ``algorithm`` 描述符与原子注册表（``AlgorithmRegistry``）。
+- 13 字段 CalculationConfig schema 加载、校验与严格 JSON 解析；
+- 统一 options/parameters schema 与阶段兼容门禁；
+- ``SolverRegistry``、``EvaluatorRegistry``、``AlgorithmRegistry`` 原子注册表。
 """
 
 from __future__ import annotations
@@ -14,137 +14,106 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
 
-from jsonschema import Draft202012Validator
-from jsonschema.exceptions import SchemaError
-
+from iesplan.computation.contracts.common import (
+    check_finite_json,
+    check_parameters_against_schema,
+    validate_against_schema,
+    validate_parameters_schema,
+)
+from iesplan.computation.contracts.compatibility import StagePluginSpec
 from iesplan.computation.errors import ComputationUnavailableError
 from iesplan.computation.protocols import (
     CalculationConfig,
     check_provider_ref,
-    freeze_json_value,
     thaw_json_value,
 )
 
-SCHEMA_PATH = (
-    pathlib.Path(__file__).parent / "schema" / "calculation-config-1.0.0.schema.json"
-)
+SCHEMA_PATH = pathlib.Path(__file__).parent / "schema" / "calculation-config-1.0.0.schema.json"
 
 
 def load_calculation_config_schema() -> dict[str, Any]:
-    """加载发布的计算配置 JSON Schema（包内资源，随包发布）。"""
+    """加载发布的 13 字段计算配置 JSON Schema（包内资源，随包发布）。"""
     return json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
 
 
 def validate_calculation_config(data: Mapping[str, Any]) -> CalculationConfig:
-    """校验计算配置映射并构造不可变载体。
-
-    依次执行：JSON Schema 校验（未知字段与模式互斥即拒绝）→ frozen
-    ``CalculationConfig`` 构造（含领域规则：引用形态、精度枚举、
-    目标去重、收敛正值、输出非空）。``to_dict`` 输出即规范字段顺序。
-    """
+    """校验 13 字段计算配置映射并构造不可变载体。"""
     if not isinstance(data, Mapping):
         raise TypeError(f"计算配置须为 Mapping，得到 {type(data).__name__}")
-    schema = load_calculation_config_schema()
-    validator = Draft202012Validator(schema)
-    errors = list(validator.iter_errors(dict(data)))
-    if errors:
-        first = errors[0]
-        location = "/".join(str(p) for p in first.absolute_path)
-        raise ValueError(f"计算配置契约校验失败[{location or '<root>'}]: {first.message}")
-    return CalculationConfig(**dict(data))
+    raw = dict(data)
+    check_finite_json(raw, "calculation_config")
+    validate_against_schema(
+        load_calculation_config_schema(),
+        raw,
+        error_prefix="计算配置契约校验失败",
+    )
+    return CalculationConfig(**raw)
+
+
+def _reject_non_finite_constant(token: str) -> Any:
+    raise ValueError(f"计算配置 JSON 禁止非有限常量: {token!r}")
+
+
+def parse_calculation_config_json(raw: str | bytes) -> CalculationConfig:
+    """严格解析并校验 JSON 文本为 13 字段 ``CalculationConfig``。"""
+    loaded = json.loads(raw, parse_constant=_reject_non_finite_constant)
+    if not isinstance(loaded, Mapping):
+        raise TypeError(f"计算配置 JSON 根节点须为 object，得到 {type(loaded).__name__}")
+    return validate_calculation_config(loaded)
 
 
 def validate_options_schema(
     schema: object, field_name: str = "options_schema"
 ) -> Mapping[str, object]:
-    """校验选项/参数 Schema 为完整 Draft 2020-12 JSON Schema 对象。
-
-    根 schema 必须描述 object，且 ``additionalProperties`` 必须显式为 ``false``。
-    """
-    if not isinstance(schema, Mapping):
-        raise TypeError(
-            f"{field_name} 须为完整 JSON Schema 对象，得到 {type(schema).__name__}"
-        )
-    if schema.get("type") != "object":
-        raise ValueError(f"{field_name} 根 schema 必须描述 object")
-    if schema.get("additionalProperties") is not False:
-        raise ValueError(f"{field_name} 必须显式声明 additionalProperties: false")
-    try:
-        Draft202012Validator.check_schema(dict(schema))
-    except SchemaError as exc:
-        raise ValueError(f"{field_name} 自身非法: {exc}") from exc
-    return freeze_json_value(dict(schema))
+    """校验选项/参数 Schema 为完整 Draft 2020-12 JSON Schema 对象。"""
+    return validate_parameters_schema(schema, field_name)
 
 
 def check_descriptor_options(descriptor: Any, config: CalculationConfig) -> None:
-    """按生成器 ``options_schema`` 或一体化算法 ``parameters_schema`` 校验 ``config.options``。
-
-    非法选项属于用户计算配置错误，抛明确 ``ValueError``（字段路径与原因），
-    不回退其他 provider、不删字段、不补默认。
-    """
+    """按生成器 ``options_schema`` 或一体化算法 ``parameters_schema`` 校验分槽 options。"""
     raw_schema = getattr(descriptor, "options_schema", None)
+    slot = "generator"
     if raw_schema is None:
         raw_schema = getattr(descriptor, "parameters_schema", None)
+        slot = "algorithm"
     if raw_schema is None:
         raise TypeError(
             f"描述符 {getattr(descriptor, 'ref', descriptor)!r} 缺少 options_schema/parameters_schema"
         )
-    schema = thaw_json_value(raw_schema)
-    options = thaw_json_value(config.options)
-    validator = Draft202012Validator(schema)
-    errors = list(validator.iter_errors(options))
-    if errors:
-        first = errors[0]
-        location = "/".join(str(p) for p in first.absolute_path)
-        raise ValueError(
-            f"计算选项非法[{location or '<root>'}]: {first.message}"
-        )
+    check_parameters_against_schema(
+        raw_schema,
+        config.slot_options(slot),
+        location_label=f"options/{slot}",
+    )
 
 
 def validate_config_capabilities(
     descriptor: Any,
     config: CalculationConfig,
     *,
-    ref_label: str = "计算能力",
+    ref_label: str,
 ) -> None:
-    """统一校验 ``CalculationConfig`` 与生成器/一体化算法描述符的能力兼容性及选项。"""
-    ref = getattr(descriptor, "ref", None) or (
-        config.algorithm if config.algorithm is not None else config.generator
-    )
+    """核对 CalculationConfig 与单个核心插件 descriptor 的能力、模式与分槽选项。"""
+    ref = descriptor.ref
     if config.mode not in descriptor.modes:
         raise ComputationUnavailableError(
-            f"{ref_label}不支持所选 mode: {ref!r} x {config.mode!r}",
+            f"{ref_label}不支持所选计算模式: {ref!r} x {config.mode!r}",
             reason="incompatible-mode",
         )
     if config.precision not in descriptor.precisions:
         raise ComputationUnavailableError(
-            f"{ref_label}不支持所选精度: {ref!r} x {config.precision!r}",
+            f"{ref_label}不支持所选计算精度: {ref!r} x {config.precision!r}",
             reason="incompatible-precision",
         )
-    if config.solver is not None:
-        supports_solver = getattr(descriptor, "supports_solver", None)
-        solver_ok = (
-            supports_solver(config.solver)
-            if callable(supports_solver)
-            else config.solver in getattr(descriptor, "solvers", ())
-        )
-        if not solver_ok:
-            raise ComputationUnavailableError(
-                f"{ref_label}不兼容所选求解器: {ref!r} x {config.solver!r}",
-                reason="incompatible-solver",
-            )
-    if config.evaluator is not None:
-        supports_evaluator = getattr(descriptor, "supports_evaluator", None)
-        if callable(supports_evaluator):
-            evaluator_ok = supports_evaluator(config.evaluator)
-        else:
-            declared_evaluators = getattr(descriptor, "evaluators", ())
-            evaluator_ok = config.evaluator in (declared_evaluators or ())
-        if not evaluator_ok:
-            raise ComputationUnavailableError(
-                f"{ref_label}不兼容所选评价器: {ref!r} x {config.evaluator!r}",
-                reason="incompatible-evaluator",
-            )
+    declared_evaluators = tuple(getattr(descriptor, "evaluators", ()) or ())
+    if declared_evaluators:
+        for ev in config.evaluators:
+            ev_ref = str(ev["evaluator"])
+            if ev_ref not in declared_evaluators:
+                raise ComputationUnavailableError(
+                    f"{ref_label}不兼容所选评价器: {ref!r} x {ev_ref!r}",
+                    reason="incompatible-evaluator",
+                )
     unsupported_outputs = tuple(
         name for name in config.outputs if name not in descriptor.outputs
     )
@@ -154,6 +123,246 @@ def validate_config_capabilities(
             reason="incompatible-outputs",
         )
     check_descriptor_options(descriptor, config)
+
+
+class _BaseStageSpecRegistry:
+    """不可变插件契约原子注册表基类（无全局状态）。"""
+
+    __slots__ = ("_specs",)
+    _kind: str = ""
+    _label: str = ""
+    _collection_key: str = "plugins"
+
+    def __init__(self, specs: Mapping[str, StagePluginSpec]) -> None:
+        self._specs = dict(specs)
+
+    def __len__(self) -> int:
+        return len(self._specs)
+
+    def snapshot(self) -> tuple[StagePluginSpec, ...]:
+        """确定性快照（按精确引用排序）。"""
+        return tuple(self._specs[key] for key in sorted(self._specs))
+
+    def get(self, ref: str) -> StagePluginSpec:
+        """按精确引用取插件契约；未知引用即明确不可用。"""
+        try:
+            return self._specs[ref]
+        except KeyError:
+            raise ComputationUnavailableError(
+                f"{self._label}不可用（未注册）: {ref!r}", reason="no-provider"
+            ) from None
+
+    def as_mapping(self) -> dict[str, StagePluginSpec]:
+        """返回引用到 StagePluginSpec 的只读映射副本。"""
+        return dict(self._specs)
+
+    def to_dict(self) -> dict[str, Any]:
+        """序列化为 JSON 兼容独立副本。"""
+        return {
+            self._collection_key: [
+                {
+                    "ref": spec.ref,
+                    "plugin_id": spec.plugin_id,
+                    "version": spec.version,
+                    "kind": spec.kind,
+                    "consumes": list(spec.consumes),
+                    "produces": list(spec.produces),
+                    "modes": list(spec.modes),
+                    "precisions": list(spec.precisions),
+                    "outputs": list(spec.outputs),
+                    "parameters_schema": thaw_json_value(spec.parameters_schema),
+                }
+                for spec in self.snapshot()
+            ]
+        }
+
+
+class SolverRegistry(_BaseStageSpecRegistry):
+    """已发布的求解器目录（按精确引用排序，实例级持有）。"""
+
+    _kind = "solver"
+    _label = "求解器"
+    _collection_key = "solvers"
+
+    def resolve(self, config: CalculationConfig) -> StagePluginSpec:
+        if config.solver is None:
+            raise ValueError("求解器目录不接受一体化算法配置(solver 为 None)")
+        spec = self.get(config.solver)
+        check_parameters_against_schema(
+            spec.parameters_schema,
+            config.slot_options("solver"),
+            location_label="options/solver",
+        )
+        return spec
+
+
+class EvaluatorRegistry(_BaseStageSpecRegistry):
+    """已发布的后置评价器目录（按精确引用排序，实例级持有）。"""
+
+    _kind = "evaluator"
+    _label = "评价器"
+    _collection_key = "evaluators"
+
+    def resolve_all(self, config: CalculationConfig) -> tuple[StagePluginSpec, ...]:
+        resolved: list[StagePluginSpec] = []
+        for idx, entry in enumerate(config.evaluators):
+            spec = self.get(str(entry["evaluator"]))
+            check_parameters_against_schema(
+                spec.parameters_schema,
+                entry["parameters"],  # type: ignore[arg-type]
+                location_label=f"evaluators/{idx}/parameters",
+            )
+            resolved.append(spec)
+        return tuple(resolved)
+
+
+def _build_stage_registry(
+    candidates: Iterable[StagePluginSpec],
+    *,
+    registry_cls: type[_BaseStageSpecRegistry],
+) -> Any:
+    specs: dict[str, StagePluginSpec] = {}
+    for candidate in candidates:
+        if not isinstance(candidate, StagePluginSpec):
+            raise TypeError(
+                f"{registry_cls._label}候选须为 StagePluginSpec，得到 {type(candidate).__name__}"
+            )
+        if candidate.kind != registry_cls._kind:
+            raise ValueError(
+                f"{registry_cls._label}候选 kind 须为 {registry_cls._kind!r}，得到 {candidate.kind!r}"
+            )
+        if candidate.ref in specs:
+            raise ValueError(f"{registry_cls._label}重复注册: {candidate.ref!r}")
+        specs[candidate.ref] = candidate
+    return registry_cls(specs)
+
+
+def build_solver_registry(candidates: Iterable[StagePluginSpec]) -> SolverRegistry:
+    """原子构建并发布求解器目录。"""
+    return _build_stage_registry(candidates, registry_cls=SolverRegistry)
+
+
+def build_evaluator_registry(candidates: Iterable[StagePluginSpec]) -> EvaluatorRegistry:
+    """原子构建并发布评价器目录。"""
+    return _build_stage_registry(candidates, registry_cls=EvaluatorRegistry)
+
+
+BUILTIN_PREDICTOR_NAIVE_SPEC = StagePluginSpec(
+    plugin_id="ies.predictor.naive",
+    version="1.0.0",
+    kind="predictor",
+    consumes=("ies.stage-input@1.0.0",),
+    produces=("ies.prediction-output@1.0.0",),
+    parameters_schema={"type": "object", "additionalProperties": False, "properties": {}},
+)
+
+BUILTIN_GENERATOR_HIGHS_MILP_SPEC = StagePluginSpec(
+    plugin_id="ies.generator.highs_milp",
+    version="1.0.0",
+    kind="generator",
+    consumes=("ies.stage-input@1.0.0",),
+    produces=("ies.solver-bundle.mps@1.0.0",),
+    modes=("planning",),
+    precisions=("medium",),
+    outputs=("solution", "metrics"),
+    parameters_schema={
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "acceleration": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "mode": {
+                        "type": "string",
+                        "enum": ["off", "on_demand_mutex"],
+                        "default": "on_demand_mutex",
+                    }
+                },
+            }
+        },
+    },
+)
+
+BUILTIN_SOLVER_HIGHS_SPEC = StagePluginSpec(
+    plugin_id="ies.solver.highs",
+    version="1.7.2",
+    kind="solver",
+    consumes=("ies.solver-bundle.mps@1.0.0",),
+    produces=("ies.primal-solution@1.0.0",),
+    parameters_schema={
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {"threads": {"type": "integer", "minimum": 1}},
+    },
+)
+
+BUILTIN_EVALUATOR_FINANCE_SPEC = StagePluginSpec(
+    plugin_id="ies.evaluator.finance",
+    version="1.0.0",
+    kind="evaluator",
+    consumes=("ies.engineering-solution@1.0.0",),
+    produces=("ies.financial-evaluation@1.0.0",),
+    outputs=("solution", "metrics"),
+    parameters_schema={"type": "object", "additionalProperties": False, "properties": {}},
+)
+
+
+def builtin_stage_plugin_specs() -> dict[str, StagePluginSpec]:
+    """返回内置四阶段标准契约描述符字典。"""
+    specs = (
+        BUILTIN_PREDICTOR_NAIVE_SPEC,
+        BUILTIN_GENERATOR_HIGHS_MILP_SPEC,
+        BUILTIN_SOLVER_HIGHS_SPEC,
+        BUILTIN_EVALUATOR_FINANCE_SPEC,
+    )
+    return {spec.ref: spec for spec in specs}
+
+
+def build_stage_plugin_map(
+    *,
+    predictor_registry: Any | None = None,
+    generator_registry: Any | None = None,
+    solver_registry: Any | None = None,
+    evaluator_registry: Any | None = None,
+    algorithm_registry: Any | None = None,
+) -> dict[str, StagePluginSpec]:
+    """聚合各已发布目录中的插件为统一 ``{ref: StagePluginSpec}`` 兼容检查映射。"""
+    specs: dict[str, StagePluginSpec] = {}
+    if predictor_registry is not None:
+        for desc in predictor_registry.snapshot():
+            if desc.ref == BUILTIN_PREDICTOR_NAIVE_SPEC.ref:
+                specs[desc.ref] = BUILTIN_PREDICTOR_NAIVE_SPEC
+            else:
+                pid, ver = desc.ref.split("@", 1)
+                specs[desc.ref] = StagePluginSpec(
+                    plugin_id=pid,
+                    version=ver,
+                    kind="predictor",
+                    consumes=("ies.stage-input@1.0.0",),
+                    produces=("ies.prediction-output@1.0.0",),
+                    parameters_schema=(
+                        dict(desc.parameters_schema)
+                        if getattr(desc, "parameters_schema", None) is not None
+                        else {
+                            "type": "object",
+                            "properties": {},
+                            "additionalProperties": False,
+                        }
+                    ),
+                )
+    if generator_registry is not None:
+        for desc in generator_registry.snapshot():
+            specs[desc.ref] = desc.to_stage_spec()
+    if solver_registry is not None:
+        specs.update(solver_registry.as_mapping())
+    if evaluator_registry is not None:
+        specs.update(evaluator_registry.as_mapping())
+    if algorithm_registry is not None:
+        for desc in algorithm_registry.snapshot():
+            specs[desc.ref] = desc.to_stage_spec()
+    return specs
 
 
 @dataclass(frozen=True, slots=True)
@@ -168,7 +377,8 @@ class AlgorithmDescriptor:
     outputs: tuple[str, ...] = ("solution", "metrics")
     capabilities: tuple[str, ...] = ()
     evaluators: tuple[str, ...] | None = None
-    result_adapter: str | None = None
+    consumes: tuple[str, ...] = ("ies.stage-input@1.0.0",)
+    produces: tuple[str, ...] = ("ies.engineering-solution@1.0.0",)
 
     def __post_init__(self) -> None:
         check_provider_ref(f"{self.algorithm_id}@{self.version}", "algorithm")
@@ -190,17 +400,12 @@ class AlgorithmDescriptor:
         if any(not isinstance(c, str) or not c for c in capabilities):
             raise ValueError("capabilities 条目须为非空字符串")
         object.__setattr__(self, "capabilities", capabilities)
-        if self.result_adapter is not None:
-            check_provider_ref(self.result_adapter, "result_adapter")
-        if self.evaluators is None:
-            evaluators = (
-                (self.result_adapter,) if self.result_adapter is not None else ()
-            )
-        else:
-            evaluators = tuple(self.evaluators)
-            for ev in evaluators:
-                check_provider_ref(ev, "evaluators")
+        evaluators = tuple(self.evaluators or ())
+        for ev in evaluators:
+            check_provider_ref(ev, "evaluators")
         object.__setattr__(self, "evaluators", evaluators)
+        object.__setattr__(self, "consumes", tuple(check_provider_ref(c, "consumes") for c in self.consumes))
+        object.__setattr__(self, "produces", tuple(check_provider_ref(c, "produces") for c in self.produces))
         object.__setattr__(
             self,
             "parameters_schema",
@@ -213,8 +418,24 @@ class AlgorithmDescriptor:
         return f"{self.algorithm_id}@{self.version}"
 
     def supports_evaluator(self, evaluator_ref: str) -> bool:
-        """该算法是否兼容给定 evaluator 精确引用（未声明则拒绝，fail-closed）。"""
-        return evaluator_ref in (self.evaluators or ())
+        """该算法是否兼容给定 evaluator 精确引用。"""
+        if not self.evaluators:
+            return True
+        return evaluator_ref in self.evaluators
+
+    def to_stage_spec(self) -> StagePluginSpec:
+        """投影为统一阶段契约 ``StagePluginSpec``。"""
+        return StagePluginSpec(
+            plugin_id=self.algorithm_id,
+            version=self.version,
+            kind="algorithm",
+            parameters_schema=self.parameters_schema,
+            consumes=self.consumes,
+            produces=self.produces,
+            modes=self.modes,
+            precisions=self.precisions,
+            outputs=self.outputs,
+        )
 
     def to_dict(self) -> dict[str, Any]:
         """序列化为 JSON 兼容独立副本。"""
@@ -226,7 +447,8 @@ class AlgorithmDescriptor:
             "outputs": list(self.outputs),
             "capabilities": list(self.capabilities),
             "evaluators": list(self.evaluators or ()),
-            "result_adapter": self.result_adapter,
+            "consumes": list(self.consumes),
+            "produces": list(self.produces),
             "parameters_schema": thaw_json_value(self.parameters_schema),
         }
 
@@ -274,7 +496,7 @@ class AlgorithmRegistry:
             ) from None
 
     def resolve(self, config: CalculationConfig) -> AlgorithmProvider:
-        """按一体化计算配置选中 provider 并完成能力与选项门禁。"""
+        """按一体化计算配置选中 provider 并完成能力与分槽选项门禁。"""
         if config.algorithm is None:
             raise ValueError("一体化算法目录不接受分步配置(algorithm 为 None)")
         provider = self.get(config.algorithm)
@@ -322,13 +544,24 @@ def build_algorithm_registry(
 
 
 __all__ = [
+    "BUILTIN_EVALUATOR_FINANCE_SPEC",
+    "BUILTIN_GENERATOR_HIGHS_MILP_SPEC",
+    "BUILTIN_PREDICTOR_NAIVE_SPEC",
+    "BUILTIN_SOLVER_HIGHS_SPEC",
     "AlgorithmDescriptor",
     "AlgorithmProvider",
     "AlgorithmRegistry",
+    "EvaluatorRegistry",
     "SCHEMA_PATH",
+    "SolverRegistry",
     "build_algorithm_registry",
+    "build_evaluator_registry",
+    "build_solver_registry",
+    "build_stage_plugin_map",
+    "builtin_stage_plugin_specs",
     "check_descriptor_options",
     "load_calculation_config_schema",
+    "parse_calculation_config_json",
     "validate_calculation_config",
     "validate_config_capabilities",
     "validate_options_schema",

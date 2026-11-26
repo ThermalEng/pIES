@@ -36,21 +36,27 @@ def resolve_entrypoint(entrypoint: str, plugin_root: Path) -> Callable[[StageCon
     if func_name.startswith("_"):
         raise EntrypointError(f"Entrypoint function must be public: {entrypoint!r}")
 
-    root_str = str(plugin_root.resolve())
-    inserted = False
-    if root_str not in sys.path:
-        sys.path.insert(0, root_str)
-        inserted = True
+    root_resolved = plugin_root.resolve()
+    root_str = str(root_resolved)
+    top_pkg = module_name.split(".", 1)[0]
+    existing = sys.modules.get(module_name) or sys.modules.get(top_pkg)
+    if existing is not None:
+        existing_file = getattr(existing, "__file__", None)
+        if existing_file is None or not Path(existing_file).resolve().is_relative_to(root_resolved):
+            for loaded_name in [
+                name for name in sys.modules if name == top_pkg or name.startswith(f"{top_pkg}.")
+            ]:
+                sys.modules.pop(loaded_name, None)
+
+    if root_str in sys.path:
+        sys.path.remove(root_str)
+    sys.path.insert(0, root_str)
     try:
         module = importlib.import_module(module_name)
     except Exception as exc:
         raise EntrypointError(
             f"Failed to import entrypoint module {module_name!r}: {exc}"
         ) from exc
-    finally:
-        if inserted and root_str in sys.path:
-            # Keep sys.path clean if module import failed; if imported, package stays in sys.modules.
-            pass
 
     target = getattr(module, func_name, None)
     if target is None or not callable(target):
@@ -92,7 +98,7 @@ def run_plugin(
     fn = resolve_entrypoint(manifest.entrypoint, manifest_file.parent)
     fn(ctx)
 
-    validate_stage_outputs(manifest.kind, out_dir)
+    validate_stage_outputs(manifest.kind, out_dir, produces=manifest.produces)
 
 
 def _build_parser() -> argparse.ArgumentParser:

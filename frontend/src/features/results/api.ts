@@ -9,12 +9,16 @@
 
 import { request } from '../../shared/http'
 import { collectHourlyValues } from '../../api/hourlyPages'
+import type { Task } from '../../types'
+import { taskFromSummary } from '../tasks/mappers'
 import type {
   AssessEnvelopeDto,
   AssessRequestDto,
   AssessmentListEnvelopeDto,
   HourlyResponseDto,
   ResultViewEnvelopeDto,
+  RetryEvaluatorRequestDto,
+  RetryEvaluatorResponseDto,
   SelectResultEnvelopeDto,
   SelectResultRequestDto,
 } from './contracts'
@@ -140,4 +144,31 @@ export async function readHourly(
     flows[meta.series_id] = values
   }
   return { absent: false, flows, series, start: first, end, totalRows: rows }
+}
+
+/**
+ * 单独重试失败的并联评价器(复用同一冻结快照与已封存标准工程解)。
+ */
+export async function retryEvaluator(
+  projectId: number,
+  taskId: number,
+  input: { evaluator: string; idempotency_key: string },
+): Promise<{ task: Task; evaluator: string; replayed: boolean; hint: string | null }> {
+  const body: RetryEvaluatorRequestDto = {
+    evaluator: input.evaluator,
+    idempotency_key: input.idempotency_key,
+  }
+  const res = await request<RetryEvaluatorResponseDto>(
+    `/projects/${projectId}/tasks/${taskId}/result/evaluators/retry`,
+    {
+      method: 'POST',
+      body,
+    },
+  )
+  return {
+    task: taskFromSummary(res.task, projectId),
+    evaluator: res.evaluator,
+    replayed: res.replayed,
+    hint: res.hint,
+  }
 }

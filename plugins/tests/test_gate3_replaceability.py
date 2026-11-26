@@ -7,7 +7,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from pies_sdk import read_compute_result, validate_stage_outputs
+from pies_sdk import read_engineering_solution, validate_stage_outputs
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 REF_PLUGIN_DIR = REPO_ROOT / "sdk" / "examples" / "reference_algorithm"
@@ -44,7 +44,7 @@ def test_gate3_reference_algorithm_runs_under_identical_stage_runner(tmp_path: P
     )
     assert proc.returncode == 0, proc.stderr
     validate_stage_outputs("algorithm", work_out)
-    actual = read_compute_result(work_out).to_dict()
+    actual = read_engineering_solution(work_out / "solution.json").to_dict()
     expected = json.loads(
         (REF_PLUGIN_DIR / "tests" / "minimal" / "expected.json").read_text(encoding="utf-8")
     )

@@ -20,7 +20,6 @@ def predict(ctx: StageContext) -> None:
     request = read_predictor_request(ctx.work_in)
     point_count = int(request["point_count"])
     seed = request.get("seed")
-    previous = request.get("previous")
     raw_targets = request["targets"]
 
     ordered_targets = sorted(
@@ -55,7 +54,6 @@ def predict(ctx: StageContext) -> None:
             parameters=parameters,
             seed=seed,
             point_count=point_count,
-            previous=previous,
         )
 
         artifact_rel = f"artifacts/{instance}__{interface}.json"

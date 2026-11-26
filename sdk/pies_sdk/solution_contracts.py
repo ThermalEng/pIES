@@ -64,7 +64,15 @@ _PRIMAL_ALLOWED_KEYS = _PRIMAL_REQUIRED_KEYS | frozenset(("extensions",))
 
 _ENG_REQUIRED_KEYS = frozenset(("schema", "schema_version", "solver_summary"))
 _ENG_ALLOWED_KEYS = _ENG_REQUIRED_KEYS | frozenset(
-    ("construction_units", "series", "system_series", "metrics", "model_sources", "extensions")
+    (
+        "construction_units",
+        "series",
+        "system_series",
+        "metrics",
+        "model_sources",
+        "planning_variables",
+        "extensions",
+    )
 )
 
 _REPORT_REQUIRED_KEYS = frozenset(
@@ -1042,6 +1050,7 @@ class EngineeringSolutionPayload:
     system_series: Mapping[str, SystemSeries] | None = None
     metrics: Mapping[str, Any] | None = None
     model_sources: Mapping[str, Any] | None = None
+    planning_variables: tuple[ConstructionScale, ...] | None = None
     schema: str = ENGINEERING_SOLUTION_SCHEMA
     schema_version: str = ENGINEERING_SOLUTION_VERSION
     extensions: Mapping[str, Any] = field(default_factory=dict)
@@ -1099,6 +1108,26 @@ class EngineeringSolutionPayload:
                 norm_sys[sid] = item if isinstance(item, SystemSeries) else SystemSeries.from_dict(item)
         object.__setattr__(self, "system_series", norm_sys)
 
+        norm_pvars: tuple[ConstructionScale, ...] | None = None
+        if self.planning_variables is not None:
+            if isinstance(self.planning_variables, (str, bytes)) or not isinstance(
+                self.planning_variables, (list, tuple)
+            ):
+                raise StageIOError("EngineeringSolution.planning_variables must be a list or null")
+            norm_pvars = tuple(
+                item if isinstance(item, ConstructionScale) else ConstructionScale.from_dict(item)
+                for item in self.planning_variables
+            )
+            seen_pvars: set[str] = set()
+            for item in norm_pvars:
+                if item.planning_variable_id in seen_pvars:
+                    raise StageIOError(
+                        "Duplicate planning_variable_id in planning_variables: "
+                        f"{item.planning_variable_id!r}"
+                    )
+                seen_pvars.add(item.planning_variable_id)
+        object.__setattr__(self, "planning_variables", norm_pvars)
+
         if summary.has_feasible_solution:
             if norm_units is None:
                 raise StageIOError("Feasible EngineeringSolution requires 'construction_units'")
@@ -1134,6 +1163,10 @@ class EngineeringSolutionPayload:
                 raise StageIOError(
                     "Non-feasible EngineeringSolution cannot contain non-empty 'system_series'"
                 )
+            if norm_pvars:
+                raise StageIOError(
+                    "Non-feasible EngineeringSolution cannot contain non-empty 'planning_variables'"
+                )
 
         for opt_name in ("metrics", "model_sources"):
             val = getattr(self, opt_name)
@@ -1164,6 +1197,8 @@ class EngineeringSolutionPayload:
             out["metrics"] = dict(self.metrics)
         if self.model_sources is not None:
             out["model_sources"] = dict(self.model_sources)
+        if self.planning_variables is not None:
+            out["planning_variables"] = [p.to_dict() for p in self.planning_variables]
         if self.extensions:
             out["extensions"] = dict(self.extensions)
         return out
@@ -1187,6 +1222,7 @@ class EngineeringSolutionPayload:
             system_series=data.get("system_series"),
             metrics=data.get("metrics"),
             model_sources=data.get("model_sources"),
+            planning_variables=data.get("planning_variables"),
             extensions=data.get("extensions", {}),
         )
 
@@ -1249,6 +1285,7 @@ class EngineeringSolutionExpectation:
     construction_units: tuple[ExpectedConstructionUnit, ...] = ()
     series: Mapping[str, ExpectedDeviceSeries] = field(default_factory=dict)
     system_series: Mapping[str, ExpectedSystemSeries] = field(default_factory=dict)
+    planning_variables: Mapping[str, str] = field(default_factory=dict)
     objective_unit: str | None = None
 
     def __post_init__(self) -> None:
@@ -1263,6 +1300,12 @@ class EngineeringSolutionExpectation:
         overlap = sorted(set(self.series) & set(self.system_series))
         if overlap:
             raise StageIOError(f"Expected series and system_series overlap: {overlap!r}")
+        if not isinstance(self.planning_variables, Mapping):
+            raise StageIOError("expectation.planning_variables must be a mapping")
+        for pvar, unit in self.planning_variables.items():
+            _require_non_empty_str(pvar, "expectation.planning_variable_id")
+            _require_non_empty_str(unit, f"expectation.planning_variables.{pvar}.unit")
+        object.__setattr__(self, "planning_variables", dict(self.planning_variables))
 
 
 def validate_engineering_solution_completeness(
@@ -1320,6 +1363,25 @@ def validate_engineering_solution_completeness(
                     f"construction_unit {uid!r} variable {pvar!r} unit mismatch: "
                     f"expected {exp_punit!r}, got {act_scales[pvar].unit!r}"
                 )
+
+    resolved_pvars: dict[str, str] = {
+        sc.planning_variable_id: sc.unit
+        for act_u in actual_units.values()
+        for sc in act_u.scales
+    }
+    for pvar_entry in solution.planning_variables or ():
+        resolved_pvars[pvar_entry.planning_variable_id] = pvar_entry.unit
+    for pname, exp_punit in sorted(expectation.planning_variables.items()):
+        actual_punit = resolved_pvars.get(pname)
+        if actual_punit is None:
+            raise StageIOError(
+                f"EngineeringSolution missing required planning variable {pname!r}"
+            )
+        if actual_punit != exp_punit:
+            raise StageIOError(
+                f"planning variable {pname!r} unit mismatch: "
+                f"expected {exp_punit!r}, got {actual_punit!r}"
+            )
 
     actual_series = dict(solution.series or {})
     if set(actual_series) != set(expectation.series):

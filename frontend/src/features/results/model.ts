@@ -8,6 +8,8 @@
 
 import type {
   AssessmentGrade,
+  EvaluationReportBlock,
+  EvaluatorResultEntry,
   EvidenceCandidate,
   FinancialAbsence,
   FinancialEvaluationBlock,
@@ -21,6 +23,8 @@ import type {
 
 export type {
   AssessmentGrade,
+  EvaluationReportBlock,
+  EvaluatorResultEntry,
   EvidenceCandidate,
   FinancialAbsence,
   FinancialEvaluationBlock,
@@ -56,6 +60,10 @@ export interface TaskResult {
   planningSolution: PlanningSolution | null
   /** 原快照资源引用。 */
   snapshotRefs: SnapshotRefs | null
+  /** 并联评价器运行状态与结构化错误诊断(1.2.0)。 */
+  evaluatorResults: EvaluatorResultEntry[]
+  /** 第三方自描述评价报告块(1.2.0)。 */
+  evaluationReports: EvaluationReportBlock[]
 }
 
 /** 逐时序列读取模型。 */

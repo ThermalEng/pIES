@@ -138,8 +138,7 @@
             "predictor": { "$ref": "#/$defs/provider_ref" },
             "generator": { "$ref": "#/$defs/provider_ref" },
             "solver": { "$ref": "#/$defs/provider_ref" },
-            "evaluator": { "$ref": "#/$defs/provider_ref" },
-            "result_adapter": { "$ref": "#/$defs/provider_ref" }
+            "evaluator": { "$ref": "#/$defs/provider_ref" }
           }
         },
         "extensions": { "type": "object" }

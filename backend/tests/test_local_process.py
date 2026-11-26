@@ -378,7 +378,7 @@ def test_start_failure_is_infrastructure_error(tmp_path) -> None:
     assert exc_info.value.reason == "executor-start-failed"
 
 
-def _runtime_bundle(outputs=None, **command_overrides) -> SolverBundle:
+def _runtime_command(**command_overrides) -> dict[str, object]:
     command: dict[str, object] = {
         "executor": EXECUTOR_REF,
         "executable": HELPER_REF,
@@ -388,23 +388,25 @@ def _runtime_bundle(outputs=None, **command_overrides) -> SolverBundle:
         "success_exit_codes": [0],
     }
     command.update(command_overrides)
+    return command
+
+
+def _runtime_bundle(outputs=None) -> SolverBundle:
     manifest = SolverBundleManifest(
         bundle={
             "generator": "acme.generator@1.0.0",
-            "solver": "ies.solver.highs@1.7.2",
+            "contract": "ies.solver-bundle.mps@1.0.0",
         },
         inputs=[{"path": "input/problem.mps", "media_type": "application/mps"}],
-        command=command,
         outputs=outputs
         if outputs is not None
         else [
             {
-                "path": "output/solution.json",
+                "path": "output/primal_solution.json",
                 "media_type": "application/json",
-                "required": False,
+                "required": True,
             }
         ],
-        result_adapter="acme.result-adapter@1.0.0",
     )
     return SolverBundle(
         manifest=manifest, files={"input/problem.mps": b"probe"}
@@ -477,7 +479,7 @@ def test_termination_reasons_are_closed_and_consistent() -> None:
 def test_runtime_reports_timeout_receipt() -> None:
     """Runtime 基于真实超时过程签发 timed_out 回执。"""
     receipt, outputs = _runtime(_provider()).run(
-        _runtime_bundle(), _attempt()
+        _runtime_bundle(), _attempt(), command=_runtime_command(),
     )
     assert receipt.status == "timed_out"
     assert receipt.termination_reason == "timeout"
@@ -495,16 +497,18 @@ def test_runtime_timeout_with_missing_required_output() -> None:
     """超时且遗留未声明文件/缺必需输出：主状态仍为 timed_out，问题追加。"""
     receipt, outputs = _runtime(_provider()).run(
         _runtime_bundle(
-            arguments=[HELPER, "sleep-with-extra", "output/sneaky.bin", "30"],
             outputs=[
                 {
-                    "path": "output/solution.json",
+                    "path": "output/primal_solution.json",
                     "media_type": "application/json",
                     "required": True,
                 }
             ],
         ),
         _attempt(),
+        command=_runtime_command(
+            arguments=[HELPER, "sleep-with-extra", "output/sneaky.bin", "30"],
+        ),
     )
     assert receipt.status == "timed_out"
     assert "超时" in receipt.error
@@ -515,7 +519,9 @@ def test_runtime_timeout_with_missing_required_output() -> None:
 def test_runtime_reports_signal_receipt() -> None:
     """Runtime 基于真实信号过程签发 process_failed 回执。"""
     receipt, _ = _runtime(_provider()).run(
-        _runtime_bundle(arguments=[HELPER, "sigterm-self"]), _attempt()
+        _runtime_bundle(),
+        _attempt(),
+        command=_runtime_command(arguments=[HELPER, "sigterm-self"]),
     )
     assert receipt.status == "process_failed"
     assert receipt.exit_code is None
@@ -526,8 +532,9 @@ def test_runtime_reports_signal_receipt() -> None:
 def test_runtime_group_terminated_is_never_succeeded() -> None:
     """组收口场景 Runtime 签发 process_failed，禁止 succeeded。"""
     receipt, _ = _runtime(_provider()).run(
-        _runtime_bundle(arguments=[HELPER, "spawn-and-exit", "30"]),
+        _runtime_bundle(),
         _attempt(),
+        command=_runtime_command(arguments=[HELPER, "spawn-and-exit", "30"]),
     )
     assert receipt.status == "process_failed"
     assert receipt.status != "succeeded"
@@ -683,7 +690,7 @@ def test_runtime_prestart_stop_receipts(reason, monkeypatch) -> None:
     """启动前停止签发对应回执且零进程启动，不伪造退出事实。"""
     calls = _spy_popen(monkeypatch)
     receipt, outputs = _runtime(_provider()).run(
-        _runtime_bundle(), _attempt(), stop=lambda: reason,
+        _runtime_bundle(), _attempt(), command=_runtime_command(), stop=lambda: reason,
     )
     assert receipt.status == reason
     assert receipt.termination_reason == reason
@@ -698,7 +705,7 @@ def test_runtime_stop_not_callable() -> None:
     """停止探针不可调用即类型错误。"""
     with pytest.raises(TypeError, match="停止探针"):
         _runtime(_provider()).run(
-            _runtime_bundle(), _attempt(), stop="cancelled",
+            _runtime_bundle(), _attempt(), command=_runtime_command(), stop="cancelled",
         )
 
 
@@ -706,7 +713,7 @@ def test_runtime_stop_bad_value() -> None:
     """停止探针非法返回值即调用方错误。"""
     with pytest.raises(ValueError, match="停止探针返回值非法"):
         _runtime(_provider()).run(
-            _runtime_bundle(), _attempt(), stop=lambda: "bogus",
+            _runtime_bundle(), _attempt(), command=_runtime_command(), stop=lambda: "bogus",
         )
 
 
@@ -718,9 +725,9 @@ def test_runtime_prestart_race_issues_stop_receipt(monkeypatch) -> None:
     """
     calls = _spy_popen(monkeypatch)
     receipt, outputs = _runtime(_provider()).run(
-        _runtime_bundle(arguments=[HELPER, "sleep", "30"],
-                        timeout_seconds=60),
+        _runtime_bundle(),
         _attempt(),
+        command=_runtime_command(arguments=[HELPER, "sleep", "30"], timeout_seconds=60),
         stop=_scripted_stop([None, "cancelled"]),
     )
     assert calls == []
@@ -737,9 +744,9 @@ def test_runtime_prestart_race_other_error_propagates(monkeypatch) -> None:
     calls = _spy_popen(monkeypatch)
     with pytest.raises(ValueError, match="停止探针返回值非法"):
         _runtime(_provider()).run(
-            _runtime_bundle(arguments=[HELPER, "sleep", "30"],
-                            timeout_seconds=60),
+            _runtime_bundle(),
             _attempt(),
+            command=_runtime_command(arguments=[HELPER, "sleep", "30"], timeout_seconds=60),
             stop=_scripted_stop([None, "bogus"]),
         )
     assert calls == []
@@ -756,7 +763,7 @@ def test_runtime_provider_nonstop_error_propagates(tmp_path) -> None:
     runtime = _runtime(provider)
     binary.unlink()
     with pytest.raises(ComputationUnavailableError) as exc_info:
-        runtime.run(_runtime_bundle(), _attempt())
+        runtime.run(_runtime_bundle(), _attempt(), command=_runtime_command())
     assert exc_info.value.reason == "executor-start-failed"
 
 
@@ -768,9 +775,9 @@ def test_runtime_midrun_cancel_receipt() -> None:
     start = time.monotonic()
     try:
         receipt, outputs = _runtime(_provider()).run(
-            _runtime_bundle(arguments=[HELPER, "sleep", "30"],
-                            timeout_seconds=60),
+            _runtime_bundle(),
             _attempt(),
+            command=_runtime_command(arguments=[HELPER, "sleep", "30"], timeout_seconds=60),
             stop=lambda: "cancelled" if flag.is_set() else None,
         )
     finally:
@@ -794,9 +801,12 @@ def test_runtime_midrun_trap_exit_zero_receipt() -> None:
     timer.start()
     try:
         receipt, _ = _runtime(_provider()).run(
-            _runtime_bundle(arguments=[HELPER, "sleep", "30", "trap-exit=0"],
-                            timeout_seconds=60),
+            _runtime_bundle(),
             _attempt(),
+            command=_runtime_command(
+                arguments=[HELPER, "sleep", "30", "trap-exit=0"],
+                timeout_seconds=60,
+            ),
             stop=lambda: "cancelled" if flag.is_set() else None,
         )
     finally:
@@ -815,9 +825,9 @@ def test_runtime_midrun_fenced_receipt() -> None:
     timer.start()
     try:
         receipt, _ = _runtime(_provider()).run(
-            _runtime_bundle(arguments=[HELPER, "sleep", "30"],
-                            timeout_seconds=60),
+            _runtime_bundle(),
             _attempt(),
+            command=_runtime_command(arguments=[HELPER, "sleep", "30"], timeout_seconds=60),
             stop=lambda: "fenced" if flag.is_set() else None,
         )
     finally:

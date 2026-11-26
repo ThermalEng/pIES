@@ -1,14 +1,31 @@
 {
-  "bundle_id": "bundle-iter-001",
-  "execution_status": "completed",
-  "math_status": "solved",
-  "outputs": {
+  "construction_units": [],
+  "metrics": {
     "converged": true,
     "estimate": 99.375,
     "final_metric_value": 0.00625,
     "iterations_completed": 7
   },
-  "receipt_id": "receipt-iter-001",
-  "schema": "ies.compute-result",
-  "schema_version": "1.0.0"
+  "schema": "ies.engineering-solution",
+  "schema_version": "1.0.0",
+  "series": {
+    "iter.estimate": {
+      "instance_id": "iter",
+      "unit": "1",
+      "values": [
+        99.375
+      ],
+      "variable_id": "estimate"
+    }
+  },
+  "solver_summary": {
+    "best_bound": 99.375,
+    "has_feasible_solution": true,
+    "math_status": "solved",
+    "objective_unit": "1",
+    "objective_value": 99.375,
+    "relative_gap": 0.0,
+    "termination_reason": "optimal"
+  },
+  "system_series": {}
 }

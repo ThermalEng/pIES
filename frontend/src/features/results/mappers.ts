@@ -34,5 +34,7 @@ export function mapResultViewDtoToModel(dto: TaskResultViewDto): TaskResult {
     candidates: dto.candidates === null ? [] : dto.candidates.map((c) => ({ index: c.index })),
     planningSolution: dto.planning_solution,
     snapshotRefs: dto.snapshot_refs,
+    evaluatorResults: dto.evaluator_results ?? [],
+    evaluationReports: dto.evaluation_reports ?? [],
   }
 }

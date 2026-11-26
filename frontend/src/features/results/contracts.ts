@@ -12,6 +12,8 @@
 
 import type {
   AssessmentGrade,
+  EvaluationReportBlock,
+  EvaluatorResultEntry,
   FinancialAbsence,
   FinancialEvaluationBlock,
   MetricValue,
@@ -19,9 +21,12 @@ import type {
   SnapshotRefs,
   SolverSummary,
 } from '../../types'
+import type { TaskSummaryDto } from '../tasks/contracts'
 
 export type {
   AssessmentGrade,
+  EvaluationReportBlock,
+  EvaluatorResultEntry,
   FinancialAbsence,
   FinancialEvaluationBlock,
   MetricValue,
@@ -136,6 +141,22 @@ export interface TaskResultViewDto {
   plan_summary: unknown | null
   hourly_refs: HourlyRefGroupDto[] | null
   selection: Omit<ResultSelectionDto, 'project_id' | 'is_current'> | null
+  evaluator_results?: EvaluatorResultEntry[]
+  evaluation_reports?: EvaluationReportBlock[]
+}
+
+/** 单评价器重试请求体(POST .../result/evaluators/retry)。 */
+export interface RetryEvaluatorRequestDto {
+  evaluator: string
+  idempotency_key: string
+}
+
+/** 单评价器重试响应 DTO(POST .../result/evaluators/retry)。 */
+export interface RetryEvaluatorResponseDto {
+  task: TaskSummaryDto
+  evaluator: string
+  replayed: boolean
+  hint: string | null
 }
 
 /** 结果视图响应 DTO(GET .../result)。 */

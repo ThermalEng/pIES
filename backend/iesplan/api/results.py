@@ -65,6 +65,16 @@ class CheckRequest(BaseModel):
     )
 
 
+class RetryEvaluatorRequest(BaseModel):
+    """单项评价器重试请求体。"""
+
+    evaluator: str = Field(min_length=1, description="要重试的评价器精确引用")
+    idempotency_key: str = Field(
+        min_length=1, max_length=128, pattern=IDEMPOTENCY_KEY_RE,
+        description="幂等键(必填, 同键重试返回同一任务摘要)",
+    )
+
+
 # ---------------------------------------------------------------------------
 # 路由
 # ---------------------------------------------------------------------------
@@ -198,6 +208,32 @@ def check_task_endpoint(
     if result["replayed"]:
         response.status_code = 200
         result["hint"] = "同幂等键复用既有检查任务, 未重复计算"
+    else:
+        result["hint"] = None
+    return result
+
+
+@router.post("/evaluators/retry", status_code=201, summary="单项评价器重试")
+def retry_evaluator_endpoint(
+    project_id: int,
+    task_id: int,
+    db: Annotated[Session, Depends(get_request_db)],
+    user: CurrentUser,
+    payload: RetryEvaluatorRequest,
+    response: Response,
+) -> dict[str, Any]:
+    """针对单个失败/超时/已取消评价器重跑评价，复用冻结工程解并追加新不可变证据包。"""
+    result = results_app.retry_evaluator_case(
+        db,
+        user,
+        project_id,
+        task_id,
+        evaluator=payload.evaluator,
+        idempotency_key=payload.idempotency_key,
+    )
+    if result["replayed"]:
+        response.status_code = 200
+        result["hint"] = "同幂等键复用既有评价重算请求, 未重复排队"
     else:
         result["hint"] = None
     return result

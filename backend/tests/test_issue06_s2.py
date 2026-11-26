@@ -12,12 +12,12 @@ from types import SimpleNamespace
 
 import pytest
 from bundle_testkit import mps_columns as _mps_column_names
+from legacy_solve_testkit import parse_highs_solution as _parse_solution
 
 from iesplan.computation import HIGHS_ADAPTER_PATH
 from iesplan.computation.generators.linear import LoweringUnsupportedError
 from iesplan.computation.generators.mps import write_mps
 from iesplan.computation.generators.project import _ProjectBuilder
-from iesplan.computation.result_adapters.highs import _parse_solution
 from iesplan.finance import FinanceProfile, merge_effective
 from iesplan.tasks.contracts import parse_evaluation_input
 
@@ -91,7 +91,11 @@ def _builder(
         "demand_charges": {},
         "taxes": ({
             "vat_tag": {"display_name": "维护增值税", "tax_type": "vat", "applies_to": "same.upfront_capex"},
-            "income_tag": {"display_name": "维护所得税", "tax_type": "income_tax", "applies_to": "same.upfront_capex"},
+            "income_tag": {
+                "display_name": "维护所得税",
+                "tax_type": "income_tax",
+                "applies_to": "same.upfront_capex",
+            },
         } if taxes else {}),
         "credit_pools": ({
             "pool": {"opening_credit": {"value": "0", "unit": "CNY"},
@@ -314,7 +318,9 @@ def test_vat_income_losses_and_same_payment_identity_on_tiny_solve(tmp_path) -> 
     paid2 = Decimal("797")   # 17 + 3×100 + 0.02×(200×100) + 4×20
     credit = paid1 * Decimal("0.13") / Decimal("1.13")
     deduction = paid1 - credit
-    assert _amount(facts["annual_operation"][0]["maintenance"], **solved) == pytest.approx(float(paid1 + paid2))
+    assert _amount(facts["annual_operation"][0]["maintenance"], **solved) == pytest.approx(
+        float(paid1 + paid2)
+    )
     assert _amount(facts["annual_net_flows"][1], **solved) == pytest.approx(-1028)
     vat = {(row["pool"], row["month"]): row for row in facts["tax_cash"]["vat"]}
     assert _amount(vat[("pool", 12)]["paid"], **solved) == pytest.approx(0)

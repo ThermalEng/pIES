@@ -1007,10 +1007,13 @@ class _ForwardFinanceEvaluator:
         self.unit_by_inst: dict[str, Mapping[str, Any]] = {}
         self.unit_by_id: dict[str, Mapping[str, Any]] = {}
         self.plan_var_si: dict[str, float] = {}
+        scale_groups: list[Any] = [solution.get("planning_variables") or ()]
         for unit in solution.get("construction_units") or ():
             self.unit_by_inst[unit["instance_id"]] = unit
             self.unit_by_id[unit["unit_id"]] = unit
-            for scale in unit.get("scales") or ():
+            scale_groups.append(unit.get("scales") or ())
+        for group in scale_groups:
+            for scale in group:
                 self.plan_var_si[scale["planning_variable_id"]] = _to_internal(
                     float(scale["value"]), str(scale["unit"])
                 )

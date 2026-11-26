@@ -387,9 +387,15 @@ def _eval_k1n2(maintenance=()):
 
 def _solve(client, db, engine, plane, pid, user, evaluation, key, expected_revision=None,
            after_submit=None):
-    from test_task_config_revision import _save_config  # noqa: E402
+    from test_task_config_revision import _body, _save_config  # noqa: E402
 
-    rev = _save_config(client, pid, user, expected_revision=expected_revision)
+    rev = _save_config(
+        client,
+        pid,
+        user,
+        body=_body(evaluators=[{"evaluator": "ies.evaluator.finance@1.0.0", "parameters": {}}]),
+        expected_revision=expected_revision,
+    )
     status, body = _submit_task(
         client,
         pid,
@@ -432,22 +438,20 @@ def _solve(client, db, engine, plane, pid, user, evaluation, key, expected_revis
     return json.loads(get_object(db, evidence.object_id).decode("utf-8"))
 
 
-def _year_sums(variables, prefix, bounds):
-    """独立手算: 指定前缀变量按年界 plain 求和(与实现 SI 路径无关)。"""
-    totals = [0.0 for _ in bounds]
-    for item in variables:
-        name = str(item["name"])
-        if not name.startswith(prefix):
-            continue
-        step = int(name.rsplit("__t", 1)[1])
-        for year, (start, end) in enumerate(bounds):
-            if start <= step < end:
-                totals[year] += float(item["value"])
-                break
-    return totals
+def _sealed_solution(db: Session, sealed: dict) -> dict:
+    """读取 1.2.0 证据封存的 ``solution.json`` 标准工程解载体。"""
+    sol_ref = sealed["engineering_solution"]["solution.json"]
+    return json.loads(get_object(db, sol_ref["object_id"]).decode("utf-8"))
+
+
+def _series_year_sums(solution_doc: dict, series_id: str, bounds) -> list[float]:
+    """独立手算: 按年界 plain 求和封存工程解时序(不经实现内部中间函数)。"""
+    values = solution_doc["series"][series_id]["values"]
+    return [float(sum(values[start:end])) for start, end in bounds]
 
 
 def _check_financial(
+    db: Session,
     sealed,
     *,
     k,
@@ -469,22 +473,22 @@ def _check_financial(
     assert fin["currency"] == "CNY"
     assert fin["profile_id"] == profile_id
     assert fin["discount_rate"] == RATE
-    solution = sealed["compute_result"]["outputs"]["solution"]
-    variables = solution["variables"]
-    components = solution["components"]
+    solution_doc = _sealed_solution(db, sealed)
 
-    capacity = next(float(v["value"]) for v in variables if v["name"] == "hp_cap")
+    capacity = next(
+        float(v["value"])
+        for v in solution_doc["planning_variables"]
+        if v["planning_variable_id"] == "hp_cap"
+    )
     assert capacity == pytest.approx(50.0, rel=1e-6)
-    upfront = components["hp1__upfront_capex"]
-    assert upfront["unit"] == "CNY"
-    assert fin["construction_total"] == str(Decimal(str(upfront["value"])))
+    assert fin["construction_total_unit"] == "CNY"
     assert float(fin["construction_total"]) == pytest.approx(expected_c, rel=1e-6)
-    fixed = components["hp1__annual_fixed_om"]
-    assert fixed["unit"] == "CNY/a"
     assert float(fin["annual_fixed_om"]) == pytest.approx(fixed_rate * 50.0, rel=1e-6)
 
-    purchase = [s * PRICE for s in _year_sums(variables, "grid1__electricity_import__t", bounds)]
-    consumed = _year_sums(variables, "hp1__electricity_in__t", bounds)
+    purchase = [
+        s * PRICE for s in _series_year_sums(solution_doc, "grid1.electricity_import", bounds)
+    ]
+    consumed = _series_year_sums(solution_doc, "hp1.electricity_in", bounds)
     expected_r = []
     for j in range(n):
         variable = (consumed[j] * variable_rate) if variable_rate else 0.0
@@ -598,6 +602,7 @@ class TestT2CashflowChain:
         pid = _prepare_t2_project(client, db, user, raw, 2023, HP_BINDING, BASE_PLANNING, _hp_demo_profile())
         sealed = _solve(client, db, engine, plane, pid, user, _eval_k1n2(), "t2-k1n2-a")
         fin = _check_financial(
+            db,
             sealed,
             k=1,
             n=2,
@@ -695,6 +700,7 @@ class TestT2CashflowChain:
         }
         sealed = _solve(client, db, engine, plane, pid, owner, evaluation, "t2-k0-fixed")
         _check_financial(
+            db,
             sealed,
             k=0,
             n=2,
@@ -726,10 +732,14 @@ class TestT2CashflowChain:
             with_existing_hp=True,
         )
         sealed = _solve(client, db, engine, plane, pid, owner, _eval_k1n2(), "t2-k1n2-existing")
-        components = sealed["compute_result"]["outputs"]["solution"]["components"]
-        assert "hp_old__upfront_capex" not in components
-        assert "hp_old__annual_fixed_om" not in components
+        cost_items = sealed["financial_evaluation"]["cost_items"]
+        assert not any(
+            item["instance_id"] == "hp_old"
+            and item["component"] in ("upfront_capex", "annual_fixed_om")
+            for item in cost_items
+        )
         _check_financial(
+            db,
             sealed,
             k=1,
             n=2,
@@ -790,16 +800,15 @@ class TestT2CashflowChain:
             client, db, engine, plane, pid, user, _eval_k1n2(), "d2-demand-worker"
         )
         fin = sealed["financial_evaluation"]
-        facts = sealed["compute_result"]["outputs"]["financial_facts"]
         assert fin["schema_version"] == "1.0.0"
         assert fin["construction_period"] == 1
         assert fin["operation_years"] == 2
         # Real heat-pump planning decision (not a placeholder): its rated
         # thermal capacity must serve the 62.5 kW second-year heat load.
-        solution = sealed["compute_result"]["outputs"]["solution"]
+        solution_doc = _sealed_solution(db, sealed)
         hp_cap = next(
-            float(v["value"]) for v in solution["variables"]
-            if v["name"] == "hp_cap"
+            float(v["value"]) for v in solution_doc["planning_variables"]
+            if v["planning_variable_id"] == "hp_cap"
         )
         assert hp_cap == pytest.approx(62.5, abs=1e-5)
         assert float(fin["construction_total"]) == pytest.approx(
@@ -810,7 +819,6 @@ class TestT2CashflowChain:
         )
         months = fin["monthly_demand"]
         assert len(months) == 24
-        assert facts["monthly_demand"] == months
         assert [(r["calendar_year"], r["calendar_month"]) for r in months] == [
             (year, month) for year in (2023, 2024) for month in range(1, 13)
         ]
@@ -923,25 +931,23 @@ def test_monthly_daily_real_task_uses_calendar_tariff_in_cashflow(
     fin = sealed["financial_evaluation"]
     assert fin["status"] == "evaluated"
     assert fin["profile_id"] == "t2-issue01-monthly"
-    variables = sealed["compute_result"]["outputs"]["solution"]["variables"]
+    solution_doc = _sealed_solution(db, sealed)
+    grid_vals = solution_doc["series"]["grid1.electricity_import"]["values"]
     purchase_by_year = [0.0, 0.0]
     daily_by_month = {
         1: [float(value) for value in jan_values],
         2: [0.8] * 24,
         **{month: [0.1] * 24 for month in range(3, 13)},
     }
-    for variable in variables:
-        name = str(variable["name"])
-        if not name.startswith("grid1__electricity_import__t"):
-            continue
-        t = int(name.rsplit("__t", 1)[1])
+    for t, val in enumerate(grid_vals):
         date = datetime(2023, 1, 1) + timedelta(hours=t)
         purchase_by_year[date.year - 2023] += (
-            float(variable["value"]) * daily_by_month[date.month][date.hour]
+            float(val) * daily_by_month[date.month][date.hour]
         )
     assert purchase_by_year[0] != pytest.approx(purchase_by_year[1])
-    consumed = _year_sums(
-        variables, "hp1__electricity_in__t",
+    consumed = _series_year_sums(
+        solution_doc,
+        "hp1.electricity_in",
         ((0, 8760), (8760, 17544)),
     )
     for offset in range(2):

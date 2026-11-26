@@ -124,7 +124,7 @@ class BuiltinStageDescriptor:
 
     @property
     def command(self) -> tuple[str, ...]:
-        """Container command matching pies-builtin-stages:1.1.5 runner contract."""
+        """Container command matching pies-builtin-stages:1.2.0 runner contract."""
         if self.manifest_path:
             return ("python", "-m", "pies_sdk.runner", "--manifest", self.manifest_path)
         return ("python", "-m", "pies_sdk.runner")
@@ -189,12 +189,12 @@ def build_builtin_stage_catalog(builtin_image: str) -> BuiltinStageCatalog:
                 manifest_path="/app/plugins/solver_highs/plugin.yaml",
             ),
             BuiltinStageDescriptor(
-                plugin_id="ies.result-adapter.highs",
+                plugin_id="ies.evaluator.finance",
                 version="1.0.0",
                 kind="evaluator",
                 image=builtin_image,
-                entrypoint="evaluator_stage:evaluate",
-                manifest_path="/app/plugins/evaluator_highs/plugin.yaml",
+                entrypoint="finance_evaluator_stage:evaluate",
+                manifest_path="/app/plugins/evaluator_finance/plugin.yaml",
             ),
         )
     )

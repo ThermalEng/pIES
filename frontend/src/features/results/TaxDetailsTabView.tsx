@@ -5,10 +5,12 @@
 import { useState } from 'react'
 
 import { BarChart, CategoryLineChart } from '../../components/charts'
-import { Alert, Badge, Button, Card, EmptyState, Select } from '../../components/ui'
+import { Badge, Button, Card, EmptyState, Select } from '../../components/ui'
 import { useI18n } from '../../i18n'
 import type { FinancialAbsence, FinancialEvaluationBlock, TaskOutcome } from '../../types'
+import { FinancialAbsenceAlert } from './resultHelpers'
 import {
+  asObjectArray,
   buildAssetBookValueChartData,
   buildCostItemChartGroups,
   buildDepreciationChartData,
@@ -39,17 +41,7 @@ export function TaxDetailsTabView({
 
   if (!fin) {
     if (finAbsence) {
-      return (
-        <div className="ies-section">
-          <Alert variant="warning">
-            {finAbsence === 'outcome_not_normal'
-              ? t('ies.result.fin_absence_outcome_not_normal', { outcome: outcome ?? '—' })
-              : finAbsence === 'solution_not_requested'
-                ? t('ies.result.fin_absence_solution_not_requested')
-                : t('ies.result.fin_absence_missing_unknown')}
-          </Alert>
-        </div>
-      )
+      return <FinancialAbsenceAlert finAbsence={finAbsence} outcome={outcome} />
     }
     return (
       <Card title={t('ies.result.tab_tax')} className="ies-section">
@@ -58,24 +50,57 @@ export function TaxDetailsTabView({
     )
   }
 
-  const ccy = fin.currency
+  const ccy = fin.currency ?? ''
+  const monthlyDemand = asObjectArray<FinancialEvaluationBlock['monthly_demand'][number]>(
+    fin.monthly_demand,
+  )
+  const costItems = asObjectArray<FinancialEvaluationBlock['cost_items'][number]>(fin.cost_items)
+  const amounts = asObjectArray<FinancialEvaluationBlock['amounts'][number]>(fin.amounts)
+  const cashMovements = asObjectArray<FinancialEvaluationBlock['cash_movements'][number]>(
+    fin.cash_movements,
+  )
+  const assets = asObjectArray<FinancialEvaluationBlock['assets'][number]>(fin.assets)
+  const taxCash = fin.tax_cash && typeof fin.tax_cash === 'object' ? fin.tax_cash : null
+  const vat = asObjectArray<FinancialEvaluationBlock['tax_cash']['vat'][number]>(taxCash?.vat)
+  const vatRules = asObjectArray<FinancialEvaluationBlock['tax_cash']['vat_rules'][number]>(
+    taxCash?.vat_rules,
+  )
+  const refunds = asObjectArray<FinancialEvaluationBlock['tax_cash']['refunds'][number]>(
+    taxCash?.refunds,
+  )
+  const income = asObjectArray<FinancialEvaluationBlock['tax_cash']['income'][number]>(
+    taxCash?.income,
+  )
+  const depreciation = asObjectArray<FinancialEvaluationBlock['tax_cash']['depreciation'][number]>(
+    taxCash?.depreciation,
+  )
+  const lossBalances = asObjectArray<FinancialEvaluationBlock['tax_cash']['loss_balances'][number]>(
+    taxCash?.loss_balances,
+  )
+  const derived = asObjectArray<FinancialEvaluationBlock['tax_cash']['derived'][number]>(
+    taxCash?.derived,
+  )
+
   const demandChart = buildMonthlyDemandChartData(fin, selectedBinding || undefined)
   const vatChart = buildVatPoolChartData(fin, selectedPool || undefined)
   const incomeChart = buildIncomeTaxChartData(fin, selectedRule || undefined)
   const depChart = buildDepreciationChartData(fin)
-  const costGroups = buildCostItemChartGroups(fin.cost_items, 30)
-  const amountGroups = buildNamedAmountChartGroups(fin.amounts)
+  const costGroups = buildCostItemChartGroups(costItems, 30)
+  const amountGroups = buildNamedAmountChartGroups(amounts)
   const assetChart = buildAssetBookValueChartData(fin)
 
-  const vatTotal = fin.tax_cash.vat.length + fin.tax_cash.vat_rules.length + fin.tax_cash.refunds.length
+  const vatTotal = vat.length + vatRules.length + refunds.length
   const incomeTotal =
-    fin.tax_cash.income.length +
-    fin.tax_cash.depreciation.length +
-    fin.tax_cash.loss_balances.length +
-    fin.tax_cash.derived.length
-  const amountRowCount = fin.amounts.reduce((acc, a) => acc + a.values.length, 0)
-  const relationsTotal = fin.cost_items.length + amountRowCount
-  const transactionsTotal = fin.cash_movements.length + fin.assets.length
+    income.length +
+    depreciation.length +
+    lossBalances.length +
+    derived.length
+  const amountRowCount = amounts.reduce(
+    (acc, a) => acc + asObjectArray(a.values).length,
+    0,
+  )
+  const relationsTotal = costItems.length + amountRowCount
+  const transactionsTotal = cashMovements.length + assets.length
 
   const vatLabelMap: Record<string, string> = {
     paid: t('ies.result.fin_tax_paid'),
@@ -99,7 +124,7 @@ export function TaxDetailsTabView({
       <Card
         title={t('ies.result.fin_demand_monthly')}
         actions={
-          fin.monthly_demand.length > 0 ? (
+          monthlyDemand.length > 0 ? (
             <div className="ies-form-row">
               {demandChart.billingIds.length > 1 ? (
                 <Select
@@ -113,14 +138,14 @@ export function TaxDetailsTabView({
                 </Select>
               ) : null}
               <Button variant="secondary" size="sm" onClick={() => onOpenDetail('demand')}>
-                {t('ies.result.view_detail_data', { count: fin.monthly_demand.length })}
+                {t('ies.result.view_detail_data', { count: monthlyDemand.length })}
               </Button>
             </div>
           ) : undefined
         }
         className="ies-section"
       >
-        {fin.monthly_demand.length === 0 ? (
+        {monthlyDemand.length === 0 ? (
           <p className="ies-text-secondary">
             {t('ies.result.fin_demand_unbound')}
           </p>
@@ -192,9 +217,9 @@ export function TaxDetailsTabView({
         className="ies-section"
       >
         <div className="ies-form-row" style={{ marginBottom: 'var(--ies-space-3)' }}>
-          <Badge variant="neutral" label={`${t('ies.result.tax_vat_pool_tab')}: ${fin.tax_cash.vat.length}`} />
-          <Badge variant="neutral" label={t('ies.result.fin_tax_rule_count', { count: fin.tax_cash.vat_rules.length })} />
-          <Badge variant="neutral" label={t('ies.result.fin_tax_refund_count', { count: fin.tax_cash.refunds.length })} />
+          <Badge variant="neutral" label={`${t('ies.result.tax_vat_pool_tab')}: ${vat.length}`} />
+          <Badge variant="neutral" label={t('ies.result.fin_tax_rule_count', { count: vatRules.length })} />
+          <Badge variant="neutral" label={t('ies.result.fin_tax_refund_count', { count: refunds.length })} />
         </div>
         {vatChart.categories.length > 0 ? (
           <CategoryLineChart
@@ -237,10 +262,10 @@ export function TaxDetailsTabView({
         className="ies-section"
       >
         <div className="ies-form-row" style={{ marginBottom: 'var(--ies-space-3)' }}>
-          <Badge variant="neutral" label={`${t('ies.result.tax_income_tab')}: ${fin.tax_cash.income.length}`} />
-          <Badge variant="neutral" label={`${t('ies.result.tax_depreciation_tab')}: ${fin.tax_cash.depreciation.length}`} />
-          <Badge variant="neutral" label={t('ies.result.fin_tax_loss_count', { count: fin.tax_cash.loss_balances.length })} />
-          <Badge variant="neutral" label={t('ies.result.fin_tax_derived_count', { count: fin.tax_cash.derived.length })} />
+          <Badge variant="neutral" label={`${t('ies.result.tax_income_tab')}: ${income.length}`} />
+          <Badge variant="neutral" label={`${t('ies.result.tax_depreciation_tab')}: ${depreciation.length}`} />
+          <Badge variant="neutral" label={t('ies.result.fin_tax_loss_count', { count: lossBalances.length })} />
+          <Badge variant="neutral" label={t('ies.result.fin_tax_derived_count', { count: derived.length })} />
         </div>
         <div className="ies-chart-grid">
           <div>
@@ -368,8 +393,8 @@ export function TaxDetailsTabView({
         className="ies-section"
       >
         <div className="ies-form-row" style={{ marginBottom: 'var(--ies-space-2)' }}>
-          <Badge variant="neutral" label={t('ies.result.fin_movement_count', { count: fin.cash_movements.length })} />
-          <Badge variant="neutral" label={t('ies.result.fin_asset_count', { count: fin.assets.length })} />
+          <Badge variant="neutral" label={t('ies.result.fin_movement_count', { count: cashMovements.length })} />
+          <Badge variant="neutral" label={t('ies.result.fin_asset_count', { count: assets.length })} />
         </div>
         <p className="ies-text-note" style={{ marginBottom: 'var(--ies-space-3)' }}>
           {t('ies.result.fin_movements_note')}
@@ -392,7 +417,7 @@ export function TaxDetailsTabView({
               {t('ies.result.fin_assets_note')}
             </p>
           </>
-        ) : fin.cash_movements.length === 0 ? (
+        ) : cashMovements.length === 0 ? (
           <p className="ies-text-secondary">
             {t('ies.result.fin_tax_none')}
           </p>

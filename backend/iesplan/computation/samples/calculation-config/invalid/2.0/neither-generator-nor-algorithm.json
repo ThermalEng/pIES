@@ -6,11 +6,13 @@
   "generator": null,
   "solver": null,
   "algorithm": null,
-  "evaluator": null,
+  "evaluators": [],
   "precision": "medium",
-  "convergence": null,
   "time_limit_seconds": 600,
   "options": {},
   "seed": 42,
-  "outputs": ["solution", "metrics"]
+  "outputs": [
+    "solution",
+    "metrics"
+  ]
 }

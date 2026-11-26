@@ -45,10 +45,8 @@ from iesplan.api import projects as projects_api  # noqa: E402
 from iesplan.api import tasks as tasks_api  # noqa: E402
 from iesplan.api.config import config_router  # noqa: E402
 from iesplan.api.deps import get_request_db  # noqa: E402
-from iesplan.application import worker as worker_app  # noqa: E402
 from iesplan.application.tasks.submissions import (  # noqa: E402
     _check_prediction_inputs,
-    submit_task,
 )
 from iesplan.assembly.contracts import ValidatedAssemblyArtifact, ValidationReceipt  # noqa: E402
 from iesplan.computation import (  # noqa: E402
@@ -56,13 +54,9 @@ from iesplan.computation import (  # noqa: E402
     NAIVE_PREDICTOR_REF,
     ComputationUnavailableError,
     PredictedTarget,
-    PredictionConvergence,
     PredictorDescriptor,
     build_predictor_registry,
-    check_convergence,
     materialize_predicted_series,
-    prediction_delta,
-    split_predictions_by_dependency,
 )
 from iesplan.db import Base  # noqa: E402
 from iesplan.main import create_app  # noqa: E402
@@ -152,252 +146,45 @@ class _StrictPredictor:
 STRICT_REF = "ies.predictor.strict@1.0.0"
 
 
-CHASE_REF = "test.predictor.chase@1.0.0"
+PARAM_PREDICTOR_REF = "test.predictor.param@1.0.0"
 
 
-class _ChasePredictor:
-    """测试耦合 predictor：首轮携载历史末值，后续轮值随上一轮真实求解目标值变化。
-
-    只验阶段二耦合机制（previous 真实透传、每轮真实求解、新 Bundle/
-    最终结果/证据同最终轮输入一致）；非生产算法，不进入公开目录。
-    """
-
-    def __init__(self) -> None:
-        self.calls: list[dict] = []
+class _ParamPredictor:
+    """参数化测试 predictor: 验证边界参数规则(scale > 0)。"""
 
     @property
     def descriptor(self):
         return PredictorDescriptor(
-            ref=CHASE_REF,
-            depends_on_solve_result=True,
-            accepts_any_target_type=True,
-            needs_history=True,
-            description="测试耦合: 预测值随上一轮求解目标值变化",
-        )
-
-    def validate_parameters(self, parameters):
-        """测试耦合参数规则: 要求 parameters.scale 为正有限数(本算法归一化尺度)。"""
-        scale = parameters.get("scale") if isinstance(parameters, dict) else None
-        if (
-            isinstance(scale, bool)
-            or not isinstance(scale, (int, float))
-            or not math.isfinite(scale)
-            or scale <= 0
-        ):
-            raise ValueError("测试耦合预测要求 parameters.scale 为正有限数")
-
-    def measure_convergence(
-        self, *, previous_prediction, current_prediction,
-        previous_outputs, current_outputs, parameters,
-    ):
-        from iesplan.computation.predictors import (  # noqa: E402
-            PredictionConvergence,
-            prediction_delta,
-        )
-
-        # 尺度规则由 validate_parameters 在输入边界保证，此处直接计算。
-        delta = prediction_delta(previous_prediction.values, current_prediction.values)
-        return PredictionConvergence(
-            metric="max_abs_diff", value=delta / float(parameters["scale"]), unit="1",
-        )
-
-    def predict(
-        self, *, device, interface, target_type, history, history_object_id,
-        parameters, seed, point_count, previous=None,
-    ):
-        if not history:
-            raise ValueError(f"测试耦合预测无历史可携: {device!r} x {interface!r}")
-        if previous is None:
-            value = float(history[-1])
-            previous_objective = None
-        else:
-            previous_objective = float(previous["solution"]["objective_value"])
-            value = 20.0 + (abs(previous_objective) % 4.3)
-        values = tuple(value for _ in range(point_count))
-        self.calls.append(
-            {
-                "device": device,
-                "interface": interface,
-                "previous_objective": previous_objective,
-                "value": value,
-            }
-        )
-        artifact = json.dumps(
-            {
-                "schema": "ies.prediction-artifact",
-                "algorithm": CHASE_REF,
-                "target": {"device": device, "interface": interface},
-                "learned": {"method": "chase_objective", "value": value},
-            },
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-        receipt = {
-            "target_type": target_type,
-            "algorithm": CHASE_REF,
-            "parameters": dict(parameters),
-            "feature_order": ["history_value", "previous_objective"],
-            "target_order": [interface],
-            "training_input_refs": {"history": history_object_id},
-            "training_target_refs": {interface: history_object_id},
-            "covariate_refs": {},
-            "seed": seed,
-            "previous_objective": previous_objective,
-            "output_series": {
-                "device": device,
-                "interface": interface,
-                "mode": "data_predict",
-                "point_count": point_count,
-            },
-        }
-        return PredictedTarget(
-            device=device,
-            interface=interface,
-            target_type=target_type,
-            values=values,
-            history_object_id=history_object_id,
-            artifact=artifact,
-            receipt=receipt,
-        )
-
-
-CONTRACT_REF = "test.predictor.contractor@1.0.0"
-
-
-class _ContractorPredictor:
-    """测试收敛耦合：下轮预测 = 上一轮真实目标值 / 10000（压缩映射）。
-
-    在购电成本目标下目标值与预测呈线性关系（见收敛正例手算），序列
-    几何收敛；首轮取历史末值。参数规则与收敛口径同 chase（scale 归一）。
-    """
-
-    def __init__(self) -> None:
-        self.calls: list[dict] = []
-
-    @property
-    def descriptor(self):
-        return PredictorDescriptor(
-            ref=CONTRACT_REF,
-            depends_on_solve_result=True,
-            accepts_any_target_type=True,
-            needs_history=True,
-            description="测试收敛: 下轮预测取上一轮真实目标值/10000",
-        )
-
-    def validate_parameters(self, parameters):
-        scale = parameters.get("scale") if isinstance(parameters, dict) else None
-        if (
-            isinstance(scale, bool)
-            or not isinstance(scale, (int, float))
-            or not math.isfinite(scale)
-            or scale <= 0
-        ):
-            raise ValueError("测试收敛预测要求 parameters.scale 为正有限数")
-
-    def measure_convergence(
-        self, *, previous_prediction, current_prediction,
-        previous_outputs, current_outputs, parameters,
-    ):
-        from iesplan.computation.predictors import (  # noqa: E402
-            PredictionConvergence,
-            prediction_delta,
-        )
-
-        delta = prediction_delta(previous_prediction.values, current_prediction.values)
-        return PredictionConvergence(
-            metric="max_abs_diff", value=delta / float(parameters["scale"]), unit="1",
-        )
-
-    def predict(
-        self, *, device, interface, target_type, history, history_object_id,
-        parameters, seed, point_count, previous=None,
-    ):
-        if previous is None:
-            value = float(history[-1])
-            previous_objective = None
-        else:
-            previous_objective = float(previous["solution"]["objective_value"])
-            value = previous_objective / 10000.0
-        values = tuple(value for _ in range(point_count))
-        self.calls.append(
-            {
-                "device": device,
-                "interface": interface,
-                "previous_objective": previous_objective,
-                "value": value,
-            }
-        )
-        artifact = json.dumps(
-            {
-                "schema": "ies.prediction-artifact",
-                "algorithm": CONTRACT_REF,
-                "target": {"device": device, "interface": interface},
-                "learned": {"method": "contract_objective", "value": value},
-            },
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-        receipt = {
-            "target_type": target_type,
-            "algorithm": CONTRACT_REF,
-            "parameters": dict(parameters),
-            "feature_order": ["history_value", "previous_objective"],
-            "target_order": [interface],
-            "training_input_refs": {"history": history_object_id},
-            "training_target_refs": {interface: history_object_id},
-            "covariate_refs": {},
-            "seed": seed,
-            "previous_objective": previous_objective,
-            "output_series": {
-                "device": device,
-                "interface": interface,
-                "mode": "data_predict",
-                "point_count": point_count,
-            },
-        }
-        return PredictedTarget(
-            device=device,
-            interface=interface,
-            target_type=target_type,
-            values=values,
-            history_object_id=history_object_id,
-            artifact=artifact,
-            receipt=receipt,
-        )
-
-
-COUNTING_NAIVE_REF = "test.predictor.counting-naive@1.0.0"
-
-
-class _CountingNaivePredictor:
-    """测试计数独立：行为同 naive（末值携载），并记录每次调用。"""
-
-    def __init__(self) -> None:
-        self.calls: list[dict] = []
-
-    @property
-    def descriptor(self):
-        return PredictorDescriptor(
-            ref=COUNTING_NAIVE_REF,
+            ref=PARAM_PREDICTOR_REF,
             depends_on_solve_result=False,
             accepts_any_target_type=True,
             needs_history=True,
-            description="测试计数独立: 末值携载并记录调用",
+            description="测试参数化独立预测: scale 为正有限数",
+            parameters_schema={
+                "type": "object",
+                "properties": {"scale": {"type": "number", "exclusiveMinimum": 0}},
+                "additionalProperties": False,
+            },
         )
 
     def validate_parameters(self, parameters):
-        return None
+        scale = parameters.get("scale") if isinstance(parameters, dict) else None
+        if (
+            isinstance(scale, bool)
+            or not isinstance(scale, (int, float))
+            or not math.isfinite(scale)
+            or scale <= 0
+        ):
+            raise ValueError("测试参数预测要求 parameters.scale 为正有限数")
 
     def predict(
         self, *, device, interface, target_type, history, history_object_id,
-        parameters, seed, point_count, previous=None,
+        parameters, seed, point_count,
     ):
-        self.calls.append({"device": device, "interface": interface})
         return NAIVE_PREDICTOR.predict(
             device=device, interface=interface, target_type=target_type,
             history=history, history_object_id=history_object_id,
             parameters=parameters, seed=seed, point_count=point_count,
-            previous=previous,
         )
 
 
@@ -449,11 +236,9 @@ class TestPredictorRegistry:
 
     def test_dependency_declaration_required_and_round_tripped(self) -> None:
         assert NAIVE_PREDICTOR.descriptor.depends_on_solve_result is False
-        chase = _ChasePredictor()
-        assert chase.descriptor.depends_on_solve_result is True
-        registry = build_predictor_registry((NAIVE_PREDICTOR, chase))
+        registry = build_predictor_registry((NAIVE_PREDICTOR, _ParamPredictor()))
         snapshot = {d.ref: d.depends_on_solve_result for d in registry.snapshot()}
-        assert snapshot == {NAIVE_PREDICTOR_REF: False, CHASE_REF: True}
+        assert snapshot == {NAIVE_PREDICTOR_REF: False, PARAM_PREDICTOR_REF: False}
         with pytest.raises(TypeError):
             PredictorDescriptor(ref="ies.predictor.missing@1.0.0")
         with pytest.raises(TypeError):
@@ -471,31 +256,9 @@ class TestPredictorRegistry:
         with pytest.raises(ComputationUnavailableError):
             build_predictor_registry((NAIVE_PREDICTOR, NAIVE_PREDICTOR))
         with pytest.raises(ComputationUnavailableError):
+            build_predictor_registry((_NoValidatePredictor(),))
+        with pytest.raises(ComputationUnavailableError):
             build_predictor_registry((object(),))
-
-
-class TestPredictionDelta:
-    def test_equal_series_zero_and_known_diff(self) -> None:
-        assert prediction_delta((1.0, 2.0), (1.0, 2.0)) == 0.0
-        assert prediction_delta((1.0, 2.0), (1.5, 1.0)) == 1.0
-
-    def test_length_mismatch_rejected(self) -> None:
-        with pytest.raises(ValueError, match="点数不一致"):
-            prediction_delta((1.0,), (1.0, 2.0))
-
-
-class _CoupledWithoutMeasure:
-    """注册拒绝用：声明耦合但不提供收敛度量。"""
-
-    @property
-    def descriptor(self):
-        return PredictorDescriptor(
-            ref="test.predictor.coupled-naked@1.0.0",
-            depends_on_solve_result=True,
-        )
-
-    def validate_parameters(self, parameters):
-        return None
 
 
 class _NoValidatePredictor:
@@ -507,84 +270,6 @@ class _NoValidatePredictor:
             ref="test.predictor.no-validate@1.0.0",
             depends_on_solve_result=False,
         )
-
-
-def _convergence_target(device, values):
-    return PredictedTarget(
-        device=device, interface="electricity_demand", target_type="load",
-        values=tuple(values), history_object_id="obj-h",
-        artifact=b"{}", receipt={},
-    )
-
-
-class TestConvergenceContract:
-    def test_convergence_value_rules(self) -> None:
-        good = PredictionConvergence(metric="max_abs_diff", value=2, unit="1")
-        assert good.value == 2.0 and isinstance(good.value, float)
-        with pytest.raises(TypeError):
-            PredictionConvergence(metric="", value=0.0, unit="1")
-        with pytest.raises(TypeError):
-            PredictionConvergence(metric="max_abs_diff", value=True, unit="1")
-        for bad in (-0.5, float("nan"), float("inf")):
-            with pytest.raises(ValueError):
-                PredictionConvergence(metric="max_abs_diff", value=bad, unit="1")
-        with pytest.raises(ValueError, match="'1'"):
-            PredictionConvergence(metric="max_abs_diff", value=0.0, unit="kW")
-
-    def test_check_convergence_boundary(self) -> None:
-        good = PredictionConvergence(metric="max_abs_diff", value=0.5, unit="1")
-        assert check_convergence(good) is good
-        with pytest.raises(ComputationUnavailableError):
-            check_convergence({"metric": "max_abs_diff", "value": 0.5, "unit": "1"})
-
-    def test_registry_enforces_capabilities(self) -> None:
-        with pytest.raises(ComputationUnavailableError):
-            build_predictor_registry((_CoupledWithoutMeasure(),))
-        with pytest.raises(ComputationUnavailableError):
-            build_predictor_registry((_NoValidatePredictor(),))
-        registry = build_predictor_registry((NAIVE_PREDICTOR, _ChasePredictor()))
-        assert len(registry) == 2
-
-    def test_split_by_dependency(self) -> None:
-        registry = build_predictor_registry((NAIVE_PREDICTOR, _ChasePredictor()))
-        entries = (
-            {
-                "target": {"instance": "load1", "interface": "electricity_demand"},
-                "algorithm": NAIVE_PREDICTOR_REF,
-                "parameters": {},
-            },
-            {
-                "target": {"instance": "flex1", "interface": "electricity_demand"},
-                "algorithm": CHASE_REF,
-                "parameters": {"scale": 10.0},
-            },
-        )
-        independent, coupled = split_predictions_by_dependency(
-            entries, registry.get
-        )
-        assert [e["target"]["instance"] for e in independent] == ["load1"]
-        assert [e["target"]["instance"] for e in coupled] == ["flex1"]
-
-    def test_chase_parameter_rule(self) -> None:
-        chase = _ChasePredictor()
-        chase.validate_parameters({"scale": 2.5})
-        NAIVE_PREDICTOR.validate_parameters({})
-        for bad in ({}, {"scale": 0}, {"scale": -1.0}, {"scale": "10"}, {"scale": True}):
-            with pytest.raises(ValueError, match="scale"):
-                chase.validate_parameters(bad)
-
-    def test_chase_measure_hand_numbers(self) -> None:
-        chase = _ChasePredictor()
-        out = chase.measure_convergence(
-            previous_prediction=_convergence_target("flex1", (10.0, 10.0, 10.0)),
-            current_prediction=_convergence_target("flex1", (12.0, 10.0, 10.0)),
-            previous_outputs={},
-            current_outputs={},
-            parameters={"scale": 4.0},
-        )
-        assert out.metric == "max_abs_diff"
-        assert out.value == 0.5
-        assert out.unit == "1"
 
 
 def _predict_artifact(bindings: dict) -> ValidatedAssemblyArtifact:
@@ -703,7 +388,7 @@ class TestSubmitCompat:
         return {"devices": devices}
 
     def _cfg(self, *entries: dict) -> dict:
-        return {"predictions": list(entries), "convergence": None}
+        return {"predictions": list(entries)}
 
     def _entry(self, dev: str, alg: str) -> dict:
         return {
@@ -741,7 +426,7 @@ class TestSubmitCompat:
             == 1
         )
 
-    def test_two_independent_targets_need_no_convergence(self) -> None:
+    def test_two_independent_targets_pass_compat(self) -> None:
         registry = build_predictor_registry((NAIVE_PREDICTOR,))
         assert (
             _check_prediction_inputs(
@@ -754,17 +439,6 @@ class TestSubmitCompat:
             )
             == 2
         )
-
-    def test_single_coupled_target_requires_convergence_012(self) -> None:
-        registry = build_predictor_registry((_ChasePredictor(),))
-        entry = self._entry("load1", CHASE_REF)
-        entry["parameters"] = {"scale": 10.0}
-        with pytest.raises(InvalidRequestError) as exc_info:
-            _check_prediction_inputs(
-                self._doc("load1"), self._cfg(entry),
-                1, predictor_registry=registry,
-            )
-        assert exc_info.value.code == "TASK-REQ-012"
 
 
 def _predict_history_csv(values: list[float], rows: int = 24) -> bytes:
@@ -952,6 +626,20 @@ def _generator_registry():
     return build_registry((HIGHS_MILP_PROVIDER,))
 
 
+def _registry_kwargs() -> dict:
+    from iesplan.computation import build_evaluator_registry, build_solver_registry
+    from iesplan.computation.config import (
+        BUILTIN_EVALUATOR_FINANCE_SPEC,
+        BUILTIN_SOLVER_HIGHS_SPEC,
+    )
+
+    return {
+        "generator_registry": _generator_registry(),
+        "solver_registry": build_solver_registry((BUILTIN_SOLVER_HIGHS_SPEC,)),
+        "evaluator_registry": build_evaluator_registry((BUILTIN_EVALUATOR_FINANCE_SPEC,)),
+    }
+
+
 def _save_calc_case(db: Session, user, pid: int, body: dict, registry) -> int:
     """经保存用例直接落配置（合成算法在保存入口真实可用，带目录注入）。
 
@@ -963,7 +651,7 @@ def _save_calc_case(db: Session, user, pid: int, body: dict, registry) -> int:
 
     saved = save_calculation_config_case(
         db, user, pid, body, None, predictor_registry=registry,
-        generator_registry=_generator_registry(),
+        **_registry_kwargs(),
     )
     return saved["revision"]
 
@@ -1024,8 +712,6 @@ class TestPredictEndToEnd:
         assert prediction["prediction_rounds"] == 1
         assert prediction["solve_rounds"] == 1
         assert prediction["phase2_solve_rounds"] == 0
-        assert prediction["converged"] is True
-        assert prediction["final_delta"] is None
         receipt = prediction["receipts"][0]
         assert receipt["algorithm"] == NAIVE_PREDICTOR_REF
         assert receipt["training_input_refs"]["history"]
@@ -1073,7 +759,6 @@ class TestPredictEndToEnd:
             }
             for dev in ("load1", "load2")
         ]
-        assert body["convergence"] is None
         rev = _save_calc(client, pid, user, body)
         status, resp = _submit_task(
             client, pid, user, config={"config_revision": rev},
@@ -1092,396 +777,8 @@ class TestPredictEndToEnd:
         assert prediction["prediction_rounds"] == 1
         assert prediction["solve_rounds"] == 1
         assert prediction["phase2_solve_rounds"] == 0
-        assert prediction["converged"] is True
-        assert prediction["final_delta"] is None
-        assert prediction["convergences"] == []
         assert len(prediction["receipts"]) == 2
         assert "rounds" not in sealed
-
-    def test_independent_with_convergence_rejected_at_submit(
-        self, client: TestClient, db: Session
-    ) -> None:
-        """仅独立目标携带 convergence 提交即 400 TASK-REQ-012（不适用须为 null）。"""
-        user = make_user(db, "predict_owner_10")
-        pid, _vids = _prepare_predict_project(
-            client, db, user,
-            [("load1", "load", [48.0, 49.0]), ("load2", "flex_load", [10.0, 11.0])],
-        )
-        body = dict(_CONFIG_BODY)
-        body["predictions"] = [
-            {
-                "target": {"instance": dev, "interface": "electricity_demand"},
-                "algorithm": NAIVE_PREDICTOR_REF,
-                "parameters": {},
-            }
-            for dev in ("load1", "load2")
-        ]
-        body["convergence"] = {"tolerance": 0.001, "max_iterations": 50}
-        rev = _save_calc(client, pid, user, body)
-        status, resp = _submit_task(
-            client, pid, user, config={"config_revision": rev},
-            idempotency_key="predict-e2e-independent-conv",
-        )
-        assert status == 400, resp
-        assert resp["error"]["code"] == "TASK-REQ-012"
-
-    @pytest.mark.parametrize("interrupt", [False, True])
-    def test_coupled_predictor_solves_each_round(
-        self, client: TestClient, db: Session, engine: Engine, plane, monkeypatch, interrupt,
-    ) -> None:
-        """耦合验收：随 previous 变化的 predictor 每一阶段二迭代都真实求解。
-
-        经提交用例直接注入测试目录（公开 HTTP 层只装配生产目录，见
-        未知算法测试）；执行面同样注入测试目录。
-        断言：轮数 == 求解数 == 上限 3 且未收敛；predictor 逐轮收到真实
-        上一轮求解输出；三轮目标值两两不同（每轮都解了新模型）；载荷
-        final_delta 与记录值独立重算一致。
-
-        本测试用电价目标（购电费最小化）使求解结果随预测序列变化；
-        默认恒零目标的链路测试见单/双目标用例。
-        """
-        from test_worker_compute_chain import PLANNING_BODY as _BASE_PLANNING  # noqa: E402
-
-        user = make_user(db, "predict_owner_5")
-        chase_planning = dict(_BASE_PLANNING)
-        chase_planning["objective"] = {
-            "sense": "minimize",
-            "expression": "grid_import__period_energy_purchase",
-        }
-        pid, _vids = _prepare_predict_project(
-            client, db, user,
-            [("load1", "load", [48.0, 49.0]), ("load2", "flex_load", [10.0, 11.0])],
-            tariff_bindings={
-                "grid_import": {
-                    "price": "grid_import",
-                    "instance": "grid1",
-                    "interface": "electricity_import",
-                    "aggregation": "integrate_positive",
-                }
-            },
-            planning_body=chase_planning,
-        )
-        body = dict(_CONFIG_BODY)
-        body["predictions"] = [
-            {
-                "target": {"instance": dev, "interface": "electricity_demand"},
-                "algorithm": CHASE_REF,
-                "parameters": {"scale": 5.0},
-            }
-            for dev in ("load1", "load2")
-        ]
-        body["convergence"] = {"tolerance": 0.001, "max_iterations": 3}
-        chase = _ChasePredictor()
-        registry = build_predictor_registry((chase,))
-        rev = _save_calc_case(db, user, pid, body, registry)
-        task, _flags = submit_task(
-            db, user, pid, "optimization", config={"config_revision": rev},
-            evaluation={
-                "evaluation_years": 1, "construction_period": 0,
-                "operation_years": 1, "discount_rate": 0.08,
-                "construction_payments": [{"t": 0, "ratio": 1}],
-                "maintenance_expenses": [],
-            },
-            idempotency_key="predict-e2e-chase",
-            generator_registry=plane.generator_registry,
-            predictor_registry=registry,
-        )
-        from stage_testkit import build_test_compute_plane
-
-        chase_plane = build_test_compute_plane(
-            plane.stage_runner.stage_root,
-            generator_registry=plane.generator_registry,
-            predictor_registry=registry,
-        )
-        claim = _claim(db, task.id)
-        executions = []
-        native_execute = worker_app.execute_saved_bundle
-
-        def execute(**kwargs):
-            executions.append(kwargs["number"])
-            return native_execute(**kwargs)
-
-        monkeypatch.setattr(worker_app, "execute_saved_bundle", execute)
-        if interrupt:
-            adaptations = []
-            native_adapt = worker_app.adapt_result
-
-            def adapt(*args, **kwargs):
-                adaptations.append(args[2].receipt_id)
-                if len(adaptations) == 2:
-                    raise SystemExit("simulated exit during coupled round 2")
-                return native_adapt(*args, **kwargs)
-
-            monkeypatch.setattr(worker_app, "adapt_result", adapt)
-            with pytest.raises(SystemExit, match="coupled round 2"):
-                _run(engine, claim, chase_plane)
-            from iesplan.application.tasks.maintenance import unlock_task_case
-
-            task = worker_app.get_task_record(db, claim.task_id)
-            assert unlock_task_case(
-                db, task_id=task.id, admin_id=task.requested_by,
-            ).outcome == "unlocked"
-            claim = _claim(db, task.id)
-        assert _run(engine, claim, chase_plane) == "completed"
-        assert executions == [1, 2, 3]
-
-        task_row = db.execute(select(Task).where(Task.id == task.id)).scalar_one()
-        assert task_row.status == "completed"
-        assert task_row.business_outcome == "normal_completion"
-        sealed, evidence = _evidence_payload(db, task.id)
-        prediction = sealed["prediction"]
-        assert prediction["predict_target_count"] == 2
-        assert prediction["prediction_rounds"] == 3
-        assert prediction["solve_rounds"] == 3
-        assert prediction["phase2_solve_rounds"] == 2
-        assert prediction["converged"] is False
-        final_delta = prediction["final_delta"]
-        assert final_delta is not None and final_delta > 0.001
-
-        by_target: dict[str, list[dict]] = {}
-        for call in chase.calls:
-            by_target.setdefault(call["device"], []).append(call)
-        assert set(by_target) == {"load1", "load2"}
-        for calls in by_target.values():
-            assert len(calls) == 3
-            assert calls[0]["previous_objective"] is None
-            assert calls[1]["previous_objective"] is not None
-            assert calls[2]["previous_objective"] is not None
-        # 两目标看到同一轮求解结果（同一次求解驱动两目标重建）。
-        assert (
-            by_target["load1"][1]["previous_objective"]
-            == by_target["load2"][1]["previous_objective"]
-        )
-        assert (
-            by_target["load1"][2]["previous_objective"]
-            == by_target["load2"][2]["previous_objective"]
-        )
-        # 三轮目标值两两不同：每轮都解了由新序列重建的新模型。
-        round_objectives = [
-            by_target["load1"][1]["previous_objective"],
-            by_target["load1"][2]["previous_objective"],
-            sealed["compute_result"]["outputs"]["solution"]["objective_value"],
-        ]
-        assert len(set(round_objectives)) == 3
-        # final_delta 与记录的最终两轮值独立重算一致（无量纲：原始差/scale）。
-        recomputed = {
-            dev: prediction_delta((calls[1]["value"],), (calls[2]["value"],)) / 5.0
-            for dev, calls in by_target.items()
-        }
-        assert final_delta == max(recomputed.values())
-        assert len(prediction["receipts"]) == 2
-        # 顶层收敛记录：逐目标 metric/value/unit、算法精确引用与汇总归属。
-        assert [
-            (record["device"], record["algorithm"], record["metric"], record["unit"])
-            for record in prediction["convergences"]
-        ] == [
-            ("load1", CHASE_REF, "max_abs_diff", "1"),
-            ("load2", CHASE_REF, "max_abs_diff", "1"),
-        ]
-        assert {
-            record["device"]: record["value"] for record in prediction["convergences"]
-        } == recomputed
-        # 封存的最终轮序列字节与记录的第三轮值一致。
-        for entry in prediction["receipts"]:
-            series_id = entry["output_series"]["object_id"]
-            sealed_lines = get_object(db, series_id).decode("utf-8").splitlines()
-            assert sealed_lines[0] == "step,electricity_demand"
-            assert len(sealed_lines) == entry["output_series"]["point_count"] + 1
-            expected_value = by_target[entry["output_series"]["device"]][2]["value"]
-            assert {line.split(",")[1] for line in sealed_lines[1:]} == {
-                repr(expected_value)
-            }
-        # 多轮证据：三轮 Bundle/回执/原始输出/训练产物/序列全部可按引用取回；
-        # 最终轮不重复封存，其条目引用顶层最终组同一对象。
-        history = sealed["round_history"]
-        rounds = sealed["rounds"]
-        assert [entry["round"] for entry in rounds] == [1, 2, 3]
-        assert [entry["phase"] for entry in rounds] == ["phase1", "phase2", "phase2"]
-        assert [entry["authoritative"] for entry in rounds] == [False, False, True]
-        assert sealed["authoritative_round"] == 3
-        # 轮次收敛证据：第 2/3 轮带聚合与逐目标明细，首轮无虚构零差。
-        assert "convergence" not in rounds[0]
-        for entry in rounds[1:]:
-            assert entry["convergence"]["aggregate"] > 0.001
-            assert [
-                (record["device"], record["algorithm"], record["metric"], record["unit"])
-                for record in entry["convergence"]["per_target"]
-            ] == [
-                ("load1", CHASE_REF, "max_abs_diff", "1"),
-                ("load2", CHASE_REF, "max_abs_diff", "1"),
-            ]
-        assert rounds[0]["sealed_in"] == rounds[1]["sealed_in"] == {
-            "bundle": "round_history", "solution": "round_history",
-            "prediction": "round_history",
-        }
-        assert rounds[2]["sealed_in"] == {
-            "bundle": "bundle_files", "solution": "solution",
-            "prediction": "prediction_files",
-        }
-        assert not [key for key in history if key.startswith("round-3/")]
-        round_receipt_ids = [entry["receipt"]["receipt_id"] for entry in rounds]
-        assert len(set(round_receipt_ids)) == 3
-        assert sealed["receipt"]["receipt_id"] == round_receipt_ids[2]
-        assert sealed["compute_result"]["receipt_id"] == round_receipt_ids[2]
-        top_groups = {
-            "bundle_files": sealed["bundle_files"],
-            "solution": sealed["solution"],
-            "prediction_files": sealed["prediction_files"],
-            "round_history": history,
-        }
-        relative_sets = []
-        for entry in rounds:
-            keys = (
-                entry["files"]["bundle"] + entry["files"]["solution"]
-                + entry["files"]["prediction"]
-            )
-            assert keys
-            depth = 1 if entry["authoritative"] else 2
-            relative_sets.append(sorted(
-                "/".join(key.split("/")[depth:]) for key in keys
-            ))
-            for section in ("bundle", "solution", "prediction"):
-                group = top_groups[entry["sealed_in"][section]]
-                for key in entry["files"][section]:
-                    if entry["authoritative"] and section != "prediction":
-                        assert key.startswith(section + "/")
-                        descriptor = group[key[len(section) + 1:]]
-                    else:
-                        descriptor = group[key]
-                    refs = list_refs(db, descriptor["object_id"])
-                    assert any(
-                        r.ref_type == "evidence_package"
-                        and r.ref_entity_id == str(evidence.id)
-                        for r in refs
-                    ), key
-        assert relative_sets[0] == relative_sets[1] == relative_sets[2]
-        # 最终轮条目经 sealed_in 引用顶层最终组同一对象（无重复封存对象）。
-        final_entry = rounds[2]
-        for section, group_name in (
-            ("bundle", "bundle_files"), ("solution", "solution"),
-            ("prediction", "prediction_files"),
-        ):
-            assert final_entry["sealed_in"][section] == group_name
-            for key in final_entry["files"][section]:
-                if section == "prediction":
-                    assert key in top_groups[group_name]
-                else:
-                    assert key.startswith(section + "/")
-                    assert key[len(section) + 1:] in top_groups[group_name]
-        all_ids = [
-            descriptor["object_id"]
-            for group in top_groups.values()
-            for descriptor in group.values()
-        ]
-        assert len(set(all_ids)) == len(all_ids)
-
-    def test_round_history_seal_failure_rolls_back(
-        self, client: TestClient, db: Session, engine: Engine, plane, monkeypatch
-    ) -> None:
-        """耦合多轮封存/挂接注入失败 → 整笔 DB 回滚，无 completed 与孤立元数据。
-
-        先无注入跑通证明本次配置确实产生 round_history，再对同配置新任务
-        只让输出引用挂接失败（purpose=evidence_output）：含 round_history
-        在内的整笔（含已封存对象元数据）必须回滚。
-        """
-        from test_worker_compute_chain import PLANNING_BODY as _BASE_PLANNING  # noqa: E402
-
-        from iesplan.application.worker import compute_cases  # noqa: E402
-        from iesplan.storage.persistence import StoredObject  # noqa: E402
-
-        user = make_user(db, "predict_owner_6")
-        chase_planning = dict(_BASE_PLANNING)
-        chase_planning["objective"] = {
-            "sense": "minimize",
-            "expression": "grid_import__period_energy_purchase",
-        }
-        pid, _vids = _prepare_predict_project(
-            client, db, user,
-            [("load1", "load", [48.0, 49.0])],
-            tariff_bindings={
-                "grid_import": {
-                    "price": "grid_import",
-                    "instance": "grid1",
-                    "interface": "electricity_import",
-                    "aggregation": "integrate_positive",
-                }
-            },
-            planning_body=chase_planning,
-        )
-        body = dict(_CONFIG_BODY)
-        body["predictions"] = [
-            {
-                "target": {"instance": "load1", "interface": "electricity_demand"},
-                "algorithm": CHASE_REF,
-                "parameters": {"scale": 5.0},
-            }
-        ]
-        body["convergence"] = {"tolerance": 1e-12, "max_iterations": 2}
-        registry = build_predictor_registry((_ChasePredictor(),))
-        rev = _save_calc_case(db, user, pid, body, registry)
-
-        def _submit(key: str):
-            return submit_task(
-                db, user, pid, "optimization", config={"config_revision": rev},
-                evaluation={
-                    "evaluation_years": 1, "construction_period": 0,
-                    "operation_years": 1, "discount_rate": 0.08,
-                    "construction_payments": [{"t": 0, "ratio": 1}],
-                    "maintenance_expenses": [],
-                },
-                idempotency_key=key,
-                generator_registry=plane.generator_registry,
-                predictor_registry=registry,
-            )
-
-        def _chase_plane():
-            from stage_testkit import build_test_compute_plane
-
-            return build_test_compute_plane(
-                plane.stage_runner.stage_root,
-                generator_registry=plane.generator_registry,
-                predictor_registry=registry,
-            )
-
-        # 无注入先行：证明本配置真实产生两轮与 round_history。
-        clean_task, _flags = _submit("predict-e2e-rollback-clean")
-        claim = _claim(db, clean_task.id)
-        assert _run(engine, claim, _chase_plane()) == "completed"
-        clean_evidence = results_store.latest_evidence_for_task(db, clean_task.id)
-        assert clean_evidence is not None
-        clean_sealed = json.loads(get_object(db, clean_evidence.object_id).decode("utf-8"))
-        assert clean_sealed["prediction"]["solve_rounds"] == 2
-        assert any(key.startswith("round-") for key in clean_sealed["round_history"])
-
-        real_add_ref = compute_cases.add_ref
-
-        def _fail_output_refs(db, object_id, ref_type, ref_id, ref_entity_type=None,
-                              purpose=None, *, actor_id=None, actor_type="system"):
-            if purpose == "evidence_output":
-                raise RuntimeError("injected-ref-failure")
-            return real_add_ref(
-                db, object_id, ref_type, ref_id, ref_entity_type=ref_entity_type,
-                purpose=purpose, actor_id=actor_id, actor_type=actor_type,
-            )
-
-        monkeypatch.setattr(compute_cases, "add_ref", _fail_output_refs)
-        fail_task, _flags = _submit("predict-e2e-rollback")
-        before = []
-        submit_result = worker_app.submit_attempt_result
-
-        def final_submit(session, *args, **kwargs):
-            before.append(len(session.execute(select(StoredObject)).scalars().all()))
-            return submit_result(session, *args, **kwargs)
-
-        monkeypatch.setattr(worker_app, "submit_attempt_result", final_submit)
-        claim = _claim(db, fail_task.id)
-        assert _run(engine, claim, _chase_plane()) == "failed"
-
-        task = db.execute(select(Task).where(Task.id == fail_task.id)).scalar_one()
-        assert task.status == "failed"
-        assert task.business_outcome is None
-        assert results_store.latest_evidence_for_task(db, fail_task.id) is None
-        assert len(db.execute(select(StoredObject)).scalars().all()) == before[0]
 
     def test_unknown_algorithm_rejected_at_save(
         self, client: TestClient, db: Session
@@ -1511,336 +808,6 @@ class TestPredictEndToEnd:
         assert resp.status_code == 422, resp.text
         assert resp.json()["error"]["code"] == "CONFIG-VAL-001"
 
-    def test_max_iterations_one_rejected_for_coupled(
-        self, client: TestClient, db: Session, plane
-    ) -> None:
-        """耦合目标配上限 1 提交即 TASK-REQ-012（不许跳过耦合迭代求解）。
-
-        经提交用例直接注入测试目录（公开 HTTP 层只装配生产目录）。
-        """
-        from test_worker_compute_chain import PLANNING_BODY as _BASE_PLANNING  # noqa: E402
-
-        user = make_user(db, "predict_owner_4")
-        chase_planning = dict(_BASE_PLANNING)
-        chase_planning["objective"] = {
-            "sense": "minimize",
-            "expression": "grid_import__period_energy_purchase",
-        }
-        pid, _vids = _prepare_predict_project(
-            client, db, user,
-            [("load1", "load", [48.0])],
-            tariff_bindings={
-                "grid_import": {
-                    "price": "grid_import",
-                    "instance": "grid1",
-                    "interface": "electricity_import",
-                    "aggregation": "integrate_positive",
-                }
-            },
-            planning_body=chase_planning,
-        )
-        body = dict(_CONFIG_BODY)
-        body["predictions"] = [
-            {
-                "target": {"instance": "load1", "interface": "electricity_demand"},
-                "algorithm": CHASE_REF,
-                "parameters": {"scale": 5.0},
-            }
-        ]
-        body["convergence"] = {"tolerance": 0.001, "max_iterations": 1}
-        registry = build_predictor_registry((_ChasePredictor(),))
-        rev = _save_calc_case(db, user, pid, body, registry)
-        with pytest.raises(InvalidRequestError) as exc_info:
-            submit_task(
-                db, user, pid, "optimization", config={"config_revision": rev},
-                evaluation={
-                    "evaluation_years": 1, "construction_period": 0,
-                    "operation_years": 1, "discount_rate": 0.08,
-                    "construction_payments": [{"t": 0, "ratio": 1}],
-                    "maintenance_expenses": [],
-                },
-                idempotency_key="predict-e2e-maxit-one",
-                generator_registry=plane.generator_registry,
-                predictor_registry=registry,
-            )
-        assert exc_info.value.code == "TASK-REQ-012"
-
-    def test_single_coupled_target_iterates(
-        self, client: TestClient, db: Session, engine: Engine, plane
-    ) -> None:
-        """单个耦合目标也迭代：两轮求解，第二次调用收到上一轮真实输出。
-
-        经提交用例与执行面直接注入测试目录；上限 2 轮，与是否收敛无关。
-        """
-        from test_worker_compute_chain import PLANNING_BODY as _BASE_PLANNING  # noqa: E402
-
-        user = make_user(db, "predict_owner_7")
-        chase_planning = dict(_BASE_PLANNING)
-        chase_planning["objective"] = {
-            "sense": "minimize",
-            "expression": "grid_import__period_energy_purchase",
-        }
-        pid, _vids = _prepare_predict_project(
-            client, db, user,
-            [("load1", "load", [48.0, 49.0])],
-            tariff_bindings={
-                "grid_import": {
-                    "price": "grid_import",
-                    "instance": "grid1",
-                    "interface": "electricity_import",
-                    "aggregation": "integrate_positive",
-                }
-            },
-            planning_body=chase_planning,
-        )
-        body = dict(_CONFIG_BODY)
-        body["predictions"] = [
-            {
-                "target": {"instance": "load1", "interface": "electricity_demand"},
-                "algorithm": CHASE_REF,
-                "parameters": {"scale": 5.0},
-            }
-        ]
-        body["convergence"] = {"tolerance": 1e-12, "max_iterations": 2}
-        chase = _ChasePredictor()
-        registry = build_predictor_registry((chase,))
-        rev = _save_calc_case(db, user, pid, body, registry)
-        task, _flags = submit_task(
-            db, user, pid, "optimization", config={"config_revision": rev},
-            evaluation={
-                "evaluation_years": 1, "construction_period": 0,
-                "operation_years": 1, "discount_rate": 0.08,
-                "construction_payments": [{"t": 0, "ratio": 1}],
-                "maintenance_expenses": [],
-            },
-            idempotency_key="predict-e2e-single-coupled",
-            generator_registry=plane.generator_registry,
-            predictor_registry=registry,
-        )
-        from stage_testkit import build_test_compute_plane
-
-        chase_plane = build_test_compute_plane(
-            plane.stage_runner.stage_root,
-            generator_registry=plane.generator_registry,
-            predictor_registry=registry,
-        )
-        claim = _claim(db, task.id)
-        assert _run(engine, claim, chase_plane) == "completed"
-        sealed, _evidence = _evidence_payload(db, task.id)
-        prediction = sealed["prediction"]
-        assert prediction["predict_target_count"] == 1
-        assert prediction["prediction_rounds"] == 2
-        assert prediction["solve_rounds"] == 2
-        assert prediction["phase2_solve_rounds"] == 1
-        assert len(chase.calls) == 2
-        assert chase.calls[0]["previous_objective"] is None
-        assert chase.calls[1]["previous_objective"] is not None
-        assert len(prediction["receipts"]) == 1
-        assert [record["device"] for record in prediction["convergences"]] == ["load1"]
-
-    def test_contractor_converges_before_cap(
-        self, client: TestClient, db: Session, engine: Engine, plane
-    ) -> None:
-        """真实收敛正例：压缩映射恰在第 7 轮提前退出，上限 10 轮。
-
-        手算链（购电目标下目标值 = 0.7×8760×预测，即 6132×p；下轮预测 =
-        上轮目标值/10000，压缩比 0.6132；首轮 p1=49.0，scale=50）：
-        各轮归一化差为 0.379064、0.232442、0.142533、0.087402、
-        0.053595、0.032864，容差 0.05 恰在第 7 轮首次不大于容差。
-        全程真实求解，不硬填目标值；调用链与封存逐轮核对。
-        """
-        from test_worker_compute_chain import PLANNING_BODY as _BASE_PLANNING  # noqa: E402
-
-        user = make_user(db, "predict_owner_11")
-        contractor_planning = dict(_BASE_PLANNING)
-        contractor_planning["objective"] = {
-            "sense": "minimize",
-            "expression": "grid_import__period_energy_purchase",
-        }
-        pid, _vids = _prepare_predict_project(
-            client, db, user,
-            [("load1", "load", [48.0, 49.0])],
-            tariff_bindings={
-                "grid_import": {
-                    "price": "grid_import",
-                    "instance": "grid1",
-                    "interface": "electricity_import",
-                    "aggregation": "integrate_positive",
-                }
-            },
-            planning_body=contractor_planning,
-        )
-        body = dict(_CONFIG_BODY)
-        body["predictions"] = [
-            {
-                "target": {"instance": "load1", "interface": "electricity_demand"},
-                "algorithm": CONTRACT_REF,
-                "parameters": {"scale": 50.0},
-            }
-        ]
-        body["convergence"] = {"tolerance": 0.05, "max_iterations": 10}
-        contractor = _ContractorPredictor()
-        registry = build_predictor_registry((contractor,))
-        rev = _save_calc_case(db, user, pid, body, registry)
-        task, _flags = submit_task(
-            db, user, pid, "optimization", config={"config_revision": rev},
-            evaluation={
-                "evaluation_years": 1, "construction_period": 0,
-                "operation_years": 1, "discount_rate": 0.08,
-                "construction_payments": [{"t": 0, "ratio": 1}],
-                "maintenance_expenses": [],
-            },
-            idempotency_key="predict-e2e-contractor",
-            generator_registry=plane.generator_registry,
-            predictor_registry=registry,
-        )
-        from stage_testkit import build_test_compute_plane
-
-        contractor_plane = build_test_compute_plane(
-            plane.stage_runner.stage_root,
-            generator_registry=plane.generator_registry,
-            predictor_registry=registry,
-        )
-        claim = _claim(db, task.id)
-        assert _run(engine, claim, contractor_plane) == "completed"
-        sealed, _evidence = _evidence_payload(db, task.id)
-        prediction = sealed["prediction"]
-        # 恰在第 7 轮停（未达上限 10），收敛为真。
-        assert prediction["prediction_rounds"] == 7
-        assert prediction["solve_rounds"] == 7
-        assert prediction["phase2_solve_rounds"] == 6
-        assert prediction["converged"] is True
-        assert prediction["final_delta"] == pytest.approx(0.032864218070976, rel=1e-6)
-        # 七次调用形成真实相邻轮链：每轮收到的上一轮目标值 = 6132×上轮预测。
-        assert len(contractor.calls) == 7
-        assert contractor.calls[0]["previous_objective"] is None
-        assert contractor.calls[0]["value"] == pytest.approx(49.0)
-        expected_value = 49.0
-        expected_deltas = [
-            0.379064, 0.2324420448, 0.14253346188,
-            0.0874015188162, 0.05359461134607, 0.032864218070976,
-        ]
-        previous_value = 49.0
-        for call, expected_delta in zip(
-            contractor.calls[1:], expected_deltas, strict=True
-        ):
-            expected_objective = 6132.0 * expected_value
-            assert call["previous_objective"] == pytest.approx(expected_objective, rel=1e-6)
-            expected_value = expected_objective / 10000.0
-            assert call["value"] == pytest.approx(expected_value, rel=1e-9)
-            assert abs(call["value"] - previous_value) / 50.0 == pytest.approx(
-                expected_delta, rel=1e-6
-            )
-            previous_value = call["value"]
-        # 顶层收敛记录与末轮一致，末轮序列封存为最终权威值。
-        assert [record["device"] for record in prediction["convergences"]] == ["load1"]
-        assert prediction["convergences"][0]["value"] == pytest.approx(
-            prediction["final_delta"], rel=1e-12
-        )
-        final_series = get_object(
-            db, sealed["prediction_files"]["prediction/load1/electricity_demand/series.csv"]["object_id"]
-        )
-        assert {line.split(",")[1] for line in final_series.decode("utf-8").splitlines()[1:]} == {
-            repr(contractor.calls[-1]["value"])
-        }
-        assert len(prediction["receipts"]) == 1
-
-    def test_mixed_targets_independent_series_fixed(
-        self, client: TestClient, db: Session, engine: Engine, plane
-    ) -> None:
-        """混合目标：独立序列复用首轮、耦合序列随轮更新，收敛记录只含耦合目标。
-
-        经提交用例与执行面直接注入测试目录；上限 2 轮，轮数与调用次数
-        确定，与是否收敛无关。
-        """
-        from test_worker_compute_chain import PLANNING_BODY as _BASE_PLANNING  # noqa: E402
-
-        user = make_user(db, "predict_owner_8")
-        chase_planning = dict(_BASE_PLANNING)
-        chase_planning["objective"] = {
-            "sense": "minimize",
-            "expression": "grid_import__period_energy_purchase",
-        }
-        pid, _vids = _prepare_predict_project(
-            client, db, user,
-            [("load1", "load", [48.0, 49.0]), ("load2", "flex_load", [10.0, 11.0])],
-            tariff_bindings={
-                "grid_import": {
-                    "price": "grid_import",
-                    "instance": "grid1",
-                    "interface": "electricity_import",
-                    "aggregation": "integrate_positive",
-                }
-            },
-            planning_body=chase_planning,
-        )
-        body = dict(_CONFIG_BODY)
-        body["predictions"] = [
-            {
-                "target": {"instance": "load1", "interface": "electricity_demand"},
-                "algorithm": COUNTING_NAIVE_REF,
-                "parameters": {},
-            },
-            {
-                "target": {"instance": "load2", "interface": "electricity_demand"},
-                "algorithm": CHASE_REF,
-                "parameters": {"scale": 5.0},
-            },
-        ]
-        body["convergence"] = {"tolerance": 1e-12, "max_iterations": 2}
-        counter = _CountingNaivePredictor()
-        chase = _ChasePredictor()
-        registry = build_predictor_registry((counter, chase))
-        rev = _save_calc_case(db, user, pid, body, registry)
-        task, _flags = submit_task(
-            db, user, pid, "optimization", config={"config_revision": rev},
-            evaluation={
-                "evaluation_years": 1, "construction_period": 0,
-                "operation_years": 1, "discount_rate": 0.08,
-                "construction_payments": [{"t": 0, "ratio": 1}],
-                "maintenance_expenses": [],
-            },
-            idempotency_key="predict-e2e-mixed",
-            generator_registry=plane.generator_registry,
-            predictor_registry=registry,
-        )
-        from stage_testkit import build_test_compute_plane
-
-        chase_plane = build_test_compute_plane(
-            plane.stage_runner.stage_root,
-            generator_registry=plane.generator_registry,
-            predictor_registry=registry,
-        )
-        claim = _claim(db, task.id)
-        assert _run(engine, claim, chase_plane) == "completed"
-        sealed, _evidence = _evidence_payload(db, task.id)
-        prediction = sealed["prediction"]
-        assert prediction["predict_target_count"] == 2
-        assert prediction["prediction_rounds"] == 2
-        assert prediction["solve_rounds"] == 2
-        # 独立目标只调用一次（首轮），耦合目标每轮重算。
-        assert len(counter.calls) == 1
-        assert counter.calls[0]["device"] == "load1"
-        assert len(chase.calls) == 2
-        assert {call["device"] for call in chase.calls} == {"load2"}
-        assert chase.calls[0]["previous_objective"] is None
-        # 耦合收到的上一轮目标值与手算一致（两目标总需求×0.7×8760）：
-        # 首轮 load1=49.0、load2=11.0，总 60.0 → 367920.0。
-        assert chase.calls[1]["previous_objective"] == pytest.approx(367920.0, rel=1e-6)
-        # 独立序列字节首轮与末轮一致（复用首轮产物，未随求解更新）。
-        history = sealed["round_history"]
-        final_files = sealed["prediction_files"]
-        naive_final_key = "prediction/load1/electricity_demand/series.csv"
-        naive_final = get_object(db, final_files[naive_final_key]["object_id"])
-        naive_first = get_object(
-            db, history["round-1/prediction/load1/electricity_demand/series.csv"]["object_id"]
-        )
-        assert naive_final == naive_first
-        assert {line.split(",")[1] for line in naive_final.decode("utf-8").splitlines()[1:]} == {"49.0"}
-        # 收敛记录只含耦合目标。
-        assert [record["device"] for record in prediction["convergences"]] == ["load2"]
-        assert len(prediction["receipts"]) == 2
-
     def test_save_parameter_boundary(
         self, client: TestClient, db: Session
     ) -> None:
@@ -1852,14 +819,14 @@ class TestPredictEndToEnd:
 
         user = make_user(db, "predict_owner_9")
         pid = _create_project(client, user, "参数边界项目")
-        registry = build_predictor_registry((_ChasePredictor(),))
+        registry = build_predictor_registry((_ParamPredictor(),))
 
         def _body(parameters: dict) -> dict:
             config = dict(_CONFIG_BODY)
             config["predictions"] = [
                 {
                     "target": {"instance": "load1", "interface": "electricity_demand"},
-                    "algorithm": CHASE_REF,
+                    "algorithm": PARAM_PREDICTOR_REF,
                     "parameters": parameters,
                 }
             ]
@@ -1868,17 +835,17 @@ class TestPredictEndToEnd:
         with pytest.raises(AppError) as exc_info:
             save_calculation_config_case(
                 db, user, pid, _body({}), None, predictor_registry=registry,
-                generator_registry=_generator_registry(),
+                **_registry_kwargs(),
             )
         assert exc_info.value.code == "CONFIG-VAL-001"
         with pytest.raises(AppError):
             save_calculation_config_case(
                 db, user, pid, _body({"scale": 0}), None, predictor_registry=registry,
-                generator_registry=_generator_registry(),
+                **_registry_kwargs(),
             )
         saved = save_calculation_config_case(
             db, user, pid, _body({"scale": 5.0}), None, predictor_registry=registry,
-            generator_registry=_generator_registry(),
+            **_registry_kwargs(),
         )
         assert saved["revision"] == 1
         # 未注册算法同样保存拒绝（不能冒充已校验配置落库）。
@@ -1893,12 +860,12 @@ class TestPredictEndToEnd:
         with pytest.raises(AppError) as exc_info:
             save_calculation_config_case(
                 db, user, pid, unknown, 1, predictor_registry=registry,
-                generator_registry=_generator_registry(),
+                **_registry_kwargs(),
             )
         assert exc_info.value.code == "CONFIG-VAL-001"
         # 目录缺席而含预测目标同样不可用。
         with pytest.raises(AppError):
             save_calculation_config_case(
                 db, user, pid, _body({"scale": 5.0}), 1, predictor_registry=None,
-                generator_registry=_generator_registry(),
+                **_registry_kwargs(),
             )

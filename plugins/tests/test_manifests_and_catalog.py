@@ -72,13 +72,13 @@ def _iter_imported_modules(py_file: Path) -> set[str]:
 
 
 def test_all_four_builtin_manifests_validate_with_pies_sdk() -> None:
-    assert BUILTIN_STAGES_IMAGE == "pies-builtin-stages:1.1.5"
+    assert BUILTIN_STAGES_IMAGE == "pies-builtin-stages:1.2.0"
     assert len(BUILTIN_STAGE_DESCRIPTORS) == 4
     expected_refs = {
         "ies.predictor.naive@1.0.0": "predictor",
         "ies.generator.highs_milp@1.0.0": "generator",
         "ies.solver.highs@1.7.2": "solver",
-        "ies.result-adapter.highs@1.0.0": "evaluator",
+        "ies.evaluator.finance@1.0.0": "evaluator",
     }
     assert set(BUILTIN_STAGE_BY_REF) == set(expected_refs)
 
@@ -110,7 +110,7 @@ def test_gate4_zero_web_db_orm_dependencies_and_zero_sha256() -> None:
         *sorted((PLUGINS_ROOT / "predictor_naive").rglob("*.py")),
         *sorted((PLUGINS_ROOT / "generator_highs_milp").rglob("*.py")),
         *sorted((PLUGINS_ROOT / "solver_highs").rglob("*.py")),
-        *sorted((PLUGINS_ROOT / "evaluator_highs").rglob("*.py")),
+        *sorted((PLUGINS_ROOT / "evaluator_finance").rglob("*.py")),
     ]
     assert py_files
 
