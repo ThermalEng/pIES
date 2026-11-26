@@ -1915,8 +1915,12 @@ def test_p2_02_evaluator_max_concurrency_budget_sequential_and_bounded_parallel(
 def test_p2_03_evaluator_start_failure_isolated_and_control_signals_propagated(
     tmp_path: Path,
 ) -> None:
-    """P2-03: per-evaluator start/proxy errors isolate to EVAL-START-001; control signals propagate."""
-    from iesplan.computation.runtime.job_runner_client import JobRunnerClientError
+    """P2-03: non-launch rejections isolate to EVAL-START-001; ambiguous/control errors propagate."""
+    from iesplan.computation.runtime.job_runner_client import (
+        JobRunnerBadRequestError,
+        JobRunnerClientError,
+        JobRunnerUnavailableError,
+    )
     from iesplan.computation.runtime.stage_runner import ControlPlaneDetached
     from iesplan.worker import runner as worker_runner
 
@@ -1952,7 +1956,7 @@ def test_p2_03_evaluator_start_failure_isolated_and_control_signals_propagated(
 
         def _fail_one_start(spec: Any) -> Any:
             if "acme.evaluator.start_err" in str(spec.stage_id):
-                raise JobRunnerClientError("image pull rejected", status_code=503)
+                raise JobRunnerBadRequestError("invalid evaluator container spec", status_code=400)
             return orig_start(spec)
 
         plane.stage_runner.client.start_stage = _fail_one_start  # type: ignore[method-assign]
@@ -2032,6 +2036,58 @@ def test_p2_03_evaluator_start_failure_isolated_and_control_signals_propagated(
                 assert ev_ckpt is None
         finally:
             plane.stage_runner._prepare_workspace = orig_prepare  # type: ignore[method-assign]
+
+        # Ambiguous start_stage JobRunnerUnavailableError (timeout/5xx) and list_stages
+        # reconciliation failures must propagate rather than isolating into EVAL-START-001.
+        def _ambiguous_unavailable_start(spec: Any) -> Any:
+            if "ies.evaluator.finance" in str(spec.stage_id):
+                raise JobRunnerUnavailableError("start timeout after dispatch", status_code=503)
+            return orig_start(spec)
+
+        plane.stage_runner.client.start_stage = _ambiguous_unavailable_start  # type: ignore[method-assign]
+        sub_u_status, sub_u_body = _submit_task(
+            env["client"],
+            env["pid"],
+            env["user"],
+            config={"config_revision": 1},
+            idempotency_key="p2-03-ambiguous-unavailable",
+        )
+        assert sub_u_status == 201, sub_u_body
+        t_unavail = int(sub_u_body["task"]["id"])
+        c_unavail = _claim(env["db"], t_unavail)
+        try:
+            assert worker_runner.run_task(env["sf"], c_unavail, worker_id="t", compute=plane) == "failed"
+            with env["sf"]() as check_db:
+                ev_ckpt = worker_app.load_evaluator_checkpoint(check_db, c_unavail, 1, 1)
+                assert ev_ckpt is None
+        finally:
+            plane.stage_runner.client.start_stage = orig_start  # type: ignore[method-assign]
+
+        orig_list_stages = plane.stage_runner.client.list_stages
+
+        def _fail_reconcile_list(**kwargs: Any) -> Any:
+            if "ies.evaluator.finance" in str(kwargs.get("stage_id") or ""):
+                raise JobRunnerUnavailableError("list_stages unavailable", status_code=503)
+            return orig_list_stages(**kwargs)
+
+        plane.stage_runner.client.list_stages = _fail_reconcile_list  # type: ignore[method-assign]
+        sub_l_status, sub_l_body = _submit_task(
+            env["client"],
+            env["pid"],
+            env["user"],
+            config={"config_revision": 1},
+            idempotency_key="p2-03-list-stages-fail",
+        )
+        assert sub_l_status == 201, sub_l_body
+        t_list = int(sub_l_body["task"]["id"])
+        c_list = _claim(env["db"], t_list)
+        try:
+            assert worker_runner.run_task(env["sf"], c_list, worker_id="t", compute=plane) == "failed"
+            with env["sf"]() as check_db:
+                ev_ckpt = worker_app.load_evaluator_checkpoint(check_db, c_list, 1, 1)
+                assert ev_ckpt is None
+        finally:
+            plane.stage_runner.client.list_stages = orig_list_stages  # type: ignore[method-assign]
 
         # Control/lease signals are NEVER swallowed into EVAL-START-001.
         orig_run_stage = plane.stage_runner.run_stage

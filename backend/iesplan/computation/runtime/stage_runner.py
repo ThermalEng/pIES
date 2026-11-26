@@ -24,7 +24,12 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from iesplan.computation.protocols import StopProbe, check_provider_ref, read_stop_reason
-from iesplan.computation.runtime.job_runner_client import JobRunnerClientError
+from iesplan.computation.runtime.job_runner_client import (
+    JobRunnerBadRequestError,
+    JobRunnerClientError,
+    JobRunnerConflictError,
+    JobRunnerNotFoundError,
+)
 from iesplan.core.content import Content, MemoryContent
 
 if TYPE_CHECKING:
@@ -399,15 +404,12 @@ class ContainerStageRunner:
         # Reconcile existing managed containers by (attempt_id, stage_id) labels FIRST so
         # any cancelled/fenced/timed-out container left running across a restart is stopped,
         # inspected, persisted, and cleaned up rather than skipped by pre-start checks.
-        try:
-            existing_matches = self.client.list_stages(
-                attempt_id=spec.attempt_id,
-                stage_id=spec.stage_id,
-                iterations_tail=spec.iterations_tail,
-                include_stats=False,
-            )
-        except JobRunnerClientError as exc:
-            raise StageStartError(str(exc), status_code=exc.status_code, detail=exc.detail) from exc
+        existing_matches = self.client.list_stages(
+            attempt_id=spec.attempt_id,
+            stage_id=spec.stage_id,
+            iterations_tail=spec.iterations_tail,
+            include_stats=False,
+        )
         reused = False
         wait_timeout = resolved_timeout
         if existing_matches:
@@ -712,7 +714,11 @@ class ContainerStageRunner:
     def _start_stage_checked(self, start_spec: StartStageSpec) -> StageInspection:
         try:
             return self.client.start_stage(start_spec)
-        except JobRunnerClientError as exc:
+        except (
+            JobRunnerBadRequestError,
+            JobRunnerNotFoundError,
+            JobRunnerConflictError,
+        ) as exc:
             raise StageStartError(str(exc), status_code=exc.status_code, detail=exc.detail) from exc
 
     @staticmethod
