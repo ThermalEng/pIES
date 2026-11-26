@@ -146,6 +146,7 @@ for (const reason of ['evaluators_empty', 'evaluator_failed']) {
         source_task_id: 7,
         evaluator: 'ies.evaluator.finance@1.0.0',
         replayed: false,
+        hint: null,
       }),
       { status: 201 },
     )

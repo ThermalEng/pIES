@@ -155,7 +155,7 @@ export async function retryEvaluator(
   input: { evaluator: string; idempotency_key: string },
 ): Promise<{
   task: Task
-  source_task_id?: number
+  source_task_id: number
   evaluator: string
   replayed: boolean
   hint: string | null
@@ -173,9 +173,9 @@ export async function retryEvaluator(
   )
   return {
     task: taskFromSummary(res.task, projectId),
-    ...(res.source_task_id !== undefined ? { source_task_id: res.source_task_id } : {}),
+    source_task_id: res.source_task_id,
     evaluator: res.evaluator,
     replayed: res.replayed,
-    hint: res.hint ?? null,
+    hint: res.hint,
   }
 }

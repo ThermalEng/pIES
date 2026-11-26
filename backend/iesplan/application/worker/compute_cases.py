@@ -78,8 +78,7 @@ from iesplan.computation.result_adapters import (
     ResultAdapter,
     project_engineering_solution,
 )
-from iesplan.computation.runtime.job_runner_client import JobRunnerClientError
-from iesplan.computation.runtime.stage_runner import StageExecutionSpec
+from iesplan.computation.runtime.stage_runner import StageExecutionSpec, StageStartError
 from iesplan.core.content import (
     Content,
     GeneratedContent,
@@ -1122,135 +1121,13 @@ def _execute_one_evaluator(
     outcome_box: list[dict[str, Any]] = []
     stage_result: Any = None
 
-    try:
-        eval_stage = _stage_descriptor(plane, evaluator_ref, kind_label="evaluator")
-        eval_spec = (
-            plane.evaluator_registry.get(evaluator_ref)
-            if plane.evaluator_registry is not None
-            else None
-        )
-        declared_produces = tuple(eval_spec.produces) if eval_spec is not None else ()
-        input_files = _build_evaluator_input_files(
-            engineering_solution=sol_content,
-            snapshot=snapshot,
-            artifact=artifact,
-            finance=finance,
-            materialized=materialized,
-            parameters=parameters,
-            receipt=receipt_dict,
-            bundle_id=attempt.bundle_id,
-            receipt_id=f"receipt-{attempt.attempt_id}-{stage_id}",
-        )
-
-        def _persist(stage_res: Any) -> Any:
-            if stage_res.status == "fenced":
-                raise LeaseRejectedError("评价器阶段租约已失效(fenced)")
-            if stage_res.status == "cancelled":
-                raise StageExecutionError(
-                    stage="evaluate",
-                    status="cancelled",
-                    termination_reason=stage_res.termination_reason,
-                    detail=f"评价器阶段 {evaluator_ref!r} 已取消",
-                    resources=dict(stage_res.resources or {}),
-                )
-
-            report_doc: dict[str, Any] | None = None
-            fin_eval: dict[str, Any] | None = None
-            result_entry: dict[str, Any]
-            if stage_res.status == "succeeded":
-                try:
-                    contract, report_doc, fin_eval = _parse_evaluator_outputs(
-                        stage_res.outputs,
-                        evaluator_ref=evaluator_ref,
-                        declared_produces=declared_produces,
-                    )
-                    result_entry = {
-                        "evaluator": evaluator_ref,
-                        "status": "succeeded",
-                        "contract": contract,
-                        "error": None,
-                        "attempt_id": attempt.attempt_id,
-                        "finished_at": stage_res.finished_at,
-                    }
-                except (KeyError, ValueError, TypeError, json.JSONDecodeError, OSError) as exc:
-                    report_doc = None
-                    fin_eval = None
-                    result_entry = {
-                        "evaluator": evaluator_ref,
-                        "status": "failed",
-                        "contract": None,
-                        "error": {
-                            "code": "EVAL-PROTOCOL-001",
-                            "message": f"评价器 {evaluator_ref} 输出协议校验失败: {exc}",
-                            "detail": {"reason": "output_protocol_failed"},
-                        },
-                        "attempt_id": attempt.attempt_id,
-                        "finished_at": stage_res.finished_at,
-                    }
-            else:
-                mapped_status = "timed_out" if stage_res.status == "timed_out" else "failed"
-                result_entry = {
-                    "evaluator": evaluator_ref,
-                    "status": mapped_status,
-                    "contract": None,
-                    "error": {
-                        "code": f"EVAL-{str(stage_res.status).upper()}",
-                        "message": (
-                            f"评价器 {evaluator_ref} 执行失败 "
-                            f"(status={stage_res.status}, reason={stage_res.termination_reason})"
-                        ),
-                        "detail": {
-                            "termination_reason": stage_res.termination_reason,
-                            "exit_code": stage_res.exit_code,
-                        },
-                    },
-                    "attempt_id": attempt.attempt_id,
-                    "finished_at": stage_res.finished_at,
-                }
-            payload_doc = _persist_isolated_evaluator_checkpoint(
-                session_factory=session_factory,
-                save_checkpoint=save_checkpoint,
-                claim=claim,
-                number=number,
-                idx=idx,
-                result_entry=result_entry,
-                report_doc=report_doc,
-                fin_eval=fin_eval,
-                db_lock=db_lock,
-            )
-            outcome_box.append(payload_doc)
-            return payload_doc
-
-        stage_result = plane.stage_runner.run_stage(
-            StageExecutionSpec(
-                attempt_id=attempt.attempt_id,
-                stage_id=stage_id,
-                fencing_token=str(claim.lease_token),
-                image=eval_stage.image,
-                command=eval_stage.command,
-                input_files=input_files,
-                required_outputs=(),
-                collect_all_outputs=True,
-            ),
-            persist=_persist,
-            stop=stop,
-            **({"detach": detach} if detach is not None else {}),
-        )
-    except LeaseRejectedError:
-        raise StageExecutionError(
-            stage="evaluate",
-            status="fenced",
-            termination_reason="fenced",
-            detail=f"评价器阶段 {evaluator_ref!r} 租约已失效(fenced)",
-        ) from None
-    except (ComputationUnavailableError, JobRunnerClientError, OSError, ValueError) as exc:
-        if detach is not None and detach.is_set():
-            raise
-        stop_reason = read_stop_reason(stop)
-        if stop_reason in ("cancelled", "fenced"):
-            raise
+    def _fail_start(exc: BaseException) -> dict[str, Any]:
         if isinstance(exc, ComputationUnavailableError) and exc.reason in ("cancelled", "fenced"):
-            raise
+            raise exc
+        if detach is not None and detach.is_set():
+            raise exc
+        if read_stop_reason(stop) in ("cancelled", "fenced"):
+            raise exc
         return _persist_isolated_evaluator_checkpoint(
             session_factory=session_factory,
             save_checkpoint=save_checkpoint,
@@ -1276,6 +1153,133 @@ def _execute_one_evaluator(
             fin_eval=None,
             db_lock=db_lock,
         )
+
+    try:
+        eval_stage = _stage_descriptor(plane, evaluator_ref, kind_label="evaluator")
+        eval_spec = (
+            plane.evaluator_registry.get(evaluator_ref)
+            if plane.evaluator_registry is not None
+            else None
+        )
+        declared_produces = tuple(eval_spec.produces) if eval_spec is not None else ()
+        input_files = _build_evaluator_input_files(
+            engineering_solution=sol_content,
+            snapshot=snapshot,
+            artifact=artifact,
+            finance=finance,
+            materialized=materialized,
+            parameters=parameters,
+            receipt=receipt_dict,
+            bundle_id=attempt.bundle_id,
+            receipt_id=f"receipt-{attempt.attempt_id}-{stage_id}",
+        )
+    except (ComputationUnavailableError, ValueError) as exc:
+        return _fail_start(exc)
+
+    def _persist(stage_res: Any) -> Any:
+        if stage_res.status == "fenced":
+            raise LeaseRejectedError("评价器阶段租约已失效(fenced)")
+        if stage_res.status == "cancelled":
+            raise StageExecutionError(
+                stage="evaluate",
+                status="cancelled",
+                termination_reason=stage_res.termination_reason,
+                detail=f"评价器阶段 {evaluator_ref!r} 已取消",
+                resources=dict(stage_res.resources or {}),
+            )
+
+        report_doc: dict[str, Any] | None = None
+        fin_eval: dict[str, Any] | None = None
+        result_entry: dict[str, Any]
+        if stage_res.status == "succeeded":
+            try:
+                contract, report_doc, fin_eval = _parse_evaluator_outputs(
+                    stage_res.outputs,
+                    evaluator_ref=evaluator_ref,
+                    declared_produces=declared_produces,
+                )
+                result_entry = {
+                    "evaluator": evaluator_ref,
+                    "status": "succeeded",
+                    "contract": contract,
+                    "error": None,
+                    "attempt_id": attempt.attempt_id,
+                    "finished_at": stage_res.finished_at,
+                }
+            except (KeyError, ValueError, TypeError, json.JSONDecodeError, OSError) as exc:
+                report_doc = None
+                fin_eval = None
+                result_entry = {
+                    "evaluator": evaluator_ref,
+                    "status": "failed",
+                    "contract": None,
+                    "error": {
+                        "code": "EVAL-PROTOCOL-001",
+                        "message": f"评价器 {evaluator_ref} 输出协议校验失败: {exc}",
+                        "detail": {"reason": "output_protocol_failed"},
+                    },
+                    "attempt_id": attempt.attempt_id,
+                    "finished_at": stage_res.finished_at,
+                }
+        else:
+            mapped_status = "timed_out" if stage_res.status == "timed_out" else "failed"
+            result_entry = {
+                "evaluator": evaluator_ref,
+                "status": mapped_status,
+                "contract": None,
+                "error": {
+                    "code": f"EVAL-{str(stage_res.status).upper()}",
+                    "message": (
+                        f"评价器 {evaluator_ref} 执行失败 "
+                        f"(status={stage_res.status}, reason={stage_res.termination_reason})"
+                    ),
+                    "detail": {
+                        "termination_reason": stage_res.termination_reason,
+                        "exit_code": stage_res.exit_code,
+                    },
+                },
+                "attempt_id": attempt.attempt_id,
+                "finished_at": stage_res.finished_at,
+            }
+        payload_doc = _persist_isolated_evaluator_checkpoint(
+            session_factory=session_factory,
+            save_checkpoint=save_checkpoint,
+            claim=claim,
+            number=number,
+            idx=idx,
+            result_entry=result_entry,
+            report_doc=report_doc,
+            fin_eval=fin_eval,
+            db_lock=db_lock,
+        )
+        outcome_box.append(payload_doc)
+        return payload_doc
+
+    try:
+        stage_result = plane.stage_runner.run_stage(
+            StageExecutionSpec(
+                attempt_id=attempt.attempt_id,
+                stage_id=stage_id,
+                fencing_token=str(claim.lease_token),
+                image=eval_stage.image,
+                command=eval_stage.command,
+                input_files=input_files,
+                required_outputs=(),
+                collect_all_outputs=True,
+            ),
+            persist=_persist,
+            stop=stop,
+            **({"detach": detach} if detach is not None else {}),
+        )
+    except LeaseRejectedError:
+        raise StageExecutionError(
+            stage="evaluate",
+            status="fenced",
+            termination_reason="fenced",
+            detail=f"评价器阶段 {evaluator_ref!r} 租约已失效(fenced)",
+        ) from None
+    except StageStartError as exc:
+        return _fail_start(exc)
 
     if not outcome_box:
         if stage_result.status == "cancelled":

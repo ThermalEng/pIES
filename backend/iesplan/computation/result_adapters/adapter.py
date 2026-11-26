@@ -1568,8 +1568,11 @@ def _materialize_readonly_input(
     dest.parent.mkdir(parents=True, exist_ok=True)
     src_path = _existing_readable_path(content)
     if src_path is not None:
-        if src_path.resolve() == dest.resolve():
+        if src_path.resolve() == dest.resolve() or (
+            dest.exists() and os.path.samefile(src_path, dest)
+        ):
             return dest
+        dest.unlink(missing_ok=True)
         try:
             os.link(src_path, dest)
             _check_stop_and_deadline(stop, deadline, "输入准备阶段")
@@ -1581,6 +1584,9 @@ def _materialize_readonly_input(
                 return dest
             except OSError:
                 pass
+    else:
+        # Never truncate an existing hardlinked target inode when overwriting dest.
+        dest.unlink(missing_ok=True)
     _stream_content_to_path(content, dest, stop=stop, deadline=deadline)
     return dest
 

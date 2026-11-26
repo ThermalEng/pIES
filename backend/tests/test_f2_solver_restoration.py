@@ -1473,6 +1473,40 @@ def test_p2_01_file_backed_inputs_reuse_path_without_chunk_streaming(
     assert projected.solution_path == sol_out
     assert projected.load_engineering_solution()["solver_summary"]["objective_value"] == 1.0
 
+    # Repeated projection to an explicit existing hardlinked dest never truncates source/dest.
+    reused_dest = tmp_path / "reused_projected.json"
+    expected_bytes = sol_out.read_bytes()
+    first_explicit = project_engineering_solution(
+        proj_src,
+        bundle_id="b-p2-01-rep1",
+        receipt_id="r-p2-01-rep1",
+        outputs=("solution", "metrics"),
+        solution_output_path=reused_dest,
+    )
+    second_explicit = project_engineering_solution(
+        proj_src,
+        bundle_id="b-p2-01-rep2",
+        receipt_id="r-p2-01-rep2",
+        outputs=("solution", "metrics"),
+        solution_output_path=reused_dest,
+    )
+    assert proj_src.calls == 0
+    assert sol_out.read_bytes() == expected_bytes
+    assert reused_dest.read_bytes() == expected_bytes
+    assert first_explicit.solution_path == reused_dest
+    assert second_explicit.load_engineering_solution()["solver_summary"]["objective_value"] == 1.0
+
+    # Overwriting reused_dest with MemoryContent never truncates the previously linked sol_out.
+    projected_overwrite = project_engineering_solution(
+        MemoryContent(expected_bytes),
+        bundle_id="b-p2-01-over",
+        receipt_id="r-p2-01-over",
+        outputs=("solution", "metrics"),
+        solution_output_path=reused_dest,
+    )
+    assert sol_out.read_bytes() == expected_bytes
+    assert projected_overwrite.load_engineering_solution()["solver_summary"]["objective_value"] == 1.0
+
     # Cross-filesystem EXDEV on os.link cleanly falls back to os.symlink with 0 iter_chunks().
     def _raise_exdev(_src: object, _dst: object) -> None:
         raise OSError(18, "Invalid cross-device link")

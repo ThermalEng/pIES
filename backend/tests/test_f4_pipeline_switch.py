@@ -1975,16 +1975,74 @@ def test_p2_03_evaluator_start_failure_isolated_and_control_signals_propagated(
         assert by_eval[start_err_ref]["status"] == "failed"
         assert by_eval[start_err_ref]["error"]["code"] == "EVAL-START-001"
 
+        # Post-persist cleanup_stage JobRunnerClientError is NOT swallowed as EVAL-START-001,
+        # and does NOT clobber the already-persisted evaluator checkpoint.
+        plane.stage_runner.client.start_stage = orig_start  # type: ignore[method-assign]
+        orig_cleanup = plane.stage_runner.client.cleanup_stage
+
+        def _fail_finance_cleanup(stage_execution_id: str, *, force: bool = False) -> Any:
+            if "ies.evaluator.finance" in stage_execution_id:
+                raise JobRunnerClientError("cleanup failed post-persist", status_code=500)
+            return orig_cleanup(stage_execution_id, force=force)
+
+        plane.stage_runner.client.cleanup_stage = _fail_finance_cleanup  # type: ignore[method-assign]
+        sub_c_status, sub_c_body = _submit_task(
+            env["client"],
+            env["pid"],
+            env["user"],
+            config={"config_revision": 1},
+            idempotency_key="p2-03-post-persist-cleanup",
+        )
+        assert sub_c_status == 201, sub_c_body
+        t_cleanup = int(sub_c_body["task"]["id"])
+        c_cleanup = _claim(env["db"], t_cleanup)
+        try:
+            assert worker_runner.run_task(env["sf"], c_cleanup, worker_id="t", compute=plane) == "failed"
+            with env["sf"]() as check_db:
+                ev_ckpt = worker_app.load_evaluator_checkpoint(check_db, c_cleanup, 1, 1)
+                assert ev_ckpt is not None
+                assert ev_ckpt["result_entry"]["status"] == "succeeded"
+                assert ev_ckpt["result_entry"]["error"] is None
+        finally:
+            plane.stage_runner.client.cleanup_stage = orig_cleanup  # type: ignore[method-assign]
+
+        # Workspace storage OSError is NOT misclassified as EVAL-START-001.
+        orig_prepare = plane.stage_runner._prepare_workspace
+
+        def _fail_workspace_io(workspace_rel: str, spec: Any) -> None:
+            if "ies.evaluator.finance" in str(spec.stage_id):
+                raise OSError("disk full writing stage input")
+            return orig_prepare(workspace_rel, spec)
+
+        plane.stage_runner._prepare_workspace = _fail_workspace_io  # type: ignore[method-assign]
+        sub_io_status, sub_io_body = _submit_task(
+            env["client"],
+            env["pid"],
+            env["user"],
+            config={"config_revision": 1},
+            idempotency_key="p2-03-workspace-oserror",
+        )
+        assert sub_io_status == 201, sub_io_body
+        t_io = int(sub_io_body["task"]["id"])
+        c_io = _claim(env["db"], t_io)
+        try:
+            assert worker_runner.run_task(env["sf"], c_io, worker_id="t", compute=plane) == "failed"
+            with env["sf"]() as check_db:
+                ev_ckpt = worker_app.load_evaluator_checkpoint(check_db, c_io, 1, 1)
+                assert ev_ckpt is None
+        finally:
+            plane.stage_runner._prepare_workspace = orig_prepare  # type: ignore[method-assign]
+
         # Control/lease signals are NEVER swallowed into EVAL-START-001.
         orig_run_stage = plane.stage_runner.run_stage
         for exc_obj, expected_outcome in (
-            (ControlPlaneDetached("detached"), "detached"),
             (
                 worker_app.StageExecutionError(
                     stage="evaluate", status="cancelled", termination_reason="cancelled", detail="cancel"
                 ),
                 "cancelled",
             ),
+            (ControlPlaneDetached("detached"), "detached"),
             (
                 worker_app.StageExecutionError(
                     stage="evaluate", status="fenced", termination_reason="fenced", detail="fenced"
