@@ -30,6 +30,7 @@ from iesplan.computation import (
 )
 from iesplan.computation.generators.highs_milp import (
     EPIGRAPHS_PATH,
+    PARAMETERS_PATH,
     VARIABLE_MAP_SCHEMA,
     VARIABLE_MAP_VERSION,
 )
@@ -1506,6 +1507,55 @@ def test_p2_01_file_backed_inputs_reuse_path_without_chunk_streaming(
     )
     assert sol_out.read_bytes() == expected_bytes
     assert projected_overwrite.load_engineering_solution()["solver_summary"]["objective_value"] == 1.0
+
+    # Cross-FS EXDEV fallback on restore_with_outcome: symlinked bundle.files (incl. input/parameters.jsonl)
+    # and file-backed primal_raw restore with 0 iter_chunks(), while ../ escape is still rejected.
+    exdev_calls = {"link": 0}
+
+    def _raise_exdev_restore(_src: object, _dst: object) -> None:
+        exdev_calls["link"] += 1
+        raise OSError(18, "Invalid cross-device link")
+
+    monkeypatch.setattr("iesplan.computation.result_adapters.adapter.os.link", _raise_exdev_restore)
+    counting_contents_exdev = [_CountingFileContent(c.path) for c in counting_contents]
+    fb_bundle_exdev = SolverBundle(
+        manifest=bundle.manifest,
+        files=dict(zip(fb_bundle.files, counting_contents_exdev, strict=True)),
+    )
+    primal_cf_exdev = _CountingFileContent(primal_file)
+    exdev_out = tmp_path / "exdev_restored_solution.json"
+    exdev_outcome = ResultAdapter().restore_with_outcome(
+        fb_bundle_exdev,
+        _succeeded_receipt(),
+        {PRIMAL_SOLUTION_OUTPUT_PATH: primal_cf_exdev},
+        solution_output_path=exdev_out,
+    )
+    assert exdev_outcome.compute_result.math_status == "solved"
+    assert exdev_calls["link"] >= 1
+    assert primal_cf_exdev.calls == 0
+    assert all(c.calls == 0 for c in counting_contents_exdev)
+
+    for bad_rel in ("../outside.jsonl", "input/../../outside.jsonl", "/etc/passwd"):
+        tampered_dir = tmp_path / f"tampered_{abs(hash(bad_rel))}"
+        tampered_dir.mkdir(parents=True, exist_ok=True)
+        for rel, content in bundle.files.items():
+            target = tampered_dir / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if rel == PARAMETERS_PATH:
+                vmap = json.loads(b"".join(content.iter_chunks()).decode("utf-8"))
+                vmap["records"] = bad_rel
+                target.write_text(json.dumps(vmap), encoding="utf-8")
+            else:
+                target.write_bytes(b"".join(content.iter_chunks()))
+        with pytest.raises(ComputationUnavailableError, match=r"records 路径(非法|越界)"):
+            restore_from_bundle_dir(
+                tampered_dir,
+                primal_file,
+                _succeeded_receipt(),
+                solution_output_path=tmp_path / f"tampered_out_{abs(hash(bad_rel))}.json",
+            )
+
+    monkeypatch.undo()
 
     # Cross-filesystem EXDEV on os.link cleanly falls back to os.symlink with 0 iter_chunks().
     def _raise_exdev(_src: object, _dst: object) -> None:

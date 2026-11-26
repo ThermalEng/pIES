@@ -1230,12 +1230,15 @@ def _restore_in_current_process(
 ) -> None:
     """Execute streaming variable_map + primal_solution restoration and write solution.json."""
     header = _read_header(bundle_dir / PARAMETERS_PATH)
-    records_path = (bundle_dir / header["records"]).resolve()
-    bundle_root = bundle_dir.resolve()
-    if records_path != bundle_root and bundle_root not in records_path.parents:
-        _fail(f"records 路径越界: {header['records']!r}")
+    raw_records_ref = header["records"]
+    if os.path.isabs(raw_records_ref):
+        _fail(f"records 路径越界: {raw_records_ref!r}")
+    bundle_root_lex = Path(os.path.abspath(bundle_dir))
+    records_path = Path(os.path.abspath(bundle_root_lex / raw_records_ref))
+    if records_path == bundle_root_lex or bundle_root_lex not in records_path.parents:
+        _fail(f"records 路径越界: {raw_records_ref!r}")
     if not records_path.is_file():
-        _fail(f"缺失参数记录文件: {header['records']!r}")
+        _fail(f"缺失参数记录文件: {raw_records_ref!r}")
 
     primal_meta, primals = _stream_primal_solution(primal_path, header["column_count"])
     math_status = str(primal_meta["math_status"])
