@@ -222,7 +222,7 @@ def test_generator_solver_evaluator_stage_io(tmp_path: Path) -> None:
     with pytest.raises(StageIOError, match="evaluation.rows\\[0\\]"):
         validate_stage_outputs("evaluator", bad_eval_rows, produces=("ies.financial-evaluation@1.0.0",))
 
-    for bad_token in ("NaN", "Infinity", "-Infinity", "not-a-number", " 1.0 "):
+    for bad_token in ("NaN", "Infinity", "-Infinity", "not-a-number", " 1.0 ", "1_000"):
         bad_flow_out = tmp_path / f"bad_flow_{abs(hash(bad_token))}"
         write_json_file(
             bad_flow_out / "financial_evaluation.json",
@@ -256,11 +256,16 @@ def test_generator_solver_evaluator_stage_io(tmp_path: Path) -> None:
                 "evaluator", bad_op_out, produces=("ies.financial-evaluation@1.0.0",)
             )
 
-    for top_field in ("construction_total", "annual_fixed_om"):
-        bad_top = tmp_path / f"bad_top_{top_field}"
+    for top_field, bad_top_val in (
+        ("construction_total", "NaN"),
+        ("construction_total", 1000),
+        ("annual_fixed_om", "NaN"),
+        ("annual_fixed_om", 30.0),
+    ):
+        bad_top = tmp_path / f"bad_top_{top_field}_{type(bad_top_val).__name__}"
         write_json_file(
             bad_top / "financial_evaluation.json",
-            {**sample_fin_eval, top_field: "NaN"},
+            {**sample_fin_eval, top_field: bad_top_val},
         )
         with pytest.raises(StageIOError, match=top_field):
             validate_stage_outputs("evaluator", bad_top, produces=("ies.financial-evaluation@1.0.0",))
@@ -272,6 +277,14 @@ def test_generator_solver_evaluator_stage_io(tmp_path: Path) -> None:
     )
     with pytest.raises(StageIOError, match="evaluation"):
         validate_stage_outputs("evaluator", bad_npv, produces=("ies.financial-evaluation@1.0.0",))
+
+    bad_irr = tmp_path / "bad_irr"
+    write_json_file(
+        bad_irr / "financial_evaluation.json",
+        {**sample_fin_eval, "evaluation": {**sample_fin_eval["evaluation"], "irr": "NaN"}},
+    )
+    with pytest.raises(StageIOError, match="evaluation.irr"):
+        validate_stage_outputs("evaluator", bad_irr, produces=("ies.financial-evaluation@1.0.0",))
 
     bad_report_out = tmp_path / "bad_report_out"
     write_json_file(

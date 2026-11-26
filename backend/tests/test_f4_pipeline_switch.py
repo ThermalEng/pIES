@@ -1461,6 +1461,22 @@ def test_codex_r2_rejects_malformed_evaluator_outputs_and_contradictory_solution
         {**valid_fin_base, "tax_cash": {**valid_fin_base["tax_cash"], "vat": [None]}},
         {**valid_fin_base, "evaluation": {"rows": [None], "npv": "0", "irr_status": "no_solution"}},
         {**valid_fin_base, "annual_net_flows": [None]},
+        {**valid_fin_base, "construction_total": 1000},
+        {**valid_fin_base, "annual_fixed_om": 10},
+        {**valid_fin_base, "annual_net_flows": ["1_000", "0"]},
+        {
+            **valid_fin_base,
+            "evaluation": {"rows": [], "npv": "0", "irr_status": "normal", "irr": "NaN"},
+        },
+        {
+            **valid_fin_base,
+            "evaluation": {
+                "rows": [],
+                "npv": "0",
+                "irr_status": "no_solution",
+                "static_payback": "not-a-number",
+            },
+        },
         *[
             bad_case
             for bad_token in ("NaN", "Infinity", "-Infinity", "not-a-number", " 1.0 ")

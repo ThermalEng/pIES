@@ -450,19 +450,13 @@ _FIN_EVAL_ROW_FIELDS: tuple[tuple[str, str], ...] = (
 )
 
 
-def _is_finite_decimal_or_number(value: Any) -> bool:
-    if isinstance(value, bool):
+def _is_finite_decimal_str(value: Any) -> bool:
+    if not isinstance(value, str) or not value or value != value.strip() or "_" in value:
         return False
-    if isinstance(value, (int, float)):
-        return math.isfinite(value)
-    if isinstance(value, str):
-        if not value or value != value.strip():
-            return False
-        try:
-            return Decimal(value).is_finite()
-        except InvalidOperation:
-            return False
-    return False
+    try:
+        return Decimal(value).is_finite()
+    except InvalidOperation:
+        return False
 
 
 def _is_scalar_kind(value: Any, kind: str) -> bool:
@@ -471,7 +465,13 @@ def _is_scalar_kind(value: Any, kind: str) -> bool:
     if kind == "int":
         return not isinstance(value, bool) and isinstance(value, int)
     if kind == "num":
-        return _is_finite_decimal_or_number(value)
+        if isinstance(value, str):
+            return _is_finite_decimal_str(value)
+        return (
+            not isinstance(value, bool)
+            and isinstance(value, (int, float))
+            and math.isfinite(value)
+        )
     if kind == "map":
         return isinstance(value, Mapping)
     return False
@@ -507,8 +507,8 @@ def _validate_financial_evaluation_mapping(data: Any) -> dict[str, Any]:
         if not _is_scalar_kind(data.get(key), "str"):
             raise StageIOError(f"FinancialEvaluation requires non-empty string {key!r}")
     for key in _FIN_EVAL_NUM_FIELDS:
-        if not _is_scalar_kind(data.get(key), "num"):
-            raise StageIOError(f"FinancialEvaluation requires finite numeric value for {key!r}")
+        if not _is_finite_decimal_str(data.get(key)):
+            raise StageIOError(f"FinancialEvaluation requires finite decimal string for {key!r}")
     if not isinstance(data.get("profile_id"), str):
         raise StageIOError("FinancialEvaluation requires string 'profile_id'")
 

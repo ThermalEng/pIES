@@ -744,6 +744,13 @@ def validate_financial_evaluation_doc(data: Any) -> dict[str, Any]:
         or not _is_fin_scalar_kind(evaluation.get("irr_status"), "str")
     ):
         fail("financial_evaluation.evaluation 须包含有效 npv 与非空字符串 irr_status")
+    for opt_num in ("discount_rate", "irr", "static_payback", "dynamic_payback"):
+        if (
+            opt_num in evaluation
+            and evaluation[opt_num] is not None
+            and not _is_fin_scalar_kind(evaluation[opt_num], "num")
+        ):
+            fail(f"financial_evaluation.evaluation.{opt_num} 须为有限数值或十进制字符串")
 
     check_finite_json(data, "financial_evaluation.json")
     return dict(data)
