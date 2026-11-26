@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
@@ -333,8 +335,10 @@ _FIN_EVAL_STR_FIELDS: tuple[str, ...] = (
     "status",
     "currency",
     "price_basis",
-    "construction_total",
     "construction_total_unit",
+)
+_FIN_EVAL_NUM_FIELDS: tuple[str, ...] = (
+    "construction_total",
     "annual_fixed_om",
 )
 # Row field type specs: "str" (non-empty str), "int" (non-bool int),
@@ -446,15 +450,28 @@ _FIN_EVAL_ROW_FIELDS: tuple[tuple[str, str], ...] = (
 )
 
 
+def _is_finite_decimal_or_number(value: Any) -> bool:
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, (int, float)):
+        return math.isfinite(value)
+    if isinstance(value, str):
+        if not value or value != value.strip():
+            return False
+        try:
+            return Decimal(value).is_finite()
+        except InvalidOperation:
+            return False
+    return False
+
+
 def _is_scalar_kind(value: Any, kind: str) -> bool:
     if kind == "str":
         return isinstance(value, str) and bool(value)
     if kind == "int":
         return not isinstance(value, bool) and isinstance(value, int)
     if kind == "num":
-        return (isinstance(value, str) and bool(value)) or (
-            not isinstance(value, bool) and isinstance(value, (int, float))
-        )
+        return _is_finite_decimal_or_number(value)
     if kind == "map":
         return isinstance(value, Mapping)
     return False
@@ -489,6 +506,9 @@ def _validate_financial_evaluation_mapping(data: Any) -> dict[str, Any]:
     for key in _FIN_EVAL_STR_FIELDS:
         if not _is_scalar_kind(data.get(key), "str"):
             raise StageIOError(f"FinancialEvaluation requires non-empty string {key!r}")
+    for key in _FIN_EVAL_NUM_FIELDS:
+        if not _is_scalar_kind(data.get(key), "num"):
+            raise StageIOError(f"FinancialEvaluation requires finite numeric value for {key!r}")
     if not isinstance(data.get("profile_id"), str):
         raise StageIOError("FinancialEvaluation requires string 'profile_id'")
 
@@ -586,7 +606,16 @@ def _validate_financial_evaluation_mapping(data: Any) -> dict[str, Any]:
     if not _is_scalar_kind(evaluation.get("npv"), "num") or not _is_scalar_kind(
         evaluation.get("irr_status"), "str"
     ):
-        raise StageIOError("FinancialEvaluation.evaluation requires 'npv' and non-empty 'irr_status'")
+        raise StageIOError(
+            "FinancialEvaluation.evaluation requires finite 'npv' and non-empty 'irr_status'"
+        )
+    for opt_num in ("discount_rate", "irr", "static_payback", "dynamic_payback"):
+        if opt_num in evaluation and evaluation[opt_num] is not None and not _is_scalar_kind(
+            evaluation[opt_num], "num"
+        ):
+            raise StageIOError(
+                f"FinancialEvaluation.evaluation.{opt_num} must be a finite numeric value"
+            )
 
     check_finite_json(data, "FinancialEvaluation")
     return dict(data)

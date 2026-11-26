@@ -1461,9 +1461,51 @@ def test_codex_r2_rejects_malformed_evaluator_outputs_and_contradictory_solution
         {**valid_fin_base, "tax_cash": {**valid_fin_base["tax_cash"], "vat": [None]}},
         {**valid_fin_base, "evaluation": {"rows": [None], "npv": "0", "irr_status": "no_solution"}},
         {**valid_fin_base, "annual_net_flows": [None]},
+        *[
+            bad_case
+            for bad_token in ("NaN", "Infinity", "-Infinity", "not-a-number", " 1.0 ")
+            for bad_case in (
+                {**valid_fin_base, "annual_net_flows": [bad_token, "0"]},
+                {
+                    **valid_fin_base,
+                    "annual_operation": [
+                        {
+                            "financial_year": 1,
+                            "energy_net": "0",
+                            "variable_om": "0",
+                            "fixed_om": "0",
+                            "maintenance": "0",
+                            "demand_charge": "0",
+                            "net": bad_token,
+                        }
+                    ],
+                },
+                {**valid_fin_base, "construction_total": bad_token},
+                {**valid_fin_base, "annual_fixed_om": bad_token},
+                {
+                    **valid_fin_base,
+                    "evaluation": {"rows": [], "npv": bad_token, "irr_status": "no_solution"},
+                },
+            )
+        ],
     ):
         with pytest.raises(ValueError):
             validate_financial_evaluation_doc(bad_fin)
+
+    # Non-finite decimal string from evaluator container routes to EVAL-PROTOCOL-001.
+    from iesplan.application.worker.compute_cases import _parse_evaluator_outputs
+    from iesplan.computation import FINANCIAL_EVALUATION_CONTRACT
+
+    with pytest.raises(ValueError, match="annual_net_flows"):
+        _parse_evaluator_outputs(
+            {
+                "financial_evaluation.json": MemoryContent(
+                    json.dumps({**valid_fin_base, "annual_net_flows": ["NaN", "0"]}).encode("utf-8")
+                )
+            },
+            evaluator_ref="ies.evaluator.finance@1.0.0",
+            declared_produces=(FINANCIAL_EVALUATION_CONTRACT,),
+        )
 
     # R2: contradictory solved + has_feasible_solution=false rejected at both validator and spawn child.
     contradictory = {

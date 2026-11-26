@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Callable, Mapping
+from decimal import Decimal, InvalidOperation
 from typing import Any, NoReturn
 
 from iesplan.computation.protocols import MATH_STATUSES, check_finite_json, check_provider_ref
@@ -591,6 +592,15 @@ def validate_evaluation_report_doc(
     return dict(data)
 
 
+def _is_finite_decimal_str(value: object) -> bool:
+    if not isinstance(value, str) or not value or value != value.strip() or "_" in value:
+        return False
+    try:
+        return Decimal(value).is_finite()
+    except InvalidOperation:
+        return False
+
+
 def _is_fin_scalar_kind(value: Any, kind: str) -> bool:
     if kind == "str":
         return isinstance(value, str) and bool(value)
@@ -598,8 +608,12 @@ def _is_fin_scalar_kind(value: Any, kind: str) -> bool:
         return not isinstance(value, bool) and isinstance(value, int)
     if kind == "num":
         if isinstance(value, str):
-            return bool(value)
-        return not isinstance(value, bool) and isinstance(value, (int, float)) and math.isfinite(float(value))
+            return _is_finite_decimal_str(value)
+        return (
+            not isinstance(value, bool)
+            and isinstance(value, (int, float))
+            and math.isfinite(float(value))
+        )
     if kind == "map":
         return isinstance(value, Mapping)
     return False
@@ -633,6 +647,9 @@ def validate_financial_evaluation_doc(data: Any) -> dict[str, Any]:
 
     for key in _FIN_EVAL_STR_FIELDS:
         _require_str(data.get(key), f"financial_evaluation.{key}", fail)
+    for key in ("construction_total", "annual_fixed_om"):
+        if not _is_finite_decimal_str(data.get(key)):
+            fail(f"financial_evaluation.{key} 须为有限十进制数值字符串")
     if not isinstance(data.get("profile_id"), str):
         fail("financial_evaluation.profile_id 须为字符串")
 

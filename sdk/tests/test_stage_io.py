@@ -222,6 +222,57 @@ def test_generator_solver_evaluator_stage_io(tmp_path: Path) -> None:
     with pytest.raises(StageIOError, match="evaluation.rows\\[0\\]"):
         validate_stage_outputs("evaluator", bad_eval_rows, produces=("ies.financial-evaluation@1.0.0",))
 
+    for bad_token in ("NaN", "Infinity", "-Infinity", "not-a-number", " 1.0 "):
+        bad_flow_out = tmp_path / f"bad_flow_{abs(hash(bad_token))}"
+        write_json_file(
+            bad_flow_out / "financial_evaluation.json",
+            {**sample_fin_eval, "annual_net_flows": [bad_token, "6072.5"]},
+        )
+        with pytest.raises(StageIOError, match="annual_net_flows"):
+            validate_stage_outputs(
+                "evaluator", bad_flow_out, produces=("ies.financial-evaluation@1.0.0",)
+            )
+
+        bad_op_out = tmp_path / f"bad_op_{abs(hash(bad_token))}"
+        write_json_file(
+            bad_op_out / "financial_evaluation.json",
+            {
+                **sample_fin_eval,
+                "annual_operation": [
+                    {
+                        "financial_year": 1,
+                        "energy_net": "0",
+                        "variable_om": "0",
+                        "fixed_om": "0",
+                        "maintenance": "0",
+                        "demand_charge": "0",
+                        "net": bad_token,
+                    }
+                ],
+            },
+        )
+        with pytest.raises(StageIOError, match="annual_operation\\[0\\]"):
+            validate_stage_outputs(
+                "evaluator", bad_op_out, produces=("ies.financial-evaluation@1.0.0",)
+            )
+
+    for top_field in ("construction_total", "annual_fixed_om"):
+        bad_top = tmp_path / f"bad_top_{top_field}"
+        write_json_file(
+            bad_top / "financial_evaluation.json",
+            {**sample_fin_eval, top_field: "NaN"},
+        )
+        with pytest.raises(StageIOError, match=top_field):
+            validate_stage_outputs("evaluator", bad_top, produces=("ies.financial-evaluation@1.0.0",))
+
+    bad_npv = tmp_path / "bad_npv"
+    write_json_file(
+        bad_npv / "financial_evaluation.json",
+        {**sample_fin_eval, "evaluation": {**sample_fin_eval["evaluation"], "npv": "Infinity"}},
+    )
+    with pytest.raises(StageIOError, match="evaluation"):
+        validate_stage_outputs("evaluator", bad_npv, produces=("ies.financial-evaluation@1.0.0",))
+
     bad_report_out = tmp_path / "bad_report_out"
     write_json_file(
         bad_report_out / "evaluation_report.json",
