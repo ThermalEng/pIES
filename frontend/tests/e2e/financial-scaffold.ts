@@ -472,6 +472,7 @@ export async function scaffoldProject(
   await requestJson(api, 'POST', `/api/projects/${pid}/validation/baseline-confirm`, {
     assumptions: {},
   }, token)
+  const outputs = opts.outputs ?? ['solution']
   await requestJson(api, 'PUT', `/api/projects/${pid}/config`, {
     calculation_config: {
       schema: 'ies.calculation-config',
@@ -481,13 +482,14 @@ export async function scaffoldProject(
       generator: 'ies.generator.highs_milp@1.0.0',
       solver: 'ies.solver.highs@1.7.2',
       algorithm: null,
-      evaluator: null,
+      evaluators: outputs.includes('solution')
+        ? [{ evaluator: 'ies.evaluator.finance@1.0.0', parameters: {} }]
+        : [],
       precision: 'medium',
-      convergence: null,
       time_limit_seconds: 600,
       options: {},
       seed: null,
-      outputs: opts.outputs ?? ['solution'],
+      outputs,
     },
     expected_revision: null,
   }, token)

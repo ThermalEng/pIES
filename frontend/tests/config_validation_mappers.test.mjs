@@ -31,11 +31,26 @@ function check(name, cond, detail = '') {
 const cfg = require('/tmp/b1-config.cjs')
 const val = require('/tmp/b1-validation.cjs')
 
-// 1. 配置信封
+// 1. 配置信封(13 字段 CalculationConfig)
 {
-  const body = { mode: 'planning', generator: 'g', solver: 'highs' }
+  const body = {
+    schema: 'ies.calculation-config',
+    schema_version: '1.0.0',
+    mode: 'planning',
+    predictions: [],
+    generator: 'ies.generator.highs_milp@1.0.0',
+    solver: 'ies.solver.highs@1.7.2',
+    algorithm: null,
+    evaluators: [{ evaluator: 'ies.evaluator.finance@1.0.0', parameters: {} }],
+    precision: 'medium',
+    time_limit_seconds: 600,
+    options: { generator: {}, solver: {} },
+    seed: null,
+    outputs: ['solution'],
+  }
   const c = cfg.configFromServer({ calculation_config: body, revision: 3 }, 4)
   check('配置信封直读', c.project_id === 4 && c.revision === 3 && c.calculation_config === body)
+  check('13字段evaluators透传', Array.isArray(c.calculation_config.evaluators) && c.calculation_config.evaluators.length === 1)
 }
 
 // 2. 校验报告

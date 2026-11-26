@@ -129,11 +129,10 @@ CONFIG_BODY: dict = {
     "generator": "ies.generator.highs_milp@1.0.0",
     "solver": "ies.solver.highs@1.7.2",
     "algorithm": None,
-    "evaluator": None,
+    "evaluators": [],
     "precision": "medium",
-    "convergence": None,
     "time_limit_seconds": 600,
-    "options": {},
+    "options": {"generator": {}, "solver": {}},
     "seed": None,
     "outputs": ["solution"],
 }
@@ -321,9 +320,15 @@ def _declare_assembly(client: TestClient, user, pid: int, revision: int, instanc
     return resp.json()["revision"]
 
 
-def _registry(client: TestClient):
-    """组合根已发布的生成器目录(随 app lifespan 装配)。"""
-    return client.app.state.bootstrap_context.generator_registry
+def _registries(client: TestClient) -> dict[str, Any]:
+    """组合根已发布的目录集合(随 app lifespan 装配)。"""
+    ctx = client.app.state.bootstrap_context
+    return {
+        "generator_registry": ctx.generator_registry,
+        "solver_registry": ctx.solver_registry,
+        "evaluator_registry": ctx.evaluator_registry,
+        "algorithm_registry": ctx.algorithm_registry,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -473,7 +478,7 @@ def test_snapshot_freezes_project_model_math(
         client, owner, pid, revision, {"load2": {"type": "none"}, "gas1": {"type": "none"}}
     )
     saved = save_calculation_config_case(
-        db, owner, pid, dict(CONFIG_BODY), None, generator_registry=_registry(client),
+        db, owner, pid, dict(CONFIG_BODY), None, **_registries(client),
     )
 
     task, flags = tasks_uc.submit_task(
@@ -491,7 +496,7 @@ def test_snapshot_freezes_project_model_math(
             "maintenance_expenses": [],
         },
         idempotency_key="consume-task-1",
-        generator_registry=_registry(client),
+        **_registries(client),
     )
     assert flags == {"replay": False}
     assert task.calc_snapshot_id is not None

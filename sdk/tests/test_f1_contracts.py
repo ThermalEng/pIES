@@ -430,6 +430,27 @@ def test_engineering_solution_dual_state_roundtrip_and_completeness(tmp_path: Pa
     )
     assert validate_engineering_solution_completeness(feasible, expectation) == feasible
 
+    # Standalone planning_variables roundtrip & completeness (without construction_units)
+    standalone_dict = _engineering_feasible_dict()
+    standalone_dict["construction_units"] = []
+    standalone_dict["planning_variables"] = [
+        {"planning_variable_id": "hp_cap", "value": 420.0, "unit": "kW"}
+    ]
+    eng_validator.validate(standalone_dict)
+    standalone = EngineeringSolutionPayload.from_dict(standalone_dict)
+    assert standalone.planning_variables == (ConstructionScale("hp_cap", 420.0, "kW"),)
+    assert EngineeringSolutionPayload.from_dict(standalone.to_dict()) == standalone
+
+    standalone_exp = EngineeringSolutionExpectation(
+        expected_steps=3,
+        objective_unit="CNY",
+        construction_units=(),
+        series={"pv1.power_out": ExpectedDeviceSeries("pv1", "power_out", "kW")},
+        system_series={"sys.reserve": ExpectedSystemSeries("reserve_balance", "margin", "kW")},
+        planning_variables={"hp_cap": "kW"},
+    )
+    assert validate_engineering_solution_completeness(standalone, standalone_exp) == standalone
+
     # Non-feasible: preserves exemption against frozen expectation
     non_feasible_omitted = EngineeringSolutionPayload.from_dict(
         {
@@ -557,6 +578,60 @@ def test_engineering_solution_rejects_invalid_and_incomplete_fixtures() -> None:
     )
     with pytest.raises(StageIOError, match="identity/unit mismatch"):
         validate_engineering_solution_completeness(feasible, wrong_series_unit)
+
+    bad_non_feasible_pvars = _engineering_feasible_dict()
+    bad_non_feasible_pvars["solver_summary"] = {
+        "termination_reason": "infeasible",
+        "math_status": "infeasible",
+        "has_feasible_solution": False,
+        "objective_value": None,
+        "objective_unit": None,
+        "best_bound": None,
+        "relative_gap": None,
+    }
+    bad_non_feasible_pvars["construction_units"] = None
+    bad_non_feasible_pvars["series"] = None
+    bad_non_feasible_pvars["system_series"] = None
+    bad_non_feasible_pvars["planning_variables"] = [
+        {"planning_variable_id": "hp_cap", "value": 100.0, "unit": "kW"}
+    ]
+    with pytest.raises(StageIOError, match="Non-feasible"):
+        EngineeringSolutionPayload.from_dict(bad_non_feasible_pvars)
+
+    bad_dup_pvars = _engineering_feasible_dict()
+    bad_dup_pvars["planning_variables"] = [
+        {"planning_variable_id": "hp_cap", "value": 100.0, "unit": "kW"},
+        {"planning_variable_id": "hp_cap", "value": 200.0, "unit": "kW"},
+    ]
+    with pytest.raises(StageIOError, match="Duplicate planning_variable_id"):
+        EngineeringSolutionPayload.from_dict(bad_dup_pvars)
+
+    missing_pvar_exp = EngineeringSolutionExpectation(
+        expected_steps=3,
+        objective_unit="CNY",
+        construction_units=(),
+        series={"pv1.power_out": ExpectedDeviceSeries("pv1", "power_out", "kW")},
+        system_series={"sys.reserve": ExpectedSystemSeries("reserve_balance", "margin", "kW")},
+        planning_variables={"hp_cap": "kW"},
+    )
+    no_unit_feasible = _engineering_feasible_dict()
+    no_unit_feasible["construction_units"] = []
+    with pytest.raises(StageIOError, match="missing required planning variable 'hp_cap'"):
+        validate_engineering_solution_completeness(
+            EngineeringSolutionPayload.from_dict(no_unit_feasible),
+            missing_pvar_exp,
+        )
+
+    wrong_pvar_unit = _engineering_feasible_dict()
+    wrong_pvar_unit["construction_units"] = []
+    wrong_pvar_unit["planning_variables"] = [
+        {"planning_variable_id": "hp_cap", "value": 100.0, "unit": "MW"}
+    ]
+    with pytest.raises(StageIOError, match="unit mismatch"):
+        validate_engineering_solution_completeness(
+            EngineeringSolutionPayload.from_dict(wrong_pvar_unit),
+            missing_pvar_exp,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -903,7 +978,7 @@ def test_stage_context_f1_helpers(tmp_path: Path) -> None:
             "kind": "evaluator",
             "name": {"en_us": "Carbon"},
             "description": "Carbon evaluator.",
-            "compatibility": {"pies": ">=1.1.5,<2.0.0"},
+            "compatibility": {"pies": ">=1.2.0,<2.0.0"},
             "consumes": ["ies.engineering-solution@1.0.0"],
             "produces": ["ies.evaluation-report@1.0.0"],
             "runtime": {"language": "python", "python": "3.12"},

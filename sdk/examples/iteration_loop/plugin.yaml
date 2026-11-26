@@ -9,7 +9,12 @@ name:
 description: Minimal self-contained iteration loop plugin reporting progress via /work/out/iterations.jsonl.
 license: MPL-2.0
 compatibility:
-  pies: ">=1.1.5,<2.0.0"
+  pies: ">=1.2.0,<2.0.0"
+  sdk: ">=1.2.0,<2.0.0"
+consumes:
+  - ies.stage-input@1.0.0
+produces:
+  - ies.engineering-solution@1.0.0
 runtime:
   language: python
   python: "3.12"

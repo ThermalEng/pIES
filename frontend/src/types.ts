@@ -494,13 +494,13 @@ export interface CalculationPrediction {
   parameters: Record<string, unknown>
 }
 
-/** 阶段二收敛配置(null 表不适用;任一耦合预测时必填，由后端按算法依赖声明判断)。 */
-export interface CalculationConvergence {
-  tolerance: number
-  max_iterations: number
+/** 并联后置评价器配置项(与后端 CalculationConfig.evaluators 元素一致)。 */
+export interface CalculationEvaluator {
+  evaluator: string
+  parameters: Record<string, unknown>
 }
 
-/** 已发布 14 字段 CalculationConfig 全文(见 formats/calculation-config.md)。 */
+/** 已发布 13 字段 CalculationConfig 全文(见 formats/calculation-config.md)。 */
 export interface CalculationConfigBody {
   schema: string
   schema_version: string
@@ -509,9 +509,8 @@ export interface CalculationConfigBody {
   generator: string | null
   solver: string | null
   algorithm: string | null
-  evaluator: string | null
+  evaluators: CalculationEvaluator[]
   precision: 'low' | 'medium' | 'high'
-  convergence: CalculationConvergence | null
   time_limit_seconds: number
   options: Record<string, unknown>
   seed: number | null
@@ -1128,7 +1127,42 @@ export interface FinancialEvaluationBlock {
 }
 
 /** 财务评价缺块原因(后端按可观察事实判定, 有块时为 null)。 */
-export type FinancialAbsence = 'outcome_not_normal' | 'solution_not_requested' | 'missing_unknown' | null
+export type FinancialAbsence =
+  | 'outcome_not_normal'
+  | 'evaluators_empty'
+  | 'evaluator_failed'
+  | 'solution_not_requested'
+  | 'missing_unknown'
+  | null
+
+/** 并联评价器执行状态(1.2.0 单向流水线)。 */
+export type EvaluatorRunStatus = 'succeeded' | 'failed' | 'timed_out' | 'cancelled' | 'skipped'
+
+export interface EvaluatorResultError {
+  code: string
+  message: string
+  detail?: string | Record<string, unknown> | null
+}
+
+export interface EvaluatorResultEntry {
+  evaluator: string
+  status: EvaluatorRunStatus
+  contract: string | null
+  error: EvaluatorResultError | null
+  attempt_id: number | null
+  finished_at: string | null
+}
+
+export interface EvaluationReportBlock {
+  evaluator: string
+  schema: string
+  schema_version: string
+  title: string
+  metrics: Array<Record<string, unknown>>
+  charts: unknown[]
+  tables: unknown[]
+  [key: string]: unknown
+}
 
 /** 证据候选(真实候选列表项; 选择用 index, 不按指标键反解)。 */
 export interface EvidenceCandidate {

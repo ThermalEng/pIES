@@ -102,9 +102,14 @@ def _user(db: Session, name: str):
     return rec
 
 
-def _registry(client: TestClient):
-    """组合根已发布的生成器目录(随 app lifespan 装配; 测试只消费, 不组装)。"""
-    return client.app.state.bootstrap_context.generator_registry
+def _registries(client: TestClient) -> dict[str, Any]:
+    ctx = client.app.state.bootstrap_context
+    return {
+        "generator_registry": ctx.generator_registry,
+        "solver_registry": ctx.solver_registry,
+        "evaluator_registry": ctx.evaluator_registry,
+        "algorithm_registry": ctx.algorithm_registry,
+    }
 
 
 def _project(client: TestClient, user, name: str) -> int:
@@ -258,7 +263,7 @@ def _declare_optimization_ready(
     assert resp.status_code == 200, resp.text
 
 
-#: 计算配置正文(14 字段契约; 与 test_http_contract._CALC_PAYLOAD 同构)。
+#: 计算配置正文(13 字段契约; 与 test_http_contract._CALC_PAYLOAD 同构)。
 _CONFIG_BODY: dict = {
     "schema": "ies.calculation-config",
     "schema_version": "1.0.0",
@@ -267,11 +272,10 @@ _CONFIG_BODY: dict = {
     "generator": "ies.generator.highs_milp@1.0.0",
     "solver": "ies.solver.highs@1.7.2",
     "algorithm": None,
-    "evaluator": None,
+    "evaluators": [],
     "precision": "medium",
-    "convergence": None,
     "time_limit_seconds": 600,
-    "options": {},
+    "options": {"generator": {}, "solver": {}},
     "seed": None,
     "outputs": ["solution"],
 }
@@ -285,7 +289,7 @@ def _prepare_running(
 
     pid = _project(client, user, name)
     _declare_optimization_ready(client, db, user, pid)
-    saved = save_calculation_config_case(db, user, pid, dict(_CONFIG_BODY), None, generator_registry=_registry(client))
+    saved = save_calculation_config_case(db, user, pid, dict(_CONFIG_BODY), None, **_registries(client))
     task, _ = tasks_uc.submit_task(
         db, user, pid, "optimization",
         config={"config_revision": saved["revision"]}, evaluation={
@@ -294,7 +298,7 @@ def _prepare_running(
                 "construction_payments": [{"t": 0, "ratio": 1}],
                 "maintenance_expenses": [],
             }, idempotency_key=key,
-        generator_registry=_registry(client),
+        **_registries(client),
     )
     claim = tasks_uc.claim_task(db, task.id, "w2c-fake-exec")
     assert claim is not None
@@ -379,3 +383,43 @@ def test_update_result_index_pointer_and_handover(
     asm4 = results_uc.run_assessment(db, pkg2.id, "physical", user=owner)
     idx4 = results_uc.update_result_index(db, task_id, asm4.id)
     assert idx4.id == idx3.id and idx4.assessment_id == asm4.id
+
+
+def test_flip_and_insert_index_repeated_handover(
+    client: TestClient, db: Session, engine: Engine
+) -> None:
+    """flip_index_for_version + insert_index keeps exactly one is_latest row per version."""
+    from iesplan.application import worker as worker_app
+
+    owner = _user(db, "w2c_res_owner4")
+    pid, task_id, claim, snap = _prepare_running(client, db, owner, "w2c-proj-flip", "w2c-flip-1")
+    project_version_id = worker_app.get_snapshot_record(db, snap).project_version_id
+    payload = _build_payload(snap, [_store_hourly(db), _store_hourly(db)], owner.id)
+    pkg1 = seal_test_evidence(db, task_id, claim.attempt_id, payload)
+    asm1 = results_uc.run_assessment(db, pkg1.id, "full", user=owner)
+    pkg2 = seal_test_evidence(db, task_id, claim.attempt_id, payload)
+    asm2 = results_uc.run_assessment(db, pkg2.id, "full", user=owner)
+
+    results_domain.flip_index_for_version(db, project_version_id)
+    idx1_id = results_domain.insert_index(
+        db,
+        project_id=pid,
+        project_version_id=project_version_id,
+        evidence_package_id=pkg1.id,
+        assessment_id=asm1.id,
+    )
+    results_domain.flip_index_for_version(db, project_version_id)
+    idx2_id = results_domain.insert_index(
+        db,
+        project_id=pid,
+        project_version_id=project_version_id,
+        evidence_package_id=pkg2.id,
+        assessment_id=asm2.id,
+    )
+    db.commit()
+
+    assert idx2_id != idx1_id
+    with _fresh_db(engine) as fresh:
+        assert results_domain.get_index(fresh, idx1_id).is_latest is False
+        latest = results_domain.latest_index_for_version(fresh, project_version_id)
+        assert latest is not None and latest.id == idx2_id and latest.is_latest is True

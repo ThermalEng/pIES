@@ -2,13 +2,15 @@
  * 结果分析页共享只读展示组件与纯辅助函数（不重算业务值）。
  */
 
-import { Badge } from '../../components/ui'
+import { Alert, Badge } from '../../components/ui'
 import { translate, useI18n } from '../../i18n'
 import { formatCo2, formatMoney, formatNumber, formatPercent } from '../../lib/format'
 import type {
   Currency,
+  FinancialAbsence,
   FinancialEvaluationBlock,
   MetricValue,
+  TaskOutcome,
 } from '../../types'
 import { paginateItems } from './chartMappers'
 
@@ -196,6 +198,39 @@ export function SealedFinancialCore({ fin }: { fin: FinancialEvaluationBlock }) 
       </div>
     </>
   )
+}
+
+/** 财务评价缺块统一提示组件(供总览/财务/税务共享, 不重算、不猜测)。 */
+export function FinancialAbsenceAlert({
+  finAbsence,
+  outcome,
+}: {
+  finAbsence: FinancialAbsence
+  outcome: TaskOutcome | null
+}) {
+  const { t } = useI18n()
+  if (!finAbsence) return null
+  const text =
+    finAbsence === 'outcome_not_normal'
+      ? t('ies.result.fin_absence_outcome_not_normal', { outcome: outcome ?? '—' })
+      : finAbsence === 'evaluators_empty'
+        ? t('ies.result.fin_absence_evaluators_empty')
+        : finAbsence === 'evaluator_failed'
+          ? t('ies.result.fin_absence_evaluator_failed')
+          : finAbsence === 'solution_not_requested'
+            ? t('ies.result.fin_absence_solution_not_requested')
+            : t('ies.result.fin_absence_missing_unknown')
+  return (
+    <div className="ies-section">
+      <Alert variant={finAbsence === 'evaluator_failed' ? 'error' : 'warning'}>{text}</Alert>
+    </div>
+  )
+}
+
+/** 格式化评价器错误诊断详情(兼容字符串与结构化对象，避免 React 渲染对象崩溃)。 */
+export function formatEvaluatorDetail(detail: unknown): string | null {
+  if (detail === undefined || detail === null || detail === '') return null
+  return typeof detail === 'string' ? detail : JSON.stringify(detail)
 }
 
 /** 通用静态数组分页辅助，确保所有组件共用一致默认页大小与边界裁剪。 */

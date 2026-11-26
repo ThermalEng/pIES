@@ -37,7 +37,7 @@ services:
     restart: unless-stopped
 
   builtin_stages:
-    image: pies-builtin-stages:1.1.5
+    image: pies-builtin-stages:1.2.0
     build:
       context: .
       dockerfile: plugins/Dockerfile
@@ -50,7 +50,7 @@ services:
     environment:
       PIES_JOB_RUNNER_STAGE_ROOT: /data/stages
       PIES_JOB_RUNNER_PLUGIN_SOURCE_ROOT: /data/plugin_builds
-      PIES_JOB_RUNNER_REQUIRED_IMAGES: pies-builtin-stages:1.1.5
+      PIES_JOB_RUNNER_REQUIRED_IMAGES: pies-builtin-stages:1.2.0
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ./data:/data

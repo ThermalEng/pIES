@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pies-sdk"
-version = "1.1.5"
+version = "1.2.0"
 description = "Standalone computation SDK and plugin runtime contract for pIES"
 license = "MPL-2.0"
 license-files = ["LICENSE"]

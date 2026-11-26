@@ -44,10 +44,7 @@ from iesplan.computation import (
     write_mps,
 )
 from iesplan.computation.generators.highs_milp import (
-    ADAPTER_REF,
-    EXECUTOR_REF,
     GENERATOR_REF,
-    PROCESS_IO_GRACE_SECONDS,
     SOLVER_REF,
 )
 from iesplan.core.yamlmini import load as load_yaml
@@ -158,13 +155,13 @@ def test_generator_cooperatively_stops_during_model_build(reason: str) -> None:
 
 
 def test_campus_generate_full_bundle() -> None:
-    """campus 生成完整聚合：manifest/文件/command/输出声明互相一致。"""
+    """campus 生成完整聚合：契约解耦 manifest/文件/输出声明互相一致。"""
     bundle, _ = _resolved_generate()
     assert isinstance(bundle, SolverBundle)
     manifest = bundle.manifest
     assert isinstance(manifest, SolverBundleManifest)
     assert manifest.bundle["generator"] == GENERATOR_REF
-    assert manifest.bundle["solver"] == SOLVER_REF
+    assert manifest.bundle["contract"] == "ies.solver-bundle.mps@1.0.0"
     assert [e["path"] for e in manifest.inputs] == [
         "input/problem.mps",
         "input/parameters.json",
@@ -183,56 +180,28 @@ def test_campus_generate_full_bundle() -> None:
         "input/parameters.jsonl",
         "input/acceleration.json",
     }
-    command = manifest.command
-    assert command["executor"] == EXECUTOR_REF
-    assert command["executable"] == SOLVER_REF
-    assert list(command["arguments"]) == [
-        "input/problem.mps",
-        "--solution_file",
-        "output/solution.sol",
-        "--time_limit",
-        "600",
-        "--random_seed",
-        "0",
-        "--acceleration_mode",
-        "on_demand_mutex",
-        "--acceleration_file",
-        "input/acceleration.json",
-    ]
-    assert command["working_directory"] == "."
-    # 求解 600 秒原样传入；PROCESS_IO_GRACE_SECONDS = 600 仅作启停/读写宽限。
-    assert command["timeout_seconds"] == 1200
-    assert command["network"] is False
-    assert list(command["success_exit_codes"]) == [0]
     assert manifest.outputs == (
         {
-            "path": "output/solution.sol",
-            "media_type": "text/plain",
+            "path": "output/primal_solution.json",
+            "media_type": "application/json",
             "required": True,
         },
     )
-    assert manifest.result_adapter == ADAPTER_REF
     assert manifest.extensions == {}
     metadata = json.loads(materialized_file(bundle, "input/parameters.json").decode("utf-8"))
     assert metadata["generator"] == GENERATOR_REF
-    assert metadata["solver"] == SOLVER_REF
-    assert metadata["result_adapter"] == ADAPTER_REF
     assert metadata["precision"] == "medium"
     assert metadata["seed"] == 0
     assert metadata["outputs"] == ["solution", "metrics"]
     assert metadata["assembly"]["id"] == "campus_demo"
-    assert isinstance(metadata["unit_map"], dict) and metadata["unit_map"]
     assert isinstance(metadata["objective_offset"], float)
-    # campus 目标为金额：目标业务单位取财务币种 CNY。
     assert metadata["objective_unit"] == "CNY"
-    # mps 文件字节即 writer 输出；unit_map/offset 与直接构造一致。
     artifact, models, materialized, finance, config, evaluation = _campus_inputs()
     model, unit_map, objective_unit = build_project_model(
         artifact, models, materialized, finance, config, evaluation
     )
     mps_text, offset = write_mps(model)
     assert materialized_file(bundle, "input/problem.mps") == mps_text.encode("utf-8")
-    assert metadata["unit_map"] == dict(sorted(unit_map.items()))
     assert metadata["objective_offset"] == pytest.approx(offset)
     assert metadata["objective_unit"] == objective_unit == "CNY"
 
@@ -246,17 +215,14 @@ def test_generate_is_byte_deterministic_and_writes_nothing(
     assert content_bytes(export_bundle_files(first)) == content_bytes(export_bundle_files(second))
     meta = json.loads(materialized_file(first, "input/parameters.json").decode("utf-8"))
     assert meta["seed"] == 7
-    args = list(first.manifest.command["arguments"])
-    assert args[args.index("--random_seed") + 1] == "7"
     monkeypatch.chdir(tmp_path)
     _resolved_generate()
     assert list(tmp_path.iterdir()) == []
 
 
 @pytest.mark.parametrize("limit", [1, 15, 600, 43200])
-def test_timeout_budget_preserves_user_time_limit_and_freezes_deterministically(limit: int) -> None:
-    """用户求解时限原样下传 HiGHS，外层预算固定 +600，且冻结输出逐字节确定。"""
-    assert PROCESS_IO_GRACE_SECONDS == 600
+def test_bundle_generation_ignores_runtime_budget_and_freezes_deterministically(limit: int) -> None:
+    """契约解耦 Bundle 不包含求解器运行时命令行与超时期限，且冻结输出逐字节确定。"""
     artifact, models, materialized, finance, base_config, evaluation = _campus_inputs(seed=42)
     config = CalculationConfig(
         mode=base_config.mode,
@@ -271,22 +237,16 @@ def test_timeout_budget_preserves_user_time_limit_and_freezes_deterministically(
     first = provider.generate(artifact, models, materialized, finance, config, evaluation)
     second = provider.generate(artifact, models, materialized, finance, config, evaluation)
 
-    command = first.manifest.command
-    args = list(command["arguments"])
-    limit_idx = args.index("--time_limit")
-    assert args[limit_idx + 1] == str(limit)
-    assert command["timeout_seconds"] == limit + 600
-    assert args[args.index("--random_seed") + 1] == "42"
-
     exported_first = export_bundle_files(first)
     exported_second = export_bundle_files(second)
     assert content_bytes(exported_first) == content_bytes(exported_second)
 
     frozen_bytes = content_bytes({"bundle.yaml": exported_first["bundle.yaml"]})["bundle.yaml"]
     frozen_manifest = load_yaml(frozen_bytes.decode("utf-8"))
-    assert frozen_manifest["command"]["timeout_seconds"] == limit + 600
-    frozen_args = frozen_manifest["command"]["arguments"]
-    assert frozen_args[frozen_args.index("--time_limit") + 1] == str(limit)
+    assert frozen_manifest["bundle"] == {
+        "generator": GENERATOR_REF,
+        "contract": "ies.solver-bundle.mps@1.0.0",
+    }
     meta = json.loads(materialized_file(first, "input/parameters.json").decode("utf-8"))
     assert meta["seed"] == 42
 
@@ -418,8 +378,6 @@ def _fake_descriptor(ref: str):
         outputs=("solution",),
         precisions=("medium",),
         solvers=(SOLVER_REF,),
-        executors=(EXECUTOR_REF,),
-        result_adapter=ADAPTER_REF,
         resource_limits={},
         unit_system="SI",
         seed_semantics="test",
@@ -512,8 +470,12 @@ def test_step_series_declared_from_variable_path() -> None:
             assert unit_map[column] == d["unit"], column
     assert len(lengths) == 1
     metadata = json.loads(materialized_file(bundle, "input/parameters.json").decode("utf-8"))
-    assert metadata["step_series"] == [dict(d) for d in decls]
+    assert [
+        {k: entry[k] for k in ("columns", "instance_id", "series_id", "unit", "variable_id")}
+        for entry in metadata["step_series"]
+    ] == [dict(d) for d in decls]
+    for entry in metadata["step_series"]:
+        assert isinstance(entry["scale"], float) and isinstance(entry["offset"], float)
     assert metadata["generator"] == GENERATOR_REF == "ies.generator.highs_milp@1.0.0"
-    assert metadata["result_adapter"] == ADAPTER_REF == "ies.result-adapter.highs@1.0.0"
     assert bundle.manifest.bundle["generator"] == GENERATOR_REF
-    assert bundle.manifest.result_adapter == ADAPTER_REF
+    assert bundle.manifest.bundle["contract"] == "ies.solver-bundle.mps@1.0.0"

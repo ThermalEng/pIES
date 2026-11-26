@@ -7,6 +7,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -32,7 +33,7 @@ from iesplan.computation import (
 )
 from iesplan.computation.bundle import export_bundle_files
 from iesplan.computation.runtime.stage_runner import StageExecutionSpec
-from iesplan.core.content import Content, GeneratedContent, json_chunks, read_content
+from iesplan.core.content import Content, GeneratedContent, MemoryContent, json_chunks, read_content
 from iesplan.storage import add_ref, find_refs_by_owner, get_object, get_object_content, put_object
 
 
@@ -159,6 +160,7 @@ def _build_receipt_from_stage(
     *,
     attempt: AttemptContext,
     bundle: SolverBundle,
+    solver_ref: str,
     stage_result: Any,
     outputs: Mapping[str, Content],
     meta: Mapping[str, Any] | None,
@@ -200,13 +202,11 @@ def _build_receipt_from_stage(
     started_at = str(meta_dict.get("started_at") or stage_result.started_at or "")
     ended_at = str(meta_dict.get("ended_at") or stage_result.finished_at or "")
     if exit_code is not None and exit_code < 0:
-        # Python subprocess reports signal termination as negative return code (-signal).
         signal_number = -exit_code
         exit_code = None
         if status == "process_failed" and termination_reason == "exited":
             termination_reason = "signaled"
     elif termination_reason == "oom" and exit_code == 137:
-        # Container OOM killer terminates with SIGKILL (exit code 128 + 9 = 137).
         exit_code = None
         signal_number = 9
 
@@ -225,10 +225,10 @@ def _build_receipt_from_stage(
         calculation_config_id=attempt.calculation_config_id,
         attempt_id=attempt.attempt_id,
         generator_ref=str(bundle.manifest.bundle["generator"]),
-        solver_ref=str(bundle.manifest.bundle["solver"]),
-        executor_ref=str(bundle.manifest.command["executor"]),
-        executable_ref=str(bundle.manifest.command["executable"]),
-        result_adapter_ref=str(bundle.manifest.result_adapter),
+        solver_ref=solver_ref,
+        executor_ref="ies.executor.container@1.0.0",
+        executable_ref=solver_ref,
+        result_adapter_ref="ies.backend.result_adapter@1.0.0",
         status=status,
         exit_code=exit_code,
         signal_number=signal_number,
@@ -244,24 +244,42 @@ def _build_receipt_from_stage(
 
 
 def execute_saved_bundle(
-    *, plane: Any, bundle: SolverBundle, attempt: AttemptContext, claim: Claim,
-    number: int, generated_id: int, session_factory: Callable[[], Session], stop=None,
+    *,
+    plane: Any,
+    bundle: SolverBundle,
+    solver_ref: str,
+    time_limit_seconds: int = 43200,
+    seed: int = 0,
+    solver_options: Mapping[str, Any] = MappingProxyType({}),
+    attempt: AttemptContext,
+    claim: Claim,
+    number: int,
+    generated_id: int,
+    session_factory: Callable[[], Session],
+    stop=None,
     detach: Any = None,
 ) -> tuple[ExecutionReceipt, Mapping[str, Content], dict]:
-    executable_ref = str(bundle.manifest.command["executable"])
     try:
-        solver_stage = plane.stage_catalog.get_by_ref(executable_ref)
+        solver_stage = plane.stage_catalog.get_by_ref(solver_ref)
     except KeyError:
         raise ComputationUnavailableError(
-            f"solver阶段容器未发布: {executable_ref!r}",
+            f"solver阶段容器未发布: {solver_ref!r}",
             reason="no-provider",
         ) from None
 
     input_files: dict[str, Any] = {
         f"bundle/{rel}": content for rel, content in export_bundle_files(bundle).items()
     }
-    raw_timeout = bundle.manifest.command.get("timeout_seconds")
-    timeout_seconds = float(raw_timeout) if raw_timeout is not None else None
+    request_doc: dict[str, Any] = {
+        "time_limit_seconds": int(time_limit_seconds),
+        "seed": int(seed),
+    }
+    for key, val in solver_options.items():
+        request_doc[str(key)] = thaw_json_value(val)
+    input_files["request.json"] = MemoryContent(
+        json.dumps(request_doc, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    )
+    timeout_seconds = float(time_limit_seconds) + 600.0
     stage_id = f"solve-r{number}"
 
     files: dict = {}
@@ -291,6 +309,7 @@ def execute_saved_bundle(
         receipt = _build_receipt_from_stage(
             attempt=attempt,
             bundle=bundle,
+            solver_ref=solver_ref,
             stage_result=stage_result,
             outputs=outputs,
             meta=meta,
@@ -337,10 +356,10 @@ def execute_saved_bundle(
             calculation_config_id=attempt.calculation_config_id,
             attempt_id=attempt.attempt_id,
             generator_ref=str(bundle.manifest.bundle["generator"]),
-            solver_ref=str(bundle.manifest.bundle["solver"]),
-            executor_ref=str(bundle.manifest.command["executor"]),
-            executable_ref=str(bundle.manifest.command["executable"]),
-            result_adapter_ref=str(bundle.manifest.result_adapter),
+            solver_ref=solver_ref,
+            executor_ref="ies.executor.container@1.0.0",
+            executable_ref=solver_ref,
+            result_adapter_ref="ies.backend.result_adapter@1.0.0",
             status="fenced",
             termination_reason="fenced",
         )
@@ -350,6 +369,7 @@ def execute_saved_bundle(
         pre_stop_receipt = _build_receipt_from_stage(
             attempt=attempt,
             bundle=bundle,
+            solver_ref=solver_ref,
             stage_result=stage_result,
             outputs={},
             meta=None,
@@ -441,7 +461,9 @@ def publish_prediction_checkpoint_with_artifacts(
         raise
 
 
-def _evaluated_from_checkpoint(raw: Mapping[str, Any]) -> EvaluatedStageOutput:
+def _evaluated_from_checkpoint(
+    raw: Mapping[str, Any], *, solution_ref: Mapping[str, Any] | None = None
+) -> EvaluatedStageOutput:
     """Reconstruct `EvaluatedStageOutput` from trusted stored checkpoint without revalidating."""
     outputs = dict(raw.get("outputs") or {})
     hourly_series = outputs.pop("hourly_series", None)
@@ -458,6 +480,7 @@ def _evaluated_from_checkpoint(raw: Mapping[str, Any]) -> EvaluatedStageOutput:
         result=result,
         hourly_series=hourly_series,
         financial_evaluation=financial_evaluation,
+        solution_ref=dict(solution_ref) if solution_ref is not None else None,
     )
 
 
@@ -474,24 +497,32 @@ def _load_evaluated_stage_checkpoint(
         raw = json.loads(read_content(content).decode("utf-8"))
     else:
         raw = data["result"]
-    return _evaluated_from_checkpoint(raw)
+    return _evaluated_from_checkpoint(raw, solution_ref=data.get("solution_file"))
 
 
 def _save_evaluated_stage_checkpoint(
-    db: Session, claim: Claim, number: int, stage: str, raw_result: Mapping[str, Any],
+    db: Session,
+    claim: Claim,
+    number: int,
+    stage: str,
+    raw_result: Mapping[str, Any],
+    *,
+    solution_content: Content | bytes | None = None,
 ) -> int:
     try:
-        files = seal_output_objects(
-            db,
-            {
-                "result.json": (
-                    GeneratedContent(partial(json_chunks, dict(raw_result))),
-                    "application/json",
-                )
-            },
-            actor_id=None,
-        )
-        return _publish(db, claim, number, stage, {"result_file": files["result.json"]}, {stage: files})
+        to_seal: dict[str, tuple[Content | bytes, str]] = {
+            "result.json": (
+                GeneratedContent(partial(json_chunks, dict(raw_result))),
+                "application/json",
+            )
+        }
+        if solution_content is not None:
+            to_seal["solution.json"] = (solution_content, "application/json")
+        files = seal_output_objects(db, to_seal, actor_id=None)
+        data: dict[str, Any] = {"result_file": files["result.json"]}
+        if "solution.json" in files:
+            data["solution_file"] = files["solution.json"]
+        return _publish(db, claim, number, stage, data, {stage: files})
     except Exception:
         db.rollback()
         raise
@@ -519,10 +550,221 @@ def save_evaluation_checkpoint(
 
 
 def save_algorithm_checkpoint(
-    db: Session, claim: Claim, raw_result: Mapping[str, Any],
+    db: Session,
+    claim: Claim,
+    raw_result: Mapping[str, Any],
+    *,
+    solution_content: Content | bytes | None = None,
 ) -> int:
-    """Persist unified algorithm stage result.json durably with Fencing Token before cleanup_stage."""
-    return _save_evaluated_stage_checkpoint(db, claim, 1, "algorithm", raw_result)
+    """Persist unified algorithm stage outputs durably with Fencing Token before cleanup_stage."""
+    return _save_evaluated_stage_checkpoint(
+        db, claim, 1, "algorithm", raw_result, solution_content=solution_content
+    )
+
+
+def save_evaluator_checkpoint(
+    db: Session,
+    claim: Claim,
+    number: int,
+    idx: int,
+    *,
+    result_entry: Mapping[str, Any],
+    report: Mapping[str, Any] | None = None,
+    financial_evaluation: Mapping[str, Any] | None = None,
+) -> int:
+    """Persist a single parallel evaluator stage outcome durably with Fencing Token before cleanup."""
+    try:
+        payload_doc: dict[str, Any] = {
+            "result_entry": thaw_json_value(result_entry),
+            "report": thaw_json_value(report) if report is not None else None,
+            "financial_evaluation": (
+                thaw_json_value(financial_evaluation)
+                if financial_evaluation is not None
+                else None
+            ),
+        }
+        files = seal_output_objects(
+            db,
+            {
+                "evaluator.json": (
+                    GeneratedContent(partial(json_chunks, payload_doc)),
+                    "application/json",
+                )
+            },
+            actor_id=None,
+        )
+        return _publish(
+            db, claim, number, f"eval-{idx}", {"evaluator_file": files["evaluator.json"]},
+            {f"eval-{idx}": files},
+        )
+    except Exception:
+        db.rollback()
+        raise
+
+
+def load_evaluator_checkpoint(
+    db: Session, claim: Claim, number: int, idx: int,
+) -> dict[str, Any] | None:
+    """Load persisted evaluator stage result for ``(claim.task_id, number, idx)`` if reusable."""
+    checkpoint = _find(db, claim, number, f"eval-{idx}")
+    if checkpoint is None:
+        return None
+    data = checkpoint[1]["data"]
+    ev_file = data["evaluator_file"]
+    loaded = json.loads(
+        read_content(get_object_content(db, int(ev_file["object_id"]))).decode("utf-8")
+    )
+    entry = loaded.get("result_entry") or {}
+    # Failed/timed_out checkpoints from prior attempts must not block retry on a new attempt.
+    if entry.get("status") != "succeeded" and entry.get("attempt_id") != str(claim.attempt_id):
+        return None
+    return loaded
+
+
+def save_restoration_checkpoint(
+    db: Session,
+    claim: Claim,
+    number: int,
+    *,
+    compute_result: Mapping[str, Any],
+    solution_content: Content | bytes | None,
+    hourly_series: Mapping[str, Any] | None = None,
+    planning_variables: list[Mapping[str, Any]] | None = None,
+) -> dict[str, dict[str, object]]:
+    """Seal restored ``ies.engineering-solution@1.0.0`` and ``ComputeResult`` with Fencing Token."""
+    try:
+        to_seal: dict[str, tuple[Content | bytes, str]] = {
+            "result.json": (
+                GeneratedContent(
+                    partial(
+                        json_chunks,
+                        {
+                            "compute_result": thaw_json_value(compute_result),
+                            "hourly_series": thaw_json_value(hourly_series) if hourly_series else None,
+                            "planning_variables": thaw_json_value(planning_variables or []),
+                        },
+                    )
+                ),
+                "application/json",
+            )
+        }
+        if solution_content is not None:
+            to_seal["solution.json"] = (solution_content, "application/json")
+        files = seal_output_objects(db, to_seal, actor_id=None)
+        _publish(
+            db,
+            claim,
+            number,
+            "restoration",
+            {"files": files},
+            {"restoration": files},
+        )
+        return files
+    except Exception:
+        db.rollback()
+        raise
+
+
+def load_restoration_checkpoint(
+    db: Session, claim: Claim, number: int,
+) -> dict[str, Any] | None:
+    """Restore core ``ComputeResult``, sealed ``solution.json`` ref, and hourly/planning projections."""
+    checkpoint = _find(db, claim, number, "restoration")
+    if checkpoint is None:
+        return None
+    files = checkpoint[1]["data"]["files"]
+    raw_doc = json.loads(
+        read_content(get_object_content(db, int(files["result.json"]["object_id"]))).decode("utf-8")
+    )
+    raw_cr = raw_doc["compute_result"]
+    cr = ComputeResult(
+        schema=raw_cr["schema"],
+        schema_version=raw_cr["schema_version"],
+        bundle_id=raw_cr["bundle_id"],
+        receipt_id=raw_cr["receipt_id"],
+        execution_status=raw_cr["execution_status"],
+        math_status=raw_cr["math_status"],
+        outputs=raw_cr.get("outputs") or {},
+    )
+    return {
+        "compute_result": cr,
+        "solution_ref": files.get("solution.json"),
+        "hourly_series": raw_doc.get("hourly_series"),
+        "planning_variables": raw_doc.get("planning_variables") or [],
+    }
+
+
+def save_evaluator_retry_request(
+    db: Session,
+    *,
+    attempt_id: int,
+    evaluator: str,
+    base_evidence_id: int,
+    idempotency_key: str,
+    min_attempt_no: int,
+) -> int:
+    """Persist durable single-evaluator retry instruction owned by an existing attempt (flush-only)."""
+    document = {
+        "schema": "ies.evaluator-retry",
+        "schema_version": "1.0.0",
+        "evaluator": evaluator,
+        "base_evidence_id": base_evidence_id,
+        "idempotency_key": idempotency_key,
+        "min_attempt_no": min_attempt_no,
+    }
+    handle = put_object(
+        db,
+        json.dumps(document, ensure_ascii=False, separators=(",", ":")).encode("utf-8"),
+        "application/json",
+        source_category="evidence",
+        purpose="evaluator_retry",
+    )
+    add_ref(
+        db,
+        handle.id,
+        "evaluator_retry",
+        attempt_id,
+        "task_attempts",
+        purpose="evaluator_retry",
+    )
+    return handle.id
+
+
+def list_evaluator_retry_requests(db: Session, task_id: int) -> list[dict[str, Any]]:
+    """List durable evaluator retry requests associated with a task in chronological order."""
+    items: list[dict[str, Any]] = []
+    for attempt in tasks.list_attempts(db, task_id):
+        refs = find_refs_by_owner(db, "evaluator_retry", attempt.id, "task_attempts")
+        for ref in refs:
+            if ref["purpose"] == "evaluator_retry":
+                items.append(_read(db, ref["object_id"]))
+    return items
+
+
+def load_pending_evaluator_retry(db: Session, claim: Claim) -> dict[str, Any] | None:
+    """Return active single-evaluator retry directive if this attempt is executing a queued retry."""
+    attempt_row = None
+    for row in tasks.list_attempts(db, claim.task_id):
+        if row.id == claim.attempt_id:
+            attempt_row = row
+            break
+    if attempt_row is None:
+        return None
+    from iesplan import results as results_domain
+
+    latest = results_domain.latest_evidence_for_task(db, claim.task_id)
+    if latest is None:
+        return None
+    requests = list_evaluator_retry_requests(db, claim.task_id)
+    if not requests:
+        return None
+    latest_req = requests[-1]
+    if (
+        int(latest_req["base_evidence_id"]) == int(latest.id)
+        and int(attempt_row.attempt_no) >= int(latest_req["min_attempt_no"])
+    ):
+        return latest_req
+    return None
 
 
 def save_stage_outcome_checkpoint(

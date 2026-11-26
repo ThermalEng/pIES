@@ -124,9 +124,8 @@ def _raise_for_receipt_status(receipt: Any) -> None:
 
 def _predict_round(
     ctx: RunContext, plane: Any, snapshot: Any,
-    previous: Mapping[str, object] | None,
 ) -> tuple[tuple, tuple]:
-    """复用已保存预测，否则经容器预测阶段执行并在清理前保存检查点。"""
+    """复用已保存预测，否则经容器单趟预测阶段执行并在清理前保存检查点。"""
     saved = worker_app.run_worker_transaction(
         ctx.session_factory, worker_app.load_prediction_checkpoint,
         ctx.claim, 1,
@@ -145,7 +144,6 @@ def _predict_round(
         save_checkpoint=worker_app.save_prediction_checkpoint,
         save_group_checkpoint=worker_app.save_prediction_group_checkpoint,
         publish_combined_checkpoint=worker_app.publish_prediction_checkpoint_with_artifacts,
-        previous=previous,
         stop=_stop_probe(ctx),
         detach=ctx.detach_event,
         on_stage_resources=ctx.update_stage_resources,
@@ -154,47 +152,12 @@ def _predict_round(
     return series, predicted
 
 
-def _predict_selected_round(
-    ctx: RunContext, plane: Any, snapshot: Any,
-    entries: tuple, previous: Mapping[str, object] | None, number: int,
-) -> tuple[tuple, tuple]:
-    """耦合轮次复用已保存产物，否则经容器预测阶段执行并提交本轮检查点。"""
-    saved = worker_app.run_worker_transaction(
-        ctx.session_factory, worker_app.load_prediction_checkpoint,
-        ctx.claim, number,
-    )
-    if saved is not None:
-        _cleanup_checkpointed_stage(
-            plane, ctx.claim.attempt_id, stage_id_prefix=f"predict-r{number}"
-        )
-        ctx.prediction_artifacts[number] = saved[2]
-        return saved[:2]
-    series, predicted, artifacts = worker_app.predict_round_stage(
-        plane=plane,
-        task_project_id=ctx.task.project_id,
-        snapshot=snapshot,
-        claim=ctx.claim,
-        number=number,
-        session_factory=ctx.session_factory,
-        save_checkpoint=worker_app.save_prediction_checkpoint,
-        save_group_checkpoint=worker_app.save_prediction_group_checkpoint,
-        publish_combined_checkpoint=worker_app.publish_prediction_checkpoint_with_artifacts,
-        entries=entries,
-        previous=previous,
-        stop=_stop_probe(ctx),
-        detach=ctx.detach_event,
-        on_stage_resources=ctx.update_stage_resources,
-    )
-    ctx.prediction_artifacts[number] = artifacts
-    return series, predicted
-
-
 def _solve_round(
     ctx: RunContext, plane: Any, snapshot: Any, artifact: Any, models: Any,
     materialized: Any, finance: Any, config: Any, evaluation: Any, attempt: Any,
     number: int = 1,
 ) -> tuple:
-    """单轮求解: 容器化生成 → 容器化执行(含回执分流) → 容器化适配 → 业务结局。"""
+    """单向流水线核心求解: 容器生成 → 容器求解 → spawn ResultAdapter 还原 → 业务结局。"""
     ctx.checkpoint("restore_round")
     saved = worker_app.run_worker_transaction(
         ctx.session_factory, worker_app.restore_round,
@@ -226,82 +189,164 @@ def _solve_round(
         receipt, collected = saved.receipt, saved.outputs
         solution_refs = saved.files["solution"]
     else:
+        assert config.solver is not None
         receipt, collected, solution_refs = worker_app.execute_saved_bundle(
-            plane=plane, bundle=bundle, attempt=attempt, claim=ctx.claim, number=number,
-            generated_id=generated_id, session_factory=ctx.session_factory,
-            stop=_stop_probe(ctx), detach=ctx.detach_event,
+            plane=plane,
+            bundle=bundle,
+            solver_ref=str(config.solver),
+            time_limit_seconds=int(config.time_limit_seconds),
+            seed=int(snapshot.random_seed),
+            solver_options=config.slot_options("solver"),
+            attempt=attempt,
+            claim=ctx.claim,
+            number=number,
+            generated_id=generated_id,
+            session_factory=ctx.session_factory,
+            stop=_stop_probe(ctx),
+            detach=ctx.detach_event,
         )
     ctx.update_stage_resources(receipt.resource_usage)
     _raise_for_receipt_status(receipt)
     ctx.progress(85.0, "execute", {"receipt_status": receipt.status})
-    evaluated = worker_app.run_worker_transaction(
-        ctx.session_factory, worker_app.load_evaluation_checkpoint,
+    restored = worker_app.run_worker_transaction(
+        ctx.session_factory, worker_app.load_restoration_checkpoint,
         ctx.claim, number,
     )
-    if evaluated is None:
-        evaluated = worker_app.adapt_result(
-            plane, bundle, receipt, collected,
-            claim=ctx.claim, number=number, finance=finance, snapshot=snapshot,
+    if restored is None:
+        restored = worker_app.restore_core_solution(
+            bundle,
+            receipt,
+            collected,
+            config=config,
+            claim=ctx.claim,
+            number=number,
             session_factory=ctx.session_factory,
-            save_checkpoint=worker_app.save_evaluation_checkpoint,
+            save_checkpoint=worker_app.save_restoration_checkpoint,
             stop=_stop_probe(ctx),
-            detach=ctx.detach_event,
         )
-    else:
-        _cleanup_checkpointed_stage(plane, ctx.claim.attempt_id, stage_id=f"evaluate-r{number}")
-    ctx.update_stage_resources(evaluated.resources)
-    result = evaluated.result
+    result = restored["compute_result"]
     outcome = worker_app.business_outcome_for(result)
     if outcome is None:
         raise EngineRunError(
             f"统一结果无法映射业务结局(execution={result.execution_status}, "
             f"math={result.math_status}, receipt={receipt.receipt_id})"
         )
-    return bundle, receipt, collected, evaluated, outcome, {
-        "bundle_files": bundle_refs, "solution": solution_refs,
-    }
+    sealed: dict[str, Any] = {"bundle_files": bundle_refs, "solution": solution_refs}
+    if restored.get("solution_ref") is not None:
+        sealed["engineering_solution"] = {"solution.json": restored["solution_ref"]}
+    return bundle, receipt, collected, restored, outcome, sealed
 
 
 def _predicted_series_csv(item: Any) -> bytes:
-    """最终轮预测序列确定性 CSV 字节（证据封存用）。
-
-    按索引连续排列全周期值（``repr`` 逐行），只如实序列化本轮预测
-    器产出的值，不做任何校验、补值或重算。
-    """
+    """预测序列确定性 CSV 字节（证据封存用）。"""
     lines = [f"step,{item.interface}"]
     lines += [f"{index},{value!r}" for index, value in enumerate(item.values)]
     return ("\n".join(lines) + "\n").encode("utf-8")
 
 
-def _execute_compute(ctx: RunContext) -> tuple[dict, dict]:
-    """计算任务真实链: 快照恢复 → 预测 → 阶段一求解 → [耦合迭代] → 证据。
+def _execute_evaluator_retry(ctx: RunContext, retry_req: Mapping[str, Any]) -> tuple[dict, dict | None]:
+    """Single-evaluator retry reusing frozen CalcSnapshot and sealed ``ies.engineering-solution@1.0.0``."""
+    task = ctx.task
+    snapshot = ctx.snapshot
+    if snapshot is None:
+        raise SnapshotInputError(
+            "计算快照缺失", location={"object_type": "calc_snapshot"})
+    plane = ctx.compute
+    if plane is None:
+        raise worker_app.ComputationUnavailableError(
+            "计算执行面未装配，计算任务不可执行", reason="compute-plane-missing")
+    artifact, _models, materialized, finance, config, _evaluation = worker_app.run_worker_transaction(
+        ctx.session_factory, worker_app.load_compute_inputs,
+        task.project_id, snapshot, materialize_series=False,
+    )
+    predicted_series: tuple = ()
+    if config.predictions:
+        saved_pred = worker_app.run_worker_transaction(
+            ctx.session_factory, worker_app.load_prediction_checkpoint,
+            ctx.claim, 1,
+        )
+        if saved_pred is not None:
+            predicted_series = saved_pred[0]
+    completed = worker_app.complete_materialized(materialized, predicted_series)
+    attempt = worker_app.build_attempt_context(task, ctx.claim, snapshot)
+    base_evidence_id = int(retry_req["base_evidence_id"])
+    base_payload = worker_app.run_worker_transaction(
+        ctx.session_factory, worker_app.load_retry_base_evidence, base_evidence_id,
+    )
+    eng_group = base_payload.get("engineering_solution") or {}
+    solution_ref = eng_group.get("solution.json")
+    if not isinstance(solution_ref, Mapping):
+        raise EngineRunError(f"基线证据缺少密封工程解(evidence_id={base_evidence_id})")
 
-    全程只按 application.worker 阶段网关结果驱动，不解释任何输入字段：
-    冻结缺件即实际结构错误可见失败；预测算法未注册/目标类型不支持即
-    明确不可用（不 stub、不回退）；取消收拢为 TaskCancelled；租约隔离
-    收拢为 LeaseFenced（不写终态）；非成功回执与不可映射结果收拢为
-    EngineRunError（结构化失败，不伪装成功）。回执状态判定后才写执行
-    进度：fenced/cancelled/失败不产生 execute 进度与终态写回。
-    耦合迭代（任一选中算法声明依赖求解结果时必进，不可选；单个耦合
-    目标也迭代，多个独立目标仍直接求解）：首轮全部目标生成并求解；
-    后续每轮只重算耦合目标（独立产物与序列复用首轮），重建完整模型
-    并真实求解，再由各耦合算法的收敛度量计算无量纲收敛量，全部不大
-    于同一容差即收敛，否则达最大迭代数；收敛判定不能跳过本轮求解。
-    轮数上限为总求解轮数（阶段一计第 1 轮；耦合时提交门要求上限
-    至少为 2，不存在跳过耦合迭代求解的上限）。prediction 载荷中
-    prediction_rounds 与 solve_rounds 恒等（每耦合迭代都真实求解），
-    phase2_solve_rounds = solve_rounds - 1（阶段一计 1 轮）。
-    每轮预测、生成与执行先发布检查点。中间轮仅保留文件描述子，
-    不常驻各轮Bundle字节；最终round_history按round-<n>/组合已有
-    对象引用，最终轮引用顶层组，不重复写入生成包、原始解或训练产物。
-    载荷 "rounds" 按轮次列出回执/manifest/文件引用（附各节所在
-    密封组）并标明最终权威轮；最终轮各组即权威结果；仍由最终
-    提交单元原子发布业务结果，无中间轮业务终态。
-    返回 (payload, output_files)：payload
-    只含JSON兼容字段；output_files只携带尚需封存的序列字节。
-    ctx.sealed_output_files携带已持久化阶段文件的描述子，提交单元
-    复用对象并挂接证据引用，原子发布最终索引和终态。本层不写ORM。
-    """
+    target_ref = str(retry_req["evaluator"])
+    target_idx = 0
+    target_params: dict[str, Any] = {}
+    for idx, ev in enumerate(config.evaluators):
+        if str(ev["evaluator"]) == target_ref:
+            target_idx = idx
+            target_params = dict(ev.get("parameters") or {})
+            break
+
+    ctx.progress(50.0, "evaluate_retry", {"evaluator": target_ref})
+    ev_out = worker_app.run_single_evaluator(
+        plane=plane,
+        attempt=attempt,
+        claim=ctx.claim,
+        idx=target_idx,
+        evaluator_ref=target_ref,
+        parameters=target_params,
+        solution_ref=solution_ref,
+        snapshot=snapshot,
+        artifact=artifact,
+        finance=finance,
+        materialized=completed,
+        receipt_dict=base_payload.get("receipt"),
+        session_factory=ctx.session_factory,
+        load_checkpoint=worker_app.load_evaluator_checkpoint,
+        save_checkpoint=worker_app.save_evaluator_checkpoint,
+        stop=_stop_probe(ctx),
+        detach=ctx.detach_event,
+    )
+
+    new_entry = dict(ev_out["result_entry"])
+    existing_results = [
+        new_entry if item.get("evaluator") == target_ref else dict(item)
+        for item in (base_payload.get("evaluator_results") or [])
+    ]
+    if not any(item.get("evaluator") == target_ref for item in existing_results):
+        existing_results.append(new_entry)
+
+    existing_reports = [
+        dict(rep)
+        for rep in (base_payload.get("evaluation_reports") or [])
+        if rep.get("evaluator") != target_ref
+    ]
+    if ev_out.get("report") is not None:
+        existing_reports.append(dict(ev_out["report"]))
+
+    for group_key in ("bundle_files", "solution", "engineering_solution", "hourly", "prediction_files"):
+        if isinstance(base_payload.get(group_key), Mapping):
+            ctx.sealed_output_files[group_key] = dict(base_payload[group_key])
+
+    merged_payload = dict(base_payload)
+    merged_payload["evaluator_results"] = existing_results
+    merged_payload["evaluation_reports"] = existing_reports
+    if target_ref == "ies.evaluator.finance@1.0.0":
+        if ev_out.get("financial_evaluation") is not None:
+            merged_payload["financial_evaluation"] = dict(ev_out["financial_evaluation"])
+        else:
+            merged_payload.pop("financial_evaluation", None)
+    return merged_payload, None
+
+
+def _execute_compute(ctx: RunContext) -> tuple[dict, dict | None]:
+    """1.2.0 单向计算流水线: 单趟预测 → 核心求解/还原 → 0..N 并联评价器 → 不可变证据。"""
+    retry_req = worker_app.run_worker_transaction(
+        ctx.session_factory, worker_app.load_pending_evaluator_retry, ctx.claim,
+    )
+    if retry_req is not None:
+        return _execute_evaluator_retry(ctx, retry_req)
+
     task = ctx.task
     snapshot = ctx.snapshot
     if snapshot is None:
@@ -319,34 +364,11 @@ def _execute_compute(ctx: RunContext) -> tuple[dict, dict]:
     ctx.progress(10.0, "materialize", None)
     predicted: tuple = ()
     predicted_series: tuple = ()
-    independent_predicted: tuple = ()
-    independent_series: tuple = ()
-    coupled_entries: tuple = ()
-    coupled_predicted: tuple = ()
     if config.predictions:
-        predicted_series, predicted = _predict_round(ctx, plane, snapshot, None)
-        # 按已注册的依赖声明分流（提交闸门同一事实；未知引用即明确不可用）。
-        _independent_entries, coupled_entries = worker_app.split_predictions_by_dependency(
-            tuple(config.predictions or ()), plane.predictor_registry.get
-        )
-        if coupled_entries:
-            coupled_keys = {
-                (str(entry["target"]["instance"]), str(entry["target"]["interface"]))
-                for entry in coupled_entries
-            }
-            independent_predicted = tuple(
-                item for item in predicted if (item.device, item.interface) not in coupled_keys
-            )
-            independent_series = tuple(
-                item for item in predicted_series if (item.device, item.interface) not in coupled_keys
-            )
-            coupled_predicted = tuple(
-                item for item in predicted if (item.device, item.interface) in coupled_keys
-            )
-    # 完成态集合：预测阶段交付全部 pending（提交闸门 TASK-REQ-010/011 保证
-    # 配置与绑定双向覆盖），由应用层合并构成，不复核。
+        predicted_series, predicted = _predict_round(ctx, plane, snapshot)
     completed = worker_app.complete_materialized(materialized, predicted_series)
     attempt = worker_app.build_attempt_context(task, ctx.claim, snapshot)
+
     if config.algorithm is not None:
         evaluated = worker_app.run_worker_transaction(
             ctx.session_factory, worker_app.load_algorithm_checkpoint,
@@ -367,6 +389,12 @@ def _execute_compute(ctx: RunContext) -> tuple[dict, dict]:
                 stop=_stop_probe(ctx),
                 detach=ctx.detach_event,
             )
+            if evaluated.solution_ref is None:
+                loaded_algo = worker_app.run_worker_transaction(
+                    ctx.session_factory, worker_app.load_algorithm_checkpoint, ctx.claim,
+                )
+                if loaded_algo is not None and loaded_algo.solution_ref is not None:
+                    evaluated = loaded_algo
         else:
             _cleanup_checkpointed_stage(plane, ctx.claim.attempt_id, stage_id="algorithm-r1")
         ctx.update_stage_resources(evaluated.resources)
@@ -377,75 +405,75 @@ def _execute_compute(ctx: RunContext) -> tuple[dict, dict]:
                 f"一体化结果无法映射业务结局(execution={result.execution_status}, "
                 f"math={result.math_status})"
             )
+        solution_ref = evaluated.solution_ref
+        if solution_ref is not None:
+            ctx.sealed_output_files["engineering_solution"] = {"solution.json": dict(solution_ref)}
+        evaluator_results, evaluation_reports, eval_financial = worker_app.run_evaluators_stage(
+            plane=plane,
+            attempt=attempt,
+            claim=ctx.claim,
+            number=1,
+            config=config,
+            has_feasible_solution=(result.math_status in ("solved", "feasible") and solution_ref is not None),
+            solution_ref=solution_ref,
+            snapshot=snapshot,
+            artifact=artifact,
+            finance=finance,
+            materialized=completed,
+            receipt_dict=None,
+            session_factory=ctx.session_factory,
+            load_checkpoint=worker_app.load_evaluator_checkpoint,
+            save_checkpoint=worker_app.save_evaluator_checkpoint,
+            stop=_stop_probe(ctx),
+            detach=ctx.detach_event,
+            cleanup_on_reuse=lambda sid: _cleanup_checkpointed_stage(
+                plane, ctx.claim.attempt_id, stage_id=sid
+            ),
+        )
         output_files: dict[str, Any] = {}
         payload: dict[str, Any] = {
             "outcome": outcome,
             "compute_result": result.to_mapping(),
+            "evaluator_results": evaluator_results,
+            "evaluation_reports": evaluation_reports,
         }
         hourly_files = worker_app.hourly_files_from_payload(evaluated.hourly_series)
         if hourly_files:
             output_files["hourly"] = hourly_files
-        if evaluated.financial_evaluation is not None:
-            payload["financial_evaluation"] = dict(evaluated.financial_evaluation)
+        final_financial = eval_financial if eval_financial is not None else evaluated.financial_evaluation
+        if final_financial is not None:
+            payload["financial_evaluation"] = dict(final_financial)
         return payload, output_files
-    rounds_log: list[dict] = []
-    bundle, receipt, collected, evaluated, outcome, sealed = _solve_round(
-        ctx, plane, snapshot, artifact, models, completed, finance, config, evaluation, attempt)
-    result = evaluated.result
-    rounds_log.append({
-        "round": 1, "phase": "phase1",
-        "manifest": bundle.manifest.to_dict(), "receipt": receipt, "files": sealed,
-        "predicted": predicted,
-        "prediction_artifacts": ctx.prediction_artifacts.get(1, {}),
-    })
-    prediction_rounds = 1 if predicted else 0
-    solve_rounds = 1
-    converged = True
-    final_delta: float | None = None
-    final_convergences: tuple = ()
-    previous_outputs: Mapping[str, object] | None = None
-    if coupled_entries:
-        convergence = config.convergence or {}
-        tolerance = float(convergence["tolerance"])
-        max_iterations = int(convergence["max_iterations"])
-        converged = False
-        previous_coupled = {(item.device, item.interface): item for item in coupled_predicted}
-        previous_outputs = result.outputs
-        while prediction_rounds < max_iterations:
-            new_series, new_predicted = _predict_selected_round(
-                ctx, plane, snapshot, coupled_entries, previous_outputs, prediction_rounds + 1)
-            prediction_rounds += 1
-            completed = worker_app.complete_materialized(
-                materialized, independent_series + new_series)
-            del bundle, collected  # 前轮仅保留对象引用，不与新轮大矩阵同时常驻。
-            bundle, receipt, collected, evaluated, outcome, sealed = _solve_round(
-                ctx, plane, snapshot, artifact, models, completed,
-                finance, config, evaluation, attempt, prediction_rounds)
-            result = evaluated.result
-            solve_rounds += 1
-            current_coupled = {(item.device, item.interface): item for item in new_predicted}
-            aggregate, records = worker_app.convergence_for_round(
-                plane, coupled_entries, previous_coupled, current_coupled,
-                previous_outputs, result.outputs)
-            final_delta = aggregate
-            final_convergences = records
-            rounds_log.append({
-                "round": prediction_rounds, "phase": "phase2",
-                "manifest": bundle.manifest.to_dict(), "receipt": receipt, "files": sealed,
-                "predicted": independent_predicted + new_predicted,
-                "prediction_artifacts": {
-                    **ctx.prediction_artifacts[1], **ctx.prediction_artifacts[prediction_rounds],
-                },
-                "convergence": {"aggregate": aggregate, "per_target": [dict(r) for r in records]},
-            })
-            ctx.progress(90.0, "phase2", {"round": solve_rounds})
-            previous_coupled = current_coupled
-            previous_outputs = result.outputs
-            coupled_predicted = new_predicted
-            if aggregate <= tolerance:
-                converged = True
-                break
-        predicted = independent_predicted + coupled_predicted
+
+    bundle, receipt, _collected, restored, outcome, sealed = _solve_round(
+        ctx, plane, snapshot, artifact, models, completed, finance, config, evaluation, attempt,
+    )
+    result = restored["compute_result"]
+    solution_ref = restored.get("solution_ref")
+    has_feasible = result.math_status in ("solved", "feasible") and "solution" in config.outputs
+    evaluator_results, evaluation_reports, financial_evaluation = worker_app.run_evaluators_stage(
+        plane=plane,
+        attempt=attempt,
+        claim=ctx.claim,
+        number=1,
+        config=config,
+        has_feasible_solution=has_feasible,
+        solution_ref=solution_ref,
+        snapshot=snapshot,
+        artifact=artifact,
+        finance=finance,
+        materialized=completed,
+        receipt_dict=receipt.to_dict(),
+        session_factory=ctx.session_factory,
+        load_checkpoint=worker_app.load_evaluator_checkpoint,
+        save_checkpoint=worker_app.save_evaluator_checkpoint,
+        stop=_stop_probe(ctx),
+        detach=ctx.detach_event,
+        cleanup_on_reuse=lambda sid: _cleanup_checkpointed_stage(
+            plane, ctx.claim.attempt_id, stage_id=sid
+        ),
+    )
+
     ctx.sealed_output_files.update(sealed)
     output_files = {}
     payload = {
@@ -453,6 +481,8 @@ def _execute_compute(ctx: RunContext) -> tuple[dict, dict]:
         "compute_result": result.to_mapping(),
         "receipt": receipt.to_dict(),
         "bundle_manifest": bundle.manifest.to_dict(),
+        "evaluator_results": evaluator_results,
+        "evaluation_reports": evaluation_reports,
     }
     if predicted:
         prediction_files = {}
@@ -460,7 +490,7 @@ def _execute_compute(ctx: RunContext) -> tuple[dict, dict]:
         for item in predicted:
             artifact_path = f"prediction/{item.device}/{item.interface}/training_artifact.json"
             ctx.sealed_output_files.setdefault("prediction_files", {})[artifact_path] = (
-                rounds_log[-1]["prediction_artifacts"][f"{item.device}/{item.interface}"])
+                ctx.prediction_artifacts[1][f"{item.device}/{item.interface}"])
             series_path = f"prediction/{item.device}/{item.interface}/series.csv"
             prediction_files[series_path] = (_predicted_series_csv(item), "text/csv")
             entry = dict(item.receipt)
@@ -471,99 +501,17 @@ def _execute_compute(ctx: RunContext) -> tuple[dict, dict]:
         output_files["prediction_files"] = prediction_files
         payload["prediction"] = {
             "predict_target_count": len(predicted),
-            "prediction_rounds": prediction_rounds,
-            "solve_rounds": solve_rounds,
-            "phase2_solve_rounds": solve_rounds - 1,
-            "converged": converged,
-            "final_delta": final_delta,
-            "convergences": [dict(record) for record in final_convergences],
+            "prediction_rounds": 1,
+            "solve_rounds": 1,
+            "phase2_solve_rounds": 0,
             "receipts": receipts,
         }
-    if len(rounds_log) > 1:
-        history: dict[str, tuple[bytes, str]] = {}
-        history_refs: dict = {}
-        rounds: list[dict] = []
-        for record in rounds_log[:-1]:
-            prefix = f"round-{record['round']}"
-            round_manifest = record["manifest"]
-            round_receipt = record["receipt"]
-            bundle_paths = []
-            for path, descriptor in record["files"]["bundle_files"].items():
-                key = f"{prefix}/bundle/{path}"
-                history_refs[key] = descriptor
-                bundle_paths.append(key)
-            solution_paths = []
-            for path, descriptor in record["files"]["solution"].items():
-                key = f"{prefix}/solution/{path}"
-                history_refs[key] = descriptor
-                solution_paths.append(key)
-            prediction_paths = []
-            for item in record["predicted"]:
-                artifact_key = (
-                    f"{prefix}/prediction/{item.device}/{item.interface}"
-                    "/training_artifact.json"
-                )
-                history_refs[artifact_key] = record["prediction_artifacts"][
-                    f"{item.device}/{item.interface}"]
-                series_key = (
-                    f"{prefix}/prediction/{item.device}/{item.interface}/series.csv"
-                )
-                history[series_key] = (_predicted_series_csv(item), "text/csv")
-                prediction_paths += [artifact_key, series_key]
-            round_entry: dict[str, object] = {
-                "round": record["round"],
-                "phase": record["phase"],
-                "authoritative": False,
-                "receipt": round_receipt.to_dict(),
-                "bundle_manifest": round_manifest,
-                "sealed_in": {
-                    "bundle": "round_history",
-                    "solution": "round_history",
-                    "prediction": "round_history",
-                },
-                "files": {
-                    "bundle": sorted(bundle_paths),
-                    "solution": sorted(solution_paths),
-                    "prediction": sorted(prediction_paths),
-                },
-            }
-            if "convergence" in record:
-                # 耦合轮次收敛聚合与逐目标明细；首轮无该键，不伪造零差。
-                round_entry["convergence"] = record["convergence"]
-            rounds.append(round_entry)
-        final_record = rounds_log[-1]
-        final_entry: dict[str, object] = {
-            "round": solve_rounds,
-            "phase": final_record["phase"],
-            "authoritative": True,
-            "receipt": receipt.to_dict(),
-            "bundle_manifest": bundle.manifest.to_dict(),
-            "sealed_in": {
-                "bundle": "bundle_files",
-                "solution": "solution",
-                "prediction": "prediction_files",
-            },
-            "files": {
-                "bundle": sorted(f"bundle/{path}" for path in bundle.files),
-                "solution": sorted(f"solution/{path}" for path in collected),
-                "prediction": sorted(set(prediction_files)
-                                     | set(ctx.sealed_output_files.get("prediction_files", {}))),
-            },
-        }
-        if "convergence" in final_record:
-            final_entry["convergence"] = final_record["convergence"]
-        rounds.append(final_entry)
-        output_files["round_history"] = history
-        ctx.sealed_output_files["round_history"] = history_refs
-        payload["rounds"] = rounds
-        payload["authoritative_round"] = solve_rounds
-    # 直接发布评价器容器产出的 hourly_series 与 financial_evaluation（不在控制面重算）。
-    del bundle, collected, materialized, completed, models, artifact
-    hourly_files = worker_app.hourly_files_from_payload(evaluated.hourly_series)
+    del bundle, _collected, materialized, completed, models, artifact
+    hourly_files = worker_app.hourly_files_from_payload(restored.get("hourly_series"))
     if hourly_files:
         output_files["hourly"] = hourly_files
-    if evaluated.financial_evaluation is not None:
-        payload["financial_evaluation"] = dict(evaluated.financial_evaluation)
+    if financial_evaluation is not None:
+        payload["financial_evaluation"] = dict(financial_evaluation)
     return payload, output_files
 
 

@@ -82,7 +82,7 @@ def _stage_payload(
         "fencing_token": fencing_token,
         "container_id": f"cid-{stage_execution_id}",
         "container_name": f"pies-stage-{stage_execution_id}",
-        "image": "pies-builtin-stages:1.1.5",
+        "image": "pies-builtin-stages:1.2.0",
         "workspace_rel": workspace_rel or stage_execution_id,
         "reused": reused,
         "status": status,
@@ -99,7 +99,7 @@ def _stage_payload(
 
 def _default_policy() -> ContainerStagePolicy:
     return ContainerStagePolicy(
-        builtin_image="pies-builtin-stages:1.1.5",
+        builtin_image="pies-builtin-stages:1.2.0",
         cpu_cores=2.0,
         memory_mb=512,
         pids_limit=256,
@@ -193,7 +193,7 @@ def test_job_runner_client_fixed_endpoints_and_error_mapping() -> None:
             attempt_id="10",
             stage_id="solver",
             fencing_token="tok-10",
-            image="pies-builtin-stages:1.1.5",
+            image="pies-builtin-stages:1.2.0",
             cpu_cores=2.0,
             memory_mb=512,
             pids_limit=256,
@@ -705,6 +705,7 @@ def test_embedded_scheduler_enforces_compute_and_io_pool_separation(
         db.commit()
 
     lock = threading.Lock()
+    db_lock = threading.Lock()
     active_by_pool = {"compute": 0, "io": 0}
     max_by_pool = {"compute": 0, "io": 0}
     started_threads: list[str] = []
@@ -718,7 +719,7 @@ def test_embedded_scheduler_enforces_compute_and_io_pool_separation(
         **_kwargs: Any,
     ) -> str:
         nonlocal io_completed
-        with _factory() as db:
+        with db_lock, _factory() as db:
             task = tasks_domain.get_task(db, claim.task_id)
             assert task is not None
             pool = "compute" if task.type == "calc" else "io"
@@ -731,7 +732,7 @@ def test_embedded_scheduler_enforces_compute_and_io_pool_separation(
                 release_compute.wait(timeout=5.0)
             else:
                 time.sleep(0.02)
-            with _factory() as db:
+            with db_lock, _factory() as db:
                 worker_app.submit_attempt_result(
                     db,
                     claim,
@@ -866,15 +867,15 @@ def test_embedded_scheduler_reconcile_on_startup_adopts_active_and_cleans_orphan
 
 
 def test_builtin_stage_catalog_contains_all_four_official_stages() -> None:
-    catalog = build_builtin_stage_catalog("pies-builtin-stages:1.1.5")
+    catalog = build_builtin_stage_catalog("pies-builtin-stages:1.2.0")
     refs = [d.ref for d in catalog.snapshot()]
     assert refs == [
+        "ies.evaluator.finance@1.0.0",
         "ies.generator.highs_milp@1.0.0",
         "ies.predictor.naive@1.0.0",
-        "ies.result-adapter.highs@1.0.0",
         "ies.solver.highs@1.7.2",
     ]
-    assert catalog.get_by_kind("evaluator").ref == "ies.result-adapter.highs@1.0.0"
+    assert catalog.get_by_kind("evaluator").ref == "ies.evaluator.finance@1.0.0"
     assert catalog.get_by_kind("solver").command == (
         "python",
         "-m",
@@ -1012,7 +1013,7 @@ def test_stage_runner_requires_persist_callback_and_enforces_timeout_ceiling(
         client=httpx.Client(base_url="http://job_runner:8090", transport=httpx.MockTransport(handler)),
     )
     policy = ContainerStagePolicy(
-        builtin_image="pies-builtin-stages:1.1.5",
+        builtin_image="pies-builtin-stages:1.2.0",
         cpu_cores=2.0,
         memory_mb=512,
         pids_limit=256,
@@ -1214,16 +1215,23 @@ def test_adapt_result_and_algorithm_stage_layout_durable_persist_and_preserved_o
     from types import SimpleNamespace
 
     from iesplan.application.worker.checkpoints import (
+        load_evaluator_checkpoint,
         save_algorithm_checkpoint,
-        save_evaluation_checkpoint,
+        save_evaluator_checkpoint,
     )
     from iesplan.computation import (
         NAIVE_PREDICTOR,
+        AttemptContext,
+        CalculationConfig,
         ExecutionReceipt,
         MaterializedSet,
-        SolverBundle,
-        SolverBundleManifest,
+        build_evaluator_registry,
         build_predictor_registry,
+        build_solver_registry,
+    )
+    from iesplan.computation.config import (
+        BUILTIN_EVALUATOR_FINANCE_SPEC,
+        BUILTIN_SOLVER_HIGHS_SPEC,
     )
     from iesplan.computation.generators import HIGHS_MILP_PROVIDER, build_registry
     from iesplan.computation.runtime.stage_runner import BuiltinStageDescriptor
@@ -1248,13 +1256,19 @@ def test_adapt_result_and_algorithm_stage_layout_durable_persist_and_preserved_o
         task = tasks_domain.create_task(
             db, project_id=proj.id, type="calc", idempotency_key="ev-1", requested_by=user.id
         )
+        sealed = worker_app.seal_output_objects(
+            db,
+            {"solution.json": (MemoryContent(b'{"schema":"ies.engineering-solution"}'), "application/json")},
+            actor_id=user.id,
+        )
+        sol_ref = sealed["solution.json"]
         db.commit()
         claim = worker_app.acquire_attempt(db, task.id, "test-worker")
         assert claim is not None
 
     stage_root = tmp_path / "stages"
     events: list[str] = []
-    seen_eval_outputs_files: list[str] = []
+    seen_eval_input_files: list[str] = []
     container_fin_eval = {"schema": "ies.financial-evaluation", "status": "evaluated", "sentinel": 42}
     container_hourly = {"data": {"dev.p": [1.0, 2.0]}, "meta": {"units": {"dev.p": "kW"}, "series": {}}}
 
@@ -1267,12 +1281,11 @@ def test_adapt_result_and_algorithm_stage_layout_durable_persist_and_preserved_o
             in_dir = ws / "in"
             out_dir = ws / "out"
             out_dir.mkdir(parents=True, exist_ok=True)
-            if body["stage_id"].startswith("evaluate"):
-                # Verify Part 1 non-recursive layout: /work/in/outputs/solution.sol directly!
-                seen_eval_outputs_files.extend(
-                    sorted(p.name for p in (in_dir / "outputs").iterdir() if p.is_file())
+            if body["stage_id"].startswith("eval-"):
+                seen_eval_input_files.extend(
+                    sorted(p.name for p in in_dir.iterdir() if p.is_file())
                 )
-                assert not (in_dir / "outputs" / "output").exists()
+                assert not (in_dir / "outputs").exists()
             (out_dir / "result.json").write_text(
                 json.dumps(
                     {
@@ -1329,7 +1342,7 @@ def test_adapt_result_and_algorithm_stage_layout_durable_persist_and_preserved_o
                 purposes = {ref["purpose"] for ref in refs}
             stage_id = seid.split("--", 1)[-1]
             expected_purpose = (
-                "round-1:evaluation" if stage_id.startswith("evaluate") else "round-1:algorithm"
+                "round-1:eval-0" if stage_id.startswith("eval-") else "round-1:algorithm"
             )
             assert expected_purpose in purposes, (
                 f"{expected_purpose} missing before cleanup: {purposes}"
@@ -1351,7 +1364,7 @@ def test_adapt_result_and_algorithm_stage_layout_durable_persist_and_preserved_o
         client=httpx.Client(base_url="http://job_runner:8090", transport=httpx.MockTransport(handler)),
     )
     runner = ContainerStageRunner(client, stage_root=stage_root, policy=_default_policy(), poll_interval=0.01)
-    base_descs = list(build_builtin_stage_catalog("pies-builtin-stages:1.1.5").snapshot())
+    base_descs = list(build_builtin_stage_catalog("pies-builtin-stages:1.2.0").snapshot())
     base_descs.append(
         BuiltinStageDescriptor(
             plugin_id="acme.algorithm.demo",
@@ -1366,24 +1379,18 @@ def test_adapt_result_and_algorithm_stage_layout_durable_persist_and_preserved_o
     plane = worker_app.ComputeExecutionPlane(
         generator_registry=build_registry((HIGHS_MILP_PROVIDER,)),
         predictor_registry=build_predictor_registry((NAIVE_PREDICTOR,)),
+        solver_registry=build_solver_registry((BUILTIN_SOLVER_HIGHS_SPEC,)),
+        evaluator_registry=build_evaluator_registry((BUILTIN_EVALUATOR_FINANCE_SPEC,)),
         stage_runner=runner,
         stage_catalog=BuiltinStageCatalog(tuple(base_descs)),
     )
 
-    manifest = SolverBundleManifest(
-        bundle={"generator": "ies.generator.highs_milp@1.0.0", "solver": "ies.solver.highs@1.7.2"},
-        inputs=[{"path": "input/problem.mps", "media_type": "text/plain"}],
-        command={
-            "executor": "ies.executor.local_process@1.0.0",
-            "executable": "ies.solver.highs@1.7.2",
-            "arguments": ["input/problem.mps"],
-            "timeout_seconds": 30,
-            "network": False,
-        },
-        outputs=[{"path": "output/solution.sol", "media_type": "text/plain", "required": True}],
-        result_adapter="ies.result-adapter.highs@1.0.0",
+    attempt = AttemptContext(
+        attempt_id=str(claim.attempt_id),
+        bundle_id="b-1",
+        assembly_id="a-1",
+        calculation_config_id="c-1",
     )
-    bundle = SolverBundle(manifest, {"input/problem.mps": MemoryContent(b"NAME X\nENDATA\n")})
     receipt = ExecutionReceipt(
         receipt_id="r-1",
         bundle_id="b-1",
@@ -1392,9 +1399,9 @@ def test_adapt_result_and_algorithm_stage_layout_durable_persist_and_preserved_o
         attempt_id=str(claim.attempt_id),
         generator_ref="ies.generator.highs_milp@1.0.0",
         solver_ref="ies.solver.highs@1.7.2",
-        executor_ref="ies.executor.local_process@1.0.0",
+        executor_ref="ies.executor.container@1.0.0",
         executable_ref="ies.solver.highs@1.7.2",
-        result_adapter_ref="ies.result-adapter.highs@1.0.0",
+        result_adapter_ref="ies.backend.result_adapter@1.0.0",
         status="succeeded",
         exit_code=0,
         termination_reason="exited",
@@ -1407,47 +1414,48 @@ def test_adapt_result_and_algorithm_stage_layout_durable_persist_and_preserved_o
         device_models={},
         evaluation={"evaluation_years": 1},
     )
+    empty_mat = MaterializedSet(operation_years=1, series=(), pending_predict=(), prices=())
 
-    evaluated = worker_app.adapt_result(
-        plane,
-        bundle,
-        receipt,
-        {"output/solution.sol": MemoryContent(b"HIGHS_SOLUTION_V1\n")},
+    ev_out = worker_app.run_single_evaluator(
+        plane=plane,
+        attempt=attempt,
         claim=claim,
-        number=1,
-        finance=fake_finance,  # type: ignore[arg-type]
+        idx=0,
+        evaluator_ref="ies.evaluator.finance@1.0.0",
+        parameters={},
+        solution_ref=sol_ref,
         snapshot=fake_snapshot,
+        artifact=SimpleNamespace(canonical_text="{}"),  # type: ignore[arg-type]
+        finance=fake_finance,  # type: ignore[arg-type]
+        materialized=empty_mat,
+        receipt_dict=receipt.to_dict(),
         session_factory=factory,
-        save_checkpoint=save_evaluation_checkpoint,
+        load_checkpoint=load_evaluator_checkpoint,
+        save_checkpoint=save_evaluator_checkpoint,
     )
-    assert seen_eval_outputs_files == ["solution.sol"]
-    assert evaluated.financial_evaluation == container_fin_eval
-    assert evaluated.hourly_series == container_hourly
-    assert "financial_evaluation" not in evaluated.result.outputs
-    assert "hourly_series" not in evaluated.result.outputs
-    assert evaluated.resources["memory_peak_bytes"]["value"] == 12_345_678
-
-    from iesplan.computation import AttemptContext, CalculationConfig
+    assert seen_eval_input_files == ["request.json", "solution.json"]
+    assert ev_out["financial_evaluation"] == container_fin_eval
 
     algo_config = CalculationConfig(
         mode="planning",
+        predictions=(),
+        generator=None,
+        solver=None,
         algorithm="acme.algorithm.demo@1.0.0",
+        evaluators=(),
         precision="medium",
         time_limit_seconds=60,
+        options={"algorithm": {}},
+        seed=None,
         outputs=("solution", "metrics"),
     )
     algo_eval = worker_app.run_algorithm_stage(
         plane=plane,
-        attempt=AttemptContext(
-            attempt_id=str(claim.attempt_id),
-            bundle_id="b-1",
-            assembly_id="a-1",
-            calculation_config_id="c-1",
-        ),
+        attempt=attempt,
         claim=claim,
         snapshot=fake_snapshot,
         artifact=SimpleNamespace(canonical_text="{}"),  # type: ignore[arg-type]
-        materialized=MaterializedSet(operation_years=1, series=(), pending_predict=(), prices=()),
+        materialized=empty_mat,
         finance=fake_finance,  # type: ignore[arg-type]
         config=algo_config,
         session_factory=factory,
@@ -1455,7 +1463,7 @@ def test_adapt_result_and_algorithm_stage_layout_durable_persist_and_preserved_o
     )
     assert algo_eval.financial_evaluation == container_fin_eval
     assert algo_eval.hourly_series == container_hourly
-    assert events == ["cleanup:evaluate-r1", "cleanup:algorithm-r1"]
+    assert events == ["cleanup:eval-r1-0-ies.evaluator.finance-1.0.0", "cleanup:algorithm-r1"]
 
 
 def test_build_receipt_from_stage_does_not_fabricate_missing_execution_facts() -> None:
@@ -1464,17 +1472,18 @@ def test_build_receipt_from_stage_does_not_fabricate_missing_execution_facts() -
     from iesplan.computation.runtime.stage_runner import StageRunResult
 
     manifest = SolverBundleManifest(
-        bundle={"generator": "ies.generator.highs_milp@1.0.0", "solver": "ies.solver.highs@1.7.2"},
-        inputs=[{"path": "input/problem.mps", "media_type": "text/plain"}],
-        command={
-            "executor": "ies.executor.local_process@1.0.0",
-            "executable": "ies.solver.highs@1.7.2",
-            "arguments": ["input/problem.mps"],
-            "timeout_seconds": 30,
-            "network": False,
+        bundle={
+            "generator": "ies.generator.highs_milp@1.0.0",
+            "contract": "ies.solver-bundle.mps@1.0.0",
         },
-        outputs=[{"path": "output/solution.sol", "media_type": "text/plain", "required": True}],
-        result_adapter="ies.result-adapter.highs@1.0.0",
+        inputs=[{"path": "input/problem.mps", "media_type": "text/plain"}],
+        outputs=[
+            {
+                "path": "output/primal_solution.json",
+                "media_type": "application/json",
+                "required": True,
+            }
+        ],
     )
     bundle = SolverBundle(manifest, {"input/problem.mps": MemoryContent(b"NAME X\nENDATA\n")})
     attempt = AttemptContext(
@@ -1500,7 +1509,12 @@ def test_build_receipt_from_stage_does_not_fabricate_missing_execution_facts() -
     )
     with pytest.raises(ValueError):
         _build_receipt_from_stage(
-            attempt=attempt, bundle=bundle, stage_result=missing_facts, outputs={}, meta=None
+            attempt=attempt,
+            bundle=bundle,
+            stage_result=missing_facts,
+            outputs={},
+            meta=None,
+            solver_ref="ies.solver.highs@1.7.2",
         )
 
     oom_result = StageRunResult(
@@ -1522,7 +1536,12 @@ def test_build_receipt_from_stage_does_not_fabricate_missing_execution_facts() -
         output_files=(),
     )
     receipt = _build_receipt_from_stage(
-        attempt=attempt, bundle=bundle, stage_result=oom_result, outputs={}, meta=None
+        attempt=attempt,
+        bundle=bundle,
+        stage_result=oom_result,
+        outputs={},
+        meta=None,
+        solver_ref="ies.solver.highs@1.7.2",
     )
     assert receipt.status == "process_failed"
     assert receipt.termination_reason == "oom"
@@ -1543,6 +1562,7 @@ def test_build_receipt_from_stage_does_not_fabricate_missing_execution_facts() -
             "ended_at": "2026-11-24T08:00:04Z",
             "stderr": "killed by OOM",
         },
+        solver_ref="ies.solver.highs@1.7.2",
     )
     assert neg_oom_receipt.status == "process_failed"
     assert neg_oom_receipt.termination_reason == "oom"
@@ -1574,6 +1594,7 @@ def test_build_receipt_from_stage_does_not_fabricate_missing_execution_facts() -
         stage_result=sigsegv_stage,
         outputs={},
         meta={"exit_code": -11, "started_at": "2026-11-24T08:00:00Z", "ended_at": "2026-11-24T08:00:02Z"},
+        solver_ref="ies.solver.highs@1.7.2",
     )
     assert sig_receipt.status == "process_failed"
     assert sig_receipt.termination_reason == "signaled"
@@ -1581,7 +1602,7 @@ def test_build_receipt_from_stage_does_not_fabricate_missing_execution_facts() -
     assert sig_receipt.exit_code is None
 
 
-@pytest.mark.parametrize("stage_kind", ["generate", "evaluate", "algorithm"])
+@pytest.mark.parametrize("stage_kind", ["generate", "algorithm"])
 def test_non_succeeded_non_solve_stages_persist_outcome_before_cleanup(
     memory_db: tuple[Engine, sessionmaker[Session]],
     tmp_path: Path,
@@ -1593,17 +1614,19 @@ def test_non_succeeded_non_solve_stages_persist_outcome_before_cleanup(
     from iesplan.application.worker.checkpoints import (
         save_algorithm_checkpoint,
         save_bundle_checkpoint,
-        save_evaluation_checkpoint,
     )
     from iesplan.computation import (
         NAIVE_PREDICTOR,
         AttemptContext,
         CalculationConfig,
-        ExecutionReceipt,
         MaterializedSet,
-        SolverBundle,
-        SolverBundleManifest,
+        build_evaluator_registry,
         build_predictor_registry,
+        build_solver_registry,
+    )
+    from iesplan.computation.config import (
+        BUILTIN_EVALUATOR_FINANCE_SPEC,
+        BUILTIN_SOLVER_HIGHS_SPEC,
     )
     from iesplan.computation.generators import HIGHS_MILP_PROVIDER, build_registry
     from iesplan.computation.runtime.stage_runner import BuiltinStageCatalog, BuiltinStageDescriptor
@@ -1707,7 +1730,7 @@ def test_non_succeeded_non_solve_stages_persist_outcome_before_cleanup(
         client=httpx.Client(base_url="http://job_runner:8090", transport=httpx.MockTransport(handler)),
     )
     runner = ContainerStageRunner(client, stage_root=stage_root, policy=_default_policy(), poll_interval=0.01)
-    descs = list(build_builtin_stage_catalog("pies-builtin-stages:1.1.5").snapshot())
+    descs = list(build_builtin_stage_catalog("pies-builtin-stages:1.2.0").snapshot())
     descs.append(
         BuiltinStageDescriptor(
             plugin_id="acme.algorithm.demo",
@@ -1720,6 +1743,8 @@ def test_non_succeeded_non_solve_stages_persist_outcome_before_cleanup(
     plane = worker_app.ComputeExecutionPlane(
         generator_registry=build_registry((HIGHS_MILP_PROVIDER,)),
         predictor_registry=build_predictor_registry((NAIVE_PREDICTOR,)),
+        solver_registry=build_solver_registry((BUILTIN_SOLVER_HIGHS_SPEC,)),
+        evaluator_registry=build_evaluator_registry((BUILTIN_EVALUATOR_FINANCE_SPEC,)),
         stage_runner=runner,
         stage_catalog=BuiltinStageCatalog(tuple(descs)),
     )
@@ -1731,8 +1756,8 @@ def test_non_succeeded_non_solve_stages_persist_outcome_before_cleanup(
     )
     fake_finance = SimpleNamespace(to_dict=lambda: {"profile_id": "p"})
     fake_snapshot = SimpleNamespace(
-        executor="ies.executor.local_process@1.0.0",
-        result_adapter="ies.result-adapter.highs@1.0.0",
+        executor="ies.executor.container@1.0.0",
+        result_adapter="ies.backend.result_adapter@1.0.0",
         assembly_receipt={"schema": "ies.validation-receipt"},
         device_models={},
         evaluation={"evaluation_years": 1},
@@ -1743,10 +1768,15 @@ def test_non_succeeded_non_solve_stages_persist_outcome_before_cleanup(
         if stage_kind == "generate":
             cfg = CalculationConfig(
                 mode="planning",
+                predictions=(),
                 generator="ies.generator.highs_milp@1.0.0",
                 solver="ies.solver.highs@1.7.2",
+                algorithm=None,
+                evaluators=(),
                 precision="medium",
                 time_limit_seconds=60,
+                options={"generator": {}, "solver": {}},
+                seed=None,
                 outputs=("solution", "metrics"),
             )
             worker_app.generate_bundle(
@@ -1764,56 +1794,18 @@ def test_non_succeeded_non_solve_stages_persist_outcome_before_cleanup(
                 session_factory=factory,
                 save_checkpoint=save_bundle_checkpoint,
             )
-        elif stage_kind == "evaluate":
-            manifest = SolverBundleManifest(
-                bundle={"generator": "ies.generator.highs_milp@1.0.0", "solver": "ies.solver.highs@1.7.2"},
-                inputs=[{"path": "input/problem.mps", "media_type": "text/plain"}],
-                command={
-                    "executor": "ies.executor.local_process@1.0.0",
-                    "executable": "ies.solver.highs@1.7.2",
-                    "arguments": ["input/problem.mps"],
-                    "timeout_seconds": 30,
-                    "network": False,
-                },
-                outputs=[{"path": "output/solution.sol", "media_type": "text/plain", "required": True}],
-                result_adapter="ies.result-adapter.highs@1.0.0",
-            )
-            bundle = SolverBundle(manifest, {"input/problem.mps": MemoryContent(b"NAME X\nENDATA\n")})
-            receipt = ExecutionReceipt(
-                receipt_id="r-1",
-                bundle_id="b-1",
-                assembly_id="a-1",
-                calculation_config_id="c-1",
-                attempt_id=str(claim.attempt_id),
-                generator_ref="ies.generator.highs_milp@1.0.0",
-                solver_ref="ies.solver.highs@1.7.2",
-                executor_ref="ies.executor.local_process@1.0.0",
-                executable_ref="ies.solver.highs@1.7.2",
-                result_adapter_ref="ies.result-adapter.highs@1.0.0",
-                status="succeeded",
-                exit_code=0,
-                termination_reason="exited",
-                started_at="2026-11-24T08:00:00Z",
-                ended_at="2026-11-24T08:00:01Z",
-            )
-            worker_app.adapt_result(
-                plane,
-                bundle,
-                receipt,
-                {"output/solution.sol": MemoryContent(b"HIGHS_SOLUTION_V1\n")},
-                claim=claim,
-                number=1,
-                finance=fake_finance,  # type: ignore[arg-type]
-                snapshot=fake_snapshot,
-                session_factory=factory,
-                save_checkpoint=save_evaluation_checkpoint,
-            )
         else:
             algo_cfg = CalculationConfig(
                 mode="planning",
+                predictions=(),
+                generator=None,
+                solver=None,
                 algorithm="acme.algorithm.demo@1.0.0",
+                evaluators=(),
                 precision="medium",
                 time_limit_seconds=60,
+                options={"algorithm": {}},
+                seed=None,
                 outputs=("solution", "metrics"),
             )
             worker_app.run_algorithm_stage(

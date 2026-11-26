@@ -3,7 +3,7 @@
  */
 
 import { BarChart, CategoryLineChart, ComboChart } from '../../components/charts'
-import { Alert, Button, Card } from '../../components/ui'
+import { Button, Card } from '../../components/ui'
 import { useI18n } from '../../i18n'
 import type {
   Currency,
@@ -19,6 +19,7 @@ import {
 } from './chartMappers'
 import type { ResultDetail } from './chartMappers'
 import {
+  FinancialAbsenceAlert,
   irrStatusToKey,
   MetricGroup,
   MetricTable,
@@ -243,15 +244,7 @@ export function FinancialTabView({
           </Card>
         </>
       ) : finAbsence ? (
-        <div className="ies-section">
-          <Alert variant="warning">
-            {finAbsence === 'outcome_not_normal'
-              ? t('ies.result.fin_absence_outcome_not_normal', { outcome: outcome ?? '—' })
-              : finAbsence === 'solution_not_requested'
-                ? t('ies.result.fin_absence_solution_not_requested')
-                : t('ies.result.fin_absence_missing_unknown')}
-          </Alert>
-        </div>
+        <FinancialAbsenceAlert finAbsence={finAbsence} outcome={outcome} />
       ) : null}
 
       {metrics && (finMetrics.length > 0 || cashflowMetrics.length > 0) ? (

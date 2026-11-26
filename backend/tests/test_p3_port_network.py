@@ -6,7 +6,13 @@ import subprocess
 
 import pytest
 from bundle_testkit import materialized_file
-from test_highs_result_adapter import _receipt
+from legacy_solve_testkit import (
+    SOLUTION_PATH,
+    evaluate_bundle_expressions,
+    read_bundle_records,
+    restore_bundle_solution,
+    succeeded_receipt,
+)
 from test_project_model import LOAD_YAML, _evaluation_n, _finance_payload, _island_doc
 
 from iesplan.assembly import build_port_buses, validate_assembly_doc
@@ -15,7 +21,6 @@ from iesplan.assembly.rules.solvability import build_buses, run_phase_d
 from iesplan.assembly.schema import AssemblyDevice, AssemblyEdge, AssemblySpec
 from iesplan.computation import CalculationConfig, materialize_non_predictive_series
 from iesplan.computation.generators.highs_milp import HIGHS_MILP_PROVIDER
-from iesplan.computation.result_adapters.highs import HIGHS_ADAPTER
 from iesplan.core.yamlmini import load as yaml_load
 from iesplan.devices import list_devices
 from iesplan.devices.parser2 import parse_device_model_v2
@@ -248,13 +253,18 @@ def test_route_capacity_and_losses_survive_public_generation_and_real_solve(
         cwd=tmp_path, capture_output=True, text=True, check=False,
     )
     assert result.returncode == 0, result.stderr
-    adapted = HIGHS_ADAPTER.adapt(
-        bundle, _receipt(), {"output/solution.sol": (tmp_path / "values.sol").read_bytes()},
+    sol_bytes = (tmp_path / "values.sol").read_bytes()
+    adapted, _eng_sol = restore_bundle_solution(
+        bundle,
+        succeeded_receipt(bundle=bundle),
+        {SOLUTION_PATH: sol_bytes},
+        tmp_path=tmp_path,
     )
     assert adapted.math_status == expected
     if expected == "solved":
         total = demand + (parallel or 0.0)
-        values = {item["name"]: item["value"] for item in adapted.outputs["solution"]["variables"]}
+        exprs = evaluate_bundle_expressions(bundle, {SOLUTION_PATH: sol_bytes})
+        values = {item["name"]: item["value"] for item in exprs["variables"]}
         assert values["source__power_out__t0"] == pytest.approx(total / 0.8)
         assert values["route__power_in__t0"] == pytest.approx(total / 0.8)
         assert values["route__power_out__t0"] == pytest.approx(total)
@@ -262,7 +272,7 @@ def test_route_capacity_and_losses_survive_public_generation_and_real_solve(
         assert values["load__electricity_in__t0"] == pytest.approx(demand)
         if parallel is not None:
             assert values["load_two__electricity_in__t0"] == pytest.approx(parallel)
-    parameters = json.loads(materialized_file(bundle, "input/parameters.json"))
+    parameters = read_bundle_records(bundle)
     buses = [source for source in parameters["model_sources"]["sources"].values() if source["kind"] == "bus"]
     downstream = (("load.electricity_in", "route.power_out") if parallel is None else
                   ("load.electricity_in", "load_two.electricity_in", "route.power_out"))

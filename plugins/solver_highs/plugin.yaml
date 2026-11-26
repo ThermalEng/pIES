@@ -9,8 +9,12 @@ name:
 description: Official isolated HiGHS 1.7.2 solver stage executing ies-highs-solver against read-only /work/in/bundle/.
 license: MPL-2.0
 compatibility:
-  pies: ">=1.1.5,<2.0.0"
-  sdk: ">=1.1.5,<2.0.0"
+  pies: ">=1.2.0,<2.0.0"
+  sdk: ">=1.2.0,<2.0.0"
+consumes:
+  - ies.solver-bundle.mps@1.0.0
+produces:
+  - ies.primal-solution@1.0.0
 runtime:
   language: python
   python: "3.12"
@@ -39,15 +43,9 @@ advanced:
     executable: /usr/local/bin/ies-highs-solver
     arguments_template:
       - input/problem.mps
-      - --solution_file
-      - output/solution.sol
       - --time_limit
       - "{time_limit_seconds}"
       - --random_seed
       - "{seed}"
     env_allowlist: []
-  companions:
-    generator: ies.generator.highs_milp@1.0.0
-    evaluator: ies.result-adapter.highs@1.0.0
-    result_adapter: ies.result-adapter.highs@1.0.0
 extensions: {}

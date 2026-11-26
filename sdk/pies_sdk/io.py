@@ -24,6 +24,7 @@ from pies_sdk.solution_contracts import (
     EngineeringSolutionPayload,
     EvaluationReportPayload,
     PrimalSolutionPayload,
+    iter_primal_solution_values,
     read_engineering_solution,
     read_evaluation_report,
     read_primal_solution,
@@ -350,10 +351,25 @@ def validate_stage_outputs(kind: str, work_out: Path = DEFAULT_WORK_OUT) -> None
     elif kind == "generator":
         validate_solver_bundle_dir(root / "bundle")
     elif kind == "solver":
-        if not list_solver_solutions(root):
-            raise StageIOError("solver /work/out missing 'solution.*' output file")
-    elif kind in ("evaluator", "algorithm"):
-        read_compute_result(root)
+        primal_path = root / "primal_solution.json"
+        if not primal_path.is_file():
+            raise StageIOError("solver /work/out missing 'primal_solution.json' output file")
+        _hdr, values_iter = iter_primal_solution_values(primal_path)
+        for _ in values_iter:
+            pass
+    elif kind == "algorithm":
+        read_engineering_solution(root / "solution.json")
+    elif kind == "evaluator":
+        report_path = root / "evaluation_report.json"
+        result_path = root / "result.json"
+        if report_path.is_file():
+            read_evaluation_report(report_path)
+        elif result_path.is_file():
+            read_compute_result(root)
+        else:
+            raise StageIOError(
+                "evaluator /work/out missing 'evaluation_report.json' or 'result.json'"
+            )
 
 
 def extract_stage_parameters(work_in: Path) -> dict[str, Any]:

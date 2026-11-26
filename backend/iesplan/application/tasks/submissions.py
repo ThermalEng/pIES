@@ -327,19 +327,16 @@ def _resolve_execution_refs(
     body: Mapping[str, Any],
     generator_registry: Any | None,
     project_id: int,
+    *,
+    predictor_registry: Any | None = None,
+    solver_registry: Any | None = None,
+    evaluator_registry: Any | None = None,
     algorithm_registry: Any | None = None,
 ) -> tuple[str, str, tuple[str, ...]]:
-    """解析并冻结执行引用并执行提交阶段描述符能力/选项门禁(14 字段契约)。
-
-    直接从已保存 14 字段配置构造 ``CalculationConfig``（无旧 12 字段回退），
-    由 ``algorithm_registry.resolve`` 或 ``generator_registry.resolve`` 完成
-    ``mode``/``precision``/``solver``/``evaluator``/``outputs``/``options`` 核对：
-    - 目录未装配(None) → 500；
-    - solver 不兼容 → 400 TASK-REQ-008；
-    - executors 非恰好一个 → 400 TASK-REQ-009；
-    - 其余未注册/不兼容/非法选项 → 400 TASK-REQ-007。
-    """
+    """解析并冻结执行引用并执行提交阶段描述符与阶段契约兼容门禁(13 字段契约)。"""
     from iesplan.computation import CalculationConfig
+    from iesplan.computation.config import build_stage_plugin_map
+    from iesplan.computation.contracts.compatibility import validate_stage_compatibility
 
     config = CalculationConfig.from_frozen(body)
     is_unified = config.algorithm is not None
@@ -354,9 +351,21 @@ def _resolve_execution_refs(
             else "生成器目录未装配, 计算任务提交不可用"
         )
         raise AppError(missing_msg, params={"project_id": project_id})
+    if not is_unified and solver_registry is None:
+        raise AppError("求解器目录未装配, 计算任务提交不可用", params={"project_id": project_id})
+    if config.evaluators and evaluator_registry is None:
+        raise AppError("评价器目录未装配, 计算任务提交不可用", params={"project_id": project_id})
 
     try:
         provider = active_registry.resolve(config)
+        plugin_specs = build_stage_plugin_map(
+            predictor_registry=predictor_registry,
+            generator_registry=generator_registry,
+            solver_registry=solver_registry,
+            evaluator_registry=evaluator_registry,
+            algorithm_registry=algorithm_registry,
+        )
+        validate_stage_compatibility(config, plugin_specs)
     except ComputationUnavailableError as exc:
         if exc.reason == "incompatible-solver":
             raise InvalidRequestError(
@@ -365,32 +374,50 @@ def _resolve_execution_refs(
                 params={"project_id": project_id, "generator": selected_ref, "solver": config.solver},
                 location={"object_type": "calculation_config", "object_id": project_id, "field": "solver"},
             ) from exc
+        msg = str(exc)
         field_map = {
-            "no-provider": ref_field,
+            "no-provider": (
+                "evaluators" if ("评价器" in msg or "evaluator" in msg)
+                else "solver" if ("求解器" in msg or "solver" in msg)
+                else "predictions" if ("预测" in msg or "predictor" in msg)
+                else ref_field
+            ),
             "incompatible-mode": "mode",
             "incompatible-precision": "precision",
-            "incompatible-evaluator": "evaluator",
+            "incompatible-evaluator": "evaluators",
             "incompatible-outputs": "outputs",
         }
         field = field_map.get(exc.reason, ref_field)
+        val: Any = (
+            [e["evaluator"] for e in config.evaluators]
+            if field == "evaluators"
+            else [p["algorithm"] for p in config.predictions]
+            if field == "predictions"
+            else getattr(config, field, selected_ref)
+        )
         raise InvalidRequestError(
-            str(exc),
+            msg,
             code="TASK-REQ-007",
-            params={"project_id": project_id, ref_field: selected_ref, field: getattr(config, field)},
+            params={"project_id": project_id, ref_field: selected_ref, field: val},
             location={"object_type": "calculation_config", "object_id": project_id, "field": field},
         ) from exc
     except ValueError as exc:
+        detail = str(exc)
+        err_field = (
+            "evaluators" if "[evaluators/" in detail
+            else "predictions" if "[predictions/" in detail
+            else "options"
+        )
         raise InvalidRequestError(
-            str(exc),
+            detail,
             code="TASK-REQ-007",
-            params={"project_id": project_id, ref_field: selected_ref, "detail": str(exc)},
-            location={"object_type": "calculation_config", "object_id": project_id, "field": "options"},
+            params={"project_id": project_id, ref_field: selected_ref, "detail": detail},
+            location={"object_type": "calculation_config", "object_id": project_id, "field": err_field},
         ) from exc
 
     descriptor = provider.descriptor
     if is_unified:
-        resolved_adapter = config.evaluator or getattr(descriptor, "result_adapter", None) or ""
-        return resolved_adapter, "", tuple(getattr(descriptor, "capabilities", ()) or ())
+        return "", "", tuple(getattr(descriptor, "capabilities", ()) or ())
 
     executors = tuple(descriptor.executors or ())
     if len(executors) != 1:
@@ -400,7 +427,7 @@ def _resolve_execution_refs(
             params={"project_id": project_id, "generator": selected_ref, "executors": list(executors)},
             location={"object_type": "calculation_config", "object_id": project_id, "field": "generator"},
         )
-    return config.evaluator or descriptor.result_adapter, executors[0], tuple(descriptor.capabilities or ())
+    return "ies.backend.result_adapter@1.0.0", executors[0], tuple(descriptor.capabilities or ())
 
 
 def _freeze_device_models(artifact: Any, device_documents: Mapping[str, Any]) -> dict[str, Any]:
@@ -502,8 +529,7 @@ def _check_prediction_inputs(
                     "object_id": project_id, "field": "predictions",
                 },
             )
-        coupled = []
-    coupled: list[tuple[str, str]] = []
+        return len(bound)
     for entry in predictions:
         algorithm = entry["algorithm"]
         try:
@@ -534,44 +560,6 @@ def _check_prediction_inputs(
                     "object_id": project_id, "field": "predictions",
                 },
             )
-        if predictor.descriptor.depends_on_solve_result:
-            coupled.append((dev_id, iface_id))
-    has_coupled = bool(coupled)
-    convergence = calc_config.get("convergence")
-    if has_coupled and convergence is None:
-        raise InvalidRequestError(
-            "耦合预测目标须给出收敛容差与最大迭代数",
-            code="TASK-REQ-012",
-            params={
-                "project_id": project_id,
-                "coupled_targets": sorted(f"{dev}x{iface}" for dev, iface in coupled),
-            },
-            location={"object_type": "calculation_config", "object_id": project_id, "field": "convergence"},
-        )
-    if has_coupled:
-        max_iterations = int(convergence["max_iterations"])
-        if max_iterations < 2:
-            raise InvalidRequestError(
-                "耦合预测要求至少求解一轮 "
-                "(max_iterations 为总求解轮数上限，阶段一计第 1 轮，至少为 2)",
-                code="TASK-REQ-012",
-                params={
-                    "project_id": project_id,
-                    "max_iterations": max_iterations,
-                },
-                location={
-                    "object_type": "calculation_config",
-                    "object_id": project_id,
-                    "field": "convergence",
-                },
-            )
-    if not has_coupled and convergence is not None:
-        raise InvalidRequestError(
-            "无耦合预测目标时 convergence 必须为 null（收敛配置只属于耦合迭代）",
-            code="TASK-REQ-012",
-            params={"project_id": project_id},
-            location={"object_type": "calculation_config", "object_id": project_id, "field": "convergence"},
-        )
     return len(bound)
 
 
@@ -584,6 +572,8 @@ def _assemble_snapshot(
     calculation_config: tuple[dict[str, Any], int] | None = None,
     generator_registry: Any | None = None,
     predictor_registry: Any | None = None,
+    solver_registry: Any | None = None,
+    evaluator_registry: Any | None = None,
     algorithm_registry: Any | None = None,
     evaluation: _EvaluationInput | None = None,
 ) -> CalcSnapshotRecord:
@@ -645,7 +635,13 @@ def _assemble_snapshot(
     # 执行引用与快照同事务冻结: 同一已解析 generator/algorithm 派生配套对。
     # 描述符能力元组一并带回，供税务闸门复用，不二次取目录。
     result_adapter, executor, generator_capabilities = _resolve_execution_refs(
-        calc_config, generator_registry, project_id, algorithm_registry=algorithm_registry
+        calc_config,
+        generator_registry,
+        project_id,
+        predictor_registry=predictor_registry,
+        solver_registry=solver_registry,
+        evaluator_registry=evaluator_registry,
+        algorithm_registry=algorithm_registry,
     )
     selected_ref = calc_config["generator"] or calc_config["algorithm"]
 
@@ -1845,6 +1841,8 @@ def _submit_task(
     parent_task_id: int | None = None,
     generator_registry: Any | None = None,
     predictor_registry: Any | None = None,
+    solver_registry: Any | None = None,
+    evaluator_registry: Any | None = None,
     algorithm_registry: Any | None = None,
     evaluation: Mapping[str, Any] | None = None,
 ) -> tuple[TaskRecord, dict[str, bool]]:
@@ -1921,7 +1919,8 @@ def _submit_task(
         snapshot = _assemble_snapshot(
             db, project_id, task_type, config=config, user=user,
             calculation_config=pinned, generator_registry=generator_registry,
-            predictor_registry=predictor_registry, algorithm_registry=algorithm_registry,
+            predictor_registry=predictor_registry, solver_registry=solver_registry,
+            evaluator_registry=evaluator_registry, algorithm_registry=algorithm_registry,
             evaluation=parsed_evaluation,
         )
     # io 类任务(report/export/import/dataset_build): 无快照, 仅幂等键命中复用
@@ -1988,6 +1987,8 @@ def submit_task(
     parent_task_id: int | None = None,
     generator_registry: Any | None = None,
     predictor_registry: Any | None = None,
+    solver_registry: Any | None = None,
+    evaluator_registry: Any | None = None,
     algorithm_registry: Any | None = None,
     evaluation: Mapping[str, Any] | None = None,
 ) -> tuple[TaskRecord, dict[str, bool]]:
@@ -1997,6 +1998,7 @@ def submit_task(
             db, user, project_id, task_type,
             config=config, idempotency_key=idempotency_key, parent_task_id=parent_task_id,
             generator_registry=generator_registry, predictor_registry=predictor_registry,
+            solver_registry=solver_registry, evaluator_registry=evaluator_registry,
             algorithm_registry=algorithm_registry,
             evaluation=evaluation,
         )

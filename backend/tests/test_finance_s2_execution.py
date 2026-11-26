@@ -12,7 +12,6 @@ import pytest
 from test_issue06_s2 import _amount, _builder, _expense, _tiny_solve
 
 from iesplan.application.worker.compute_cases import build_financial_evaluation
-from iesplan.computation.result_adapters.highs import _recover_financial_facts
 
 
 def _money(value: str, unit: str = "CNY") -> dict:
@@ -83,14 +82,19 @@ def _construction_and_annual(profile: dict) -> None:
             "confirmation": "same_period",
         },
         "income": _income([
-            _depr({"kind": "upfront_capex_net", "finance_type": "same", "scope": {"kind": "all_new_instances"}}, 4, 1,
-                  _money("0.1", "1")),
+            _depr(
+                {"kind": "upfront_capex_net", "finance_type": "same", "scope": {"kind": "all_new_instances"}},
+                4,
+                1,
+                _money("0.1", "1"),
+            ),
         ], annual=True),
     }
     profile["net_cashflows"] = {
         "recovery": {"at": {"kind": "evaluation_end"}, "direction": "inflow",
                      "amount": {"kind": "source_share", "base_from": {
-                         "kind": "upfront_capex_net", "finance_type": "same", "scope": {"kind": "all_new_instances"}},
+                         "kind": "upfront_capex_net", "finance_type": "same",
+                         "scope": {"kind": "all_new_instances"}},
                          "ratio": _money("0.1", "1")}},
     }
 
@@ -163,7 +167,11 @@ def _replacement_profile(profile: dict) -> None:
             ], "credit_pool": "pool", "confirmation": "same_period",
         },
         "income": _income([
-            _depr({"kind": "upfront_capex_net", "finance_type": "same", "scope": {"kind": "all_new_instances"}}, 4, 1),
+            _depr(
+                {"kind": "upfront_capex_net", "finance_type": "same", "scope": {"kind": "all_new_instances"}},
+                4,
+                1,
+            ),
             _depr({"kind": "maintenance_expense_net", "year": 2, "position": 1}, 2, 2),
             _depr({"kind": "maintenance_expense_net", "year": 2, "position": 2},
                   2, 2, _money("50")),
@@ -210,7 +218,8 @@ def _decision_profile(recovery: str, annual_rate: str):
             profile["net_cashflows"] = {
                 "recovery": {"at": {"kind": "evaluation_end"}, "direction": "inflow",
                              "amount": {"kind": "source_share", "base_from": {
-                                 "kind": "upfront_capex_net", "finance_type": "same", "scope": {"kind": "all_new_instances"}},
+                                 "kind": "upfront_capex_net", "finance_type": "same",
+                                 "scope": {"kind": "all_new_instances"}},
                                  "ratio": _money(recovery, "1")}},
             }
     return patch
@@ -235,8 +244,9 @@ def test_recovery_and_annual_fee_switch_main_solution(tmp_path, recovery, annual
         )
     # Adapter's actual affine recovery path, on the very same MPS primal vector;
     # Worker projects it and evaluates, without reading the draft or rebuilding tax.
-    from bundle_testkit import evaluate_fact_expressions
-    restored = _recover_financial_facts(evaluate_fact_expressions(facts, solved))
+    from legacy_solve_testkit import evaluate_builder_forward_finance
+
+    restored = evaluate_builder_forward_finance(builder, solved, model=model)
     sealed = build_financial_evaluation(
         SimpleNamespace(evaluation={
             "construction_period": 0, "operation_years": 2,
@@ -259,25 +269,14 @@ def test_recovery_and_annual_fee_switch_main_solution(tmp_path, recovery, annual
 
 @pytest.mark.parametrize("currency", ("CNY", "USD"))
 def test_same_currency_annual_fixed_and_linear_end_to_end(tmp_path, currency):
-    """One genuine HiGHS solution → paired 6.0.0 adapter → year/NPV/components.
+    """One genuine HiGHS solution → forward finance → year/NPV/components.
 
     Currency is retained, never converted: a=10kW, b=100kW new, old
     existing excluded.  Annual: 2*500 + 25*(10+100) = 3750;
     upfront: 200*(10+100) = 22000; two operation years, zero discount.
     """
-    import json
-
-    from test_highs_result_adapter import (
-        PARAMETERS_PATH,
-        PROBLEM_PATH,
-        SOLUTION_PATH,
-        _bundle,
-        _parameters,
-        _receipt,
-    )
-
-    from iesplan.computation.generators.mps import write_mps
-    from iesplan.computation.result_adapters.highs import HIGHS_ADAPTER
+    from bundle_testkit import evaluate_fact_expressions
+    from legacy_solve_testkit import evaluate_builder_forward_finance
 
     def annual(profile):
         profile["finance_types"]["same"]["annual_fixed_om"] = {
@@ -286,29 +285,30 @@ def test_same_currency_annual_fixed_and_linear_end_to_end(tmp_path, currency):
         }
 
     builder = _builder([], currency=currency, fixed_capacity=True, finance_patch=annual)
-    solved, facts, model = _tiny_solve(builder, tmp_path, with_model=True)
-    mps_text, offset = write_mps(model)
-    doc = json.loads(_parameters(offset=offset, objective_unit=currency).decode("utf-8"))
-    doc["unit_map"] = dict(builder.unit_map)
-    doc["financial_facts"] = dict(facts)
-    doc["components"] = {name: dict(value) for name, value in builder.finance_components().items()}
-    bundle = _bundle({
-        PROBLEM_PATH: mps_text.encode("utf-8"),
-        PARAMETERS_PATH: (json.dumps(doc, sort_keys=True) + "\n").encode("utf-8"),
-    })
-    adapted = HIGHS_ADAPTER.adapt(
-        bundle, _receipt(), {SOLUTION_PATH: (tmp_path / "output" / "solution.sol").read_bytes()},
+    solved, _, model = _tiny_solve(builder, tmp_path, with_model=True)
+    objective = float(model.objective.constant) + sum(
+        float(coef) * float(solved[name]) for (name, _), coef in model.objective.terms
     )
-    assert adapted.math_status == "solved"
-    solution = adapted.outputs["solution"]
-    assert solution["objective_unit"] == currency
-    assert solution["objective_value"] == pytest.approx(-29500.0)
-    components = solution["components"]
-    assert components["a__annual_fixed_om"]["unit"] == f"{currency}/a"
-    assert components["b__annual_fixed_om"]["unit"] == f"{currency}/a"
-    assert components["a__annual_fixed_om"]["value"] == pytest.approx(750.0)
-    assert components["b__annual_fixed_om"]["value"] == pytest.approx(3000.0)
-    restored = adapted.outputs["financial_facts"]
+    assert objective == pytest.approx(-29500.0)
+    from iesplan.computation.generators.highs_milp import linear_conversion_for_unit
+
+    comp_defs = builder.finance_components()
+    components = evaluate_fact_expressions(comp_defs, solved)
+    assert comp_defs["a__annual_fixed_om"]["unit"] == f"{currency}/a"
+    assert comp_defs["b__annual_fixed_om"]["unit"] == f"{currency}/a"
+    assert (
+        components["a__annual_fixed_om"]
+        * linear_conversion_for_unit(comp_defs["a__annual_fixed_om"]["unit"])[0]
+    ) == pytest.approx(750.0)
+    assert (
+        components["b__annual_fixed_om"]
+        * linear_conversion_for_unit(comp_defs["b__annual_fixed_om"]["unit"])[0]
+    ) == pytest.approx(3000.0)
+    restored = evaluate_builder_forward_finance(builder, solved, model=model)
+    adapted = SimpleNamespace(
+        math_status="solved",
+        outputs={"solution": {"objective_value": objective}, "financial_facts": restored},
+    )
     assert restored["currency"] == currency
     assert float(restored["annual_fixed_om"]) == pytest.approx(3750.0)
     assert float(restored["construction_total"]) == pytest.approx(22000.0)
@@ -321,6 +321,6 @@ def test_same_currency_annual_fixed_and_linear_end_to_end(tmp_path, currency):
         }), builder.finance, adapted,
     )
     assert sealed["currency"] == currency
-    assert float(sealed["evaluation"]["npv"]) == pytest.approx(solution["objective_value"])
+    assert float(sealed["evaluation"]["npv"]) == pytest.approx(objective)
     assert sealed["annual_net_flows"] == list(restored["annual_net_flows"])
     assert solved["cap_a"] == pytest.approx(10000)

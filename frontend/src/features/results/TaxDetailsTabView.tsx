@@ -5,9 +5,10 @@
 import { useState } from 'react'
 
 import { BarChart, CategoryLineChart } from '../../components/charts'
-import { Alert, Badge, Button, Card, EmptyState, Select } from '../../components/ui'
+import { Badge, Button, Card, EmptyState, Select } from '../../components/ui'
 import { useI18n } from '../../i18n'
 import type { FinancialAbsence, FinancialEvaluationBlock, TaskOutcome } from '../../types'
+import { FinancialAbsenceAlert } from './resultHelpers'
 import {
   buildAssetBookValueChartData,
   buildCostItemChartGroups,
@@ -39,17 +40,7 @@ export function TaxDetailsTabView({
 
   if (!fin) {
     if (finAbsence) {
-      return (
-        <div className="ies-section">
-          <Alert variant="warning">
-            {finAbsence === 'outcome_not_normal'
-              ? t('ies.result.fin_absence_outcome_not_normal', { outcome: outcome ?? '—' })
-              : finAbsence === 'solution_not_requested'
-                ? t('ies.result.fin_absence_solution_not_requested')
-                : t('ies.result.fin_absence_missing_unknown')}
-          </Alert>
-        </div>
-      )
+      return <FinancialAbsenceAlert finAbsence={finAbsence} outcome={outcome} />
     }
     return (
       <Card title={t('ies.result.tab_tax')} className="ies-section">

@@ -1,15 +1,4 @@
-"""CalculationConfig 契约测试(0.8 切片 C)。
-
-字段唯一依据 domain-model 与 calculation-config 格式页，不含离散化，
-也不含规划目标/变量/约束、设备参数、财务配置、资源或装配内容：
-
-- schema 文件元信息：$id/标题/必需键/精度枚举/未知字段拒绝，
-  且 schema 内无任何 hash/摘要/完整性字段；
-- 发布样例：合法通过并构造 frozen 载体；7 个非法样例各只违一条，
-  逐个被拒绝（含离散化字段直接拒绝）；
-- 载体规则：mode 非空、预测目标去重且 to_dict 稳定排序、精度枚举、
-  收敛正值可空、时间限制正整数、输出非空保序、options 可空只读。
-"""
+"""CalculationConfig 1.2.0 契约测试 (13 字段 + 并联 evaluators + 分槽 options)。"""
 
 from __future__ import annotations
 
@@ -20,6 +9,7 @@ import pathlib
 import pytest
 
 from iesplan.computation import (
+    CALCULATION_CONFIG_FIELDS,
     CALCULATION_CONFIG_SCHEMA,
     CALCULATION_CONFIG_VERSION,
     CalculationConfig,
@@ -40,6 +30,7 @@ INVALID = SAMPLES / "invalid" / "2.0"
 
 GENERATOR = "acme.generator@1.0.0"
 SOLVER = "ies.solver.highs@1.7.2"
+EVALUATOR = "ies.evaluator.finance@1.0.0"
 
 
 def _load(path: pathlib.Path) -> dict:
@@ -57,17 +48,16 @@ def _config(**kwargs) -> CalculationConfig:
 
 
 def test_schema_file_meta() -> None:
-    """schema 文件标识与计算配置必需结构；无 hash/摘要/完整性字段。"""
+    """schema 文件标识与 13 字段计算配置必需结构；无 hash/摘要/完整性字段。"""
     schema = load_calculation_config_schema()
     assert schema["$id"] == f"{CALCULATION_CONFIG_SCHEMA}/{CALCULATION_CONFIG_VERSION}"
-    assert schema["title"] == "ies.calculation-config 1.0.0 计算配置契约"
-    assert set(schema["required"]) == {
-        "schema", "schema_version", "mode", "predictions", "generator",
-        "solver", "algorithm", "evaluator", "precision", "convergence",
-        "time_limit_seconds", "options", "seed", "outputs",
-    }
+    assert schema["title"] == "ies.calculation-config 1.0.0 计算配置目标契约"
+    assert set(schema["required"]) == set(CALCULATION_CONFIG_FIELDS)
+    assert len(CALCULATION_CONFIG_FIELDS) == 13
+    assert "convergence" not in schema["properties"]
+    assert "evaluator" not in schema["properties"]
+    assert "evaluators" in schema["properties"]
     assert schema["properties"]["predictions"]["type"] == "array"
-    assert schema["properties"]["options"] == {"type": "object"}
     assert schema["additionalProperties"] is False
     assert schema["properties"]["schema"] == {"const": CALCULATION_CONFIG_SCHEMA}
     assert schema["properties"]["precision"] == {"enum": ["low", "medium", "high"]}
@@ -84,7 +74,7 @@ def test_valid_sample_builds_frozen_config() -> None:
     assert config.mode == "planning"
     assert config.precision == "medium"
     assert config.algorithm is None
-    assert config.evaluator is None
+    assert config.evaluators == ()
     assert config.to_dict() == _load(VALID)
     with pytest.raises(dataclasses.FrozenInstanceError):
         config.mode = "other"  # type: ignore[misc]
@@ -94,20 +84,22 @@ def test_valid_sample_builds_frozen_config() -> None:
     assert unified.generator is None
     assert unified.solver is None
     assert unified.algorithm == "acme.algorithm.capacity_search@1.2.0"
-    assert unified.evaluator == "ies.result-adapter.highs@1.0.0"
+    assert unified.evaluators == (
+        {"evaluator": EVALUATOR, "parameters": {}},
+    )
     assert unified.to_dict() == _load(VALID_UNIFIED)
 
 
 EXPECTED_INVALID = {
     "bad-precision.json": "ultra",
+    "bad-slotted-options.json": "gap_rel",
     "both-generator-and-algorithm.json": "null",
     "discretization-rejected.json": "discretization",
     "duplicate-target.json": "不得重复",
-    "bad-convergence.json": "tolerance",
-    "missing-mode.json": "mode",
-    "missing-convergence.json": "convergence",
-    "neither-generator-nor-algorithm.json": "generator",
     "empty-outputs.json": "outputs",
+    "legacy-convergence-rejected.json": "convergence",
+    "missing-mode.json": "mode",
+    "neither-generator-nor-algorithm.json": "generator",
 }
 
 
@@ -117,7 +109,7 @@ def test_invalid_samples_rejected() -> None:
     for name, location in EXPECTED_INVALID.items():
         with pytest.raises(ValueError) as exc_info:
             validate_calculation_config(_load(INVALID / name))
-        assert location in str(exc_info.value), name
+        assert location in str(exc_info.value), (name, str(exc_info.value))
 
 
 def test_predictions_sorted_unique_and_shape_checked() -> None:
@@ -137,7 +129,7 @@ def test_predictions_sorted_unique_and_shape_checked() -> None:
         ]
     )
     assert [p["target"]["instance"] for p in config.to_dict()["predictions"]] == [
-        "pv1", "zeta",
+        "zeta", "pv1",
     ]
     with pytest.raises(TypeError):
         config.predictions[0]["parameters"]["p"] = 2  # type: ignore[index]
@@ -181,26 +173,8 @@ def test_predictions_sorted_unique_and_shape_checked() -> None:
         )
 
 
-def test_convergence_optional_but_strict() -> None:
-    """收敛可空；给出即恰二键、正有限容差与正整数迭代。"""
-    assert _config(convergence=None).convergence is None
-    good = _config(convergence={"tolerance": 0.01, "max_iterations": 10})
-    assert good.to_dict()["convergence"] == {
-        "tolerance": 0.01, "max_iterations": 10,
-    }
-    for bad in (
-        {"tolerance": 0, "max_iterations": 10},
-        {"tolerance": float("inf"), "max_iterations": 10},
-        {"tolerance": 0.01, "max_iterations": 0},
-        {"tolerance": 0.01, "max_iterations": True},
-        {"tolerance": 0.01},
-    ):
-        with pytest.raises(ValueError):
-            _config(convergence=bad)
-
-
-def test_scalar_selections() -> None:
-    """mode/精度/时间限制/输出/options 的选择语义。"""
+def test_scalar_selections_and_slotted_options() -> None:
+    """mode/精度/时间限制/输出/分槽 options 的选择语义。"""
     with pytest.raises(ValueError, match="mode"):
         _config(mode="")
     with pytest.raises(ValueError, match="precision"):
@@ -216,24 +190,31 @@ def test_scalar_selections() -> None:
     with pytest.raises(TypeError, match="Mapping"):
         _config(options=None)
     assert _config(options={}).options == {}
-    assert _config(options={"k": [1]}).to_dict()["options"] == {"k": [1]}
+    slotted = _config(options={"generator": {"k": [1]}, "solver": {"threads": 2}})
+    assert slotted.to_dict()["options"] == {"generator": {"k": [1]}, "solver": {"threads": 2}}
+    with pytest.raises(ValueError, match="options"):
+        _config(options={"algorithm": {}})
+    with pytest.raises(ValueError, match="options"):
+        _config(options={"flat_key": 1})
     with pytest.raises(ValueError, match="非有限"):
-        _config(options={"k": float("nan")})
+        _config(options={"generator": {"k": float("nan")}})
     with pytest.raises(TypeError, match="布尔"):
         _config(seed=True)
 
 
-def test_mutually_exclusive_modes_and_evaluator() -> None:
-    """分步模式与一体化模式严格互斥；evaluator 在两种模式下均按需可选。"""
-    stepped_with_eval = _config(evaluator="ies.result-adapter.highs@1.0.0")
-    assert stepped_with_eval.evaluator == "ies.result-adapter.highs@1.0.0"
+def test_mutually_exclusive_modes_and_evaluators() -> None:
+    """分步模式与一体化模式严格互斥；evaluators 在两种模式下均按需多选。"""
+    stepped_with_eval = _config(evaluators=[{"evaluator": EVALUATOR, "parameters": {}}])
+    assert len(stepped_with_eval.evaluators) == 1
+    assert stepped_with_eval.evaluators[0]["evaluator"] == EVALUATOR
 
     unified = CalculationConfig(
         mode="planning",
         algorithm="acme.algorithm.capacity_search@1.2.0",
-        evaluator="ies.result-adapter.highs@1.0.0",
+        evaluators=[{"evaluator": EVALUATOR, "parameters": {}}],
         precision="medium",
         time_limit_seconds=600,
+        options={"algorithm": {"steps": 10}},
         outputs=["solution"],
     )
     assert unified.generator is None
@@ -260,5 +241,12 @@ def test_mutually_exclusive_modes_and_evaluator() -> None:
             time_limit_seconds=600,
             outputs=["solution"],
         )
-    with pytest.raises(ValueError, match="evaluator"):
-        _config(evaluator="not-a-ref")
+    with pytest.raises(ValueError, match="evaluators"):
+        _config(evaluators=[{"evaluator": "not-a-ref", "parameters": {}}])
+    with pytest.raises(ValueError, match="不得重复"):
+        _config(
+            evaluators=[
+                {"evaluator": EVALUATOR, "parameters": {}},
+                {"evaluator": EVALUATOR, "parameters": {"x": 1}},
+            ]
+        )

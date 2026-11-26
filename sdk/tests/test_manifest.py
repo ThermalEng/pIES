@@ -83,7 +83,7 @@ def test_optional_advanced_and_iteration_sections() -> None:
         },
         "companions": {
             "generator": "ies.generator.highs_milp@1.0.0",
-            "result_adapter": "ies.result-adapter.highs@1.0.0",
+            "evaluator": "ies.evaluator.finance@1.0.0",
         },
     }
     data["iteration"] = {

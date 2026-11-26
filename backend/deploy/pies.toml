@@ -43,7 +43,7 @@ time_limit_seconds = 43200
 
 [stage]
 # 内置计算阶段容器镜像精确引用
-builtin_image = "pies-builtin-stages:1.1.5"
+builtin_image = "pies-builtin-stages:1.2.0"
 # 临时计算容器进程数上限
 pids_limit = 256
 # 临时计算容器 /tmp tmpfs 大小上限（MiB）

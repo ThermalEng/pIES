@@ -1,16 +1,29 @@
-"""ResultAdapterProvider 真实实现(0.10 切片 B：首个 HiGHS 适配器)。
+"""Universal 1.2.0 ResultAdapter restoring ``ies.primal-solution@1.0.0`` via spawn subprocess."""
 
-公开 ``result_adapters.highs`` 首个真实 provider；原子注册表见
-``iesplan.computation.result_adapter``。provider 选择与装配只归
-bootstrap 组合根；API/Worker 不得自行发现或动态加载 provider。
-"""
-
-from iesplan.computation.result_adapters.highs import (
-    HIGHS_ADAPTER,
-    HighsResultAdapter,
+from iesplan.computation.result_adapters.adapter import (
+    DEFAULT_MEMORY_LIMIT_MB,
+    DEFAULT_TIMEOUT_SECONDS,
+    ENGINEERING_SOLUTION_SCHEMA,
+    ENGINEERING_SOLUTION_VERSION,
+    PRIMAL_SOLUTION_SCHEMA,
+    PRIMAL_SOLUTION_VERSION,
+    FileContent,
+    RestorationOutcome,
+    ResultAdapter,
+    restore_bundle_outputs,
+    restore_from_bundle_dir,
 )
 
 __all__ = [
-    "HIGHS_ADAPTER",
-    "HighsResultAdapter",
+    "DEFAULT_MEMORY_LIMIT_MB",
+    "DEFAULT_TIMEOUT_SECONDS",
+    "ENGINEERING_SOLUTION_SCHEMA",
+    "ENGINEERING_SOLUTION_VERSION",
+    "FileContent",
+    "PRIMAL_SOLUTION_SCHEMA",
+    "PRIMAL_SOLUTION_VERSION",
+    "RestorationOutcome",
+    "ResultAdapter",
+    "restore_bundle_outputs",
+    "restore_from_bundle_dir",
 ]

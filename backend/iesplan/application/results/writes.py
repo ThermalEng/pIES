@@ -671,12 +671,10 @@ def _financial_absence(
     financial: Any,
     snapshot_id: int | None,
     db: Session,
+    *,
+    evaluator_results: list[Any] | None = None,
 ) -> str | None:
-    """财务评价缺块原因(只读派生, 不校验、不重算)。
-
-    有块返回 None; 无块时按可观察事实区分, 不把所有缺块猜为未请求
-    solution(是否请求以快照 outputs 为准)。
-    """
+    """财务评价缺块原因(只读派生, 不校验、不重算)。"""
     if financial is not None:
         return None
     if business_outcome not in ("normal_completion", "restricted_results"):
@@ -684,10 +682,20 @@ def _financial_absence(
     snapshot = tasks_domain.get_snapshot(db, snapshot_id) if snapshot_id else None
     config = snapshot.calc_config_snapshot if snapshot is not None else None
     outputs = config.get("outputs") if isinstance(config, Mapping) else None
-    # 冻结快照 outputs 为 tuple(与 computation 协议一致的合法冻结形态),
-    # 与 list 同等对待; 非序列仍落 missing_unknown, 不猜测。
     if isinstance(outputs, (list, tuple)) and "solution" not in outputs:
         return "solution_not_requested"
+    if isinstance(evaluator_results, list):
+        finance_entry = next(
+            (e for e in evaluator_results if isinstance(e, Mapping) and e.get("evaluator") == "ies.evaluator.finance@1.0.0"),
+            None,
+        )
+        if finance_entry is None:
+            return "evaluators_empty"
+        status = finance_entry.get("status")
+        if status in ("failed", "timed_out", "cancelled"):
+            return "evaluator_failed"
+        if status == "skipped":
+            return "outcome_not_normal"
     return "missing_unknown"
 
 
@@ -744,6 +752,17 @@ def result_view(db: Session, user: UserRecord, project_id: int, task_id: int) ->
             content.get("financial_evaluation") if content else None,
             task.calc_snapshot_id,
             db,
+            evaluator_results=(
+                content.get("evaluator_results")
+                if content and isinstance(content.get("evaluator_results"), list)
+                else None
+            ),
+        ),
+        "evaluator_results": (
+            list(content.get("evaluator_results") or []) if content else []
+        ),
+        "evaluation_reports": (
+            list(content.get("evaluation_reports") or []) if content else []
         ),
         # 证据内容中的候选解列表(方案评价单解 / 规划候选列表, 含 IRR/NPV)
         "candidates": (

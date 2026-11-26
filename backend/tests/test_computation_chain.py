@@ -21,13 +21,18 @@ from time import perf_counter
 
 import pytest
 from bundle_testkit import materialized_file
+from legacy_solve_testkit import (
+    evaluate_bundle_expressions,
+    read_bundle_records,
+    restore_bundle_solution,
+)
 
 from iesplan.assembly import validate_assembly_text
 from iesplan.computation import (
-    HIGHS_ADAPTER_PATH,
     HIGHS_EXECUTABLE_REF,
     HIGHS_MILP_PROVIDER,
     HIGHS_VERSION,
+    SOLVER_BUNDLE_MPS_CONTRACT,
     AttemptContext,
     CalculationConfig,
     DeploymentPolicy,
@@ -38,7 +43,6 @@ from iesplan.computation import (
     SolverRuntime,
     build_executor_registry,
     build_registry,
-    build_result_adapter_registry,
     materialize_non_predictive_series,
 )
 from iesplan.computation.generators.highs_milp import (
@@ -46,7 +50,6 @@ from iesplan.computation.generators.highs_milp import (
     GENERATOR_REF,
     SOLVER_REF,
 )
-from iesplan.computation.result_adapters.highs import HIGHS_ADAPTER
 from iesplan.core.content import read_content
 from iesplan.devices import init_registry, list_devices
 from iesplan.finance import (
@@ -214,6 +217,8 @@ def _generate_bundle(inputs):
 
 def _runtime(policy=None) -> SolverRuntime:
     """真实执行编排：本地进程 provider + 真实垫片绑定 + 部署策略。"""
+    from legacy_solve_testkit import install_highs_stage_wrapper
+
     executor_id, _, executor_version = EXECUTOR_REF.rpartition("@")
     provider = LocalProcessProvider(
         ExecutorDescriptor(
@@ -224,7 +229,7 @@ def _runtime(policy=None) -> SolverRuntime:
         (
             LocalExecutable(
                 ref=HIGHS_EXECUTABLE_REF,
-                path=HIGHS_ADAPTER_PATH,
+                path=install_highs_stage_wrapper(),
                 readiness=ExecutableReadiness(
                     version=HIGHS_VERSION,
                     self_test=("--self-test",),
@@ -256,12 +261,50 @@ def _attempt(suffix: str) -> AttemptContext:
     )
 
 
+def _command(*, time_limit: int = 600, timeout_seconds: int = 1200) -> dict[str, object]:
+    return {
+        "executor": EXECUTOR_REF,
+        "executable": HIGHS_EXECUTABLE_REF,
+        "arguments": [
+            PROBLEM_PATH,
+            "--solution_file",
+            SOLUTION_PATH,
+            "--time_limit",
+            str(time_limit),
+            "--random_seed",
+            "0",
+        ],
+        "working_directory": ".",
+        "timeout_seconds": timeout_seconds,
+        "network": False,
+        "success_exit_codes": [0],
+    }
+
+
 def _adapt(bundle, receipt, collected):
-    """按回执固定引用选中适配器解释（只凭三元组）。"""
-    registry = build_result_adapter_registry([HIGHS_ADAPTER])
-    adapter = registry.resolve(receipt.result_adapter_ref)
-    assert adapter is HIGHS_ADAPTER
-    return adapter.adapt(bundle, receipt, collected)
+    """通过真实 1.2.0 ResultAdapter 恢复工程解并计算表达式。"""
+    from types import SimpleNamespace
+
+    cr, eng_sol = restore_bundle_solution(bundle, receipt, collected)
+    outputs = dict(cr.outputs)
+    if eng_sol:
+        outputs.update(eng_sol)
+    if cr.math_status in ("solved", "feasible"):
+        summary = eng_sol["solver_summary"]
+        exprs = evaluate_bundle_expressions(bundle, collected)
+        outputs["solution"] = {
+            "objective_value": summary["objective_value"],
+            "objective_unit": summary["objective_unit"],
+            "variables": exprs["variables"],
+            "components": exprs["components"],
+        }
+    return SimpleNamespace(
+        execution_status=cr.execution_status,
+        math_status=cr.math_status,
+        bundle_id=cr.bundle_id,
+        receipt_id=cr.receipt_id,
+        outputs=outputs,
+    )
 
 
 def _parse_v1_solution(raw: bytes) -> tuple[float, list[float]]:
@@ -322,14 +365,18 @@ def _mps_columns_and_objective(raw: bytes) -> tuple[list[str], dict[str, float]]
 def test_chain_success_reports_business_result() -> None:
     """成功链：求解→回执→解释，业务数值/单位/追溯一致且确定。"""
     inputs = _timed("business.inputs", _campus_inputs)
+    from iesplan.computation import PRIMAL_SOLUTION_OUTPUT_PATH
+
     bundle = _timed("business.generate_bundle", _generate_bundle, inputs)
-    assert bundle.manifest.command["executable"] == HIGHS_EXECUTABLE_REF
-    parameters = json.loads(materialized_file(bundle, PARAMETERS_PATH).decode("utf-8"))
+    assert bundle.manifest.bundle["contract"] == SOLVER_BUNDLE_MPS_CONTRACT
+    parameters = read_bundle_records(bundle)
     unit_map = parameters["unit_map"]
     assert parameters["objective_unit"] == "CNY"
 
     runtime = _runtime()
-    receipt, collected = _timed("business.solve_first", runtime.run, bundle, _attempt("ok"))
+    receipt, collected = _timed(
+        "business.solve_first", runtime.run, bundle, _attempt("ok"), command=_command()
+    )
     _report_solver_receipt("business.solve_first", receipt)
     assert receipt.status == "succeeded"
     assert receipt.exit_code == 0
@@ -337,7 +384,7 @@ def test_chain_success_reports_business_result() -> None:
     assert receipt.executable_ref == HIGHS_EXECUTABLE_REF
     assert receipt.bundle_id == "bundle-10c-ok"
     assert receipt.executor_ref == EXECUTOR_REF
-    assert set(collected) == {SOLUTION_PATH}
+    assert PRIMAL_SOLUTION_OUTPUT_PATH in collected
 
     result = _timed("business.adapt", _adapt, bundle, receipt, collected)
     assert result.execution_status == "completed"
@@ -351,13 +398,12 @@ def test_chain_success_reports_business_result() -> None:
     # battery discharge at 0.7 CNY/kWh. The full MILP must prove this optimum.
     assert solution["objective_value"] == pytest.approx(850_051.6, rel=0, abs=1e-5)
     assert next(v["value"] for v in solution["variables"] if v["name"] == "pv_cap") == 0
-    assert [item["name"] for item in solution["variables"]] == list(unit_map)
-    assert [item["unit"] for item in solution["variables"]] == list(unit_map.values())
+    assert {item["name"]: item["unit"] for item in solution["variables"]} == unit_map
 
     # 独立复算：MPS 目标行点乘主解 + offset == 报告目标（业务数值保真）。
-    file_objective, primals = _timed(
-        "business.parse_solution", _parse_v1_solution, read_content(collected[SOLUTION_PATH])
-    )
+    primal_doc = json.loads(read_content(collected[PRIMAL_SOLUTION_OUTPUT_PATH]).decode("utf-8"))
+    file_objective = float(primal_doc["objective_value"])
+    primals = [float(v) for v in primal_doc["values"]]
     order, mps_coeffs = _timed(
         "business.parse_mps", _mps_columns_and_objective, materialized_file(bundle, PROBLEM_PATH)
     )
@@ -372,9 +418,11 @@ def test_chain_success_reports_business_result() -> None:
 
     # 确定性：同一 Bundle 再跑一次，解字节与业务输出一致。
     _, collected_again = _timed(
-        "business.solve_second", runtime.run, bundle, _attempt("ok2")
+        "business.solve_second", runtime.run, bundle, _attempt("ok2"), command=_command()
     )
-    assert read_content(collected_again[SOLUTION_PATH]) == read_content(collected[SOLUTION_PATH])
+    assert read_content(collected_again[PRIMAL_SOLUTION_OUTPUT_PATH]) == read_content(
+        collected[PRIMAL_SOLUTION_OUTPUT_PATH]
+    )
 
 
 def test_chain_infeasible_model_reports_math_status() -> None:
@@ -406,13 +454,15 @@ def test_chain_infeasible_model_reports_math_status() -> None:
         (d.code, d.params) for d in revalidated.diagnostics if d.blocking
     ]
     bundle = _generate_bundle((revalidated.artifact, models, materialized, finance, config, evaluation))
-    receipt, collected = _runtime().run(bundle, _attempt("inf"))
+    receipt, collected = _runtime().run(bundle, _attempt("inf"), command=_command())
     assert receipt.status == "succeeded"
     assert receipt.exit_code == 0
     result = _adapt(bundle, receipt, collected)
     assert result.execution_status == "completed"
     assert result.math_status == "infeasible"
-    assert set(result.outputs) == {"solver_summary"}
+    assert "solver_summary" in result.outputs
+    assert "solution" not in result.outputs
+    assert result.outputs["solver_summary"]["has_feasible_solution"] is False
     assert result.outputs["solver_summary"]["termination_reason"] == "infeasible"
     assert result.bundle_id == receipt.bundle_id
     assert result.receipt_id == receipt.receipt_id
@@ -593,13 +643,14 @@ def test_chain_policy_rejected_never_executes() -> None:
         max_cpu_cores=4,
         allow_network=False,
     )
-    receipt, collected = _runtime(policy=denied).run(bundle, _attempt("rej"))
+    receipt, collected = _runtime(policy=denied).run(bundle, _attempt("rej"), command=_command())
     assert receipt.status == "policy_rejected"
     assert dict(collected) == {}
     result = _adapt(bundle, receipt, collected)
     assert result.execution_status == "rejected"
     assert result.math_status == "not_solved"
-    assert dict(result.outputs) == {}
+    assert "solution" not in result.outputs
+    assert result.outputs["solver_summary"]["has_feasible_solution"] is False
 
 
 def _solution_components(solution) -> dict:
@@ -618,7 +669,7 @@ def test_chain_success_reports_declared_components() -> None:
     inputs = _timed("components.inputs", _campus_inputs)
     bundle = _timed("components.generate_bundle", _generate_bundle, inputs)
     runtime = _runtime()
-    receipt, collected = _timed("components.solve", runtime.run, bundle, _attempt("comp"))
+    receipt, collected = _timed("components.solve", runtime.run, bundle, _attempt("comp"), command=_command())
     _report_solver_receipt("components.solve", receipt)
     assert receipt.status == "succeeded", receipt.termination_reason
     result = _timed("components.adapt", _adapt, bundle, receipt, collected)
@@ -697,7 +748,9 @@ def test_chain_two_solves_feed_yearly_evaluation() -> None:
     inputs1 = _timed("yearly.inputs_one", _campus_inputs)
     bundle1 = _timed("yearly.generate_one", _generate_bundle, inputs1)
     runtime = _runtime()
-    receipt1, collected1 = _timed("yearly.solve_one", runtime.run, bundle1, _attempt("yr1"))
+    receipt1, collected1 = _timed(
+        "yearly.solve_one", runtime.run, bundle1, _attempt("yr1"), command=_command()
+    )
     _report_solver_receipt("yearly.solve_one", receipt1)
     assert receipt1.status == "succeeded", receipt1.termination_reason
     solution1 = _timed("yearly.adapt_one", _adapt, bundle1, receipt1, collected1).outputs["solution"]
@@ -715,7 +768,9 @@ def test_chain_two_solves_feed_yearly_evaluation() -> None:
         "yearly.generate_two", _generate_bundle,
         (artifact, models, materialized, finance2, config, evaluation),
     )
-    receipt2, collected2 = _timed("yearly.solve_two", runtime.run, bundle2, _attempt("yr2"))
+    receipt2, collected2 = _timed(
+        "yearly.solve_two", runtime.run, bundle2, _attempt("yr2"), command=_command()
+    )
     _report_solver_receipt("yearly.solve_two", receipt2)
     assert receipt2.status == "succeeded", receipt2.termination_reason
     solution2 = _timed("yearly.adapt_two", _adapt, bundle2, receipt2, collected2).outputs["solution"]

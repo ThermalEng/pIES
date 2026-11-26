@@ -211,3 +211,6 @@ def init_db(trigger_statements: Iterable[str] | None = None) -> None:
         for stmt in trigger_statements or ():
             if stmt and stmt.strip():
                 conn.execute(sa_text(stmt))
+        from iesplan.migrations.runner import apply_migrations
+
+        apply_migrations(conn)

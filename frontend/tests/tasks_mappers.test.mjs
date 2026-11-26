@@ -299,6 +299,7 @@ const PAYMENTS = JSON.stringify([{ t: 0, ratio: '0.6' }, { t: 1, ratio: '0.4' }]
   )
   check('评价缺席占位', tk.describeFrozenEvaluation({}) === '—')
   check('配置摘要', tk.describeFrozenConfig({ mode: 'planning', generator: 'g', solver: 'highs', config_ref: { revision: 2 } }) === 'planning · g · highs · revision v2')
+  check('一体化算法配置摘要', tk.describeFrozenConfig({ mode: 'planning', generator: null, solver: null, algorithm: 'acme.alg@1.0.0', config_ref: { revision: 3 } }) === 'planning · acme.alg@1.0.0 · revision v3')
   check('财务摘要', tk.describeFrozenFinance('rg', 2) === 'rg · revision v2' && tk.describeFrozenFinance(null, null) === '—')
 }
 // 16. hasSavedConfig

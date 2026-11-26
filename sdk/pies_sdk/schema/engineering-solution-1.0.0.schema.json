@@ -4,6 +4,18 @@
   "title": "ies.engineering-solution 1.0.0 Contract",
   "description": "Canonical business-unit engineering solution emitted by algorithm plugins or backend bounded-subprocess restoration.",
   "type": "object",
+  "$defs": {
+    "construction_scale": {
+      "type": "object",
+      "required": ["planning_variable_id", "value", "unit"],
+      "additionalProperties": false,
+      "properties": {
+        "planning_variable_id": { "type": "string", "minLength": 1 },
+        "value": { "type": "number" },
+        "unit": { "type": "string", "minLength": 1 }
+      }
+    }
+  },
   "required": [
     "schema",
     "schema_version",
@@ -66,16 +78,7 @@
           "built": { "type": "boolean" },
           "scales": {
             "type": "array",
-            "items": {
-              "type": "object",
-              "required": ["planning_variable_id", "value", "unit"],
-              "additionalProperties": false,
-              "properties": {
-                "planning_variable_id": { "type": "string", "minLength": 1 },
-                "value": { "type": "number" },
-                "unit": { "type": "string", "minLength": 1 }
-              }
-            }
+            "items": { "$ref": "#/$defs/construction_scale" }
           }
         }
       }
@@ -120,6 +123,10 @@
     },
     "metrics": { "type": ["object", "null"] },
     "model_sources": { "type": ["object", "null"] },
+    "planning_variables": {
+      "type": ["array", "null"],
+      "items": { "$ref": "#/$defs/construction_scale" }
+    },
     "extensions": { "type": "object" }
   },
   "allOf": [

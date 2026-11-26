@@ -305,7 +305,7 @@ export default function TasksPage() {
       generator: body.generator,
       solver: body.solver,
       algorithm: body.algorithm,
-      evaluator: body.evaluator,
+      evaluators: body.evaluators,
       precision: body.precision,
     }
   }, [config])
@@ -1270,10 +1270,10 @@ export default function TasksPage() {
                   <dd>{calcSummary?.solver || '—'}</dd>
                 </>
               )}
-              {calcSummary?.evaluator ? (
+              {calcSummary?.evaluators && calcSummary.evaluators.length > 0 ? (
                 <>
-                  <dt>{t('ies.config.evaluator')}</dt>
-                  <dd>{calcSummary.evaluator}</dd>
+                  <dt>{t('ies.config.evaluators')}</dt>
+                  <dd>{calcSummary.evaluators.map((e) => e.evaluator).join(', ')}</dd>
                 </>
               ) : null}
               <dt>{t('ies.config.precision')}</dt>

@@ -240,9 +240,12 @@ export function describeFrozenEvaluation(evaluation: Record<string, unknown>): s
 
 /** 冻结计算配置正文 → 单行摘要(缺席以 — 占位, 不猜测)。 */
 export function describeFrozenConfig(body: Record<string, unknown>): string {
-  const parts = [frozenStr(body.mode), frozenStr(body.generator), frozenStr(body.solver)].filter(
-    (x): x is string => x !== null,
-  )
+  const parts = [
+    frozenStr(body.mode),
+    frozenStr(body.generator),
+    frozenStr(body.solver),
+    frozenStr(body.algorithm),
+  ].filter((x): x is string => x !== null)
   const ref = body.config_ref
   if (typeof ref === 'object' && ref !== null) {
     const rev = (ref as Record<string, unknown>).revision

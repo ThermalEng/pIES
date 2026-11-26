@@ -30,6 +30,7 @@ dataset/project/storage 领域公开门面, 不声明裸表, 不导入 ``iesplan
 
 from __future__ import annotations
 
+import json
 import logging
 import signal
 from collections.abc import Mapping
@@ -80,6 +81,7 @@ from iesplan.core.diagnostics import (
     TASK_RESOURCE_EXHAUSTED,
     TASK_TIMEOUT,
 )
+from iesplan.storage import get_object
 from iesplan.tasks import TaskRecord, TaskStateError, check_transition
 
 __all__ = [
@@ -274,22 +276,39 @@ def submit_attempt_result(
             # 载荷内已恢复统一序列的身份/单位元数据, 组装 hourly_refs 随
             # 证据载荷同事务提交；无 hourly 组（非计算任务亦如此）即合法缺席。
             # 只消费已恢复序列各必需键, 不解释求解列, 不做长度/hash 复核。
-            if "hourly" in sealed_groups:
+            if "hourly" in sealed_groups and "hourly_refs" not in payload:
                 hourly_desc = sealed_groups["hourly"][HOURLY_OBJECT_PATH]
                 hourly_series = result_step_series(payload["compute_result"]["outputs"])
-                ordered_ids = sorted(hourly_series)
-                payload["hourly_refs"] = [{
-                    "object_id": hourly_desc["object_id"],
-                    "fields": ordered_ids,
-                    "rows": len(hourly_series[ordered_ids[0]]["values"]),
-                    "series": [
-                        {
-                            **{key: value for key, value in hourly_series[series_id].items()
-                               if key != "values"},
-                        }
-                        for series_id in ordered_ids
-                    ],
-                }]
+                if hourly_series:
+                    ordered_ids = sorted(hourly_series)
+                    payload["hourly_refs"] = [{
+                        "object_id": hourly_desc["object_id"],
+                        "fields": ordered_ids,
+                        "rows": len(hourly_series[ordered_ids[0]]["values"]) if ordered_ids else 0,
+                        "series": [
+                            {
+                                **{key: value for key, value in hourly_series[series_id].items()
+                                   if key != "values"},
+                            }
+                            for series_id in ordered_ids
+                        ],
+                    }]
+                else:
+                    hourly_doc = json.loads(
+                        get_object(db, int(hourly_desc["object_id"])).decode("utf-8")
+                    )
+                    data_map = hourly_doc.get("data") or {}
+                    meta_series = (hourly_doc.get("meta") or {}).get("series") or {}
+                    ordered_ids = sorted(data_map)
+                    payload["hourly_refs"] = [{
+                        "object_id": hourly_desc["object_id"],
+                        "fields": ordered_ids,
+                        "rows": len(data_map[ordered_ids[0]]) if ordered_ids else 0,
+                        "series": [
+                            dict(meta_series.get(series_id) or {"series_id": series_id})
+                            for series_id in ordered_ids
+                        ],
+                    }]
             blob = GeneratedContent(partial(json_chunks, payload))
             object_id = store_result_blob(db, blob, actor_id=who)
             evidence_id = create_evidence_record(

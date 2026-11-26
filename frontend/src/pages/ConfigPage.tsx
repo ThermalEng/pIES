@@ -6,8 +6,9 @@
  *   初值加载失败即明确报错);
  * - 保存:PUT {calculation_config, expected_revision}(自有链乐观锁, 首次为 null);
  *   成功提示 revision; 409 保留表单仅提示冲突, 由用户主动重载; 422 展示错误信息;
- * - predictions/options/convergence/outputs 为 JSON 文本域, 本地解析失败即
- *   阻断保存; 空 convergence/seed 按契约以 null 提交。
+ * - predictions/evaluators/options/outputs 为 JSON 文本域, 本地解析失败即
+ *   阻断保存; 空 seed 按契约以 null 提交, 空 evaluators/predictions 为 [],
+ *   空 options 为 {}。
  *
  * 挂载方式:路由 /projects/:id/config 由 useParams 取项目 id;
  * 也可由工作台以 <ConfigPage projectId={id} /> 方式嵌入。
@@ -37,13 +38,12 @@ function emptyFormState(): {
   generator: string
   solver: string
   algorithm: string
-  evaluator: string
+  evaluatorsText: string
   precision: '' | 'low' | 'medium' | 'high'
   timeLimit: string
   seed: string
   outputsText: string
   predictionsText: string
-  convergenceText: string
   optionsText: string
 } {
   return {
@@ -51,13 +51,12 @@ function emptyFormState(): {
     generator: '',
     solver: '',
     algorithm: '',
-    evaluator: '',
+    evaluatorsText: '',
     precision: '',
     timeLimit: '',
     seed: '',
     outputsText: '',
     predictionsText: '',
-    convergenceText: '',
     optionsText: '',
   }
 }
@@ -92,13 +91,12 @@ export default function ConfigPage(props: ConfigPageProps) {
   const [generator, setGenerator] = useState('')
   const [solver, setSolver] = useState('')
   const [algorithm, setAlgorithm] = useState('')
-  const [evaluator, setEvaluator] = useState('')
+  const [evaluatorsText, setEvaluatorsText] = useState('')
   const [precision, setPrecision] = useState<'' | 'low' | 'medium' | 'high'>('')
   const [timeLimit, setTimeLimit] = useState('')
   const [seed, setSeed] = useState('')
   const [outputsText, setOutputsText] = useState('')
   const [predictionsText, setPredictionsText] = useState('')
-  const [convergenceText, setConvergenceText] = useState('')
   const [optionsText, setOptionsText] = useState('')
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({})
   const [saving, setSaving] = useState(false)
@@ -112,13 +110,12 @@ export default function ConfigPage(props: ConfigPageProps) {
     setGenerator(body.generator ?? '')
     setSolver(body.solver ?? '')
     setAlgorithm(body.algorithm ?? '')
-    setEvaluator(body.evaluator ?? '')
+    setEvaluatorsText(pretty(body.evaluators))
     setPrecision(body.precision === 'low' || body.precision === 'medium' || body.precision === 'high' ? body.precision : '')
     setTimeLimit(Number.isFinite(body.time_limit_seconds) ? String(body.time_limit_seconds) : '')
     setSeed(typeof body.seed === 'number' ? String(body.seed) : '')
     setOutputsText(pretty(body.outputs))
     setPredictionsText(pretty(body.predictions))
-    setConvergenceText(pretty(body.convergence))
     setOptionsText(pretty(body.options))
     setRevision(rev)
     setFieldErrors({})
@@ -152,13 +149,12 @@ export default function ConfigPage(props: ConfigPageProps) {
             setGenerator(e.generator)
             setSolver(e.solver)
             setAlgorithm(e.algorithm)
-            setEvaluator(e.evaluator)
+            setEvaluatorsText(e.evaluatorsText)
             setPrecision(e.precision)
             setTimeLimit(String(d.calculation_defaults.time_limit_seconds))
             setSeed(e.seed)
             setOutputsText(e.outputsText)
             setPredictionsText(e.predictionsText)
-            setConvergenceText(e.convergenceText)
             setOptionsText(e.optionsText)
             setRevision(null)
             setFieldErrors({})
@@ -181,14 +177,13 @@ export default function ConfigPage(props: ConfigPageProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pid])
 
-  /** 组装提交体: 返回 body 或字段错误表(空 convergence/seed 按契约以 null 提交)。 */
+  /** 组装提交体: 返回 body 或字段错误表(13 字段 CalculationConfig 契约)。 */
   function buildBody(): { body: CalculationConfigBody | null; errors: Record<string, string> } {
     const errors: Record<string, string> = {}
     if (!mode.trim()) errors.mode = t('ies.config.required')
     const generatorVal = generator.trim() || null
     const solverVal = solver.trim() || null
     const algorithmVal = algorithm.trim() || null
-    const evaluatorVal = evaluator.trim() || null
     if (algorithmVal) {
       if (generatorVal) errors.generator = t('ies.config.mode_conflict')
       if (solverVal) errors.solver = t('ies.config.mode_conflict')
@@ -217,11 +212,23 @@ export default function ConfigPage(props: ConfigPageProps) {
       errors.outputs = t('ies.config.outputs_required')
     }
     const predictions = parseJsonField(predictionsText, [])
-    if (predictions.error) errors.predictions = predictions.error
-    const convergence = parseJsonField(convergenceText, null)
-    if (convergence.error) errors.convergence = convergence.error
+    if (predictions.error) {
+      errors.predictions = predictions.error
+    } else if (!Array.isArray(predictions.value)) {
+      errors.predictions = t('ies.config.invalid_json_array')
+    }
+    const evaluators = parseJsonField(evaluatorsText, [])
+    if (evaluators.error) {
+      errors.evaluators = evaluators.error
+    } else if (!Array.isArray(evaluators.value)) {
+      errors.evaluators = t('ies.config.invalid_json_array')
+    }
     const options = parseJsonField(optionsText, {})
-    if (options.error) errors.options = options.error
+    if (options.error) {
+      errors.options = options.error
+    } else if (options.value === null || typeof options.value !== 'object' || Array.isArray(options.value)) {
+      errors.options = t('ies.config.invalid_json_object')
+    }
     if (Object.keys(errors).length > 0) return { body: null, errors }
     return {
       body: {
@@ -232,9 +239,8 @@ export default function ConfigPage(props: ConfigPageProps) {
         generator: generatorVal,
         solver: solverVal,
         algorithm: algorithmVal,
-        evaluator: evaluatorVal,
+        evaluators: evaluators.value as CalculationConfigBody['evaluators'],
         precision: precision as 'low' | 'medium' | 'high',
-        convergence: convergence.value as CalculationConfigBody['convergence'],
         time_limit_seconds: limit,
         options: options.value as Record<string, unknown>,
         seed: seedValue,
@@ -274,8 +280,8 @@ export default function ConfigPage(props: ConfigPageProps) {
       // 后端按已选生成器公开 descriptor 返回字段定位。保留整份编辑态，
       // 总览与字段旁同时展示，不把静态不相容留到任务运行后才发现。
       if (err instanceof ApiError && err.status === 422 && err.location?.field) {
-        const field = err.location.field
-        if (['generator', 'solver', 'algorithm', 'evaluator', 'mode', 'precision', 'outputs', 'options'].includes(field)) {
+        const field = err.location.field.split('.')[0].split('[')[0].split('/')[0]
+        if (['generator', 'solver', 'algorithm', 'evaluators', 'mode', 'precision', 'outputs', 'options', 'predictions', 'seed', 'time_limit_seconds'].includes(field)) {
           setFieldErrors({ [field]: errorMessage(err) })
         }
       }
@@ -371,15 +377,6 @@ export default function ConfigPage(props: ConfigPageProps) {
               invalid={!!fieldErrors.algorithm}
             />
           </FormField>
-          <FormField label={t('ies.config.evaluator')} htmlFor="calc-evaluator" error={fieldErrors.evaluator} hint={t('ies.config.hint_refs')}>
-            <Input
-              id="calc-evaluator"
-              value={evaluator}
-              onChange={(e) => setEvaluator(e.target.value)}
-              placeholder="ies.result-adapter.highs@1.0.0"
-              invalid={!!fieldErrors.evaluator}
-            />
-          </FormField>
           <FormField label={t('ies.config.precision')} htmlFor="calc-precision" required error={fieldErrors.precision}>
             <Select id="calc-precision" value={precision} onChange={(e) => setPrecision(e.target.value as '' | 'low' | 'medium' | 'high')} invalid={!!fieldErrors.precision}>
               <option value="">—</option>
@@ -413,17 +410,25 @@ export default function ConfigPage(props: ConfigPageProps) {
             invalid={!!fieldErrors.predictions}
           />
         </FormField>
-        <FormField label={t('ies.config.convergence')} htmlFor="calc-convergence" error={fieldErrors.convergence}>
+        <FormField label={t('ies.config.evaluators')} htmlFor="calc-evaluators" error={fieldErrors.evaluators} hint={t('ies.config.hint_evaluators')}>
           <Textarea
-            id="calc-convergence"
-            value={convergenceText}
-            onChange={(e) => setConvergenceText(e.target.value)}
-            rows={3}
-            invalid={!!fieldErrors.convergence}
+            id="calc-evaluators"
+            value={evaluatorsText}
+            onChange={(e) => setEvaluatorsText(e.target.value)}
+            rows={4}
+            placeholder='[{"evaluator": "ies.evaluator.finance@1.0.0", "parameters": {}}]'
+            invalid={!!fieldErrors.evaluators}
           />
         </FormField>
-        <FormField label={t('ies.config.options')} htmlFor="calc-options" error={fieldErrors.options}>
-          <Textarea id="calc-options" value={optionsText} onChange={(e) => setOptionsText(e.target.value)} rows={4} invalid={!!fieldErrors.options} />
+        <FormField label={t('ies.config.options')} htmlFor="calc-options" error={fieldErrors.options} hint={t('ies.config.hint_options')}>
+          <Textarea
+            id="calc-options"
+            value={optionsText}
+            onChange={(e) => setOptionsText(e.target.value)}
+            rows={4}
+            placeholder='{"generator": {}, "solver": {}}'
+            invalid={!!fieldErrors.options}
+          />
         </FormField>
       </Card>
     </div>

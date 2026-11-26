@@ -20,8 +20,8 @@ PLUGIN_SCHEMA = "ies.algorithm-plugin"
 PLUGIN_SCHEMA_VERSION = "1.0.0"
 PLUGIN_KINDS = ("predictor", "generator", "solver", "evaluator", "algorithm")
 
-CURRENT_PIES_VERSION = "1.1.5"
-CURRENT_SDK_VERSION = "1.1.5"
+CURRENT_PIES_VERSION = "1.2.0"
+CURRENT_SDK_VERSION = "1.2.0"
 
 _SCHEMA_PATH = Path(__file__).parent / "schema" / "plugin-1.0.0.schema.json"
 _SEMVER_RE = re.compile(r"^(\d+)\.(\d+)\.(\d+)$")

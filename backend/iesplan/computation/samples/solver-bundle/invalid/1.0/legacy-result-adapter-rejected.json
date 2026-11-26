@@ -1,0 +1,27 @@
+{
+  "schema": "ies.solver-bundle",
+  "schema_version": "1.0.0",
+  "bundle": {
+    "generator": "acme.generator@1.0.0",
+    "contract": "ies.solver-bundle.mps@1.0.0"
+  },
+  "inputs": [
+    {
+      "path": "input/problem.mps",
+      "media_type": "application/mps"
+    },
+    {
+      "path": "input/parameters.json",
+      "media_type": "application/json"
+    }
+  ],
+  "outputs": [
+    {
+      "path": "output/primal_solution.json",
+      "media_type": "application/json",
+      "required": true
+    }
+  ],
+  "extensions": {},
+  "result_adapter": "acme.result-adapter@1.0.0"
+}

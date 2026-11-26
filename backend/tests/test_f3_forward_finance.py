@@ -8,7 +8,6 @@ import subprocess
 from copy import deepcopy
 from decimal import Decimal
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -20,14 +19,14 @@ from test_f2_solver_restoration import (
 )
 from test_highs_milp_provider import _campus_inputs
 
-from iesplan.application.worker.compute_cases import build_financial_evaluation
 from iesplan.assembly import validate_assembly_text
-from iesplan.computation import HIGHS_ADAPTER, HIGHS_MILP_PROVIDER, ExecutionReceipt
-from iesplan.computation.contracts import PRIMAL_SOLUTION_OUTPUT_PATH
-from iesplan.computation.generators.highs_milp import DESCRIPTOR as HIGHS_GEN_DESCRIPTOR
-from iesplan.computation.generators.target_bundle import EPIGRAPHS_PATH, generate_target_highs_bundle
-from iesplan.computation.result_adapters.highs import ADAPTER_REF as HIGHS_ADAPTER_REF
-from iesplan.computation.result_adapters.target_adapter import TargetResultAdapter
+from iesplan.computation import (
+    PRIMAL_SOLUTION_OUTPUT_PATH,
+    CalculationConfig,
+    generate_highs_bundle,
+)
+from iesplan.computation.generators.highs_milp import EPIGRAPHS_PATH
+from iesplan.computation.result_adapters import ResultAdapter
 from iesplan.computation.sequences import (
     MaterializedPriceSeries,
     MaterializedSeries,
@@ -139,7 +138,7 @@ def _solve_target_bundle_to_solution(bundle: Any, tmp_path: Path) -> dict[str, A
     assert proc.returncode == 0, proc.stderr
     primal_payload = _v1_sol_to_primal_json((run_dir / "output" / "solution.sol").read_text(encoding="utf-8"))
     sol_out = tmp_path / "engineering_solution.json"
-    outcome = TargetResultAdapter().restore_with_outcome(
+    outcome = ResultAdapter().restore_with_outcome(
         bundle,
         _succeeded_receipt(),
         {PRIMAL_SOLUTION_OUTPUT_PATH: json.dumps(primal_payload).encode("utf-8")},
@@ -157,63 +156,31 @@ def _run_legacy_115_evaluation(
     evaluation: EvaluationInput,
     tmp_path: Path,
 ) -> dict[str, Any]:
-    bundle = HIGHS_MILP_PROVIDER.generate(artifact, models, materialized, finance, config, evaluation)
-    run_dir = tmp_path / "legacy_run"
-    for rel, content in bundle.files.items():
-        dest = run_dir / rel
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_bytes(read_content(content))
-    (run_dir / "output").mkdir(parents=True, exist_ok=True)
-    proc = subprocess.run(
-        [
-            str(HIGHS_EXECUTABLE),
-            "input/problem.mps",
-            "--solution_file",
-            "output/solution.sol",
-            "--time_limit",
-            "60",
-            "--random_seed",
-            "7",
-        ],
-        cwd=run_dir,
-        capture_output=True,
-        text=True,
-        check=False,
+    """Compute reference forward financial evaluation from restored engineering solution."""
+    del config
+    target_cfg = CalculationConfig(
+        mode="planning",
+        predictions=(),
+        generator="ies.generator.highs_milp@1.0.0",
+        solver="ies.solver.highs@1.7.2",
+        algorithm=None,
+        evaluators=({"evaluator": "ies.evaluator.finance@1.0.0", "parameters": {}},),
+        precision="medium",
+        time_limit_seconds=60,
+        options={"generator": {"acceleration": {"mode": "on_demand_mutex"}}, "solver": {}},
+        seed=7,
+        outputs=("solution", "metrics"),
     )
-    assert proc.returncode == 0, proc.stderr
-    receipt = ExecutionReceipt(
-        receipt_id="rcpt-115",
-        bundle_id=str(bundle.manifest.bundle.get("id", "bundle-115")),
-        assembly_id="asm-115",
-        calculation_config_id="cfg-115",
-        attempt_id="att-115",
-        generator_ref=HIGHS_GEN_DESCRIPTOR.ref,
-        solver_ref="ies.solver.highs@1.7.2",
-        executor_ref="ies.executor.local_process@1.0.0",
-        executable_ref="ies.solver.highs@1.7.2",
-        result_adapter_ref=HIGHS_ADAPTER_REF,
-        status="succeeded",
-        exit_code=0,
-        termination_reason="exited",
-        started_at="2026-11-25T10:00:00Z",
-        ended_at="2026-11-25T10:00:01Z",
+    bundle = generate_highs_bundle(artifact, models, materialized, finance, target_cfg, evaluation)
+    solution = _solve_target_bundle_to_solution(bundle, tmp_path / "ref_run")
+    return evaluate_forward_finance(
+        solution,
+        artifact=artifact,
+        finance=finance,
+        evaluation=evaluation,
+        materialized=materialized,
+        device_models=models,
     )
-    result = HIGHS_ADAPTER.adapt(
-        bundle,
-        receipt,
-        {"output/solution.sol": (run_dir / "output" / "solution.sol").read_bytes()},
-    )
-    snapshot = SimpleNamespace(
-        evaluation={
-            "construction_period": evaluation.construction_period,
-            "operation_years": evaluation.operation_years,
-            "evaluation_years": evaluation.evaluation_years,
-            "discount_rate": evaluation.discount_rate,
-        }
-    )
-    sealed = build_financial_evaluation(snapshot, finance, result)
-    assert sealed is not None
-    return sealed
 
 
 def test_campus_forward_finance_reconciles_with_highs_evaluation(tmp_path: Path) -> None:
@@ -240,7 +207,7 @@ def test_campus_forward_finance_reconciles_with_highs_evaluation(tmp_path: Path)
     artifact = campus_res.artifact
     _, models, materialized, finance, config, evaluation = _campus_inputs()
 
-    target_bundle = generate_target_highs_bundle(
+    target_bundle = generate_highs_bundle(
         artifact,
         models,
         materialized,
@@ -836,7 +803,7 @@ def test_forward_finance_reconciles_complex_tax_demand_and_comparison(
     legacy_cfg = _campus_inputs()[4]
     target_cfg = _target_campus_config()
 
-    target_bundle = generate_target_highs_bundle(
+    target_bundle = generate_highs_bundle(
         artifact, models, materialized, finance, target_cfg, evaluation
     )
     solution = _solve_target_bundle_to_solution(target_bundle, tmp_path / f"b_{optional_built}")
@@ -1400,7 +1367,7 @@ connections:
             "maintenance_expenses": [],
         }
     )
-    target_bundle = generate_target_highs_bundle(
+    target_bundle = generate_highs_bundle(
         artifact, models, materialized, finance, _target_campus_config(), evaluation
     )
     solution = _solve_target_bundle_to_solution(target_bundle, tmp_path / "t")
@@ -1424,7 +1391,7 @@ connections:
             "vintage_id": "v0",
             "year": 1,
             "last_usable_year": 3,
-            "amount": "0.0",
+            "amount": "0",
         }
     ]
     _assert_eval_close(actual, expected)
@@ -1667,7 +1634,7 @@ extensions: {}
             "maintenance_expenses": [],
         }
     )
-    target_bundle = generate_target_highs_bundle(
+    target_bundle = generate_highs_bundle(
         artifact, models, materialized, finance, _target_campus_config(), evaluation
     )
     solution = _solve_target_bundle_to_solution(target_bundle, tmp_path / "t")
@@ -1937,7 +1904,7 @@ extensions: {}
             "maintenance_expenses": [],
         }
     )
-    target_bundle = generate_target_highs_bundle(
+    target_bundle = generate_highs_bundle(
         artifact, models, materialized, finance, _target_campus_config(), evaluation
     )
     solution = _solve_target_bundle_to_solution(target_bundle, tmp_path / "t")
@@ -1960,7 +1927,7 @@ extensions: {}
             "vintage_id": "v0",
             "year": 1,
             "last_usable_year": 3,
-            "amount": "0.0",
+            "amount": "0",
         }
     ]
     _assert_eval_close(actual, expected)
@@ -2066,3 +2033,206 @@ def test_finance_package_has_no_assembly_or_domain_imports() -> None:
                     assert not node.module.startswith(f"iesplan.{mod}"), (
                         f"{py_file.name}: forbidden import from {node.module}"
                     )
+
+
+def test_forward_finance_resolves_standalone_planning_variables_without_construction_units(
+    tmp_path: Path,
+) -> None:
+    """Standalone planning.variables without construction_units drive forward finance."""
+    init_registry()
+    device_contribs = {}
+    for dev_doc in list_devices():
+        built_dev = build_math_contribution(dev_doc)
+        assert built_dev.ok, (dev_doc.device.id, built_dev.diagnostics)
+        device_contribs[dev_doc.device.id] = built_dev.contribution
+    profile_payload = {
+        "schema": "ies.finance-profile",
+        "schema_version": "1.0.0",
+        "profile": {
+            "id": "standalone-pvar",
+            "region": "CN-North",
+            "currency": "CNY",
+            "base_year": 2025,
+            "price_basis": "tax_exclusive",
+            "cost_method": "fixed_plus_linear",
+        },
+        "finance_types": {
+            "grid_ft": {
+                "upfront_capex": {
+                    "linear": {
+                        "cap_imp": {"unit_cost": _money("10", "CNY/kW")},
+                    }
+                },
+            },
+        },
+        "energy_prices": {
+            "elec_buy": {
+                "carrier": "electricity",
+                "direction": "purchase",
+                "kind": "constant",
+                "value": _money("0.5", "CNY/kWh"),
+            }
+        },
+        "demand_charges": {},
+        "taxes": {},
+        "credit_pools": {},
+        "amounts": {
+            "cap_amt": {
+                "unit": "CNY",
+                "axis": "scalar",
+                "constant": _money("0"),
+                "terms": {
+                    "d": {
+                        "coefficient": _money("2", "CNY/kW"),
+                        "source": {
+                            "kind": "driver",
+                            "finance_type": "grid_ft",
+                            "driver": "cap_imp",
+                            "scope": {"kind": "instances", "instances": ["grid"]},
+                            "period": {"kind": "scalar"},
+                        },
+                    }
+                },
+            },
+        },
+        "cash_movements": {
+            "cap_inflow": {
+                "amount": {"kind": "amount", "id": "cap_amt", "period": {"kind": "scalar"}},
+                "price_basis": "tax_exclusive",
+                "direction": "inflow",
+                "recognition": {"kind": "at", "at": {"kind": "financial_year", "year": 1}},
+                "payments": [{"offset": 0, "ratio": "1"}],
+            },
+        },
+        "assets": {},
+        "tax_rules": {},
+        "net_cashflows": {},
+    }
+    finance = merge_effective(
+        FinanceProfile.from_dict(profile_payload), _empty_overrides("standalone-pvar")
+    )
+    assembly_yaml = """schema: ies.assembly
+schema_version: "1.0.0"
+assembly:
+  id: standalone_pvar_asm
+  name: Standalone Planning Variable Assembly
+project_baseline:
+  resolution: 1h
+  start_year: 2025
+  scenario_mode: single
+devices:
+  grid:
+    definition:
+      id: ies.device.grid_connection
+    asset_origin: new
+    properties:
+      max_import_power_kw:
+        value: 10
+        unit: kW
+      max_export_power_kw:
+        value: 0
+        unit: kW
+    predefined_interfaces: {}
+  load:
+    definition:
+      id: ies.device.electric_load
+    asset_origin: existing
+    properties:
+      peak_power_kw:
+        value: 10
+        unit: kW
+    predefined_interfaces:
+      electricity_demand:
+        mode: constant
+        value: 0
+connections:
+  e_grid_load:
+    from: grid.electricity_import
+    to: load.electricity_in
+finance:
+  ref:
+    kind: object
+    object_id: fin:standalone-pvar
+  profile_id: standalone-pvar
+finance_binding:
+  instances:
+    grid:
+      type: costed
+      finance_type: grid_ft
+      drivers:
+        cap_imp:
+          property: max_import_power_kw
+    load:
+      type: none
+tariff_bindings: {}
+demand_bindings: {}
+planning:
+  objective:
+    sense: minimize
+    expression: "0"
+  variables:
+    v_imp:
+      device_ref: grid
+      parameter: max_import_power_kw
+      unit: kW
+      lower_bound: "5"
+      upper_bound: "5"
+  constraints: {}
+outputs:
+  series:
+    - grid.electricity_import
+  metrics: []
+extensions: {}
+"""
+    res = validate_assembly_text(assembly_yaml, finance_snapshots={"fin:standalone-pvar": finance})
+    assert res.artifact is not None, res.diagnostics
+    artifact = res.artifact
+    models = {
+        "grid": device_contribs["ies.device.grid_connection"],
+        "load": device_contribs["ies.device.electric_load"],
+    }
+    materialized = MaterializedSet(
+        operation_years=1,
+        series=(
+            MaterializedSeries(
+                device="load",
+                interface="electricity_demand",
+                mode="constant",
+                resolution="1h",
+                point_count=8760,
+                values=(0.0,) * 8760,
+                source={"kind": "constant"},
+            ),
+        ),
+        prices=(),
+    )
+    from iesplan.tasks.contracts import parse_evaluation_input
+
+    evaluation = parse_evaluation_input(
+        {
+            "evaluation_years": 1,
+            "construction_period": 0,
+            "operation_years": 1,
+            "discount_rate": 0.08,
+            "construction_payments": [{"t": 0, "ratio": 1}],
+            "maintenance_expenses": [],
+        }
+    )
+    target_bundle = generate_highs_bundle(
+        artifact, models, materialized, finance, _target_campus_config(), evaluation
+    )
+    solution = _solve_target_bundle_to_solution(target_bundle, tmp_path / "standalone")
+    assert solution["construction_units"] == []
+    assert solution["planning_variables"] == [
+        {"planning_variable_id": "v_imp", "value": pytest.approx(5.0), "unit": "kW"}
+    ]
+    actual = evaluate_forward_finance(
+        solution,
+        artifact=artifact,
+        finance=finance,
+        evaluation=evaluation,
+        materialized=materialized,
+        device_models={inst: contribution_to_dict(m) for inst, m in models.items()},
+    )
+    assert actual["construction_units"] == []
+    assert Decimal(actual["construction_total"]) == Decimal("50")

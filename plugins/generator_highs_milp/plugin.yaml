@@ -9,8 +9,12 @@ name:
 description: Official deterministic HiGHS MILP Solver Bundle generator preserving all iesplan modeling, unit, and tax rules.
 license: MPL-2.0
 compatibility:
-  pies: ">=1.1.5,<2.0.0"
-  sdk: ">=1.1.5,<2.0.0"
+  pies: ">=1.2.0,<2.0.0"
+  sdk: ">=1.2.0,<2.0.0"
+consumes:
+  - ies.stage-input@1.0.0
+produces:
+  - ies.solver-bundle.mps@1.0.0
 runtime:
   language: python
   python: "3.12"
@@ -46,8 +50,4 @@ advanced:
     - planning
   supported_precisions:
     - medium
-  companions:
-    solver: ies.solver.highs@1.7.2
-    evaluator: ies.result-adapter.highs@1.0.0
-    result_adapter: ies.result-adapter.highs@1.0.0
 extensions: {}

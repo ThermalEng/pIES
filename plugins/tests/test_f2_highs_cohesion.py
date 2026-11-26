@@ -1,4 +1,4 @@
-"""Tests for F2 HiGHS solver cohesion (`ies-highs-solver`, `solve_f2`, `generate_f2`)."""
+"""Tests for HiGHS solver cohesion (`ies-highs-solver`, `solver_stage:solve`, `generator_stage:generate`)."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ import highspy
 import pytest
 from iesplan.assembly import validate_assembly_text
 from iesplan.computation import materialize_non_predictive_series
-from iesplan.computation.contracts import TargetCalculationConfig
+from iesplan.computation.protocols import CalculationConfig
 from iesplan.devices import init_registry, list_devices
 from iesplan.finance import EvaluationInput, effective_from_yaml
 from iesplan.modeling import build_math_contribution, contribution_to_dict
@@ -35,11 +35,11 @@ REPO_ROOT = PLUGINS_ROOT.parent
 IESPLAN_SAMPLES = REPO_ROOT / "backend" / "iesplan" / "assembly" / "samples"
 HIGHS_EXECUTABLE_SRC = REPO_ROOT / "backend" / "solver-executables" / "ies-highs-solver"
 
-generate_f2 = resolve_entrypoint("f2_generator:generate_f2", PLUGINS_ROOT / "generator_highs_milp")
-solve_f2 = resolve_entrypoint("f2_solver:solve_f2", PLUGINS_ROOT / "solver_highs")
-_f2_solver_mod = sys.modules["f2_solver"]
-HIGHS_EXECUTABLE_PATH = _f2_solver_mod.HIGHS_EXECUTABLE_PATH
-_stream_v1_solution_to_primal_json = _f2_solver_mod._stream_v1_solution_to_primal_json
+generate_stage = resolve_entrypoint("generator_stage:generate", PLUGINS_ROOT / "generator_highs_milp")
+solve_stage = resolve_entrypoint("solver_stage:solve", PLUGINS_ROOT / "solver_highs")
+_solver_stage_mod = sys.modules["solver_stage"]
+HIGHS_EXECUTABLE_PATH = _solver_stage_mod.HIGHS_EXECUTABLE_PATH
+_stream_v1_solution_to_primal_json = _solver_stage_mod._stream_v1_solution_to_primal_json
 
 
 _SOLVER_MANIFEST = load_plugin_manifest(
@@ -353,7 +353,7 @@ def test_solver_module_rejects_inflated_epigraph_and_lp_violation(tmp_path: Path
 
 
 @pytest.mark.parametrize("use_acceleration", [False, True])
-def test_solve_f2_rejects_inflated_epigraph_in_real_solver(
+def test_solve_stage_rejects_inflated_epigraph_in_real_solver(
     tmp_path: Path, use_acceleration: bool
 ) -> None:
     mps_text = _build_epigraph_mps(peak_lb=10.0, peak_cost=0.0, include_mutex=use_acceleration)
@@ -383,7 +383,7 @@ def test_solve_f2_rejects_inflated_epigraph_in_real_solver(
     )
     write_json_file(work_in / "request.json", {"time_limit_seconds": 30, "seed": 7})
 
-    solve_f2(
+    solve_stage(
         StageContext(
             manifest=_SOLVER_MANIFEST,
             work_in=work_in,
@@ -401,7 +401,7 @@ def test_solve_f2_rejects_inflated_epigraph_in_real_solver(
     assert primal.receipt["solver_diagnostics"]["epigraph_verified"] is False
 
 
-def test_solve_f2_statuses_and_accelerated_recovery(tmp_path: Path) -> None:
+def test_solve_stage_statuses_and_accelerated_recovery(tmp_path: Path) -> None:
     # 1) Solved with on_demand_mutex + tight epigraph in 0-based order
     acc_in = tmp_path / "acc_in"
     acc_out = tmp_path / "acc_out"
@@ -423,7 +423,7 @@ def test_solve_f2_statuses_and_accelerated_recovery(tmp_path: Path) -> None:
             "epigraphs": [{"peak_col": 0, "flow_cols": [1, 2]}],
         },
     )
-    solve_f2(
+    solve_stage(
         StageContext(
             manifest=_SOLVER_MANIFEST, work_in=acc_in, work_out=acc_out, parameters={}
         )
@@ -446,7 +446,7 @@ def test_solve_f2_statuses_and_accelerated_recovery(tmp_path: Path) -> None:
     inf_out = tmp_path / "inf_out"
     inf_out.mkdir()
     _write_bundle(inf_in, mps_text=_build_infeasible_mps())
-    solve_f2(
+    solve_stage(
         StageContext(
             manifest=_SOLVER_MANIFEST, work_in=inf_in, work_out=inf_out, parameters={}
         )
@@ -463,7 +463,7 @@ def test_solve_f2_statuses_and_accelerated_recovery(tmp_path: Path) -> None:
     unb_out = tmp_path / "unb_out"
     unb_out.mkdir()
     _write_bundle(unb_in, mps_text=_build_unbounded_mps())
-    solve_f2(
+    solve_stage(
         StageContext(
             manifest=_SOLVER_MANIFEST, work_in=unb_in, work_out=unb_out, parameters={}
         )
@@ -476,7 +476,7 @@ def test_solve_f2_statuses_and_accelerated_recovery(tmp_path: Path) -> None:
     assert unb_primal.values == ()
 
 
-def test_generate_f2_and_solve_f2_campus_end_to_end(tmp_path: Path) -> None:
+def test_generate_stage_and_solve_stage_campus_end_to_end(tmp_path: Path) -> None:
     init_registry()
     text = (IESPLAN_SAMPLES / "valid" / "campus.assembly.yaml").read_text(encoding="utf-8")
     validated = validate_assembly_text(text, package_dir=IESPLAN_SAMPLES)
@@ -521,13 +521,13 @@ def test_generate_f2_and_solve_f2_campus_end_to_end(tmp_path: Path) -> None:
         construction_payments=(),
         maintenance_expenses=(),
     )
-    target_cfg = TargetCalculationConfig(
+    target_cfg = CalculationConfig(
         mode="planning",
         predictions=(),
         generator="ies.generator.highs_milp@1.0.0",
         solver="ies.solver.highs@1.7.2",
         algorithm=None,
-        evaluators=({"evaluator": "ies.evaluator.highs@1.0.0", "parameters": {}},),
+        evaluators=({"evaluator": "ies.evaluator.finance@1.0.0", "parameters": {}},),
         precision="medium",
         time_limit_seconds=120,
         options={"generator": {}, "solver": {}},
@@ -559,7 +559,7 @@ def test_generate_f2_and_solve_f2_campus_end_to_end(tmp_path: Path) -> None:
         },
     )
 
-    generate_f2(
+    generate_stage(
         StageContext(
             manifest=_GENERATOR_MANIFEST, work_in=gen_in, work_out=gen_out, parameters={}
         )
@@ -583,7 +583,7 @@ def test_generate_f2_and_solve_f2_campus_end_to_end(tmp_path: Path) -> None:
     (solver_in / "bundle").symlink_to(bundle_dir)
     write_json_file(solver_in / "request.json", {"time_limit_seconds": 120, "seed": 0})
 
-    solve_f2(
+    solve_stage(
         StageContext(
             manifest=_SOLVER_MANIFEST,
             work_in=solver_in,

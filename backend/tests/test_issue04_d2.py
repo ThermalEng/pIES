@@ -5,12 +5,15 @@ HiGHS primal, paired adapter and worker sealing function; no mock peak values.
 """
 from __future__ import annotations
 
-import json
-from types import SimpleNamespace
-
 import pytest
-from bundle_testkit import materialized_file
-from test_highs_result_adapter import SOLUTION_PATH, _bundle, _receipt
+from legacy_solve_testkit import (
+    SOLUTION_PATH,
+    read_bundle_records,
+    restore_bundle_solution,
+)
+from legacy_solve_testkit import (
+    succeeded_receipt as _receipt,
+)
 from test_vat_monthly import (
     GRID_YAML,
     HEATER_UNBOUNDED_YAML,
@@ -25,7 +28,6 @@ from test_vat_monthly import (
     _solve_internal,
 )
 
-from iesplan.application.worker.compute_cases import build_financial_evaluation
 from iesplan.assembly import validate_assembly_doc
 from iesplan.computation import (
     HIGHS_MILP_PROVIDER,
@@ -34,7 +36,6 @@ from iesplan.computation import (
 )
 from iesplan.computation.generators.highs_milp import GENERATOR_REF
 from iesplan.computation.generators.linear import LoweringUnsupportedError
-from iesplan.computation.result_adapters.highs import ADAPTER_REF, HIGHS_ADAPTER
 from iesplan.core.yamlmini import load as yaml_load
 from iesplan.devices import init_registry
 from iesplan.devices.parser2 import parse_device_model_v2
@@ -42,6 +43,7 @@ from iesplan.finance import (
     ConstructionPayment,
     EvaluationInput,
     FinanceProfile,
+    evaluate_forward_finance,
     merge_effective,
 )
 
@@ -228,24 +230,19 @@ def _solved(inputs, tmp_path):
         artifact, models, mat, finance, config, evaluation,
     )
     _, _, raw = _solve_internal(bundle, tmp_path)
-    adapted = HIGHS_ADAPTER.adapt(
-        _bundle({
-            "input/problem.mps": materialized_file(bundle, "input/problem.mps"),
-            "input/parameters.json": materialized_file(bundle, "input/parameters.json"),
-        }),
-        _receipt(result_adapter_ref=ADAPTER_REF), {SOLUTION_PATH: raw},
+    adapted, eng_sol = restore_bundle_solution(
+        bundle, _receipt(bundle=bundle), {SOLUTION_PATH: raw}, tmp_path=tmp_path,
     )
-    sealed = build_financial_evaluation(
-        SimpleNamespace(evaluation={
-            "evaluation_years": evaluation.evaluation_years,
-            "construction_period": evaluation.construction_period,
-            "operation_years": evaluation.operation_years,
-            "discount_rate": evaluation.discount_rate,
-        }),
-        finance, adapted,
+    assert adapted.math_status == "solved"
+    sealed = evaluate_forward_finance(
+        eng_sol,
+        artifact=artifact,
+        finance=finance,
+        evaluation=evaluation,
+        materialized=mat,
+        device_models=models,
     )
-    assert sealed is not None
-    return adapted.outputs["financial_facts"], sealed, bundle
+    return sealed, sealed, bundle
 
 
 @pytest.mark.parametrize("resolution", ("1h", "30min"))
@@ -273,7 +270,7 @@ def test_zero_rate_non_economic_still_real_peak(tmp_path, resolution):
 def test_two_rates_same_meter_no_energy_tariff(tmp_path):
     """Two user-declared charges on the same physical meter are independent."""
     facts, sealed, bundle = _solved(_inputs(second_rate="4"), tmp_path)
-    sources = json.loads(materialized_file(bundle, "input/parameters.json"))["model_sources"]["sources"]
+    sources = read_bundle_records(bundle)["model_sources"]["sources"]
     assert sources["relation:demand.second.m13"]["depends_on"] == ["relation:demand.first.m13"]
     rows = facts["monthly_demand"]
     assert len(rows) == 24
@@ -296,7 +293,7 @@ def test_two_rates_same_meter_no_energy_tariff(tmp_path):
 
 def test_unused_demand_catalogue_publishes_empty_months(tmp_path):
     facts, sealed, _ = _solved(_inputs(empty=True), tmp_path)
-    assert facts["monthly_demand"] == ()
+    assert facts["monthly_demand"] == []
     assert sealed["monthly_demand"] == []
     assert float(facts["annual_operation"][0]["demand_charge"]) == 0.0
 

@@ -7,7 +7,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from pies_sdk.io import read_compute_result
+from pies_sdk.io import read_engineering_solution
 from pies_sdk.iteration import read_iterations
 from pies_sdk.runner import main, run_plugin
 
@@ -43,7 +43,7 @@ def test_reference_algorithm_via_cli_and_expected(tmp_path: Path) -> None:
     )
     assert proc.returncode == 0, proc.stderr
 
-    actual = json.loads((work_out / "result.json").read_text(encoding="utf-8"))
+    actual = json.loads((work_out / "solution.json").read_text(encoding="utf-8"))
     expected = json.loads(
         (plugin_dir / "tests" / "minimal" / "expected.json").read_text(encoding="utf-8")
     )
@@ -67,7 +67,7 @@ def test_iteration_loop_plugin_via_runner(tmp_path: Path) -> None:
         work_out=work_out,
     )
 
-    actual = read_compute_result(work_out).to_dict()
+    actual = read_engineering_solution(work_out / "solution.json").to_dict()
     expected = json.loads(
         (plugin_dir / "tests" / "minimal" / "expected.json").read_text(encoding="utf-8")
     )
@@ -92,9 +92,9 @@ version: "1.0.0"
 kind: algorithm
 name:
   en_us: Noop
-description: Plugin that omits required /work/out/result.json.
+description: Plugin that omits required /work/out/solution.json.
 compatibility:
-  pies: ">=1.1.5,<2.0.0"
+  pies: ">=1.2.0,<2.0.0"
 runtime:
   language: python
   python: "3.12"

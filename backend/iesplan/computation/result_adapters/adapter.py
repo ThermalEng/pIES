@@ -15,19 +15,20 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, NoReturn
 
-from iesplan.computation.contracts import (
-    PRIMAL_SOLUTION_OUTPUT_PATH,
-    TargetSolverBundle,
-    check_finite_json,
-)
+from iesplan.computation.bundle import PRIMAL_SOLUTION_OUTPUT_PATH
 from iesplan.computation.errors import ComputationUnavailableError
-from iesplan.computation.generators.highs_milp import PARAMETERS_PATH
-from iesplan.computation.generators.target_bundle import VARIABLE_MAP_SCHEMA, VARIABLE_MAP_VERSION
+from iesplan.computation.generators.highs_milp import (
+    PARAMETERS_PATH,
+    VARIABLE_MAP_SCHEMA,
+    VARIABLE_MAP_VERSION,
+)
 from iesplan.computation.protocols import (
     MATH_STATUSES,
     ComputeResult,
     ExecutionReceipt,
+    SolverBundle,
     StopProbe,
+    check_finite_json,
     check_provider_ref,
     read_stop_reason,
 )
@@ -1036,6 +1037,38 @@ def _recover_variable_map_records(
     }
 
 
+def _resolve_scale_entries(
+    raw_entries: Sequence[Any],
+    *,
+    label: str,
+    value_prefix: str,
+    resolve_scale_value: Any,
+) -> list[dict[str, Any]]:
+    """Validate and convert scale entries into business-unit EngineeringSolution items."""
+    scales_out: list[dict[str, Any]] = []
+    seen_pvars: set[str] = set()
+    for scale_entry in raw_entries:
+        if not isinstance(scale_entry, Mapping):
+            _fail(f"{label} 条目须为对象")
+        extra_s = sorted(set(scale_entry) - _SCALE_ENTRY_ALLOWED_KEYS)
+        if extra_s:
+            _fail(f"{label} 含未知字段: {extra_s!r}")
+        for req in ("planning_variable_id", "value", "unit"):
+            if req not in scale_entry:
+                _fail(f"{label} 缺少字段: {req!r}")
+        pname = _require_non_empty_str(
+            scale_entry["planning_variable_id"],
+            f"{label}.planning_variable_id",
+        )
+        if pname in seen_pvars:
+            _fail(f"{label} planning_variable_id 重复: {pname!r}")
+        seen_pvars.add(pname)
+        unit = _require_non_empty_str(scale_entry["unit"], f"{label}.{pname}.unit")
+        biz_val = resolve_scale_value(scale_entry, unit, f"{value_prefix}.{pname}")
+        scales_out.append({"planning_variable_id": pname, "value": biz_val, "unit": unit})
+    return scales_out
+
+
 def _resolve_facts_payload(
     raw_facts: Mapping[str, Any],
     *,
@@ -1074,29 +1107,12 @@ def _resolve_facts_payload(
 
         if not isinstance(unit_entry["scales"], list):
             _fail(f"construction_units[{uid!r}].scales 须为数组")
-        scales_out: list[dict[str, Any]] = []
-        seen_pvars: set[str] = set()
-        for scale_entry in unit_entry["scales"]:
-            if not isinstance(scale_entry, Mapping):
-                _fail(f"construction_units[{uid!r}].scales 条目须为对象")
-            extra_s = sorted(set(scale_entry) - _SCALE_ENTRY_ALLOWED_KEYS)
-            if extra_s:
-                _fail(f"construction_units[{uid!r}].scales 含未知字段: {extra_s!r}")
-            for req in ("planning_variable_id", "value", "unit"):
-                if req not in scale_entry:
-                    _fail(f"construction_units[{uid!r}].scales 缺少字段: {req!r}")
-            pname = _require_non_empty_str(
-                scale_entry["planning_variable_id"],
-                f"construction_units[{uid!r}].planning_variable_id",
-            )
-            if pname in seen_pvars:
-                _fail(f"construction_units[{uid!r}] planning_variable_id 重复: {pname!r}")
-            seen_pvars.add(pname)
-            unit = _require_non_empty_str(
-                scale_entry["unit"], f"construction_units[{uid!r}].{pname}.unit"
-            )
-            biz_val = resolve_scale_value(scale_entry, unit, f"{uid}.{pname}")
-            scales_out.append({"planning_variable_id": pname, "value": biz_val, "unit": unit})
+        scales_out = _resolve_scale_entries(
+            unit_entry["scales"],
+            label=f"construction_units[{uid!r}].scales",
+            value_prefix=uid,
+            resolve_scale_value=resolve_scale_value,
+        )
 
         resolved_units.append(
             {
@@ -1108,7 +1124,17 @@ def _resolve_facts_payload(
             }
         )
 
-    return {"construction_units": resolved_units}
+    resolved_out: dict[str, Any] = {"construction_units": resolved_units}
+    if "planning_variables" in raw_facts and raw_facts["planning_variables"] is not None:
+        if not isinstance(raw_facts["planning_variables"], list):
+            _fail("facts.planning_variables 须为数组")
+        resolved_out["planning_variables"] = _resolve_scale_entries(
+            raw_facts["planning_variables"],
+            label="planning_variables",
+            value_prefix="planning_variables",
+            resolve_scale_value=resolve_scale_value,
+        )
+    return resolved_out
 
 
 def _stream_engineering_solution_to_path(eng_sol: Mapping[str, Any], path: Path) -> int:
@@ -1232,6 +1258,8 @@ def _restore_in_current_process(
         "system_series": recovered["system_series"],
         "extensions": {},
     }
+    if "planning_variables" in facts_payload:
+        eng_sol["planning_variables"] = facts_payload["planning_variables"]
     if recovered["model_sources"] is not None:
         eng_sol["model_sources"] = recovered["model_sources"]
 
@@ -1515,14 +1543,14 @@ def restore_from_bundle_dir(
     )
 
 
-class TargetResultAdapter:
-    """Universal F2 ResultAdapter restoring ``ies.primal-solution@1.0.0`` via spawn subprocess."""
+class ResultAdapter:
+    """Universal 1.2.0 ResultAdapter restoring ``ies.primal-solution@1.0.0`` via spawn subprocess."""
 
     __slots__ = ()
 
     def restore_with_outcome(
         self,
-        bundle: TargetSolverBundle,
+        bundle: SolverBundle,
         receipt: ExecutionReceipt | Mapping[str, Any],
         outputs: Mapping[str, object],
         *,
@@ -1532,8 +1560,8 @@ class TargetResultAdapter:
         stop: StopProbe | None = None,
     ) -> RestorationOutcome:
         """Materialize streamed inputs/outputs under one budget and run bounded spawn restoration."""
-        if not isinstance(bundle, TargetSolverBundle):
-            raise TypeError(f"bundle 须为 TargetSolverBundle，得到 {type(bundle).__name__}")
+        if not isinstance(bundle, SolverBundle):
+            raise TypeError(f"bundle 须为 SolverBundle，得到 {type(bundle).__name__}")
         eff_mem_mb, eff_timeout_s = _validate_resource_budgets(memory_limit_mb, timeout_seconds)
         deadline = time.monotonic() + eff_timeout_s
         _check_stop_and_deadline(stop, deadline, "启动前")
@@ -1575,7 +1603,7 @@ class TargetResultAdapter:
 
     def restore(
         self,
-        bundle: TargetSolverBundle,
+        bundle: SolverBundle,
         receipt: ExecutionReceipt | Mapping[str, Any],
         outputs: Mapping[str, object],
         *,
@@ -1596,6 +1624,28 @@ class TargetResultAdapter:
         ).compute_result
 
 
+def restore_bundle_outputs(
+    bundle: SolverBundle,
+    receipt: ExecutionReceipt | Mapping[str, Any],
+    outputs: Mapping[str, object],
+    *,
+    solution_output_path: Path | None = None,
+    memory_limit_mb: int | None = None,
+    timeout_seconds: float | None = None,
+    stop: StopProbe | None = None,
+) -> RestorationOutcome:
+    """Convenience entry calling ``ResultAdapter().restore_with_outcome``."""
+    return ResultAdapter().restore_with_outcome(
+        bundle,
+        receipt,
+        outputs,
+        solution_output_path=solution_output_path,
+        memory_limit_mb=memory_limit_mb,
+        timeout_seconds=timeout_seconds,
+        stop=stop,
+    )
+
+
 __all__ = [
     "DEFAULT_MEMORY_LIMIT_MB",
     "DEFAULT_TIMEOUT_SECONDS",
@@ -1605,6 +1655,7 @@ __all__ = [
     "PRIMAL_SOLUTION_SCHEMA",
     "PRIMAL_SOLUTION_VERSION",
     "RestorationOutcome",
-    "TargetResultAdapter",
+    "ResultAdapter",
+    "restore_bundle_outputs",
     "restore_from_bundle_dir",
 ]

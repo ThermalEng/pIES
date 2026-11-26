@@ -36,6 +36,7 @@ __all__ = [
     "get_evidence_record",
     "get_latest_evidence_for_project",
     "get_latest_evidence_for_task",
+    "load_retry_base_evidence",
     "point_result_assessment",
     "record_sample_value",
 ]
@@ -144,3 +145,15 @@ def record_sample_value(
         db, sample_task_id=sample_task_id, variable_name=variable_name,
         value=value, unit=unit,
     )
+
+
+def load_retry_base_evidence(db: Session, evidence_package_id: int) -> dict[str, Any]:
+    """Load the full immutable base evidence JSON payload for a single-evaluator retry."""
+    import json
+
+    from iesplan.storage import get_object
+
+    package = get_evidence_record(db, evidence_package_id)
+    if package is None:
+        raise RuntimeError(f"基线证据包不存在: {evidence_package_id}")
+    return json.loads(get_object(db, package.object_id))

@@ -35,7 +35,11 @@ storage/领域门面 + computation 公开门面)。
 from __future__ import annotations
 
 import json
+import re
+import tempfile
+import threading
 from collections.abc import Callable, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
@@ -50,6 +54,8 @@ from iesplan.assembly import ValidatedAssemblyArtifact, ValidationReceipt
 from iesplan.computation import (
     COMPUTE_RESULT_SCHEMA,
     COMPUTE_RESULT_VERSION,
+    EVALUATION_REPORT_CONTRACT,
+    FINANCIAL_EVALUATION_CONTRACT,
     AttemptContext,
     CalculationConfig,
     ComputationUnavailableError,
@@ -64,15 +70,12 @@ from iesplan.computation import (
     SolverBundle,
     SolverBundleManifest,
     StopProbe,
-    check_convergence,
     collect_resource_ids,
     materialize_non_predictive_series,
-    prediction_delta,
-    split_predictions_by_dependency,
     thaw_json_value,
 )
-from iesplan.computation.bundle import export_bundle_files
 from iesplan.computation.generators.highs_milp import SOLVER_REF
+from iesplan.computation.result_adapters import FileContent, ResultAdapter
 from iesplan.computation.runtime.stage_runner import StageExecutionSpec
 from iesplan.core.content import (
     Content,
@@ -96,23 +99,22 @@ __all__ = [
     "EvaluatedStageOutput",
     "FrozenSeriesInputs",
     "StageExecutionError",
-    "adapt_result",
     "attach_evidence_objects",
     "build_attempt_context",
     "build_financial_evaluation",
     "build_hourly_files",
     "business_outcome_for",
     "complete_materialized",
-    "convergence_for_round",
     "generate_bundle",
     "hourly_files_from_payload",
     "load_compute_inputs",
     "predict_round_stage",
-    "prediction_delta",
+    "restore_core_solution",
     "result_step_series",
     "run_algorithm_stage",
+    "run_evaluators_stage",
+    "run_single_evaluator",
     "seal_output_objects",
-    "split_predictions_by_dependency",
 ]
 
 
@@ -144,6 +146,7 @@ class EvaluatedStageOutput:
     hourly_series: Mapping[str, Any] | None = None
     financial_evaluation: Mapping[str, Any] | None = None
     resources: Mapping[str, Any] = field(default_factory=dict)
+    solution_ref: Mapping[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return self.result.to_dict()
@@ -167,6 +170,8 @@ class ComputeExecutionPlane:
     predictor_registry: PredictorRegistry
     stage_runner: Any
     stage_catalog: Any
+    solver_registry: Any | None = None
+    evaluator_registry: Any | None = None
     algorithm_registry: Any | None = None
 
 
@@ -565,7 +570,6 @@ def predict_round_stage(
         dict[str, dict[str, object]],
     ] | None = None,
     entries: tuple[Mapping[str, object], ...] | None = None,
-    previous: Mapping[str, object] | None = None,
     stop: StopProbe | None = None,
     detach: Any = None,
     on_stage_resources: Callable[[Mapping[str, Any]], None] | None = None,
@@ -574,7 +578,7 @@ def predict_round_stage(
     tuple[PredictedTarget, ...],
     dict[str, dict[str, object]],
 ]:
-    """预测阶段容器化执行：读取历史字节 → job_runner 预测阶段 → 检查点落库后清理。"""
+    """预测阶段单趟容器化执行：读取历史字节 → job_runner 预测阶段 → 检查点落库后清理。"""
     artifact, resources, config, seed = run_worker_transaction(
         session_factory, _restore_artifact_resources_config, task_project_id, snapshot
     )
@@ -639,7 +643,6 @@ def predict_round_stage(
                 {
                     "point_count": point_count,
                     "seed": seed,
-                    "previous": thaw_json_value(previous) if previous is not None else None,
                     "targets": group_targets,
                 }
             )
@@ -773,45 +776,6 @@ def predict_round_stage(
     return final_series, final_predicted, saved_artifacts
 
 
-def convergence_for_round(
-    plane: ComputeExecutionPlane,
-    coupled_entries: tuple[Mapping[str, object], ...],
-    previous_predicted: Mapping[tuple[str, str], PredictedTarget],
-    current_predicted: Mapping[tuple[str, str], PredictedTarget],
-    previous_outputs: Mapping[str, object] | None,
-    current_outputs: Mapping[str, object],
-) -> tuple[float, tuple[dict[str, object], ...]]:
-    """逐耦合目标调用算法收敛度量并汇总（求解完成后的公开输出边界）。"""
-    records: list[dict[str, object]] = []
-    for entry in coupled_entries:
-        target = entry["target"]
-        key = (str(target["instance"]), str(target["interface"]))
-        algorithm = str(entry["algorithm"])
-        predictor = plane.predictor_registry.get(algorithm)
-        convergence = check_convergence(
-            predictor.measure_convergence(
-                previous_prediction=previous_predicted[key],
-                current_prediction=current_predicted[key],
-                previous_outputs=previous_outputs,
-                current_outputs=current_outputs,
-                parameters=dict(entry.get("parameters") or {}),
-            )
-        )
-        records.append(
-            {
-                "device": key[0],
-                "interface": key[1],
-                "algorithm": algorithm,
-                "metric": convergence.metric,
-                "value": convergence.value,
-                "unit": convergence.unit,
-            }
-        )
-    records.sort(key=lambda record: (str(record["device"]), str(record["interface"])))
-    aggregate = max(float(record["value"]) for record in records)
-    return aggregate, tuple(records)
-
-
 def generate_bundle(
     plane: ComputeExecutionPlane,
     snapshot: Any,
@@ -834,20 +798,14 @@ def generate_bundle(
     detach: Any = None,
     on_stage_resources: Callable[[Mapping[str, Any]], None] | None = None,
 ) -> tuple[int, dict[str, dict[str, object]]]:
-    """经生成器阶段容器生成完整 Bundle，并在 cleanup 前带 Fencing Token 持久化检查点。"""
+    """经生成器阶段容器生成 1.2.0 契约解耦 SolverBundle，并在 cleanup 前带 Fencing Token 持久化。"""
     del models, evaluation
     provider = plane.generator_registry.resolve(config)
-    descriptor = provider.descriptor
-    if snapshot.executor not in descriptor.executors or snapshot.result_adapter != descriptor.result_adapter:
-        raise ComputationUnavailableError(
-            "生成器声明与快照冻结 provider 不一致 "
-            f"(snapshot={snapshot.executor!r}/{snapshot.result_adapter!r})",
-            reason="frozen-provider-mismatch",
-        )
     gen_stage = _stage_descriptor(plane, provider.ref, kind_label="generator")
     solver_ref = config.solver or SOLVER_REF
     _stage_descriptor(plane, solver_ref, kind_label="solver")
-    _stage_descriptor(plane, snapshot.result_adapter, kind_label="evaluator")
+    for ev in config.evaluators:
+        _stage_descriptor(plane, str(ev["evaluator"]), kind_label="evaluator")
 
     request_payload: dict[str, Any] = {
         "artifact": {
@@ -875,15 +833,10 @@ def generate_bundle(
             read_content(stage_result.outputs["bundle/bundle.yaml"]).decode("utf-8")
         )
         manifest = SolverBundleManifest(**manifest_raw)
-        declared_executor = manifest.command["executor"]
-        if (
-            declared_executor != snapshot.executor
-            or manifest.result_adapter != snapshot.result_adapter
-        ):
+        if manifest.bundle["generator"] != provider.ref:
             raise ComputationUnavailableError(
-                "Bundle 声明与快照冻结 provider 不一致 "
-                f"(bundle={declared_executor!r}/{manifest.result_adapter!r}, "
-                f"snapshot={snapshot.executor!r}/{snapshot.result_adapter!r})",
+                "Bundle 声明生成器与计算配置不一致 "
+                f"(bundle={manifest.bundle['generator']!r}, config={provider.ref!r})",
                 reason="frozen-provider-mismatch",
             )
         bundle_files: dict[str, Content] = {
@@ -934,60 +887,316 @@ def generate_bundle(
     return saved_info
 
 
-def adapt_result(
-    plane: ComputeExecutionPlane,
+def _extract_solution_projections(
+    solution_path: Path,
+    *,
+    include_solution: bool,
+) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
+    """Extract hourly series & planning variables from canonical ``ies.engineering-solution@1.0.0``."""
+    if not include_solution or not solution_path.is_file():
+        return None, []
+    doc = json.loads(solution_path.read_text(encoding="utf-8"))
+    summary = doc.get("solver_summary") or {}
+    if not summary.get("has_feasible_solution", False):
+        return None, []
+    planning_vars: list[dict[str, Any]] = []
+    seen_pvars: set[str] = set()
+    for unit in doc.get("construction_units") or ():
+        for sc in unit.get("scales") or ():
+            pvar_id = sc.get("planning_variable_id")
+            if pvar_id and str(pvar_id) not in seen_pvars:
+                seen_pvars.add(str(pvar_id))
+                planning_vars.append(
+                    {"name": str(pvar_id), "value": sc["value"], "unit": sc.get("unit", "")}
+                )
+    for sc in doc.get("planning_variables") or ():
+        pvar_id = sc.get("planning_variable_id")
+        if pvar_id and str(pvar_id) not in seen_pvars:
+            seen_pvars.add(str(pvar_id))
+            planning_vars.append(
+                {"name": str(pvar_id), "value": sc["value"], "unit": sc.get("unit", "")}
+            )
+    hourly_payload: dict[str, Any] | None = None
+    series_sources = (
+        ("device", doc.get("series") or {}),
+        ("system", doc.get("system_series") or {}),
+    )
+    if any(entries for _, entries in series_sources):
+        data: dict[str, Any] = {}
+        units: dict[str, str] = {}
+        identities: dict[str, dict[str, Any]] = {}
+        for kind, entries in series_sources:
+            for sid in sorted(entries):
+                entry = entries[sid]
+                data[sid] = list(entry["values"])
+                units[sid] = str(entry["unit"])
+                identities[sid] = {
+                    "series_id": sid,
+                    "kind": kind,
+                    **{k: v for k, v in entry.items() if k != "values"},
+                }
+        hourly_payload = {"data": data, "meta": {"units": units, "series": identities}}
+    return hourly_payload, planning_vars
+
+
+def restore_core_solution(
     bundle: SolverBundle,
     receipt: ExecutionReceipt,
     collected: Mapping[str, object],
     *,
+    config: CalculationConfig,
     claim: Claim,
     number: int,
-    finance: EffectiveFinanceConfig,
-    snapshot: Any,
     session_factory: Callable[[], Session],
-    save_checkpoint: Callable[[Session, Claim, int, Mapping[str, Any]], int],
+    save_checkpoint: Callable[..., dict[str, dict[str, object]]],
+    stop: StopProbe | None = None,
+) -> dict[str, Any]:
+    """Run isolated ``spawn`` ResultAdapter restoration and seal engineering solution."""
+    with tempfile.TemporaryDirectory(prefix="ies-core-restore-") as tmp_dir:
+        sol_path = Path(tmp_dir) / "solution.json"
+        outcome = ResultAdapter().restore_with_outcome(
+            bundle,
+            receipt,
+            collected,
+            solution_output_path=sol_path,
+            stop=stop,
+        )
+        cr = outcome.compute_result
+        cr_dict = cr.to_dict()
+        feasible = cr.math_status in ("solved", "feasible")
+        include_solution = "solution" in config.outputs
+        hourly_series, planning_vars = _extract_solution_projections(
+            sol_path,
+            include_solution=feasible and include_solution,
+        )
+        if planning_vars:
+            cr_dict["outputs"] = {
+                **cr_dict["outputs"],
+                "solution": {"variables": planning_vars},
+            }
+            cr = ComputeResult(
+                schema=cr.schema,
+                schema_version=cr.schema_version,
+                bundle_id=cr.bundle_id,
+                receipt_id=cr.receipt_id,
+                execution_status=cr.execution_status,
+                math_status=cr.math_status,
+                outputs=cr_dict["outputs"],
+            )
+        sealed_files = run_worker_transaction(
+            session_factory,
+            save_checkpoint,
+            claim,
+            number,
+            compute_result=cr_dict,
+            solution_content=(
+                FileContent(sol_path, sol_path.stat().st_size)
+                if feasible and sol_path.is_file()
+                else None
+            ),
+            hourly_series=hourly_series,
+            planning_variables=planning_vars,
+        )
+        return {
+            "compute_result": cr,
+            "solution_ref": sealed_files.get("solution.json"),
+            "hourly_series": hourly_series,
+            "planning_variables": planning_vars,
+        }
+
+
+def _slugify_stage_id(ref: str) -> str:
+    return re.sub(r"[^A-Za-z0-9._-]+", "-", ref).strip("-")[:40] or "eval"
+
+
+def _build_evaluator_input_files(
+    *,
+    engineering_solution: Content,
+    snapshot: Any,
+    artifact: ValidatedAssemblyArtifact,
+    finance: EffectiveFinanceConfig,
+    materialized: MaterializedSet | FrozenSeriesInputs,
+    parameters: Mapping[str, Any],
+    receipt: Mapping[str, Any] | None,
+    bundle_id: str,
+    receipt_id: str,
+) -> dict[str, Content | bytes]:
+    request_payload: dict[str, Any] = {
+        "artifact": {
+            "canonical_text": artifact.canonical_text,
+            "receipt": thaw_json_value(snapshot.assembly_receipt),
+        },
+        "device_models": thaw_json_value(snapshot.device_models),
+        "finance": finance.to_dict(),
+        "evaluation": thaw_json_value(snapshot.evaluation),
+        "parameters": thaw_json_value(parameters),
+        "bundle_id": bundle_id,
+        "receipt_id": receipt_id,
+    }
+    if receipt is not None:
+        request_payload["receipt"] = dict(receipt)
+    input_files: dict[str, Content | bytes] = {
+        "solution.json": engineering_solution,
+    }
+    _attach_series_inputs(request_payload, input_files, materialized)
+    input_files["request.json"] = _json_bytes(request_payload)
+    return input_files
+
+
+_UNSET = object()
+
+
+def _execute_one_evaluator(
+    *,
+    plane: ComputeExecutionPlane,
+    attempt: AttemptContext,
+    claim: Claim,
+    number: int,
+    idx: int,
+    evaluator_ref: str,
+    parameters: Mapping[str, Any],
+    solution_ref: Mapping[str, Any],
+    snapshot: Any,
+    artifact: ValidatedAssemblyArtifact,
+    finance: EffectiveFinanceConfig,
+    materialized: MaterializedSet | FrozenSeriesInputs,
+    receipt_dict: Mapping[str, Any] | None,
+    session_factory: Callable[[], Session],
+    load_checkpoint: Callable[[Session, Claim, int, int], dict[str, Any] | None],
+    save_checkpoint: Callable[..., int],
     stop: StopProbe | None = None,
     detach: Any = None,
-) -> EvaluatedStageOutput:
-    """经评价器阶段容器解释结果，在 cleanup 前带 Fencing Token 持久化检查点。"""
-    eval_stage = _stage_descriptor(plane, receipt.result_adapter_ref, kind_label="evaluator")
-    input_files: dict[str, Content | bytes] = {
-        f"bundle/{rel}": content for rel, content in export_bundle_files(bundle).items()
-    }
-    for rel, content in collected.items():
-        if isinstance(content, (Content, bytes)):
-            # Part 1 evaluator searches directly under /work/in/outputs/ (non-recursive).
-            staged_rel = Path(rel).name if rel.startswith("output/") else rel
-            input_files[f"outputs/{staged_rel}"] = content
-    input_files["receipt.json"] = _json_bytes(receipt.to_dict())
-    input_files["request.json"] = _json_bytes(
-        {
-            "finance": finance.to_dict(),
-            "evaluation": thaw_json_value(snapshot.evaluation),
-        }
+    cleanup_on_reuse: Callable[[str], None] | None = None,
+    preloaded_cached: Any = _UNSET,
+    preloaded_sol_content: Any = _UNSET,
+    db_lock: threading.Lock | None = None,
+) -> dict[str, Any]:
+    """Run one evaluator container stage with checkpoint reuse and isolated error capture."""
+    cached = (
+        run_worker_transaction(session_factory, load_checkpoint, claim, number, idx)
+        if preloaded_cached is _UNSET
+        else preloaded_cached
+    )
+    stage_id = f"eval-r{number}-{idx}-{_slugify_stage_id(evaluator_ref)}"
+    if cached is not None:
+        if cleanup_on_reuse is not None:
+            cleanup_on_reuse(stage_id)
+        return cached
+
+    eval_stage = _stage_descriptor(plane, evaluator_ref, kind_label="evaluator")
+    sol_content = (
+        run_worker_transaction(
+            session_factory, get_object_content, int(solution_ref["object_id"])
+        )
+        if preloaded_sol_content is _UNSET
+        else preloaded_sol_content
+    )
+    input_files = _build_evaluator_input_files(
+        engineering_solution=sol_content,
+        snapshot=snapshot,
+        artifact=artifact,
+        finance=finance,
+        materialized=materialized,
+        parameters=parameters,
+        receipt=receipt_dict,
+        bundle_id=attempt.bundle_id,
+        receipt_id=f"receipt-{attempt.attempt_id}-{stage_id}",
     )
 
-    evaluated: EvaluatedStageOutput | None = None
+    outcome_box: list[dict[str, Any]] = []
 
     def _persist(stage_result: Any) -> Any:
-        nonlocal evaluated
-        if stage_result.status != "succeeded":
-            return _handle_non_succeeded_stage(
-                "evaluate", stage_result, claim, number, session_factory
+        if stage_result.status == "fenced":
+            raise LeaseRejectedError("评价器阶段租约已失效(fenced)")
+        if stage_result.status == "cancelled":
+            raise StageExecutionError(
+                stage="evaluate",
+                status="cancelled",
+                termination_reason=stage_result.termination_reason,
+                detail=f"评价器阶段 {evaluator_ref!r} 已取消",
+                resources=dict(stage_result.resources or {}),
             )
-        raw = json.loads(read_content(stage_result.outputs["result.json"]).decode("utf-8"))
-        evaluated = _evaluated_output_from_result_json(
-            raw, resources=stage_result.resources or {},
-        )
-        # Durably persist container evaluation payload with Fencing Token BEFORE cleanup_stage.
-        run_worker_transaction(session_factory, save_checkpoint, claim, number, raw)
-        return evaluated
+
+        report_doc: dict[str, Any] | None = None
+        fin_eval: dict[str, Any] | None = None
+        result_entry: dict[str, Any]
+        if stage_result.status == "succeeded":
+            raw = json.loads(read_content(stage_result.outputs["result.json"]).decode("utf-8"))
+            outputs = dict(raw.get("outputs") or {})
+            contract: str | None = None
+            if "financial_evaluation" in outputs and outputs["financial_evaluation"] is not None:
+                fin_eval = dict(outputs["financial_evaluation"])
+                contract = FINANCIAL_EVALUATION_CONTRACT
+            elif "evaluation_report" in outputs and isinstance(outputs["evaluation_report"], Mapping):
+                report_doc = {"evaluator": evaluator_ref, **dict(outputs["evaluation_report"])}
+                contract = EVALUATION_REPORT_CONTRACT
+            elif outputs.get("schema") == "ies.evaluation-report":
+                report_doc = {"evaluator": evaluator_ref, **outputs}
+                contract = EVALUATION_REPORT_CONTRACT
+            result_entry = {
+                "evaluator": evaluator_ref,
+                "status": "succeeded",
+                "contract": contract,
+                "error": None,
+                "attempt_id": attempt.attempt_id,
+                "finished_at": stage_result.finished_at,
+            }
+        else:
+            mapped_status = "timed_out" if stage_result.status == "timed_out" else "failed"
+            result_entry = {
+                "evaluator": evaluator_ref,
+                "status": mapped_status,
+                "contract": None,
+                "error": {
+                    "code": f"EVAL-{str(stage_result.status).upper()}",
+                    "message": (
+                        f"评价器 {evaluator_ref} 执行失败 "
+                        f"(status={stage_result.status}, reason={stage_result.termination_reason})"
+                    ),
+                    "detail": {
+                        "termination_reason": stage_result.termination_reason,
+                        "exit_code": stage_result.exit_code,
+                    },
+                },
+                "attempt_id": attempt.attempt_id,
+                "finished_at": stage_result.finished_at,
+            }
+        payload_doc = {
+            "result_entry": result_entry,
+            "report": report_doc,
+            "financial_evaluation": fin_eval,
+        }
+        if db_lock is not None:
+            with db_lock:
+                run_worker_transaction(
+                    session_factory,
+                    save_checkpoint,
+                    claim,
+                    number,
+                    idx,
+                    result_entry=result_entry,
+                    report=report_doc,
+                    financial_evaluation=fin_eval,
+                )
+        else:
+            run_worker_transaction(
+                session_factory,
+                save_checkpoint,
+                claim,
+                number,
+                idx,
+                result_entry=result_entry,
+                report=report_doc,
+                financial_evaluation=fin_eval,
+            )
+        outcome_box.append(payload_doc)
+        return payload_doc
 
     try:
         stage_result = plane.stage_runner.run_stage(
             StageExecutionSpec(
-                attempt_id=str(claim.attempt_id),
-                stage_id=f"evaluate-r{number}",
+                attempt_id=attempt.attempt_id,
+                stage_id=stage_id,
                 fencing_token=str(claim.lease_token),
                 image=eval_stage.image,
                 command=eval_stage.command,
@@ -1004,13 +1213,163 @@ def adapt_result(
             stage="evaluate",
             status="fenced",
             termination_reason="fenced",
-            detail="结果适配阶段租约已失效(fenced)",
+            detail=f"评价器阶段 {evaluator_ref!r} 租约已失效(fenced)",
         ) from None
 
-    if stage_result.status != "succeeded":
-        _raise_stage_error("evaluate", stage_result)
-    assert evaluated is not None
-    return evaluated
+    if not outcome_box:
+        if stage_result.status == "cancelled":
+            raise StageExecutionError(
+                stage="evaluate",
+                status="cancelled",
+                termination_reason=stage_result.termination_reason or "cancelled",
+                detail=f"评价器阶段 {evaluator_ref!r} 已取消",
+            )
+        raise StageExecutionError(
+            stage="evaluate",
+            status=str(stage_result.status),
+            termination_reason=stage_result.termination_reason,
+            detail=f"评价器阶段 {evaluator_ref!r} 未产出检查点 (status={stage_result.status})",
+        )
+    return outcome_box[0]
+
+
+def run_evaluators_stage(
+    *,
+    plane: ComputeExecutionPlane,
+    attempt: AttemptContext,
+    claim: Claim,
+    number: int,
+    config: CalculationConfig,
+    has_feasible_solution: bool,
+    solution_ref: Mapping[str, Any] | None,
+    snapshot: Any,
+    artifact: ValidatedAssemblyArtifact,
+    finance: EffectiveFinanceConfig,
+    materialized: MaterializedSet | FrozenSeriesInputs,
+    receipt_dict: Mapping[str, Any] | None,
+    session_factory: Callable[[], Session],
+    load_checkpoint: Callable[[Session, Claim, int, int], dict[str, Any] | None],
+    save_checkpoint: Callable[..., int],
+    stop: StopProbe | None = None,
+    detach: Any = None,
+    cleanup_on_reuse: Callable[[str], None] | None = None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any] | None]:
+    """Execute configured ``evaluators[]`` in parallel or mark skipped when core solution is infeasible."""
+    evaluators = tuple(config.evaluators or ())
+    if not evaluators:
+        return [], [], None
+    if not has_feasible_solution or solution_ref is None:
+        skipped = [
+            {
+                "evaluator": str(ev["evaluator"]),
+                "status": "skipped",
+                "contract": None,
+                "error": None,
+                "attempt_id": attempt.attempt_id,
+                "finished_at": None,
+            }
+            for ev in evaluators
+        ]
+        return skipped, [], None
+
+    # Preload checkpoints and sealed solution on the caller thread so parallel container
+    # threads never contend on a shared SQLite StaticPool connection.
+    preloaded_checkpoints = {
+        idx: run_worker_transaction(session_factory, load_checkpoint, claim, number, idx)
+        for idx in range(len(evaluators))
+    }
+    sol_content = run_worker_transaction(
+        session_factory, get_object_content, int(solution_ref["object_id"])
+    )
+    db_lock = threading.Lock()
+
+    def _run_idx(idx_and_ev: tuple[int, Mapping[str, object]]) -> dict[str, Any]:
+        idx, ev = idx_and_ev
+        return _execute_one_evaluator(
+            plane=plane,
+            attempt=attempt,
+            claim=claim,
+            number=number,
+            idx=idx,
+            evaluator_ref=str(ev["evaluator"]),
+            parameters=thaw_json_value(ev.get("parameters") or {}),  # type: ignore[arg-type]
+            solution_ref=solution_ref,
+            snapshot=snapshot,
+            artifact=artifact,
+            finance=finance,
+            materialized=materialized,
+            receipt_dict=receipt_dict,
+            session_factory=session_factory,
+            load_checkpoint=load_checkpoint,
+            save_checkpoint=save_checkpoint,
+            stop=stop,
+            detach=detach,
+            cleanup_on_reuse=cleanup_on_reuse,
+            preloaded_cached=preloaded_checkpoints[idx],
+            preloaded_sol_content=sol_content,
+            db_lock=db_lock,
+        )
+
+    items = list(enumerate(evaluators))
+    if len(items) == 1:
+        raw_outcomes = [_run_idx(items[0])]
+    else:
+        with ThreadPoolExecutor(max_workers=min(len(items), 4)) as pool:
+            raw_outcomes = list(pool.map(_run_idx, items))
+
+    evaluator_results: list[dict[str, Any]] = []
+    evaluation_reports: list[dict[str, Any]] = []
+    financial_evaluation: dict[str, Any] | None = None
+    for item in raw_outcomes:
+        evaluator_results.append(dict(item["result_entry"]))
+        if item.get("report") is not None:
+            evaluation_reports.append(dict(item["report"]))
+        if item.get("financial_evaluation") is not None:
+            financial_evaluation = dict(item["financial_evaluation"])
+    return evaluator_results, evaluation_reports, financial_evaluation
+
+
+def run_single_evaluator(
+    *,
+    plane: ComputeExecutionPlane,
+    attempt: AttemptContext,
+    claim: Claim,
+    idx: int = 0,
+    evaluator_ref: str,
+    parameters: Mapping[str, Any],
+    solution_ref: Mapping[str, Any],
+    snapshot: Any,
+    artifact: ValidatedAssemblyArtifact,
+    finance: EffectiveFinanceConfig,
+    materialized: MaterializedSet | FrozenSeriesInputs,
+    receipt_dict: Mapping[str, Any] | None,
+    session_factory: Callable[[], Session],
+    load_checkpoint: Callable[[Session, Claim, int, int], dict[str, Any] | None],
+    save_checkpoint: Callable[..., int],
+    stop: StopProbe | None = None,
+    detach: Any = None,
+) -> dict[str, Any]:
+    """Execute one targeted evaluator during a single-evaluator retry attempt."""
+    return _execute_one_evaluator(
+        plane=plane,
+        attempt=attempt,
+        claim=claim,
+        number=1,
+        idx=idx,
+        evaluator_ref=evaluator_ref,
+        parameters=parameters,
+        solution_ref=solution_ref,
+        snapshot=snapshot,
+        artifact=artifact,
+        finance=finance,
+        materialized=materialized,
+        receipt_dict=receipt_dict,
+        session_factory=session_factory,
+        load_checkpoint=load_checkpoint,
+        save_checkpoint=save_checkpoint,
+        stop=stop,
+        detach=detach,
+    )
 
 
 def run_algorithm_stage(
@@ -1068,7 +1427,13 @@ def run_algorithm_stage(
             raw, resources=stage_result.resources or {},
         )
         # Durably persist container algorithm payload with Fencing Token BEFORE cleanup_stage.
-        run_worker_transaction(session_factory, save_checkpoint, claim, raw)
+        run_worker_transaction(
+            session_factory,
+            save_checkpoint,
+            claim,
+            raw,
+            solution_content=stage_result.outputs.get("solution.json"),
+        )
         return evaluated
 
     try:

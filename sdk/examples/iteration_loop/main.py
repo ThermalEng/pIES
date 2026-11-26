@@ -2,7 +2,13 @@
 
 from __future__ import annotations
 
-from pies_sdk import ComputeResultPayload, IterationRecord, StageContext
+from pies_sdk import (
+    DeviceSeries,
+    EngineeringSolutionPayload,
+    IterationRecord,
+    SolverSummary,
+    StageContext,
+)
 
 
 def solve(ctx: StageContext) -> None:
@@ -22,9 +28,6 @@ def solve(ctx: StageContext) -> None:
     target = float(request["target_value"])
     current = float(request["initial_guess"])
     scale = max(abs(target), 1.0)
-
-    bundle_id = str(request.get("bundle_id") or ctx.manifest.ref)
-    receipt_id = str(request.get("receipt_id") or "standalone-iter-receipt")
 
     converged = False
     rounds = 0
@@ -59,15 +62,31 @@ def solve(ctx: StageContext) -> None:
                 break
 
     math_status = "solved" if converged else "feasible"
-    ctx.write_result(
-        ComputeResultPayload(
-            bundle_id=bundle_id,
-            receipt_id=receipt_id,
-            execution_status="completed",
-            math_status=math_status,
-            outputs={
+    estimate = round(current, 6)
+    ctx.write_engineering_solution(
+        EngineeringSolutionPayload(
+            solver_summary=SolverSummary(
+                math_status=math_status,
+                termination_reason="optimal" if converged else "not_solved",
+                has_feasible_solution=True,
+                objective_value=estimate,
+                best_bound=estimate if converged else None,
+                relative_gap=0.0 if converged else None,
+                objective_unit="1",
+            ),
+            construction_units=(),
+            series={
+                "iter.estimate": DeviceSeries(
+                    instance_id="iter",
+                    variable_id="estimate",
+                    unit="1",
+                    values=(estimate,),
+                )
+            },
+            system_series={},
+            metrics={
                 "converged": converged,
-                "estimate": round(current, 6),
+                "estimate": estimate,
                 "iterations_completed": rounds,
                 "final_metric_value": round(final_delta, 10),
             },

@@ -11,21 +11,19 @@ from copy import deepcopy
 from types import SimpleNamespace
 
 import pytest
-from test_finance_s2_execution import _income, _money, _vat_labels
-from test_highs_result_adapter import (
-    PARAMETERS_PATH,
-    PROBLEM_PATH,
-    SOLUTION_PATH,
-    _bundle,
-    _parameters,
-    _receipt,
+from legacy_solve_testkit import (
+    evaluate_builder_forward_finance,
+    mps_columns,
+    parse_highs_solution,
 )
+from test_finance_s2_execution import _income, _money, _vat_labels
 from test_issue06_s2 import _amount, _builder, _collect_only, _tiny_solve
 
 from iesplan.application.worker.compute_cases import build_financial_evaluation
+from iesplan.computation.generators.highs_milp import linear_conversion_for_unit
 from iesplan.computation.generators.mps import write_mps
 from iesplan.computation.generators.project import _ProjectBuilder
-from iesplan.computation.result_adapters.highs import HIGHS_ADAPTER
+from iesplan.finance import evaluate_forward_finance
 
 
 def _rebuild(base, mutate=None):
@@ -69,19 +67,29 @@ def _items(profile):
 
 
 def _adapt(builder, model, facts, tmp_path):
-    mps, offset = write_mps(model)
-    parameters = json.loads(_parameters(offset=offset, objective_unit="CNY"))
-    parameters["unit_map"] = dict(builder.unit_map)
-    parameters["components"] = {name: dict(entry) for name, entry in builder.finance_components().items()}
-    parameters["financial_facts"] = dict(facts)
-    bundle = _bundle({
-        PROBLEM_PATH: mps.encode(), PARAMETERS_PATH: json.dumps(parameters, sort_keys=True).encode(),
-    })
-    result = HIGHS_ADAPTER.adapt(
-        bundle, _receipt(), {SOLUTION_PATH: (tmp_path / "output/solution.sol").read_bytes()},
+    mps_text, _ = write_mps(model)
+    cols = mps_columns(mps_text.encode("utf-8"))
+    parsed = parse_highs_solution((tmp_path / "output/solution.sol").read_bytes())
+    assert len(cols) == len(parsed["primals"])
+    solved_si = {name: float(val) for name, val in zip(cols, parsed["primals"], strict=True)}
+    objective = float(model.objective.constant) + sum(
+        float(coef) * solved_si[name] for (name, _), coef in model.objective.terms
     )
-    assert result.math_status == "solved"
-    return result
+    fin = evaluate_builder_forward_finance(builder, solved_si, model=model, objective_value=objective)
+    plan_vars = ((builder.doc.get("planning") or {}).get("variables") or {})
+    variables = []
+    for pname, pcfg in sorted(plan_vars.items()):
+        if pname in solved_si:
+            unit = str(pcfg.get("unit") or "1")
+            sc, off = linear_conversion_for_unit(unit)
+            variables.append({"name": pname, "value": solved_si[pname] * sc + off, "unit": unit})
+    return SimpleNamespace(
+        math_status="solved",
+        outputs={
+            "solution": {"variables": variables, "objective_value": objective},
+            "financial_facts": fin,
+        },
+    )
 
 
 def _named_values(facts):
@@ -375,7 +383,36 @@ def test_monthly_system_tariff_demand_and_conditional_cost_share_the_main_soluti
     result = _solve(bundle, tmp_path)
     assert result.math_status == "solved"
     assert result.outputs["system_series"] == {}
-    facts = result.outputs["financial_facts"]
+    from legacy_solve_testkit import read_bundle_records
+
+    col_names = read_bundle_records(bundle)["column_names"]
+    parsed_sol = parse_highs_solution((tmp_path / "values.sol").read_bytes())
+    vals_by_col = dict(zip(col_names, parsed_sol["primals"], strict=True))
+    dispatch_cols = sorted(
+        (int(name.rsplit("__t", 1)[1]), name)
+        for name in col_names
+        if name.startswith("system:account__dispatch__t")
+    )
+    sc_kw, off_kw = linear_conversion_for_unit("kW")
+    eng_for_finance = {
+        **result.outputs,
+        "system_series": {
+            "system:account.dispatch": {
+                "block": "account",
+                "variable": "dispatch",
+                "unit": "kW",
+                "values": [vals_by_col[col] * sc_kw + off_kw for _, col in dispatch_cols],
+            }
+        },
+    }
+    facts = evaluate_forward_finance(
+        eng_for_finance,
+        artifact=new_inputs[0],
+        finance=new_inputs[3],
+        evaluation=new_inputs[5],
+        materialized=new_inputs[2],
+        device_models=new_inputs[1],
+    )
     amounts = _named_values(facts)
     assert amounts[("dispatch_month", 1)] == pytest.approx(2976)
     assert amounts[("purchase_month", 1)] == pytest.approx(2976)

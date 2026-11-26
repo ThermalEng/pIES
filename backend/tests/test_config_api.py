@@ -27,7 +27,14 @@ from iesplan.api.deps import get_request_db
 from iesplan.application import identity
 from iesplan.computation import (
     AlgorithmDescriptor,
+    StagePluginSpec,
     build_algorithm_registry,
+    build_evaluator_registry,
+    build_solver_registry,
+)
+from iesplan.computation.config import (
+    BUILTIN_EVALUATOR_FINANCE_SPEC,
+    BUILTIN_SOLVER_HIGHS_SPEC,
 )
 from iesplan.computation.generators import HIGHS_MILP_PROVIDER, build_registry
 from iesplan.computation.generators.descriptor import GeneratorDescriptor
@@ -95,6 +102,9 @@ def make_app(db: Session) -> FastAPI:
     application.state.bootstrap_context = SimpleNamespace(
         generator_registry=build_registry((HIGHS_MILP_PROVIDER,)),
         predictor_registry=None,
+        solver_registry=build_solver_registry((BUILTIN_SOLVER_HIGHS_SPEC,)),
+        evaluator_registry=build_evaluator_registry((BUILTIN_EVALUATOR_FINANCE_SPEC,)),
+        algorithm_registry=None,
     )
     _register_exception_handlers(application)
     application.dependency_overrides[get_request_db] = lambda: db
@@ -116,7 +126,7 @@ def client(db: Session) -> Iterator[TestClient]:
 
 
 def _valid_payload() -> dict[str, Any]:
-    """合法 14 字段 CalculationConfig(已发布契约形态)。"""
+    """合法 13 字段 CalculationConfig(1.2.0 单一契约形态)。"""
     return {
         "schema": "ies.calculation-config",
         "schema_version": "1.0.0",
@@ -125,11 +135,10 @@ def _valid_payload() -> dict[str, Any]:
         "generator": "ies.generator.highs_milp@1.0.0",
         "solver": "ies.solver.highs@1.7.2",
         "algorithm": None,
-        "evaluator": None,
+        "evaluators": [],
         "precision": "medium",
-        "convergence": None,
         "time_limit_seconds": 600,
-        "options": {},
+        "options": {"generator": {}, "solver": {}},
         "seed": None,
         "outputs": ["solution"],
     }
@@ -290,7 +299,6 @@ class _SyntheticGenerator:
             precisions=("low", "high"),
             solvers=("test.solver.flex@2.0.0",),
             outputs=("trace", "metrics"),
-            result_adapter="test.result.adapter@1.0.0",
             unit_system="SI",
             seed_semantics="synthetic fixed seed",
         )
@@ -309,20 +317,36 @@ class _SyntheticGenerator:
 def test_save_uses_selected_public_descriptor_for_all_static_choices(
     client: TestClient, db: Session,
 ) -> None:
-    """公开保存边界支持非 medium 能力，并逐项拒绝模式、精度、solver、outputs。"""
+    """公开保存边界支持非 medium 能力，并逐项拒绝模式、精度、solver、evaluators、outputs。"""
     project = seed_project(db)
     generator = _SyntheticGenerator()
+    flex_solver = StagePluginSpec(
+        plugin_id="test.solver.flex",
+        version="2.0.0",
+        kind="solver",
+        consumes=("ies.solver-bundle.mps@1.0.0",),
+        produces=("ies.primal-solution@1.0.0",),
+        parameters_schema={"type": "object", "additionalProperties": False, "properties": {}},
+    )
     client.app.state.bootstrap_context.generator_registry = build_registry((generator,))
+    client.app.state.bootstrap_context.solver_registry = build_solver_registry((flex_solver,))
     body = {
-        **_valid_payload(), "generator": generator.ref, "mode": "dispatch",
-        "precision": "high", "solver": "test.solver.flex@2.0.0",
+        **_valid_payload(),
+        "generator": generator.ref,
+        "mode": "dispatch",
+        "precision": "high",
+        "solver": "test.solver.flex@2.0.0",
         "outputs": ["trace", "metrics"],
     }
     cases = [
         ("mode", "planning", "ies.config.unsupported_mode"),
         ("precision", "medium", "ies.config.unsupported_precision"),
         ("solver", "test.solver.other@2.0.0", "ies.config.unsupported_solver"),
-        ("evaluator", "missing.evaluator@1.0.0", "ies.config.unsupported_evaluator"),
+        (
+            "evaluators",
+            [{"evaluator": "missing.evaluator@1.0.0", "parameters": {}}],
+            "ies.config.unsupported_evaluators",
+        ),
         ("outputs", ["trace", "unknown"], "ies.config.unsupported_outputs"),
         ("generator", "test.generator.missing@1.0.0", "ies.config.unsupported_generator"),
     ]
@@ -369,7 +393,7 @@ class _SyntheticUnifiedAlgorithm:
             modes=("planning", "search"),
             precisions=("low", "high"),
             outputs=("solution", "metrics"),
-            evaluators=("ies.result-adapter.highs@1.0.0",),
+            evaluators=("ies.evaluator.finance@1.0.0",),
             parameters_schema={
                 "type": "object",
                 "properties": {"max_steps": {"type": "integer", "minimum": 1}},
@@ -388,7 +412,7 @@ class _SyntheticUnifiedAlgorithm:
 def test_save_unified_algorithm_mode_roundtrip_and_checks(
     client: TestClient, db: Session,
 ) -> None:
-    """一体化算法模式校验互斥字段、mode/evaluator/options 并完整持久化 14 字段。"""
+    """一体化算法模式校验互斥字段、mode/evaluators/options 并完整持久化 13 字段。"""
     project = seed_project(db)
     algo = _SyntheticUnifiedAlgorithm()
     client.app.state.bootstrap_context.algorithm_registry = build_algorithm_registry((algo,))
@@ -397,10 +421,10 @@ def test_save_unified_algorithm_mode_roundtrip_and_checks(
         "generator": None,
         "solver": None,
         "algorithm": algo.ref,
-        "evaluator": "ies.result-adapter.highs@1.0.0",
+        "evaluators": [{"evaluator": "ies.evaluator.finance@1.0.0", "parameters": {}}],
         "mode": "search",
         "precision": "high",
-        "options": {"max_steps": 25},
+        "options": {"algorithm": {"max_steps": 25}},
         "outputs": ["solution", "metrics"],
     }
     # 互斥冲突拒绝
@@ -412,10 +436,14 @@ def test_save_unified_algorithm_mode_roundtrip_and_checks(
     assert resp.status_code == 422, resp.text
     assert resp.json()["error"]["code"] == "CONFIG-VAL-001"
 
-    # mode/evaluator/options 能力门禁
+    # mode/evaluators/options 能力门禁
     for field, invalid, key in (
         ("mode", "other", "ies.config.unsupported_mode"),
-        ("evaluator", "other.evaluator@1.0.0", "ies.config.unsupported_evaluator"),
+        (
+            "evaluators",
+            [{"evaluator": "other.evaluator@1.0.0", "parameters": {}}],
+            "ies.config.unsupported_evaluators",
+        ),
         ("algorithm", "test.algorithm.missing@1.0.0", "ies.config.unsupported_algorithm"),
     ):
         resp = client.put(
@@ -429,7 +457,10 @@ def test_save_unified_algorithm_mode_roundtrip_and_checks(
 
     bad_opts = client.put(
         f"/api/projects/{project.id}/config",
-        json={"calculation_config": {**unified_body, "options": {"max_steps": 0}}, "expected_revision": None},
+        json={
+            "calculation_config": {**unified_body, "options": {"algorithm": {"max_steps": 0}}},
+            "expected_revision": None,
+        },
     )
     assert bad_opts.status_code == 422, bad_opts.text
     assert bad_opts.json()["error"]["location"]["field"] == "options"

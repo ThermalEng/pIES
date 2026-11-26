@@ -153,11 +153,10 @@ _CALC_PAYLOAD = {
     "generator": "ies.generator.highs_milp@3.4.0",
     "solver": "ies.solver.highs@1.7.2",
     "algorithm": None,
-    "evaluator": None,
+    "evaluators": [],
     "precision": "medium",
-    "convergence": None,
     "time_limit_seconds": 600,
-    "options": {},
+    "options": {"generator": {}, "solver": {}},
     "seed": None,
     "outputs": ["solution"],
 }

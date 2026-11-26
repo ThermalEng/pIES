@@ -2,10 +2,12 @@
 
 Requirements verified:
 1. Binary construction activation status z (built_{inst}) linked to scale q (L*z <= q <= U*z).
-2. Distinction between mandatory build (z=1), optional build (z in {0, 1}), unconditional costs, and conditional costs (F*z).
+2. Distinction between mandatory build (z=1), optional build (z in {0, 1}), unconditional costs,
+   and conditional costs (F*z).
 3. Multiple scales sharing same activation state (e.g. capacity and power for same instance).
 4. Multiple instances sharing same finance type do not conflate construction states.
-5. Zero construction: when z=0, q=0, capex=0, payments=0, depreciation=0, residual=0. No fictitious values.
+5. Zero construction: when z=0, q=0, capex=0, payments=0, depreciation=0, residual=0.
+   No fictitious values.
 6. Recovery and sealing of construction status and scales from solver solution.
 """
 from __future__ import annotations
@@ -319,9 +321,10 @@ def test_highs_solve_optional_construction_zero_and_active(tmp_path) -> None:
     """真实 HiGHS 求解并经 ResultAdapter 恢复封存选建状态、规模与金额。"""
     import subprocess
 
+    from legacy_solve_testkit import SOLUTION_PATH, restore_bundle_solution, succeeded_receipt
+
     from iesplan.computation.generators.highs_milp import HIGHS_MILP_PROVIDER
-    from iesplan.computation.result_adapters.highs import HIGHS_ADAPTER
-    SOLUTION_PATH = "output/solution.sol"
+    from iesplan.finance import evaluate_forward_finance
 
     # Case A: 无负荷收入，明确支付全额建设费 => 税后最优为零建设。
     artifact, models, materialized, finance, config, evaluation = _activation_inputs(
@@ -383,44 +386,38 @@ def test_highs_solve_optional_construction_zero_and_active(tmp_path) -> None:
     assert res.returncode == 0, res.stderr
     sol_bytes = (tmp_path / "case_a" / "solution" / "values.sol").read_bytes()
 
-    from test_highs_result_adapter import _receipt
-    receipt = _receipt()
-    adapted = HIGHS_ADAPTER.adapt(bundle, receipt, {SOLUTION_PATH: sol_bytes})
+    adapted, eng_sol = restore_bundle_solution(
+        bundle, succeeded_receipt(bundle=bundle), {SOLUTION_PATH: sol_bytes}, tmp_path=tmp_path / "case_a",
+    )
     assert adapted.math_status == "solved"
-    facts = adapted.outputs["financial_facts"]
-    assert "construction_units" in facts
-    status_entry = next(s for s in facts["construction_units"] if s["instance_id"] == "gen1")
+    sealed = evaluate_forward_finance(
+        eng_sol, artifact=artifact, finance=finance, evaluation=evaluation,
+        materialized=materialized, device_models=models,
+    )
+    assert "construction_units" in sealed
+    status_entry = next(s for s in sealed["construction_units"] if s["instance_id"] == "gen1")
     assert status_entry["built"] is False, {
-        "status": status_entry, "capex": facts["construction_total"],
-        "om": facts["annual_fixed_om"], "flows": facts["annual_net_flows"],
+        "status": status_entry, "capex": sealed["construction_total"],
+        "om": sealed["annual_fixed_om"], "flows": sealed["annual_net_flows"],
     }
     scale = next(v for v in status_entry["scales"] if v["planning_variable_id"] == "gen_cap")
     assert type(scale["value"]) is float
     assert scale["value"] == 0.0 and scale["unit"] == "kW"
-    assert float(facts["construction_total"]) == 0.0
-    assert float(facts["annual_fixed_om"]) == 0.0
-    assert len(facts["payments_applied"]) == len(facts["net_cashflows"]) == 1
-    assert len(facts["tax_cash"]["depreciation"]) == len(facts["tax_cash"]["income"]) == 1
-    assert all(float(item["amount"]) == 0.0 for item in facts["payments_applied"])
-    assert all(float(item["amount"]) == 0.0 for item in facts["net_cashflows"])
-    assert all(float(item["amount"]) == 0.0 for item in facts["tax_cash"]["depreciation"])
-    assert all(float(item["tax"]) == 0.0 for item in facts["tax_cash"]["income"])
-    assert all(float(value) == 0.0 for value in facts["annual_net_flows"])
-    from iesplan.application.worker.compute_cases import build_financial_evaluation
-
-    sealed = build_financial_evaluation(
-        SimpleNamespace(evaluation={
-            "construction_period": evaluation.construction_period,
-            "operation_years": evaluation.operation_years,
-            "evaluation_years": evaluation.evaluation_years,
-            "discount_rate": evaluation.discount_rate,
-        }), finance, adapted,
-    )
+    assert float(sealed["construction_total"]) == 0.0
+    assert float(sealed["annual_fixed_om"]) == 0.0
+    assert len(sealed["payments_applied"]) == len(sealed["net_cashflows"]) == 1
+    assert len(sealed["tax_cash"]["depreciation"]) == len(sealed["tax_cash"]["income"]) == 1
+    assert all(float(item["amount"]) == 0.0 for item in sealed["payments_applied"])
+    assert all(float(item["amount"]) == 0.0 for item in sealed["net_cashflows"])
+    assert all(float(item["amount"]) == 0.0 for item in sealed["tax_cash"]["depreciation"])
+    assert all(float(item["tax"]) == 0.0 for item in sealed["tax_cash"]["income"])
+    assert all(float(value) == 0.0 for value in sealed["annual_net_flows"])
     assert sealed["construction_units"] == [{
         "unit_id": "gen_build", "instance_id": "gen1", "mode": "optional", "built": False,
         "scales": [{"planning_variable_id": "gen_cap", "value": 0.0, "unit": "kW"}],
     }]
     assert json.loads(json.dumps(sealed))["construction_units"][0]["scales"][0]["value"] == 0.0
+
     # Case B: 强制建设 (lower_bound = 50 kW) => 最优解为建成 (built__gen_build=1, gen_cap=50kW)
     artifact_b, models_b, materialized_b, finance_b, config_b, evaluation_b = _activation_inputs(
         optional=True, fixed_fee=50000.0, lower_kw=50.0,
@@ -441,10 +438,14 @@ def test_highs_solve_optional_construction_zero_and_active(tmp_path) -> None:
     assert res_b.returncode == 0, res_b.stderr
     sol_b = (tmp_path / "case_b" / "solution" / "values.sol").read_bytes()
 
-    receipt_b = _receipt()
-    adapted_b = HIGHS_ADAPTER.adapt(bundle_b, receipt_b, {SOLUTION_PATH: sol_b})
+    adapted_b, eng_sol_b = restore_bundle_solution(
+        bundle_b, succeeded_receipt(bundle=bundle_b), {SOLUTION_PATH: sol_b}, tmp_path=tmp_path / "case_b",
+    )
     assert adapted_b.math_status == "solved"
-    facts_b = adapted_b.outputs["financial_facts"]
+    facts_b = evaluate_forward_finance(
+        eng_sol_b, artifact=artifact_b, finance=finance_b, evaluation=evaluation_b,
+        materialized=materialized_b, device_models=models_b,
+    )
     status_entry_b = next(s for s in facts_b["construction_units"] if s["instance_id"] == "gen1")
     assert status_entry_b["built"] is True
     scale_b = next(v for v in status_entry_b["scales"] if v["planning_variable_id"] == "gen_cap")
@@ -466,11 +467,17 @@ def test_highs_solve_optional_construction_zero_and_active(tmp_path) -> None:
         cwd=directory, text=True, capture_output=True, check=False,
     )
     assert solved_c.returncode == 0, solved_c.stderr
-    adapted_c = HIGHS_ADAPTER.adapt(bundle_c, _receipt(), {
-        SOLUTION_PATH: (directory / "values.sol").read_bytes(),
-    })
+    adapted_c, eng_sol_c = restore_bundle_solution(
+        bundle_c,
+        succeeded_receipt(bundle=bundle_c),
+        {SOLUTION_PATH: (directory / "values.sol").read_bytes()},
+        tmp_path=directory,
+    )
     assert adapted_c.math_status == "solved"
-    facts_c = adapted_c.outputs["financial_facts"]
+    facts_c = evaluate_forward_finance(
+        eng_sol_c, artifact=inputs_c[0], finance=inputs_c[3], evaluation=inputs_c[5],
+        materialized=inputs_c[2], device_models=inputs_c[1],
+    )
     unit_c = facts_c["construction_units"][0]
     assert unit_c["built"] is True and unit_c["mode"] == "mandatory"
     assert unit_c["scales"][0]["value"] == 0.0

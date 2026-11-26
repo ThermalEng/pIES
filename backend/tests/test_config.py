@@ -58,7 +58,7 @@ def test_defaults_from_deploy_file() -> None:
     assert tuple(s.solver_allowed_executables) == ("ies.solver.highs@1.7.2",)
     assert tuple(s.solver_allowed_environment_vars) == ()
     assert s.calc_time_limit_seconds == 43200
-    assert s.stage_builtin_image == "pies-builtin-stages:1.1.5"
+    assert s.stage_builtin_image == "pies-builtin-stages:1.2.0"
     assert s.stage_pids_limit == 256
     assert s.stage_tmpfs_size_mb == 512
     assert s.stage_stop_grace_seconds == 5

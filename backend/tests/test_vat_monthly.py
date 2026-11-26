@@ -13,8 +13,17 @@ from decimal import Decimal
 
 import pytest
 from bundle_testkit import materialized_file
-from test_highs_result_adapter import SOLUTION_PATH, _receipt
-from test_highs_result_adapter import _bundle as _wrap_bundle
+from legacy_solve_testkit import (
+    SOLUTION_PATH,
+    evaluate_bundle_expressions,
+    restore_bundle_solution,
+)
+from legacy_solve_testkit import (
+    parse_highs_solution as _parse_solution,
+)
+from legacy_solve_testkit import (
+    succeeded_receipt as _receipt,
+)
 
 from iesplan.assembly import validate_assembly_doc
 from iesplan.computation import (
@@ -29,7 +38,6 @@ from iesplan.computation import (
 from iesplan.computation.generators.highs_milp import GENERATOR_REF
 from iesplan.computation.generators.linear import LoweringUnsupportedError
 from iesplan.computation.generators.project import _new_builder
-from iesplan.computation.result_adapters.highs import HIGHS_ADAPTER
 from iesplan.core.yamlmini import load as yaml_load
 from iesplan.devices import init_registry
 from iesplan.devices.parser2 import parse_device_model_v2
@@ -697,8 +705,6 @@ def _solve_internal(bundle, tmp_path, *, check_soc_pin=True):
     """
     from bundle_testkit import mps_columns
 
-    from iesplan.computation.result_adapters.highs import _parse_solution
-
     mps_raw = materialized_file(bundle, "input/problem.mps")
     (tmp_path / "input").mkdir(parents=True, exist_ok=True)
     (tmp_path / "output").mkdir(parents=True, exist_ok=True)
@@ -755,20 +761,18 @@ def test_vat_chain_matches_hand_and_npv(tmp_path) -> None:
     assert value == pytest.approx(float(_hand_npv_with_vat(paids)), rel=1e-6)
     # 生产 Adapter 交接：同一 Bundle 与同一次真实解，无列数/映射失败，
     # 目标值与固定变量恢复同源（税列不提前发布，不在此断言）。
-    adapted = HIGHS_ADAPTER.adapt(
-        _wrap_bundle(
-            {
-                "input/problem.mps": materialized_file(bundle, "input/problem.mps"),
-                "input/parameters.json": materialized_file(bundle, "input/parameters.json"),
-            }
-        ),
-        _receipt(),
+    adapted, eng_sol = restore_bundle_solution(
+        bundle,
+        _receipt(bundle=bundle),
         {SOLUTION_PATH: solution_raw},
+        tmp_path=tmp_path,
     )
     assert adapted.execution_status == "completed"
-    published = adapted.outputs["solution"]
-    assert published["objective_value"] == pytest.approx(float(_hand_npv_with_vat(paids)), rel=1e-6)
-    by_name = {entry["name"]: entry["value"] for entry in published["variables"]}
+    exprs = evaluate_bundle_expressions(bundle, {SOLUTION_PATH: solution_raw})
+    assert eng_sol["solver_summary"]["objective_value"] == pytest.approx(
+        float(_hand_npv_with_vat(paids)), rel=1e-6
+    )
+    by_name = {entry["name"]: entry["value"] for entry in exprs["variables"]}
     assert by_name["soc_pin"] == pytest.approx(0.5)
 
 

@@ -30,12 +30,11 @@ os.environ.setdefault("IESPLAN_QUEUE", "memory")
 import pytest  # noqa: E402
 from auth_helpers import login_headers, make_user  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
-from worker_testkit import seal_test_evidence
-
 from sqlalchemy import create_engine, select  # noqa: E402
 from sqlalchemy.engine import Engine  # noqa: E402
 from sqlalchemy.orm import Session, sessionmaker  # noqa: E402
 from sqlalchemy.pool import StaticPool  # noqa: E402
+from worker_testkit import seal_test_evidence
 
 from iesplan import tasks as tasks_domain  # noqa: E402
 from iesplan.api import projects as projects_api  # noqa: E402
@@ -52,10 +51,10 @@ from iesplan.core.errors import NotFoundError  # noqa: E402
 from iesplan.db import Base  # noqa: E402
 from iesplan.identity.persistence import User  # noqa: E402,F401
 from iesplan.main import create_app  # noqa: E402
-from iesplan.tasks.persistence import Task  # noqa: E402
 from iesplan.results.persistence import EvidencePackage, ResultSelection  # noqa: E402
 from iesplan.storage import put_object
 from iesplan.tasks import queue  # noqa: E402
+from iesplan.tasks.persistence import Task  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # 测试环境
@@ -228,7 +227,7 @@ def _prepare_project(client: TestClient, db: Session, user, name: str = "结果�
     return pid
 
 
-#: 计算配置正文(14 字段契约; 与 test_http_contract._CALC_PAYLOAD 同构)。
+#: 计算配置正文(13 字段 1.2.0 单一契约形态)。
 _CONFIG_BODY: dict[str, Any] = {
     "schema": "ies.calculation-config",
     "schema_version": "1.0.0",
@@ -237,11 +236,10 @@ _CONFIG_BODY: dict[str, Any] = {
     "generator": "ies.generator.highs_milp@1.0.0",
     "solver": "ies.solver.highs@1.7.2",
     "algorithm": None,
-    "evaluator": None,
+    "evaluators": [],
     "precision": "medium",
-    "convergence": None,
     "time_limit_seconds": 600,
-    "options": {},
+    "options": {"generator": {}, "solver": {}},
     "seed": None,
     "outputs": ["solution"],
 }

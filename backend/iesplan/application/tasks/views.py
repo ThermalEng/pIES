@@ -377,21 +377,17 @@ def submit_task_case(
     parent_task_id: int | None = None,
     generator_registry: Any | None = None,
     predictor_registry: Any | None = None,
+    solver_registry: Any | None = None,
+    evaluator_registry: Any | None = None,
     algorithm_registry: Any | None = None,
     evaluation: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """提交任务完整用例(路由原顺序: 提交 → 摘要; 幂等标记同返回)。
-
-    幂等键为必填 keyword-only 参数(宪法 §5.5); 空值由任务提交权威用例按
-    TASK-REQ-003 拒绝。``submissions.submit_task`` 的 (任务记录, 标记) 元组
-    契约保持不变(``results`` 检查任务编排继续使用); 本用例在其上追加摘要
-    组装, 供提交端点一次转交。返回与 HTTP 无关的应用结果(摘要 + 标记);
-    幂等命中 → 200 的状态码映射与中文提示由 API 传输层按 ``replayed`` 决定。
-    """
+    """提交任务完整用例(路由原顺序: 提交 → 摘要; 幂等标记同返回)。"""
     task, flags = submit_task(
         db, user, project_id, task_type,
         config=config, idempotency_key=idempotency_key, parent_task_id=parent_task_id,
         generator_registry=generator_registry, predictor_registry=predictor_registry,
+        solver_registry=solver_registry, evaluator_registry=evaluator_registry,
         algorithm_registry=algorithm_registry,
         evaluation=evaluation,
     )

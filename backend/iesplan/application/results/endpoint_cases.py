@@ -22,16 +22,27 @@ API 跨包二次调用。
 
 from __future__ import annotations
 
+import json
+import re
+from collections.abc import Mapping
 from typing import Any
 
 from sqlalchemy.orm import Session
 
+from iesplan import tasks as tasks_domain
 from iesplan.application.projects import ensure_access
 from iesplan.application.results import writes as results_writes
 from iesplan.application.tasks import ensure_task_belongs, task_summary
-from iesplan.core.errors import NotFoundError
+from iesplan.core.errors import ConflictError, NotFoundError
 from iesplan.identity.contracts import UserRecord
 from iesplan.results.contracts import ResultAssessmentRecord, ResultSelectionRecord
+from iesplan.storage import get_object
+from iesplan.tasks.contracts import (
+    IDEMPOTENCY_KEY_RE,
+    POOL_BY_TYPE,
+    InvalidRequestError,
+    TaskConflictError,
+)
 
 
 def result_view(
@@ -186,12 +197,7 @@ def create_check_task_case(
 def list_assessments_case(
     db: Session, user: UserRecord, project_id: int, task_id: int
 ) -> dict[str, Any]:
-    """评估历史完整用例(路由原顺序: view 权限 + 归属 → 列表 → 逐项序列化)。
-
-    原路由借 ``result_view`` 做权限 + 归属校验(其证据/评估聚合结果被丢弃);
-    本用例保留相同的校验顺序与错误语义(ensure_access → ensure_task_belongs),
-    直接列表并逐项序列化。只读, 不拥有事务。返回响应就绪字典。
-    """
+    """评估历史完整用例(路由原顺序: view 权限 + 归属 → 列表 → 逐项序列化)。"""
     ensure_access(db, user, project_id, "view")
     ensure_task_belongs(db, project_id, task_id)
     items = [
@@ -199,3 +205,125 @@ def list_assessments_case(
         for a in results_writes.list_assessments(db, task_id)
     ]
     return {"items": items, "total": len(items)}
+
+
+def retry_evaluator_case(
+    db: Session,
+    user: UserRecord,
+    project_id: int,
+    task_id: int,
+    *,
+    evaluator: str,
+    idempotency_key: str,
+) -> dict[str, Any]:
+    """单项评价器重试用例：校验失败评价与密封工程解，幂等重排现有任务执行单项评价。"""
+    from iesplan.application.worker import (
+        list_evaluator_retry_requests,
+        save_evaluator_retry_request,
+    )
+
+    ensure_access(db, user, project_id, "edit")
+    task = ensure_task_belongs(db, project_id, task_id)
+    if not idempotency_key or not re.fullmatch(IDEMPOTENCY_KEY_RE, idempotency_key):
+        raise InvalidRequestError(
+            "单项评价器重试必须提供合法幂等键",
+            code="TASK-REQ-003",
+            params={"idempotency_key": idempotency_key},
+        )
+    existing_reqs = list_evaluator_retry_requests(db, task.id)
+    for req in existing_reqs:
+        if req.get("idempotency_key") == idempotency_key:
+            if req.get("evaluator") != evaluator:
+                raise ConflictError(
+                    "同一幂等键已绑定其他评价器重试请求",
+                    params={"idempotency_key": idempotency_key, "evaluator": evaluator},
+                )
+            return {
+                "task": task_summary(db, task),
+                "evaluator": evaluator,
+                "replayed": True,
+            }
+
+    if task.status in ("queued", "running", "cancelling"):
+        raise TaskConflictError(
+            "任务正在排队或执行中，暂不可发起单项评价器重试",
+            params={"task_id": task_id, "status": task.status},
+        )
+    package = results_writes.latest_evidence(db, task_id)
+    if package is None:
+        raise NotFoundError("任务尚无证据包，无法发起单项评价器重试", params={"task_id": task_id})
+
+    snapshot = tasks_domain.get_snapshot(db, task.calc_snapshot_id) if task.calc_snapshot_id else None
+    if snapshot is None:
+        raise InvalidRequestError("任务缺少冻结计算快照，无法重试评价器", params={"task_id": task_id})
+    configured_evals = {
+        str(ev["evaluator"])
+        for ev in (snapshot.calc_config_snapshot.get("evaluators") or ())
+        if isinstance(ev, Mapping) and "evaluator" in ev
+    }
+    if evaluator not in configured_evals:
+        raise InvalidRequestError(
+            "指定评价器不在任务冻结配置中",
+            params={"task_id": task_id, "evaluator": evaluator},
+        )
+
+    evidence_payload = json.loads(get_object(db, package.object_id))
+    eng_group = evidence_payload.get("engineering_solution") or {}
+    if not isinstance(eng_group, Mapping) or "solution.json" not in eng_group:
+        raise InvalidRequestError(
+            "当前证据包缺少可复用的密封工程解，无法执行单项评价器重试",
+            params={"task_id": task_id, "evidence_package_id": package.id},
+        )
+    eval_entries = evidence_payload.get("evaluator_results") or []
+    matching_entry = next(
+        (e for e in eval_entries if isinstance(e, dict) and e.get("evaluator") == evaluator),
+        None,
+    )
+    if matching_entry is None or matching_entry.get("status") not in ("failed", "timed_out", "cancelled"):
+        raise TaskConflictError(
+            "仅失败、超时或已取消的评价器支持单项重试",
+            params={
+                "task_id": task_id,
+                "evaluator": evaluator,
+                "status": matching_entry.get("status") if matching_entry else None,
+            },
+        )
+
+    attempts = tasks_domain.list_attempts(db, task.id)
+    if not attempts:
+        raise TaskConflictError("任务无历史执行尝试，无法绑定单项重试", params={"task_id": task_id})
+    try:
+        save_evaluator_retry_request(
+            db,
+            attempt_id=attempts[-1].id,
+            evaluator=evaluator,
+            base_evidence_id=package.id,
+            idempotency_key=idempotency_key,
+            min_attempt_no=task.attempt_count + 1,
+        )
+        updated_task = tasks_domain.set_task_status(
+            db, task.id, "queued", business_outcome=task.business_outcome
+        )
+        tasks_domain.clear_cancel(task.id)
+        tasks_domain.append_diagnostic(
+            db,
+            task_id=task.id,
+            level="info",
+            code="TASK_QUEUED",
+            message=f"单项评价器重试已排队: {evaluator}",
+            context={"evaluator": evaluator, "base_evidence_id": package.id},
+        )
+        pool = POOL_BY_TYPE[task.type]
+        tasks_domain.enqueue(
+            task.id,
+            pool,
+            task_type=task.type,
+            snapshot_id=task.calc_snapshot_id,
+            priority=task.priority,
+        )
+        summary = task_summary(db, updated_task)
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    return {"task": summary, "evaluator": evaluator, "replayed": False}

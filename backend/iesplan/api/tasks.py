@@ -111,6 +111,12 @@ def create_task_endpoint(
     predictor_registry = (
         getattr(bootstrap, "predictor_registry", None) if bootstrap is not None else None
     )
+    solver_registry = (
+        getattr(bootstrap, "solver_registry", None) if bootstrap is not None else None
+    )
+    evaluator_registry = (
+        getattr(bootstrap, "evaluator_registry", None) if bootstrap is not None else None
+    )
     algorithm_registry = (
         getattr(bootstrap, "algorithm_registry", None) if bootstrap is not None else None
     )
@@ -121,6 +127,8 @@ def create_task_endpoint(
         parent_task_id=payload.parent_task_id,
         generator_registry=generator_registry,
         predictor_registry=predictor_registry,
+        solver_registry=solver_registry,
+        evaluator_registry=evaluator_registry,
         algorithm_registry=algorithm_registry,
         evaluation=payload.evaluation,
     )

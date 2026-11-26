@@ -112,6 +112,9 @@ class SolverRuntime:
         bundle: SolverBundle,
         attempt: AttemptContext,
         *,
+        command: Mapping[str, object],
+        solver_ref: str = "ies.solver.highs@1.7.2",
+        result_adapter_ref: str | None = None,
         stop: StopProbe | None = None,
         handoff: Callable[[ExecutionReceipt, Mapping[str, Content]], Mapping[str, Content]] | None = None,
     ) -> tuple[ExecutionReceipt, Mapping[str, Content]]:
@@ -143,8 +146,10 @@ class SolverRuntime:
             raise TypeError(
                 f"stop 须为停止探针可调用对象，得到 {type(stop).__name__}"
             )
-        manifest = bundle.manifest
-        command = manifest.command
+        if not isinstance(command, Mapping):
+            raise TypeError(
+                f"command 须为 Mapping，得到 {type(command).__name__}"
+            )
         executor_ref = command["executor"]
         executable_ref = command["executable"]
         stop_reason = read_stop_reason(stop)
@@ -159,6 +164,8 @@ class SolverRuntime:
                     if stop_reason == "cancelled"
                     else "启动前租约失效，未启动进程"
                 ),
+                solver_ref=solver_ref,
+                result_adapter_ref=result_adapter_ref,
                 status=stop_reason,
             ), {}
         try:
@@ -172,11 +179,19 @@ class SolverRuntime:
                 str(executor_ref),
                 str(executable_ref),
                 str(exc),
+                solver_ref=solver_ref,
+                result_adapter_ref=result_adapter_ref,
             ), {}
         gate_error = self._check_policy(command)
         if gate_error is not None:
             return self._unexecuted(
-                bundle, attempt, provider.ref, str(executable_ref), gate_error
+                bundle,
+                attempt,
+                provider.ref,
+                str(executable_ref),
+                gate_error,
+                solver_ref=solver_ref,
+                result_adapter_ref=result_adapter_ref,
             ), {}
         root = tempfile.mkdtemp(prefix="ies-runtime-")
         delivered = True
@@ -193,6 +208,8 @@ class SolverRuntime:
                     provider.ref,
                     str(executable_ref),
                     str(exc),
+                    solver_ref=solver_ref,
+                    result_adapter_ref=result_adapter_ref,
                     status=exc.reason,
                 ), {}
             if not isinstance(outcome, ProcessOutcome):
@@ -201,7 +218,14 @@ class SolverRuntime:
                     f"得到 {type(outcome).__name__}"
                 )
             receipt, outputs = self._finish(
-                bundle, attempt, provider, command, outcome, root
+                bundle,
+                attempt,
+                provider,
+                command,
+                outcome,
+                root,
+                solver_ref=solver_ref,
+                result_adapter_ref=result_adapter_ref,
             )
             if handoff is not None:
                 delivered = False
@@ -271,6 +295,9 @@ class SolverRuntime:
         command: Mapping[str, object],
         outcome: ProcessOutcome,
         root: str,
+        *,
+        solver_ref: str = "ies.solver.highs@1.7.2",
+        result_adapter_ref: str | None = None,
     ) -> tuple[ExecutionReceipt, dict[str, Content]]:
         """核对输出边界并签发回执（见 ``run`` 状态优先级）。"""
         manifest = bundle.manifest
@@ -352,7 +379,16 @@ class SolverRuntime:
             status = "succeeded"
             error = ""
         receipt = self._build_receipt(
-            bundle, attempt, provider, command, outcome, status, error, collected
+            bundle,
+            attempt,
+            provider,
+            command,
+            outcome,
+            status,
+            error,
+            collected,
+            solver_ref=solver_ref,
+            result_adapter_ref=result_adapter_ref,
         )
         return receipt, collected
 
@@ -376,6 +412,9 @@ class SolverRuntime:
         executor_ref: str,
         executable_ref: str,
         error: str,
+        *,
+        solver_ref: str = "ies.solver.highs@1.7.2",
+        result_adapter_ref: str | None = None,
         status: str = "policy_rejected",
     ) -> ExecutionReceipt:
         """执行前拒绝回执（进程未启动，无执行事实，不伪造）。
@@ -391,10 +430,10 @@ class SolverRuntime:
             calculation_config_id=attempt.calculation_config_id,
             attempt_id=attempt.attempt_id,
             generator_ref=str(manifest.bundle["generator"]),
-            solver_ref=str(manifest.bundle["solver"]),
+            solver_ref=solver_ref,
             executor_ref=executor_ref,
             executable_ref=executable_ref,
-            result_adapter_ref=manifest.result_adapter,
+            result_adapter_ref=result_adapter_ref,
             status=status,
             termination_reason=(
                 status if status in ("cancelled", "fenced") else ""
@@ -413,6 +452,9 @@ class SolverRuntime:
         status: str,
         error: str,
         collected: Mapping[str, Content],
+        *,
+        solver_ref: str = "ies.solver.highs@1.7.2",
+        result_adapter_ref: str | None = None,
     ) -> ExecutionReceipt:
         """由过程结果与已核对输出签发唯一回执。"""
         manifest = bundle.manifest
@@ -436,10 +478,10 @@ class SolverRuntime:
             calculation_config_id=attempt.calculation_config_id,
             attempt_id=attempt.attempt_id,
             generator_ref=str(manifest.bundle["generator"]),
-            solver_ref=str(manifest.bundle["solver"]),
+            solver_ref=solver_ref,
             executor_ref=provider.ref,
             executable_ref=str(command["executable"]),
-            result_adapter_ref=manifest.result_adapter,
+            result_adapter_ref=result_adapter_ref,
             status=status,
             exit_code=outcome.exit_code,
             signal_number=outcome.signal_number,

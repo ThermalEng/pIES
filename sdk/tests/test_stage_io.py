@@ -9,20 +9,23 @@ import pytest
 from pies_sdk.contracts import ComputeResultPayload, PredictionOutputPayload
 from pies_sdk.errors import StageIOError
 from pies_sdk.io import (
-    list_solver_solutions,
     read_algorithm_request,
     read_compute_result,
-    read_evaluator_inputs,
+    read_engineering_solution,
+    read_evaluation_report,
     read_generator_inputs,
     read_prediction_output,
     read_predictor_request,
+    read_primal_solution,
     read_solver_bundle,
     validate_stage_outputs,
     write_compute_result,
+    write_engineering_solution,
+    write_evaluation_report,
     write_json_file,
     write_prediction_output,
+    write_primal_solution,
     write_solver_bundle,
-    write_solver_solution,
 )
 from pies_sdk.iteration import IterationRecord, IterationWriter, read_iterations
 
@@ -33,20 +36,18 @@ def _sample_bundle_manifest() -> dict:
         "schema_version": "1.0.0",
         "bundle": {
             "generator": "ies.generator.highs_milp@1.0.0",
-            "solver": "ies.solver.highs@1.7.2",
+            "contract": "ies.solver-bundle.mps@1.0.0",
         },
         "inputs": [
             {"path": "input/problem.mps", "media_type": "application/mps"},
         ],
-        "command": {
-            "executor": "ies.executor.local_process@1.0.0",
-            "executable": "ies.solver.highs@1.7.2",
-            "arguments": ["input/problem.mps"],
-        },
         "outputs": [
-            {"path": "output/solution.json", "media_type": "application/json", "required": True},
+            {
+                "path": "output/primal_solution.json",
+                "media_type": "application/json",
+                "required": True,
+            },
         ],
-        "result_adapter": "ies.result-adapter.highs@1.0.0",
         "extensions": {},
     }
 
@@ -80,7 +81,7 @@ def test_generator_solver_evaluator_stage_io(tmp_path: Path) -> None:
     write_solver_bundle(gen_out, bundle_manifest, {"input/problem.mps": "NAME TEST\nENDATA\n"})
     validate_stage_outputs("generator", gen_out)
 
-    # Solver consumes frozen generator bundle directory
+    # Solver consumes frozen generator bundle directory and emits primal_solution.json
     solver_in = tmp_path / "solver_in"
     solver_out = tmp_path / "solver_out"
     (solver_in / "bundle" / "input").mkdir(parents=True)
@@ -92,27 +93,48 @@ def test_generator_solver_evaluator_stage_io(tmp_path: Path) -> None:
     loaded_manifest, _ = read_solver_bundle(solver_in)
     assert loaded_manifest["schema"] == "ies.solver-bundle"
 
-    write_solver_solution(solver_out, "solution.json", {"status": "optimal", "objective": 10.0})
+    write_primal_solution(
+        solver_out / "primal_solution.json",
+        {
+            "schema": "ies.primal-solution",
+            "schema_version": "1.0.0",
+            "math_status": "solved",
+            "termination_reason": "optimal",
+            "has_feasible_solution": True,
+            "column_count": 2,
+            "objective_value": 10.0,
+            "best_bound": 10.0,
+            "relative_gap": 0.0,
+            "values": [1.0, 2.0],
+            "receipt": {"solver": "ies.solver.highs@1.7.2"},
+        },
+    )
     validate_stage_outputs("solver", solver_out)
-    assert [p.name for p in list_solver_solutions(solver_out)] == ["solution.json"]
+    assert read_primal_solution(solver_out / "primal_solution.json").column_count == 2
 
-    # Evaluator consumes bundle + solution + receipt
-    eval_in = tmp_path / "eval_in"
+    # Algorithm emits ies.engineering-solution@1.0.0 (solution.json)
+    alg_out = tmp_path / "alg_out"
+    write_engineering_solution(
+        alg_out / "solution.json",
+        {
+            "schema": "ies.engineering-solution",
+            "schema_version": "1.0.0",
+            "solver_summary": {
+                "math_status": "infeasible",
+                "termination_reason": "infeasible",
+                "has_feasible_solution": False,
+                "objective_value": None,
+                "objective_unit": None,
+                "best_bound": None,
+                "relative_gap": None,
+            },
+        },
+    )
+    validate_stage_outputs("algorithm", alg_out)
+    assert read_engineering_solution(alg_out / "solution.json").solver_summary.math_status == "infeasible"
+
+    # Evaluators support both official result.json and third-party evaluation_report.json
     eval_out = tmp_path / "eval_out"
-    (eval_in / "bundle" / "input").mkdir(parents=True)
-    (eval_in / "bundle" / "bundle.yaml").write_text(
-        (gen_out / "bundle" / "bundle.yaml").read_text(encoding="utf-8"),
-        encoding="utf-8",
-    )
-    (eval_in / "bundle" / "input" / "problem.mps").write_text("NAME TEST\nENDATA\n", encoding="utf-8")
-    (eval_in / "solution.json").write_text(
-        (solver_out / "solution.json").read_text(encoding="utf-8"),
-        encoding="utf-8",
-    )
-    write_json_file(eval_in / "receipt.json", {"receipt_id": "rcpt-1", "status": "succeeded"})
-    ev = read_evaluator_inputs(eval_in)
-    assert ev["receipt"]["receipt_id"] == "rcpt-1"
-
     write_compute_result(
         eval_out,
         ComputeResultPayload(
@@ -125,6 +147,22 @@ def test_generator_solver_evaluator_stage_io(tmp_path: Path) -> None:
     )
     validate_stage_outputs("evaluator", eval_out)
     assert read_compute_result(eval_out).math_status == "solved"
+
+    report_out = tmp_path / "report_out"
+    write_evaluation_report(
+        report_out / "evaluation_report.json",
+        {
+            "schema": "ies.evaluation-report",
+            "schema_version": "1.0.0",
+            "title": "Carbon Report",
+            "evaluator": "acme.evaluator.carbon@1.0.0",
+            "metrics": [{"id": "co2", "label": "CO2", "value": 12.5, "unit": "t"}],
+            "charts": [],
+            "tables": [],
+        },
+    )
+    validate_stage_outputs("evaluator", report_out)
+    assert read_evaluation_report(report_out / "evaluation_report.json").title == "Carbon Report"
 
 
 def test_algorithm_and_iterations_ndjson(tmp_path: Path) -> None:

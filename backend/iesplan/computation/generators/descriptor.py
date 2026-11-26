@@ -99,17 +99,14 @@ class GeneratorDescriptor:
         object.__setattr__(self, "precisions", precisions)
         if not self.outputs:
             raise ValueError("outputs 须为非空能力集合")
-        if not self.result_adapter:
-            raise ValueError(
-                "result_adapter 不得为空：descriptor 必须声明配套结果适配器"
-            )
-        check_provider_ref(self.result_adapter, "result_adapter")
+        if self.result_adapter:
+            check_provider_ref(self.result_adapter, "result_adapter")
         if self.evaluators is None:
-            evaluators = (self.result_adapter,)
+            evaluators = (
+                (self.result_adapter,) if self.result_adapter else ()
+            )
         else:
             evaluators = tuple(self.evaluators)
-            if not evaluators:
-                raise ValueError("evaluators 若显式声明则不得为空")
             for ev_ref in evaluators:
                 check_provider_ref(ev_ref, "evaluators")
         object.__setattr__(self, "evaluators", evaluators)
@@ -139,6 +136,26 @@ class GeneratorDescriptor:
     def supports_evaluator(self, evaluator_ref: str) -> bool:
         """该 provider 是否兼容给定 evaluator 精确引用。"""
         return evaluator_ref in (self.evaluators or ())
+
+    def to_stage_spec(self) -> Any:
+        """投影为统一阶段契约 ``StagePluginSpec``。"""
+        from iesplan.computation.contracts.compatibility import (
+            SOLVER_BUNDLE_MPS_CONTRACT,
+            STAGE_INPUT_CONTRACT,
+            StagePluginSpec,
+        )
+
+        return StagePluginSpec(
+            plugin_id=self.generator_id,
+            version=self.version,
+            kind="generator",
+            parameters_schema=self.options_schema,
+            consumes=(STAGE_INPUT_CONTRACT,),
+            produces=(SOLVER_BUNDLE_MPS_CONTRACT,),
+            modes=self.modes,
+            precisions=self.precisions,
+            outputs=self.outputs,
+        )
 
     def to_dict(self) -> dict[str, Any]:
         """序列化为 JSON 兼容独立副本。"""

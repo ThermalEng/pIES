@@ -1,15 +1,15 @@
-"""GeneratorProvider 独立注册(0.8 切片 A)。
-
-公开 descriptor 形状、首个真实 provider(``highs_milp``)与原子注册表。
-provider 选择与装配只归 bootstrap 组合根；API/Worker 不得自行发现或
-动态加载 provider。无可用 provider 时统一抛
-``ComputationUnavailableError``。
-"""
+"""GeneratorProvider 独立注册与 1.2.0 SolverBundle 生成。"""
 
 from iesplan.computation.generators.descriptor import GeneratorDescriptor
 from iesplan.computation.generators.highs_milp import (
+    EPIGRAPHS_PATH,
+    GENERATOR_REF,
     HIGHS_MILP_PROVIDER,
+    PARAMETERS_PATH,
+    RECORDS_PATH,
+    SOLVER_REF,
     HighsMilpProvider,
+    generate_highs_bundle,
 )
 from iesplan.computation.generators.linear import (
     LinearConstraint,
@@ -36,7 +36,12 @@ from iesplan.computation.generators.registry import (
 )
 
 __all__ = [
+    "EPIGRAPHS_PATH",
+    "GENERATOR_REF",
     "HIGHS_MILP_PROVIDER",
+    "PARAMETERS_PATH",
+    "RECORDS_PATH",
+    "SOLVER_REF",
     "GeneratorDescriptor",
     "GeneratorRegistry",
     "HighsMilpProvider",
@@ -50,6 +55,7 @@ __all__ = [
     "build_project_model",
     "build_project_model_with_facts",
     "build_registry",
+    "generate_highs_bundle",
     "iter_mps_chunks",
     "lower_expression",
     "lower_mutex",

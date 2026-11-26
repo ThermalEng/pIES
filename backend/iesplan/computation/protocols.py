@@ -40,14 +40,13 @@ from iesplan.modeling import DeviceMathContribution
 
 if TYPE_CHECKING:
     from iesplan.computation.generators.descriptor import GeneratorDescriptor
-    from iesplan.computation.result_adapter import ResultAdapterDescriptor
     from iesplan.computation.runtime.descriptor import ExecutorDescriptor
 
 #: 公开计算配置 schema(进入业务事实前须校验字头)。
 CALCULATION_CONFIG_SCHEMA = "ies.calculation-config"
 CALCULATION_CONFIG_VERSION = "1.0.0"
 
-#: 公开 CalculationConfig 14 字段权威顺序。
+#: 公开 CalculationConfig 13 字段权威顺序。
 CALCULATION_CONFIG_FIELDS = (
     "schema",
     "schema_version",
@@ -56,9 +55,8 @@ CALCULATION_CONFIG_FIELDS = (
     "generator",
     "solver",
     "algorithm",
-    "evaluator",
+    "evaluators",
     "precision",
-    "convergence",
     "time_limit_seconds",
     "options",
     "seed",
@@ -240,60 +238,37 @@ class ExecutorProvider(Protocol):
         ...
 
 
-@runtime_checkable
-class ResultAdapter(Protocol):
-    """统一计算结果的声明输出适配(仅形状, 无实现)。
+def check_relative_path(path: object, name: str = "path") -> str:
+    """校验安全相对路径（非空，不以 ``/`` 或尾 ``/`` 起止，不含反斜杠、空段或 ``..``）。"""
+    if not isinstance(path, str) or not path:
+        raise ValueError(f"{name} 须为非空相对路径: {path!r}")
+    if "\\" in path or path.startswith("/") or path.endswith("/"):
+        raise ValueError(f"{name} 路径越界: {path!r}")
+    parts = path.split("/")
+    if any(not part or part == ".." for part in parts):
+        raise ValueError(f"{name} 路径越界: {path!r}")
+    return path
 
-    只凭只读 Bundle、回执和声明输出解释结果; 不得重新运行求解器、不得
-    访问项目草稿、不得按当前最新 provider 改写历史结果。
-    """
 
-    @property
-    def descriptor(self) -> ResultAdapterDescriptor:
-        """公开能力描述符(与 ``ref`` 单一来源；类型仅静态引用，避免循环导入)。"""
-        ...
-
-    @property
-    def ref(self) -> str:
-        """适配器精确引用(``<稳定ID>@<语义化版本>`` 形态，与描述符单一来源)。"""
-        ...
-
-    def available(self) -> bool:
-        """该 provider 当前是否可用。"""
-        ...
-
-    def adapt(
-        self,
-        bundle: SolverBundle,
-        receipt: ExecutionReceipt,
-        outputs: Mapping[str, object],
-    ) -> ComputeResult:
-        """把 Bundle、回执和声明输出映射为统一计算结果。
-
-        不可行/无界/数值异常映射为明确结果状态; 结果格式损坏或非有限值
-        即结果协议失败, 不发布伪成功。无可用实现时抛
-        ``ComputationUnavailableError``。
-        """
-        ...
+def check_finite_json(value: object, name: str = "value") -> None:
+    """递归拒绝非有限浮点、非字符串映射键与非 JSON 值。"""
+    if isinstance(value, float) and not math.isfinite(value):
+        raise ValueError(f"{name} 禁止非有限数值: {value!r}")
+    if isinstance(value, Mapping):
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise TypeError(f"{name} 映射键须为字符串，得到 {type(key).__name__}")
+            check_finite_json(item, f"{name}.{key}")
+    elif isinstance(value, (list, tuple)):
+        for index, item in enumerate(value):
+            check_finite_json(item, f"{name}[{index}]")
+    elif value is not None and not isinstance(value, (str, int, float, bool)):
+        raise TypeError(f"{name} 须为 JSON 值，得到 {type(value).__name__}")
 
 
 @dataclass(frozen=True, slots=True)
 class CalculationConfig:
-    """公开计算配置(14 字段契约，进入业务事实前已校验字头与模式互斥规则)。
-
-    固定一次计算的全部选择: ``mode``、``predictions``（预测目标/算法/
-    参数列表，可空列表，不接受 None）、互斥的计算组合（分步模式：
-    ``generator`` + ``solver`` 精确引用且 ``algorithm=None``；一体化模式：
-    ``algorithm`` 精确引用且 ``generator=None``、``solver=None``）、
-    ``evaluator``（按需选择的评价器精确引用或 None）、``precision``
-    （low|medium|high）、``convergence``（阶段二收敛，可空）、
-    ``time_limit_seconds``、``options``（对象，可空对象，不接受 None）、
-    随机种子与输出请求。同一字段只有一种形态；嵌套非有限浮点当场拒绝。
-    计算按项目基线完整连续序列进行，本配置不含离散化字段，也不含规划
-    目标/变量/约束、设备参数、财务配置、资源或装配内容。多个
-    data_predict 时收敛是否必填由后续 application 结合 artifact 判断，
-    本载体不重读装配。
-    """
+    """公开计算配置(1.2.0 单向流水线 13 字段契约)。"""
 
     schema: str = CALCULATION_CONFIG_SCHEMA
     schema_version: str = CALCULATION_CONFIG_VERSION
@@ -302,9 +277,8 @@ class CalculationConfig:
     generator: str | None = None
     solver: str | None = None
     algorithm: str | None = None
-    evaluator: str | None = None
+    evaluators: tuple[Mapping[str, object], ...] = ()
     precision: str = ""
-    convergence: Mapping[str, object] | None = None
     time_limit_seconds: int = 0
     options: Mapping[str, object] = field(default_factory=dict)
     seed: int | None = None
@@ -323,50 +297,50 @@ class CalculationConfig:
             check_provider_ref(self.solver, "solver")
         if self.algorithm is not None:
             check_provider_ref(self.algorithm, "algorithm")
-        if self.evaluator is not None:
-            check_provider_ref(self.evaluator, "evaluator")
-        if self.algorithm is not None:
+        is_unified = self.algorithm is not None
+        if is_unified:
             if self.generator is not None or self.solver is not None:
-                raise ValueError(
-                    "一体化算法模式(algorithm 非空)下 generator 与 solver 必须为 None"
-                )
+                raise ValueError("一体化算法模式(algorithm 非空)下 generator 与 solver 必须为 None")
         elif self.generator is None or self.solver is None:
-            raise ValueError(
-                "分步算法模式下 generator 与 solver 必须同时提供精确引用（不能为 None）"
-            )
+            raise ValueError("分步算法模式下 generator 与 solver 必须同时提供精确引用（不能为 None）")
         if self.precision not in ("low", "medium", "high"):
             raise ValueError(f"precision 须为 low|medium|high: {self.precision!r}")
-        object.__setattr__(self, "predictions", _freeze_predictions(self.predictions))
-        object.__setattr__(self, "convergence", _freeze_convergence(self.convergence))
         if (
             not isinstance(self.time_limit_seconds, int)
             or isinstance(self.time_limit_seconds, bool)
             or self.time_limit_seconds <= 0
         ):
-            raise ValueError(
-                f"time_limit_seconds 须为正整数: {self.time_limit_seconds!r}"
-            )
-        if not isinstance(self.options, Mapping):
-            raise TypeError(
-                f"options 须为 Mapping（可用空对象，不得为 None），"
-                f"得到 {type(self.options).__name__}"
-            )
-        _check_finite_json(self.options, "options")
-        object.__setattr__(self, "options", freeze_json_value(dict(self.options)))
-        if self.seed is not None and (
-            not isinstance(self.seed, int) or isinstance(self.seed, bool)
-        ):
+            raise ValueError(f"time_limit_seconds 须为正整数: {self.time_limit_seconds!r}")
+        if self.seed is not None and (not isinstance(self.seed, int) or isinstance(self.seed, bool)):
             raise TypeError("seed 须为整数或 None（不接受布尔值）")
+        if isinstance(self.outputs, Mapping) or not isinstance(self.outputs, (list, tuple)):
+            raise TypeError(f"outputs 须为字符串序列，得到 {type(self.outputs).__name__}")
         outputs = tuple(self.outputs)
         if not outputs:
             raise ValueError("outputs 不得为空")
         for name in outputs:
             if not isinstance(name, str) or not name:
                 raise ValueError(f"输出请求须为非空字符串: {name!r}")
+        object.__setattr__(self, "predictions", _freeze_predictions(self.predictions))
+        object.__setattr__(self, "evaluators", _freeze_evaluators(self.evaluators))
+        object.__setattr__(self, "options", _freeze_slotted_options(self.options, is_unified=is_unified))
         object.__setattr__(self, "outputs", outputs)
 
+    @property
+    def is_unified(self) -> bool:
+        """若选中一体化算法插件则返回 True。"""
+        return self.algorithm is not None
+
+    def slot_options(self, slot: str) -> Mapping[str, object]:
+        """返回指定分槽的只读参数映射（缺槽返回空映射）。"""
+        value = self.options.get(slot)
+        if value is None:
+            return MappingProxyType({})
+        assert isinstance(value, Mapping)
+        return value
+
     def to_dict(self) -> dict[str, Any]:
-        """序列化为 JSON 兼容独立副本（predictions 按目标稳定排序）。"""
+        """序列化为 13 字段标准顺序 JSON 兼容独立副本。"""
         return {
             "schema": self.schema,
             "schema_version": self.schema_version,
@@ -375,13 +349,8 @@ class CalculationConfig:
             "generator": self.generator,
             "solver": self.solver,
             "algorithm": self.algorithm,
-            "evaluator": self.evaluator,
+            "evaluators": [_thaw_entry(entry) for entry in self.evaluators],
             "precision": self.precision,
-            "convergence": (
-                dict(thaw_json_value(self.convergence))
-                if self.convergence is not None
-                else None
-            ),
             "time_limit_seconds": self.time_limit_seconds,
             "options": thaw_json_value(self.options),
             "seed": self.seed,
@@ -390,11 +359,7 @@ class CalculationConfig:
 
     @classmethod
     def from_frozen(cls, frozen: Mapping[str, Any]) -> CalculationConfig:
-        """从已校验持久化/快照字典直接恢复不可变载体（只还原类型，不重跑输入校验）。
-
-        调用方保证输入已通过保存入口校验；14 字段缺件即 ``KeyError`` 直接可见，
-        不设默认值、不回退旧 12 字段形态，也不重复执行引用格式或非有限浮点校验。
-        """
+        """从已校验持久化/快照字典直接恢复不可变载体（只还原类型，不重跑输入校验）。"""
         instance = object.__new__(cls)
         object.__setattr__(instance, "schema", frozen["schema"])
         object.__setattr__(instance, "schema_version", frozen["schema_version"])
@@ -407,28 +372,17 @@ class CalculationConfig:
         object.__setattr__(instance, "generator", frozen["generator"])
         object.__setattr__(instance, "solver", frozen["solver"])
         object.__setattr__(instance, "algorithm", frozen["algorithm"])
-        object.__setattr__(instance, "evaluator", frozen["evaluator"])
-        object.__setattr__(instance, "precision", frozen["precision"])
-        conv = frozen["convergence"]
         object.__setattr__(
             instance,
-            "convergence",
-            freeze_json_value(conv) if conv is not None else None,
+            "evaluators",
+            tuple(freeze_json_value(entry) for entry in frozen["evaluators"]),
         )
+        object.__setattr__(instance, "precision", frozen["precision"])
         object.__setattr__(instance, "time_limit_seconds", frozen["time_limit_seconds"])
         object.__setattr__(instance, "options", freeze_json_value(frozen["options"]))
         object.__setattr__(instance, "seed", frozen["seed"])
         object.__setattr__(instance, "outputs", tuple(frozen["outputs"]))
         return instance
-
-
-def _check_relative_path(path: object, name: str) -> str:
-    """校验 Bundle 内相对路径（非空，不以 ``/`` 开头，不含 ``..`` 段）。"""
-    if not isinstance(path, str) or not path:
-        raise ValueError(f"{name} 须为非空相对路径: {path!r}")
-    if path.startswith("/") or ".." in path.split("/"):
-        raise ValueError(f"{name} 路径越界: {path!r}")
-    return path
 
 
 def _check_media_type(media_type: object, name: str) -> str:
@@ -438,32 +392,53 @@ def _check_media_type(media_type: object, name: str) -> str:
     return media_type
 
 
-def _freeze_file_entries(entries: object, name: str) -> tuple[Mapping[str, object], ...]:
-    """冻结 inputs/outputs 条目（[{path, media_type(, required)}]，拒绝未知键）。"""
+_RESERVED_MANIFEST_PATHS = frozenset({"bundle.yaml"})
+_INPUT_PATH_PREFIX = "input/"
+_OUTPUT_PATH_PREFIX = "output/"
+PRIMAL_SOLUTION_OUTPUT_PATH = "output/primal_solution.json"
+_PRIMAL_SOLUTION_OUTPUT_PATH = PRIMAL_SOLUTION_OUTPUT_PATH
+
+
+def _freeze_io_entries(entries: object, name: str) -> tuple[Mapping[str, object], ...]:
+    """冻结 inputs/outputs 条目（限定 input/ 与 output/ 相对路径，强制 output/primal_solution.json）。"""
     if isinstance(entries, Mapping) or not isinstance(entries, (list, tuple)):
         raise TypeError(f"{name} 须为条目序列，得到 {type(entries).__name__}")
-    frozen = []
+    allowed = ("path", "media_type", "required") if name == "outputs" else ("path", "media_type")
+    frozen: list[Mapping[str, object]] = []
+    seen_paths: set[str] = set()
     for entry in entries:
         if not isinstance(entry, Mapping):
             raise TypeError(f"{name} 条目须为 Mapping，得到 {type(entry).__name__}")
-        if name == "outputs":
-            allowed = ("path", "media_type", "required")
-        else:
-            allowed = ("path", "media_type")
         extra = sorted(k for k in entry if k not in allowed)
         if extra:
             raise ValueError(f"{name} 条目不接受额外字段: {extra!r}")
         for key in ("path", "media_type"):
             if key not in entry:
                 raise ValueError(f"{name} 条目缺必需字段: {key}")
-        _check_relative_path(entry["path"], f"{name}.path")
+        rel_path = check_relative_path(entry["path"], f"{name}.path")
+        if rel_path in _RESERVED_MANIFEST_PATHS:
+            raise ValueError(f"{name}.path 禁止占用保留清单路径: {rel_path!r}")
+        expected_prefix = _INPUT_PATH_PREFIX if name == "inputs" else _OUTPUT_PATH_PREFIX
+        if not rel_path.startswith(expected_prefix) or rel_path == expected_prefix:
+            raise ValueError(f"{name}.path 须归属 {expected_prefix!r} 目录: {rel_path!r}")
+        if rel_path in seen_paths:
+            raise ValueError(f"{name}.path 不得重复: {rel_path!r}")
+        seen_paths.add(rel_path)
         _check_media_type(entry["media_type"], f"{name}.media_type")
-        if name == "outputs":
-            if "required" not in entry or not isinstance(entry["required"], bool):
-                raise ValueError(f"{name} 条目 required 须为布尔值")
+        if name == "outputs" and ("required" not in entry or not isinstance(entry["required"], bool)):
+            raise ValueError(f"{name} 条目 required 须为布尔值")
         frozen.append(freeze_json_value(dict(entry)))
     if not frozen:
         raise ValueError(f"{name} 不得为空")
+    if name == "outputs":
+        primal_entries = [e for e in frozen if e["path"] == _PRIMAL_SOLUTION_OUTPUT_PATH]
+        if not primal_entries:
+            raise ValueError(f"outputs 必须包含 {_PRIMAL_SOLUTION_OUTPUT_PATH!r}")
+        primal = primal_entries[0]
+        if primal["required"] is not True or primal["media_type"] != "application/json":
+            raise ValueError(
+                f"{_PRIMAL_SOLUTION_OUTPUT_PATH!r} 须声明 required=true 且 media_type='application/json'"
+            )
     return tuple(frozen)
 
 
@@ -482,51 +457,23 @@ def _freeze_prediction_target(target: object) -> Mapping[str, object]:
     return freeze_json_value(dict(target))
 
 
-def _check_finite_json(value: object, name: str) -> None:
-    """递归拒绝非有限浮点（仅公开输入载体边界，不扩散为内部复核）。"""
-    if isinstance(value, float) and not math.isfinite(value):
-        raise ValueError(f"{name} 禁止非有限数值: {value!r}")
-    if isinstance(value, Mapping):
-        for key, item in value.items():
-            _check_finite_json(item, f"{name}.{key}")
-    elif isinstance(value, (list, tuple)):
-        for index, item in enumerate(value):
-            _check_finite_json(item, f"{name}[{index}]")
-
-
-def _freeze_predictions(
-    predictions: object,
-) -> tuple[Mapping[str, object], ...]:
-    """冻结预测配置（列表，可空列表，不接受 None；每项去重并稳定排序）。
-
-    每项 {target, algorithm, parameters}，目标不重复；algorithm 本切片
-    只校验精确引用形态，不做注册表查找。返回按 (instance, interface)
-    稳定排序的元组。
-    """
+def _freeze_predictions(predictions: object) -> tuple[Mapping[str, object], ...]:
+    """冻结预测配置（列表，可空列表，不接受 None；target 不重复）。"""
     if predictions is None:
         raise TypeError("predictions 不得为 None，使用空列表表示无预测")
     if isinstance(predictions, Mapping) or not isinstance(predictions, (list, tuple)):
-        raise TypeError(
-            f"predictions 须为序列，得到 {type(predictions).__name__}"
-        )
-    frozen = []
+        raise TypeError(f"predictions 须为序列，得到 {type(predictions).__name__}")
+    frozen: list[Mapping[str, object]] = []
     seen: set[tuple[str, str]] = set()
     for entry in predictions:
-        if not isinstance(entry, Mapping) or set(entry) != {
-            "target",
-            "algorithm",
-            "parameters",
-        }:
-            raise ValueError(
-                "prediction 条目须恰为 target/algorithm/parameters 三键: "
-                f"{entry!r}"
-            )
+        if not isinstance(entry, Mapping) or set(entry) != {"target", "algorithm", "parameters"}:
+            raise ValueError(f"prediction 条目须恰为 target/algorithm/parameters 三键: {entry!r}")
         target = _freeze_prediction_target(entry["target"])
         check_provider_ref(entry["algorithm"], "prediction.algorithm")
         if not isinstance(entry["parameters"], Mapping):
             raise TypeError("prediction.parameters 须为 Mapping")
-        _check_finite_json(entry["parameters"], "prediction.parameters")
-        key = (target["instance"], target["interface"])
+        check_finite_json(entry["parameters"], "prediction.parameters")
+        key = (str(target["instance"]), str(target["interface"]))
         if key in seen:
             raise ValueError(f"prediction.target 不得重复: {key!r}")
         seen.add(key)
@@ -539,127 +486,60 @@ def _freeze_predictions(
                 }
             )
         )
-    frozen.sort(key=lambda e: (e["target"]["instance"], e["target"]["interface"]))
     return tuple(frozen)
 
 
-def _freeze_convergence(convergence: object) -> Mapping[str, object] | None:
-    """冻结阶段二收敛配置（可空；{tolerance, max_iterations} 恰二键）。
-
-    tolerance 为正有限数，max_iterations 为正整数。多个 data_predict 时
-    是否必填由后续 application 结合 artifact 判断，本载体不重读装配。
-    """
-    if convergence is None:
-        return None
-    if not isinstance(convergence, Mapping) or set(convergence) != {
-        "tolerance",
-        "max_iterations",
-    }:
-        raise ValueError(
-            "convergence 须恰为 tolerance/max_iterations 二键: "
-            f"{convergence!r}"
-        )
-    tolerance = convergence["tolerance"]
-    if (
-        not isinstance(tolerance, (int, float))
-        or isinstance(tolerance, bool)
-        or not math.isfinite(tolerance)
-        or tolerance <= 0
-    ):
-        raise ValueError(f"convergence.tolerance 须为正有限数: {tolerance!r}")
-    max_iterations = convergence["max_iterations"]
-    if (
-        not isinstance(max_iterations, int)
-        or isinstance(max_iterations, bool)
-        or max_iterations <= 0
-    ):
-        raise ValueError(
-            f"convergence.max_iterations 须为正整数: {max_iterations!r}"
-        )
-    return freeze_json_value(dict(convergence))
+def _freeze_evaluators(evaluators: object) -> tuple[Mapping[str, object], ...]:
+    """冻结并联后置评价器列表（可空列表，不允许 None；evaluator 引用不可重复）。"""
+    if evaluators is None:
+        raise TypeError("evaluators 不得为 None，使用空列表表示无评价器")
+    if isinstance(evaluators, Mapping) or not isinstance(evaluators, (list, tuple)):
+        raise TypeError(f"evaluators 须为序列，得到 {type(evaluators).__name__}")
+    frozen: list[Mapping[str, object]] = []
+    seen: set[str] = set()
+    for entry in evaluators:
+        if not isinstance(entry, Mapping) or set(entry) != {"evaluator", "parameters"}:
+            raise ValueError(f"evaluators 条目须恰为 evaluator/parameters 二键: {entry!r}")
+        evaluator_ref = check_provider_ref(entry["evaluator"], "evaluators.evaluator")
+        if evaluator_ref in seen:
+            raise ValueError(f"evaluators.evaluator 不得重复: {evaluator_ref!r}")
+        seen.add(evaluator_ref)
+        parameters = entry["parameters"]
+        if not isinstance(parameters, Mapping):
+            raise TypeError("evaluators.parameters 须为 Mapping")
+        check_finite_json(parameters, "evaluators.parameters")
+        frozen.append(freeze_json_value({"evaluator": evaluator_ref, "parameters": dict(parameters)}))
+    return tuple(frozen)
 
 
-def _freeze_command(command: object) -> Mapping[str, object]:
-    """冻结结构化命令（必需 executor/executable/arguments，拒绝未知键）。"""
-    if not isinstance(command, Mapping):
-        raise TypeError("command 须为结构化 Mapping（禁止 shell 字符串）")
-    allowed = (
-        "executor",
-        "executable",
-        "arguments",
-        "working_directory",
-        "environment",
-        "timeout_seconds",
-        "memory_mib",
-        "cpu_cores",
-        "network",
-        "success_exit_codes",
-    )
-    extra = sorted(k for k in command if k not in allowed)
-    if extra:
-        raise ValueError(f"command 不接受额外字段: {extra!r}")
-    for key in ("executor", "executable", "arguments"):
-        if key not in command:
-            raise ValueError(f"command 缺必需字段: {key}")
-    check_provider_ref(command["executor"], "command.executor")
-    check_provider_ref(command["executable"], "command.executable")
-    arguments = command["arguments"]
-    if not isinstance(arguments, (list, tuple)) or any(
-        not isinstance(a, str) for a in arguments
-    ):
-        raise TypeError("command.arguments 须为字符串序列")
-    if "working_directory" in command:
-        _check_relative_path(command["working_directory"], "command.working_directory")
-    if "environment" in command:
-        environment = command["environment"]
-        if not isinstance(environment, Mapping) or any(
-            not isinstance(k, str) or not isinstance(v, str)
-            for k, v in environment.items()
-        ):
-            raise TypeError("command.environment 须为字符串映射")
-    for key in ("timeout_seconds", "memory_mib", "cpu_cores"):
-        if key in command and (
-            not isinstance(command[key], (int, float))
-            or isinstance(command[key], bool)
-            or command[key] <= 0
-        ):
-            raise ValueError(f"command.{key} 须为正数")
-    if "network" in command and not isinstance(command["network"], bool):
-        raise TypeError("command.network 须为布尔值")
-    if "success_exit_codes" in command:
-        codes = command["success_exit_codes"]
-        if (
-            not isinstance(codes, (list, tuple))
-            or not codes
-            or any(not isinstance(c, int) or isinstance(c, bool) for c in codes)
-        ):
-            raise ValueError("command.success_exit_codes 须为非空整数序列")
-    return freeze_json_value(dict(command))
+def _freeze_slotted_options(options: object, *, is_unified: bool) -> Mapping[str, object]:
+    """冻结分槽 options（分步只允许 {generator, solver}；一体化只允许 {algorithm}）。"""
+    if not isinstance(options, Mapping):
+        raise TypeError(f"options 须为 Mapping，得到 {type(options).__name__}")
+    allowed_slots = ("algorithm",) if is_unified else ("generator", "solver")
+    extra_slots = sorted(k for k in options if k not in allowed_slots)
+    if extra_slots:
+        mode_label = "一体化算法模式" if is_unified else "分步计算模式"
+        raise ValueError(f"{mode_label} 下 options 仅允许 {allowed_slots!r} 槽，出现非法键: {extra_slots!r}")
+    normalized: dict[str, Any] = {}
+    for slot in options:
+        slot_val = options[slot]
+        if not isinstance(slot_val, Mapping):
+            raise TypeError(f"options.{slot} 须为 Mapping，得到 {type(slot_val).__name__}")
+        check_finite_json(slot_val, f"options.{slot}")
+        normalized[slot] = dict(slot_val)
+    return freeze_json_value(normalized)
 
 
 @dataclass(frozen=True, slots=True)
 class SolverBundleManifest:
-    """求解交接包的 manifest 载体(bundle.yaml 内容，生产者 GeneratorProvider)。
-
-    只携带 manifest 本体，不携带文件字节；完整可执行包见 ``SolverBundle``
-    聚合。字段与 ``formats/solver-bundle.md`` 的 manifest 一一对应，不增删：
-    ``bundle{generator, solver}`` 追溯所选精确引用；
-    ``inputs[{path, media_type}]`` 声明只读输入文件；
-    ``command`` 为结构化命令数据(执行器/可执行文件 ID、逐参数字符串、
-    Bundle 内规范相对路径、硬资源限制)，不是 shell 字符串；
-    ``outputs[{path, media_type, required}]`` 为允许写入的输出清单；
-    ``result_adapter`` 为配套结果适配器精确引用；
-    ``extensions`` 为规范预留的开放扩展点。
-    条目与映射在构造时冻结；未知字段当场拒绝，不静默丢弃。
-    """
+    """1.2.0 契约解耦 SolverBundle manifest（bundle{generator, contract} + inputs + outputs + extensions）。"""
 
     schema: str = SOLVER_BUNDLE_SCHEMA
     schema_version: str = SOLVER_BUNDLE_VERSION
     bundle: Mapping[str, object] = field(default_factory=dict)
     inputs: tuple[Mapping[str, object], ...] = ()
-    command: Mapping[str, object] = field(default_factory=dict)
     outputs: tuple[Mapping[str, object], ...] = ()
-    result_adapter: str = ""
     extensions: Mapping[str, object] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -669,23 +549,16 @@ class SolverBundleManifest:
             raise ValueError(f"Bundle 版本非法: {self.schema_version!r}")
         if not isinstance(self.bundle, Mapping):
             raise TypeError("bundle 须为 Mapping")
-        if set(self.bundle) != {"generator", "solver"}:
-            raise ValueError(
-                f"bundle 须恰为 generator/solver 二键: {sorted(self.bundle)!r}"
-            )
+        if set(self.bundle) != {"generator", "contract"}:
+            raise ValueError(f"bundle 须恰为 generator/contract 二键: {sorted(self.bundle)!r}")
         check_provider_ref(self.bundle["generator"], "bundle.generator")
-        check_provider_ref(self.bundle["solver"], "bundle.solver")
-        object.__setattr__(
-            self, "bundle", freeze_json_value(dict(self.bundle))
-        )
-        object.__setattr__(self, "inputs", _freeze_file_entries(self.inputs, "inputs"))
-        object.__setattr__(self, "command", _freeze_command(self.command))
-        object.__setattr__(self, "outputs", _freeze_file_entries(self.outputs, "outputs"))
-        if not self.result_adapter:
-            raise ValueError("Bundle 缺必需引用: result_adapter")
-        check_provider_ref(self.result_adapter, "result_adapter")
+        check_provider_ref(self.bundle["contract"], "bundle.contract")
         if not isinstance(self.extensions, Mapping):
             raise TypeError("extensions 须为 Mapping")
+        check_finite_json(self.extensions, "extensions")
+        object.__setattr__(self, "bundle", freeze_json_value(dict(self.bundle)))
+        object.__setattr__(self, "inputs", _freeze_io_entries(self.inputs, "inputs"))
+        object.__setattr__(self, "outputs", _freeze_io_entries(self.outputs, "outputs"))
         object.__setattr__(self, "extensions", freeze_json_value(dict(self.extensions)))
 
     def to_dict(self) -> dict[str, Any]:
@@ -695,9 +568,7 @@ class SolverBundleManifest:
             "schema_version": self.schema_version,
             "bundle": thaw_json_value(self.bundle),
             "inputs": [_thaw_entry(entry) for entry in self.inputs],
-            "command": thaw_json_value(self.command),
             "outputs": [_thaw_entry(entry) for entry in self.outputs],
-            "result_adapter": self.result_adapter,
             "extensions": thaw_json_value(self.extensions),
         }
 
@@ -727,7 +598,7 @@ class SolverBundle:
                 f"files 须为路径到内容的 Mapping，得到 {type(self.files).__name__}"
             )
         for path, content in self.files.items():
-            _check_relative_path(path, "files")
+            check_relative_path(path, "files")
             if not isinstance(content, (Content, bytes)):
                 raise TypeError(f"files[{path!r}] 须为 Content，得到 {type(content).__name__}")
         declared = {entry["path"] for entry in self.manifest.inputs}
@@ -890,7 +761,7 @@ class ExecutionReceipt:
     solver_ref: str = ""
     executor_ref: str = ""
     executable_ref: str = ""
-    result_adapter_ref: str = ""
+    result_adapter_ref: str | None = None
     status: str = ""
     exit_code: int | None = None
     signal_number: int | None = None
@@ -926,9 +797,10 @@ class ExecutionReceipt:
             "solver_ref",
             "executor_ref",
             "executable_ref",
-            "result_adapter_ref",
         ):
             check_provider_ref(getattr(self, name), name)
+        if self.result_adapter_ref is not None:
+            check_provider_ref(self.result_adapter_ref, "result_adapter_ref")
         if self.status not in RECEIPT_STATUSES:
             raise ValueError(f"回执状态非法: {self.status!r}")
         if self.exit_code is not None and (
@@ -1061,7 +933,7 @@ def _freeze_receipt_outputs(
                 "回执 outputs 条目须恰为 path/media_type/size_bytes/required "
                 f"四键: {entry!r}"
             )
-        _check_relative_path(entry["path"], "outputs.path")
+        check_relative_path(entry["path"], "outputs.path")
         _check_media_type(entry["media_type"], "outputs.media_type")
         size = entry["size_bytes"]
         if not isinstance(size, int) or isinstance(size, bool) or size < 0:
@@ -1163,6 +1035,7 @@ class ComputeResult:
 
 
 __all__ = [
+    "CALCULATION_CONFIG_FIELDS",
     "CALCULATION_CONFIG_SCHEMA",
     "CALCULATION_CONFIG_VERSION",
     "COMPUTE_RESULT_SCHEMA",
@@ -1182,9 +1055,10 @@ __all__ = [
     "RECEIPT_STATUSES",
     "StopProbe",
     "TERMINATION_REASONS",
+    "check_finite_json",
     "check_provider_ref",
+    "check_relative_path",
     "read_stop_reason",
-    "ResultAdapter",
     "SolverBundle",
     "SolverBundleManifest",
     "freeze_json_value",

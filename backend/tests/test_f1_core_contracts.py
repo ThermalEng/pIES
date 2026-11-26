@@ -9,7 +9,25 @@ from typing import Any
 
 import pytest
 
-from iesplan.computation import ComputationUnavailableError
+from iesplan.computation import (
+    CALCULATION_CONFIG_FIELDS,
+    CALCULATION_CONFIG_SCHEMA,
+    CALCULATION_CONFIG_VERSION,
+    ComputationUnavailableError,
+    SOLVER_BUNDLE_SCHEMA,
+    SOLVER_BUNDLE_VERSION,
+    CalculationConfig,
+    SolverBundle,
+    SolverBundleManifest,
+    export_bundle_files,
+    load_bundle_schema,
+    load_calculation_config_schema,
+    manifest_to_yaml_bytes,
+    normalize_bundle,
+    parse_calculation_config_json,
+    validate_bundle,
+    validate_calculation_config,
+)
 from iesplan.computation.contracts import (
     ENGINEERING_SOLUTION_CONTRACT,
     EVALUATION_REPORT_CONTRACT,
@@ -19,24 +37,8 @@ from iesplan.computation.contracts import (
     PRIMAL_SOLUTION_OUTPUT_PATH,
     SOLVER_BUNDLE_MPS_CONTRACT,
     STAGE_INPUT_CONTRACT,
-    TARGET_CALCULATION_CONFIG_FIELDS,
-    TARGET_CALCULATION_CONFIG_SCHEMA,
-    TARGET_CALCULATION_CONFIG_VERSION,
-    TARGET_SOLVER_BUNDLE_SCHEMA,
-    TARGET_SOLVER_BUNDLE_VERSION,
     StagePluginSpec,
-    TargetCalculationConfig,
-    TargetSolverBundle,
-    TargetSolverBundleManifest,
-    export_target_bundle_files,
-    load_target_bundle_schema,
-    load_target_calculation_config_schema,
-    normalize_target_bundle,
-    parse_target_calculation_config_json,
-    target_manifest_to_yaml_bytes,
     validate_stage_compatibility,
-    validate_target_bundle,
-    validate_target_calculation_config,
 )
 from iesplan.core.content import MemoryContent, read_content
 from iesplan.core.yamlmini import load as yaml_load
@@ -171,10 +173,10 @@ def _stepped_plugin_catalog() -> dict[str, StagePluginSpec]:
 
 
 def test_target_calculation_config_schema_meta() -> None:
-    schema = load_target_calculation_config_schema()
-    assert schema["$id"] == f"{TARGET_CALCULATION_CONFIG_SCHEMA}/{TARGET_CALCULATION_CONFIG_VERSION}"
-    assert len(TARGET_CALCULATION_CONFIG_FIELDS) == 13
-    assert set(schema["required"]) == set(TARGET_CALCULATION_CONFIG_FIELDS)
+    schema = load_calculation_config_schema()
+    assert schema["$id"] == f"{CALCULATION_CONFIG_SCHEMA}/{CALCULATION_CONFIG_VERSION}"
+    assert len(CALCULATION_CONFIG_FIELDS) == 13
+    assert set(schema["required"]) == set(CALCULATION_CONFIG_FIELDS)
     assert schema["additionalProperties"] is False
     assert "convergence" not in schema["properties"]
     assert "evaluator" not in schema["properties"]
@@ -185,8 +187,8 @@ def test_target_calculation_config_schema_meta() -> None:
 
 
 def test_target_solver_bundle_schema_meta() -> None:
-    schema = load_target_bundle_schema()
-    assert schema["$id"] == f"{TARGET_SOLVER_BUNDLE_SCHEMA}/{TARGET_SOLVER_BUNDLE_VERSION}"
+    schema = load_bundle_schema()
+    assert schema["$id"] == f"{SOLVER_BUNDLE_SCHEMA}/{SOLVER_BUNDLE_VERSION}"
     assert set(schema["required"]) == {
         "schema",
         "schema_version",
@@ -210,11 +212,11 @@ def test_valid_calculation_config_fixtures() -> None:
     assert len(valid_files) == 3
     for path in valid_files:
         raw = _load_json(path)
-        cfg = validate_target_calculation_config(raw)
-        assert isinstance(cfg, TargetCalculationConfig)
-        assert tuple(cfg.to_dict().keys()) == TARGET_CALCULATION_CONFIG_FIELDS
+        cfg = validate_calculation_config(raw)
+        assert isinstance(cfg, CalculationConfig)
+        assert tuple(cfg.to_dict().keys()) == CALCULATION_CONFIG_FIELDS
         assert cfg.to_dict() == raw
-        restored = TargetCalculationConfig.from_frozen(cfg.to_dict())
+        restored = CalculationConfig.from_frozen(cfg.to_dict())
         assert restored.to_dict() == raw
         with pytest.raises(dataclasses.FrozenInstanceError):
             cfg.mode = "other"  # type: ignore[misc]
@@ -245,12 +247,12 @@ def test_invalid_calculation_config_fixtures_rejected() -> None:
     assert sorted(p.name for p in CC_INVALID.glob("*.json")) == sorted(EXPECTED_INVALID_CC)
     for name, marker in EXPECTED_INVALID_CC.items():
         with pytest.raises(ValueError) as exc_info:
-            validate_target_calculation_config(_load_json(CC_INVALID / name))
+            validate_calculation_config(_load_json(CC_INVALID / name))
         assert marker in str(exc_info.value), f"{name}: {exc_info.value}"
 
 
 def test_calculation_config_edge_cases_and_immutability() -> None:
-    stepped = validate_target_calculation_config(_load_json(CC_VALID / "stepped-full.json"))
+    stepped = validate_calculation_config(_load_json(CC_VALID / "stepped-full.json"))
     assert stepped.is_unified is False
     assert stepped.slot_options("generator")["acceleration"] == {"mode": "on_demand_mutex"}
     assert stepped.slot_options("solver") == {}
@@ -270,11 +272,11 @@ def test_calculation_config_edge_cases_and_immutability() -> None:
         '"seed":null,"outputs":["solution"]}',
     ):
         with pytest.raises(ValueError, match="非有限"):
-            parse_target_calculation_config_json(bad_json)
+            parse_calculation_config_json(bad_json)
 
     raw = _load_json(CC_VALID / "stepped-minimal.json")
     with pytest.raises(ValueError, match="非有限"):
-        validate_target_calculation_config(
+        validate_calculation_config(
             {
                 **raw,
                 "evaluators": [
@@ -283,7 +285,7 @@ def test_calculation_config_edge_cases_and_immutability() -> None:
             }
         )
     with pytest.raises(TypeError, match="布尔"):
-        TargetCalculationConfig(
+        CalculationConfig(
             mode="planning",
             generator="ies.generator.highs_milp@1.0.0",
             solver="ies.solver.highs@1.7.2",
@@ -293,7 +295,7 @@ def test_calculation_config_edge_cases_and_immutability() -> None:
             outputs=("solution",),
         )
     with pytest.raises(ValueError, match="time_limit_seconds"):
-        TargetCalculationConfig(
+        CalculationConfig(
             mode="planning",
             generator="ies.generator.highs_milp@1.0.0",
             solver="ies.solver.highs@1.7.2",
@@ -302,27 +304,27 @@ def test_calculation_config_edge_cases_and_immutability() -> None:
             outputs=("solution",),
         )
     with pytest.raises(KeyError):
-        TargetCalculationConfig.from_frozen({"schema": "ies.calculation-config"})
+        CalculationConfig.from_frozen({"schema": "ies.calculation-config"})
 
 
 def test_valid_solver_bundle_fixture_and_yaml_export() -> None:
     raw = _load_json(SB_VALID / "mps-minimal.json")
-    manifest = validate_target_bundle(raw)
-    assert isinstance(manifest, TargetSolverBundleManifest)
+    manifest = validate_bundle(raw)
+    assert isinstance(manifest, SolverBundleManifest)
     assert manifest.bundle["generator"] == "ies.generator.highs_milp@1.0.0"
     assert manifest.bundle["contract"] == SOLVER_BUNDLE_MPS_CONTRACT
     assert manifest.outputs[0]["path"] == PRIMAL_SOLUTION_OUTPUT_PATH
     assert manifest.to_dict() == raw
 
     shuffled = dict(reversed(list(raw.items())))
-    assert normalize_target_bundle(shuffled) == normalize_target_bundle(raw)
+    assert normalize_bundle(shuffled) == normalize_bundle(raw)
 
-    yaml_bytes = target_manifest_to_yaml_bytes(manifest)
+    yaml_bytes = manifest_to_yaml_bytes(manifest)
     assert yaml_bytes.endswith(b"\n")
-    assert target_manifest_to_yaml_bytes(manifest) == yaml_bytes
+    assert manifest_to_yaml_bytes(manifest) == yaml_bytes
     assert yaml_load(yaml_bytes.decode("utf-8")) == manifest.to_dict()
 
-    bundle = TargetSolverBundle(
+    bundle = SolverBundle(
         manifest=manifest,
         files={
             "input/problem.mps": MemoryContent(b"NAME DEMO\nENDATA\n"),
@@ -330,7 +332,7 @@ def test_valid_solver_bundle_fixture_and_yaml_export() -> None:
             "input/parameters.jsonl": MemoryContent(b'["column_names", ["x0"]]\n'),
         },
     )
-    exported = export_target_bundle_files(bundle)
+    exported = export_bundle_files(bundle)
     assert list(exported.keys()) == [
         "bundle.yaml",
         "input/parameters.json",
@@ -361,12 +363,12 @@ def test_invalid_solver_bundle_fixtures_rejected() -> None:
     assert sorted(p.name for p in SB_INVALID.glob("*.json")) == sorted(EXPECTED_INVALID_SB)
     for name, marker in EXPECTED_INVALID_SB.items():
         with pytest.raises(ValueError) as exc_info:
-            validate_target_bundle(_load_json(SB_INVALID / name))
+            validate_bundle(_load_json(SB_INVALID / name))
         assert marker in str(exc_info.value), f"{name}: {exc_info.value}"
 
     # Direct dataclass construction must also block reserved manifest collisions and cross-dir paths.
     with pytest.raises(ValueError, match="保留清单路径"):
-        TargetSolverBundleManifest(
+        SolverBundleManifest(
             bundle={
                 "generator": "ies.generator.highs_milp@1.0.0",
                 "contract": SOLVER_BUNDLE_MPS_CONTRACT,
@@ -378,7 +380,7 @@ def test_invalid_solver_bundle_fixtures_rejected() -> None:
             extensions={},
         )
     with pytest.raises(ValueError, match="'input/'"):
-        TargetSolverBundleManifest(
+        SolverBundleManifest(
             bundle={
                 "generator": "ies.generator.highs_milp@1.0.0",
                 "contract": SOLVER_BUNDLE_MPS_CONTRACT,
@@ -390,7 +392,7 @@ def test_invalid_solver_bundle_fixtures_rejected() -> None:
             extensions={},
         )
     with pytest.raises(ValueError, match="'output/'"):
-        TargetSolverBundleManifest(
+        SolverBundleManifest(
             bundle={
                 "generator": "ies.generator.highs_milp@1.0.0",
                 "contract": SOLVER_BUNDLE_MPS_CONTRACT,
@@ -405,13 +407,13 @@ def test_invalid_solver_bundle_fixtures_rejected() -> None:
     # Schema/API parity for immediate traversal segments under input/ and output/.
     from jsonschema import Draft202012Validator
 
-    schema_validator = Draft202012Validator(load_target_bundle_schema())
+    schema_validator = Draft202012Validator(load_bundle_schema())
     base_bundle = _load_json(SB_VALID / "mps-minimal.json")
     for bad_input in ("input/../escape.mps", "input/..", "input/sub/../escape.mps"):
         payload = {**base_bundle, "inputs": [{"path": bad_input, "media_type": "application/mps"}]}
         assert list(schema_validator.iter_errors(payload)), f"schema missed {bad_input}"
         with pytest.raises(ValueError):
-            validate_target_bundle(payload)
+            validate_bundle(payload)
     for bad_output in ("output/../escape.json", "output/..", "output/sub/../escape.json"):
         payload = {
             **base_bundle,
@@ -422,15 +424,15 @@ def test_invalid_solver_bundle_fixtures_rejected() -> None:
         }
         assert list(schema_validator.iter_errors(payload)), f"schema missed {bad_output}"
         with pytest.raises(ValueError):
-            validate_target_bundle(payload)
+            validate_bundle(payload)
 
 
 def test_solver_bundle_binding_and_file_set_checks() -> None:
     catalog = _stepped_plugin_catalog()
-    cfg = validate_target_calculation_config(_load_json(CC_VALID / "stepped-minimal.json"))
+    cfg = validate_calculation_config(_load_json(CC_VALID / "stepped-minimal.json"))
     raw = _load_json(SB_VALID / "mps-minimal.json")
 
-    manifest = validate_target_bundle(
+    manifest = validate_bundle(
         raw,
         generator_spec=catalog["ies.generator.highs_milp@1.0.0"],
         solver_spec=catalog["ies.solver.highs@1.7.2"],
@@ -447,18 +449,18 @@ def test_solver_bundle_binding_and_file_set_checks() -> None:
         parameters_schema=_empty_object_schema(),
     )
     with pytest.raises(ValueError, match="不兼容 Bundle 契约"):
-        validate_target_bundle(
+        validate_bundle(
             raw,
             generator_spec=catalog["ies.generator.highs_milp@1.0.0"],
             solver_spec=incompatible_solver,
         )
 
-    unified_cfg = validate_target_calculation_config(_load_json(CC_VALID / "unified-minimal.json"))
+    unified_cfg = validate_calculation_config(_load_json(CC_VALID / "unified-minimal.json"))
     with pytest.raises(ValueError, match="一体化配置"):
-        validate_target_bundle(raw, config=unified_cfg)
+        validate_bundle(raw, config=unified_cfg)
 
     with pytest.raises(ValueError, match="必须恰好对应"):
-        TargetSolverBundle(
+        SolverBundle(
             manifest=manifest,
             files={"input/problem.mps": MemoryContent(b"NAME DEMO\nENDATA\n")},
         )
@@ -468,7 +470,7 @@ def test_stage_compatibility_consumes_produces_and_slotted_parameters() -> None:
     catalog = _stepped_plugin_catalog()
 
     for valid_name in ("stepped-minimal.json", "stepped-full.json", "unified-minimal.json"):
-        cfg = validate_target_calculation_config(_load_json(CC_VALID / valid_name))
+        cfg = validate_calculation_config(_load_json(CC_VALID / valid_name))
         validate_stage_compatibility(cfg, catalog)
 
     # Incompatible generator -> solver contract
@@ -482,7 +484,7 @@ def test_stage_compatibility_consumes_produces_and_slotted_parameters() -> None:
     )
     with pytest.raises(ComputationUnavailableError) as exc_info:
         validate_stage_compatibility(
-            validate_target_calculation_config(_load_json(CC_VALID / "stepped-minimal.json")),
+            validate_calculation_config(_load_json(CC_VALID / "stepped-minimal.json")),
             {**catalog, lp_solver.ref: lp_solver},
         )
     assert exc_info.value.reason == "incompatible-contracts"
@@ -498,7 +500,7 @@ def test_stage_compatibility_consumes_produces_and_slotted_parameters() -> None:
     )
     with pytest.raises(ComputationUnavailableError, match="ies.primal-solution@1.0.0"):
         validate_stage_compatibility(
-            validate_target_calculation_config(_load_json(CC_VALID / "stepped-minimal.json")),
+            validate_calculation_config(_load_json(CC_VALID / "stepped-minimal.json")),
             {**catalog, bad_solver.ref: bad_solver},
         )
 
@@ -513,27 +515,27 @@ def test_stage_compatibility_consumes_produces_and_slotted_parameters() -> None:
     )
     with pytest.raises(ComputationUnavailableError) as exc_info:
         validate_stage_compatibility(
-            validate_target_calculation_config(_load_json(CC_VALID / "unified-minimal.json")),
+            validate_calculation_config(_load_json(CC_VALID / "unified-minimal.json")),
             {**catalog, bad_eval.ref: bad_eval},
         )
     assert exc_info.value.reason == "incompatible-contracts"
 
     # Per-stage parameters_schema checks: omitted required options.algorithm fails
     unified_raw = _load_json(CC_VALID / "unified-minimal.json")
-    unified_empty_opts = validate_target_calculation_config({**unified_raw, "options": {}})
+    unified_empty_opts = validate_calculation_config({**unified_raw, "options": {}})
     with pytest.raises(ValueError, match="options/algorithm"):
         validate_stage_compatibility(unified_empty_opts, catalog)
 
     # Unknown field inside options.generator
     stepped_raw = _load_json(CC_VALID / "stepped-full.json")
-    bad_gen_opts = validate_target_calculation_config(
+    bad_gen_opts = validate_calculation_config(
         {**stepped_raw, "options": {"generator": {"unknown_flag": 1}, "solver": {}}}
     )
     with pytest.raises(ValueError, match="options/generator"):
         validate_stage_compatibility(bad_gen_opts, catalog)
 
     # Invalid evaluator parameter in evaluators[].parameters
-    bad_eval_param = validate_target_calculation_config(
+    bad_eval_param = validate_calculation_config(
         {
             **stepped_raw,
             "evaluators": [
@@ -545,7 +547,7 @@ def test_stage_compatibility_consumes_produces_and_slotted_parameters() -> None:
         validate_stage_compatibility(bad_eval_param, catalog)
 
     # Invalid prediction parameter in predictions[].parameters
-    bad_pred_param = validate_target_calculation_config(
+    bad_pred_param = validate_calculation_config(
         {
             **stepped_raw,
             "predictions": [
@@ -575,7 +577,7 @@ def test_stage_compatibility_consumes_produces_and_slotted_parameters() -> None:
     )
     with pytest.raises(ComputationUnavailableError) as exc_info:
         validate_stage_compatibility(
-            validate_target_calculation_config(_load_json(CC_VALID / "stepped-minimal.json")),
+            validate_calculation_config(_load_json(CC_VALID / "stepped-minimal.json")),
             {**catalog, companion_gen.ref: companion_gen},
         )
     assert exc_info.value.reason == "incompatible-companion"
@@ -583,9 +585,9 @@ def test_stage_compatibility_consumes_produces_and_slotted_parameters() -> None:
 
 def test_stage_compatibility_rejects_missing_capabilities_and_unsupported_contracts() -> None:
     catalog = _stepped_plugin_catalog()
-    stepped_full = validate_target_calculation_config(_load_json(CC_VALID / "stepped-full.json"))
-    stepped_minimal = validate_target_calculation_config(_load_json(CC_VALID / "stepped-minimal.json"))
-    unified_minimal = validate_target_calculation_config(_load_json(CC_VALID / "unified-minimal.json"))
+    stepped_full = validate_calculation_config(_load_json(CC_VALID / "stepped-full.json"))
+    stepped_minimal = validate_calculation_config(_load_json(CC_VALID / "stepped-minimal.json"))
+    unified_minimal = validate_calculation_config(_load_json(CC_VALID / "unified-minimal.json"))
 
     # Empty consumes must NOT bypass stage-input contract check for predictor / generator / algorithm.
     for role_ref, kwargs in (

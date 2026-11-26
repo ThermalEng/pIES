@@ -1,4 +1,4 @@
-"""End-to-end equivalence tests comparing 4 stage plugins against in-process iesplan."""
+"""End-to-end 1.2.0 pipeline equivalence and replaceability tests across built-in stage plugins."""
 
 from __future__ import annotations
 
@@ -10,86 +10,42 @@ from typing import Any
 import pytest
 from iesplan.assembly import validate_assembly_text
 from iesplan.computation import (
-    HIGHS_ADAPTER,
-    HIGHS_ADAPTER_PATH,
     HIGHS_EXECUTABLE_REF,
     HIGHS_MILP_PROVIDER,
-    HIGHS_VERSION,
     NAIVE_PREDICTOR,
     NAIVE_PREDICTOR_REF,
-    AttemptContext,
+    PRIMAL_SOLUTION_OUTPUT_PATH,
     CalculationConfig,
-    DeploymentPolicy,
-    ExecutableReadiness,
     ExecutionReceipt,
-    ExecutorDescriptor,
-    LocalExecutable,
-    LocalProcessProvider,
     MaterializedSeries,
     MaterializedSet,
-    SolverRuntime,
-    build_executor_registry,
     materialize_non_predictive_series,
     materialize_predicted_series,
-    thaw_json_value,
 )
 from iesplan.computation.bundle import export_bundle_files
 from iesplan.computation.generators.highs_milp import EXECUTOR_REF, GENERATOR_REF, SOLVER_REF
+from iesplan.computation.result_adapters import ResultAdapter
 from iesplan.core.content import read_content
 from iesplan.devices import init_registry, list_devices
-from iesplan.finance import EvaluationInput, effective_from_yaml
+from iesplan.finance import EvaluationInput, effective_from_yaml, evaluate_forward_finance
 from iesplan.modeling import build_math_contribution, contribution_to_dict
 from pies_sdk import (
+    StageIOError,
     read_compute_result,
-    read_json_file,
+    read_engineering_solution,
     read_prediction_output,
+    read_primal_solution,
     validate_solver_bundle_dir,
     validate_stage_outputs,
     write_json_file,
 )
 from pies_sdk.runner import run_plugin
 
-from pies_builtin_plugins.stage_io import (
-    build_financial_evaluation_payload,
-    build_hourly_series_payload,
-    effective_finance_from_frozen,
-)
+from pies_builtin_plugins.stage_io import effective_finance_from_frozen
 
 PLUGINS_ROOT = Path(__file__).resolve().parent.parent
 REPO_ROOT = PLUGINS_ROOT.parent
 IESPLAN_SAMPLES = REPO_ROOT / "backend" / "iesplan" / "assembly" / "samples"
-
-
-def _runtime() -> SolverRuntime:
-    executor_id, _, executor_version = EXECUTOR_REF.rpartition("@")
-    provider = LocalProcessProvider(
-        ExecutorDescriptor(
-            executor_id=executor_id,
-            version=executor_version,
-            executables=(HIGHS_EXECUTABLE_REF,),
-        ),
-        (
-            LocalExecutable(
-                ref=HIGHS_EXECUTABLE_REF,
-                path=HIGHS_ADAPTER_PATH,
-                readiness=ExecutableReadiness(
-                    version=HIGHS_VERSION,
-                    self_test=("--self-test",),
-                    output_path="self-test.sol",
-                ),
-            ),
-        ),
-        base_environ={},
-    )
-    policy = DeploymentPolicy(
-        executables=(HIGHS_EXECUTABLE_REF,),
-        environment_vars=(),
-        max_timeout_seconds=1200,
-        max_memory_mib=4096,
-        max_cpu_cores=4,
-        allow_network=False,
-    )
-    return SolverRuntime(build_executor_registry([provider]), policy)
 
 
 def _collect_resources(doc: dict[str, Any], samples_dir: Path = IESPLAN_SAMPLES) -> dict[str, bytes]:
@@ -119,6 +75,18 @@ def _load_campus_inputs(*, assembly_text: str | None = None, samples_dir: Path =
     text = assembly_text or (samples_dir / "valid" / "campus.assembly.yaml").read_text(
         encoding="utf-8"
     )
+    if "  construction_units:\n" not in text and "  constraints:\n" in text:
+        unit_block = (
+            "  construction_units:\n"
+            "    u_pv1:\n"
+            "      device_ref: pv1\n"
+            "      mode: optional\n"
+            "      scales:\n"
+            "        pv_cap:\n"
+            '          active_lower_bound: "0"\n'
+            "          active_upper_bound: null\n"
+        )
+        text = text.replace("  constraints:\n", unit_block + "  constraints:\n", 1)
     validated = validate_assembly_text(text, package_dir=samples_dir)
     assert validated.ok, [(d.code, d.params) for d in validated.diagnostics if d.blocking]
     artifact = validated.artifact
@@ -157,7 +125,7 @@ def _evaluation_to_dict(ev: EvaluationInput) -> dict[str, Any]:
         "operation_years": ev.operation_years,
         "discount_rate": ev.discount_rate,
         "construction_payments": [
-            {"t": p.t, "ratio": p.ratio} for p in ev.construction_payments
+            {"t": p.t, "ratio": str(p.ratio)} for p in ev.construction_payments
         ],
         "maintenance_expenses": [],
         "comparison": ev.comparison.to_dict(),
@@ -171,10 +139,9 @@ def _stage_receipt(
     assembly_id: str,
     config_id: str,
     attempt_id: str,
-    solver_out: Path,
+    solver_ref: str = SOLVER_REF,
+    primal_size: int = 1,
 ) -> dict[str, Any]:
-    meta = read_json_file(solver_out / "solver_meta.json")
-    sol_size = (solver_out / "solution.sol").stat().st_size
     return ExecutionReceipt(
         receipt_id=receipt_id,
         bundle_id=bundle_id,
@@ -182,22 +149,20 @@ def _stage_receipt(
         calculation_config_id=config_id,
         attempt_id=attempt_id,
         generator_ref=GENERATOR_REF,
-        solver_ref=SOLVER_REF,
+        solver_ref=solver_ref,
         executor_ref=EXECUTOR_REF,
         executable_ref=HIGHS_EXECUTABLE_REF,
-        result_adapter_ref=HIGHS_ADAPTER.ref,
+        result_adapter_ref=None,
         status="succeeded",
-        exit_code=int(meta["exit_code"]),
+        exit_code=0,
         termination_reason="exited",
-        started_at=str(meta["started_at"]),
-        ended_at=str(meta["ended_at"]),
-        stdout=str(meta["stdout"]),
-        stderr=str(meta["stderr"]),
+        started_at="2026-01-01T00:00:00Z",
+        ended_at="2026-01-01T00:00:01Z",
         outputs=(
             {
-                "path": "output/solution.sol",
-                "media_type": "text/plain",
-                "size_bytes": sol_size,
+                "path": PRIMAL_SOLUTION_OUTPUT_PATH,
+                "media_type": "application/json",
+                "size_bytes": primal_size,
                 "required": True,
             },
         ),
@@ -216,41 +181,30 @@ def test_effective_finance_from_frozen_roundtrip() -> None:
 
 
 def test_campus_full_pipeline_equivalence(tmp_path: Path) -> None:
-    """Full campus MILP: generator -> solver -> evaluator matches in-process iesplan."""
+    """1.2.0 campus MILP: generator -> solver -> ResultAdapter -> evaluator_finance parity."""
     artifact, models, resources, finance, evaluation = _load_campus_inputs()
     materialized = materialize_non_predictive_series(artifact, resources, operation_years=1)
     assert not materialized.pending_predict
 
     config = CalculationConfig(
         mode="planning",
+        predictions=(),
         generator=GENERATOR_REF,
         solver=SOLVER_REF,
-        evaluator=HIGHS_ADAPTER.ref,
+        algorithm=None,
+        evaluators=({"evaluator": "ies.evaluator.finance@1.0.0", "parameters": {}},),
         precision="medium",
         time_limit_seconds=600,
+        options={"generator": {}, "solver": {}},
+        seed=0,
         outputs=("solution", "metrics"),
-        seed=None,
     )
 
-    # 1) Direct in-process iesplan execution
     direct_bundle = HIGHS_MILP_PROVIDER.generate(
         artifact, models, materialized, finance, config, evaluation
     )
-    direct_attempt = AttemptContext(
-        attempt_id="attempt-eq-1",
-        bundle_id="bundle-eq-1",
-        assembly_id="campus_demo",
-        calculation_config_id="cfg-eq-1",
-    )
-    direct_receipt, direct_outputs = _runtime().run(direct_bundle, direct_attempt)
-    assert direct_receipt.status == "succeeded"
-    direct_result = HIGHS_ADAPTER.adapt(direct_bundle, direct_receipt, direct_outputs)
-    direct_eval = build_financial_evaluation_payload(
-        _evaluation_to_dict(evaluation), finance, direct_result
-    )
-    direct_hourly = build_hourly_series_payload(direct_result.outputs)
 
-    # 2) Stage-by-stage plugin pipeline via pies_sdk.runner
+    # Stage 2: generator_highs_milp
     gen_in = tmp_path / "gen_in"
     gen_out = tmp_path / "gen_out"
     write_json_file(
@@ -268,128 +222,167 @@ def test_campus_full_pipeline_equivalence(tmp_path: Path) -> None:
         manifest_path=PLUGINS_ROOT / "generator_highs_milp" / "plugin.yaml",
         work_in=gen_in,
         work_out=gen_out,
+        pies_version="1.2.0",
     )
     validate_stage_outputs("generator", gen_out)
     validate_solver_bundle_dir(gen_out / "bundle")
 
-    # Byte-for-byte identical Solver Bundle files
     expected_bundle_files = export_bundle_files(direct_bundle)
     for rel_path, content in expected_bundle_files.items():
         actual_bytes = (gen_out / "bundle" / rel_path).read_bytes()
         assert actual_bytes == read_content(content), f"Bundle mismatch in {rel_path}"
 
-    # Stage 3: solver_highs consuming Stage 2 /work/out/bundle and parameters.threads
+    # Stage 3: solver_highs -> strictly 0-based output/primal_solution.json
     solver_in = tmp_path / "solver_in"
     solver_out = tmp_path / "solver_out"
     solver_in.mkdir()
     (solver_in / "bundle").symlink_to(gen_out / "bundle")
-    write_json_file(solver_in / "request.json", {"parameters": {"threads": 2}})
+    write_json_file(
+        solver_in / "request.json",
+        {"time_limit_seconds": 600, "seed": 0, "parameters": {"threads": 2}},
+    )
     run_plugin(
         manifest_path=PLUGINS_ROOT / "solver_highs" / "plugin.yaml",
         work_in=solver_in,
         work_out=solver_out,
+        pies_version="1.2.0",
     )
     validate_stage_outputs("solver", solver_out)
-    solver_meta = read_json_file(solver_out / "solver_meta.json")
-    assert solver_meta["arguments"][-2:] == ["--threads", "2"]
-    assert (solver_out / "solution.sol").read_bytes() == read_content(
-        direct_outputs["output/solution.sol"]
+    primal_bytes = (solver_out / "primal_solution.json").read_bytes()
+    primal = read_primal_solution(solver_out / "primal_solution.json")
+    assert primal.math_status == "solved"
+    assert primal.has_feasible_solution is True
+    assert primal.objective_value == pytest.approx(850_051.6, abs=1e-5)
+
+    # Bounded restoration -> canonical ies.engineering-solution@1.0.0
+    sol_json_out = tmp_path / "solution.json"
+    receipt_dict = _stage_receipt(
+        receipt_id="eq-rcpt-1",
+        bundle_id="eq-bnd-1",
+        assembly_id="campus_demo",
+        config_id="cfg-eq-1",
+        attempt_id="attempt-eq-1",
+        primal_size=len(primal_bytes),
+    )
+    outcome = ResultAdapter().restore_with_outcome(
+        direct_bundle,
+        receipt_dict,
+        {PRIMAL_SOLUTION_OUTPUT_PATH: primal_bytes},
+        solution_output_path=sol_json_out,
+    )
+    assert outcome.compute_result.math_status == "solved"
+    eng_sol = read_engineering_solution(sol_json_out)
+    assert eng_sol.solver_summary.objective_value == pytest.approx(850_051.6, abs=1e-5)
+
+    direct_eval = evaluate_forward_finance(
+        eng_sol.to_dict(),
+        artifact=artifact,
+        finance=finance,
+        evaluation=evaluation,
+        materialized=materialized,
+        device_models=models,
     )
 
-    # Stage 4: evaluator_highs consuming bundle + solver /work/out + real ExecutionReceipt
+    # Stage 4: evaluator_finance consuming ONLY solution.json + hardlinked frozen context
     eval_in = tmp_path / "eval_in"
     eval_out = tmp_path / "eval_out"
     eval_in.mkdir()
-    (eval_in / "bundle").symlink_to(gen_out / "bundle")
-    (eval_in / "outputs").symlink_to(solver_out)
-    write_json_file(eval_in / "receipt.json", direct_receipt.to_dict())
+    (eval_in / "solution.json").symlink_to(sol_json_out)
+    write_json_file(eval_in / "assembly.json", artifact.to_dict())
     write_json_file(
-        eval_in / "request.json",
-        {
-            "finance": finance.to_dict(),
-            "evaluation": _evaluation_to_dict(evaluation),
-        },
+        eval_in / "device_models.json",
+        {inst: contribution_to_dict(c) for inst, c in models.items()},
     )
+    write_json_file(eval_in / "sequences.json", materialized.to_dict())
+    write_json_file(eval_in / "finance.json", finance.to_dict())
+    write_json_file(eval_in / "evaluation.json", _evaluation_to_dict(evaluation))
+    write_json_file(eval_in / "receipt.json", receipt_dict)
+
     run_plugin(
-        manifest_path=PLUGINS_ROOT / "evaluator_highs" / "plugin.yaml",
+        manifest_path=PLUGINS_ROOT / "evaluator_finance" / "plugin.yaml",
         work_in=eval_in,
         work_out=eval_out,
+        pies_version="1.2.0",
     )
     validate_stage_outputs("evaluator", eval_out)
     stage_result = read_compute_result(eval_out)
 
-    assert stage_result.execution_status == direct_result.execution_status == "completed"
-    assert stage_result.math_status == direct_result.math_status == "solved"
-    assert stage_result.bundle_id == direct_receipt.bundle_id
-    assert stage_result.receipt_id == direct_receipt.receipt_id
-    assert stage_result.outputs["solution"]["objective_value"] == pytest.approx(850_051.6, abs=1e-5)
-
-    direct_outputs_thawed = dict(thaw_json_value(direct_result.outputs))
-    for key in (
-        "solver_summary",
-        "solution",
-        "series",
-        "system_series",
-        "financial_facts",
-        "model_sources",
-        "metrics",
-    ):
-        assert stage_result.outputs[key] == direct_outputs_thawed[key], f"Mismatch in {key}"
+    assert stage_result.execution_status == "completed"
+    assert stage_result.math_status == "solved"
+    assert stage_result.bundle_id == "eq-bnd-1"
+    assert stage_result.receipt_id == "eq-rcpt-1"
     assert stage_result.outputs["financial_evaluation"] == direct_eval
-    assert stage_result.outputs["hourly_series"] == direct_hourly
 
 
-def test_four_stage_pipeline_with_predictor_equivalence(tmp_path: Path) -> None:
-    """4-stage pipeline with data_predict: predictor -> generator -> solver -> evaluator."""
+def test_four_stage_pipeline_with_grouped_joint_predictor_equivalence(tmp_path: Path) -> None:
+    """Single-pass grouped multi-target predictor -> generator -> solver -> ResultAdapter -> evaluator."""
     samples_copy = tmp_path / "samples"
     shutil.copytree(IESPLAN_SAMPLES, samples_copy)
-    load_csv = samples_copy / "data" / "campus_load.data.csv"
-    load_csv.write_text(
-        load_csv.read_text(encoding="utf-8").replace(
-            "# source_mode: data_repeat", "# source_mode: data_predict", 1
-        ),
-        encoding="utf-8",
-    )
+    for csv_name in ("campus_load.data.csv", "campus_heat.data.csv"):
+        csv_file = samples_copy / "data" / csv_name
+        csv_file.write_text(
+            csv_file.read_text(encoding="utf-8").replace(
+                "# source_mode: data_repeat", "# source_mode: data_predict", 1
+            ),
+            encoding="utf-8",
+        )
     source_text = (samples_copy / "valid" / "campus.assembly.yaml").read_text(encoding="utf-8")
-    predict_text = source_text.replace(
-        "      electricity_demand:\n"
-        "        mode: data_repeat\n"
-        "        path: data/campus_load.data.csv",
-        "      electricity_demand:\n"
-        "        mode: data_predict\n"
-        "        path: data/campus_load.data.csv\n"
-        "        target_type: load",
-        1,
+    predict_text = (
+        source_text.replace(
+            "      electricity_demand:\n"
+            "        mode: data_repeat\n"
+            "        path: data/campus_load.data.csv",
+            "      electricity_demand:\n"
+            "        mode: data_predict\n"
+            "        path: data/campus_load.data.csv\n"
+            "        target_type: load",
+            1,
+        ).replace(
+            "      heat_demand:\n"
+            "        mode: data_repeat\n"
+            "        path: data/campus_heat.data.csv",
+            "      heat_demand:\n"
+            "        mode: data_predict\n"
+            "        path: data/campus_heat.data.csv\n"
+            "        target_type: heat_load",
+            1,
+        )
     )
-    assert "mode: data_predict" in predict_text
+    assert predict_text.count("mode: data_predict") == 2
     artifact, models, resources, finance, evaluation = _load_campus_inputs(
         assembly_text=predict_text, samples_dir=samples_copy
     )
 
     base_mat = materialize_non_predictive_series(artifact, resources, operation_years=1)
-    assert len(base_mat.pending_predict) == 1
-    pending = base_mat.pending_predict[0]
-    assert pending["device"] == "elec_load"
-    assert pending["interface"] == "electricity_demand"
+    assert len(base_mat.pending_predict) == 2
+    pending_by_key = {(p["device"], p["interface"]): p for p in base_mat.pending_predict}
 
-    pred_entry = {
-        "target": {"instance": "elec_load", "interface": "electricity_demand"},
-        "algorithm": NAIVE_PREDICTOR_REF,
-        "parameters": {},
-    }
+    pred_entries = (
+        {
+            "target": {"instance": "elec_load", "interface": "electricity_demand"},
+            "algorithm": NAIVE_PREDICTOR_REF,
+            "parameters": {},
+        },
+        {
+            "target": {"instance": "heat_load", "interface": "heat_demand"},
+            "algorithm": NAIVE_PREDICTOR_REF,
+            "parameters": {},
+        },
+    )
     config = CalculationConfig(
         mode="planning",
-        predictions=(pred_entry,),
+        predictions=pred_entries,
         generator=GENERATOR_REF,
         solver=SOLVER_REF,
-        evaluator=HIGHS_ADAPTER.ref,
+        algorithm=None,
+        evaluators=({"evaluator": "ies.evaluator.finance@1.0.0", "parameters": {}},),
         precision="medium",
         time_limit_seconds=600,
-        outputs=("solution", "metrics"),
+        options={"generator": {}, "solver": {}},
         seed=42,
+        outputs=("solution", "metrics"),
     )
 
-    # Direct in-process prediction + generation
     predicted_targets = materialize_predicted_series(
         artifact,
         resources,
@@ -398,22 +391,22 @@ def test_four_stage_pipeline_with_predictor_equivalence(tmp_path: Path) -> None:
         config.seed,
         operation_years=1,
     )
-    assert len(predicted_targets) == 1
-    pred_target = predicted_targets[0]
+    assert len(predicted_targets) == 2
 
     direct_mat = MaterializedSet(
         operation_years=base_mat.operation_years,
         series=base_mat.series
-        + (
+        + tuple(
             MaterializedSeries(
-                device=pred_target.device,
-                interface=pred_target.interface,
+                device=pt.device,
+                interface=pt.interface,
                 mode="data_predict",
                 resolution="1h",
-                point_count=len(pred_target.values),
-                values=pred_target.values,
-                source={"kind": "data_predict", "object_id": pred_target.history_object_id},
-            ),
+                point_count=len(pt.values),
+                values=pt.values,
+                source={"kind": "data_predict", "object_id": pt.history_object_id},
+            )
+            for pt in predicted_targets
         ),
         pending_predict=(),
         prices=base_mat.prices,
@@ -422,12 +415,14 @@ def test_four_stage_pipeline_with_predictor_equivalence(tmp_path: Path) -> None:
         artifact, models, direct_mat, finance, config, evaluation
     )
 
-    # Stage 1: predictor_naive using zero-copy CSV relative path
+    # Stage 1: single-pass joint predictor_naive over BOTH targets (no `previous` field)
     pred_in = tmp_path / "pred_in"
     pred_out = tmp_path / "pred_out"
     (pred_in / "resources").mkdir(parents=True)
-    csv_bytes = resources[str(pending["object_id"])]
-    (pred_in / "resources" / "load.csv").write_bytes(csv_bytes)
+    elec_pending = pending_by_key[("elec_load", "electricity_demand")]
+    heat_pending = pending_by_key[("heat_load", "heat_demand")]
+    (pred_in / "resources" / "load.csv").write_bytes(resources[str(elec_pending["object_id"])])
+    (pred_in / "resources" / "heat.csv").write_bytes(resources[str(heat_pending["object_id"])])
     write_json_file(
         pred_in / "request.json",
         {
@@ -437,11 +432,19 @@ def test_four_stage_pipeline_with_predictor_equivalence(tmp_path: Path) -> None:
                 {
                     "instance": "elec_load",
                     "interface": "electricity_demand",
-                    "target_type": str(pending["target_type"]),
-                    "history_object_id": str(pending["object_id"]),
+                    "target_type": str(elec_pending["target_type"]),
+                    "history_object_id": str(elec_pending["object_id"]),
                     "history_csv_rel": "resources/load.csv",
                     "parameters": {},
-                }
+                },
+                {
+                    "instance": "heat_load",
+                    "interface": "heat_demand",
+                    "target_type": str(heat_pending["target_type"]),
+                    "history_object_id": str(heat_pending["object_id"]),
+                    "history_csv_rel": "resources/heat.csv",
+                    "parameters": {},
+                },
             ],
         },
     )
@@ -449,16 +452,19 @@ def test_four_stage_pipeline_with_predictor_equivalence(tmp_path: Path) -> None:
         manifest_path=PLUGINS_ROOT / "predictor_naive" / "plugin.yaml",
         work_in=pred_in,
         work_out=pred_out,
+        pies_version="1.2.0",
     )
     validate_stage_outputs("predictor", pred_out)
     pred_output = read_prediction_output(pred_out)
-    assert len(pred_output.predictions) == 1
-    p_item = pred_output.predictions[0]
-    assert p_item["values"] == list(pred_target.values)
-    assert p_item["receipt"] == dict(pred_target.receipt)
-    assert (pred_out / p_item["artifact_path"]).read_bytes() == pred_target.artifact
+    assert len(pred_output.predictions) == 2
+    by_target = {(p["instance"], p["interface"]): p for p in pred_output.predictions}
+    for pt in predicted_targets:
+        p_item = by_target[(pt.device, pt.interface)]
+        assert p_item["values"] == list(pt.values)
+        assert p_item["receipt"] == dict(pt.receipt)
+        assert (pred_out / p_item["artifact_path"]).read_bytes() == pt.artifact
 
-    # Stage 2: generator_highs_milp directly consuming /work/in/prediction.json
+    # Stage 2: generator_highs_milp directly consuming merged /work/in/prediction.json
     gen_in = tmp_path / "gen_in"
     gen_out = tmp_path / "gen_out"
     gen_in.mkdir()
@@ -478,12 +484,12 @@ def test_four_stage_pipeline_with_predictor_equivalence(tmp_path: Path) -> None:
         manifest_path=PLUGINS_ROOT / "generator_highs_milp" / "plugin.yaml",
         work_in=gen_in,
         work_out=gen_out,
+        pies_version="1.2.0",
     )
-    expected_bundle_files = export_bundle_files(direct_bundle)
-    for rel_path, content in expected_bundle_files.items():
+    for rel_path, content in export_bundle_files(direct_bundle).items():
         assert (gen_out / "bundle" / rel_path).read_bytes() == read_content(content)
 
-    # Stage 3 + Stage 4
+    # Stage 3 + ResultAdapter + Stage 4
     solver_in = tmp_path / "solver_in"
     solver_out = tmp_path / "solver_out"
     solver_in.mkdir()
@@ -492,46 +498,191 @@ def test_four_stage_pipeline_with_predictor_equivalence(tmp_path: Path) -> None:
         manifest_path=PLUGINS_ROOT / "solver_highs" / "plugin.yaml",
         work_in=solver_in,
         work_out=solver_out,
+        pies_version="1.2.0",
     )
-
-    eval_in = tmp_path / "eval_in"
-    eval_out = tmp_path / "eval_out"
-    eval_in.mkdir()
-    (eval_in / "bundle").symlink_to(gen_out / "bundle")
-    (eval_in / "outputs").symlink_to(solver_out)
-    write_json_file(
-        eval_in / "receipt.json",
+    primal_bytes = (solver_out / "primal_solution.json").read_bytes()
+    sol_json_out = tmp_path / "pred_solution.json"
+    ResultAdapter().restore_with_outcome(
+        direct_bundle,
         _stage_receipt(
             receipt_id="pred-rcpt-1",
             bundle_id="pred-bnd-1",
             assembly_id="campus_demo",
             config_id="cfg-pred-1",
             attempt_id="att-pred-1",
-            solver_out=solver_out,
+            primal_size=len(primal_bytes),
         ),
+        {PRIMAL_SOLUTION_OUTPUT_PATH: primal_bytes},
+        solution_output_path=sol_json_out,
     )
+
+    eval_in = tmp_path / "eval_in"
+    eval_out = tmp_path / "eval_out"
+    eval_in.mkdir()
+    (eval_in / "solution.json").symlink_to(sol_json_out)
+    (eval_in / "prediction.json").symlink_to(pred_out / "prediction.json")
+    write_json_file(eval_in / "assembly.json", artifact.to_dict())
     write_json_file(
-        eval_in / "request.json",
-        {
-            "finance": finance.to_dict(),
-            "evaluation": _evaluation_to_dict(evaluation),
-        },
+        eval_in / "device_models.json",
+        {inst: contribution_to_dict(c) for inst, c in models.items()},
     )
+    write_json_file(eval_in / "sequences.json", base_mat.to_dict())
+    write_json_file(eval_in / "finance.json", finance.to_dict())
+    write_json_file(eval_in / "evaluation.json", _evaluation_to_dict(evaluation))
     run_plugin(
-        manifest_path=PLUGINS_ROOT / "evaluator_highs" / "plugin.yaml",
+        manifest_path=PLUGINS_ROOT / "evaluator_finance" / "plugin.yaml",
         work_in=eval_in,
         work_out=eval_out,
+        pies_version="1.2.0",
     )
     result = read_compute_result(eval_out)
     assert result.execution_status == "completed"
     assert result.math_status == "solved"
-    assert "financial_evaluation" in result.outputs
     assert result.outputs["financial_evaluation"]["evaluation"]["schema"] == "ies.project-evaluation"
-    assert "hourly_series" in result.outputs
 
 
-def test_infeasible_model_pipeline_reports_infeasible_and_requires_receipt(tmp_path: Path) -> None:
-    """Infeasible model passes Stage 3 cleanly and Stage 4 maps kInfeasible; missing receipt fails."""
+def test_third_party_mps_solver_replaceability(tmp_path: Path) -> None:
+    """Any compliant 3rd-party MPS solver emitting primal_solution.json replaces solver_highs."""
+    artifact, models, resources, finance, evaluation = _load_campus_inputs()
+    materialized = materialize_non_predictive_series(artifact, resources, operation_years=1)
+    config = CalculationConfig(
+        mode="planning",
+        predictions=(),
+        generator=GENERATOR_REF,
+        solver="acme.solver.custom_mps@1.0.0",
+        algorithm=None,
+        evaluators=({"evaluator": "ies.evaluator.finance@1.0.0", "parameters": {}},),
+        precision="medium",
+        time_limit_seconds=120,
+        options={"generator": {}, "solver": {}},
+        seed=0,
+        outputs=("solution", "metrics"),
+    )
+    gen_in = tmp_path / "gen_in"
+    gen_out = tmp_path / "gen_out"
+    write_json_file(
+        gen_in / "request.json",
+        {
+            "artifact": artifact.to_dict(),
+            "device_models": {inst: contribution_to_dict(c) for inst, c in models.items()},
+            "materialized": materialized.to_dict(),
+            "finance": finance.to_dict(),
+            "calculation_config": config.to_dict(),
+            "evaluation": _evaluation_to_dict(evaluation),
+        },
+    )
+    run_plugin(
+        manifest_path=PLUGINS_ROOT / "generator_highs_milp" / "plugin.yaml",
+        work_in=gen_in,
+        work_out=gen_out,
+        pies_version="1.2.0",
+    )
+
+    custom_solver = tmp_path / "custom_solver"
+    custom_solver.mkdir()
+    (custom_solver / "plugin.yaml").write_text(
+        "\n".join(
+            [
+                "schema: ies.algorithm-plugin",
+                'schema_version: "1.0.0"',
+                "plugin_id: acme.solver.custom_mps",
+                'version: "1.0.0"',
+                "kind: solver",
+                "name:",
+                "  en_us: Custom MPS Solver",
+                "description: Third-party MPS solver emitting 0-based ies.primal-solution@1.0.0.",
+                "compatibility:",
+                '  pies: ">=1.2.0,<2.0.0"',
+                "consumes:",
+                "  - ies.solver-bundle.mps@1.0.0",
+                "produces:",
+                "  - ies.primal-solution@1.0.0",
+                "runtime:",
+                "  language: python",
+                '  python: "3.12"',
+                "entrypoint: custom_solver_mod:solve",
+                "parameters_schema:",
+                "  type: object",
+                "  additionalProperties: false",
+                "  properties: {}",
+                "resources:",
+                "  default: {cpu: 1, memory_mb: 1024, timeout_seconds: 120, process_limit: 8}",
+                "  maximum: {cpu: 2, memory_mb: 2048, timeout_seconds: 300, process_limit: 16}",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (custom_solver / "custom_solver_mod.py").write_text(
+        "\n".join(
+            [
+                "import highspy",
+                "from pies_sdk import StageContext, read_solver_bundle",
+                "def solve(ctx: StageContext) -> None:",
+                "    _manifest, bundle_dir = read_solver_bundle(ctx.work_in)",
+                "    h = highspy.Highs()",
+                "    h.setOptionValue('output_flag', False)",
+                "    h.readModel(str(bundle_dir / 'input' / 'problem.mps'))",
+                "    h.run()",
+                "    info = h.getInfo()",
+                "    sol = h.getSolution()",
+                "    ctx.write_primal_solution({",
+                "        'schema': 'ies.primal-solution',",
+                "        'schema_version': '1.0.0',",
+                "        'math_status': 'solved',",
+                "        'termination_reason': 'optimal',",
+                "        'has_feasible_solution': True,",
+                "        'column_count': h.getNumCol(),",
+                "        'objective_value': float(info.objective_function_value),",
+                "        'best_bound': float(info.objective_function_value),",
+                "        'relative_gap': 0.0,",
+                "        'values': [float(v) for v in sol.col_value],",
+                "        'receipt': {'solver': ctx.manifest.ref},",
+                "    })",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    solver_in = tmp_path / "solver_in"
+    solver_out = tmp_path / "solver_out"
+    solver_in.mkdir()
+    (solver_in / "bundle").symlink_to(gen_out / "bundle")
+    run_plugin(
+        manifest_path=custom_solver / "plugin.yaml",
+        work_in=solver_in,
+        work_out=solver_out,
+        pies_version="1.2.0",
+    )
+    validate_stage_outputs("solver", solver_out)
+
+    bundle = HIGHS_MILP_PROVIDER.generate(artifact, models, materialized, finance, config, evaluation)
+    primal_bytes = (solver_out / "primal_solution.json").read_bytes()
+    sol_json_out = tmp_path / "custom_solution.json"
+    ResultAdapter().restore_with_outcome(
+        bundle,
+        _stage_receipt(
+            receipt_id="custom-rcpt-1",
+            bundle_id="custom-bnd-1",
+            assembly_id="campus_demo",
+            config_id="cfg-custom-1",
+            attempt_id="att-custom-1",
+            solver_ref="acme.solver.custom_mps@1.0.0",
+            primal_size=len(primal_bytes),
+        ),
+        {PRIMAL_SOLUTION_OUTPUT_PATH: primal_bytes},
+        solution_output_path=sol_json_out,
+    )
+    assert read_engineering_solution(sol_json_out).solver_summary.objective_value == pytest.approx(
+        850_051.6, abs=1e-5
+    )
+
+
+def test_infeasible_model_pipeline_produces_non_feasible_solution_and_blocks_evaluator(
+    tmp_path: Path,
+) -> None:
+    """Infeasible solve yields non-feasible ies.engineering-solution@1.0.0; evaluator refuses cleanly."""
     source_text = (IESPLAN_SAMPLES / "valid" / "campus.assembly.yaml").read_text(encoding="utf-8")
     anchor = '      expression: "import_meter__period_energy_purchase <= 900000 CNY"\n'
     pin_line = (
@@ -546,13 +697,16 @@ def test_infeasible_model_pipeline_reports_infeasible_and_requires_receipt(tmp_p
     materialized = materialize_non_predictive_series(artifact, resources, operation_years=1)
     config = CalculationConfig(
         mode="planning",
+        predictions=(),
         generator=GENERATOR_REF,
         solver=SOLVER_REF,
-        evaluator=HIGHS_ADAPTER.ref,
+        algorithm=None,
+        evaluators=({"evaluator": "ies.evaluator.finance@1.0.0", "parameters": {}},),
         precision="medium",
         time_limit_seconds=600,
-        outputs=("solution", "metrics"),
+        options={"generator": {}, "solver": {}},
         seed=0,
+        outputs=("solution", "metrics"),
     )
 
     gen_in = tmp_path / "gen_in"
@@ -572,6 +726,7 @@ def test_infeasible_model_pipeline_reports_infeasible_and_requires_receipt(tmp_p
         manifest_path=PLUGINS_ROOT / "generator_highs_milp" / "plugin.yaml",
         work_in=gen_in,
         work_out=gen_out,
+        pies_version="1.2.0",
     )
 
     solver_in = tmp_path / "solver_in"
@@ -582,46 +737,45 @@ def test_infeasible_model_pipeline_reports_infeasible_and_requires_receipt(tmp_p
         manifest_path=PLUGINS_ROOT / "solver_highs" / "plugin.yaml",
         work_in=solver_in,
         work_out=solver_out,
+        pies_version="1.2.0",
     )
+    primal_bytes = (solver_out / "primal_solution.json").read_bytes()
+    primal = read_primal_solution(solver_out / "primal_solution.json")
+    assert primal.math_status == "infeasible"
+    assert primal.has_feasible_solution is False
 
-    eval_in = tmp_path / "eval_in"
-    eval_out = tmp_path / "eval_out"
-    eval_in.mkdir()
-    (eval_in / "bundle").symlink_to(gen_out / "bundle")
-    (eval_in / "outputs").symlink_to(solver_out)
-    write_json_file(
-        eval_in / "request.json",
-        {
-            "finance": finance.to_dict(),
-            "evaluation": _evaluation_to_dict(evaluation),
-        },
-    )
-    with pytest.raises(KeyError, match="ExecutionReceipt"):
-        run_plugin(
-            manifest_path=PLUGINS_ROOT / "evaluator_highs" / "plugin.yaml",
-            work_in=eval_in,
-            work_out=eval_out,
-        )
-
-    write_json_file(
-        eval_in / "receipt.json",
+    bundle = HIGHS_MILP_PROVIDER.generate(artifact, models, materialized, finance, config, evaluation)
+    sol_json_out = tmp_path / "infeasible_solution.json"
+    outcome = ResultAdapter().restore_with_outcome(
+        bundle,
         _stage_receipt(
             receipt_id="inf-rcpt-1",
             bundle_id="inf-bnd-1",
             assembly_id="campus_demo",
             config_id="cfg-inf-1",
             attempt_id="att-inf-1",
-            solver_out=solver_out,
+            primal_size=len(primal_bytes),
         ),
+        {PRIMAL_SOLUTION_OUTPUT_PATH: primal_bytes},
+        solution_output_path=sol_json_out,
     )
-    run_plugin(
-        manifest_path=PLUGINS_ROOT / "evaluator_highs" / "plugin.yaml",
-        work_in=eval_in,
-        work_out=eval_out,
-    )
+    assert outcome.compute_result.math_status == "infeasible"
+    eng_sol = read_engineering_solution(sol_json_out)
+    assert eng_sol.solver_summary.has_feasible_solution is False
+    assert not eng_sol.construction_units
+    assert not eng_sol.series
 
-    result = read_compute_result(eval_out)
-    assert result.execution_status == "completed"
-    assert result.math_status == "infeasible"
-    assert result.outputs["solver_summary"]["termination_reason"] == "infeasible"
-    assert "financial_evaluation" not in result.outputs
+    eval_in = tmp_path / "eval_in"
+    eval_out = tmp_path / "eval_out"
+    eval_in.mkdir()
+    (eval_in / "solution.json").symlink_to(sol_json_out)
+    write_json_file(eval_in / "assembly.json", artifact.to_dict())
+    write_json_file(eval_in / "finance.json", finance.to_dict())
+    write_json_file(eval_in / "evaluation.json", _evaluation_to_dict(evaluation))
+    with pytest.raises(StageIOError, match="non-feasible"):
+        run_plugin(
+            manifest_path=PLUGINS_ROOT / "evaluator_finance" / "plugin.yaml",
+            work_in=eval_in,
+            work_out=eval_out,
+            pies_version="1.2.0",
+        )

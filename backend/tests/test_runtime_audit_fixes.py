@@ -29,8 +29,10 @@ from iesplan.application.worker import compute_cases
 from iesplan.application.worker.checkpoints import (
     load_algorithm_checkpoint,
     load_evaluation_checkpoint,
+    load_evaluator_checkpoint,
     save_algorithm_checkpoint,
     save_evaluation_checkpoint,
+    save_evaluator_checkpoint,
 )
 from iesplan.bootstrap import collect_immutable_tables
 from iesplan.computation import (
@@ -40,9 +42,13 @@ from iesplan.computation import (
     ExecutionReceipt,
     MaterializedSeries,
     MaterializedSet,
-    SolverBundle,
-    SolverBundleManifest,
+    build_evaluator_registry,
     build_predictor_registry,
+    build_solver_registry,
+)
+from iesplan.computation.config import (
+    BUILTIN_EVALUATOR_FINANCE_SPEC,
+    BUILTIN_SOLVER_HIGHS_SPEC,
 )
 from iesplan.computation.generators import HIGHS_MILP_PROVIDER, build_registry
 from iesplan.computation.runtime.job_runner_client import JobRunnerClient
@@ -99,7 +105,7 @@ def _stage_payload(
         "fencing_token": fencing_token,
         "container_id": f"cid-{stage_execution_id}",
         "container_name": f"pies-stage-{stage_execution_id}",
-        "image": "pies-builtin-stages:1.1.5",
+        "image": "pies-builtin-stages:1.2.0",
         "workspace_rel": workspace_rel or stage_execution_id,
         "reused": False,
         "status": status,
@@ -119,7 +125,7 @@ def _stage_payload(
 
 def _default_policy() -> ContainerStagePolicy:
     return ContainerStagePolicy(
-        builtin_image="pies-builtin-stages:1.1.5",
+        builtin_image="pies-builtin-stages:1.2.0",
         cpu_cores=2.0,
         memory_mb=512,
         pids_limit=256,
@@ -291,11 +297,10 @@ def test_load_evaluation_and_algorithm_checkpoints_consumed_by_runner(
             "generator": None,
             "solver": None,
             "algorithm": "acme.algorithm.demo@1.0.0",
-            "evaluator": None,
+            "evaluators": [],
             "precision": "medium",
-            "convergence": None,
             "time_limit_seconds": 30,
-            "options": {},
+            "options": {"algorithm": {}},
             "seed": 7,
             "outputs": ["solution"],
         }
@@ -576,11 +581,10 @@ def test_load_compute_inputs_deferred_passes_frozen_series_inputs_and_hardlinks(
                 "generator": "ies.generator.highs_milp@1.0.0",
                 "solver": "ies.solver.highs@1.7.2",
                 "algorithm": None,
-                "evaluator": None,
+                "evaluators": [],
                 "precision": "medium",
-                "convergence": None,
                 "time_limit_seconds": 30,
-                "options": {},
+                "options": {"generator": {}, "solver": {}},
                 "seed": 1,
                 "outputs": ["solution"],
             },
@@ -708,7 +712,7 @@ def test_load_compute_inputs_deferred_passes_frozen_series_inputs_and_hardlinks(
         generator_registry=build_registry((HIGHS_MILP_PROVIDER,)),
         predictor_registry=build_predictor_registry((NAIVE_PREDICTOR,)),
         stage_runner=CaptureStageRunner(tmp_path / "stages"),
-        stage_catalog=build_builtin_stage_catalog("pies-builtin-stages:1.1.5"),
+        stage_catalog=build_builtin_stage_catalog("pies-builtin-stages:1.2.0"),
     )
     attempt = AttemptContext(
         attempt_id=str(claim.attempt_id),
@@ -862,7 +866,7 @@ def test_result_json_boundary_requires_valid_schema_and_version(
         client=httpx.Client(base_url="http://job_runner:8090", transport=httpx.MockTransport(handler)),
     )
     sr = ContainerStageRunner(client, stage_root=stage_root, policy=_default_policy(), poll_interval=0.01)
-    base_descs = list(build_builtin_stage_catalog("pies-builtin-stages:1.1.5").snapshot())
+    base_descs = list(build_builtin_stage_catalog("pies-builtin-stages:1.2.0").snapshot())
     base_descs.append(
         BuiltinStageDescriptor(
             plugin_id="acme.algorithm.demo",
@@ -872,42 +876,22 @@ def test_result_json_boundary_requires_valid_schema_and_version(
             entrypoint="algo:run",
         )
     )
+    from iesplan.computation import (
+        build_evaluator_registry,
+        build_solver_registry,
+    )
+    from iesplan.computation.config import (
+        BUILTIN_EVALUATOR_FINANCE_SPEC,
+        BUILTIN_SOLVER_HIGHS_SPEC,
+    )
+
     plane = worker_app.ComputeExecutionPlane(
         generator_registry=build_registry((HIGHS_MILP_PROVIDER,)),
         predictor_registry=build_predictor_registry((NAIVE_PREDICTOR,)),
+        solver_registry=build_solver_registry((BUILTIN_SOLVER_HIGHS_SPEC,)),
+        evaluator_registry=build_evaluator_registry((BUILTIN_EVALUATOR_FINANCE_SPEC,)),
         stage_runner=sr,
         stage_catalog=BuiltinStageCatalog(tuple(base_descs)),
-    )
-    manifest = SolverBundleManifest(
-        bundle={"generator": "ies.generator.highs_milp@1.0.0", "solver": "ies.solver.highs@1.7.2"},
-        inputs=[{"path": "input/problem.mps", "media_type": "text/plain"}],
-        command={
-            "executor": "ies.executor.local_process@1.0.0",
-            "executable": "ies.solver.highs@1.7.2",
-            "arguments": ["input/problem.mps"],
-            "timeout_seconds": 30,
-            "network": False,
-        },
-        outputs=[{"path": "output/solution.sol", "media_type": "text/plain", "required": True}],
-        result_adapter="ies.result-adapter.highs@1.0.0",
-    )
-    bundle = SolverBundle(manifest, {"input/problem.mps": MemoryContent(b"NAME X\nENDATA\n")})
-    receipt = ExecutionReceipt(
-        receipt_id="r-1",
-        bundle_id="b-1",
-        assembly_id="a-1",
-        calculation_config_id="c-1",
-        attempt_id=str(claim.attempt_id),
-        generator_ref="ies.generator.highs_milp@1.0.0",
-        solver_ref="ies.solver.highs@1.7.2",
-        executor_ref="ies.executor.local_process@1.0.0",
-        executable_ref="ies.solver.highs@1.7.2",
-        result_adapter_ref="ies.result-adapter.highs@1.0.0",
-        status="succeeded",
-        exit_code=0,
-        termination_reason="exited",
-        started_at="2026-11-24T08:00:00Z",
-        ended_at="2026-11-24T08:00:01Z",
     )
     fake_finance = SimpleNamespace(to_dict=lambda: {"profile_id": "p"})
     fake_snapshot = SimpleNamespace(
@@ -916,25 +900,17 @@ def test_result_json_boundary_requires_valid_schema_and_version(
         evaluation={"evaluation_years": 1},
     )
 
-    with pytest.raises(exc_type):
-        worker_app.adapt_result(
-            plane,
-            bundle,
-            receipt,
-            {"output/solution.sol": MemoryContent(b"HIGHS_SOLUTION_V1\n")},
-            claim=claim,
-            number=1,
-            finance=fake_finance,  # type: ignore[arg-type]
-            snapshot=fake_snapshot,
-            session_factory=factory,
-            save_checkpoint=save_evaluation_checkpoint,
-        )
-
     algo_cfg = CalculationConfig(
         mode="planning",
+        predictions=(),
+        generator=None,
+        solver=None,
         algorithm="acme.algorithm.demo@1.0.0",
+        evaluators=(),
         precision="medium",
         time_limit_seconds=60,
+        options={"algorithm": {}},
+        seed=None,
         outputs=("solution",),
     )
     with pytest.raises(exc_type):
@@ -1130,6 +1106,12 @@ def test_adapt_result_uses_current_claim_attempt_id_when_reusing_older_receipt(
             idempotency_key="eval-attempt-2",
             requested_by=_user.id,
         )
+        sealed = worker_app.seal_output_objects(
+            db,
+            {"solution.json": (MemoryContent(b'{"schema":"ies.engineering-solution"}'), "application/json")},
+            actor_id=_user.id,
+        )
+        sol_ref = sealed["solution.json"]
         db.commit()
         old_claim = worker_app.acquire_attempt(db, task.id, "w-old")
         assert old_claim is not None
@@ -1148,7 +1130,9 @@ def test_adapt_result_uses_current_claim_attempt_id_when_reusing_older_receipt(
         "receipt_id": "r-old",
         "execution_status": "completed",
         "math_status": "solved",
-        "outputs": {"solution": {"objective_value": 10.0, "variables": []}},
+        "outputs": {
+            "financial_evaluation": {"schema": "ies.financial-evaluation", "status": "evaluated"},
+        },
     }
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -1158,8 +1142,8 @@ def test_adapt_result_uses_current_claim_attempt_id_when_reusing_older_receipt(
         if request.method == "POST" and request.url.path == "/v1/stages/start":
             captured_start.update(body)
             ws_dir = stage_root / body["workspace_rel"]
-            staged = json.loads((ws_dir / "in" / "receipt.json").read_text(encoding="utf-8"))
-            staged_receipt_attempt.append(str(staged["attempt_id"]))
+            staged = json.loads((ws_dir / "in" / "request.json").read_text(encoding="utf-8"))
+            staged_receipt_attempt.append(str(staged["receipt"]["attempt_id"]))
             out_dir = ws_dir / "out"
             out_dir.mkdir(parents=True, exist_ok=True)
             (out_dir / "result.json").write_text(json.dumps(valid_result), encoding="utf-8")
@@ -1214,25 +1198,13 @@ def test_adapt_result_uses_current_claim_attempt_id_when_reusing_older_receipt(
     plane = worker_app.ComputeExecutionPlane(
         generator_registry=build_registry((HIGHS_MILP_PROVIDER,)),
         predictor_registry=build_predictor_registry((NAIVE_PREDICTOR,)),
+        solver_registry=build_solver_registry((BUILTIN_SOLVER_HIGHS_SPEC,)),
+        evaluator_registry=build_evaluator_registry((BUILTIN_EVALUATOR_FINANCE_SPEC,)),
         stage_runner=sr,
         stage_catalog=BuiltinStageCatalog(
-            tuple(build_builtin_stage_catalog("pies-builtin-stages:1.1.5").snapshot())
+            tuple(build_builtin_stage_catalog("pies-builtin-stages:1.2.0").snapshot())
         ),
     )
-    manifest = SolverBundleManifest(
-        bundle={"generator": "ies.generator.highs_milp@1.0.0", "solver": "ies.solver.highs@1.7.2"},
-        inputs=[{"path": "input/problem.mps", "media_type": "text/plain"}],
-        command={
-            "executor": "ies.executor.local_process@1.0.0",
-            "executable": "ies.solver.highs@1.7.2",
-            "arguments": ["input/problem.mps"],
-            "timeout_seconds": 30,
-            "network": False,
-        },
-        outputs=[{"path": "output/solution.sol", "media_type": "text/plain", "required": True}],
-        result_adapter="ies.result-adapter.highs@1.0.0",
-    )
-    bundle = SolverBundle(manifest, {"input/problem.mps": MemoryContent(b"NAME X\nENDATA\n")})
     old_receipt = ExecutionReceipt(
         receipt_id="r-old",
         bundle_id="b-old",
@@ -1241,9 +1213,9 @@ def test_adapt_result_uses_current_claim_attempt_id_when_reusing_older_receipt(
         attempt_id=str(old_claim.attempt_id),
         generator_ref="ies.generator.highs_milp@1.0.0",
         solver_ref="ies.solver.highs@1.7.2",
-        executor_ref="ies.executor.local_process@1.0.0",
+        executor_ref="ies.executor.container@1.0.0",
         executable_ref="ies.solver.highs@1.7.2",
-        result_adapter_ref="ies.result-adapter.highs@1.0.0",
+        result_adapter_ref="ies.backend.result_adapter@1.0.0",
         status="succeeded",
         exit_code=0,
         termination_reason="exited",
@@ -1257,22 +1229,32 @@ def test_adapt_result_uses_current_claim_attempt_id_when_reusing_older_receipt(
         evaluation={"evaluation_years": 1},
     )
 
-    evaluated = worker_app.adapt_result(
-        plane,
-        bundle,
-        old_receipt,
-        {"output/solution.sol": MemoryContent(b"HIGHS_SOLUTION_V1\n")},
+    evaluated = worker_app.run_single_evaluator(
+        plane=plane,
+        attempt=AttemptContext(
+            attempt_id=str(new_claim.attempt_id),
+            bundle_id="b-old",
+            assembly_id="a-1",
+            calculation_config_id="c-1",
+        ),
         claim=new_claim,
-        number=1,
-        finance=fake_finance,  # type: ignore[arg-type]
+        idx=0,
+        evaluator_ref="ies.evaluator.finance@1.0.0",
+        parameters={},
+        solution_ref=sol_ref,
         snapshot=fake_snapshot,
+        artifact=SimpleNamespace(canonical_text="{}"),  # type: ignore[arg-type]
+        finance=fake_finance,  # type: ignore[arg-type]
+        materialized=MaterializedSet(operation_years=1, series=(), pending_predict=(), prices=()),
+        receipt_dict=old_receipt.to_dict(),
         session_factory=factory,
-        save_checkpoint=save_evaluation_checkpoint,
+        load_checkpoint=load_evaluator_checkpoint,
+        save_checkpoint=save_evaluator_checkpoint,
     )
-    assert evaluated.result.receipt_id == "r-old"
+    assert evaluated["result_entry"]["attempt_id"] == str(new_claim.attempt_id)
     assert captured_start["attempt_id"] == str(new_claim.attempt_id)
     assert captured_start["fencing_token"] == str(new_claim.lease_token)
-    assert captured_start["stage_execution_id"] == f"{new_claim.attempt_id}--evaluate-r1"
+    assert captured_start["stage_execution_id"].startswith(f"{new_claim.attempt_id}--eval-r1-0-")
     assert staged_receipt_attempt == [str(old_claim.attempt_id)]
 
 
@@ -1384,11 +1366,10 @@ def test_runner_checkpoint_hits_cleanup_residual_stages_and_fresh_run_skips(
                 "generator": None,
                 "solver": None,
                 "algorithm": "acme.algorithm.demo@1.0.0",
-                "evaluator": None,
+                "evaluators": [],
                 "precision": "medium",
-                "convergence": None,
                 "time_limit_seconds": 30,
-                "options": {},
+                "options": {"algorithm": {}},
                 "seed": 7,
                 "outputs": ["solution"],
             },
@@ -1486,9 +1467,15 @@ def test_runner_checkpoint_hits_cleanup_residual_stages_and_fresh_run_skips(
     plane = SimpleNamespace(stage_runner=RecordingStageRunner())
     cfg_obj = CalculationConfig(
         mode="planning",
+        predictions=(),
+        generator=None,
+        solver=None,
         algorithm="acme.algorithm.demo@1.0.0",
+        evaluators=(),
         precision="medium",
         time_limit_seconds=30,
+        options={"algorithm": {}},
+        seed=None,
         outputs=("solution",),
     )
     empty_set = MaterializedSet(1, (), (), ())
@@ -1502,7 +1489,7 @@ def test_runner_checkpoint_hits_cleanup_residual_stages_and_fresh_run_skips(
         {"attempt_id": str(claim.attempt_id), "stage_id": "algorithm-r1", "stage_id_prefix": None}
     ]
 
-    # _predict_round / _predict_selected_round / _solve_round checkpoint hit vs fresh miss
+    # _predict_round / _solve_round checkpoint hit vs fresh miss
     cleanup_calls.clear()
     ctx = SimpleNamespace(
         claim=SimpleNamespace(attempt_id=99, lease_token="tok-99"),
@@ -1519,11 +1506,9 @@ def test_runner_checkpoint_hits_cleanup_residual_stages_and_fresh_run_skips(
         worker_app, "run_worker_transaction", lambda _sf, fn, *args, **_k: fn(*args)
     )
     monkeypatch.setattr(worker_app, "load_prediction_checkpoint", lambda _c, _n: ((), (), {}))
-    runner._predict_round(ctx, plane, snap, None)
-    runner._predict_selected_round(ctx, plane, snap, (), None, 2)
+    runner._predict_round(ctx, plane, snap)
     assert cleanup_calls == [
         {"attempt_id": "99", "stage_id": None, "stage_id_prefix": "predict-r1"},
-        {"attempt_id": "99", "stage_id": None, "stage_id_prefix": "predict-r2"},
     ]
 
     cleanup_calls.clear()
@@ -1540,13 +1525,26 @@ def test_runner_checkpoint_hits_cleanup_residual_stages_and_fresh_run_skips(
         receipt=fake_receipt,
         outputs={},
     )
-    fake_eval = SimpleNamespace(
-        resources={},
-        result=SimpleNamespace(execution_status="completed", math_status="solved"),
-    )
+    fake_restored = {
+        "compute_result": SimpleNamespace(execution_status="completed", math_status="solved"),
+        "solution_ref": {"object_id": 1},
+    }
     monkeypatch.setattr(worker_app, "restore_round", lambda _c, _n: saved_round)
-    monkeypatch.setattr(worker_app, "load_evaluation_checkpoint", lambda _c, _n: fake_eval)
+    monkeypatch.setattr(worker_app, "load_restoration_checkpoint", lambda _c, _n: fake_restored)
     monkeypatch.setattr(worker_app, "business_outcome_for", lambda _r: "normal_completion")
+    solve_cfg = CalculationConfig(
+        mode="planning",
+        predictions=(),
+        generator="ies.generator.highs_milp@1.0.0",
+        solver="ies.solver.highs@1.7.2",
+        algorithm=None,
+        evaluators=(),
+        precision="medium",
+        time_limit_seconds=30,
+        options={"generator": {}, "solver": {}},
+        seed=None,
+        outputs=("solution",),
+    )
     attempt_ctx = AttemptContext("99", "b-init", "a-1", "c-1")
     runner._solve_round(
         ctx,
@@ -1556,7 +1554,7 @@ def test_runner_checkpoint_hits_cleanup_residual_stages_and_fresh_run_skips(
         {},
         empty_set,
         SimpleNamespace(),
-        cfg_obj,
+        solve_cfg,
         SimpleNamespace(),
         attempt_ctx,
         number=1,
@@ -1564,7 +1562,6 @@ def test_runner_checkpoint_hits_cleanup_residual_stages_and_fresh_run_skips(
     assert cleanup_calls == [
         {"attempt_id": "99", "stage_id": "generate-r1", "stage_id_prefix": None},
         {"attempt_id": "99", "stage_id": "solve-r1", "stage_id_prefix": None},
-        {"attempt_id": "99", "stage_id": "evaluate-r1", "stage_id_prefix": None},
     ]
 
     # Fresh miss path must NOT invoke checkpoint cleanup
@@ -1589,8 +1586,8 @@ def test_runner_checkpoint_hits_cleanup_residual_stages_and_fresh_run_skips(
     monkeypatch.setattr(
         worker_app, "execute_saved_bundle", lambda **_k: (fake_receipt, {}, {})
     )
-    monkeypatch.setattr(worker_app, "load_evaluation_checkpoint", lambda _c, _n: None)
-    monkeypatch.setattr(worker_app, "adapt_result", lambda *_a, **_k: fake_eval)
+    monkeypatch.setattr(worker_app, "load_restoration_checkpoint", lambda _c, _n: None)
+    monkeypatch.setattr(worker_app, "restore_core_solution", lambda *_a, **_k: fake_restored)
     runner._solve_round(
         ctx,
         plane,
@@ -1599,7 +1596,7 @@ def test_runner_checkpoint_hits_cleanup_residual_stages_and_fresh_run_skips(
         {},
         empty_set,
         SimpleNamespace(),
-        cfg_obj,
+        solve_cfg,
         SimpleNamespace(),
         attempt_ctx,
         number=1,

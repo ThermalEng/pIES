@@ -344,7 +344,6 @@ def materialize_predicted_series(
     seed: int | None,
     *,
     operation_years: int,
-    previous: Mapping[str, object] | None = None,
     allow_subset: bool = False,
 ) -> tuple[PredictedTarget, ...]:
     """物化装配产物中 data_predict 绑定的全周期预测序列。
@@ -359,8 +358,7 @@ def materialize_predicted_series(
     历史列按绑定接口名投影; 目标类型不透明透传进产物与回执, 不在此解释。
     ``operation_years`` 为调用方从快照顶层评价确认块读取的已确认运营
     年限（必填，无默认值，不在此校验），预测序列按推导的运营期总点数
-    生成。上一轮统一结果 ``previous`` 原样透传给各 predictor(自回归类算法
-    使用；朴素算法忽略)。
+    生成（1.2.0 单趟前向预测，不再透传上一轮求解结果）。
     返回按 (实例, 接口) 稳定排序的预测产物。
     """
     doc = json.loads(artifact.canonical_text)
@@ -408,7 +406,6 @@ def materialize_predicted_series(
                     parameters=parameters,
                     seed=seed,
                     point_count=point_count,
-                    previous=previous,
                 )
             )
     return tuple(predicted)
