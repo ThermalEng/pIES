@@ -1689,6 +1689,363 @@ extensions: {}
     _assert_eval_close(actual, expected)
 
 
+def test_forward_finance_reconciles_distinct_sources_no_false_cancellation(tmp_path: Path) -> None:
+    """Distinct driver or system_quantity sources must never cancel falsely in _AffineExpr."""
+    init_registry()
+    device_contribs = {}
+    for dev_doc in list_devices():
+        built_dev = build_math_contribution(dev_doc)
+        assert built_dev.ok, (dev_doc.device.id, built_dev.diagnostics)
+        device_contribs[dev_doc.device.id] = built_dev.contribution
+
+    profile_payload = {
+        "schema": "ies.finance-profile",
+        "schema_version": "1.0.0",
+        "profile": {
+            "id": "distinct-no-cancel",
+            "region": "CN-North",
+            "currency": "CNY",
+            "base_year": 2025,
+            "price_basis": "tax_exclusive",
+            "cost_method": "fixed_plus_linear",
+        },
+        "finance_types": {
+            "grid_ft": {
+                "upfront_capex": {
+                    "linear": {
+                        "cap_imp": {"unit_cost": _money("10", "CNY/kW")},
+                        "cap_exp": {"unit_cost": _money("0", "CNY/kW")},
+                    }
+                },
+            },
+        },
+        "energy_prices": {
+            "elec_buy": {
+                "carrier": "electricity",
+                "direction": "purchase",
+                "kind": "constant",
+                "value": _money("0.5", "CNY/kWh"),
+            }
+        },
+        "demand_charges": {},
+        "taxes": {
+            "income_tag": {
+                "display_name": "CIT",
+                "tax_type": "income_tax",
+                "applies_to": "grid_ft.upfront_capex",
+            }
+        },
+        "credit_pools": {},
+        "amounts": {
+            "rev_imp_amt": {
+                "unit": "CNY",
+                "axis": "scalar",
+                "constant": _money("0"),
+                "terms": {
+                    "d": {
+                        "coefficient": _money("1", "CNY/kW"),
+                        "source": {
+                            "kind": "driver",
+                            "finance_type": "grid_ft",
+                            "driver": "cap_imp",
+                            "scope": {"kind": "instances", "instances": ["grid"]},
+                            "period": {"kind": "scalar"},
+                        },
+                    }
+                },
+            },
+            "cost_exp_amt": {
+                "unit": "CNY",
+                "axis": "scalar",
+                "constant": _money("0"),
+                "terms": {
+                    "d": {
+                        "coefficient": _money("1", "CNY/kW"),
+                        "source": {
+                            "kind": "driver",
+                            "finance_type": "grid_ft",
+                            "driver": "cap_exp",
+                            "scope": {"kind": "instances", "instances": ["grid"]},
+                            "period": {"kind": "scalar"},
+                        },
+                    }
+                },
+            },
+        },
+        "cash_movements": {
+            "rev_imp": {
+                "amount": {"kind": "amount", "id": "rev_imp_amt", "period": {"kind": "scalar"}},
+                "price_basis": "tax_exclusive",
+                "direction": "inflow",
+                "recognition": {"kind": "at", "at": {"kind": "financial_year", "year": 1}},
+                "payments": [{"offset": 0, "ratio": "1"}],
+            },
+            "cost_exp": {
+                "amount": {"kind": "amount", "id": "cost_exp_amt", "period": {"kind": "scalar"}},
+                "price_basis": "tax_exclusive",
+                "direction": "outflow",
+                "recognition": {"kind": "at", "at": {"kind": "financial_year", "year": 1}},
+                "payments": [{"offset": 0, "ratio": "1"}],
+            },
+        },
+        "assets": {},
+        "tax_rules": {
+            "cit": {
+                "kind": "income_tax",
+                "label_ref": "income_tag",
+                "rate": _money("0.25", "1"),
+                "revenue": [],
+                "energy_cost": [],
+                "annual_om": [],
+                "variable_om": [],
+                "deductible_maintenance": {"mode": "explicit_items", "items": []},
+                "depreciation": [],
+                "movement_revenue": ["rev_imp"],
+                "movement_cost": ["cost_exp"],
+                "loss_carryforward_years": 2,
+                "opening_losses": [],
+            }
+        },
+        "net_cashflows": {},
+    }
+    finance = merge_effective(
+        FinanceProfile.from_dict(profile_payload), _empty_overrides("distinct-no-cancel")
+    )
+    assembly_yaml = """schema: ies.assembly
+schema_version: "1.0.0"
+assembly:
+  id: distinct_no_cancel
+  name: Distinct Drivers No False Cancellation
+project_baseline:
+  resolution: 1h
+  start_year: 2025
+  scenario_mode: single
+devices:
+  grid:
+    definition:
+      id: ies.device.grid_connection
+    asset_origin: new
+    properties:
+      max_import_power_kw:
+        value: 10
+        unit: kW
+      max_export_power_kw:
+        value: 10
+        unit: kW
+    predefined_interfaces: {}
+  load:
+    definition:
+      id: ies.device.electric_load
+    asset_origin: existing
+    properties:
+      peak_power_kw:
+        value: 10
+        unit: kW
+    predefined_interfaces:
+      electricity_demand:
+        mode: constant
+        value: 0
+connections:
+  e_grid_load:
+    from: grid.electricity_import
+    to: load.electricity_in
+finance:
+  ref:
+    kind: object
+    object_id: fin:distinct-no-cancel
+  profile_id: distinct-no-cancel
+finance_binding:
+  instances:
+    grid:
+      type: costed
+      finance_type: grid_ft
+      drivers:
+        cap_imp:
+          property: max_import_power_kw
+        cap_exp:
+          property: max_export_power_kw
+    load:
+      type: none
+tariff_bindings: {}
+demand_bindings: {}
+planning:
+  objective:
+    sense: maximize
+    expression: system.after_tax_npv
+  variables:
+    v_imp:
+      device_ref: grid
+      parameter: max_import_power_kw
+      unit: kW
+      lower_bound: "0"
+      upper_bound: "10"
+    v_exp:
+      device_ref: grid
+      parameter: max_export_power_kw
+      unit: kW
+      lower_bound: "0"
+      upper_bound: "10"
+  construction_units:
+    u_grid:
+      device_ref: grid
+      mode: mandatory
+      scales:
+        v_imp:
+          active_lower_bound: "0"
+          active_upper_bound: "10"
+        v_exp:
+          active_lower_bound: "0"
+          active_upper_bound: "10"
+  constraints: {}
+outputs:
+  series:
+    - grid.electricity_import
+  metrics: []
+extensions: {}
+"""
+    res = validate_assembly_text(assembly_yaml, finance_snapshots={"fin:distinct-no-cancel": finance})
+    assert res.artifact is not None, res.diagnostics
+    artifact = res.artifact
+    models = {
+        "grid": device_contribs["ies.device.grid_connection"],
+        "load": device_contribs["ies.device.electric_load"],
+    }
+    materialized = MaterializedSet(
+        operation_years=1,
+        series=(
+            MaterializedSeries(
+                device="load",
+                interface="electricity_demand",
+                mode="constant",
+                resolution="1h",
+                point_count=8760,
+                values=(0.0,) * 8760,
+                source={"kind": "constant"},
+            ),
+        ),
+        prices=(),
+    )
+    from iesplan.tasks.contracts import parse_evaluation_input
+
+    evaluation = parse_evaluation_input(
+        {
+            "evaluation_years": 1,
+            "construction_period": 0,
+            "operation_years": 1,
+            "discount_rate": 0.08,
+            "construction_payments": [{"t": 0, "ratio": 1}],
+            "maintenance_expenses": [],
+        }
+    )
+    target_bundle = generate_target_highs_bundle(
+        artifact, models, materialized, finance, _target_campus_config(), evaluation
+    )
+    solution = _solve_target_bundle_to_solution(target_bundle, tmp_path / "t")
+    legacy_cfg = _campus_inputs()[4]
+    expected = _run_legacy_115_evaluation(
+        artifact, models, materialized, finance, legacy_cfg, evaluation, tmp_path / "l"
+    )
+    actual = evaluate_forward_finance(
+        solution,
+        artifact=artifact,
+        finance=finance,
+        evaluation=evaluation,
+        materialized=materialized,
+        device_models={inst: contribution_to_dict(m) for inst, m in models.items()},
+    )
+    assert Decimal(actual["tax_cash"]["income"][0]["taxable_base"]) == Decimal("0")
+    assert expected["tax_cash"]["loss_balances"] == [
+        {
+            "rule": "cit",
+            "vintage_id": "v0",
+            "year": 1,
+            "last_usable_year": 3,
+            "amount": "0.0",
+        }
+    ]
+    _assert_eval_close(actual, expected)
+
+    # Also verify distinct vs identical system_quantity references on pure forward path
+    sys_profile = deepcopy(profile_payload)
+    sys_profile["amounts"]["rev_imp_amt"] = {
+        "unit": "CNY",
+        "axis": "financial_year",
+        "constant": _money("0"),
+        "terms": {
+            "d": {
+                "coefficient": _money("1", "CNY/kWh"),
+                "source": {
+                    "kind": "system_quantity",
+                    "block": "sys",
+                    "variable": "a",
+                    "aggregation": "integrate_positive",
+                    "period": {"kind": "current"},
+                },
+            }
+        },
+    }
+    sys_profile["amounts"]["cost_exp_amt"] = {
+        "unit": "CNY",
+        "axis": "financial_year",
+        "constant": _money("0"),
+        "terms": {
+            "d": {
+                "coefficient": _money("1", "CNY/kWh"),
+                "source": {
+                    "kind": "system_quantity",
+                    "block": "sys",
+                    "variable": "b",
+                    "aggregation": "integrate_positive",
+                    "period": {"kind": "current"},
+                },
+            }
+        },
+    }
+    sys_profile["cash_movements"]["rev_imp"]["amount"] = {
+        "kind": "amount",
+        "id": "rev_imp_amt",
+        "period": {"kind": "current"},
+    }
+    sys_profile["cash_movements"]["cost_exp"]["amount"] = {
+        "kind": "amount",
+        "id": "cost_exp_amt",
+        "period": {"kind": "current"},
+    }
+    sys_finance = merge_effective(
+        FinanceProfile.from_dict(sys_profile), _empty_overrides("distinct-no-cancel")
+    )
+    sys_sol = deepcopy(solution)
+    sys_sol["system_series"] = {
+        "sys.a": {"block": "sys", "variable": "a", "unit": "kW", "values": [1.0] * 8760},
+        "sys.b": {"block": "sys", "variable": "b", "unit": "kW", "values": [1.0] * 8760},
+    }
+    distinct_out = evaluate_forward_finance(
+        sys_sol,
+        artifact=artifact,
+        finance=sys_finance,
+        evaluation=evaluation,
+        materialized=materialized,
+        device_models=models,
+    )
+    assert Decimal(distinct_out["tax_cash"]["income"][0]["taxable_base"]) == Decimal("0")
+    assert len(distinct_out["tax_cash"]["loss_balances"]) == 1
+
+    # Identical (block, variable, aggregation, period) system_quantity terms DO cancel
+    sys_profile["amounts"]["cost_exp_amt"]["terms"]["d"]["source"]["variable"] = "a"
+    same_finance = merge_effective(
+        FinanceProfile.from_dict(sys_profile), _empty_overrides("distinct-no-cancel")
+    )
+    same_out = evaluate_forward_finance(
+        sys_sol,
+        artifact=artifact,
+        finance=same_finance,
+        evaluation=evaluation,
+        materialized=materialized,
+        device_models=models,
+    )
+    assert same_out["tax_cash"]["loss_balances"] == []
+
+
 def test_finance_package_has_no_assembly_or_domain_imports() -> None:
     """Architecture check: iesplan.finance must not import assembly/computation/modeling/devices."""
     import ast

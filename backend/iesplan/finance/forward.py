@@ -2103,6 +2103,20 @@ class _ForwardFinanceEvaluator:
                     return acc
         return _AffineExpr()
 
+    def _demand_row_affine(self, row: Mapping[str, Any]) -> _AffineExpr:
+        billing_id = row["billing_id"]
+        charge_id = row["charge_id"]
+        month = row["month"]
+        sym = ("demand", billing_id, charge_id, month)
+        if sym not in self._bound_symbols:
+            binding = (self.doc.get("demand_bindings") or {})[billing_id]
+            m_start, m_end = self.month_span_map.get(month, _DEFAULT_MONTH_SPAN)
+            self._bound_symbols[sym] = self._iface_step_interval(
+                binding["instance"], binding["interface"], m_start, min(m_start + 1, m_end)
+            )
+        rate_si = _money_to_internal(self.finance.demand_charges[charge_id].rate)
+        return _AffineExpr(terms={sym: rate_si})
+
     def _amount_source_affine(self, reference: Any, axis: str, period: int) -> _AffineExpr:
         kind = reference.kind
         if kind == "amount":
@@ -2165,8 +2179,51 @@ class _ForwardFinanceEvaluator:
             for binding_id in reference.bindings:
                 acc.add_scaled(self._tariff_affine(binding_id, start, end), sign * factor)
             return acc
-        sym = ("unbounded", kind)
-        self._bound_symbols[sym] = (-math.inf, math.inf)
+        if kind == "driver":
+            acc = _AffineExpr()
+            for inst in self._amount_instances(reference):
+                target = self.fb_instances[inst]["drivers"][reference.driver]
+                if "property" in target:
+                    acc.add_scaled(self._bound_var_affine(inst, str(target["property"])))
+                else:
+                    acc.add_scaled(
+                        self._iface_affine(
+                            inst,
+                            str(target["interface"]),
+                            start,
+                            end,
+                            str(target.get("aggregation", "scalar")),
+                        )
+                    )
+            return acc
+        if kind == "system_quantity":
+            if axis != "scalar" and start == end:
+                return _AffineExpr()
+            sym = (
+                "system_quantity",
+                reference.block,
+                reference.variable,
+                reference.aggregation,
+                start,
+                end,
+            )
+            self._bound_symbols.setdefault(sym, (-math.inf, math.inf))
+            return _AffineExpr(terms={sym: 1.0})
+        if kind == "demand":
+            if start == end:
+                return _AffineExpr()
+            multiplier, credit = self.demand_tax_factors.get(reference.charge, (1.0, 0.0))
+            factor = _amount_basis(1.0, multiplier, multiplier - credit, reference.basis)
+            acc = _AffineExpr()
+            for row in self._demand_rows:
+                selected = (
+                    row["financial_year"] == period if axis == "financial_year" else row["month"] == period
+                )
+                if row["billing_id"] in reference.bindings and selected:
+                    acc.add_scaled(self._demand_row_affine(row), factor)
+            return acc
+        sym = ("unbounded", kind, json.dumps(reference.to_dict(), sort_keys=True), axis, period)
+        self._bound_symbols.setdefault(sym, (-math.inf, math.inf))
         return _AffineExpr(terms={sym: 1.0})
 
     def _amount_reference_affine(
@@ -2206,14 +2263,7 @@ class _ForwardFinanceEvaluator:
             for row in self._demand_rows:
                 if row["charge_id"] in demand_refs and row["financial_year"] == year:
                     gross, credit = self.demand_tax_factors.get(row["charge_id"], (1.0, 0.0))
-                    binding = (self.doc.get("demand_bindings") or {})[row["billing_id"]]
-                    rate_si = _money_to_internal(self.finance.demand_charges[row["charge_id"]].rate)
-                    m_start, m_end = self.month_span_map.get(row["month"], _DEFAULT_MONTH_SPAN)
-                    sym = ("demand", row["billing_id"], row["charge_id"], row["month"])
-                    self._bound_symbols[sym] = self._iface_step_interval(
-                        binding["instance"], binding["interface"], m_start, min(m_start + 1, m_end)
-                    )
-                    base_expr.add_scaled(_AffineExpr(terms={sym: 1.0}), -(gross - credit) * rate_si)
+                    base_expr.add_scaled(self._demand_row_affine(row), -(gross - credit))
             for for_path, is_annual in (
                 *((p, True) for p in rule.annual_om),
                 *((p, False) for p in rule.variable_om),

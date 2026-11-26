@@ -748,13 +748,14 @@ def test_f3_complex_tax_serialized_device_models_and_system_quantity_unit_mismat
     tax_res = read_compute_result(tax_out)
     assert Decimal(tax_res.outputs["financial_evaluation"]["evaluation"]["npv"]) == Decimal("5072.5")
 
-    # 2) system_quantity expects unit from frozen system_equations, rejecting solution unit spoofing
+    # 2) system_quantity in active consumption closure expects unit from frozen system_equations,
+    # while unused amounts outside the closure do not require extra system_series
     sys_doc = deepcopy(base_doc)
     sys_doc["system_equations"] = {"plant": {"variables": {"output": {"unit": "kW"}}}}
     sys_fin = deepcopy(base_fin)
     sys_fin["amounts"] = {
         "sys_rev": {
-            "axis": "financial_year",
+            "axis": "scalar",
             "unit": "CNY",
             "constant": {"unit": "CNY", "value": "0"},
             "terms": {
@@ -769,7 +770,29 @@ def test_f3_complex_tax_serialized_device_models_and_system_quantity_unit_mismat
                     },
                 }
             },
-        }
+        },
+        "sys_unused": {
+            "axis": "financial_year",
+            "unit": "CNY",
+            "constant": {"unit": "CNY", "value": "0"},
+            "terms": {
+                "flow": {
+                    "coefficient": {"unit": "CNY/kWh", "value": "1"},
+                    "source": {
+                        "aggregation": "integrate_positive",
+                        "block": "unused_block",
+                        "kind": "system_quantity",
+                        "period": {"kind": "current"},
+                        "variable": "unused_var",
+                    },
+                }
+            },
+        },
+    }
+    sys_fin["net_cashflows"]["sys_cash"] = {
+        "at": {"kind": "financial_year", "year": 1},
+        "direction": "inflow",
+        "amount": {"kind": "amount_ref", "id": "sys_rev"},
     }
     sys_sol = deepcopy(base_sol)
     sys_sol["system_series"] = {
@@ -794,7 +817,11 @@ def test_f3_complex_tax_serialized_device_models_and_system_quantity_unit_mismat
         work_out=sys_ok_out,
         pies_version="1.2.0",
     )
-    assert read_compute_result(sys_ok_out).math_status == "solved"
+    sys_ok_res = read_compute_result(sys_ok_out)
+    assert sys_ok_res.math_status == "solved"
+    assert Decimal(sys_ok_res.outputs["financial_evaluation"]["evaluation"]["npv"]) == Decimal(
+        "13832.5"
+    )
 
     # Spoofed unit ("kWh" when system_equations declares "kW") must be rejected
     bad_sys_sol = deepcopy(sys_sol)

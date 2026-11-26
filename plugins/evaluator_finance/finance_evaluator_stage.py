@@ -13,6 +13,7 @@ from iesplan.core.contracts import horizon_point_count
 from iesplan.finance import (
     EffectiveFinanceConfig,
     EvaluationInput,
+    amount_dependency_closure,
     evaluate_forward_finance,
 )
 from iesplan.finance.triplet import AmountReference
@@ -121,6 +122,41 @@ def _iter_system_quantity_refs(node: object) -> Iterable[AmountReference]:
     if isinstance(node, (tuple, list)):
         for item in node:
             yield from _iter_system_quantity_refs(item)
+
+
+def _active_finance_nodes(doc: Mapping[str, Any], finance: EffectiveFinanceConfig) -> list[object]:
+    roots: set[str] = {
+        str(target["id"])
+        for constraint in ((doc.get("planning") or {}).get("constraints") or {}).values()
+        if isinstance(constraint, Mapping)
+        and constraint.get("type") == "amount_relation"
+        and constraint.get("enabled", True)
+        for target in (constraint.get("references") or {}).values()
+        if isinstance(target, Mapping) and target.get("kind") == "amount" and target.get("id")
+    }
+    roots.update(
+        cash.amount.id
+        for cash in finance.net_cashflows.values()
+        if cash.amount.kind == "amount_ref"
+    )
+    roots.update(movement.amount.id for movement in finance.cash_movements.values())
+    roots.update(
+        asset.basis_from.id
+        for asset in finance.assets.values()
+        if asset.basis_from.kind == "amount"
+    )
+    for rule in finance.tax_rules.values():
+        base_from = getattr(rule, "base_from", None)
+        if isinstance(base_from, AmountReference) and base_from.kind == "amount" and base_from.id:
+            roots.add(base_from.id)
+    consumed_ids = amount_dependency_closure(finance.amounts, roots)
+    return [
+        *(finance.amounts[aid] for aid in consumed_ids),
+        finance.cash_movements,
+        finance.assets,
+        finance.net_cashflows,
+        finance.tax_rules,
+    ]
 
 
 def _predefined_series_keys(
@@ -232,24 +268,25 @@ def _validate_solution_against_frozen_context(
     actual_sys = solution.system_series or {}
     by_sys_key = {(entry.block, entry.variable): entry for entry in actual_sys.values()}
     sys_var_units = _system_variable_units(system_equations)
-    for ref in _iter_system_quantity_refs(finance):
-        if ref.block is None or ref.variable is None:
-            continue
-        expected_sys_unit = sys_var_units.get((ref.block, ref.variable))
-        if expected_sys_unit is None:
-            raise StageIOError(
-                f"Frozen system_equations missing unit declaration for {ref.block}.{ref.variable}"
-            )
-        entry = by_sys_key.get((ref.block, ref.variable))
-        if entry is None:
-            raise StageIOError(
-                f"EngineeringSolution missing required system_series {ref.block}.{ref.variable}"
-            )
-        if entry.unit != expected_sys_unit:
-            raise StageIOError(
-                f"EngineeringSolution system_series {ref.block}.{ref.variable} unit mismatch: "
-                f"expected {expected_sys_unit!r}, got {entry.unit!r}"
-            )
+    for active_node in _active_finance_nodes(doc, finance):
+        for ref in _iter_system_quantity_refs(active_node):
+            if ref.block is None or ref.variable is None:
+                continue
+            expected_sys_unit = sys_var_units.get((ref.block, ref.variable))
+            if expected_sys_unit is None:
+                raise StageIOError(
+                    f"Frozen system_equations missing unit declaration for {ref.block}.{ref.variable}"
+                )
+            entry = by_sys_key.get((ref.block, ref.variable))
+            if entry is None:
+                raise StageIOError(
+                    f"EngineeringSolution missing required system_series {ref.block}.{ref.variable}"
+                )
+            if entry.unit != expected_sys_unit:
+                raise StageIOError(
+                    f"EngineeringSolution system_series {ref.block}.{ref.variable} unit mismatch: "
+                    f"expected {expected_sys_unit!r}, got {entry.unit!r}"
+                )
 
     exp_series = {
         sid: ExpectedDeviceSeries(
