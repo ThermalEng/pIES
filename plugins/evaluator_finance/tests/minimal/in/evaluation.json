@@ -1,0 +1,16 @@
+{
+  "comparison": {
+    "mode": "absolute"
+  },
+  "construction_payments": [
+    {
+      "ratio": "1",
+      "t": 0
+    }
+  ],
+  "construction_period": 0,
+  "discount_rate": 0.0,
+  "evaluation_years": 1,
+  "maintenance_expenses": [],
+  "operation_years": 1
+}

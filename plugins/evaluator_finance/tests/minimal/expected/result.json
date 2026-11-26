@@ -1,0 +1,331 @@
+{
+  "bundle_id": "ies.engineering-solution@1.0.0",
+  "execution_status": "completed",
+  "math_status": "solved",
+  "outputs": {
+    "financial_evaluation": {
+      "amounts": [],
+      "annual_fixed_om": "30.0",
+      "annual_net_flows": [
+        "-1000.0",
+        "6072.5"
+      ],
+      "annual_operation": [
+        {
+          "demand_charge": "24.0",
+          "energy_net": "8760.0",
+          "financial_year": 1,
+          "fixed_om": "30.0",
+          "maintenance": "0.0",
+          "net": "7830.0",
+          "variable_om": "876.0"
+        }
+      ],
+      "assets": [],
+      "base_year": 2025,
+      "cash_movements": [],
+      "comparison": {
+        "mode": "absolute"
+      },
+      "construction_period": 0,
+      "construction_total": "1000.0",
+      "construction_total_unit": "CNY",
+      "construction_units": [
+        {
+          "built": true,
+          "instance_id": "g",
+          "mode": "mandatory",
+          "scales": [
+            {
+              "planning_variable_id": "cap_v",
+              "unit": "kW",
+              "value": 80.0
+            }
+          ],
+          "unit_id": "u_g"
+        }
+      ],
+      "cost_items": [],
+      "currency": "CNY",
+      "discount_rate": 0.0,
+      "evaluation": {
+        "base_year": 2025,
+        "currency": "CNY",
+        "discount_rate": "0.0",
+        "dynamic_payback": 0.16467682173734047,
+        "dynamic_payback_unit": "year",
+        "dynamic_status": "recovered",
+        "evaluation_years": 1,
+        "irr": 5.072499999999999,
+        "irr_status": "normal",
+        "npv": "5072.5",
+        "npv_unit": "CNY",
+        "price_basis": "tax_inclusive",
+        "rows": [
+          {
+            "cumulative": "-1000.0",
+            "cumulative_discounted": "-1000.0",
+            "discounted": "-1000.0",
+            "net": "-1000.0",
+            "year": 0
+          },
+          {
+            "cumulative": "5072.5",
+            "cumulative_discounted": "5072.5",
+            "discounted": "6072.5",
+            "net": "6072.5",
+            "year": 1
+          }
+        ],
+        "schema": "ies.project-evaluation",
+        "schema_version": "1.0.0",
+        "static_payback": 0.16467682173734047,
+        "static_payback_unit": "year",
+        "static_status": "recovered"
+      },
+      "evaluation_years": 1,
+      "monthly_demand": [
+        {
+          "billing_id": "dem",
+          "calendar_month": 1,
+          "calendar_year": 2025,
+          "charge": "2.0",
+          "charge_id": "dc",
+          "financial_year": 1,
+          "peak_power": "1.0",
+          "peak_unit": "kW",
+          "rate": {
+            "unit": "CNY/kW",
+            "value": "2"
+          }
+        },
+        {
+          "billing_id": "dem",
+          "calendar_month": 2,
+          "calendar_year": 2025,
+          "charge": "2.0",
+          "charge_id": "dc",
+          "financial_year": 1,
+          "peak_power": "1.0",
+          "peak_unit": "kW",
+          "rate": {
+            "unit": "CNY/kW",
+            "value": "2"
+          }
+        },
+        {
+          "billing_id": "dem",
+          "calendar_month": 3,
+          "calendar_year": 2025,
+          "charge": "2.0",
+          "charge_id": "dc",
+          "financial_year": 1,
+          "peak_power": "1.0",
+          "peak_unit": "kW",
+          "rate": {
+            "unit": "CNY/kW",
+            "value": "2"
+          }
+        },
+        {
+          "billing_id": "dem",
+          "calendar_month": 4,
+          "calendar_year": 2025,
+          "charge": "2.0",
+          "charge_id": "dc",
+          "financial_year": 1,
+          "peak_power": "1.0",
+          "peak_unit": "kW",
+          "rate": {
+            "unit": "CNY/kW",
+            "value": "2"
+          }
+        },
+        {
+          "billing_id": "dem",
+          "calendar_month": 5,
+          "calendar_year": 2025,
+          "charge": "2.0",
+          "charge_id": "dc",
+          "financial_year": 1,
+          "peak_power": "1.0",
+          "peak_unit": "kW",
+          "rate": {
+            "unit": "CNY/kW",
+            "value": "2"
+          }
+        },
+        {
+          "billing_id": "dem",
+          "calendar_month": 6,
+          "calendar_year": 2025,
+          "charge": "2.0",
+          "charge_id": "dc",
+          "financial_year": 1,
+          "peak_power": "1.0",
+          "peak_unit": "kW",
+          "rate": {
+            "unit": "CNY/kW",
+            "value": "2"
+          }
+        },
+        {
+          "billing_id": "dem",
+          "calendar_month": 7,
+          "calendar_year": 2025,
+          "charge": "2.0",
+          "charge_id": "dc",
+          "financial_year": 1,
+          "peak_power": "1.0",
+          "peak_unit": "kW",
+          "rate": {
+            "unit": "CNY/kW",
+            "value": "2"
+          }
+        },
+        {
+          "billing_id": "dem",
+          "calendar_month": 8,
+          "calendar_year": 2025,
+          "charge": "2.0",
+          "charge_id": "dc",
+          "financial_year": 1,
+          "peak_power": "1.0",
+          "peak_unit": "kW",
+          "rate": {
+            "unit": "CNY/kW",
+            "value": "2"
+          }
+        },
+        {
+          "billing_id": "dem",
+          "calendar_month": 9,
+          "calendar_year": 2025,
+          "charge": "2.0",
+          "charge_id": "dc",
+          "financial_year": 1,
+          "peak_power": "1.0",
+          "peak_unit": "kW",
+          "rate": {
+            "unit": "CNY/kW",
+            "value": "2"
+          }
+        },
+        {
+          "billing_id": "dem",
+          "calendar_month": 10,
+          "calendar_year": 2025,
+          "charge": "2.0",
+          "charge_id": "dc",
+          "financial_year": 1,
+          "peak_power": "1.0",
+          "peak_unit": "kW",
+          "rate": {
+            "unit": "CNY/kW",
+            "value": "2"
+          }
+        },
+        {
+          "billing_id": "dem",
+          "calendar_month": 11,
+          "calendar_year": 2025,
+          "charge": "2.0",
+          "charge_id": "dc",
+          "financial_year": 1,
+          "peak_power": "1.0",
+          "peak_unit": "kW",
+          "rate": {
+            "unit": "CNY/kW",
+            "value": "2"
+          }
+        },
+        {
+          "billing_id": "dem",
+          "calendar_month": 12,
+          "calendar_year": 2025,
+          "charge": "2.0",
+          "charge_id": "dc",
+          "financial_year": 1,
+          "peak_power": "1.0",
+          "peak_unit": "kW",
+          "rate": {
+            "unit": "CNY/kW",
+            "value": "2"
+          }
+        }
+      ],
+      "net_cashflows": [
+        {
+          "amount": "50.0",
+          "direction": "inflow",
+          "id": "end_bonus",
+          "t": 1
+        }
+      ],
+      "operation_years": 1,
+      "payments_applied": [
+        {
+          "amount": "1000.0",
+          "ratio": "1",
+          "t": 0
+        }
+      ],
+      "price_basis": "tax_inclusive",
+      "profile_id": "pure-fwd",
+      "schema": "ies.financial-evaluation",
+      "schema_version": "1.0.0",
+      "status": "evaluated",
+      "tax_cash": {
+        "depreciation": [
+          {
+            "amount": "500.0",
+            "base_from": {
+              "finance_type": "gen",
+              "kind": "upfront_capex_net",
+              "scope": {
+                "kind": "all_new_instances"
+              }
+            },
+            "rule": "cit",
+            "year": 1
+          }
+        ],
+        "derived": [],
+        "income": [
+          {
+            "assessed": "1807.500",
+            "loss_expired": "0",
+            "loss_generated": "0",
+            "loss_used": "100.0",
+            "rule": "cit",
+            "tax": "1807.500",
+            "taxable_base": "7330.0",
+            "year": 1
+          }
+        ],
+        "loss_balances": [
+          {
+            "amount": "0",
+            "last_usable_year": 1,
+            "rule": "cit",
+            "vintage_id": "v0",
+            "year": 1
+          },
+          {
+            "amount": "0",
+            "last_usable_year": 3,
+            "rule": "cit",
+            "vintage_id": "v1",
+            "year": 1
+          }
+        ],
+        "refunds": [],
+        "vat": [],
+        "vat_rules": []
+      }
+    }
+  },
+  "receipt_id": "ies.evaluator.finance@1.0.0",
+  "schema": "ies.compute-result",
+  "schema_version": "1.0.0"
+}

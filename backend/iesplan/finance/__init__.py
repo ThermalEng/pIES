@@ -48,6 +48,11 @@ from iesplan.finance.evaluation import (
     ProjectEvaluation,
     evaluate_project_investment,
 )
+from iesplan.finance.forward import (
+    FINANCIAL_EVALUATION_SCHEMA,
+    FINANCIAL_EVALUATION_VERSION,
+    evaluate_forward_finance,
+)
 from iesplan.finance.hourly import FinancialResult, compute_financials, compute_lcoe, compute_payback
 from iesplan.finance.metrics import (
     IRRStatus,
@@ -224,6 +229,10 @@ __all__ = [
     "PaybackStatus",
     "ProjectEvaluation",
     "evaluate_project_investment",
+    # forward evaluation
+    "FINANCIAL_EVALUATION_SCHEMA",
+    "FINANCIAL_EVALUATION_VERSION",
+    "evaluate_forward_finance",
     # timeline(0.12-T2 评价时间轴现金流)
     "AnnualBreakdown",
     "InterfaceDriverFacts",
