@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -21,6 +21,8 @@ from pies_sdk.errors import StageIOError
 from pies_sdk.iteration import ITERATION_LOG_FILENAME, IterationWriter
 from pies_sdk.manifest import PLUGIN_KINDS, PluginManifest
 from pies_sdk.solution_contracts import (
+    EVALUATION_REPORT_SCHEMA,
+    EVALUATION_REPORT_VERSION,
     EngineeringSolutionPayload,
     EvaluationReportPayload,
     PrimalSolutionPayload,
@@ -33,6 +35,9 @@ from pies_sdk.solution_contracts import (
     write_primal_solution,
 )
 from pies_sdk.yaml_safe import dump_safe_yaml, load_safe_yaml
+
+FINANCIAL_EVALUATION_SCHEMA = "ies.financial-evaluation"
+FINANCIAL_EVALUATION_VERSION = "1.0.0"
 
 DEFAULT_WORK_IN = Path("/work/in")
 DEFAULT_WORK_OUT = Path("/work/out")
@@ -254,7 +259,7 @@ def list_solver_solutions(work_out: Path = DEFAULT_WORK_OUT) -> list[Path]:
 
 
 # ---------------------------------------------------------------------------
-# Stage 4: evaluator (/work/in/{bundle/,solution.*,receipt.json} -> /work/out/result.json)
+# Stage 4: evaluator (/work/out/{financial_evaluation.json | evaluation_report.json})
 # ---------------------------------------------------------------------------
 
 
@@ -306,7 +311,7 @@ def read_evaluator_inputs(work_in: Path = DEFAULT_WORK_IN) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# Stage 5: algorithm (/work/in/request.json -> /work/out/result.json)
+# Stage 5: algorithm (/work/in/request.json -> /work/out/solution.json)
 # ---------------------------------------------------------------------------
 
 
@@ -316,6 +321,33 @@ def read_algorithm_request(work_in: Path = DEFAULT_WORK_IN) -> dict[str, Any]:
     if not isinstance(data, dict):
         raise StageIOError("algorithm /work/in/request.json must be a JSON object")
     return data
+
+
+def _validate_financial_evaluation_mapping(data: Any) -> dict[str, Any]:
+    if not isinstance(data, Mapping):
+        raise StageIOError("FinancialEvaluation payload must be a JSON object")
+    if data.get("schema") != FINANCIAL_EVALUATION_SCHEMA:
+        raise StageIOError(f"Invalid FinancialEvaluation schema: {data.get('schema')!r}")
+    if data.get("schema_version") != FINANCIAL_EVALUATION_VERSION:
+        raise StageIOError(
+            f"Invalid FinancialEvaluation schema_version: {data.get('schema_version')!r}"
+        )
+    status = data.get("status")
+    if not isinstance(status, str) or not status:
+        raise StageIOError("FinancialEvaluation requires non-empty string 'status'")
+    check_finite_json(data, "FinancialEvaluation")
+    return dict(data)
+
+
+def write_financial_evaluation(path: Path, payload: Mapping[str, Any]) -> Path:
+    """Validate and write financial_evaluation.json (ies.financial-evaluation@1.0.0)."""
+    validated = _validate_financial_evaluation_mapping(payload)
+    return write_json_file(Path(path), validated)
+
+
+def read_financial_evaluation(path: Path) -> dict[str, Any]:
+    """Read and validate financial_evaluation.json (ies.financial-evaluation@1.0.0)."""
+    return _validate_financial_evaluation_mapping(read_json_file(Path(path)))
 
 
 def write_compute_result(
@@ -339,8 +371,13 @@ def read_compute_result(work_out: Path = DEFAULT_WORK_OUT) -> ComputeResultPaylo
 # ---------------------------------------------------------------------------
 
 
-def validate_stage_outputs(kind: str, work_out: Path = DEFAULT_WORK_OUT) -> None:
-    """Validate that /work/out satisfies the stage output contract for `kind`."""
+def validate_stage_outputs(
+    kind: str,
+    work_out: Path = DEFAULT_WORK_OUT,
+    *,
+    produces: Sequence[str] = (),
+) -> None:
+    """Validate that /work/out satisfies the canonical stage output contract for `kind`."""
     if kind not in PLUGIN_KINDS:
         raise StageIOError(f"Unknown plugin kind: {kind!r}")
     root = Path(work_out)
@@ -361,42 +398,40 @@ def validate_stage_outputs(kind: str, work_out: Path = DEFAULT_WORK_OUT) -> None
         read_engineering_solution(root / "solution.json")
     elif kind == "evaluator":
         report_path = root / "evaluation_report.json"
-        result_path = root / "result.json"
-        if report_path.is_file():
+        fin_path = root / "financial_evaluation.json"
+        fin_contract = f"{FINANCIAL_EVALUATION_SCHEMA}@{FINANCIAL_EVALUATION_VERSION}"
+        report_contract = f"{EVALUATION_REPORT_SCHEMA}@{EVALUATION_REPORT_VERSION}"
+        if fin_contract in produces:
+            if not fin_path.is_file():
+                raise StageIOError("evaluator /work/out missing 'financial_evaluation.json'")
+            read_financial_evaluation(fin_path)
+        elif report_contract in produces:
+            if not report_path.is_file():
+                raise StageIOError("evaluator /work/out missing 'evaluation_report.json'")
             read_evaluation_report(report_path)
-        elif result_path.is_file():
-            read_compute_result(root)
+        elif report_path.is_file():
+            read_evaluation_report(report_path)
+        elif fin_path.is_file():
+            read_financial_evaluation(fin_path)
         else:
             raise StageIOError(
-                "evaluator /work/out missing 'evaluation_report.json' or 'result.json'"
+                "evaluator /work/out missing 'evaluation_report.json' or 'financial_evaluation.json'"
             )
 
 
 def extract_stage_parameters(work_in: Path) -> dict[str, Any]:
-    """Extract parameters/options mapping from /work/in request or calculation config."""
+    """Extract stage parameters mapping from /work/in/request.json['parameters']."""
     root = Path(work_in)
     req_path = root / "request.json"
     if req_path.is_file():
         req = read_json_file(req_path)
-        if isinstance(req, Mapping):
-            if "parameters" in req:
-                params = req["parameters"]
-                if not isinstance(params, Mapping):
-                    raise StageIOError("request.json 'parameters' must be a JSON object")
-                return dict(params)
-            if "options" in req:
-                opts = req["options"]
-                if not isinstance(opts, Mapping):
-                    raise StageIOError("request.json 'options' must be a JSON object")
-                return dict(opts)
-    cfg_path = root / "calculation_config.json"
-    if cfg_path.is_file():
-        cfg = read_json_file(cfg_path)
-        if isinstance(cfg, Mapping) and "options" in cfg:
-            opts = cfg["options"]
-            if not isinstance(opts, Mapping):
-                raise StageIOError("calculation_config.json 'options' must be a JSON object")
-            return dict(opts)
+        if not isinstance(req, Mapping):
+            raise StageIOError("request.json must be a JSON object")
+        if "parameters" in req and req["parameters"] is not None:
+            params = req["parameters"]
+            if not isinstance(params, Mapping):
+                raise StageIOError("request.json 'parameters' must be a JSON object")
+            return dict(params)
     return {}
 
 
@@ -458,3 +493,9 @@ class StageContext:
 
     def read_evaluation_report(self) -> EvaluationReportPayload:
         return read_evaluation_report(self.work_in / "evaluation_report.json")
+
+    def write_financial_evaluation(self, payload: Mapping[str, Any]) -> Path:
+        return write_financial_evaluation(self.work_out / "financial_evaluation.json", payload)
+
+    def read_financial_evaluation(self) -> dict[str, Any]:
+        return read_financial_evaluation(self.work_in / "financial_evaluation.json")

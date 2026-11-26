@@ -32,8 +32,8 @@ from pies_sdk import (
     StageIOError,
     check_compatibility,
     load_plugin_manifest,
-    read_compute_result,
     read_engineering_solution,
+    read_financial_evaluation,
     read_json_file,
     write_engineering_solution,
     write_json_file,
@@ -230,11 +230,10 @@ def test_evaluator_finance_manifest_and_offline_minimal_fixture(tmp_path: Path) 
         work_out=work_out,
         pies_version="1.2.0",
     )
-    actual = read_compute_result(work_out).to_dict()
-    expected = read_json_file(EVAL_FINANCE_DIR / test_spec.expected / "result.json")
-    assert actual == expected
+    fin_eval = read_financial_evaluation(work_out / "financial_evaluation.json")
+    expected = read_json_file(EVAL_FINANCE_DIR / test_spec.expected / "financial_evaluation.json")
+    assert fin_eval == expected
 
-    fin_eval = actual["outputs"]["financial_evaluation"]
     assert fin_eval["schema"] == "ies.financial-evaluation"
     assert fin_eval["schema_version"] == "1.0.0"
     assert Decimal(fin_eval["construction_total"]) == Decimal("1000")
@@ -384,10 +383,8 @@ def test_f3_campus_full_parity_with_forward_evaluator(tmp_path: Path) -> None:
         work_out=eval_out,
         pies_version="1.2.0",
     )
-    result = read_compute_result(eval_out)
-    assert result.execution_status == "completed"
-    assert result.math_status == "solved"
-    actual_eval = result.outputs["financial_evaluation"]
+    actual_eval = read_financial_evaluation(eval_out / "financial_evaluation.json")
+    assert actual_eval["status"] == "evaluated"
     _assert_eval_close(actual_eval, expected_eval)
 
 
@@ -475,11 +472,11 @@ def test_f3_independent_algorithm_to_evaluator_without_bundle(tmp_path: Path) ->
         work_out=eval_out,
         pies_version="1.2.0",
     )
-    res = read_compute_result(eval_out)
-    assert res.execution_status == "completed"
-    assert res.math_status == "solved"
-    expected = read_json_file(EVAL_FINANCE_DIR / "tests" / "minimal" / "expected" / "result.json")
-    assert res.to_dict()["outputs"] == expected["outputs"]
+    actual = read_financial_evaluation(eval_out / "financial_evaluation.json")
+    expected = read_json_file(
+        EVAL_FINANCE_DIR / "tests" / "minimal" / "expected" / "financial_evaluation.json"
+    )
+    assert actual == expected
 
 
 def test_f3_rejects_infeasible_solution_and_missing_frozen_inputs(tmp_path: Path) -> None:
@@ -538,7 +535,9 @@ def test_f3_rejects_omitted_truncated_or_unit_mismatched_solution_and_loads_froz
 
     minimal_in = EVAL_FINANCE_DIR / "tests" / "minimal" / "in"
     base_sol = read_json_file(minimal_in / "solution.json")
-    expected = read_json_file(EVAL_FINANCE_DIR / "tests" / "minimal" / "expected" / "result.json")
+    expected = read_json_file(
+        EVAL_FINANCE_DIR / "tests" / "minimal" / "expected" / "financial_evaluation.json"
+    )
 
     def _run_case(name: str, mutate_sol: Any, *, use_yaml: bool = False) -> None:
         in_dir = tmp_path / f"{name}_in"
@@ -563,7 +562,7 @@ def test_f3_rejects_omitted_truncated_or_unit_mismatched_solution_and_loads_froz
             pies_version="1.2.0",
         )
         if use_yaml:
-            assert read_compute_result(out_dir).to_dict()["outputs"] == expected["outputs"]
+            assert read_financial_evaluation(out_dir / "financial_evaluation.json") == expected
 
     # 0) Frozen assembly.yaml loads without repeating submission validation
     _run_case("frozen_yaml", lambda _s: None, use_yaml=True)
@@ -662,8 +661,8 @@ def test_f3_complex_tax_serialized_device_models_and_system_quantity_unit_mismat
         work_out=tax_out,
         pies_version="1.2.0",
     )
-    tax_res = read_compute_result(tax_out)
-    assert Decimal(tax_res.outputs["financial_evaluation"]["evaluation"]["npv"]) == Decimal("5072.5")
+    tax_eval = read_financial_evaluation(tax_out / "financial_evaluation.json")
+    assert Decimal(tax_eval["evaluation"]["npv"]) == Decimal("5072.5")
 
     # 2) system_quantity in active consumption closure expects unit from frozen system_equations,
     # while unused amounts outside the closure do not require extra system_series
@@ -734,11 +733,9 @@ def test_f3_complex_tax_serialized_device_models_and_system_quantity_unit_mismat
         work_out=sys_ok_out,
         pies_version="1.2.0",
     )
-    sys_ok_res = read_compute_result(sys_ok_out)
-    assert sys_ok_res.math_status == "solved"
-    assert Decimal(sys_ok_res.outputs["financial_evaluation"]["evaluation"]["npv"]) == Decimal(
-        "13832.5"
-    )
+    sys_ok_eval = read_financial_evaluation(sys_ok_out / "financial_evaluation.json")
+    assert sys_ok_eval["status"] == "evaluated"
+    assert Decimal(sys_ok_eval["evaluation"]["npv"]) == Decimal("13832.5")
 
     # Spoofed unit ("kWh" when system_equations declares "kW") must be rejected
     bad_sys_sol = deepcopy(sys_sol)
@@ -814,8 +811,8 @@ def test_f3_standalone_planning_variables_without_construction_units(tmp_path: P
         work_out=ok_out,
         pies_version="1.2.0",
     )
-    ok_res = read_compute_result(ok_out)
-    assert ok_res.math_status == "solved"
+    ok_eval = read_financial_evaluation(ok_out / "financial_evaluation.json")
+    assert ok_eval["status"] == "evaluated"
 
     miss_sol = deepcopy(base_sol)
     miss_sol["construction_units"] = []

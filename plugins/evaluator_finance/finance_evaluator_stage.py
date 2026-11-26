@@ -18,7 +18,6 @@ from iesplan.finance import (
 )
 from iesplan.finance.triplet import AmountReference
 from pies_sdk import (
-    ComputeResultPayload,
     EngineeringSolutionExpectation,
     EngineeringSolutionPayload,
     ExpectedConstructionUnit,
@@ -461,28 +460,4 @@ def evaluate(ctx: StageContext) -> None:
         device_models=raw_models,
     )
 
-    receipt_raw = request_raw.get("receipt")
-    if receipt_raw is None:
-        receipt_raw = _read_optional_json(ctx.work_in / "receipt.json")
-    receipt_map = receipt_raw if isinstance(receipt_raw, Mapping) else {}
-
-    bundle_id = str(
-        request_raw.get("bundle_id")
-        or receipt_map.get("bundle_id")
-        or "ies.engineering-solution@1.0.0"
-    )
-    receipt_id = str(
-        request_raw.get("receipt_id")
-        or receipt_map.get("receipt_id")
-        or ctx.manifest.ref
-    )
-
-    ctx.write_result(
-        ComputeResultPayload(
-            bundle_id=bundle_id,
-            receipt_id=receipt_id,
-            execution_status="completed",
-            math_status=solution.solver_summary.math_status,
-            outputs={"financial_evaluation": fin_eval},
-        )
-    )
+    ctx.write_financial_evaluation(fin_eval)

@@ -10,6 +10,7 @@ from iesplan.computation.result_adapters.adapter import (
     FileContent,
     RestorationOutcome,
     ResultAdapter,
+    project_engineering_solution,
     restore_bundle_outputs,
     restore_from_bundle_dir,
 )
@@ -24,6 +25,7 @@ __all__ = [
     "PRIMAL_SOLUTION_VERSION",
     "RestorationOutcome",
     "ResultAdapter",
+    "project_engineering_solution",
     "restore_bundle_outputs",
     "restore_from_bundle_dir",
 ]

@@ -523,16 +523,10 @@ class TestComputeChainEndToEnd:
             assert get_object(db, descriptor["object_id"]) is not None
 
     def test_tax_task_completes_with_sealed_financial_evaluation(
-        self, client: TestClient, db: Session, engine: Engine, plane, monkeypatch
+        self, client: TestClient, db: Session, engine: Engine, plane
     ) -> None:
         """含税则闭环(C3)：提交 201 → 真实求解 → 封存容器产出的 financial_evaluation。"""
-        monkeypatch.setattr(
-            worker_app,
-            "build_financial_evaluation",
-            lambda *_args, **_kwargs: (_ for _ in ()).throw(
-                AssertionError("financial evaluation must run in evaluator container, not backend")
-            ),
-        )
+        assert not hasattr(worker_app, "build_financial_evaluation")
         task_id = _submit_tax_calc_task(client, db)
         claim = _claim(db, task_id)
         assert _run(engine, claim, plane) == "completed"

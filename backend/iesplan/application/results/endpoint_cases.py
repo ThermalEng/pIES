@@ -223,76 +223,82 @@ def retry_evaluator_case(
     )
 
     ensure_access(db, user, project_id, "edit")
-    task = ensure_task_belongs(db, project_id, task_id)
     if not idempotency_key or not re.fullmatch(IDEMPOTENCY_KEY_RE, idempotency_key):
         raise InvalidRequestError(
             "单项评价器重试必须提供合法幂等键",
             code="TASK-REQ-003",
             params={"idempotency_key": idempotency_key},
         )
-    existing_reqs = list_evaluator_retry_requests(db, task.id)
-    for req in existing_reqs:
-        if req.get("idempotency_key") == idempotency_key:
-            if req.get("evaluator") != evaluator:
-                raise ConflictError(
-                    "同一幂等键已绑定其他评价器重试请求",
-                    params={"idempotency_key": idempotency_key, "evaluator": evaluator},
-                )
-            return {
-                "task": task_summary(db, task),
-                "evaluator": evaluator,
-                "replayed": True,
-            }
-
-    if task.status in ("queued", "running", "cancelling"):
-        raise TaskConflictError(
-            "任务正在排队或执行中，暂不可发起单项评价器重试",
-            params={"task_id": task_id, "status": task.status},
-        )
-    package = results_writes.latest_evidence(db, task_id)
-    if package is None:
-        raise NotFoundError("任务尚无证据包，无法发起单项评价器重试", params={"task_id": task_id})
-
-    snapshot = tasks_domain.get_snapshot(db, task.calc_snapshot_id) if task.calc_snapshot_id else None
-    if snapshot is None:
-        raise InvalidRequestError("任务缺少冻结计算快照，无法重试评价器", params={"task_id": task_id})
-    configured_evals = {
-        str(ev["evaluator"])
-        for ev in (snapshot.calc_config_snapshot.get("evaluators") or ())
-        if isinstance(ev, Mapping) and "evaluator" in ev
-    }
-    if evaluator not in configured_evals:
-        raise InvalidRequestError(
-            "指定评价器不在任务冻结配置中",
-            params={"task_id": task_id, "evaluator": evaluator},
-        )
-
-    evidence_payload = json.loads(get_object(db, package.object_id))
-    eng_group = evidence_payload.get("engineering_solution") or {}
-    if not isinstance(eng_group, Mapping) or "solution.json" not in eng_group:
-        raise InvalidRequestError(
-            "当前证据包缺少可复用的密封工程解，无法执行单项评价器重试",
-            params={"task_id": task_id, "evidence_package_id": package.id},
-        )
-    eval_entries = evidence_payload.get("evaluator_results") or []
-    matching_entry = next(
-        (e for e in eval_entries if isinstance(e, dict) and e.get("evaluator") == evaluator),
-        None,
-    )
-    if matching_entry is None or matching_entry.get("status") not in ("failed", "timed_out", "cancelled"):
-        raise TaskConflictError(
-            "仅失败、超时或已取消的评价器支持单项重试",
-            params={
-                "task_id": task_id,
-                "evaluator": evaluator,
-                "status": matching_entry.get("status") if matching_entry else None,
-            },
-        )
-
-    attempts = tasks_domain.list_attempts(db, task.id)
-    if not attempts:
-        raise TaskConflictError("任务无历史执行尝试，无法绑定单项重试", params={"task_id": task_id})
     try:
+        task = tasks_domain.get_task_for_update(db, task_id)
+        if task is None or task.project_id != project_id:
+            raise NotFoundError(
+                "任务不存在",
+                params={"task_id": task_id, "project_id": project_id},
+                location={"object_type": "task", "object_id": task_id},
+            )
+        existing_reqs = list_evaluator_retry_requests(db, task.id)
+        for req in existing_reqs:
+            if req.get("idempotency_key") == idempotency_key:
+                if req.get("evaluator") != evaluator:
+                    raise ConflictError(
+                        "同一幂等键已绑定其他评价器重试请求",
+                        params={"idempotency_key": idempotency_key, "evaluator": evaluator},
+                    )
+                return {
+                    "task": task_summary(db, task),
+                    "evaluator": evaluator,
+                    "replayed": True,
+                }
+
+        if task.status in ("queued", "running", "cancelling"):
+            raise TaskConflictError(
+                "任务正在排队或执行中，暂不可发起单项评价器重试",
+                params={"task_id": task_id, "status": task.status},
+            )
+        package = results_writes.latest_evidence(db, task_id)
+        if package is None:
+            raise NotFoundError("任务尚无证据包，无法发起单项评价器重试", params={"task_id": task_id})
+
+        snapshot = tasks_domain.get_snapshot(db, task.calc_snapshot_id) if task.calc_snapshot_id else None
+        if snapshot is None:
+            raise InvalidRequestError("任务缺少冻结计算快照，无法重试评价器", params={"task_id": task_id})
+        configured_evals = {
+            str(ev["evaluator"])
+            for ev in (snapshot.calc_config_snapshot.get("evaluators") or ())
+            if isinstance(ev, Mapping) and "evaluator" in ev
+        }
+        if evaluator not in configured_evals:
+            raise InvalidRequestError(
+                "指定评价器不在任务冻结配置中",
+                params={"task_id": task_id, "evaluator": evaluator},
+            )
+
+        evidence_payload = json.loads(get_object(db, package.object_id))
+        eng_group = evidence_payload.get("engineering_solution") or {}
+        if not isinstance(eng_group, Mapping) or "solution.json" not in eng_group:
+            raise InvalidRequestError(
+                "当前证据包缺少可复用的密封工程解，无法执行单项评价器重试",
+                params={"task_id": task_id, "evidence_package_id": package.id},
+            )
+        eval_entries = evidence_payload.get("evaluator_results") or []
+        matching_entry = next(
+            (e for e in eval_entries if isinstance(e, dict) and e.get("evaluator") == evaluator),
+            None,
+        )
+        if matching_entry is None or matching_entry.get("status") not in ("failed", "timed_out", "cancelled"):
+            raise TaskConflictError(
+                "仅失败、超时或已取消的评价器支持单项重试",
+                params={
+                    "task_id": task_id,
+                    "evaluator": evaluator,
+                    "status": matching_entry.get("status") if matching_entry else None,
+                },
+            )
+
+        attempts = tasks_domain.list_attempts(db, task.id)
+        if not attempts:
+            raise TaskConflictError("任务无历史执行尝试，无法绑定单项重试", params={"task_id": task_id})
         save_evaluator_retry_request(
             db,
             attempt_id=attempts[-1].id,

@@ -1269,8 +1269,42 @@ def test_adapt_result_and_algorithm_stage_layout_durable_persist_and_preserved_o
     stage_root = tmp_path / "stages"
     events: list[str] = []
     seen_eval_input_files: list[str] = []
-    container_fin_eval = {"schema": "ies.financial-evaluation", "status": "evaluated", "sentinel": 42}
-    container_hourly = {"data": {"dev.p": [1.0, 2.0]}, "meta": {"units": {"dev.p": "kW"}, "series": {}}}
+    container_fin_eval = {
+        "schema": "ies.financial-evaluation",
+        "schema_version": "1.0.0",
+        "status": "evaluated",
+        "sentinel": 42,
+    }
+    container_eng_solution = {
+        "schema": "ies.engineering-solution",
+        "schema_version": "1.0.0",
+        "solver_summary": {
+            "termination_reason": "optimal",
+            "math_status": "solved",
+            "has_feasible_solution": True,
+            "objective_value": 10.0,
+            "objective_unit": "CNY",
+            "best_bound": 10.0,
+            "relative_gap": 0.0,
+        },
+        "construction_units": [],
+        "series": {
+            "dev.p": {
+                "instance_id": "dev",
+                "variable_id": "p",
+                "unit": "kW",
+                "values": [1.0, 2.0],
+            }
+        },
+        "system_series": {},
+        "metrics": {
+            "termination_reason": "optimal",
+            "math_status": "solved",
+            "objective_value": 10.0,
+            "objective_unit": "CNY",
+        },
+        "extensions": {},
+    }
 
     def handler(request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content.decode()) if request.content else None
@@ -1286,24 +1320,15 @@ def test_adapt_result_and_algorithm_stage_layout_durable_persist_and_preserved_o
                     sorted(p.name for p in in_dir.iterdir() if p.is_file())
                 )
                 assert not (in_dir / "outputs").exists()
-            (out_dir / "result.json").write_text(
-                json.dumps(
-                    {
-                        "schema": "ies.compute-result",
-                        "schema_version": "1.0.0",
-                        "bundle_id": "b-1",
-                        "receipt_id": "r-1",
-                        "execution_status": "completed",
-                        "math_status": "solved",
-                        "outputs": {
-                            "solver_summary": {"termination_reason": "optimal"},
-                            "hourly_series": container_hourly,
-                            "financial_evaluation": container_fin_eval,
-                        },
-                    }
-                ),
-                encoding="utf-8",
-            )
+                out_name = "financial_evaluation.json"
+                (out_dir / out_name).write_text(
+                    json.dumps(container_fin_eval), encoding="utf-8"
+                )
+            else:
+                out_name = "solution.json"
+                (out_dir / out_name).write_text(
+                    json.dumps(container_eng_solution), encoding="utf-8"
+                )
             return httpx.Response(
                 200,
                 json=_stage_payload(
@@ -1315,23 +1340,27 @@ def test_adapt_result_and_algorithm_stage_layout_durable_persist_and_preserved_o
                     running=False,
                     exit_code=0,
                     termination_reason="normal",
-                    output_files=["result.json"],
+                    output_files=[out_name],
                 ),
             )
         if request.method == "GET" and request.url.path.startswith("/v1/stages/"):
             seid = request.url.path.split("/")[-1]
+            stage_id = seid.split("--", 1)[-1]
+            out_name = (
+                "financial_evaluation.json" if stage_id.startswith("eval-") else "solution.json"
+            )
             return httpx.Response(
                 200,
                 json=_stage_payload(
                     stage_execution_id=seid,
                     attempt_id=str(claim.attempt_id),
-                    stage_id=seid.split("--", 1)[-1],
+                    stage_id=stage_id,
                     fencing_token=str(claim.lease_token),
                     status="exited",
                     running=False,
                     exit_code=0,
                     termination_reason="normal",
-                    output_files=["result.json"],
+                    output_files=[out_name],
                 ),
             )
         if request.method == "POST" and request.url.path.endswith("/cleanup"):
@@ -1413,6 +1442,7 @@ def test_adapt_result_and_algorithm_stage_layout_durable_persist_and_preserved_o
         assembly_receipt={"schema": "ies.validation-receipt"},
         device_models={},
         evaluation={"evaluation_years": 1},
+        random_seed=7,
     )
     empty_mat = MaterializedSet(operation_years=1, series=(), pending_predict=(), prices=())
 
@@ -1461,8 +1491,27 @@ def test_adapt_result_and_algorithm_stage_layout_durable_persist_and_preserved_o
         session_factory=factory,
         save_checkpoint=save_algorithm_checkpoint,
     )
-    assert algo_eval.financial_evaluation == container_fin_eval
-    assert algo_eval.hourly_series == container_hourly
+    assert algo_eval.result.math_status == "solved"
+    expected_hourly_meta = {
+        "fields": ["dev.p"],
+        "rows": 2,
+        "series": [
+            {
+                "series_id": "dev.p",
+                "kind": "device",
+                "instance_id": "dev",
+                "variable_id": "p",
+                "unit": "kW",
+            }
+        ],
+    }
+    assert algo_eval.hourly_meta == expected_hourly_meta
+    with factory() as db:
+        loaded_algo = worker_app.load_algorithm_checkpoint(db, claim)
+        assert loaded_algo is not None
+        assert loaded_algo.hourly_meta == expected_hourly_meta
+        assert loaded_algo.hourly_ref is not None
+        assert loaded_algo.solution_ref is not None
     assert events == ["cleanup:eval-r1-0-ies.evaluator.finance-1.0.0", "cleanup:algorithm-r1"]
 
 
@@ -1761,6 +1810,7 @@ def test_non_succeeded_non_solve_stages_persist_outcome_before_cleanup(
         assembly_receipt={"schema": "ies.validation-receipt"},
         device_models={},
         evaluation={"evaluation_years": 1},
+        random_seed=7,
     )
     materialized = MaterializedSet(operation_years=1, series=(), pending_predict=(), prices=())
 

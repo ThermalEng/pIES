@@ -15,6 +15,7 @@ from types import SimpleNamespace
 import pytest
 from legacy_solve_testkit import (
     SOLUTION_PATH,
+    build_financial_evaluation,
     read_bundle_records,
     restore_bundle_solution,
     succeeded_receipt,
@@ -39,7 +40,6 @@ from test_vat_monthly import (
     _solve_internal,
 )
 
-from iesplan.application.worker.compute_cases import build_financial_evaluation
 from iesplan.computation import HIGHS_MILP_PROVIDER
 from iesplan.computation.protocols import ComputeResult
 from iesplan.finance import evaluate_forward_finance

@@ -31,8 +31,7 @@ as isolated ephemeral containers (`--network=none --read-only --cap-drop=ALL`):
    - `/work/in/solution.json`: canonical `ies.engineering-solution@1.0.0`
    - `/work/in/{assembly,device_models,sequences/frozen_series_inputs,finance,evaluation}.json`:
      frozen read-only context hardlinked by `backend`
-   - `/work/out/result.json`: `ies.compute-result@1.0.0` carrying `outputs["financial_evaluation"]`
-     (`ies.financial-evaluation@1.0.0`).
+   - `/work/out/financial_evaluation.json`: canonical `ies.financial-evaluation@1.0.0` JSON.
 """
 
 from __future__ import annotations

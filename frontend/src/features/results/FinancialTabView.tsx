@@ -55,7 +55,7 @@ export function FinancialTabView({
     /opex|o&m|running.?cost/i,
   ])
   const cashflowMetrics = pickMetrics(metrics, [/cashflow|cf_/i])
-  const irrKey = fin ? irrStatusToKey(fin.evaluation.irr_status) : null
+  const irrKey = fin?.evaluation?.irr_status ? irrStatusToKey(fin.evaluation.irr_status) : null
 
   const cfChart = fin ? buildCashflowChartData(fin) : null
   const cfLabelMap: Record<string, string> = {
@@ -83,7 +83,7 @@ export function FinancialTabView({
   }
 
   const cfRowCount = fin
-    ? Math.max(fin.evaluation.rows.length, fin.annual_net_flows.length)
+    ? Math.max(fin.evaluation?.rows?.length ?? 0, fin.annual_net_flows?.length ?? 0)
     : 0
 
   return (
@@ -97,7 +97,7 @@ export function FinancialTabView({
           {cfChart && cfChart.categories.length > 0 ? (
             <Card
               title={
-                fin.evaluation.rows.length > 0
+                (fin.evaluation?.rows?.length ?? 0) > 0
                   ? t('ies.result.fin_cf_table')
                   : t('ies.result.fin_tax_flows')
               }

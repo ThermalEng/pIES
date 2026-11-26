@@ -4,13 +4,13 @@ from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
+from legacy_solve_testkit import build_financial_evaluation
 from test_finance_s2_execution import _income, _money, _vat_labels
 from test_issue06_s2 import _builder, _tiny_solve
 from test_p3_f1_execution import _adapt, _rebuild
 from test_p3_f3_comparison import declared
 
 from iesplan.application.tasks.baselines import check_comparison_inputs
-from iesplan.application.worker.compute_cases import build_financial_evaluation
 from iesplan.computation.generators.highs_milp import DESCRIPTOR
 from iesplan.core.jsonutil import canonical_json
 from iesplan.finance import freeze_comparison, parse_comparison

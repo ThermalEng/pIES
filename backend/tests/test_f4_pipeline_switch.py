@@ -398,6 +398,7 @@ def _setup_pipeline_env(
     tmp_path: Path,
     *,
     extra_evaluators: tuple[StagePluginSpec, ...] = (),
+    extra_solvers: tuple[StagePluginSpec, ...] = (),
     extra_algorithms: tuple[Any, ...] = (),
 ):
     settings.data_dir = tmp_path / "data"
@@ -413,7 +414,7 @@ def _setup_pipeline_env(
     ctx = SimpleNamespace(
         predictor_registry=build_predictor_registry((NAIVE_PREDICTOR,)),
         generator_registry=build_registry((HIGHS_MILP_PROVIDER,)),
-        solver_registry=build_solver_registry((BUILTIN_SOLVER_HIGHS_SPEC,)),
+        solver_registry=build_solver_registry((BUILTIN_SOLVER_HIGHS_SPEC, *extra_solvers)),
         evaluator_registry=build_evaluator_registry(
             (BUILTIN_EVALUATOR_FINANCE_SPEC, *extra_evaluators)
         ),
@@ -476,27 +477,17 @@ def test_parallel_evaluators_partial_failure_single_retry_and_hardlinks(tmp_path
         report_calls["count"] += 1
         sol_file = work_in / "solution.json"
         assert sol_file.is_file()
-        sol_data = json.loads(sol_file.read_text(encoding="utf-8"))
         seen_solution_nlinks.append(sol_file.stat().st_nlink)
-        doc = {
-            "schema": "ies.compute-result",
+        report_doc = {
+            "schema": "ies.evaluation-report",
             "schema_version": "1.0.0",
-            "bundle_id": "b1",
-            "receipt_id": "r1",
-            "execution_status": "completed",
-            "math_status": sol_data["solver_summary"]["math_status"],
-            "outputs": {
-                "evaluation_report": {
-                    "schema": "ies.evaluation-report",
-                    "schema_version": "1.0.0",
-                    "title": "Carbon Intensity Report",
-                    "metrics": {"co2_tons": 12.5},
-                    "charts": [],
-                    "tables": [],
-                }
-            },
+            "title": "Carbon Intensity Report",
+            "evaluator": report_eval_ref,
+            "metrics": [{"id": "co2_tons", "label": "CO2 Tons", "value": 12.5, "unit": "t"}],
+            "charts": [],
+            "tables": [],
         }
-        (work_out / "result.json").write_text(json.dumps(doc), encoding="utf-8")
+        (work_out / "evaluation_report.json").write_text(json.dumps(report_doc), encoding="utf-8")
 
     def _finance_or_fail_handler(work_in: Path, work_out: Path) -> None:
         if fail_finance["should_fail"]:
@@ -520,16 +511,7 @@ def test_parallel_evaluators_partial_failure_single_retry_and_hardlinks(tmp_path
             evaluation=EvaluationInput.from_frozen(req["evaluation"]),
             device_models=req.get("device_models"),
         )
-        doc = {
-            "schema": "ies.compute-result",
-            "schema_version": "1.0.0",
-            "bundle_id": str(req["bundle_id"]),
-            "receipt_id": str(req["receipt_id"]),
-            "execution_status": "completed",
-            "math_status": sol["solver_summary"]["math_status"],
-            "outputs": {"financial_evaluation": fin_eval},
-        }
-        (work_out / "result.json").write_text(json.dumps(doc), encoding="utf-8")
+        (work_out / "financial_evaluation.json").write_text(json.dumps(fin_eval), encoding="utf-8")
 
     env = _setup_pipeline_env(tmp_path, extra_evaluators=(custom_eval_spec,))
     try:
@@ -751,6 +733,7 @@ def test_unified_algorithm_mode_pipeline_and_checkpoint_recovery(tmp_path: Path)
     def _algo_handler(work_in: Path, work_out: Path) -> None:
         algo_calls["count"] += 1
         req = json.loads((work_in / "request.json").read_text(encoding="utf-8"))
+        assert "parameters" in req
         eng_sol = {
             "schema": "ies.engineering-solution",
             "schema_version": "1.0.0",
@@ -770,21 +753,6 @@ def test_unified_algorithm_mode_pipeline_and_checkpoint_recovery(tmp_path: Path)
             "extensions": {},
         }
         (work_out / "solution.json").write_text(json.dumps(eng_sol), encoding="utf-8")
-        result_doc = {
-            "schema": "ies.compute-result",
-            "schema_version": "1.0.0",
-            "bundle_id": str(req["attempt"]["bundle_id"]),
-            "receipt_id": "rcpt-algo-1",
-            "execution_status": "completed",
-            "math_status": "solved",
-            "outputs": {
-                "solver_summary": eng_sol["solver_summary"],
-                "planning_variables": {},
-                "metrics": {"objective_value": 100.0},
-                "engineering_solution_path": "solution.json",
-            },
-        }
-        (work_out / "result.json").write_text(json.dumps(result_doc), encoding="utf-8")
 
     env = _setup_pipeline_env(tmp_path, extra_algorithms=(algo,))
     try:
@@ -1027,6 +995,393 @@ def test_grouped_prediction_without_convergence(tmp_path: Path) -> None:
         assert len(artifacts) == 2
         assert "convergence" not in snap.calc_config_snapshot
         _ = (ValidatedAssemblyArtifact, ValidationReceipt, MemoryContent, yaml_dump, task, RunContext)
+    finally:
+        env["db"].close()
+        env["engine"].dispose()
+
+
+def test_codex_f4_parameters_slot_third_party_solver_and_metrics_only_evaluators(
+    tmp_path: Path,
+) -> None:
+    """Third-party .mps solver runs without allowlist and metrics-only solves run evaluators."""
+    from iesplan.computation import SOLVER_BUNDLE_MPS_CONTRACT, CalculationConfig
+
+    custom_solver_ref = "acme.solver.custom@1.0.0"
+    custom_solver_spec = StagePluginSpec(
+        plugin_id="acme.solver.custom",
+        version="1.0.0",
+        kind="solver",
+        consumes=(SOLVER_BUNDLE_MPS_CONTRACT,),
+        produces=("ies.primal-solution@1.0.0",),
+        parameters_schema={
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {"threads": {"type": "integer", "minimum": 1}},
+        },
+    )
+    custom_solver_desc = BuiltinStageDescriptor(
+        plugin_id="acme.solver.custom",
+        version="1.0.0",
+        kind="solver",
+        image="pies-plugin/acme-solver:1.0.0",
+        entrypoint="solver:solve",
+    )
+
+    seen_requests: dict[str, dict[str, Any]] = {}
+    eval_calls = {"count": 0}
+
+    def _report_handler(work_in: Path, work_out: Path) -> None:
+        eval_calls["count"] += 1
+        seen_requests["eval"] = json.loads((work_in / "request.json").read_text(encoding="utf-8"))
+        doc = {
+            "schema": "ies.evaluation-report",
+            "schema_version": "1.0.0",
+            "title": "Metrics Only Evaluator Report",
+            "evaluator": "acme.evaluator.metrics_check@1.0.0",
+            "metrics": [{"id": "ok", "label": "OK", "value": 1, "unit": "1"}],
+            "charts": [],
+            "tables": [],
+        }
+        (work_out / "evaluation_report.json").write_text(json.dumps(doc), encoding="utf-8")
+
+    report_spec = StagePluginSpec(
+        plugin_id="acme.evaluator.metrics_check",
+        version="1.0.0",
+        kind="evaluator",
+        consumes=("ies.engineering-solution@1.0.0",),
+        produces=(EVALUATION_REPORT_CONTRACT,),
+        outputs=("solution", "metrics"),
+        parameters_schema={
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {"tag": {"type": "string"}},
+        },
+    )
+    report_desc = BuiltinStageDescriptor(
+        plugin_id="acme.evaluator.metrics_check",
+        version="1.0.0",
+        kind="evaluator",
+        image="pies-plugin/eval:1.0.0",
+        entrypoint="eval:run",
+        manifest_path="test://acme.evaluator.metrics_check@1.0.0",
+    )
+
+    env = _setup_pipeline_env(
+        tmp_path,
+        extra_evaluators=(report_spec,),
+        extra_solvers=(custom_solver_spec,),
+    )
+    try:
+        sol_reg = build_solver_registry((BUILTIN_SOLVER_HIGHS_SPEC, custom_solver_spec))
+        eval_reg = build_evaluator_registry((BUILTIN_EVALUATOR_FINANCE_SPEC, report_spec))
+        catalog = build_test_stage_catalog(extra_descriptors=(custom_solver_desc, report_desc))
+        plane = build_test_compute_plane(
+            tmp_path / "stages_custom",
+            solver_registry=sol_reg,
+            evaluator_registry=eval_reg,
+            stage_catalog=catalog,
+            evaluator_handlers={"test://acme.evaluator.metrics_check@1.0.0": _report_handler},
+        )
+        orig_start = plane.stage_runner.client.start_stage
+
+        def _inspect_start(spec: Any) -> Any:
+            ws_in = Path(plane.stage_runner.stage_root) / str(spec.workspace_rel) / "in"
+            req_path = ws_in / "request.json"
+            if req_path.is_file():
+                seen_requests[str(spec.stage_id)] = json.loads(req_path.read_text("utf-8"))
+            return orig_start(spec)
+
+        plane.stage_runner.client.start_stage = _inspect_start  # type: ignore[method-assign]
+
+        cfg = _valid_13_config(
+            solver=custom_solver_ref,
+            outputs=["metrics"],
+            options={
+                "generator": {"acceleration": {"mode": "off"}},
+                "solver": {"threads": 2},
+            },
+            evaluators=[{"evaluator": "acme.evaluator.metrics_check@1.0.0", "parameters": {"tag": "m"}}],
+        )
+        assert plane.generator_registry.resolve(CalculationConfig(**cfg)).ref == HIGHS_MILP_PROVIDER.ref
+        task_id = _save_and_submit(env, cfg, idempotency_key="f4-3p-metrics-only")
+        claim = _claim(env["db"], task_id)
+        assert _run(env["engine"], claim, plane) == "completed"
+        assert seen_requests["generate-r1"]["parameters"] == {"acceleration": {"mode": "off"}}
+        assert seen_requests["solve-r1"]["parameters"] == {"threads": 2}
+        assert seen_requests["eval"]["parameters"] == {"tag": "m"}
+        assert eval_calls["count"] == 1
+        res = env["client"].get(
+            f"/api/projects/{env['pid']}/tasks/{task_id}/result",
+            headers=login_headers(env["client"], env["user"]),
+        )
+        assert res.status_code == 200
+        assert res.json()["result"]["evaluator_results"][0]["status"] == "succeeded"
+    finally:
+        env["db"].close()
+        env["engine"].dispose()
+
+
+def test_codex_f4_evaluator_protocol_failure_isolated_from_core_and_siblings(
+    tmp_path: Path,
+) -> None:
+    """Missing/invalid evaluator output fails only that evaluator (EVAL-PROTOCOL-001)."""
+    report_ref = "acme.evaluator.bad_proto@1.0.0"
+    report_spec = StagePluginSpec(
+        plugin_id="acme.evaluator.bad_proto",
+        version="1.0.0",
+        kind="evaluator",
+        consumes=("ies.engineering-solution@1.0.0",),
+        produces=(EVALUATION_REPORT_CONTRACT,),
+        outputs=("solution", "metrics"),
+        parameters_schema={"type": "object", "additionalProperties": False, "properties": {}},
+    )
+    report_desc = BuiltinStageDescriptor(
+        plugin_id="acme.evaluator.bad_proto",
+        version="1.0.0",
+        kind="evaluator",
+        image="pies-plugin/bad:1.0.0",
+        entrypoint="eval:run",
+        manifest_path="test://acme.evaluator.bad_proto@1.0.0",
+    )
+
+    def _bad_eval_handler(_work_in: Path, work_out: Path) -> None:
+        (work_out / "result.json").write_text(json.dumps({"outputs": {}}), encoding="utf-8")
+
+    env = _setup_pipeline_env(tmp_path, extra_evaluators=(report_spec,))
+    try:
+        eval_reg = build_evaluator_registry((BUILTIN_EVALUATOR_FINANCE_SPEC, report_spec))
+        catalog = build_test_stage_catalog(extra_descriptors=(report_desc,))
+        plane = build_test_compute_plane(
+            tmp_path / "stages_bad_proto",
+            evaluator_registry=eval_reg,
+            stage_catalog=catalog,
+            evaluator_handlers={"test://acme.evaluator.bad_proto@1.0.0": _bad_eval_handler},
+        )
+        cfg = _valid_13_config(
+            evaluators=[
+                {"evaluator": "ies.evaluator.finance@1.0.0", "parameters": {}},
+                {"evaluator": report_ref, "parameters": {}},
+            ]
+        )
+        task_id = _save_and_submit(env, cfg, idempotency_key="f4-bad-proto-1")
+        claim = _claim(env["db"], task_id)
+        assert _run(env["engine"], claim, plane) == "completed"
+
+        res = env["client"].get(
+            f"/api/projects/{env['pid']}/tasks/{task_id}/result",
+            headers=login_headers(env["client"], env["user"]),
+        )
+        assert res.status_code == 200
+        body = res.json()["result"]
+        assert body["financial_evaluation"] is not None
+        by_ref = {entry["evaluator"]: entry for entry in body["evaluator_results"]}
+        assert by_ref["ies.evaluator.finance@1.0.0"]["status"] == "succeeded"
+        assert by_ref[report_ref]["status"] == "failed"
+        assert by_ref[report_ref]["contract"] is None
+        assert by_ref[report_ref]["error"]["code"] == "EVAL-PROTOCOL-001"
+    finally:
+        env["db"].close()
+        env["engine"].dispose()
+
+
+def test_codex_f4_predictor_group_checkpoint_recovery_and_retry_cleanup(
+    tmp_path: Path,
+) -> None:
+    """Multi-predictor recovery skips checkpointed group via stable algo_ref and cleans up reuse."""
+    from iesplan.application.results import endpoint_cases as results_ep
+    from iesplan.tasks.contracts import TaskConflictError
+
+    env = _setup_pipeline_env(tmp_path)
+    try:
+        from iesplan.assembly import ValidationReceipt
+        from iesplan.computation import build_predictor_registry
+        from iesplan.computation.predictors import NAIVE_PREDICTOR, PredictorDescriptor
+        from iesplan.core.content import MemoryContent
+        from iesplan.storage import put_object
+
+        second_pred_ref = "acme.predictor.second@1.0.0"
+        second_desc = PredictorDescriptor(
+            ref=second_pred_ref,
+            depends_on_solve_result=False,
+            parameters_schema={"type": "object", "additionalProperties": False},
+        )
+        second_stage = BuiltinStageDescriptor(
+            plugin_id="acme.predictor.second",
+            version="1.0.0",
+            kind="predictor",
+            image="pies-builtin-stages:1.2.0",
+            entrypoint="predictor_stage:predict",
+            manifest_path="test://acme.predictor.second@1.0.0",
+        )
+
+        class _FakeSecondPred:
+            ref = second_pred_ref
+            descriptor = second_desc
+
+            def validate_parameters(self, parameters: Any) -> dict[str, Any]:
+                return dict(parameters or {})
+
+            def available(self) -> bool:
+                return True
+
+            def predict(self, **kwargs: Any) -> Any:
+                return NAIVE_PREDICTOR.predict(**kwargs)
+
+        pred_reg = build_predictor_registry((NAIVE_PREDICTOR, _FakeSecondPred()))
+        catalog = build_test_stage_catalog(
+            predictor_registry=pred_reg,
+            extra_descriptors=(second_stage,),
+        )
+        plane = build_test_compute_plane(
+            tmp_path / "stages_pred_grp",
+            predictor_registry=pred_reg,
+            stage_catalog=catalog,
+        )
+
+        with env["sf"]() as db:
+            csv_body = "hour,electricity_demand\n" + "".join(f"{i},1.0\n" for i in range(8760))
+            stored = put_object(db, csv_body.encode("utf-8"), "text/csv", source_category="dataset")
+            doc = {
+                "project_baseline": {"resolution": "1h", "start_year": 2025},
+                "devices": {
+                    "load1": {
+                        "predefined_interfaces": {
+                            "electricity_demand": {
+                                "mode": "data_predict",
+                                "target_type": "flex_load",
+                                "content": {"object_id": str(stored.id), "media_type": "text/csv"},
+                            }
+                        }
+                    },
+                    "load2": {
+                        "predefined_interfaces": {
+                            "electricity_demand": {
+                                "mode": "data_predict",
+                                "target_type": "flex_load",
+                                "content": {"object_id": str(stored.id), "media_type": "text/csv"},
+                            }
+                        }
+                    },
+                },
+            }
+            cfg = _valid_13_config(
+                predictions=[
+                    {
+                        "target": {"instance": "load1", "interface": "electricity_demand"},
+                        "algorithm": NAIVE_PREDICTOR.descriptor.ref,
+                        "parameters": {},
+                    },
+                    {
+                        "target": {"instance": "load2", "interface": "electricity_demand"},
+                        "algorithm": second_pred_ref,
+                        "parameters": {},
+                    },
+                ]
+            )
+            snap = CalcSnapshot(
+                project_version_id=1,
+                dataset_version_ids=[],
+                calc_config_snapshot={**cfg, "config_ref": {"project_id": env["pid"], "revision": 1}},
+                schema_version="1.0.0",
+                result_adapter="",
+                executor="",
+                extension_versions={},
+                random_seed=7,
+                device_models={},
+                evaluation={
+                    "evaluation_years": 1,
+                    "construction_period": 0,
+                    "operation_years": 1,
+                    "discount_rate": 0.08,
+                    "construction_payments": [],
+                    "maintenance_expenses": [],
+                },
+                canonical_assembly_text=json.dumps(doc),
+                assembly_receipt=ValidationReceipt().to_dict(),
+                created_by=env["user"].id,
+            )
+            db.add(snap)
+            db.flush()
+            from iesplan.tasks.persistence import Task
+
+            t_row = Task(
+                project_id=env["pid"],
+                type="optimization",
+                status="queued",
+                requested_by=env["user"].id,
+                idempotency_key="f4-pred-grp-1",
+                calc_snapshot_id=snap.id,
+            )
+            db.add(t_row)
+            db.commit()
+            claim = _claim(db, t_row.id)
+
+            from iesplan.computation import MaterializedSeries, PredictedTarget
+
+            cached_series = (
+                MaterializedSeries(
+                    device="load1",
+                    interface="electricity_demand",
+                    mode="data_predict",
+                    resolution="1h",
+                    point_count=8760,
+                    values=(1.0,) * 8760,
+                    source={"kind": "data_predict", "object_id": str(stored.id)},
+                ),
+            )
+            cached_pred = (
+                PredictedTarget(
+                    device="load1",
+                    interface="electricity_demand",
+                    target_type="flex_load",
+                    values=(1.0,) * 8760,
+                    history_object_id=str(stored.id),
+                    artifact=b"{}",
+                ),
+            )
+            worker_app.save_prediction_group_checkpoint(
+                db, claim, 1, NAIVE_PREDICTOR.descriptor.ref, cached_series, cached_pred
+            )
+
+        reused_cleanups: list[str] = []
+        started_stages: list[str] = []
+        orig_start = plane.stage_runner.client.start_stage
+
+        def _tracking_start(spec: Any) -> Any:
+            started_stages.append(str(spec.stage_id))
+            return orig_start(spec)
+
+        plane.stage_runner.client.start_stage = _tracking_start  # type: ignore[method-assign]
+        series, predicted, _artifacts = worker_app.predict_round_stage(
+            plane=plane,
+            task_project_id=env["pid"],
+            snapshot=snap,
+            claim=claim,
+            number=1,
+            session_factory=env["sf"],
+            save_checkpoint=worker_app.save_prediction_checkpoint,
+            save_group_checkpoint=worker_app.save_prediction_group_checkpoint,
+            load_group_checkpoint=worker_app.load_prediction_group_checkpoint,
+            publish_combined_checkpoint=worker_app.publish_prediction_checkpoint_with_artifacts,
+            cleanup_on_reuse=reused_cleanups.append,
+        )
+        assert len(series) == 2 and len(predicted) == 2
+        assert started_stages == ["predict-r1-0"]
+        assert reused_cleanups == ["predict-r1-1"]
+
+        # Verify retry_evaluator rejects conflicting second retry after locking Task row.
+        ev_task_id = _save_and_submit(env, _valid_13_config(), idempotency_key="f4-retry-lock")
+        ev_claim = _claim(env["db"], ev_task_id)
+        with pytest.raises(TaskConflictError):
+            results_ep.retry_evaluator_case(
+                env["db"],
+                env["user"],
+                env["pid"],
+                ev_task_id,
+                evaluator="ies.evaluator.finance@1.0.0",
+                idempotency_key="retry-while-running",
+            )
+        _ = (MemoryContent, ev_claim)
     finally:
         env["db"].close()
         env["engine"].dispose()

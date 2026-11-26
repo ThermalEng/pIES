@@ -142,7 +142,7 @@ export function buildCashflowChartData(fin: FinancialEvaluationBlock): {
   bars: CategorySeries[]
   lines: CategorySeries[]
 } {
-  const rows = fin.evaluation.rows
+  const rows = Array.isArray(fin?.evaluation?.rows) ? fin.evaluation.rows : []
   if (rows.length > 0) {
     const categories = rows.map((r) => `t=${r.year}`)
     const netData = toSeriesData(rows.map((r) => r.net))
@@ -184,9 +184,10 @@ export function buildCashflowChartData(fin: FinancialEvaluationBlock): {
       ],
     }
   }
-  if (fin.annual_net_flows.length > 0) {
-    const categories = fin.annual_net_flows.map((_, idx) => `t=${idx}`)
-    const netData = toSeriesData(fin.annual_net_flows)
+  const netFlows = Array.isArray(fin?.annual_net_flows) ? fin.annual_net_flows : []
+  if (netFlows.length > 0) {
+    const categories = netFlows.map((_, idx) => `t=${idx}`)
+    const netData = toSeriesData(netFlows)
     return {
       categories,
       bars: [

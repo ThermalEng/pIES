@@ -722,3 +722,83 @@ def with_planning_variable_units(
         for inst, scales in sorted(by_inst.items())
     ]
     return out
+
+
+def build_financial_evaluation(
+    snapshot: Any,
+    finance: Any,
+    result: Any,
+) -> dict[str, object] | None:
+    """Test-only helper assembling ``ies.financial-evaluation@1.0.0`` from precomputed facts."""
+    from decimal import Decimal
+
+    from iesplan.computation import thaw_json_value
+    from iesplan.finance import evaluate_project_investment
+
+    if result.math_status not in ("solved", "feasible"):
+        return None
+    if "solution" not in result.outputs:
+        return None
+    facts = result.outputs["financial_facts"]
+    evaluation = snapshot.evaluation
+    period = int(evaluation["construction_period"])
+    operation = int(evaluation["operation_years"])
+    years = int(evaluation["evaluation_years"])
+    rate = float(evaluation["discount_rate"])
+
+    currency = finance.currency
+    tax_cash = thaw_json_value(facts["tax_cash"])
+    flows = [value for value in facts["annual_net_flows"]]
+    comparison = thaw_json_value(facts["comparison"])
+    evaluation_flows = comparison["evaluation_net_flows"] if comparison["mode"] == "difference" else flows
+    assessed = evaluate_project_investment(
+        [Decimal(value) for value in evaluation_flows],
+        rate,
+        years,
+        currency=currency,
+        price_basis=finance.price_basis,
+        base_year=finance.base_year,
+    )
+    return {
+        "schema": "ies.financial-evaluation",
+        "schema_version": "1.0.0",
+        "status": "evaluated",
+        "evaluation_years": years,
+        "construction_period": period,
+        "operation_years": operation,
+        "currency": currency,
+        "price_basis": finance.price_basis,
+        "base_year": finance.base_year,
+        "profile_id": finance.profile_id,
+        "discount_rate": rate,
+        "construction_total": facts["construction_total"],
+        "construction_total_unit": currency,
+        "annual_fixed_om": facts["annual_fixed_om"],
+        "payments_applied": [
+            {"t": entry["t"], "ratio": entry["ratio"], "amount": entry["amount"]}
+            for entry in facts["payments_applied"]
+        ],
+        "net_cashflows": thaw_json_value(facts["net_cashflows"]),
+        "cost_items": thaw_json_value(facts["cost_items"]),
+        "amounts": thaw_json_value(facts["amounts"]),
+        "cash_movements": thaw_json_value(facts["cash_movements"]),
+        "assets": thaw_json_value(facts["assets"]),
+        "construction_units": thaw_json_value(facts["construction_units"]),
+        "annual_operation": [
+            {
+                "financial_year": entry["financial_year"],
+                "energy_net": entry["energy_net"],
+                "variable_om": entry["variable_om"],
+                "fixed_om": entry["fixed_om"],
+                "maintenance": entry["maintenance"],
+                "demand_charge": entry["demand_charge"],
+                "net": entry["net"],
+            }
+            for entry in facts["annual_operation"]
+        ],
+        "monthly_demand": thaw_json_value(facts["monthly_demand"]),
+        "tax_cash": tax_cash,
+        "annual_net_flows": list(flows),
+        "comparison": comparison,
+        "evaluation": assessed.to_dict(),
+    }

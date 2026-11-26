@@ -143,10 +143,14 @@ def _predict_round(
         session_factory=ctx.session_factory,
         save_checkpoint=worker_app.save_prediction_checkpoint,
         save_group_checkpoint=worker_app.save_prediction_group_checkpoint,
+        load_group_checkpoint=worker_app.load_prediction_group_checkpoint,
         publish_combined_checkpoint=worker_app.publish_prediction_checkpoint_with_artifacts,
         stop=_stop_probe(ctx),
         detach=ctx.detach_event,
         on_stage_resources=ctx.update_stage_resources,
+        cleanup_on_reuse=lambda sid: _cleanup_checkpointed_stage(
+            plane, ctx.claim.attempt_id, stage_id=sid
+        ),
     )
     ctx.prediction_artifacts[1] = artifacts
     return series, predicted
@@ -234,6 +238,8 @@ def _solve_round(
     sealed: dict[str, Any] = {"bundle_files": bundle_refs, "solution": solution_refs}
     if restored.get("solution_ref") is not None:
         sealed["engineering_solution"] = {"solution.json": restored["solution_ref"]}
+    if restored.get("hourly_ref") is not None:
+        sealed["hourly"] = {worker_app.HOURLY_OBJECT_PATH: restored["hourly_ref"]}
     return bundle, receipt, collected, restored, outcome, sealed
 
 
@@ -306,6 +312,9 @@ def _execute_evaluator_retry(ctx: RunContext, retry_req: Mapping[str, Any]) -> t
         save_checkpoint=worker_app.save_evaluator_checkpoint,
         stop=_stop_probe(ctx),
         detach=ctx.detach_event,
+        cleanup_on_reuse=lambda sid: _cleanup_checkpointed_stage(
+            plane, ctx.claim.attempt_id, stage_id=sid
+        ),
     )
 
     new_entry = dict(ev_out["result_entry"])
@@ -408,6 +417,10 @@ def _execute_compute(ctx: RunContext) -> tuple[dict, dict | None]:
         solution_ref = evaluated.solution_ref
         if solution_ref is not None:
             ctx.sealed_output_files["engineering_solution"] = {"solution.json": dict(solution_ref)}
+        if evaluated.hourly_ref is not None:
+            ctx.sealed_output_files["hourly"] = {
+                worker_app.HOURLY_OBJECT_PATH: dict(evaluated.hourly_ref)
+            }
         evaluator_results, evaluation_reports, eval_financial = worker_app.run_evaluators_stage(
             plane=plane,
             attempt=attempt,
@@ -430,27 +443,26 @@ def _execute_compute(ctx: RunContext) -> tuple[dict, dict | None]:
                 plane, ctx.claim.attempt_id, stage_id=sid
             ),
         )
-        output_files: dict[str, Any] = {}
         payload: dict[str, Any] = {
             "outcome": outcome,
             "compute_result": result.to_mapping(),
             "evaluator_results": evaluator_results,
             "evaluation_reports": evaluation_reports,
         }
-        hourly_files = worker_app.hourly_files_from_payload(evaluated.hourly_series)
-        if hourly_files:
-            output_files["hourly"] = hourly_files
-        final_financial = eval_financial if eval_financial is not None else evaluated.financial_evaluation
-        if final_financial is not None:
-            payload["financial_evaluation"] = dict(final_financial)
-        return payload, output_files
+        if evaluated.hourly_ref is not None and evaluated.hourly_meta is not None:
+            payload["hourly_refs"] = [
+                {"object_id": evaluated.hourly_ref["object_id"], **dict(evaluated.hourly_meta)}
+            ]
+        if eval_financial is not None:
+            payload["financial_evaluation"] = dict(eval_financial)
+        return payload, None
 
     bundle, receipt, _collected, restored, outcome, sealed = _solve_round(
         ctx, plane, snapshot, artifact, models, completed, finance, config, evaluation, attempt,
     )
     result = restored["compute_result"]
     solution_ref = restored.get("solution_ref")
-    has_feasible = result.math_status in ("solved", "feasible") and "solution" in config.outputs
+    has_feasible = result.math_status in ("solved", "feasible") and solution_ref is not None
     evaluator_results, evaluation_reports, financial_evaluation = worker_app.run_evaluators_stage(
         plane=plane,
         attempt=attempt,
@@ -507,9 +519,10 @@ def _execute_compute(ctx: RunContext) -> tuple[dict, dict | None]:
             "receipts": receipts,
         }
     del bundle, _collected, materialized, completed, models, artifact
-    hourly_files = worker_app.hourly_files_from_payload(restored.get("hourly_series"))
-    if hourly_files:
-        output_files["hourly"] = hourly_files
+    if restored.get("hourly_ref") is not None and restored.get("hourly_meta") is not None:
+        payload["hourly_refs"] = [
+            {"object_id": restored["hourly_ref"]["object_id"], **dict(restored["hourly_meta"])}
+        ]
     if financial_evaluation is not None:
         payload["financial_evaluation"] = dict(financial_evaluation)
     return payload, output_files

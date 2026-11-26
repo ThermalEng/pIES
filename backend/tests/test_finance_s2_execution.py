@@ -9,9 +9,8 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pytest
+from legacy_solve_testkit import build_financial_evaluation
 from test_issue06_s2 import _amount, _builder, _expense, _tiny_solve
-
-from iesplan.application.worker.compute_cases import build_financial_evaluation
 
 
 def _money(value: str, unit: str = "CNY") -> dict:

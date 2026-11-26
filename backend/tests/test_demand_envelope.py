@@ -12,6 +12,7 @@ import pytest
 from bundle_testkit import materialized_file
 from legacy_solve_testkit import (
     SOLUTION_PATH,
+    build_financial_evaluation,
     restore_bundle_solution,
     succeeded_receipt,
 )
@@ -19,7 +20,6 @@ from test_issue04_d2 import POWER_KW, _inputs
 from test_p3_f1_contract import _amount, _money
 from test_vat_monthly import _solve_internal
 
-from iesplan.application.worker.compute_cases import build_financial_evaluation
 from iesplan.computation import HIGHS_MILP_PROVIDER
 from iesplan.computation.generators import project
 from iesplan.computation.generators.demand import monotone_demand_meters

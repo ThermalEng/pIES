@@ -28,10 +28,8 @@ from iesplan.application import worker as worker_app
 from iesplan.application.worker import compute_cases
 from iesplan.application.worker.checkpoints import (
     load_algorithm_checkpoint,
-    load_evaluation_checkpoint,
     load_evaluator_checkpoint,
     save_algorithm_checkpoint,
-    save_evaluation_checkpoint,
     save_evaluator_checkpoint,
 )
 from iesplan.bootstrap import collect_immutable_tables
@@ -387,31 +385,55 @@ def test_load_evaluation_and_algorithm_checkpoints_consumed_by_runner(
             "execution_status": "completed",
             "math_status": "solved",
             "outputs": {
-                "solution": {"objective_value": 12.5, "variables": []},
-                "series": {
-                    "dev.p": {
-                        "device": "dev",
-                        "interface": "p",
-                        "unit": "kW",
-                        "values": [1.0],
-                    }
-                },
-                "hourly_series": {"data": {"dev.p": [1.0]}, "meta": {"units": {"dev.p": "kW"}, "series": {}}},
-                "financial_evaluation": {"schema": "ies.financial-evaluation", "status": "evaluated"},
+                "solver_summary": {"math_status": "solved", "has_feasible_solution": True},
             },
         }
-        save_algorithm_checkpoint(db, claim, raw_algo_result)
+        hourly_payload = json.dumps(
+            {
+                "data": {"dev.p": [1.0]},
+                "meta": {
+                    "units": {"dev.p": "kW"},
+                    "series": {"dev.p": {"series_id": "dev.p", "kind": "device", "unit": "kW"}},
+                },
+            }
+        ).encode("utf-8")
+        hourly_meta = {
+            "fields": ["dev.p"],
+            "rows": 1,
+            "series": [{"series_id": "dev.p", "kind": "device", "unit": "kW"}],
+        }
+        sol_bytes = json.dumps({
+            "schema": "ies.engineering-solution",
+            "schema_version": "1.0.0",
+            "solver_summary": {
+                "math_status": "solved",
+                "termination_reason": "optimal",
+                "has_feasible_solution": True,
+                "objective_value": 12.5,
+                "objective_unit": "CNY",
+                "best_bound": 12.5,
+                "relative_gap": 0.0,
+            },
+            "construction_units": [],
+            "series": {},
+            "system_series": {},
+            "extensions": {},
+        }).encode("utf-8")
+        save_algorithm_checkpoint(
+            db,
+            claim,
+            raw_algo_result,
+            solution_content=sol_bytes,
+            hourly_content=hourly_payload,
+            hourly_meta=hourly_meta,
+        )
 
         loaded_algo = load_algorithm_checkpoint(db, claim)
         assert loaded_algo is not None
         assert loaded_algo.result.receipt_id == "rcpt-algo-1"
-        assert loaded_algo.hourly_series == raw_algo_result["outputs"]["hourly_series"]
-        assert loaded_algo.financial_evaluation == raw_algo_result["outputs"]["financial_evaluation"]
-
-        save_evaluation_checkpoint(db, claim, 1, raw_algo_result)
-        loaded_eval = load_evaluation_checkpoint(db, claim, 1)
-        assert loaded_eval is not None
-        assert loaded_eval.result.bundle_id == raw_algo_result["bundle_id"]
+        assert loaded_algo.hourly_ref is not None
+        assert loaded_algo.hourly_meta == hourly_meta
+        assert loaded_algo.solution_ref is not None
 
     # Runner consumes algorithm checkpoint without invoking run_algorithm_stage container
     plane = build_test_compute_plane(tmp_path / "stages")
@@ -756,48 +778,27 @@ def test_load_compute_inputs_deferred_passes_frozen_series_inputs_and_hardlinks(
 
 
 # ---------------------------------------------------------------------------
-# Item 5: Explicit schema & schema_version validation at result.json boundary
+# Item 5: Explicit schema & schema_version validation at solution.json boundary
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
-    ("bad_payload", "exc_type"),
+    "bad_payload",
     [
-        (
-            {
-                "schema_version": "1.0.0",
-                "bundle_id": "b-1",
-                "receipt_id": "r-1",
-                "execution_status": "completed",
-                "math_status": "solved",
-                "outputs": {},
-            },
-            KeyError,
-        ),
-        (
-            {
-                "schema": "ies.wrong",
-                "schema_version": "1.0.0",
-                "bundle_id": "b-1",
-                "receipt_id": "r-1",
-                "execution_status": "completed",
-                "math_status": "solved",
-                "outputs": {},
-            },
-            ValueError,
-        ),
-        (
-            {
-                "schema": "ies.compute-result",
-                "schema_version": "9.9.9",
-                "bundle_id": "b-1",
-                "receipt_id": "r-1",
-                "execution_status": "completed",
-                "math_status": "solved",
-                "outputs": {},
-            },
-            ValueError,
-        ),
+        {
+            "schema_version": "1.0.0",
+            "solver_summary": {"math_status": "solved", "has_feasible_solution": False},
+        },
+        {
+            "schema": "ies.wrong",
+            "schema_version": "1.0.0",
+            "solver_summary": {"math_status": "solved", "has_feasible_solution": False},
+        },
+        {
+            "schema": "ies.engineering-solution",
+            "schema_version": "9.9.9",
+            "solver_summary": {"math_status": "solved", "has_feasible_solution": False},
+        },
     ],
 )
 def test_result_json_boundary_requires_valid_schema_and_version(
@@ -805,13 +806,14 @@ def test_result_json_boundary_requires_valid_schema_and_version(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     bad_payload: dict[str, Any],
-    exc_type: type[Exception],
 ) -> None:
     _eng, factory = memory_db
     monkeypatch.setattr(settings, "data_dir", tmp_path)
     with factory() as db:
         _user, _proj, task = _create_project_and_task(
-            db, username=f"schema_{exc_type.__name__}", idempotency_key=f"s-{exc_type.__name__}"
+            db,
+            username="schema_bad_user",
+            idempotency_key=f"s-{bad_payload.get('schema', 'missing')}-{bad_payload.get('schema_version')}",
         )
         db.commit()
         claim = worker_app.acquire_attempt(db, task.id, "w-s")
@@ -826,7 +828,7 @@ def test_result_json_boundary_requires_valid_schema_and_version(
         if request.method == "POST" and request.url.path == "/v1/stages/start":
             out_dir = stage_root / body["workspace_rel"] / "out"
             out_dir.mkdir(parents=True, exist_ok=True)
-            (out_dir / "result.json").write_text(json.dumps(bad_payload), encoding="utf-8")
+            (out_dir / "solution.json").write_text(json.dumps(bad_payload), encoding="utf-8")
             return httpx.Response(
                 200,
                 json=_stage_payload(
@@ -838,7 +840,7 @@ def test_result_json_boundary_requires_valid_schema_and_version(
                     running=False,
                     exit_code=0,
                     termination_reason="normal",
-                    output_files=["result.json"],
+                    output_files=["solution.json"],
                 ),
             )
         if request.method == "GET" and request.url.path.startswith("/v1/stages/"):
@@ -854,7 +856,7 @@ def test_result_json_boundary_requires_valid_schema_and_version(
                     running=False,
                     exit_code=0,
                     termination_reason="normal",
-                    output_files=["result.json"],
+                    output_files=["solution.json"],
                 ),
             )
         raise AssertionError(
@@ -898,6 +900,7 @@ def test_result_json_boundary_requires_valid_schema_and_version(
         assembly_receipt={"schema": "ies.validation-receipt"},
         device_models={},
         evaluation={"evaluation_years": 1},
+        random_seed=0,
     )
 
     algo_cfg = CalculationConfig(
@@ -913,7 +916,7 @@ def test_result_json_boundary_requires_valid_schema_and_version(
         seed=None,
         outputs=("solution",),
     )
-    with pytest.raises(exc_type):
+    with pytest.raises(worker_app.ComputationUnavailableError):
         worker_app.run_algorithm_stage(
             plane=plane,
             attempt=AttemptContext(
@@ -1123,17 +1126,7 @@ def test_adapt_result_uses_current_claim_attempt_id_when_reusing_older_receipt(
     captured_start: dict[str, Any] = {}
     staged_receipt_attempt: list[str] = []
 
-    valid_result = {
-        "schema": "ies.compute-result",
-        "schema_version": "1.0.0",
-        "bundle_id": "b-old",
-        "receipt_id": "r-old",
-        "execution_status": "completed",
-        "math_status": "solved",
-        "outputs": {
-            "financial_evaluation": {"schema": "ies.financial-evaluation", "status": "evaluated"},
-        },
-    }
+    valid_fin = {"schema": "ies.financial-evaluation", "schema_version": "1.0.0", "status": "evaluated"}
 
     def handler(request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content.decode()) if request.content else None
@@ -1146,7 +1139,7 @@ def test_adapt_result_uses_current_claim_attempt_id_when_reusing_older_receipt(
             staged_receipt_attempt.append(str(staged["receipt"]["attempt_id"]))
             out_dir = ws_dir / "out"
             out_dir.mkdir(parents=True, exist_ok=True)
-            (out_dir / "result.json").write_text(json.dumps(valid_result), encoding="utf-8")
+            (out_dir / "financial_evaluation.json").write_text(json.dumps(valid_fin), encoding="utf-8")
             return httpx.Response(
                 200,
                 json=_stage_payload(
@@ -1158,7 +1151,7 @@ def test_adapt_result_uses_current_claim_attempt_id_when_reusing_older_receipt(
                     running=False,
                     exit_code=0,
                     termination_reason="normal",
-                    output_files=["result.json"],
+                    output_files=["financial_evaluation.json"],
                 ),
             )
         if request.method == "GET" and request.url.path.startswith("/v1/stages/"):

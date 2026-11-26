@@ -1091,7 +1091,15 @@ export default function ResultsPage() {
                               <div style={{ marginTop: 'var(--ies-space-2)' }}>
                                 <Alert variant={canRetry ? 'error' : 'warning'}>
                                   <div>
-                                    <strong>{ev.error.code}</strong>: {ev.error.message}
+                                    <strong>
+                                      {typeof ev.error.code === 'string'
+                                        ? ev.error.code
+                                        : JSON.stringify(ev.error.code ?? '')}
+                                    </strong>
+                                    :{' '}
+                                    {typeof ev.error.message === 'string'
+                                      ? ev.error.message
+                                      : JSON.stringify(ev.error.message ?? '')}
                                   </div>
                                   {(() => {
                                     const detailText = formatEvaluatorDetail(ev.error.detail)
@@ -1127,7 +1135,11 @@ export default function ResultsPage() {
                 {evaluationReports.length > 0 ? (
                   <Card title={t('ies.result.eval_reports_title')} className="ies-section">
                     <div className="ies-stack">
-                      {evaluationReports.map((rep) => (
+                      {evaluationReports.map((rep) => {
+                        const repMetrics = Array.isArray(rep.metrics) ? rep.metrics : []
+                        const repCharts = Array.isArray(rep.charts) ? rep.charts : []
+                        const repTables = Array.isArray(rep.tables) ? rep.tables : []
+                        return (
                         <div key={`${rep.evaluator}-${rep.title}`}>
                           <h3 className="ies-section-subtitle">
                             {rep.title || rep.evaluator}{' '}
@@ -1135,9 +1147,9 @@ export default function ResultsPage() {
                               ({rep.evaluator} · {rep.schema}@{rep.schema_version})
                             </span>
                           </h3>
-                          {rep.metrics.length > 0 ? (
+                          {repMetrics.length > 0 ? (
                             <dl className="ies-kv">
-                              {rep.metrics.map((m, idx) => (
+                              {repMetrics.map((m, idx) => (
                                 <span key={String(m.id ?? idx)} style={{ display: 'contents' }}>
                                   <dt>{String(m.label ?? m.id ?? idx)}</dt>
                                   <dd>
@@ -1152,21 +1164,22 @@ export default function ResultsPage() {
                               ))}
                             </dl>
                           ) : null}
-                          {rep.charts.length > 0 || rep.tables.length > 0 ? (
+                          {repCharts.length > 0 || repTables.length > 0 ? (
                             <p className="ies-text-note" style={{ marginTop: 'var(--ies-space-1)' }}>
                               {t('ies.result.eval_report_charts_tables', {
-                                charts: rep.charts.length,
-                                tables: rep.tables.length,
+                                charts: repCharts.length,
+                                tables: repTables.length,
                               })}
                             </p>
                           ) : null}
                         </div>
-                      ))}
+                        )
+                      })}
                     </div>
                   </Card>
                 ) : null}
 
-                {!resultError && finEval ? (
+                {!resultError && finEval && Array.isArray(finEval.construction_units) ? (
                   <Card title={t('ies.result.fin_construction_units')} className="ies-section">
                     {finEval.construction_units.length === 0 ? (
                       <p className="ies-text-secondary">{t('ies.result.fin_construction_none')}</p>
@@ -1190,7 +1203,7 @@ export default function ResultsPage() {
                                 <td>{t(`ies.result.fin_construction_${unit.mode}`)}</td>
                                 <td>{t(unit.built ? 'ies.result.fin_construction_yes' : 'ies.result.fin_construction_no')}</td>
                                 <td>
-                                  {unit.scales.map((scale) => (
+                                  {(Array.isArray(unit.scales) ? unit.scales : []).map((scale) => (
                                     <div key={scale.planning_variable_id}>
                                       {scale.planning_variable_id}: {scale.value} {scale.unit}
                                     </div>

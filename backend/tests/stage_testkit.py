@@ -11,7 +11,6 @@ import csv
 import json
 import shutil
 import subprocess
-import sys
 import tempfile
 import threading
 from collections.abc import Mapping
@@ -418,7 +417,8 @@ class MockJobRunnerBackend:
         manifest = yaml_load((bundle_dir / "bundle.yaml").read_text(encoding="utf-8"))
         outputs = manifest.get("outputs") or []
         primal_rel = str(outputs[0]["path"]) if outputs else PRIMAL_SOLUTION_OUTPUT_PATH
-        req = json.loads((work_in / "request.json").read_text(encoding="utf-8")) if (work_in / "request.json").is_file() else {}
+        req_path = work_in / "request.json"
+        req = json.loads(req_path.read_text(encoding="utf-8")) if req_path.is_file() else {}
         time_limit = str(int(req.get("time_limit_seconds", 60)))
         seed = str(int(req.get("seed", 0)))
 
@@ -607,16 +607,9 @@ class MockJobRunnerBackend:
             materialized=materialized,
             device_models=raw_models,
         )
-        result_doc = {
-            "schema": "ies.compute-result",
-            "schema_version": "1.0.0",
-            "bundle_id": str(req.get("bundle_id") or "ies.engineering-solution@1.0.0"),
-            "receipt_id": str(req.get("receipt_id") or "ies.evaluator.finance@1.0.0"),
-            "execution_status": "completed",
-            "math_status": str(solution["solver_summary"]["math_status"]),
-            "outputs": {"financial_evaluation": fin_eval},
-        }
-        (work_out / "result.json").write_text(json.dumps(result_doc), encoding="utf-8")
+        (work_out / "financial_evaluation.json").write_text(
+            json.dumps(fin_eval), encoding="utf-8"
+        )
 
     def handle(self, request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content.decode()) if request.content else None

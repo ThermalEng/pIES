@@ -121,7 +121,6 @@ DESCRIPTOR = GeneratorDescriptor(
         "finance.amount_references",
         "finance.amount_constraints",
     ),
-    solvers=(SOLVER_REF,),
     executors=(EXECUTOR_REF,),
     equation_contracts=("ies.equation.ast",),
     evaluators=(),

@@ -771,6 +771,7 @@ def _rlimit_hard_capped_entry(
     solution_out_str: str,
     result_meta_str: str,
     memory_limit_mb: int,
+    hourly_out_str: str | None = None,
 ) -> None:
     import iesplan.computation.result_adapters.adapter as ta
 
@@ -783,6 +784,7 @@ def _rlimit_hard_capped_entry(
         solution_out_str,
         result_meta_str,
         memory_limit_mb,
+        hourly_out_str,
     )
 
 

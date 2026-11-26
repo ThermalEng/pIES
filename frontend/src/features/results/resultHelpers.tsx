@@ -133,7 +133,8 @@ export function MetricGroup({
 /** 已封存财务评价头与核心四指标（保持 direct <dt>/<dd> DOM 结构）。 */
 export function SealedFinancialCore({ fin }: { fin: FinancialEvaluationBlock }) {
   const { t } = useI18n()
-  const ev = fin.evaluation
+  const ev = fin?.evaluation
+  if (!ev) return null
   const irrKey = irrStatusToKey(ev.irr_status)
   const staticPb = { value: ev.static_payback, status: ev.static_status }
   const dynamicPb = { value: ev.dynamic_payback, status: ev.dynamic_status }

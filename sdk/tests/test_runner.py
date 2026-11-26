@@ -49,6 +49,20 @@ def test_reference_algorithm_via_cli_and_expected(tmp_path: Path) -> None:
     )
     assert actual == expected
 
+    # Confirm request["parameters"] takes effect (tariff_multiplier changes objective_value)
+    scaled_in = tmp_path / "scaled_in"
+    scaled_out = tmp_path / "scaled_out"
+    scaled_in.mkdir()
+    scaled_req = json.loads(
+        (plugin_dir / "tests" / "minimal" / "input.json").read_text(encoding="utf-8")
+    )
+    scaled_req["parameters"]["tariff_multiplier"] = 2.2
+    (scaled_in / "request.json").write_text(json.dumps(scaled_req), encoding="utf-8")
+    run_plugin(manifest_path=plugin_dir / "plugin.yaml", work_in=scaled_in, work_out=scaled_out)
+    assert read_engineering_solution(scaled_out / "solution.json").solver_summary.objective_value == (
+        actual["solver_summary"]["objective_value"] * 2.0
+    )
+
 
 def test_iteration_loop_plugin_via_runner(tmp_path: Path) -> None:
     plugin_dir = EXAMPLES_DIR / "iteration_loop"

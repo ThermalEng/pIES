@@ -31,8 +31,8 @@ from iesplan.finance import EvaluationInput, effective_from_yaml, evaluate_forwa
 from iesplan.modeling import build_math_contribution, contribution_to_dict
 from pies_sdk import (
     StageIOError,
-    read_compute_result,
     read_engineering_solution,
+    read_financial_evaluation,
     read_prediction_output,
     read_primal_solution,
     validate_solver_bundle_dir,
@@ -304,14 +304,13 @@ def test_campus_full_pipeline_equivalence(tmp_path: Path) -> None:
         work_out=eval_out,
         pies_version="1.2.0",
     )
-    validate_stage_outputs("evaluator", eval_out)
-    stage_result = read_compute_result(eval_out)
-
-    assert stage_result.execution_status == "completed"
-    assert stage_result.math_status == "solved"
-    assert stage_result.bundle_id == "eq-bnd-1"
-    assert stage_result.receipt_id == "eq-rcpt-1"
-    assert stage_result.outputs["financial_evaluation"] == direct_eval
+    validate_stage_outputs(
+        "evaluator",
+        eval_out,
+        produces=("ies.financial-evaluation@1.0.0",),
+    )
+    actual_eval = read_financial_evaluation(eval_out / "financial_evaluation.json")
+    assert actual_eval == direct_eval
 
 
 def test_four_stage_pipeline_with_grouped_joint_predictor_equivalence(tmp_path: Path) -> None:
@@ -535,10 +534,9 @@ def test_four_stage_pipeline_with_grouped_joint_predictor_equivalence(tmp_path: 
         work_out=eval_out,
         pies_version="1.2.0",
     )
-    result = read_compute_result(eval_out)
-    assert result.execution_status == "completed"
-    assert result.math_status == "solved"
-    assert result.outputs["financial_evaluation"]["evaluation"]["schema"] == "ies.project-evaluation"
+    actual_eval = read_financial_evaluation(eval_out / "financial_evaluation.json")
+    assert actual_eval["status"] == "evaluated"
+    assert actual_eval["evaluation"]["schema"] == "ies.project-evaluation"
 
 
 def test_third_party_mps_solver_replaceability(tmp_path: Path) -> None:

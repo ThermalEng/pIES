@@ -9,19 +9,20 @@ import pytest
 from pies_sdk.contracts import ComputeResultPayload, PredictionOutputPayload
 from pies_sdk.errors import StageIOError
 from pies_sdk.io import (
+    extract_stage_parameters,
     read_algorithm_request,
-    read_compute_result,
     read_engineering_solution,
     read_evaluation_report,
+    read_financial_evaluation,
     read_generator_inputs,
     read_prediction_output,
     read_predictor_request,
     read_primal_solution,
     read_solver_bundle,
     validate_stage_outputs,
-    write_compute_result,
     write_engineering_solution,
     write_evaluation_report,
+    write_financial_evaluation,
     write_json_file,
     write_prediction_output,
     write_primal_solution,
@@ -133,20 +134,28 @@ def test_generator_solver_evaluator_stage_io(tmp_path: Path) -> None:
     validate_stage_outputs("algorithm", alg_out)
     assert read_engineering_solution(alg_out / "solution.json").solver_summary.math_status == "infeasible"
 
-    # Evaluators support both official result.json and third-party evaluation_report.json
+    # Evaluators emit canonical financial_evaluation.json or evaluation_report.json (no result.json)
     eval_out = tmp_path / "eval_out"
-    write_compute_result(
-        eval_out,
-        ComputeResultPayload(
-            bundle_id="bnd-1",
-            receipt_id="rcpt-1",
-            execution_status="completed",
-            math_status="solved",
-            outputs={"objective": 10.0},
-        ),
+    write_financial_evaluation(
+        eval_out / "financial_evaluation.json",
+        {
+            "schema": "ies.financial-evaluation",
+            "schema_version": "1.0.0",
+            "status": "evaluated",
+            "profile_id": "pure-fwd",
+        },
     )
-    validate_stage_outputs("evaluator", eval_out)
-    assert read_compute_result(eval_out).math_status == "solved"
+    validate_stage_outputs(
+        "evaluator",
+        eval_out,
+        produces=("ies.financial-evaluation@1.0.0",),
+    )
+    assert read_financial_evaluation(eval_out / "financial_evaluation.json")["status"] == "evaluated"
+
+    legacy_only = tmp_path / "legacy_eval_out"
+    write_json_file(legacy_only / "result.json", {"schema": "ies.compute-result", "schema_version": "1.0.0"})
+    with pytest.raises(StageIOError, match="missing 'evaluation_report.json' or 'financial_evaluation.json'"):
+        validate_stage_outputs("evaluator", legacy_only)
 
     report_out = tmp_path / "report_out"
     write_evaluation_report(
@@ -161,8 +170,32 @@ def test_generator_solver_evaluator_stage_io(tmp_path: Path) -> None:
             "tables": [],
         },
     )
-    validate_stage_outputs("evaluator", report_out)
+    validate_stage_outputs(
+        "evaluator",
+        report_out,
+        produces=("ies.evaluation-report@1.0.0",),
+    )
     assert read_evaluation_report(report_out / "evaluation_report.json").title == "Carbon Report"
+
+
+def test_extract_stage_parameters_reads_canonical_request_parameters_only(tmp_path: Path) -> None:
+    req_in = tmp_path / "req_params"
+    write_json_file(
+        req_in / "request.json",
+        {"parameters": {"threads": 4}, "options": {"threads": 1}},
+    )
+    write_json_file(req_in / "calculation_config.json", {"options": {"threads": 2}})
+    assert extract_stage_parameters(req_in) == {"threads": 4}
+
+    opts_only = tmp_path / "opts_only"
+    write_json_file(opts_only / "request.json", {"options": {"solver": {"threads": 4}}})
+    write_json_file(opts_only / "calculation_config.json", {"options": {"solver": {"threads": 2}}})
+    assert extract_stage_parameters(opts_only) == {}
+
+    bad_params = tmp_path / "bad_params"
+    write_json_file(bad_params / "request.json", {"parameters": ["not", "an", "object"]})
+    with pytest.raises(StageIOError, match="'parameters' must be a JSON object"):
+        extract_stage_parameters(bad_params)
 
 
 def test_algorithm_and_iterations_ndjson(tmp_path: Path) -> None:

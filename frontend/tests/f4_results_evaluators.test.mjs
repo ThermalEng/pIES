@@ -10,7 +10,12 @@ const { createElement } = await import('react')
 const { renderToStaticMarkup } = await import('react-dom/server')
 const { api } = await import('../src/api/client.ts')
 const { mapResultViewDtoToModel } = await import('../src/features/results/mappers.ts')
-const { FinancialAbsenceAlert, formatEvaluatorDetail } = await import('../src/features/results/index.ts')
+const {
+  FinancialAbsenceAlert,
+  SealedFinancialCore,
+  buildCashflowChartData,
+  formatEvaluatorDetail,
+} = await import('../src/features/results/index.ts')
 const { I18nProvider } = await import('../src/i18n/index.ts')
 const { messagesEn } = await import('../src/i18n/messages_en.ts')
 const { messagesZh } = await import('../src/i18n/messages_zh.ts')
@@ -163,5 +168,19 @@ assert.equal(
   formatEvaluatorDetail({ exit_code: 1, termination_reason: 'failed' }),
   '{"exit_code":1,"termination_reason":"failed"}',
 )
+
+// 5. Partial financial block renders safely without crashing
+{
+  const partialFin = {}
+  const coreHtml = renderToStaticMarkup(
+    createElement(
+      I18nProvider,
+      null,
+      createElement(SealedFinancialCore, { fin: partialFin }),
+    ),
+  )
+  assert.equal(coreHtml, '')
+  assert.deepEqual(buildCashflowChartData(partialFin), { categories: [], bars: [], lines: [] })
+}
 
 console.log('ALL F4 RESULTS/EVALUATOR CHECKS PASSED')

@@ -105,14 +105,6 @@ def validate_config_capabilities(
             f"{ref_label}不支持所选计算精度: {ref!r} x {config.precision!r}",
             reason="incompatible-precision",
         )
-    supports_solver = getattr(descriptor, "supports_solver", None)
-    if callable(supports_solver):
-        assert config.solver is not None
-        if not supports_solver(config.solver):
-            raise ComputationUnavailableError(
-                f"{ref_label}不兼容所选求解器: {ref!r} x {config.solver!r}",
-                reason="incompatible-solver",
-            )
     declared_evaluators = tuple(getattr(descriptor, "evaluators", ()) or ())
     if declared_evaluators:
         for ev in config.evaluators:

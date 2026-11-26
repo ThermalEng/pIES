@@ -12,6 +12,7 @@ from types import SimpleNamespace
 
 import pytest
 from legacy_solve_testkit import (
+    build_financial_evaluation,
     evaluate_builder_forward_finance,
     mps_columns,
     parse_highs_solution,
@@ -19,7 +20,6 @@ from legacy_solve_testkit import (
 from test_finance_s2_execution import _income, _money, _vat_labels
 from test_issue06_s2 import _amount, _builder, _collect_only, _tiny_solve
 
-from iesplan.application.worker.compute_cases import build_financial_evaluation
 from iesplan.computation.generators.highs_milp import linear_conversion_for_unit
 from iesplan.computation.generators.mps import write_mps
 from iesplan.computation.generators.project import _ProjectBuilder

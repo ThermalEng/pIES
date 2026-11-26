@@ -581,15 +581,18 @@ def test_generate_stage_and_solve_stage_campus_end_to_end(tmp_path: Path) -> Non
     solver_in.mkdir()
     solver_out.mkdir()
     (solver_in / "bundle").symlink_to(bundle_dir)
-    write_json_file(solver_in / "request.json", {"time_limit_seconds": 120, "seed": 0})
+    write_json_file(
+        solver_in / "request.json",
+        {"time_limit_seconds": 120, "seed": 0, "parameters": {"threads": 1}},
+    )
 
-    solve_stage(
-        StageContext(
-            manifest=_SOLVER_MANIFEST,
-            work_in=solver_in,
-            work_out=solver_out,
-            parameters={"threads": 1},
-        )
+    from pies_sdk.runner import run_plugin
+
+    run_plugin(
+        manifest_path=PLUGINS_ROOT / "solver_highs" / "plugin.yaml",
+        work_in=solver_in,
+        work_out=solver_out,
+        pies_version="1.2.0",
     )
 
     # Solver outputs strictly primal_solution.json (never variable_map/finance artifacts)
