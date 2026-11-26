@@ -22,7 +22,6 @@ from test_highs_milp_provider import _campus_inputs
 from iesplan.assembly import validate_assembly_text
 from iesplan.computation import (
     PRIMAL_SOLUTION_OUTPUT_PATH,
-    CalculationConfig,
     generate_highs_bundle,
 )
 from iesplan.computation.generators.highs_milp import EPIGRAPHS_PATH
@@ -147,40 +146,10 @@ def _solve_target_bundle_to_solution(bundle: Any, tmp_path: Path) -> dict[str, A
     return outcome.load_engineering_solution()
 
 
-def _run_legacy_115_evaluation(
-    artifact: Any,
-    models: Any,
-    materialized: Any,
-    finance: EffectiveFinanceConfig,
-    config: Any,
-    evaluation: EvaluationInput,
-    tmp_path: Path,
-) -> dict[str, Any]:
-    """Compute reference forward financial evaluation from restored engineering solution."""
-    del config
-    target_cfg = CalculationConfig(
-        mode="planning",
-        predictions=(),
-        generator="ies.generator.highs_milp@1.0.0",
-        solver="ies.solver.highs@1.7.2",
-        algorithm=None,
-        evaluators=({"evaluator": "ies.evaluator.finance@1.0.0", "parameters": {}},),
-        precision="medium",
-        time_limit_seconds=60,
-        options={"generator": {"acceleration": {"mode": "on_demand_mutex"}}, "solver": {}},
-        seed=7,
-        outputs=("solution", "metrics"),
-    )
-    bundle = generate_highs_bundle(artifact, models, materialized, finance, target_cfg, evaluation)
-    solution = _solve_target_bundle_to_solution(bundle, tmp_path / "ref_run")
-    return evaluate_forward_finance(
-        solution,
-        artifact=artifact,
-        finance=finance,
-        evaluation=evaluation,
-        materialized=materialized,
-        device_models=models,
-    )
+def _load_legacy_115_baseline(case_id: str) -> dict[str, Any]:
+    """Load frozen authentic ``b490989e`` 1.1.5 golden objective and evaluation baseline."""
+    path = Path(__file__).with_name("fixtures") / "f3_legacy_115_baselines" / f"{case_id}.json"
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
 def test_campus_forward_finance_reconciles_with_highs_evaluation(tmp_path: Path) -> None:
@@ -205,7 +174,7 @@ def test_campus_forward_finance_reconciles_with_highs_evaluation(tmp_path: Path)
     )
     assert campus_res.artifact is not None, campus_res.diagnostics
     artifact = campus_res.artifact
-    _, models, materialized, finance, config, evaluation = _campus_inputs()
+    _, models, materialized, finance, _legacy_cfg, evaluation = _campus_inputs()
 
     target_bundle = generate_highs_bundle(
         artifact,
@@ -216,8 +185,10 @@ def test_campus_forward_finance_reconciles_with_highs_evaluation(tmp_path: Path)
         evaluation,
     )
     solution = _solve_target_bundle_to_solution(target_bundle, tmp_path)
-    expected = _run_legacy_115_evaluation(
-        artifact, models, materialized, finance, config, evaluation, tmp_path
+    baseline = _load_legacy_115_baseline("campus")
+    expected = baseline["financial_evaluation"]
+    assert solution["solver_summary"]["objective_value"] == pytest.approx(
+        baseline["objective_value"], rel=1e-7, abs=1e-6
     )
 
     actual_direct = evaluate_forward_finance(
@@ -800,15 +771,21 @@ def test_forward_finance_reconciles_complex_tax_demand_and_comparison(
     artifact, models, materialized, finance, evaluation = _complex_finance_case(
         optional_built=optional_built, comparison_mode="difference"
     )
-    legacy_cfg = _campus_inputs()[4]
     target_cfg = _target_campus_config()
 
     target_bundle = generate_highs_bundle(
         artifact, models, materialized, finance, target_cfg, evaluation
     )
     solution = _solve_target_bundle_to_solution(target_bundle, tmp_path / f"b_{optional_built}")
-    expected = _run_legacy_115_evaluation(
-        artifact, models, materialized, finance, legacy_cfg, evaluation, tmp_path / f"l_{optional_built}"
+    case_id = (
+        "complex_tax_demand_comparison_built"
+        if optional_built
+        else "complex_tax_demand_comparison_unbuilt"
+    )
+    baseline = _load_legacy_115_baseline(case_id)
+    expected = baseline["financial_evaluation"]
+    assert solution["solver_summary"]["objective_value"] == pytest.approx(
+        baseline["objective_value"], rel=1e-7, abs=1e-6
     )
 
     actual = evaluate_forward_finance(
@@ -1371,9 +1348,10 @@ connections:
         artifact, models, materialized, finance, _target_campus_config(), evaluation
     )
     solution = _solve_target_bundle_to_solution(target_bundle, tmp_path / "t")
-    legacy_cfg = _campus_inputs()[4]
-    expected = _run_legacy_115_evaluation(
-        artifact, models, materialized, finance, legacy_cfg, evaluation, tmp_path / "l"
+    baseline = _load_legacy_115_baseline("zero_realized_loss_sign_crossing_base")
+    expected = baseline["financial_evaluation"]
+    assert solution["solver_summary"]["objective_value"] == pytest.approx(
+        baseline["objective_value"], rel=1e-7, abs=1e-6
     )
     actual = evaluate_forward_finance(
         solution,
@@ -1385,7 +1363,9 @@ connections:
     )
     assert Decimal(actual["tax_cash"]["income"][0]["taxable_base"]) > Decimal("0")
     assert Decimal(actual["tax_cash"]["income"][0]["loss_generated"]) == Decimal("0")
-    assert expected["tax_cash"]["loss_balances"] == [
+    assert len(expected["tax_cash"]["loss_balances"]) == 1
+    assert Decimal(expected["tax_cash"]["loss_balances"][0]["amount"]) == Decimal("0")
+    assert actual["tax_cash"]["loss_balances"] == [
         {
             "rule": "cit",
             "vintage_id": "v0",
@@ -1638,9 +1618,10 @@ extensions: {}
         artifact, models, materialized, finance, _target_campus_config(), evaluation
     )
     solution = _solve_target_bundle_to_solution(target_bundle, tmp_path / "t")
-    legacy_cfg = _campus_inputs()[4]
-    expected = _run_legacy_115_evaluation(
-        artifact, models, materialized, finance, legacy_cfg, evaluation, tmp_path / "l"
+    baseline = _load_legacy_115_baseline("shared_expression_cancellation_no_loss_balances")
+    expected = baseline["financial_evaluation"]
+    assert solution["solver_summary"]["objective_value"] == pytest.approx(
+        baseline["objective_value"], rel=1e-7, abs=1e-6
     )
     actual = evaluate_forward_finance(
         solution,
@@ -1908,9 +1889,10 @@ extensions: {}
         artifact, models, materialized, finance, _target_campus_config(), evaluation
     )
     solution = _solve_target_bundle_to_solution(target_bundle, tmp_path / "t")
-    legacy_cfg = _campus_inputs()[4]
-    expected = _run_legacy_115_evaluation(
-        artifact, models, materialized, finance, legacy_cfg, evaluation, tmp_path / "l"
+    baseline = _load_legacy_115_baseline("distinct_sources_no_false_cancellation")
+    expected = baseline["financial_evaluation"]
+    assert solution["solver_summary"]["objective_value"] == pytest.approx(
+        baseline["objective_value"], rel=1e-7, abs=1e-6
     )
     actual = evaluate_forward_finance(
         solution,
@@ -1921,7 +1903,9 @@ extensions: {}
         device_models={inst: contribution_to_dict(m) for inst, m in models.items()},
     )
     assert Decimal(actual["tax_cash"]["income"][0]["taxable_base"]) == Decimal("0")
-    assert expected["tax_cash"]["loss_balances"] == [
+    assert len(expected["tax_cash"]["loss_balances"]) == 1
+    assert Decimal(expected["tax_cash"]["loss_balances"][0]["amount"]) == Decimal("0")
+    assert actual["tax_cash"]["loss_balances"] == [
         {
             "rule": "cit",
             "vintage_id": "v0",

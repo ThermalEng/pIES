@@ -94,6 +94,11 @@ class ApplicationContext:
             solver_registry=self.solver_registry,
             evaluator_registry=self.evaluator_registry,
             algorithm_registry=self.algorithm_registry,
+            evaluator_max_concurrency=int(
+                self.container_stage_policy.evaluator_max_concurrency
+                if self.container_stage_policy is not None
+                else 1
+            ),
         )
 
     def health(self) -> dict[str, str]:
@@ -216,6 +221,7 @@ def _container_stage_policy_from_settings() -> Any:
         stop_grace_seconds=int(settings.stage_stop_grace_seconds),
         max_timeout_seconds=float(settings.solver_max_timeout_seconds),
         allowed_environment_vars=tuple(settings.solver_allowed_environment_vars),
+        evaluator_max_concurrency=int(settings.stage_evaluator_max_concurrency),
     )
 
 

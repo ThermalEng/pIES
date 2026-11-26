@@ -39,9 +39,10 @@ from iesplan.computation.result_adapters import (
     PRIMAL_SOLUTION_SCHEMA,
     PRIMAL_SOLUTION_VERSION,
     ResultAdapter,
+    project_engineering_solution,
     restore_from_bundle_dir,
 )
-from iesplan.core.content import GeneratedContent, MemoryContent, read_content
+from iesplan.core.content import Content, GeneratedContent, MemoryContent, read_content
 
 
 def _read_restored(res: Any) -> dict[str, Any]:
@@ -1387,3 +1388,114 @@ def test_f2_restores_standalone_planning_variables_and_rejects_invalid_entries(
                 {PRIMAL_SOLUTION_OUTPUT_PATH: json.dumps(primal).encode("utf-8")},
                 solution_output_path=tmp_path / "bad_pvars.json",
             )
+
+
+def test_p2_01_file_backed_inputs_reuse_path_without_chunk_streaming(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """P2-01: file-backed Content avoids iter_chunks() via path reuse / hardlink / symlink fallback."""
+    from iesplan.computation.result_adapters.adapter import FileContent
+
+    bundle = _minimal_bundle(
+        columns=["x0"],
+        records=[
+            ["column_names", ["x0"]],
+            ["expression", 0, 0.0],
+            ["terms", [[0, 1.0]]],
+            ["expression_end"],
+            ["facts", {"construction_units": [], "planning_variables": []}],
+        ],
+    )
+    primal = {
+        "schema": PRIMAL_SOLUTION_SCHEMA,
+        "schema_version": PRIMAL_SOLUTION_VERSION,
+        "math_status": "solved",
+        "termination_reason": "optimal",
+        "has_feasible_solution": True,
+        "column_count": 1,
+        "values": [100.0],
+        "objective_value": 1.0,
+        "best_bound": 1.0,
+        "relative_gap": 0.0,
+        "receipt": {"solver": "acme.solver@1.0.0"},
+        "extensions": {},
+    }
+
+    class _CountingFileContent(FileContent):
+        def __init__(self, path: Path) -> None:
+            object.__setattr__(self, "path", path)
+            object.__setattr__(self, "size_bytes", path.stat().st_size)
+            object.__setattr__(self, "calls", 0)
+
+        def iter_chunks(self):
+            object.__setattr__(self, "calls", self.calls + 1)
+            return FileContent.iter_chunks(self)
+
+    bundle_dir = tmp_path / "bundle_src"
+    bundle_dir.mkdir()
+    file_backed_files: dict[str, Content] = {}
+    counting_contents: list[_CountingFileContent] = []
+    for rel, content in bundle.files.items():
+        p = bundle_dir / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(b"".join(content.iter_chunks()))
+        cf = _CountingFileContent(p)
+        file_backed_files[rel] = cf
+        counting_contents.append(cf)
+
+    primal_file = tmp_path / "primal_solution.json"
+    primal_file.write_bytes(json.dumps(primal).encode("utf-8"))
+    primal_cf = _CountingFileContent(primal_file)
+
+    from iesplan.computation.protocols import SolverBundle
+
+    fb_bundle = SolverBundle(manifest=bundle.manifest, files=file_backed_files)
+    sol_out = tmp_path / "restored_solution.json"
+    outcome = ResultAdapter().restore_with_outcome(
+        fb_bundle,
+        _succeeded_receipt(),
+        {PRIMAL_SOLUTION_OUTPUT_PATH: primal_cf},
+        solution_output_path=sol_out,
+    )
+    assert outcome.compute_result.math_status == "solved"
+    assert primal_cf.calls == 0
+    assert all(c.calls == 0 for c in counting_contents)
+
+    # project_engineering_solution without solution_output_path reuses source path directly.
+    proj_src = _CountingFileContent(sol_out)
+    projected = project_engineering_solution(
+        proj_src,
+        bundle_id="b-p2-01",
+        receipt_id="r-p2-01",
+        outputs=("solution", "metrics"),
+    )
+    assert proj_src.calls == 0
+    assert projected.solution_path == sol_out
+    assert projected.load_engineering_solution()["solver_summary"]["objective_value"] == 1.0
+
+    # Cross-filesystem EXDEV on os.link cleanly falls back to os.symlink with 0 iter_chunks().
+    def _raise_exdev(_src: object, _dst: object) -> None:
+        raise OSError(18, "Invalid cross-device link")
+
+    monkeypatch.setattr("iesplan.computation.result_adapters.adapter.os.link", _raise_exdev)
+    symlink_dest = tmp_path / "symlink_projected.json"
+    projected_symlink = project_engineering_solution(
+        proj_src,
+        bundle_id="b-p2-01-sym",
+        receipt_id="r-p2-01-sym",
+        outputs=("solution", "metrics"),
+        solution_output_path=symlink_dest,
+    )
+    assert proj_src.calls == 0
+    assert symlink_dest.is_symlink()
+    assert projected_symlink.solution_path == symlink_dest
+
+    # Non-file MemoryContent fallback still streams normally.
+    raw_bytes = sol_out.read_bytes()
+    projected_mem = project_engineering_solution(
+        MemoryContent(raw_bytes),
+        bundle_id="b-p2-01-mem",
+        receipt_id="r-p2-01-mem",
+        outputs=("solution", "metrics"),
+    )
+    assert projected_mem.load_engineering_solution()["solver_summary"]["objective_value"] == 1.0

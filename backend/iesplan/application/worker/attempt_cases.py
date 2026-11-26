@@ -210,6 +210,7 @@ def submit_attempt_result(
     actor_id: int | None = None,
     output_files: Mapping[str, Mapping[str, tuple[Content | bytes, str]]] | None = None,
     sealed_output_files: Mapping[str, Mapping[str, Mapping[str, object]]] | None = None,
+    evidence_task_id: int | None = None,
 ) -> SubmitReceipt:
     """仅租约持有者可提交(03 §11.4): token 不符/租约已撤销 → 整笔回滚并抛 LeaseRejectedError。
 
@@ -290,10 +291,11 @@ def submit_attempt_result(
                         for series_id in ordered_ids
                     ],
                 }]
+            evidence_owner_id = task.id if evidence_task_id is None else evidence_task_id
             blob = GeneratedContent(partial(json_chunks, payload))
             object_id = store_result_blob(db, blob, actor_id=who)
             evidence_id = create_evidence_record(
-                db, task_id=task.id, attempt_id=attempt_id, snapshot_id=snapshot.id,
+                db, task_id=evidence_owner_id, attempt_id=attempt_id, snapshot_id=snapshot.id,
                 object_id=object_id, created_by=who,
             )
             attach_result_ref(db, object_id, evidence_id, actor_id=who)

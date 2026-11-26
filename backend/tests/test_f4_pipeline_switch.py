@@ -61,6 +61,7 @@ from iesplan.migrations import (
     convert_calc_config_115_to_120,
 )
 from iesplan.results import persistence as results_store
+from iesplan.tasks import persistence as tasks_store
 from iesplan.tasks import queue
 from iesplan.tasks.persistence import CalcSnapshot, TaskAttempt
 from iesplan.worker.executors import RunContext
@@ -566,7 +567,7 @@ def test_parallel_evaluators_partial_failure_single_retry_and_hardlinks(tmp_path
         )
         assert bad_retry.status_code == 409, bad_retry.text
 
-        # Trigger single-evaluator retry on failed finance evaluator -> 201, replay -> 200.
+        # Trigger single-evaluator retry -> 201 child analysis task, replay -> 200.
         retry_resp = env["client"].post(
             f"/api/projects/{env['pid']}/tasks/{task_id}/result/evaluators/retry",
             json={
@@ -576,8 +577,37 @@ def test_parallel_evaluators_partial_failure_single_retry_and_hardlinks(tmp_path
             headers=headers,
         )
         assert retry_resp.status_code == 201, retry_resp.text
-        assert retry_resp.json()["replayed"] is False
-        assert retry_resp.json()["evaluator"] == "ies.evaluator.finance@1.0.0"
+        retry_body = retry_resp.json()
+        retry_task_id = retry_body["task"]["id"]
+        assert retry_body["replayed"] is False
+        assert retry_body["source_task_id"] == task_id
+        assert retry_body["evaluator"] == "ies.evaluator.finance@1.0.0"
+        assert retry_task_id != task_id
+        assert retry_body["task"]["type"] == "analysis"
+        assert retry_body["task"]["status"] == "queued"
+
+        # Source task remains completed & usable as baseline while child retry is active.
+        source_task_resp = env["client"].get(
+            f"/api/projects/{env['pid']}/tasks/{task_id}", headers=headers
+        )
+        assert source_task_resp.status_code == 200
+        assert source_task_resp.json()["task"]["status"] == "completed"
+        baseline_during_retry = env["client"].get(
+            f"/api/projects/{env['pid']}/tasks/{task_id}/result", headers=headers
+        )
+        assert baseline_during_retry.status_code == 200
+        assert baseline_during_retry.json()["result"]["evidence"]["id"] == old_ev_id
+
+        # Active child retry blocks a different concurrent retry key with 409.
+        dup_retry = env["client"].post(
+            f"/api/projects/{env['pid']}/tasks/{task_id}/result/evaluators/retry",
+            json={
+                "evaluator": "ies.evaluator.finance@1.0.0",
+                "idempotency_key": "retry-fin-concurrent",
+            },
+            headers=headers,
+        )
+        assert dup_retry.status_code == 409, dup_retry.text
 
         replay_resp = env["client"].post(
             f"/api/projects/{env['pid']}/tasks/{task_id}/result/evaluators/retry",
@@ -589,10 +619,12 @@ def test_parallel_evaluators_partial_failure_single_retry_and_hardlinks(tmp_path
         )
         assert replay_resp.status_code == 200, replay_resp.text
         assert replay_resp.json()["replayed"] is True
+        assert replay_resp.json()["task"]["id"] == retry_task_id
+        assert replay_resp.json()["source_task_id"] == task_id
 
-        # Re-run queued retry -> only finance evaluator executes; report evaluator stays at 1 call.
+        # Run child analysis retry -> only finance runs; source stays completed.
         fail_finance["should_fail"] = False
-        claim2 = _claim(env["db"], task_id)
+        claim2 = _claim(env["db"], retry_task_id)
         outcome2 = _run(env["engine"], claim2, plane)
         assert outcome2 == "completed"
         assert report_calls["count"] == 1
@@ -612,10 +644,14 @@ def test_parallel_evaluators_partial_failure_single_retry_and_hardlinks(tmp_path
         assert by_eval2["ies.evaluator.finance@1.0.0"]["status"] == "succeeded"
         assert by_eval2[report_eval_ref]["status"] == "succeeded"
 
-        # Verify old immutable EvidencePackage content was never modified.
+        # Verify old immutable EvidencePackage content was never modified and source task never reopened.
         with env["sf"]() as check_db:
             old_pkg = results_store.get_evidence(check_db, old_ev_id)
             assert old_pkg is not None and old_pkg.object_id == old_obj_id
+            src_row = tasks_store.get_task(check_db, task_id)
+            child_row = tasks_store.get_task(check_db, retry_task_id)
+            assert src_row is not None and src_row.status == "completed" and src_row.attempt_count == 1
+            assert child_row is not None and child_row.status == "completed" and child_row.type == "analysis"
     finally:
         env["db"].close()
         env["engine"].dispose()
@@ -1626,6 +1662,372 @@ def test_codex_r2_rejects_malformed_evaluator_outputs_and_contradictory_solution
         assert by_eval[bad_ref]["status"] == "failed"
         assert by_eval[bad_ref]["error"]["code"] == "EVAL-PROTOCOL-001"
         assert by_eval["ies.evaluator.finance@1.0.0"]["status"] == "succeeded"
+    finally:
+        env["db"].close()
+        env["engine"].dispose()
+
+
+def test_p1_02_failed_or_cancelled_retry_preserves_completed_source_and_allows_rerun(
+    tmp_path: Path,
+) -> None:
+    """P1-02: failed/cancelled child analysis retry never reopens source task or drops baseline."""
+    fail_mode = {"mode": "fail_eval"}  # fail_eval -> cancel -> crash_runner -> ok
+
+    def _finance_handler(work_in: Path, work_out: Path) -> None:
+        mode = fail_mode["mode"]
+        if mode == "fail_eval":
+            raise RuntimeError("initial finance failure")
+        sol = json.loads((work_in / "solution.json").read_text(encoding="utf-8"))
+        req = json.loads((work_in / "request.json").read_text(encoding="utf-8"))
+        from stage_testkit import _artifact_from_json
+
+        from iesplan.finance import (
+            EffectiveFinanceConfig,
+            EvaluationInput,
+            evaluate_forward_finance,
+        )
+
+        fin_eval = evaluate_forward_finance(
+            sol,
+            artifact=_artifact_from_json(req["artifact"]),
+            finance=EffectiveFinanceConfig.from_dict(req["finance"]),
+            evaluation=EvaluationInput.from_frozen(req["evaluation"]),
+            device_models=req.get("device_models"),
+        )
+        (work_out / "financial_evaluation.json").write_text(json.dumps(fin_eval), encoding="utf-8")
+
+    env = _setup_pipeline_env(tmp_path)
+    try:
+        plane = build_test_compute_plane(
+            tmp_path / "stages",
+            evaluator_handlers={"/app/plugins/evaluator_finance/plugin.yaml": _finance_handler},
+        )
+        source_id = _save_and_submit(env, _valid_13_config(), idempotency_key="p1-02-src")
+        claim1 = _claim(env["db"], source_id)
+        assert _run(env["engine"], claim1, plane) == "completed"
+
+        headers = login_headers(env["client"], env["user"])
+        res1 = env["client"].get(f"/api/projects/{env['pid']}/tasks/{source_id}/result", headers=headers)
+        assert res1.status_code == 200
+        old_ev_id = res1.json()["result"]["evidence"]["id"]
+
+        # Start retry #1 -> simulate unexpected child failure before submit.
+        r1 = env["client"].post(
+            f"/api/projects/{env['pid']}/tasks/{source_id}/result/evaluators/retry",
+            json={"evaluator": "ies.evaluator.finance@1.0.0", "idempotency_key": "p1-02-r1"},
+            headers=headers,
+        )
+        assert r1.status_code == 201, r1.text
+        retry1_id = r1.json()["task"]["id"]
+        orig_run_stage = plane.stage_runner.run_stage
+
+        def _boom_once(spec: Any, **kwargs: Any) -> Any:
+            if str(spec.stage_id).startswith("eval-"):
+                raise RuntimeError("boom during child retry")
+            return orig_run_stage(spec, **kwargs)
+
+        plane.stage_runner.run_stage = _boom_once  # type: ignore[method-assign]
+        try:
+            assert _run(env["engine"], _claim(env["db"], retry1_id), plane) == "failed"
+        finally:
+            plane.stage_runner.run_stage = orig_run_stage  # type: ignore[method-assign]
+
+        # Source task stays completed & baseline evidence unchanged.
+        with env["sf"]() as check_db:
+            src = tasks_store.get_task(check_db, source_id)
+            child1 = tasks_store.get_task(check_db, retry1_id)
+            latest_ev = results_store.latest_evidence_for_task(check_db, source_id)
+            assert src is not None and src.status == "completed"
+            assert child1 is not None and child1.status == "failed"
+            assert latest_ev is not None and latest_ev.id == old_ev_id
+
+        # Start retry #2 -> cancel child retry -> source still completed & baseline intact.
+        r2 = env["client"].post(
+            f"/api/projects/{env['pid']}/tasks/{source_id}/result/evaluators/retry",
+            json={"evaluator": "ies.evaluator.finance@1.0.0", "idempotency_key": "p1-02-r2"},
+            headers=headers,
+        )
+        assert r2.status_code == 201, r2.text
+        retry2_id = r2.json()["task"]["id"]
+        from iesplan.worker import runner as worker_runner
+
+        cancel_claim = _claim(env["db"], retry2_id)
+
+        def _cancel_eval(spec: Any, **kwargs: Any) -> Any:
+            if str(spec.stage_id).startswith("eval-"):
+                cancel_resp = env["client"].post(
+                    f"/api/projects/{env['pid']}/tasks/{retry2_id}/cancel",
+                    headers=headers,
+                )
+                assert cancel_resp.status_code == 200, cancel_resp.text
+                raise worker_app.StageExecutionError(
+                    stage="evaluate",
+                    status="cancelled",
+                    termination_reason="cancelled",
+                    detail="user cancel",
+                )
+            return orig_run_stage(spec, **kwargs)
+
+        plane.stage_runner.run_stage = _cancel_eval  # type: ignore[method-assign]
+        try:
+            assert (
+                worker_runner.run_task(env["sf"], cancel_claim, worker_id="t", compute=plane)
+                == "cancelled"
+            )
+        finally:
+            plane.stage_runner.run_stage = orig_run_stage  # type: ignore[method-assign]
+
+        with env["sf"]() as check_db:
+            src = tasks_store.get_task(check_db, source_id)
+            child2 = tasks_store.get_task(check_db, retry2_id)
+            latest_ev = results_store.latest_evidence_for_task(check_db, source_id)
+            assert src is not None and src.status == "completed"
+            assert child2 is not None and child2.status == "cancelled"
+            assert latest_ev is not None and latest_ev.id == old_ev_id
+
+        # Retry #3 succeeds and updates source task's evidence package.
+        fail_mode["mode"] = "ok"
+        r3 = env["client"].post(
+            f"/api/projects/{env['pid']}/tasks/{source_id}/result/evaluators/retry",
+            json={"evaluator": "ies.evaluator.finance@1.0.0", "idempotency_key": "p1-02-r3"},
+            headers=headers,
+        )
+        assert r3.status_code == 201, r3.text
+        retry3_id = r3.json()["task"]["id"]
+        assert _run(env["engine"], _claim(env["db"], retry3_id), plane) == "completed"
+
+        res3 = env["client"].get(f"/api/projects/{env['pid']}/tasks/{source_id}/result", headers=headers)
+        assert res3.status_code == 200
+        assert res3.json()["result"]["evidence"]["id"] != old_ev_id
+        assert res3.json()["result"]["financial_evaluation"] is not None
+    finally:
+        env["db"].close()
+        env["engine"].dispose()
+
+
+def test_p2_02_evaluator_max_concurrency_budget_sequential_and_bounded_parallel(
+    tmp_path: Path,
+) -> None:
+    """P2-02: run_evaluators_stage enforces ComputeExecutionPlane.evaluator_max_concurrency."""
+    import threading
+    import time
+    from dataclasses import replace
+
+    specs: list[StagePluginSpec] = []
+    descs: list[BuiltinStageDescriptor] = []
+    handlers: dict[str, Any] = {}
+    lock = threading.Lock()
+    state = {"active": 0, "peak": 0}
+
+    for idx in range(3):
+        ref_id = f"acme.evaluator.conc{idx}"
+        spec = StagePluginSpec(
+            plugin_id=ref_id,
+            version="1.0.0",
+            kind="evaluator",
+            consumes=("ies.engineering-solution@1.0.0",),
+            produces=(EVALUATION_REPORT_CONTRACT,),
+            outputs=("solution", "metrics"),
+            parameters_schema={"type": "object", "additionalProperties": False},
+        )
+        desc = BuiltinStageDescriptor(
+            plugin_id=ref_id,
+            version="1.0.0",
+            kind="evaluator",
+            image="pies-builtin-stages:1.2.0",
+            entrypoint="report:eval",
+            manifest_path=f"test://{ref_id}@1.0.0",
+        )
+        specs.append(spec)
+        descs.append(desc)
+
+        def _make_handler(eval_ref: str):
+            def _handler(_work_in: Path, work_out: Path) -> None:
+                with lock:
+                    state["active"] += 1
+                    state["peak"] = max(state["peak"], state["active"])
+                try:
+                    time.sleep(0.08)
+                finally:
+                    with lock:
+                        state["active"] -= 1
+                (work_out / "evaluation_report.json").write_text(
+                    json.dumps(
+                        {
+                            "schema": "ies.evaluation-report",
+                            "schema_version": "1.0.0",
+                            "title": eval_ref,
+                            "evaluator": eval_ref,
+                            "metrics": [],
+                            "charts": [],
+                            "tables": [],
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+
+            return _handler
+
+        handlers[f"test://{ref_id}@1.0.0"] = _make_handler(f"{ref_id}@1.0.0")
+
+    env = _setup_pipeline_env(tmp_path, extra_evaluators=tuple(specs))
+    try:
+        eval_reg = build_evaluator_registry((BUILTIN_EVALUATOR_FINANCE_SPEC, *specs))
+        catalog = build_test_stage_catalog(extra_descriptors=tuple(descs))
+        base_plane = build_test_compute_plane(
+            tmp_path / "stages",
+            evaluator_registry=eval_reg,
+            stage_catalog=catalog,
+            evaluator_handlers=handlers,
+        )
+        cfg = _valid_13_config(
+            evaluators=[{"evaluator": f"{s.plugin_id}@1.0.0", "parameters": {}} for s in specs]
+        )
+
+        # evaluator_max_concurrency == 1 -> strict sequential execution (peak == 1).
+        state["active"] = 0
+        state["peak"] = 0
+        seq_plane = replace(base_plane, evaluator_max_concurrency=1)
+        t1 = _save_and_submit(env, cfg, idempotency_key="p2-02-seq")
+        assert _run(env["engine"], _claim(env["db"], t1), seq_plane) == "completed"
+        assert state["peak"] == 1
+
+        # evaluator_max_concurrency == 2 with 3 evaluators -> bounded concurrency (peak == 2).
+        state["active"] = 0
+        state["peak"] = 0
+        par_plane = replace(base_plane, evaluator_max_concurrency=2)
+        sub_status, sub_body = _submit_task(
+            env["client"],
+            env["pid"],
+            env["user"],
+            config={"config_revision": 1},
+            idempotency_key="p2-02-par",
+        )
+        assert sub_status == 201, sub_body
+        t2 = int(sub_body["task"]["id"])
+        assert _run(env["engine"], _claim(env["db"], t2), par_plane) == "completed"
+        assert state["peak"] == 2
+    finally:
+        env["db"].close()
+        env["engine"].dispose()
+
+
+def test_p2_03_evaluator_start_failure_isolated_and_control_signals_propagated(
+    tmp_path: Path,
+) -> None:
+    """P2-03: per-evaluator start/proxy errors isolate to EVAL-START-001; control signals propagate."""
+    from iesplan.computation.runtime.job_runner_client import JobRunnerClientError
+    from iesplan.computation.runtime.stage_runner import ControlPlaneDetached
+    from iesplan.worker import runner as worker_runner
+
+    start_err_ref = "acme.evaluator.start_err@1.0.0"
+    start_err_spec = StagePluginSpec(
+        plugin_id="acme.evaluator.start_err",
+        version="1.0.0",
+        kind="evaluator",
+        consumes=("ies.engineering-solution@1.0.0",),
+        produces=(EVALUATION_REPORT_CONTRACT,),
+        outputs=("solution", "metrics"),
+        parameters_schema={"type": "object", "additionalProperties": False},
+    )
+    start_err_desc = BuiltinStageDescriptor(
+        plugin_id="acme.evaluator.start_err",
+        version="1.0.0",
+        kind="evaluator",
+        image="pies-builtin-stages:1.2.0",
+        entrypoint="report:eval",
+        manifest_path=f"test://{start_err_ref}",
+    )
+
+    env = _setup_pipeline_env(tmp_path, extra_evaluators=(start_err_spec,))
+    try:
+        eval_reg = build_evaluator_registry((BUILTIN_EVALUATOR_FINANCE_SPEC, start_err_spec))
+        catalog = build_test_stage_catalog(extra_descriptors=(start_err_desc,))
+        plane = build_test_compute_plane(
+            tmp_path / "stages",
+            evaluator_registry=eval_reg,
+            stage_catalog=catalog,
+        )
+        orig_start = plane.stage_runner.client.start_stage
+
+        def _fail_one_start(spec: Any) -> Any:
+            if "acme.evaluator.start_err" in str(spec.stage_id):
+                raise JobRunnerClientError("image pull rejected", status_code=503)
+            return orig_start(spec)
+
+        plane.stage_runner.client.start_stage = _fail_one_start  # type: ignore[method-assign]
+        cfg = _valid_13_config(
+            evaluators=[
+                {"evaluator": start_err_ref, "parameters": {}},
+                {"evaluator": "ies.evaluator.finance@1.0.0", "parameters": {}},
+            ]
+        )
+        task_id = _save_and_submit(env, cfg, idempotency_key="p2-03-isolate")
+        assert _run(env["engine"], _claim(env["db"], task_id), plane) == "completed"
+
+        headers = login_headers(env["client"], env["user"])
+        res = env["client"].get(f"/api/projects/{env['pid']}/tasks/{task_id}/result", headers=headers)
+        assert res.status_code == 200
+        result_view = res.json()["result"]
+        assert result_view["financial_evaluation"] is not None
+        by_eval = {item["evaluator"]: item for item in result_view["evaluator_results"]}
+        assert by_eval["ies.evaluator.finance@1.0.0"]["status"] == "succeeded"
+        assert by_eval[start_err_ref]["status"] == "failed"
+        assert by_eval[start_err_ref]["error"]["code"] == "EVAL-START-001"
+
+        # Control/lease signals are NEVER swallowed into EVAL-START-001.
+        orig_run_stage = plane.stage_runner.run_stage
+        for exc_obj, expected_outcome in (
+            (ControlPlaneDetached("detached"), "detached"),
+            (
+                worker_app.StageExecutionError(
+                    stage="evaluate", status="cancelled", termination_reason="cancelled", detail="cancel"
+                ),
+                "cancelled",
+            ),
+            (
+                worker_app.StageExecutionError(
+                    stage="evaluate", status="fenced", termination_reason="fenced", detail="fenced"
+                ),
+                "fenced",
+            ),
+        ):
+            sub_status, sub_body = _submit_task(
+                env["client"],
+                env["pid"],
+                env["user"],
+                config={"config_revision": 1},
+                idempotency_key=f"p2-03-ctrl-{expected_outcome}",
+            )
+            assert sub_status == 201, sub_body
+            t_ctrl = int(sub_body["task"]["id"])
+            c_ctrl = _claim(env["db"], t_ctrl)
+
+            def _raise_ctrl(
+                spec: Any,
+                _exc: BaseException = exc_obj,
+                _tid: int = t_ctrl,
+                _expected: str = expected_outcome,
+                **kwargs: Any,
+            ) -> Any:
+                if str(spec.stage_id).startswith("eval-"):
+                    if _expected == "cancelled":
+                        cancel_resp = env["client"].post(
+                            f"/api/projects/{env['pid']}/tasks/{_tid}/cancel",
+                            headers=headers,
+                        )
+                        assert cancel_resp.status_code == 200, cancel_resp.text
+                    raise _exc
+                return orig_run_stage(spec, **kwargs)
+
+            plane.stage_runner.run_stage = _raise_ctrl  # type: ignore[method-assign]
+            try:
+                assert (
+                    worker_runner.run_task(env["sf"], c_ctrl, worker_id="t", compute=plane)
+                    == expected_outcome
+                )
+            finally:
+                plane.stage_runner.run_stage = orig_run_stage  # type: ignore[method-assign]
     finally:
         env["db"].close()
         env["engine"].dispose()

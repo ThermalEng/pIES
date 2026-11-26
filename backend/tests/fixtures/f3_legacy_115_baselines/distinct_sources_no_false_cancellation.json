@@ -1,0 +1,207 @@
+{
+  "case": "distinct_sources_no_false_cancellation",
+  "financial_evaluation": {
+    "amounts": [
+      {
+        "axis": "scalar",
+        "id": "cost_exp_amt",
+        "unit": "CNY",
+        "values": [
+          {
+            "period": 0,
+            "value": "0.0"
+          }
+        ]
+      },
+      {
+        "axis": "scalar",
+        "id": "rev_imp_amt",
+        "unit": "CNY",
+        "values": [
+          {
+            "period": 0,
+            "value": "0.0"
+          }
+        ]
+      }
+    ],
+    "annual_fixed_om": "0.0",
+    "annual_net_flows": [
+      "0.0",
+      "0.0"
+    ],
+    "annual_operation": [
+      {
+        "demand_charge": "0.0",
+        "energy_net": "0.0",
+        "financial_year": 1,
+        "fixed_om": "0.0",
+        "maintenance": "0.0",
+        "net": "0.0",
+        "variable_om": "0.0"
+      }
+    ],
+    "assets": [],
+    "base_year": 2025,
+    "cash_movements": [
+      {
+        "axis": "financial_year",
+        "deductible_input": "0.0",
+        "direction": "outflow",
+        "end_unpaid": "0.0",
+        "gross": "0.0",
+        "id": "cost_exp",
+        "net_basis": "0.0",
+        "net_revenue": "0.0",
+        "output_tax": "0.0",
+        "payments": [
+          {
+            "amount": "0.0",
+            "at": {
+              "kind": "financial_year",
+              "year": 1
+            },
+            "ratio": "1"
+          }
+        ],
+        "period": 1,
+        "price_basis": "tax_exclusive",
+        "raw": "0.0"
+      },
+      {
+        "axis": "financial_year",
+        "deductible_input": "0.0",
+        "direction": "inflow",
+        "end_unpaid": "0.0",
+        "gross": "0.0",
+        "id": "rev_imp",
+        "net_basis": "0.0",
+        "net_revenue": "0.0",
+        "output_tax": "0.0",
+        "payments": [
+          {
+            "amount": "0.0",
+            "at": {
+              "kind": "financial_year",
+              "year": 1
+            },
+            "ratio": "1"
+          }
+        ],
+        "period": 1,
+        "price_basis": "tax_exclusive",
+        "raw": "0.0"
+      }
+    ],
+    "comparison": {
+      "mode": "absolute"
+    },
+    "construction_period": 0,
+    "construction_total": "0.0",
+    "construction_total_unit": "CNY",
+    "construction_units": [
+      {
+        "built": true,
+        "instance_id": "grid",
+        "mode": "mandatory",
+        "scales": [
+          {
+            "planning_variable_id": "v_exp",
+            "unit": "kW",
+            "value": 0.0
+          },
+          {
+            "planning_variable_id": "v_imp",
+            "unit": "kW",
+            "value": 0.0
+          }
+        ],
+        "unit_id": "u_grid"
+      }
+    ],
+    "cost_items": [],
+    "currency": "CNY",
+    "discount_rate": 0.08,
+    "evaluation": {
+      "base_year": 2025,
+      "currency": "CNY",
+      "discount_rate": "0.08",
+      "dynamic_payback": null,
+      "dynamic_payback_unit": null,
+      "dynamic_status": "not_applicable",
+      "evaluation_years": 1,
+      "irr": null,
+      "irr_status": "degenerate",
+      "npv": "0.0",
+      "npv_unit": "CNY",
+      "price_basis": "tax_exclusive",
+      "rows": [
+        {
+          "cumulative": "0.0",
+          "cumulative_discounted": "0.0",
+          "discounted": "0.0",
+          "net": "0.0",
+          "year": 0
+        },
+        {
+          "cumulative": "0.0",
+          "cumulative_discounted": "0.0",
+          "discounted": "0E+1",
+          "net": "0.0",
+          "year": 1
+        }
+      ],
+      "schema": "ies.project-evaluation",
+      "schema_version": "1.0.0",
+      "static_payback": null,
+      "static_payback_unit": null,
+      "static_status": "not_applicable"
+    },
+    "evaluation_years": 1,
+    "monthly_demand": [],
+    "net_cashflows": [],
+    "operation_years": 1,
+    "payments_applied": [
+      {
+        "amount": "0.0",
+        "ratio": 1.0,
+        "t": 0
+      }
+    ],
+    "price_basis": "tax_exclusive",
+    "profile_id": "distinct-no-cancel",
+    "schema": "ies.financial-evaluation",
+    "schema_version": "1.0.0",
+    "status": "evaluated",
+    "tax_cash": {
+      "depreciation": [],
+      "derived": [],
+      "income": [
+        {
+          "assessed": "0.0",
+          "loss_expired": "0.0",
+          "loss_generated": "0.0",
+          "loss_used": "0.0",
+          "rule": "cit",
+          "tax": "0.0",
+          "taxable_base": "0.0",
+          "year": 1
+        }
+      ],
+      "loss_balances": [
+        {
+          "amount": "0.0",
+          "last_usable_year": 3,
+          "rule": "cit",
+          "vintage_id": "v0",
+          "year": 1
+        }
+      ],
+      "refunds": [],
+      "vat": [],
+      "vat_rules": []
+    }
+  },
+  "objective_value": 0.0,
+  "source_commit": "b490989e7ec3cd3746e548e9ee85bf8a8214c5c8"
+}

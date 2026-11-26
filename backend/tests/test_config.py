@@ -62,6 +62,7 @@ def test_defaults_from_deploy_file() -> None:
     assert s.stage_pids_limit == 256
     assert s.stage_tmpfs_size_mb == 512
     assert s.stage_stop_grace_seconds == 5
+    assert s.stage_evaluator_max_concurrency == 1
     assert s.job_runner_url == ""
     assert s.stage_root == Path("/data/stages")
     assert s.embedded_scheduler is False
@@ -86,6 +87,7 @@ def test_env_override_only_for_env_layer(monkeypatch) -> None:
     monkeypatch.setenv("IESPLAN_COMPUTE_SLOTS", "8")
     monkeypatch.setenv("IESPLAN_SOLVER_MAX_TIMEOUT_SECONDS", "60")
     monkeypatch.setenv("IESPLAN_STAGE_PIDS_LIMIT", "999")
+    monkeypatch.setenv("IESPLAN_STAGE_EVALUATOR_MAX_CONCURRENCY", "9")
     s = Settings()
     assert s.db_url == "postgresql+psycopg://u:p@db:5432/other"
     assert s.redis_url == "redis://redis:6380/1"
@@ -97,6 +99,7 @@ def test_env_override_only_for_env_layer(monkeypatch) -> None:
     assert s.compute_slots == 2
     assert s.solver_max_timeout_seconds == 172800
     assert s.stage_pids_limit == 256
+    assert s.stage_evaluator_max_concurrency == 1
 
 
 def test_deploy_boundary_values_rejected(tmp_path: Path) -> None:

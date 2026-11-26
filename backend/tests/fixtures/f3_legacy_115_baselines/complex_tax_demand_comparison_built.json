@@ -1,0 +1,1978 @@
+{
+  "case": "complex_tax_demand_comparison_built",
+  "financial_evaluation": {
+    "amounts": [
+      {
+        "axis": "scalar",
+        "id": "asset_salvage",
+        "unit": "CNY",
+        "values": [
+          {
+            "period": 0,
+            "value": "115.23809523809526"
+          }
+        ]
+      },
+      {
+        "axis": "scalar",
+        "id": "capex_gross",
+        "unit": "CNY",
+        "values": [
+          {
+            "period": 0,
+            "value": "1210.0000000000002"
+          }
+        ]
+      },
+      {
+        "axis": "scalar",
+        "id": "end_bonus",
+        "unit": "CNY",
+        "values": [
+          {
+            "period": 0,
+            "value": "35.0"
+          }
+        ]
+      },
+      {
+        "axis": "scalar",
+        "id": "grant_base",
+        "unit": "CNY",
+        "values": [
+          {
+            "period": 0,
+            "value": "300.0"
+          }
+        ]
+      }
+    ],
+    "annual_fixed_om": "115.2",
+    "annual_net_flows": [
+      "-484.0000000000001",
+      "-1331.0",
+      "-52350.20000000865",
+      "-52109.96190477057"
+    ],
+    "annual_operation": [
+      {
+        "demand_charge": "1272.0",
+        "energy_net": "-44544.60000000115",
+        "financial_year": 2,
+        "fixed_om": "115.2",
+        "maintenance": "125.00000000000001",
+        "net": "-52758.200000008816",
+        "variable_om": "6701.400000000892"
+      },
+      {
+        "demand_charge": "1272.0",
+        "energy_net": "-44544.60000000112",
+        "financial_year": 3,
+        "fixed_om": "115.2",
+        "maintenance": "0.0",
+        "net": "-52633.200000008816",
+        "variable_om": "6701.400000000892"
+      }
+    ],
+    "assets": [
+      {
+        "available_from": 1,
+        "basis": "1152.3809523809525",
+        "book_values": [
+          {
+            "value": "1152.3809523809525",
+            "year": 1
+          },
+          {
+            "value": "889.2857142857142",
+            "year": 2
+          },
+          {
+            "value": "626.1904761904761",
+            "year": 3
+          }
+        ],
+        "capitalized_at": {
+          "kind": "financial_year",
+          "year": 1
+        },
+        "id": "plant_asset"
+      }
+    ],
+    "base_year": 2025,
+    "cash_movements": [
+      {
+        "axis": "financial_year",
+        "deductible_input": "57.61904761904763",
+        "direction": "outflow",
+        "end_unpaid": "605.0000000000001",
+        "gross": "1210.0000000000002",
+        "id": "equip_pay",
+        "net_basis": "1152.3809523809525",
+        "net_revenue": "1210.0000000000002",
+        "output_tax": "0.0",
+        "payments": [
+          {
+            "amount": "605.0000000000001",
+            "at": {
+              "kind": "financial_year",
+              "year": 1
+            },
+            "ratio": "0.5"
+          },
+          {
+            "amount": "605.0000000000001",
+            "at": {
+              "kind": "financial_year",
+              "year": 4
+            },
+            "ratio": "0.5"
+          }
+        ],
+        "period": 1,
+        "price_basis": "tax_inclusive",
+        "raw": "1210.0000000000002"
+      },
+      {
+        "axis": "financial_year",
+        "deductible_input": "0.0",
+        "direction": "inflow",
+        "end_unpaid": "0.0",
+        "gross": "318.0",
+        "id": "service_rev",
+        "net_basis": "318.0",
+        "net_revenue": "300.0",
+        "output_tax": "18.0",
+        "payments": [
+          {
+            "amount": "318.0",
+            "at": {
+              "kind": "financial_year",
+              "year": 2
+            },
+            "ratio": "1"
+          }
+        ],
+        "period": 2,
+        "price_basis": "tax_exclusive",
+        "raw": "300.0"
+      },
+      {
+        "axis": "financial_year",
+        "deductible_input": "0.0",
+        "direction": "inflow",
+        "end_unpaid": "0.0",
+        "gross": "318.0",
+        "id": "service_rev",
+        "net_basis": "318.0",
+        "net_revenue": "300.0",
+        "output_tax": "18.0",
+        "payments": [
+          {
+            "amount": "318.0",
+            "at": {
+              "kind": "financial_year",
+              "year": 3
+            },
+            "ratio": "1"
+          }
+        ],
+        "period": 3,
+        "price_basis": "tax_exclusive",
+        "raw": "300.0"
+      }
+    ],
+    "comparison": {
+      "baseline_net_flows": [
+        "-500",
+        "100",
+        "100",
+        "100"
+      ],
+      "baseline_source": {
+        "kind": "declared",
+        "selectors": {}
+      },
+      "comparability": {
+        "differences": "test",
+        "service_basis": "same"
+      },
+      "evaluation_net_flows": [
+        "15.999999999999886",
+        "-1431.0",
+        "-52450.2000000087",
+        "-52209.96190477062"
+      ],
+      "facts": {},
+      "mode": "difference"
+    },
+    "construction_period": 1,
+    "construction_total": "1210.0000000000002",
+    "construction_total_unit": "CNY",
+    "construction_units": [
+      {
+        "built": true,
+        "instance_id": "grid",
+        "mode": "optional",
+        "scales": [
+          {
+            "planning_variable_id": "v_cap",
+            "unit": "kW",
+            "value": 20.0
+          }
+        ],
+        "unit_id": "u_grid"
+      }
+    ],
+    "cost_items": [
+      {
+        "axis": "scalar",
+        "component": "annual_fixed_om",
+        "deductible_input": "5.200000000000004",
+        "finance_type": "grid_ft",
+        "gross": "45.199999999999996",
+        "instance_id": "grid",
+        "item_id": "materials",
+        "net_basis": "39.99999999999999",
+        "period": 0,
+        "raw": "40.0",
+        "unit": "CNY/a"
+      },
+      {
+        "axis": "scalar",
+        "component": "annual_fixed_om",
+        "deductible_input": "0.0",
+        "finance_type": "grid_ft",
+        "gross": "70.0",
+        "instance_id": "grid",
+        "item_id": "service",
+        "net_basis": "70.0",
+        "period": 0,
+        "raw": "70.0",
+        "unit": "CNY/a"
+      },
+      {
+        "axis": "financial_year",
+        "component": "period_variable_om",
+        "deductible_input": "284.70000000001585",
+        "finance_type": "grid_ft",
+        "gross": "4949.3999999997395",
+        "instance_id": "grid",
+        "item_id": "chem",
+        "net_basis": "4664.699999999593",
+        "period": 2,
+        "raw": "4380.0",
+        "unit": "CNY"
+      },
+      {
+        "axis": "financial_year",
+        "component": "period_variable_om",
+        "deductible_input": "284.70000000001585",
+        "finance_type": "grid_ft",
+        "gross": "4949.3999999997395",
+        "instance_id": "grid",
+        "item_id": "chem",
+        "net_basis": "4664.699999999593",
+        "period": 3,
+        "raw": "4380.0",
+        "unit": "CNY"
+      },
+      {
+        "axis": "financial_year",
+        "component": "period_variable_om",
+        "deductible_input": "0.0",
+        "finance_type": "grid_ft",
+        "gross": "1752.0000000002613",
+        "instance_id": "grid",
+        "item_id": "misc",
+        "net_basis": "1752.0000000002613",
+        "period": 2,
+        "raw": "1752.0000000002613",
+        "unit": "CNY"
+      },
+      {
+        "axis": "financial_year",
+        "component": "period_variable_om",
+        "deductible_input": "0.0",
+        "finance_type": "grid_ft",
+        "gross": "1752.0000000002613",
+        "instance_id": "grid",
+        "item_id": "misc",
+        "net_basis": "1752.0000000002613",
+        "period": 3,
+        "raw": "1752.0000000002613",
+        "unit": "CNY"
+      }
+    ],
+    "currency": "CNY",
+    "discount_rate": 0.08,
+    "evaluation": {
+      "base_year": 2025,
+      "currency": "CNY",
+      "discount_rate": "0.08",
+      "dynamic_payback": null,
+      "dynamic_payback_unit": null,
+      "dynamic_status": "not_recovered",
+      "evaluation_years": 3,
+      "irr": null,
+      "irr_status": "out_of_domain",
+      "npv": "-87722.54365504180014448315806",
+      "npv_unit": "CNY",
+      "price_basis": "tax_exclusive",
+      "rows": [
+        {
+          "cumulative": "15.999999999999886",
+          "cumulative_discounted": "15.999999999999886",
+          "discounted": "15.999999999999886",
+          "net": "15.999999999999886",
+          "year": 0
+        },
+        {
+          "cumulative": "-1415.000000000000114",
+          "cumulative_discounted": "-1309.000000000000114",
+          "discounted": "-1325",
+          "net": "-1431.0",
+          "year": 1
+        },
+        {
+          "cumulative": "-53865.200000008700114",
+          "cumulative_discounted": "-46276.59259260005155432921811",
+          "discounted": "-44967.59259260005144032921811",
+          "net": "-52450.2000000087",
+          "year": 2
+        },
+        {
+          "cumulative": "-106075.161904779320114",
+          "cumulative_discounted": "-87722.54365504180014448315806",
+          "discounted": "-41445.95106244174859015393995",
+          "net": "-52209.96190477062",
+          "year": 3
+        }
+      ],
+      "schema": "ies.project-evaluation",
+      "schema_version": "1.0.0",
+      "static_payback": null,
+      "static_payback_unit": null,
+      "static_status": "not_recovered"
+    },
+    "evaluation_years": 3,
+    "monthly_demand": [
+      {
+        "billing_id": "grid_demand",
+        "calendar_month": 1,
+        "calendar_year": 2025,
+        "charge": "106.0",
+        "charge_id": "cap_charge",
+        "financial_year": 2,
+        "peak_power": "10.0",
+        "peak_unit": "kW",
+        "rate": {
+          "unit": "CNY/kW",
+          "value": "10"
+        }
+      },
+      {
+        "billing_id": "grid_demand",
+        "calendar_month": 2,
+        "calendar_year": 2025,
+        "charge": "106.0",
+        "charge_id": "cap_charge",
+        "financial_year": 2,
+        "peak_power": "10.0",
+        "peak_unit": "kW",
+        "rate": {
+          "unit": "CNY/kW",
+          "value": "10"
+        }
+      },
+      {
+        "billing_id": "grid_demand",
+        "calendar_month": 3,
+        "calendar_year": 2025,
+        "charge": "106.0",
+        "charge_id": "cap_charge",
+        "financial_year": 2,
+        "peak_power": "10.0",
+        "peak_unit": "kW",
+        "rate": {
+          "unit": "CNY/kW",
+          "value": "10"
+        }
+      },
+      {
+        "billing_id": "grid_demand",
+        "calendar_month": 4,
+        "calendar_year": 2025,
+        "charge": "106.0",
+        "charge_id": "cap_charge",
+        "financial_year": 2,
+        "peak_power": "10.0",
+        "peak_unit": "kW",
+        "rate": {
+          "unit": "CNY/kW",
+          "value": "10"
+        }
+      },
+      {
+        "billing_id": "grid_demand",
+        "calendar_month": 5,
+        "calendar_year": 2025,
+        "charge": "106.0",
+        "charge_id": "cap_charge",
+        "financial_year": 2,
+        "peak_power": "10.0",
+        "peak_unit": "kW",
+        "rate": {
+          "unit": "CNY/kW",
+          "value": "10"
+        }
+      },
+      {
+        "billing_id": "grid_demand",
+        "calendar_month": 6,
+        "calendar_year": 2025,
+        "charge": "106.0",
+        "charge_id": "cap_charge",
+        "financial_year": 2,
+        "peak_power": "10.0",
+        "peak_unit": "kW",
+        "rate": {
+          "unit": "CNY/kW",
+          "value": "10"
+        }
+      },
+      {
+        "billing_id": "grid_demand",
+        "calendar_month": 7,
+        "calendar_year": 2025,
+        "charge": "106.0",
+        "charge_id": "cap_charge",
+        "financial_year": 2,
+        "peak_power": "10.0",
+        "peak_unit": "kW",
+        "rate": {
+          "unit": "CNY/kW",
+          "value": "10"
+        }
+      },
+      {
+        "billing_id": "grid_demand",
+        "calendar_month": 8,
+        "calendar_year": 2025,
+        "charge": "106.0",
+        "charge_id": "cap_charge",
+        "financial_year": 2,
+        "peak_power": "10.0",
+        "peak_unit": "kW",
+        "rate": {
+          "unit": "CNY/kW",
+          "value": "10"
+        }
+      },
+      {
+        "billing_id": "grid_demand",
+        "calendar_month": 9,
+        "calendar_year": 2025,
+        "charge": "106.0",
+        "charge_id": "cap_charge",
+        "financial_year": 2,
+        "peak_power": "10.0",
+        "peak_unit": "kW",
+        "rate": {
+          "unit": "CNY/kW",
+          "value": "10"
+        }
+      },
+      {
+        "billing_id": "grid_demand",
+        "calendar_month": 10,
+        "calendar_year": 2025,
+        "charge": "106.0",
+        "charge_id": "cap_charge",
+        "financial_year": 2,
+        "peak_power": "10.0",
+        "peak_unit": "kW",
+        "rate": {
+          "unit": "CNY/kW",
+          "value": "10"
+        }
+      },
+      {
+        "billing_id": "grid_demand",
+        "calendar_month": 11,
+        "calendar_year": 2025,
+        "charge": "106.0",
+        "charge_id": "cap_charge",
+        "financial_year": 2,
+        "peak_power": "10.0",
+        "peak_unit": "kW",
+        "rate": {
+          "unit": "CNY/kW",
+          "value": "10"
+        }
+      },
+      {
+        "billing_id": "grid_demand",
+        "calendar_month": 12,
+        "calendar_year": 2025,
+        "charge": "106.0",
+        "charge_id": "cap_charge",
+        "financial_year": 2,
+        "peak_power": "10.0",
+        "peak_unit": "kW",
+        "rate": {
+          "unit": "CNY/kW",
+          "value": "10"
+        }
+      },
+      {
+        "billing_id": "grid_demand",
+        "calendar_month": 1,
+        "calendar_year": 2026,
+        "charge": "106.0",
+        "charge_id": "cap_charge",
+        "financial_year": 3,
+        "peak_power": "10.0",
+        "peak_unit": "kW",
+        "rate": {
+          "unit": "CNY/kW",
+          "value": "10"
+        }
+      },
+      {
+        "billing_id": "grid_demand",
+        "calendar_month": 2,
+        "calendar_year": 2026,
+        "charge": "106.0",
+        "charge_id": "cap_charge",
+        "financial_year": 3,
+        "peak_power": "10.0",
+        "peak_unit": "kW",
+        "rate": {
+          "unit": "CNY/kW",
+          "value": "10"
+        }
+      },
+      {
+        "billing_id": "grid_demand",
+        "calendar_month": 3,
+        "calendar_year": 2026,
+        "charge": "106.0",
+        "charge_id": "cap_charge",
+        "financial_year": 3,
+        "peak_power": "10.0",
+        "peak_unit": "kW",
+        "rate": {
+          "unit": "CNY/kW",
+          "value": "10"
+        }
+      },
+      {
+        "billing_id": "grid_demand",
+        "calendar_month": 4,
+        "calendar_year": 2026,
+        "charge": "106.0",
+        "charge_id": "cap_charge",
+        "financial_year": 3,
+        "peak_power": "10.0",
+        "peak_unit": "kW",
+        "rate": {
+          "unit": "CNY/kW",
+          "value": "10"
+        }
+      },
+      {
+        "billing_id": "grid_demand",
+        "calendar_month": 5,
+        "calendar_year": 2026,
+        "charge": "106.0",
+        "charge_id": "cap_charge",
+        "financial_year": 3,
+        "peak_power": "10.0",
+        "peak_unit": "kW",
+        "rate": {
+          "unit": "CNY/kW",
+          "value": "10"
+        }
+      },
+      {
+        "billing_id": "grid_demand",
+        "calendar_month": 6,
+        "calendar_year": 2026,
+        "charge": "106.0",
+        "charge_id": "cap_charge",
+        "financial_year": 3,
+        "peak_power": "10.0",
+        "peak_unit": "kW",
+        "rate": {
+          "unit": "CNY/kW",
+          "value": "10"
+        }
+      },
+      {
+        "billing_id": "grid_demand",
+        "calendar_month": 7,
+        "calendar_year": 2026,
+        "charge": "106.0",
+        "charge_id": "cap_charge",
+        "financial_year": 3,
+        "peak_power": "10.0",
+        "peak_unit": "kW",
+        "rate": {
+          "unit": "CNY/kW",
+          "value": "10"
+        }
+      },
+      {
+        "billing_id": "grid_demand",
+        "calendar_month": 8,
+        "calendar_year": 2026,
+        "charge": "106.0",
+        "charge_id": "cap_charge",
+        "financial_year": 3,
+        "peak_power": "10.0",
+        "peak_unit": "kW",
+        "rate": {
+          "unit": "CNY/kW",
+          "value": "10"
+        }
+      },
+      {
+        "billing_id": "grid_demand",
+        "calendar_month": 9,
+        "calendar_year": 2026,
+        "charge": "106.0",
+        "charge_id": "cap_charge",
+        "financial_year": 3,
+        "peak_power": "10.0",
+        "peak_unit": "kW",
+        "rate": {
+          "unit": "CNY/kW",
+          "value": "10"
+        }
+      },
+      {
+        "billing_id": "grid_demand",
+        "calendar_month": 10,
+        "calendar_year": 2026,
+        "charge": "106.0",
+        "charge_id": "cap_charge",
+        "financial_year": 3,
+        "peak_power": "10.0",
+        "peak_unit": "kW",
+        "rate": {
+          "unit": "CNY/kW",
+          "value": "10"
+        }
+      },
+      {
+        "billing_id": "grid_demand",
+        "calendar_month": 11,
+        "calendar_year": 2026,
+        "charge": "106.0",
+        "charge_id": "cap_charge",
+        "financial_year": 3,
+        "peak_power": "10.0",
+        "peak_unit": "kW",
+        "rate": {
+          "unit": "CNY/kW",
+          "value": "10"
+        }
+      },
+      {
+        "billing_id": "grid_demand",
+        "calendar_month": 12,
+        "calendar_year": 2026,
+        "charge": "106.0",
+        "charge_id": "cap_charge",
+        "financial_year": 3,
+        "peak_power": "10.0",
+        "peak_unit": "kW",
+        "rate": {
+          "unit": "CNY/kW",
+          "value": "10"
+        }
+      }
+    ],
+    "net_cashflows": [
+      {
+        "amount": "50.0",
+        "direction": "inflow",
+        "id": "fixed_grant",
+        "t": 2
+      },
+      {
+        "amount": "55.00000000000001",
+        "direction": "inflow",
+        "id": "capex_share",
+        "t": 3
+      },
+      {
+        "amount": "35.0",
+        "direction": "inflow",
+        "id": "residual_end",
+        "t": 3
+      },
+      {
+        "amount": "115.23809523809526",
+        "direction": "inflow",
+        "id": "salvage_share",
+        "t": 3
+      }
+    ],
+    "operation_years": 2,
+    "payments_applied": [
+      {
+        "amount": "484.0000000000001",
+        "ratio": 0.4,
+        "t": 0
+      },
+      {
+        "amount": "726.0",
+        "ratio": 0.6,
+        "t": 1
+      }
+    ],
+    "price_basis": "tax_exclusive",
+    "profile_id": "complex-f3",
+    "schema": "ies.financial-evaluation",
+    "schema_version": "1.0.0",
+    "status": "evaluated",
+    "tax_cash": {
+      "depreciation": [
+        {
+          "amount": "263.09523809523813",
+          "base_from": {
+            "id": "plant_asset",
+            "kind": "asset"
+          },
+          "rule": "cit",
+          "year": 2
+        },
+        {
+          "amount": "58.962264150943405",
+          "base_from": {
+            "kind": "maintenance_expense_net",
+            "position": 1,
+            "year": 2
+          },
+          "rule": "cit",
+          "year": 2
+        },
+        {
+          "amount": "263.09523809523813",
+          "base_from": {
+            "id": "plant_asset",
+            "kind": "asset"
+          },
+          "rule": "cit",
+          "year": 3
+        },
+        {
+          "amount": "58.962264150943405",
+          "base_from": {
+            "kind": "maintenance_expense_net",
+            "position": 1,
+            "year": 2
+          },
+          "rule": "cit",
+          "year": 3
+        }
+      ],
+      "derived": [
+        {
+          "assessed": "0.0",
+          "axis": "tax_month",
+          "paid": "0.0",
+          "payment_period": 2,
+          "period": 1,
+          "rule": "levy"
+        },
+        {
+          "assessed": "0.0",
+          "axis": "tax_month",
+          "paid": "0.0",
+          "payment_period": 3,
+          "period": 2,
+          "rule": "levy"
+        },
+        {
+          "assessed": "0.0",
+          "axis": "tax_month",
+          "paid": "0.0",
+          "payment_period": 4,
+          "period": 3,
+          "rule": "levy"
+        },
+        {
+          "assessed": "0.0",
+          "axis": "tax_month",
+          "paid": "0.0",
+          "payment_period": 5,
+          "period": 4,
+          "rule": "levy"
+        },
+        {
+          "assessed": "0.0",
+          "axis": "tax_month",
+          "paid": "0.0",
+          "payment_period": 6,
+          "period": 5,
+          "rule": "levy"
+        },
+        {
+          "assessed": "0.0",
+          "axis": "tax_month",
+          "paid": "0.0",
+          "payment_period": 7,
+          "period": 6,
+          "rule": "levy"
+        },
+        {
+          "assessed": "0.0",
+          "axis": "tax_month",
+          "paid": "0.0",
+          "payment_period": 8,
+          "period": 7,
+          "rule": "levy"
+        },
+        {
+          "assessed": "0.0",
+          "axis": "tax_month",
+          "paid": "0.0",
+          "payment_period": 9,
+          "period": 8,
+          "rule": "levy"
+        },
+        {
+          "assessed": "0.0",
+          "axis": "tax_month",
+          "paid": "0.0",
+          "payment_period": 10,
+          "period": 9,
+          "rule": "levy"
+        },
+        {
+          "assessed": "0.0",
+          "axis": "tax_month",
+          "paid": "0.0",
+          "payment_period": 11,
+          "period": 10,
+          "rule": "levy"
+        },
+        {
+          "assessed": "0.0",
+          "axis": "tax_month",
+          "paid": "0.0",
+          "payment_period": 12,
+          "period": 11,
+          "rule": "levy"
+        },
+        {
+          "assessed": "0.0",
+          "axis": "tax_month",
+          "paid": "0.0",
+          "payment_period": 13,
+          "period": 12,
+          "rule": "levy"
+        },
+        {
+          "assessed": "0.0",
+          "axis": "tax_month",
+          "paid": "0.0",
+          "payment_period": 14,
+          "period": 13,
+          "rule": "levy"
+        },
+        {
+          "assessed": "0.0",
+          "axis": "tax_month",
+          "paid": "0.0",
+          "payment_period": 15,
+          "period": 14,
+          "rule": "levy"
+        },
+        {
+          "assessed": "0.0",
+          "axis": "tax_month",
+          "paid": "0.0",
+          "payment_period": 16,
+          "period": 15,
+          "rule": "levy"
+        },
+        {
+          "assessed": "0.0",
+          "axis": "tax_month",
+          "paid": "0.0",
+          "payment_period": 17,
+          "period": 16,
+          "rule": "levy"
+        },
+        {
+          "assessed": "0.0",
+          "axis": "tax_month",
+          "paid": "0.0",
+          "payment_period": 18,
+          "period": 17,
+          "rule": "levy"
+        },
+        {
+          "assessed": "0.0",
+          "axis": "tax_month",
+          "paid": "0.0",
+          "payment_period": 19,
+          "period": 18,
+          "rule": "levy"
+        },
+        {
+          "assessed": "0.0",
+          "axis": "tax_month",
+          "paid": "0.0",
+          "payment_period": 20,
+          "period": 19,
+          "rule": "levy"
+        },
+        {
+          "assessed": "0.0",
+          "axis": "tax_month",
+          "paid": "0.0",
+          "payment_period": 21,
+          "period": 20,
+          "rule": "levy"
+        },
+        {
+          "assessed": "0.0",
+          "axis": "tax_month",
+          "paid": "0.0",
+          "payment_period": 22,
+          "period": 21,
+          "rule": "levy"
+        },
+        {
+          "assessed": "0.0",
+          "axis": "tax_month",
+          "paid": "0.0",
+          "payment_period": 23,
+          "period": 22,
+          "rule": "levy"
+        },
+        {
+          "assessed": "0.0",
+          "axis": "tax_month",
+          "paid": "0.0",
+          "payment_period": 24,
+          "period": 23,
+          "rule": "levy"
+        },
+        {
+          "assessed": "0.0",
+          "axis": "tax_month",
+          "paid": "0.0",
+          "payment_period": 25,
+          "period": 24,
+          "rule": "levy"
+        },
+        {
+          "assessed": "0.0",
+          "axis": "tax_month",
+          "paid": "0.0",
+          "payment_period": 26,
+          "period": 25,
+          "rule": "levy"
+        },
+        {
+          "assessed": "0.0",
+          "axis": "tax_month",
+          "paid": "0.0",
+          "payment_period": 27,
+          "period": 26,
+          "rule": "levy"
+        },
+        {
+          "assessed": "0.0",
+          "axis": "tax_month",
+          "paid": "0.0",
+          "payment_period": 28,
+          "period": 27,
+          "rule": "levy"
+        },
+        {
+          "assessed": "0.0",
+          "axis": "tax_month",
+          "paid": "0.0",
+          "payment_period": 29,
+          "period": 28,
+          "rule": "levy"
+        },
+        {
+          "assessed": "0.0",
+          "axis": "tax_month",
+          "paid": "0.0",
+          "payment_period": 30,
+          "period": 29,
+          "rule": "levy"
+        },
+        {
+          "assessed": "0.0",
+          "axis": "tax_month",
+          "paid": "0.0",
+          "payment_period": 31,
+          "period": 30,
+          "rule": "levy"
+        },
+        {
+          "assessed": "0.0",
+          "axis": "tax_month",
+          "paid": "0.0",
+          "payment_period": 32,
+          "period": 31,
+          "rule": "levy"
+        },
+        {
+          "assessed": "0.0",
+          "axis": "tax_month",
+          "paid": "0.0",
+          "payment_period": 33,
+          "period": 32,
+          "rule": "levy"
+        },
+        {
+          "assessed": "0.0",
+          "axis": "tax_month",
+          "paid": "0.0",
+          "payment_period": 34,
+          "period": 33,
+          "rule": "levy"
+        },
+        {
+          "assessed": "0.0",
+          "axis": "tax_month",
+          "paid": "0.0",
+          "payment_period": 35,
+          "period": 34,
+          "rule": "levy"
+        },
+        {
+          "assessed": "0.0",
+          "axis": "tax_month",
+          "paid": "0.0",
+          "payment_period": 36,
+          "period": 35,
+          "rule": "levy"
+        },
+        {
+          "assessed": "0.0",
+          "axis": "tax_month",
+          "paid": "0.0",
+          "payment_period": 37,
+          "period": 36,
+          "rule": "levy"
+        }
+      ],
+      "income": [
+        {
+          "assessed": "0.0",
+          "loss_expired": "0.0",
+          "loss_generated": "0.0",
+          "loss_used": "0.0",
+          "rule": "cit",
+          "tax": "0.0",
+          "taxable_base": "0.0",
+          "year": 1
+        },
+        {
+          "assessed": "0.0",
+          "loss_expired": "80.0",
+          "loss_generated": "47286.68203053854",
+          "loss_used": "0.0",
+          "rule": "cit",
+          "tax": "0.0",
+          "taxable_base": "-47286.682030538126",
+          "year": 2
+        },
+        {
+          "assessed": "0.0",
+          "loss_expired": "0.0",
+          "loss_generated": "47168.757502236665",
+          "loss_used": "0.0",
+          "rule": "cit",
+          "tax": "0.0",
+          "taxable_base": "-47168.75750223625",
+          "year": 3
+        }
+      ],
+      "loss_balances": [
+        {
+          "amount": "80.0",
+          "last_usable_year": 1,
+          "rule": "cit",
+          "vintage_id": "v0",
+          "year": 1
+        },
+        {
+          "amount": "47286.68203053854",
+          "last_usable_year": 3,
+          "rule": "cit",
+          "vintage_id": "v1",
+          "year": 2
+        },
+        {
+          "amount": "47286.68203053854",
+          "last_usable_year": 3,
+          "rule": "cit",
+          "vintage_id": "v1",
+          "year": 3
+        },
+        {
+          "amount": "47168.757502236665",
+          "last_usable_year": 4,
+          "rule": "cit",
+          "vintage_id": "v2",
+          "year": 3
+        }
+      ],
+      "refunds": [
+        {
+          "amount": "40.0",
+          "arrival_period": 13,
+          "period": 1,
+          "pool": "pool"
+        }
+      ],
+      "vat": [
+        {
+          "carry": "111.61904761904765",
+          "month": 1,
+          "paid": "0.0",
+          "pool": "pool",
+          "receivable": "40.0",
+          "refund_arrived": "0.0",
+          "refund_claimed": "40.0"
+        },
+        {
+          "carry": "111.61904761904765",
+          "month": 2,
+          "paid": "0.0",
+          "pool": "pool",
+          "receivable": "40.0",
+          "refund_arrived": "0.0",
+          "refund_claimed": "0.0"
+        },
+        {
+          "carry": "111.61904761904765",
+          "month": 3,
+          "paid": "0.0",
+          "pool": "pool",
+          "receivable": "40.0",
+          "refund_arrived": "0.0",
+          "refund_claimed": "0.0"
+        },
+        {
+          "carry": "111.61904761904765",
+          "month": 4,
+          "paid": "0.0",
+          "pool": "pool",
+          "receivable": "40.0",
+          "refund_arrived": "0.0",
+          "refund_claimed": "0.0"
+        },
+        {
+          "carry": "111.61904761904765",
+          "month": 5,
+          "paid": "0.0",
+          "pool": "pool",
+          "receivable": "40.0",
+          "refund_arrived": "0.0",
+          "refund_claimed": "0.0"
+        },
+        {
+          "carry": "111.61904761904765",
+          "month": 6,
+          "paid": "0.0",
+          "pool": "pool",
+          "receivable": "40.0",
+          "refund_arrived": "0.0",
+          "refund_claimed": "0.0"
+        },
+        {
+          "carry": "111.61904761904765",
+          "month": 7,
+          "paid": "0.0",
+          "pool": "pool",
+          "receivable": "40.0",
+          "refund_arrived": "0.0",
+          "refund_claimed": "0.0"
+        },
+        {
+          "carry": "111.61904761904765",
+          "month": 8,
+          "paid": "0.0",
+          "pool": "pool",
+          "receivable": "40.0",
+          "refund_arrived": "0.0",
+          "refund_claimed": "0.0"
+        },
+        {
+          "carry": "111.61904761904765",
+          "month": 9,
+          "paid": "0.0",
+          "pool": "pool",
+          "receivable": "40.0",
+          "refund_arrived": "0.0",
+          "refund_claimed": "0.0"
+        },
+        {
+          "carry": "111.61904761904765",
+          "month": 10,
+          "paid": "0.0",
+          "pool": "pool",
+          "receivable": "40.0",
+          "refund_arrived": "0.0",
+          "refund_claimed": "0.0"
+        },
+        {
+          "carry": "111.61904761904765",
+          "month": 11,
+          "paid": "0.0",
+          "pool": "pool",
+          "receivable": "40.0",
+          "refund_arrived": "0.0",
+          "refund_claimed": "0.0"
+        },
+        {
+          "carry": "111.61904761904765",
+          "month": 12,
+          "paid": "0.0",
+          "pool": "pool",
+          "receivable": "40.0",
+          "refund_arrived": "0.0",
+          "refund_claimed": "0.0"
+        },
+        {
+          "carry": "643.0390476190512",
+          "month": 13,
+          "paid": "0.0",
+          "pool": "pool",
+          "receivable": "0.0",
+          "refund_arrived": "40.0",
+          "refund_claimed": "0.0"
+        },
+        {
+          "carry": "1063.9990476190542",
+          "month": 14,
+          "paid": "0.0",
+          "pool": "pool",
+          "receivable": "0.0",
+          "refund_arrived": "0.0",
+          "refund_claimed": "0.0"
+        },
+        {
+          "carry": "1529.419047619058",
+          "month": 15,
+          "paid": "0.0",
+          "pool": "pool",
+          "receivable": "0.0",
+          "refund_arrived": "0.0",
+          "refund_claimed": "0.0"
+        },
+        {
+          "carry": "1980.0190476190614",
+          "month": 16,
+          "paid": "0.0",
+          "pool": "pool",
+          "receivable": "0.0",
+          "refund_arrived": "0.0",
+          "refund_claimed": "0.0"
+        },
+        {
+          "carry": "2445.439047619065",
+          "month": 17,
+          "paid": "0.0",
+          "pool": "pool",
+          "receivable": "0.0",
+          "refund_arrived": "0.0",
+          "refund_claimed": "0.0"
+        },
+        {
+          "carry": "2896.0390476190687",
+          "month": 18,
+          "paid": "0.0",
+          "pool": "pool",
+          "receivable": "0.0",
+          "refund_arrived": "0.0",
+          "refund_claimed": "0.0"
+        },
+        {
+          "carry": "3361.4590476190724",
+          "month": 19,
+          "paid": "0.0",
+          "pool": "pool",
+          "receivable": "0.0",
+          "refund_arrived": "0.0",
+          "refund_claimed": "0.0"
+        },
+        {
+          "carry": "3826.879047619076",
+          "month": 20,
+          "paid": "0.0",
+          "pool": "pool",
+          "receivable": "0.0",
+          "refund_arrived": "0.0",
+          "refund_claimed": "0.0"
+        },
+        {
+          "carry": "4277.479047619079",
+          "month": 21,
+          "paid": "0.0",
+          "pool": "pool",
+          "receivable": "0.0",
+          "refund_arrived": "0.0",
+          "refund_claimed": "0.0"
+        },
+        {
+          "carry": "4742.899047619083",
+          "month": 22,
+          "paid": "0.0",
+          "pool": "pool",
+          "receivable": "0.0",
+          "refund_arrived": "0.0",
+          "refund_claimed": "0.0"
+        },
+        {
+          "carry": "5193.499047619086",
+          "month": 23,
+          "paid": "0.0",
+          "pool": "pool",
+          "receivable": "0.0",
+          "refund_arrived": "0.0",
+          "refund_claimed": "0.0"
+        },
+        {
+          "carry": "5653.194519317202",
+          "month": 24,
+          "paid": "0.0",
+          "pool": "pool",
+          "receivable": "0.0",
+          "refund_arrived": "0.0",
+          "refund_claimed": "0.0"
+        },
+        {
+          "carry": "6118.614519317206",
+          "month": 25,
+          "paid": "0.0",
+          "pool": "pool",
+          "receivable": "0.0",
+          "refund_arrived": "0.0",
+          "refund_claimed": "0.0"
+        },
+        {
+          "carry": "6539.574519317209",
+          "month": 26,
+          "paid": "0.0",
+          "pool": "pool",
+          "receivable": "0.0",
+          "refund_arrived": "0.0",
+          "refund_claimed": "0.0"
+        },
+        {
+          "carry": "7004.9945193172125",
+          "month": 27,
+          "paid": "0.0",
+          "pool": "pool",
+          "receivable": "0.0",
+          "refund_arrived": "0.0",
+          "refund_claimed": "0.0"
+        },
+        {
+          "carry": "7455.594519317216",
+          "month": 28,
+          "paid": "0.0",
+          "pool": "pool",
+          "receivable": "0.0",
+          "refund_arrived": "0.0",
+          "refund_claimed": "0.0"
+        },
+        {
+          "carry": "7921.014519317219",
+          "month": 29,
+          "paid": "0.0",
+          "pool": "pool",
+          "receivable": "0.0",
+          "refund_arrived": "0.0",
+          "refund_claimed": "0.0"
+        },
+        {
+          "carry": "8371.614519317223",
+          "month": 30,
+          "paid": "0.0",
+          "pool": "pool",
+          "receivable": "0.0",
+          "refund_arrived": "0.0",
+          "refund_claimed": "0.0"
+        },
+        {
+          "carry": "8837.034519317227",
+          "month": 31,
+          "paid": "0.0",
+          "pool": "pool",
+          "receivable": "0.0",
+          "refund_arrived": "0.0",
+          "refund_claimed": "0.0"
+        },
+        {
+          "carry": "9302.45451931723",
+          "month": 32,
+          "paid": "0.0",
+          "pool": "pool",
+          "receivable": "0.0",
+          "refund_arrived": "0.0",
+          "refund_claimed": "0.0"
+        },
+        {
+          "carry": "9753.054519317235",
+          "month": 33,
+          "paid": "0.0",
+          "pool": "pool",
+          "receivable": "0.0",
+          "refund_arrived": "0.0",
+          "refund_claimed": "0.0"
+        },
+        {
+          "carry": "10218.474519317238",
+          "month": 34,
+          "paid": "0.0",
+          "pool": "pool",
+          "receivable": "0.0",
+          "refund_arrived": "0.0",
+          "refund_claimed": "0.0"
+        },
+        {
+          "carry": "10669.074519317242",
+          "month": 35,
+          "paid": "0.0",
+          "pool": "pool",
+          "receivable": "0.0",
+          "refund_arrived": "0.0",
+          "refund_claimed": "0.0"
+        },
+        {
+          "carry": "11121.694519317245",
+          "month": 36,
+          "paid": "0.0",
+          "pool": "pool",
+          "receivable": "0.0",
+          "refund_arrived": "0.0",
+          "refund_claimed": "0.0"
+        }
+      ],
+      "vat_rules": [
+        {
+          "deductible_input": "44.00000000000001",
+          "month": 1,
+          "output_tax": "0.0",
+          "pool": "pool",
+          "rule": "capex_vat"
+        },
+        {
+          "deductible_input": "0.0",
+          "month": 2,
+          "output_tax": "0.0",
+          "pool": "pool",
+          "rule": "capex_vat"
+        },
+        {
+          "deductible_input": "0.0",
+          "month": 3,
+          "output_tax": "0.0",
+          "pool": "pool",
+          "rule": "capex_vat"
+        },
+        {
+          "deductible_input": "0.0",
+          "month": 4,
+          "output_tax": "0.0",
+          "pool": "pool",
+          "rule": "capex_vat"
+        },
+        {
+          "deductible_input": "0.0",
+          "month": 5,
+          "output_tax": "0.0",
+          "pool": "pool",
+          "rule": "capex_vat"
+        },
+        {
+          "deductible_input": "0.0",
+          "month": 6,
+          "output_tax": "0.0",
+          "pool": "pool",
+          "rule": "capex_vat"
+        },
+        {
+          "deductible_input": "0.0",
+          "month": 7,
+          "output_tax": "0.0",
+          "pool": "pool",
+          "rule": "capex_vat"
+        },
+        {
+          "deductible_input": "0.0",
+          "month": 8,
+          "output_tax": "0.0",
+          "pool": "pool",
+          "rule": "capex_vat"
+        },
+        {
+          "deductible_input": "0.0",
+          "month": 9,
+          "output_tax": "0.0",
+          "pool": "pool",
+          "rule": "capex_vat"
+        },
+        {
+          "deductible_input": "0.0",
+          "month": 10,
+          "output_tax": "0.0",
+          "pool": "pool",
+          "rule": "capex_vat"
+        },
+        {
+          "deductible_input": "0.0",
+          "month": 11,
+          "output_tax": "0.0",
+          "pool": "pool",
+          "rule": "capex_vat"
+        },
+        {
+          "deductible_input": "0.0",
+          "month": 12,
+          "output_tax": "0.0",
+          "pool": "pool",
+          "rule": "capex_vat"
+        },
+        {
+          "deductible_input": "66.0",
+          "month": 13,
+          "output_tax": "0.0",
+          "pool": "pool",
+          "rule": "capex_vat"
+        },
+        {
+          "deductible_input": "0.0",
+          "month": 14,
+          "output_tax": "0.0",
+          "pool": "pool",
+          "rule": "capex_vat"
+        },
+        {
+          "deductible_input": "0.0",
+          "month": 15,
+          "output_tax": "0.0",
+          "pool": "pool",
+          "rule": "capex_vat"
+        },
+        {
+          "deductible_input": "0.0",
+          "month": 16,
+          "output_tax": "0.0",
+          "pool": "pool",
+          "rule": "capex_vat"
+        },
+        {
+          "deductible_input": "0.0",
+          "month": 17,
+          "output_tax": "0.0",
+          "pool": "pool",
+          "rule": "capex_vat"
+        },
+        {
+          "deductible_input": "0.0",
+          "month": 18,
+          "output_tax": "0.0",
+          "pool": "pool",
+          "rule": "capex_vat"
+        },
+        {
+          "deductible_input": "0.0",
+          "month": 19,
+          "output_tax": "0.0",
+          "pool": "pool",
+          "rule": "capex_vat"
+        },
+        {
+          "deductible_input": "0.0",
+          "month": 20,
+          "output_tax": "0.0",
+          "pool": "pool",
+          "rule": "capex_vat"
+        },
+        {
+          "deductible_input": "0.0",
+          "month": 21,
+          "output_tax": "0.0",
+          "pool": "pool",
+          "rule": "capex_vat"
+        },
+        {
+          "deductible_input": "0.0",
+          "month": 22,
+          "output_tax": "0.0",
+          "pool": "pool",
+          "rule": "capex_vat"
+        },
+        {
+          "deductible_input": "0.0",
+          "month": 23,
+          "output_tax": "0.0",
+          "pool": "pool",
+          "rule": "capex_vat"
+        },
+        {
+          "deductible_input": "0.0",
+          "month": 24,
+          "output_tax": "0.0",
+          "pool": "pool",
+          "rule": "capex_vat"
+        },
+        {
+          "deductible_input": "0.0",
+          "month": 25,
+          "output_tax": "0.0",
+          "pool": "pool",
+          "rule": "capex_vat"
+        },
+        {
+          "deductible_input": "0.0",
+          "month": 26,
+          "output_tax": "0.0",
+          "pool": "pool",
+          "rule": "capex_vat"
+        },
+        {
+          "deductible_input": "0.0",
+          "month": 27,
+          "output_tax": "0.0",
+          "pool": "pool",
+          "rule": "capex_vat"
+        },
+        {
+          "deductible_input": "0.0",
+          "month": 28,
+          "output_tax": "0.0",
+          "pool": "pool",
+          "rule": "capex_vat"
+        },
+        {
+          "deductible_input": "0.0",
+          "month": 29,
+          "output_tax": "0.0",
+          "pool": "pool",
+          "rule": "capex_vat"
+        },
+        {
+          "deductible_input": "0.0",
+          "month": 30,
+          "output_tax": "0.0",
+          "pool": "pool",
+          "rule": "capex_vat"
+        },
+        {
+          "deductible_input": "0.0",
+          "month": 31,
+          "output_tax": "0.0",
+          "pool": "pool",
+          "rule": "capex_vat"
+        },
+        {
+          "deductible_input": "0.0",
+          "month": 32,
+          "output_tax": "0.0",
+          "pool": "pool",
+          "rule": "capex_vat"
+        },
+        {
+          "deductible_input": "0.0",
+          "month": 33,
+          "output_tax": "0.0",
+          "pool": "pool",
+          "rule": "capex_vat"
+        },
+        {
+          "deductible_input": "0.0",
+          "month": 34,
+          "output_tax": "0.0",
+          "pool": "pool",
+          "rule": "capex_vat"
+        },
+        {
+          "deductible_input": "0.0",
+          "month": 35,
+          "output_tax": "0.0",
+          "pool": "pool",
+          "rule": "capex_vat"
+        },
+        {
+          "deductible_input": "0.0",
+          "month": 36,
+          "output_tax": "0.0",
+          "pool": "pool",
+          "rule": "capex_vat"
+        },
+        {
+          "deductible_input": "57.61904761904763",
+          "month": 1,
+          "output_tax": "0.0",
+          "pool": "pool",
+          "rule": "op_vat"
+        },
+        {
+          "deductible_input": "0.0",
+          "month": 2,
+          "output_tax": "0.0",
+          "pool": "pool",
+          "rule": "op_vat"
+        },
+        {
+          "deductible_input": "0.0",
+          "month": 3,
+          "output_tax": "0.0",
+          "pool": "pool",
+          "rule": "op_vat"
+        },
+        {
+          "deductible_input": "0.0",
+          "month": 4,
+          "output_tax": "0.0",
+          "pool": "pool",
+          "rule": "op_vat"
+        },
+        {
+          "deductible_input": "0.0",
+          "month": 5,
+          "output_tax": "0.0",
+          "pool": "pool",
+          "rule": "op_vat"
+        },
+        {
+          "deductible_input": "0.0",
+          "month": 6,
+          "output_tax": "0.0",
+          "pool": "pool",
+          "rule": "op_vat"
+        },
+        {
+          "deductible_input": "0.0",
+          "month": 7,
+          "output_tax": "0.0",
+          "pool": "pool",
+          "rule": "op_vat"
+        },
+        {
+          "deductible_input": "0.0",
+          "month": 8,
+          "output_tax": "0.0",
+          "pool": "pool",
+          "rule": "op_vat"
+        },
+        {
+          "deductible_input": "0.0",
+          "month": 9,
+          "output_tax": "0.0",
+          "pool": "pool",
+          "rule": "op_vat"
+        },
+        {
+          "deductible_input": "0.0",
+          "month": 10,
+          "output_tax": "0.0",
+          "pool": "pool",
+          "rule": "op_vat"
+        },
+        {
+          "deductible_input": "0.0",
+          "month": 11,
+          "output_tax": "0.0",
+          "pool": "pool",
+          "rule": "op_vat"
+        },
+        {
+          "deductible_input": "0.0",
+          "month": 12,
+          "output_tax": "0.0",
+          "pool": "pool",
+          "rule": "op_vat"
+        },
+        {
+          "deductible_input": "465.42000000000365",
+          "month": 13,
+          "output_tax": "0.0",
+          "pool": "pool",
+          "rule": "op_vat"
+        },
+        {
+          "deductible_input": "420.9600000000032",
+          "month": 14,
+          "output_tax": "0.0",
+          "pool": "pool",
+          "rule": "op_vat"
+        },
+        {
+          "deductible_input": "465.4200000000036",
+          "month": 15,
+          "output_tax": "0.0",
+          "pool": "pool",
+          "rule": "op_vat"
+        },
+        {
+          "deductible_input": "450.60000000000343",
+          "month": 16,
+          "output_tax": "0.0",
+          "pool": "pool",
+          "rule": "op_vat"
+        },
+        {
+          "deductible_input": "465.4200000000036",
+          "month": 17,
+          "output_tax": "0.0",
+          "pool": "pool",
+          "rule": "op_vat"
+        },
+        {
+          "deductible_input": "450.60000000000343",
+          "month": 18,
+          "output_tax": "0.0",
+          "pool": "pool",
+          "rule": "op_vat"
+        },
+        {
+          "deductible_input": "465.4200000000036",
+          "month": 19,
+          "output_tax": "0.0",
+          "pool": "pool",
+          "rule": "op_vat"
+        },
+        {
+          "deductible_input": "465.4200000000036",
+          "month": 20,
+          "output_tax": "0.0",
+          "pool": "pool",
+          "rule": "op_vat"
+        },
+        {
+          "deductible_input": "450.60000000000343",
+          "month": 21,
+          "output_tax": "0.0",
+          "pool": "pool",
+          "rule": "op_vat"
+        },
+        {
+          "deductible_input": "465.4200000000036",
+          "month": 22,
+          "output_tax": "0.0",
+          "pool": "pool",
+          "rule": "op_vat"
+        },
+        {
+          "deductible_input": "450.60000000000343",
+          "month": 23,
+          "output_tax": "0.0",
+          "pool": "pool",
+          "rule": "op_vat"
+        },
+        {
+          "deductible_input": "477.69547169811693",
+          "month": 24,
+          "output_tax": "18.0",
+          "pool": "pool",
+          "rule": "op_vat"
+        },
+        {
+          "deductible_input": "465.4200000000036",
+          "month": 25,
+          "output_tax": "0.0",
+          "pool": "pool",
+          "rule": "op_vat"
+        },
+        {
+          "deductible_input": "420.9600000000032",
+          "month": 26,
+          "output_tax": "0.0",
+          "pool": "pool",
+          "rule": "op_vat"
+        },
+        {
+          "deductible_input": "465.4200000000036",
+          "month": 27,
+          "output_tax": "0.0",
+          "pool": "pool",
+          "rule": "op_vat"
+        },
+        {
+          "deductible_input": "450.60000000000343",
+          "month": 28,
+          "output_tax": "0.0",
+          "pool": "pool",
+          "rule": "op_vat"
+        },
+        {
+          "deductible_input": "465.4200000000036",
+          "month": 29,
+          "output_tax": "0.0",
+          "pool": "pool",
+          "rule": "op_vat"
+        },
+        {
+          "deductible_input": "450.60000000000343",
+          "month": 30,
+          "output_tax": "0.0",
+          "pool": "pool",
+          "rule": "op_vat"
+        },
+        {
+          "deductible_input": "465.4200000000036",
+          "month": 31,
+          "output_tax": "0.0",
+          "pool": "pool",
+          "rule": "op_vat"
+        },
+        {
+          "deductible_input": "465.4200000000036",
+          "month": 32,
+          "output_tax": "0.0",
+          "pool": "pool",
+          "rule": "op_vat"
+        },
+        {
+          "deductible_input": "450.60000000000343",
+          "month": 33,
+          "output_tax": "0.0",
+          "pool": "pool",
+          "rule": "op_vat"
+        },
+        {
+          "deductible_input": "465.4200000000036",
+          "month": 34,
+          "output_tax": "0.0",
+          "pool": "pool",
+          "rule": "op_vat"
+        },
+        {
+          "deductible_input": "450.60000000000343",
+          "month": 35,
+          "output_tax": "0.0",
+          "pool": "pool",
+          "rule": "op_vat"
+        },
+        {
+          "deductible_input": "470.6200000000036",
+          "month": 36,
+          "output_tax": "18.0",
+          "pool": "pool",
+          "rule": "op_vat"
+        }
+      ]
+    }
+  },
+  "objective_value": -87722.54365502742,
+  "source_commit": "b490989e7ec3cd3746e548e9ee85bf8a8214c5c8"
+}

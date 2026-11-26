@@ -663,7 +663,8 @@ export default function ResultsPage() {
           idempotency_key: key,
         })
         setEvalRetryOk(res.hint ?? t('ies.result.evaluator_retry_ok', { evaluator: evaluatorRef }))
-        taskCtx.retry()
+        // 独立子 analysis 重试任务不重开原任务；保留 pickedTaskId 与当前结果页成功提示
+        if (res.task.id === pickedTaskId) taskCtx.retry()
       } catch (err) {
         setEvalRetryError(translateError(err as ApiError))
       } finally {

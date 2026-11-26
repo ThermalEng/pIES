@@ -1,6 +1,6 @@
-"""Worker 计算阶段命令(application/worker.compute_cases): 快照输入恢复与三段调用。
+"""Worker 计算阶段命令(application/worker.compute_cases): 快照输入恢复与 1.2.0 阶段调用。
 
-本模块提供 worker.md 规定的生成 / 执行 / 适配公开阶段命令，Worker 只按
+本模块提供 worker 驱动的 1.2.0 单向计算阶段命令，Worker 只按
 返回的公开 contract 驱动状态机，不复制领域规则：
 
 - ``load_compute_inputs``：把快照冻结的直接输入恢复为生成器可消费
@@ -9,10 +9,12 @@
   快照冻结的有效种子、固定资源字节加载、非预测序列物化）。本层不包装第
   二套输入对象，不做缺省；冻结结构缺件即实际结构错误（KeyError/TypeError/
   ValueError 等）直接可见，不重跑输入校验。
-- ``generate_bundle`` / ``execute_bundle`` / ``adapt_result``：经组合根
-  给定的已发布目录与运行时完成三段调用，本层不选型、不回退；生成后核对
-  Bundle 声明与快照冻结 provider 一致并预先解析执行器/适配器（不可解析
-  即明确失败，不等到求解后）。
+- ``predict_round_stage`` / ``generate_bundle`` / ``execute_saved_bundle`` /
+  ``restore_core_solution`` / ``run_algorithm_stage`` /
+  ``run_evaluators_stage`` / ``run_single_evaluator``：经组合根
+  给定的已发布目录与容器阶段运行时完成 1.2.0 阶段调用（其中
+  ``execute_saved_bundle`` 由 ``checkpoints`` 提供并经 ``application.worker``
+  统一导出）；本层不选型、不回退。
 - ``seal_output_objects`` / ``attach_evidence_objects``：声明文件字节以
   存储对象无损封存并挂接证据引用（字节原样入对象，不做文本校验与编码
   猜测；媒体类型取 manifest/回执声明）。
@@ -64,6 +66,7 @@ from iesplan.computation import (
     StopProbe,
     collect_resource_ids,
     materialize_non_predictive_series,
+    read_stop_reason,
     thaw_json_value,
 )
 from iesplan.computation.contracts.outputs import (
@@ -75,6 +78,7 @@ from iesplan.computation.result_adapters import (
     ResultAdapter,
     project_engineering_solution,
 )
+from iesplan.computation.runtime.job_runner_client import JobRunnerClientError
 from iesplan.computation.runtime.stage_runner import StageExecutionSpec
 from iesplan.core.content import (
     Content,
@@ -171,6 +175,7 @@ class ComputeExecutionPlane:
     solver_registry: Any | None = None
     evaluator_registry: Any | None = None
     algorithm_registry: Any | None = None
+    evaluator_max_concurrency: int = 1
 
 
 def _receipt_from_frozen(data: Mapping[str, Any]) -> ValidationReceipt:
@@ -213,9 +218,7 @@ def _restore_artifact_resources_config(
     artifact = ValidatedAssemblyArtifact(canonical_text=snapshot.canonical_assembly_text, receipt=receipt)
 
     body = snapshot.calc_config_snapshot
-    seed = body["seed"]
-    if not isinstance(seed, int) or isinstance(seed, bool):
-        seed = snapshot.random_seed
+    seed = snapshot.random_seed if body["seed"] is None else body["seed"]
     config = CalculationConfig.from_frozen({**body, "seed": seed})
 
     doc = json.loads(snapshot.canonical_assembly_text)
@@ -1108,13 +1111,6 @@ def _execute_one_evaluator(
             cleanup_on_reuse(stage_id)
         return cached
 
-    eval_stage = _stage_descriptor(plane, evaluator_ref, kind_label="evaluator")
-    eval_spec = (
-        plane.evaluator_registry.get(evaluator_ref)
-        if plane.evaluator_registry is not None
-        else None
-    )
-    declared_produces = tuple(eval_spec.produces) if eval_spec is not None else ()
     sol_content = (
         run_worker_transaction(
             session_factory, get_object_content, int(solution_ref["object_id"])
@@ -1122,100 +1118,109 @@ def _execute_one_evaluator(
         if preloaded_sol_content is _UNSET
         else preloaded_sol_content
     )
-    input_files = _build_evaluator_input_files(
-        engineering_solution=sol_content,
-        snapshot=snapshot,
-        artifact=artifact,
-        finance=finance,
-        materialized=materialized,
-        parameters=parameters,
-        receipt=receipt_dict,
-        bundle_id=attempt.bundle_id,
-        receipt_id=f"receipt-{attempt.attempt_id}-{stage_id}",
-    )
 
     outcome_box: list[dict[str, Any]] = []
-
-    def _persist(stage_result: Any) -> Any:
-        if stage_result.status == "fenced":
-            raise LeaseRejectedError("评价器阶段租约已失效(fenced)")
-        if stage_result.status == "cancelled":
-            raise StageExecutionError(
-                stage="evaluate",
-                status="cancelled",
-                termination_reason=stage_result.termination_reason,
-                detail=f"评价器阶段 {evaluator_ref!r} 已取消",
-                resources=dict(stage_result.resources or {}),
-            )
-
-        report_doc: dict[str, Any] | None = None
-        fin_eval: dict[str, Any] | None = None
-        result_entry: dict[str, Any]
-        if stage_result.status == "succeeded":
-            try:
-                contract, report_doc, fin_eval = _parse_evaluator_outputs(
-                    stage_result.outputs,
-                    evaluator_ref=evaluator_ref,
-                    declared_produces=declared_produces,
-                )
-                result_entry = {
-                    "evaluator": evaluator_ref,
-                    "status": "succeeded",
-                    "contract": contract,
-                    "error": None,
-                    "attempt_id": attempt.attempt_id,
-                    "finished_at": stage_result.finished_at,
-                }
-            except (KeyError, ValueError, TypeError, json.JSONDecodeError, OSError) as exc:
-                report_doc = None
-                fin_eval = None
-                result_entry = {
-                    "evaluator": evaluator_ref,
-                    "status": "failed",
-                    "contract": None,
-                    "error": {
-                        "code": "EVAL-PROTOCOL-001",
-                        "message": f"评价器 {evaluator_ref} 输出协议校验失败: {exc}",
-                        "detail": {"reason": "output_protocol_failed"},
-                    },
-                    "attempt_id": attempt.attempt_id,
-                    "finished_at": stage_result.finished_at,
-                }
-        else:
-            mapped_status = "timed_out" if stage_result.status == "timed_out" else "failed"
-            result_entry = {
-                "evaluator": evaluator_ref,
-                "status": mapped_status,
-                "contract": None,
-                "error": {
-                    "code": f"EVAL-{str(stage_result.status).upper()}",
-                    "message": (
-                        f"评价器 {evaluator_ref} 执行失败 "
-                        f"(status={stage_result.status}, reason={stage_result.termination_reason})"
-                    ),
-                    "detail": {
-                        "termination_reason": stage_result.termination_reason,
-                        "exit_code": stage_result.exit_code,
-                    },
-                },
-                "attempt_id": attempt.attempt_id,
-                "finished_at": stage_result.finished_at,
-            }
-        payload_doc = _persist_isolated_evaluator_checkpoint(
-            session_factory=session_factory,
-            save_checkpoint=save_checkpoint,
-            claim=claim,
-            number=number,
-            idx=idx,
-            result_entry=result_entry,
-            report_doc=report_doc,
-            fin_eval=fin_eval,
-            db_lock=db_lock,
-        )
-        outcome_box.append(payload_doc)
-        return payload_doc
+    stage_result: Any = None
 
     try:
+        eval_stage = _stage_descriptor(plane, evaluator_ref, kind_label="evaluator")
+        eval_spec = (
+            plane.evaluator_registry.get(evaluator_ref)
+            if plane.evaluator_registry is not None
+            else None
+        )
+        declared_produces = tuple(eval_spec.produces) if eval_spec is not None else ()
+        input_files = _build_evaluator_input_files(
+            engineering_solution=sol_content,
+            snapshot=snapshot,
+            artifact=artifact,
+            finance=finance,
+            materialized=materialized,
+            parameters=parameters,
+            receipt=receipt_dict,
+            bundle_id=attempt.bundle_id,
+            receipt_id=f"receipt-{attempt.attempt_id}-{stage_id}",
+        )
+
+        def _persist(stage_res: Any) -> Any:
+            if stage_res.status == "fenced":
+                raise LeaseRejectedError("评价器阶段租约已失效(fenced)")
+            if stage_res.status == "cancelled":
+                raise StageExecutionError(
+                    stage="evaluate",
+                    status="cancelled",
+                    termination_reason=stage_res.termination_reason,
+                    detail=f"评价器阶段 {evaluator_ref!r} 已取消",
+                    resources=dict(stage_res.resources or {}),
+                )
+
+            report_doc: dict[str, Any] | None = None
+            fin_eval: dict[str, Any] | None = None
+            result_entry: dict[str, Any]
+            if stage_res.status == "succeeded":
+                try:
+                    contract, report_doc, fin_eval = _parse_evaluator_outputs(
+                        stage_res.outputs,
+                        evaluator_ref=evaluator_ref,
+                        declared_produces=declared_produces,
+                    )
+                    result_entry = {
+                        "evaluator": evaluator_ref,
+                        "status": "succeeded",
+                        "contract": contract,
+                        "error": None,
+                        "attempt_id": attempt.attempt_id,
+                        "finished_at": stage_res.finished_at,
+                    }
+                except (KeyError, ValueError, TypeError, json.JSONDecodeError, OSError) as exc:
+                    report_doc = None
+                    fin_eval = None
+                    result_entry = {
+                        "evaluator": evaluator_ref,
+                        "status": "failed",
+                        "contract": None,
+                        "error": {
+                            "code": "EVAL-PROTOCOL-001",
+                            "message": f"评价器 {evaluator_ref} 输出协议校验失败: {exc}",
+                            "detail": {"reason": "output_protocol_failed"},
+                        },
+                        "attempt_id": attempt.attempt_id,
+                        "finished_at": stage_res.finished_at,
+                    }
+            else:
+                mapped_status = "timed_out" if stage_res.status == "timed_out" else "failed"
+                result_entry = {
+                    "evaluator": evaluator_ref,
+                    "status": mapped_status,
+                    "contract": None,
+                    "error": {
+                        "code": f"EVAL-{str(stage_res.status).upper()}",
+                        "message": (
+                            f"评价器 {evaluator_ref} 执行失败 "
+                            f"(status={stage_res.status}, reason={stage_res.termination_reason})"
+                        ),
+                        "detail": {
+                            "termination_reason": stage_res.termination_reason,
+                            "exit_code": stage_res.exit_code,
+                        },
+                    },
+                    "attempt_id": attempt.attempt_id,
+                    "finished_at": stage_res.finished_at,
+                }
+            payload_doc = _persist_isolated_evaluator_checkpoint(
+                session_factory=session_factory,
+                save_checkpoint=save_checkpoint,
+                claim=claim,
+                number=number,
+                idx=idx,
+                result_entry=result_entry,
+                report_doc=report_doc,
+                fin_eval=fin_eval,
+                db_lock=db_lock,
+            )
+            outcome_box.append(payload_doc)
+            return payload_doc
+
         stage_result = plane.stage_runner.run_stage(
             StageExecutionSpec(
                 attempt_id=attempt.attempt_id,
@@ -1238,6 +1243,39 @@ def _execute_one_evaluator(
             termination_reason="fenced",
             detail=f"评价器阶段 {evaluator_ref!r} 租约已失效(fenced)",
         ) from None
+    except (ComputationUnavailableError, JobRunnerClientError, OSError, ValueError) as exc:
+        if detach is not None and detach.is_set():
+            raise
+        stop_reason = read_stop_reason(stop)
+        if stop_reason in ("cancelled", "fenced"):
+            raise
+        if isinstance(exc, ComputationUnavailableError) and exc.reason in ("cancelled", "fenced"):
+            raise
+        return _persist_isolated_evaluator_checkpoint(
+            session_factory=session_factory,
+            save_checkpoint=save_checkpoint,
+            claim=claim,
+            number=number,
+            idx=idx,
+            result_entry={
+                "evaluator": evaluator_ref,
+                "status": "failed",
+                "contract": None,
+                "error": {
+                    "code": "EVAL-START-001",
+                    "message": f"评价器 {evaluator_ref} 启动失败: {exc}",
+                    "detail": {
+                        "reason": getattr(exc, "reason", None) or "evaluator_start_failed",
+                        "error_type": type(exc).__name__,
+                    },
+                },
+                "attempt_id": attempt.attempt_id,
+                "finished_at": None,
+            },
+            report_doc=None,
+            fin_eval=None,
+            db_lock=db_lock,
+        )
 
     if not outcome_box:
         if stage_result.status == "cancelled":
@@ -1357,11 +1395,22 @@ def run_evaluators_stage(
         )
 
     items = list(enumerate(evaluators))
-    if len(items) == 1:
-        raw_outcomes = [_run_idx(items[0])]
+    concurrency = int(plane.evaluator_max_concurrency)
+    if concurrency <= 0:
+        raise ValueError(f"evaluator_max_concurrency must be positive, got {concurrency}")
+    if len(items) == 1 or concurrency == 1:
+        raw_outcomes = [_run_idx(item) for item in items]
     else:
-        with ThreadPoolExecutor(max_workers=min(len(items), 4)) as pool:
-            raw_outcomes = list(pool.map(_run_idx, items))
+        with ThreadPoolExecutor(max_workers=min(len(items), concurrency)) as pool:
+            futures = [pool.submit(_run_idx, item) for item in items]
+            raw_outcomes = []
+            for future in futures:
+                try:
+                    raw_outcomes.append(future.result())
+                except BaseException:
+                    for pending in futures:
+                        pending.cancel()
+                    raise
 
     evaluator_results: list[dict[str, Any]] = []
     evaluation_reports: list[dict[str, Any]] = []

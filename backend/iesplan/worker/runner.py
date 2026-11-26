@@ -265,11 +265,13 @@ def _execute_evaluator_retry(ctx: RunContext, retry_req: Mapping[str, Any]) -> t
         ctx.session_factory, worker_app.load_compute_inputs,
         task.project_id, snapshot, materialize_series=False,
     )
+    source_task_id = int(retry_req["source_task_id"])
+    ctx.evidence_target_task_id = source_task_id
     predicted_series: tuple = ()
     if config.predictions:
         saved_pred = worker_app.run_worker_transaction(
-            ctx.session_factory, worker_app.load_prediction_checkpoint,
-            ctx.claim, 1,
+            ctx.session_factory, worker_app.load_prediction_checkpoint_for_task,
+            source_task_id, 1,
         )
         if saved_pred is not None:
             predicted_series = saved_pred[0]
@@ -649,6 +651,7 @@ def run_task(
                 db, claim, payload=payload, outcome=outcome,
                 actor_id=task.requested_by, output_files=output_files,
                 sealed_output_files=ctx.sealed_output_files,
+                evidence_task_id=ctx.evidence_target_task_id,
             ),
         )
         return "completed"

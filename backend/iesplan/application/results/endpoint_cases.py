@@ -216,9 +216,10 @@ def retry_evaluator_case(
     evaluator: str,
     idempotency_key: str,
 ) -> dict[str, Any]:
-    """单项评价器重试用例：校验失败评价与密封工程解，幂等重排现有任务执行单项评价。"""
+    """单项评价器重试用例：保留已完成源任务状态不变，派生独立 analysis 子任务重试单个评价器。"""
     from iesplan.application.worker import (
-        list_evaluator_retry_requests,
+        find_active_evaluator_retry_for_source,
+        load_evaluator_retry_directive,
         save_evaluator_retry_request,
     )
 
@@ -230,37 +231,56 @@ def retry_evaluator_case(
             params={"idempotency_key": idempotency_key},
         )
     try:
-        task = tasks_domain.get_task_for_update(db, task_id)
-        if task is None or task.project_id != project_id:
+        source_task = tasks_domain.get_task_for_update(db, task_id)
+        if source_task is None or source_task.project_id != project_id:
             raise NotFoundError(
                 "任务不存在",
                 params={"task_id": task_id, "project_id": project_id},
                 location={"object_type": "task", "object_id": task_id},
             )
-        existing_reqs = list_evaluator_retry_requests(db, task.id)
-        for req in existing_reqs:
-            if req.get("idempotency_key") == idempotency_key:
-                if req.get("evaluator") != evaluator:
-                    raise ConflictError(
-                        "同一幂等键已绑定其他评价器重试请求",
-                        params={"idempotency_key": idempotency_key, "evaluator": evaluator},
-                    )
-                return {
-                    "task": task_summary(db, task),
-                    "evaluator": evaluator,
-                    "replayed": True,
-                }
+        existing_task = tasks_domain.get_task_by_idempotency(db, project_id, idempotency_key)
+        if existing_task is not None:
+            directive = load_evaluator_retry_directive(db, existing_task.id)
+            if (
+                directive is None
+                or int(directive.get("source_task_id", -1)) != source_task.id
+                or directive.get("evaluator") != evaluator
+            ):
+                raise ConflictError(
+                    "同一幂等键已绑定其他任务或评价器重试请求",
+                    params={"idempotency_key": idempotency_key, "evaluator": evaluator},
+                )
+            return {
+                "task": task_summary(db, existing_task),
+                "source_task_id": source_task.id,
+                "evaluator": evaluator,
+                "replayed": True,
+            }
 
-        if task.status in ("queued", "running", "cancelling"):
+        if source_task.status != "completed":
             raise TaskConflictError(
-                "任务正在排队或执行中，暂不可发起单项评价器重试",
-                params={"task_id": task_id, "status": task.status},
+                "仅已完成任务支持单项评价器重试",
+                params={"task_id": task_id, "status": source_task.status},
             )
+        active_retry = find_active_evaluator_retry_for_source(db, source_task.id)
+        if active_retry is not None:
+            raise TaskConflictError(
+                "该任务已有进行中的单项评价器重试",
+                params={
+                    "task_id": task_id,
+                    "retry_task_id": active_retry.get("retry_task_id"),
+                },
+            )
+
         package = results_writes.latest_evidence(db, task_id)
         if package is None:
             raise NotFoundError("任务尚无证据包，无法发起单项评价器重试", params={"task_id": task_id})
 
-        snapshot = tasks_domain.get_snapshot(db, task.calc_snapshot_id) if task.calc_snapshot_id else None
+        snapshot = (
+            tasks_domain.get_snapshot(db, source_task.calc_snapshot_id)
+            if source_task.calc_snapshot_id
+            else None
+        )
         if snapshot is None:
             raise InvalidRequestError("任务缺少冻结计算快照，无法重试评价器", params={"task_id": task_id})
         configured_evals = {
@@ -296,40 +316,52 @@ def retry_evaluator_case(
                 },
             )
 
-        attempts = tasks_domain.list_attempts(db, task.id)
-        if not attempts:
-            raise TaskConflictError("任务无历史执行尝试，无法绑定单项重试", params={"task_id": task_id})
+        retry_task = tasks_domain.create_task(
+            db,
+            project_id=project_id,
+            type="analysis",
+            requested_by=user.id,
+            idempotency_key=idempotency_key,
+            calc_snapshot_id=source_task.calc_snapshot_id,
+            priority=source_task.priority,
+            max_attempts=1,
+        )
         save_evaluator_retry_request(
             db,
-            attempt_id=attempts[-1].id,
+            retry_task_id=retry_task.id,
+            source_task_id=source_task.id,
             evaluator=evaluator,
             base_evidence_id=package.id,
             idempotency_key=idempotency_key,
-            min_attempt_no=task.attempt_count + 1,
         )
-        updated_task = tasks_domain.set_task_status(
-            db, task.id, "queued", business_outcome=task.business_outcome
-        )
-        tasks_domain.clear_cancel(task.id)
         tasks_domain.append_diagnostic(
             db,
-            task_id=task.id,
+            task_id=retry_task.id,
             level="info",
             code="TASK_QUEUED",
             message=f"单项评价器重试已排队: {evaluator}",
-            context={"evaluator": evaluator, "base_evidence_id": package.id},
+            context={
+                "source_task_id": source_task.id,
+                "evaluator": evaluator,
+                "base_evidence_id": package.id,
+            },
         )
-        pool = POOL_BY_TYPE[task.type]
+        pool = POOL_BY_TYPE[retry_task.type]
         tasks_domain.enqueue(
-            task.id,
+            retry_task.id,
             pool,
-            task_type=task.type,
-            snapshot_id=task.calc_snapshot_id,
-            priority=task.priority,
+            task_type=retry_task.type,
+            snapshot_id=retry_task.calc_snapshot_id,
+            priority=retry_task.priority,
         )
-        summary = task_summary(db, updated_task)
+        summary = task_summary(db, retry_task)
         db.commit()
     except Exception:
         db.rollback()
         raise
-    return {"task": summary, "evaluator": evaluator, "replayed": False}
+    return {
+        "task": summary,
+        "source_task_id": source_task.id,
+        "evaluator": evaluator,
+        "replayed": False,
+    }

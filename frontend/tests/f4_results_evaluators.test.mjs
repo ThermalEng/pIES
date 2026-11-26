@@ -10,6 +10,7 @@ const { createElement } = await import('react')
 const { renderToStaticMarkup } = await import('react-dom/server')
 const { api } = await import('../src/api/client.ts')
 const { mapResultViewDtoToModel } = await import('../src/features/results/mappers.ts')
+const { selectDefaultTaskId, selectEvidencePackage } = await import('../src/lib/taskSelection.ts')
 const {
   FinancialAbsenceAlert,
   FinancialTabView,
@@ -117,7 +118,7 @@ for (const reason of ['evaluators_empty', 'evaluator_failed']) {
   assert.ok(html.includes(messagesZh[`ies.result.fin_absence_${reason}`]), `missing rendered text for ${reason}`)
 }
 
-// 4. Single-evaluator retry API sends exact path & payload
+// 4. Single-evaluator retry API sends exact path & payload and handles child analysis retry response
 {
   let captured = null
   globalThis.fetch = async (url, init = {}) => {
@@ -125,26 +126,26 @@ for (const reason of ['evaluators_empty', 'evaluator_failed']) {
     return new Response(
       JSON.stringify({
         task: {
-          id: 7,
-          type: 'optimization',
+          id: 42,
+          type: 'analysis',
           status: 'queued',
-          business_outcome: 'normal_completion',
+          business_outcome: null,
           priority: 0,
           calc_snapshot_id: 3,
           requested_by: 1,
-          requested_at: '2026-11-26T10:00:00Z',
-          attempt_count: 1,
-          max_attempts: 3,
-          idempotency_key: 'sub-opt-1',
+          requested_at: '2026-11-26T10:05:00Z',
+          attempt_count: 0,
+          max_attempts: 1,
+          idempotency_key: 'eval-retry-7-abc-123',
           superseded_by_task_id: null,
-          created_at: '2026-11-26T10:00:00Z',
+          created_at: '2026-11-26T10:05:00Z',
           updated_at: '2026-11-26T10:05:00Z',
-          result_available: true,
-          summary: { attempt_no: 2, percent: 0, stage: 'evaluating', queue_position: 1 },
+          result_available: false,
+          summary: { attempt_no: 0, percent: 0, stage: 'queued', queue_position: 1 },
         },
+        source_task_id: 7,
         evaluator: 'ies.evaluator.finance@1.0.0',
         replayed: false,
-        hint: null,
       }),
       { status: 201 },
     )
@@ -159,10 +160,41 @@ for (const reason of ['evaluators_empty', 'evaluator_failed']) {
     evaluator: 'ies.evaluator.finance@1.0.0',
     idempotency_key: 'eval-retry-7-abc-123',
   })
-  assert.equal(res.task.id, 7)
+  assert.equal(res.task.id, 42)
+  assert.equal(res.task.type, 'analysis')
   assert.equal(res.task.project_id, 5)
+  assert.equal(res.source_task_id, 7)
   assert.equal(res.evaluator, 'ies.evaluator.finance@1.0.0')
   assert.equal(res.replayed, false)
+  assert.equal(res.hint, null)
+}
+
+// 6. Child analysis retry task never hijacks default pickedTaskId / evidence selection from source task
+{
+  const history = [
+    { id: 7, type: 'optimization', completed_at: '2026-11-26T10:00:00Z' },
+    { id: 42, type: 'analysis', completed_at: '2026-11-26T10:10:00Z' },
+  ]
+  const defaultWinnerId = selectDefaultTaskId(
+    history.filter((tk) => tk.type === 'calc' || tk.type === 'optimization' || tk.type === 'uncertainty'),
+  )
+  assert.equal(defaultWinnerId, 7)
+  const sourceDetail = {
+    id: 7,
+    type: 'optimization',
+    status: 'completed',
+    attempts: [{ attempt_no: 1, finished_at: '2026-11-26T10:00:00Z' }],
+    evidence: [{ package_id: 26, status: 'available' }],
+  }
+  const retryDetail = {
+    id: 42,
+    type: 'analysis',
+    status: 'completed',
+    attempts: [{ attempt_no: 1, finished_at: '2026-11-26T10:10:00Z' }],
+    evidence: [],
+  }
+  assert.deepEqual(selectEvidencePackage([sourceDetail], null), { taskId: 7, packageId: 26 })
+  assert.deepEqual(selectEvidencePackage([sourceDetail, retryDetail], 7), { taskId: 7, packageId: 26 })
 }
 
 assert.equal(formatEvaluatorDetail(null), null)

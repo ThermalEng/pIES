@@ -1,0 +1,143 @@
+{
+  "case": "zero_realized_loss_sign_crossing_base",
+  "financial_evaluation": {
+    "amounts": [],
+    "annual_fixed_om": "50.0",
+    "annual_net_flows": [
+      "-100.0",
+      "65662.49999999939"
+    ],
+    "annual_operation": [
+      {
+        "demand_charge": "0.0",
+        "energy_net": "87599.99999999939",
+        "financial_year": 1,
+        "fixed_om": "50.0",
+        "maintenance": "0.0",
+        "net": "87549.99999999939",
+        "variable_om": "0.0"
+      }
+    ],
+    "assets": [],
+    "base_year": 2025,
+    "cash_movements": [],
+    "comparison": {
+      "mode": "absolute"
+    },
+    "construction_period": 0,
+    "construction_total": "100.0",
+    "construction_total_unit": "CNY",
+    "construction_units": [
+      {
+        "built": true,
+        "instance_id": "grid",
+        "mode": "mandatory",
+        "scales": [
+          {
+            "planning_variable_id": "v_cap",
+            "unit": "kW",
+            "value": 10.0
+          }
+        ],
+        "unit_id": "u_grid"
+      },
+      {
+        "built": true,
+        "instance_id": "pv1",
+        "mode": "mandatory",
+        "scales": [
+          {
+            "planning_variable_id": "v_pv",
+            "unit": "kWp",
+            "value": 9.999999999999334
+          }
+        ],
+        "unit_id": "u_pv"
+      }
+    ],
+    "cost_items": [],
+    "currency": "CNY",
+    "discount_rate": 0.08,
+    "evaluation": {
+      "base_year": 2025,
+      "currency": "CNY",
+      "discount_rate": "0.08",
+      "dynamic_payback": 0.0016447744146202324,
+      "dynamic_payback_unit": "year",
+      "dynamic_status": "recovered",
+      "evaluation_years": 1,
+      "irr": 655.6249999999939,
+      "irr_status": "normal",
+      "npv": "60698.61111111054629629629630",
+      "npv_unit": "CNY",
+      "price_basis": "tax_inclusive",
+      "rows": [
+        {
+          "cumulative": "-100.0",
+          "cumulative_discounted": "-100.0",
+          "discounted": "-100.0",
+          "net": "-100.0",
+          "year": 0
+        },
+        {
+          "cumulative": "65562.49999999939",
+          "cumulative_discounted": "60698.61111111054629629629630",
+          "discounted": "60798.61111111054629629629630",
+          "net": "65662.49999999939",
+          "year": 1
+        }
+      ],
+      "schema": "ies.project-evaluation",
+      "schema_version": "1.0.0",
+      "static_payback": 0.0015229392727965114,
+      "static_payback_unit": "year",
+      "static_status": "recovered"
+    },
+    "evaluation_years": 1,
+    "monthly_demand": [],
+    "net_cashflows": [],
+    "operation_years": 1,
+    "payments_applied": [
+      {
+        "amount": "100.0",
+        "ratio": 1.0,
+        "t": 0
+      }
+    ],
+    "price_basis": "tax_inclusive",
+    "profile_id": "zero-loss-sign-cross",
+    "schema": "ies.financial-evaluation",
+    "schema_version": "1.0.0",
+    "status": "evaluated",
+    "tax_cash": {
+      "depreciation": [],
+      "derived": [],
+      "income": [
+        {
+          "assessed": "21887.500000000004",
+          "loss_expired": "0.0",
+          "loss_generated": "0.0",
+          "loss_used": "0.0",
+          "rule": "cit",
+          "tax": "21887.500000000004",
+          "taxable_base": "87549.99999999939",
+          "year": 1
+        }
+      ],
+      "loss_balances": [
+        {
+          "amount": "0.0",
+          "last_usable_year": 3,
+          "rule": "cit",
+          "vintage_id": "v0",
+          "year": 1
+        }
+      ],
+      "refunds": [],
+      "vat": [],
+      "vat_rules": []
+    }
+  },
+  "objective_value": 60698.611111105696,
+  "source_commit": "b490989e7ec3cd3746e548e9ee85bf8a8214c5c8"
+}

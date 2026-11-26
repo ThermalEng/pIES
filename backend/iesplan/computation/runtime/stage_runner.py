@@ -96,6 +96,11 @@ class ContainerStagePolicy:
     stop_grace_seconds: int
     max_timeout_seconds: float
     allowed_environment_vars: tuple[str, ...] = ()
+    evaluator_max_concurrency: int = 1
+
+    def __post_init__(self) -> None:
+        if isinstance(self.evaluator_max_concurrency, bool) or self.evaluator_max_concurrency <= 0:
+            raise ValueError("evaluator_max_concurrency must be a positive integer")
 
 
 @dataclass(frozen=True, slots=True)
