@@ -72,10 +72,12 @@ def test_assemble_container_execution_plane_and_scheduler(monkeypatch) -> None:
     assert policy.pids_limit == settings.stage_pids_limit
     assert policy.tmpfs_size_mb == settings.stage_tmpfs_size_mb
     assert policy.stop_grace_seconds == settings.stage_stop_grace_seconds
+    assert policy.evaluator_max_concurrency == settings.stage_evaluator_max_concurrency
     plane = api.compute_execution_plane()
     assert plane is not None
     assert plane.stage_runner is api.stage_runner
     assert plane.stage_catalog is api.builtin_stage_catalog
+    assert plane.evaluator_max_concurrency == settings.stage_evaluator_max_concurrency
     assert "job_runner" in api.health()
 
     scheduler = assemble_embedded_scheduler(api)

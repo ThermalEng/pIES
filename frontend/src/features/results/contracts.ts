@@ -154,6 +154,7 @@ export interface RetryEvaluatorRequestDto {
 /** 单评价器重试响应 DTO(POST .../result/evaluators/retry)。 */
 export interface RetryEvaluatorResponseDto {
   task: TaskSummaryDto
+  source_task_id: number
   evaluator: string
   replayed: boolean
   hint: string | null

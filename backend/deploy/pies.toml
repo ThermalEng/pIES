@@ -50,3 +50,5 @@ pids_limit = 256
 tmpfs_size_mb = 512
 # 停止/取消临时容器宽限（秒）
 stop_grace_seconds = 5
+# 单个计算任务评价器阶段并发度上限
+evaluator_max_concurrency = 1

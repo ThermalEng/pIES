@@ -51,14 +51,18 @@ def _read(db: Session, object_id: int) -> dict:
     return json.loads(get_object(db, object_id))
 
 
-def _find(db: Session, claim: Claim, number: int, stage: str) -> tuple[int, dict] | None:
+def _find_for_task(db: Session, task_id: int, number: int, stage: str) -> tuple[int, dict] | None:
     purpose = f"round-{number}:{stage}"
-    for attempt in reversed(tasks.list_attempts(db, claim.task_id)):
+    for attempt in reversed(tasks.list_attempts(db, task_id)):
         refs = find_refs_by_owner(db, "task_checkpoint", attempt.id, "task_attempts")
         for ref in refs:
             if ref["purpose"] == purpose:
                 return int(ref["object_id"]), _read(db, ref["object_id"])
     return None
+
+
+def _find(db: Session, claim: Claim, number: int, stage: str) -> tuple[int, dict] | None:
+    return _find_for_task(db, claim.task_id, number, stage)
 
 
 def _publish(
@@ -397,11 +401,15 @@ def _restore_prediction_data(db: Session, data: Mapping[str, Any]) -> tuple:
     }
 
 
-def load_prediction_checkpoint(db: Session, claim: Claim, number: int) -> tuple | None:
-    checkpoint = _find(db, claim, number, "prediction")
+def load_prediction_checkpoint_for_task(db: Session, task_id: int, number: int) -> tuple | None:
+    checkpoint = _find_for_task(db, task_id, number, "prediction")
     if checkpoint is None:
         return None
     return _restore_prediction_data(db, checkpoint[1]["data"])
+
+
+def load_prediction_checkpoint(db: Session, claim: Claim, number: int) -> tuple | None:
+    return load_prediction_checkpoint_for_task(db, claim.task_id, number)
 
 
 def load_prediction_group_checkpoint(
@@ -738,20 +746,21 @@ def load_restoration_checkpoint(
 def save_evaluator_retry_request(
     db: Session,
     *,
-    attempt_id: int,
+    retry_task_id: int,
+    source_task_id: int,
     evaluator: str,
     base_evidence_id: int,
     idempotency_key: str,
-    min_attempt_no: int,
 ) -> int:
-    """Persist durable single-evaluator retry instruction owned by an existing attempt (flush-only)."""
+    """Persist durable single-evaluator retry directive linked to retry task and source task (flush-only)."""
     document = {
         "schema": "ies.evaluator-retry",
         "schema_version": "1.0.0",
+        "retry_task_id": retry_task_id,
+        "source_task_id": source_task_id,
         "evaluator": evaluator,
         "base_evidence_id": base_evidence_id,
         "idempotency_key": idempotency_key,
-        "min_attempt_no": min_attempt_no,
     }
     handle = put_object(
         db,
@@ -764,48 +773,51 @@ def save_evaluator_retry_request(
         db,
         handle.id,
         "evaluator_retry",
-        attempt_id,
-        "task_attempts",
+        retry_task_id,
+        "tasks",
+        purpose="evaluator_retry",
+    )
+    add_ref(
+        db,
+        handle.id,
+        "evaluator_retry_child",
+        source_task_id,
+        "tasks",
         purpose="evaluator_retry",
     )
     return handle.id
 
 
-def list_evaluator_retry_requests(db: Session, task_id: int) -> list[dict[str, Any]]:
-    """List durable evaluator retry requests associated with a task in chronological order."""
-    items: list[dict[str, Any]] = []
-    for attempt in tasks.list_attempts(db, task_id):
-        refs = find_refs_by_owner(db, "evaluator_retry", attempt.id, "task_attempts")
-        for ref in refs:
-            if ref["purpose"] == "evaluator_retry":
-                items.append(_read(db, ref["object_id"]))
-    return items
+def load_evaluator_retry_directive(db: Session, retry_task_id: int) -> dict[str, Any] | None:
+    """Load the durable evaluator retry directive for an independent child analysis task."""
+    refs = find_refs_by_owner(db, "evaluator_retry", retry_task_id, "tasks")
+    for ref in reversed(refs):
+        if ref["purpose"] == "evaluator_retry":
+            return _read(db, ref["object_id"])
+    return None
+
+
+def list_evaluator_retry_requests(db: Session, source_task_id: int) -> list[dict[str, Any]]:
+    """List durable evaluator retry directives targeting a completed source task."""
+    refs = find_refs_by_owner(db, "evaluator_retry_child", source_task_id, "tasks")
+    return [_read(db, ref["object_id"]) for ref in refs if ref["purpose"] == "evaluator_retry"]
+
+
+def find_active_evaluator_retry_for_source(
+    db: Session, source_task_id: int
+) -> dict[str, Any] | None:
+    """Return active queued/running/cancelling child retry directive for ``source_task_id`` if any."""
+    for req in reversed(list_evaluator_retry_requests(db, source_task_id)):
+        child_id = int(req.get("retry_task_id", 0))
+        child = tasks.get_task(db, child_id)
+        if child is not None and child.status in ("queued", "running", "cancelling"):
+            return req
+    return None
 
 
 def load_pending_evaluator_retry(db: Session, claim: Claim) -> dict[str, Any] | None:
-    """Return active single-evaluator retry directive if this attempt is executing a queued retry."""
-    attempt_row = None
-    for row in tasks.list_attempts(db, claim.task_id):
-        if row.id == claim.attempt_id:
-            attempt_row = row
-            break
-    if attempt_row is None:
-        return None
-    from iesplan import results as results_domain
-
-    latest = results_domain.latest_evidence_for_task(db, claim.task_id)
-    if latest is None:
-        return None
-    requests = list_evaluator_retry_requests(db, claim.task_id)
-    if not requests:
-        return None
-    latest_req = requests[-1]
-    if (
-        int(latest_req["base_evidence_id"]) == int(latest.id)
-        and int(attempt_row.attempt_no) >= int(latest_req["min_attempt_no"])
-    ):
-        return latest_req
-    return None
+    """Return durable single-evaluator retry directive when ``claim.task_id`` is a child retry."""
+    return load_evaluator_retry_directive(db, claim.task_id)
 
 
 def save_stage_outcome_checkpoint(

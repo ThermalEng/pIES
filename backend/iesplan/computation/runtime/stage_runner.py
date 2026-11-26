@@ -24,6 +24,12 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from iesplan.computation.protocols import StopProbe, check_provider_ref, read_stop_reason
+from iesplan.computation.runtime.job_runner_client import (
+    JobRunnerBadRequestError,
+    JobRunnerClientError,
+    JobRunnerConflictError,
+    JobRunnerNotFoundError,
+)
 from iesplan.core.content import Content, MemoryContent
 
 if TYPE_CHECKING:
@@ -31,12 +37,17 @@ if TYPE_CHECKING:
         CleanupStageResult,
         JobRunnerClient,
         StageInspection,
+        StartStageSpec,
     )
 
 _OUTPUT_READ_CHUNK_BYTES = 65_536
 _TERMINAL_CONTAINER_STATUSES = frozenset(("exited", "dead"))
 _VALID_STAGE_KINDS = frozenset(("predictor", "generator", "solver", "evaluator", "algorithm"))
 logger = logging.getLogger(__name__)
+
+
+class StageStartError(JobRunnerClientError):
+    """Startup failure raised specifically before/during container start_stage."""
 
 
 class ControlPlaneDetached(Exception):
@@ -96,6 +107,11 @@ class ContainerStagePolicy:
     stop_grace_seconds: int
     max_timeout_seconds: float
     allowed_environment_vars: tuple[str, ...] = ()
+    evaluator_max_concurrency: int = 1
+
+    def __post_init__(self) -> None:
+        if isinstance(self.evaluator_max_concurrency, bool) or self.evaluator_max_concurrency <= 0:
+            raise ValueError("evaluator_max_concurrency must be a positive integer")
 
 
 @dataclass(frozen=True, slots=True)
@@ -402,7 +418,7 @@ class ContainerStageRunner:
             stage_execution_id = inspection.stage_execution_id
             workspace_rel = inspection.workspace_rel
             if inspection.status == "created":
-                inspection = self.client.start_stage(
+                inspection = self._start_stage_checked(
                     StartStageSpec(
                         attempt_id=spec.attempt_id,
                         stage_id=spec.stage_id,
@@ -447,7 +463,7 @@ class ContainerStageRunner:
                 )
 
             self._prepare_workspace(workspace_rel, spec)
-            inspection = self.client.start_stage(
+            inspection = self._start_stage_checked(
                 StartStageSpec(
                     attempt_id=str(spec.attempt_id),
                     stage_id=spec.stage_id,
@@ -695,6 +711,16 @@ class ContainerStageRunner:
                 missing_required.append(rel_path)
         return collected, tuple(sorted(missing_required))
 
+    def _start_stage_checked(self, start_spec: StartStageSpec) -> StageInspection:
+        try:
+            return self.client.start_stage(start_spec)
+        except (
+            JobRunnerBadRequestError,
+            JobRunnerNotFoundError,
+            JobRunnerConflictError,
+        ) as exc:
+            raise StageStartError(str(exc), status_code=exc.status_code, detail=exc.detail) from exc
+
     @staticmethod
     def _derive_stage_status(
         inspection: StageInspection,
@@ -718,5 +744,6 @@ __all__ = [
     "ControlPlaneDetached",
     "StageExecutionSpec",
     "StageRunResult",
+    "StageStartError",
     "build_builtin_stage_catalog",
 ]

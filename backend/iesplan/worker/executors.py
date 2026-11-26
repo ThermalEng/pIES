@@ -137,6 +137,7 @@ class RunContext:
     sealed_output_files: dict = field(default_factory=dict)
     prediction_artifacts: dict = field(default_factory=dict)
     stage_resources: dict[str, Any] = field(default_factory=dict)
+    evidence_target_task_id: int | None = None
 
     def update_stage_resources(self, resources: Mapping[str, Any] | None) -> None:
         """Record latest observed stage-container cgroup v2 resource metrics."""

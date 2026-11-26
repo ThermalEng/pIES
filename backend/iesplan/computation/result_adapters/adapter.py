@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import math
 import multiprocessing
+import os
 import resource
 import shutil
 import tempfile
@@ -1229,12 +1230,15 @@ def _restore_in_current_process(
 ) -> None:
     """Execute streaming variable_map + primal_solution restoration and write solution.json."""
     header = _read_header(bundle_dir / PARAMETERS_PATH)
-    records_path = (bundle_dir / header["records"]).resolve()
-    bundle_root = bundle_dir.resolve()
-    if records_path != bundle_root and bundle_root not in records_path.parents:
-        _fail(f"records 路径越界: {header['records']!r}")
+    raw_records_ref = header["records"]
+    if os.path.isabs(raw_records_ref):
+        _fail(f"records 路径越界: {raw_records_ref!r}")
+    bundle_root_lex = Path(os.path.abspath(bundle_dir))
+    records_path = Path(os.path.abspath(bundle_root_lex / raw_records_ref))
+    if records_path == bundle_root_lex or bundle_root_lex not in records_path.parents:
+        _fail(f"records 路径越界: {raw_records_ref!r}")
     if not records_path.is_file():
-        _fail(f"缺失参数记录文件: {header['records']!r}")
+        _fail(f"缺失参数记录文件: {raw_records_ref!r}")
 
     primal_meta, primals = _stream_primal_solution(primal_path, header["column_count"])
     math_status = str(primal_meta["math_status"])
@@ -1547,6 +1551,49 @@ def _stream_content_to_path(
     _check_stop_and_deadline(stop, deadline, "输入准备阶段")
 
 
+def _existing_readable_path(content: Content | bytes) -> Path | None:
+    """Return existing local file path exposed by a file-backed Content handle, if any."""
+    src = getattr(content, "path", None)
+    if isinstance(src, Path) and src.is_file():
+        return src
+    return None
+
+
+def _materialize_readonly_input(
+    content: Content | bytes,
+    dest: Path,
+    *,
+    stop: StopProbe | None,
+    deadline: float,
+) -> Path:
+    """Materialize a read-only input file via hardlink/symlink when file-backed, else stream."""
+    _check_stop_and_deadline(stop, deadline, "输入准备阶段")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    src_path = _existing_readable_path(content)
+    if src_path is not None:
+        if src_path.resolve() == dest.resolve() or (
+            dest.exists() and os.path.samefile(src_path, dest)
+        ):
+            return dest
+        dest.unlink(missing_ok=True)
+        try:
+            os.link(src_path, dest)
+            _check_stop_and_deadline(stop, deadline, "输入准备阶段")
+            return dest
+        except OSError:
+            try:
+                os.symlink(src_path, dest)
+                _check_stop_and_deadline(stop, deadline, "输入准备阶段")
+                return dest
+            except OSError:
+                pass
+    else:
+        # Never truncate an existing hardlinked target inode when overwriting dest.
+        dest.unlink(missing_ok=True)
+    _stream_content_to_path(content, dest, stop=stop, deadline=deadline)
+    return dest
+
+
 def _allocate_solution_path(solution_output_path: Path | None) -> tuple[Path, Path | None]:
     if solution_output_path is not None:
         sol_path = Path(solution_output_path)
@@ -1745,9 +1792,14 @@ def project_engineering_solution(
     deadline = time.monotonic() + eff_timeout_s
     _check_stop_and_deadline(stop, deadline, "启动前")
 
-    sol_path, owned_tmp_dir = _allocate_solution_path(solution_output_path)
+    src_path = _existing_readable_path(solution_content) if solution_output_path is None else None
+    if src_path is not None:
+        sol_path, owned_tmp_dir = src_path, None
+    else:
+        sol_path, owned_tmp_dir = _allocate_solution_path(solution_output_path)
     try:
-        _stream_content_to_path(solution_content, sol_path, stop=stop, deadline=deadline)
+        if src_path is None:
+            _materialize_readonly_input(solution_content, sol_path, stop=stop, deadline=deadline)
         with tempfile.TemporaryDirectory(prefix="ies-project-") as tmp_dir:
             meta_path = Path(tmp_dir) / "restore_meta.json"
             hourly_str = str(hourly_output_path) if hourly_output_path is not None else None
@@ -1850,10 +1902,11 @@ class ResultAdapter:
             for rel_path, content in bundle.files.items():
                 if rel_path.endswith((".mps", "acceleration.json", "epigraphs.json")):
                     continue
-                _check_stop_and_deadline(stop, deadline, "输入准备阶段")
-                _stream_content_to_path(content, root / rel_path, stop=stop, deadline=deadline)
-            primal_path = root / PRIMAL_SOLUTION_OUTPUT_PATH
-            _stream_content_to_path(primal_raw, primal_path, stop=stop, deadline=deadline)
+                _materialize_readonly_input(content, root / rel_path, stop=stop, deadline=deadline)
+            primal_path = _existing_readable_path(primal_raw)
+            if primal_path is None:
+                primal_path = root / PRIMAL_SOLUTION_OUTPUT_PATH
+                _stream_content_to_path(primal_raw, primal_path, stop=stop, deadline=deadline)
             return _restore_from_bundle_dir_validated(
                 root,
                 primal_path,

@@ -52,6 +52,7 @@ _ALLOWED_DEPLOY_SECTIONS: dict[str, frozenset[str]] = {
         "pids_limit",
         "tmpfs_size_mb",
         "stop_grace_seconds",
+        "evaluator_max_concurrency",
     }),
 }
 
@@ -72,6 +73,7 @@ _APP_TOML_MAP: tuple[tuple[str, str, str], ...] = (
     ("stage_pids_limit", "stage", "pids_limit"),
     ("stage_tmpfs_size_mb", "stage", "tmpfs_size_mb"),
     ("stage_stop_grace_seconds", "stage", "stop_grace_seconds"),
+    ("stage_evaluator_max_concurrency", "stage", "evaluator_max_concurrency"),
 )
 
 
@@ -183,6 +185,8 @@ class Settings(BaseSettings):
     stage_tmpfs_size_mb: int = Field(exclude=True, gt=0)
     #: 停止/取消临时容器宽限(秒)
     stage_stop_grace_seconds: int = Field(exclude=True, ge=0, le=300)
+    #: 单个计算任务评价器阶段并发度上限
+    stage_evaluator_max_concurrency: int = Field(exclude=True, gt=0)
 
     def __init__(self, **values: Any) -> None:
         raw_path = (

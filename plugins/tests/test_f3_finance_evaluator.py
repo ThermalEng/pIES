@@ -353,8 +353,16 @@ def test_f3_campus_full_parity_with_forward_evaluator(tmp_path: Path) -> None:
         solution_output_path=sol_json_out,
     )
     assert outcome.compute_result.math_status == "solved"
+    baseline = read_json_file(
+        REPO_ROOT / "backend" / "tests" / "fixtures" / "f3_legacy_115_baselines" / "campus.json"
+    )
+    assert baseline["case"] == "campus"
+    assert baseline["source_commit"] == "b490989e7ec3cd3746e548e9ee85bf8a8214c5c8"
+
     restored_sol = read_engineering_solution(sol_json_out)
-    assert restored_sol.solver_summary.objective_value == pytest.approx(850_051.6, abs=1e-5)
+    assert restored_sol.solver_summary.objective_value == pytest.approx(
+        baseline["objective_value"], rel=1e-7, abs=1e-6
+    )
 
     expected_eval = evaluate_forward_finance(
         restored_sol.to_dict(),
@@ -386,6 +394,7 @@ def test_f3_campus_full_parity_with_forward_evaluator(tmp_path: Path) -> None:
     actual_eval = read_financial_evaluation(eval_out / "financial_evaluation.json")
     assert actual_eval["status"] == "evaluated"
     _assert_eval_close(actual_eval, expected_eval)
+    _assert_eval_close(actual_eval, baseline["financial_evaluation"])
 
 
 def test_f3_independent_algorithm_to_evaluator_without_bundle(tmp_path: Path) -> None:
