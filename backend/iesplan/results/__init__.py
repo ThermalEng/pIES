@@ -44,6 +44,7 @@ list_reports = persistence.list_reports
 planning_solution_params = rules.planning_solution_params
 point_index_assessment = persistence.point_index_assessment
 point_index_latest = persistence.point_index_latest
+publish_result_index = persistence.publish_result_index
 select_result = persistence.select_result
 
 ASSESSMENT_RULE_VERSION = rules.ASSESSMENT_RULE_VERSION
@@ -140,6 +141,7 @@ __all__ = [
     "planning_solution_params",
     "point_index_assessment",
     "point_index_latest",
+    "publish_result_index",
     "select_result",
     "summarize_assessment",
     "IMMUTABLE_TABLES",

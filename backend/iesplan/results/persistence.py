@@ -28,8 +28,8 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, Session, mapped_column
 
 from iesplan.db import (
-    Base,
     JSONB,
+    Base,
     bigint_pk,
     drop_trigger_function_sql,
     immutable_trigger_sql,
@@ -542,6 +542,55 @@ def insert_index(
         evidence_package_id=evidence_package_id,
         assessment_id=assessment_id,
         is_latest=True,
+    )
+    db.add(row)
+    db.flush()
+    return int(row.id)
+
+
+def publish_result_index(
+    db: Session,
+    *,
+    project_id: int,
+    project_version_id: int,
+    evidence_package_id: int,
+    assessment_id: int | None,
+    only_if_latest_owner_task_id: int | None = None,
+) -> int:
+    """Under version lock, publish ResultIndex while preserving newer tasks' is_latest on retry."""
+    _lock_result_index_version(db, project_version_id)
+    current_latest = (
+        db.execute(
+            select(ResultIndex).where(
+                ResultIndex.project_version_id == project_version_id,
+                ResultIndex.is_latest.is_(True),
+            )
+        )
+        .scalars()
+        .all()
+    )
+    promote_latest = True
+    if only_if_latest_owner_task_id is not None and current_latest:
+        latest_ev_ids = [row.evidence_package_id for row in current_latest]
+        latest_task_ids = set(
+            db.execute(
+                select(EvidencePackage.task_id).where(EvidencePackage.id.in_(latest_ev_ids))
+            )
+            .scalars()
+            .all()
+        )
+        if latest_task_ids != {only_if_latest_owner_task_id}:
+            promote_latest = False
+    if promote_latest and current_latest:
+        for existing in current_latest:
+            existing.is_latest = False
+        db.flush()
+    row = ResultIndex(
+        project_id=project_id,
+        project_version_id=project_version_id,
+        evidence_package_id=evidence_package_id,
+        assessment_id=assessment_id,
+        is_latest=promote_latest,
     )
     db.add(row)
     db.flush()

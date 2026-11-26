@@ -500,6 +500,26 @@ def insert_result_index(
     )
 
 
+def publish_result_index(
+    db: Session,
+    *,
+    project_id: int,
+    project_version_id: int,
+    evidence_package_id: int,
+    assessment_id: int | None,
+    only_if_latest_owner_task_id: int | None = None,
+) -> int:
+    """原子发布结果索引行; 单项评价器重试时仅当原任务仍为最新才接管 is_latest。"""
+    return results_domain.publish_result_index(
+        db,
+        project_id=project_id,
+        project_version_id=project_version_id,
+        evidence_package_id=evidence_package_id,
+        assessment_id=assessment_id,
+        only_if_latest_owner_task_id=only_if_latest_owner_task_id,
+    )
+
+
 def point_result_assessment(
     db: Session, *, evidence_package_id: int, assessment_id: int
 ) -> int:
