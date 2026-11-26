@@ -10,6 +10,7 @@ import { useI18n } from '../../i18n'
 import type { FinancialAbsence, FinancialEvaluationBlock, TaskOutcome } from '../../types'
 import { FinancialAbsenceAlert } from './resultHelpers'
 import {
+  asObjectArray,
   buildAssetBookValueChartData,
   buildCostItemChartGroups,
   buildDepreciationChartData,
@@ -50,19 +51,35 @@ export function TaxDetailsTabView({
   }
 
   const ccy = fin.currency ?? ''
-  const monthlyDemand = Array.isArray(fin.monthly_demand) ? fin.monthly_demand : []
-  const costItems = Array.isArray(fin.cost_items) ? fin.cost_items : []
-  const amounts = Array.isArray(fin.amounts) ? fin.amounts : []
-  const cashMovements = Array.isArray(fin.cash_movements) ? fin.cash_movements : []
-  const assets = Array.isArray(fin.assets) ? fin.assets : []
+  const monthlyDemand = asObjectArray<FinancialEvaluationBlock['monthly_demand'][number]>(
+    fin.monthly_demand,
+  )
+  const costItems = asObjectArray<FinancialEvaluationBlock['cost_items'][number]>(fin.cost_items)
+  const amounts = asObjectArray<FinancialEvaluationBlock['amounts'][number]>(fin.amounts)
+  const cashMovements = asObjectArray<FinancialEvaluationBlock['cash_movements'][number]>(
+    fin.cash_movements,
+  )
+  const assets = asObjectArray<FinancialEvaluationBlock['assets'][number]>(fin.assets)
   const taxCash = fin.tax_cash && typeof fin.tax_cash === 'object' ? fin.tax_cash : null
-  const vat = Array.isArray(taxCash?.vat) ? taxCash.vat : []
-  const vatRules = Array.isArray(taxCash?.vat_rules) ? taxCash.vat_rules : []
-  const refunds = Array.isArray(taxCash?.refunds) ? taxCash.refunds : []
-  const income = Array.isArray(taxCash?.income) ? taxCash.income : []
-  const depreciation = Array.isArray(taxCash?.depreciation) ? taxCash.depreciation : []
-  const lossBalances = Array.isArray(taxCash?.loss_balances) ? taxCash.loss_balances : []
-  const derived = Array.isArray(taxCash?.derived) ? taxCash.derived : []
+  const vat = asObjectArray<FinancialEvaluationBlock['tax_cash']['vat'][number]>(taxCash?.vat)
+  const vatRules = asObjectArray<FinancialEvaluationBlock['tax_cash']['vat_rules'][number]>(
+    taxCash?.vat_rules,
+  )
+  const refunds = asObjectArray<FinancialEvaluationBlock['tax_cash']['refunds'][number]>(
+    taxCash?.refunds,
+  )
+  const income = asObjectArray<FinancialEvaluationBlock['tax_cash']['income'][number]>(
+    taxCash?.income,
+  )
+  const depreciation = asObjectArray<FinancialEvaluationBlock['tax_cash']['depreciation'][number]>(
+    taxCash?.depreciation,
+  )
+  const lossBalances = asObjectArray<FinancialEvaluationBlock['tax_cash']['loss_balances'][number]>(
+    taxCash?.loss_balances,
+  )
+  const derived = asObjectArray<FinancialEvaluationBlock['tax_cash']['derived'][number]>(
+    taxCash?.derived,
+  )
 
   const demandChart = buildMonthlyDemandChartData(fin, selectedBinding || undefined)
   const vatChart = buildVatPoolChartData(fin, selectedPool || undefined)
@@ -79,7 +96,7 @@ export function TaxDetailsTabView({
     lossBalances.length +
     derived.length
   const amountRowCount = amounts.reduce(
-    (acc, a) => acc + (Array.isArray(a?.values) ? a.values.length : 0),
+    (acc, a) => acc + asObjectArray(a.values).length,
     0,
   )
   const relationsTotal = costItems.length + amountRowCount

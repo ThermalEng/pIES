@@ -1211,16 +1211,30 @@ export default function ResultsPage() {
                             </tr>
                           </thead>
                           <tbody>
-                            {finEval.construction_units.map((unit) => (
-                              <tr key={unit.unit_id}>
-                                <td>{unit.unit_id}</td>
-                                <td>{unit.instance_id}</td>
-                                <td>{t(`ies.result.fin_construction_${unit.mode}`)}</td>
+                            {finEval.construction_units
+                              .filter(
+                                (unit): unit is NonNullable<typeof unit> =>
+                                  unit !== null && typeof unit === 'object' && !Array.isArray(unit),
+                              )
+                              .map((unit, unitIdx) => (
+                              <tr key={unit.unit_id ?? unitIdx}>
+                                <td>{unit.unit_id ?? '—'}</td>
+                                <td>{unit.instance_id ?? '—'}</td>
+                                <td>
+                                  {unit.mode === 'mandatory' || unit.mode === 'optional'
+                                    ? t(`ies.result.fin_construction_${unit.mode}`)
+                                    : (unit.mode ?? '—')}
+                                </td>
                                 <td>{t(unit.built ? 'ies.result.fin_construction_yes' : 'ies.result.fin_construction_no')}</td>
                                 <td>
-                                  {(Array.isArray(unit.scales) ? unit.scales : []).map((scale) => (
-                                    <div key={scale.planning_variable_id}>
-                                      {scale.planning_variable_id}: {scale.value} {scale.unit}
+                                  {(Array.isArray(unit.scales) ? unit.scales : [])
+                                    .filter(
+                                      (scale): scale is NonNullable<typeof scale> =>
+                                        scale !== null && typeof scale === 'object' && !Array.isArray(scale),
+                                    )
+                                    .map((scale, scaleIdx) => (
+                                    <div key={scale.planning_variable_id ?? scaleIdx}>
+                                      {scale.planning_variable_id ?? '—'}: {scale.value ?? '—'} {scale.unit ?? ''}
                                     </div>
                                   ))}
                                 </td>

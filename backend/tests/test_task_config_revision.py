@@ -1102,7 +1102,7 @@ def test_submission_rejects_legacy_12_field_and_enforces_capabilities(monkeypatc
             "evaluators",
         ),
         ({"options": {"generator": {"unknown": 1}}}, "TASK-REQ-007", "options"),
-        ({"solver": "other.solver@1.0.0"}, "TASK-REQ-008", "solver"),
+        ({"solver": "other.solver@1.0.0"}, "TASK-REQ-007", "solver"),
     ):
         with pytest.raises(InvalidRequestError) as exc_info:
             _resolve_execution_refs(

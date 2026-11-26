@@ -13,6 +13,7 @@ import type {
   TaskOutcome,
 } from '../../types'
 import {
+  asObjectArray,
   buildAnnualOperationChartData,
   buildCashflowChartData,
   buildComparisonChartData,
@@ -82,12 +83,21 @@ export function FinancialTabView({
     difference: t('ies.result.comparison_diff'),
   }
 
-  const paymentsApplied = Array.isArray(fin?.payments_applied) ? fin.payments_applied : []
-  const netCashflows = Array.isArray(fin?.net_cashflows) ? fin.net_cashflows : []
-  const annualOperation = Array.isArray(fin?.annual_operation) ? fin.annual_operation : []
+  const paymentsApplied = asObjectArray<FinancialEvaluationBlock['payments_applied'][number]>(
+    fin?.payments_applied,
+  )
+  const netCashflows = asObjectArray<FinancialEvaluationBlock['net_cashflows'][number]>(
+    fin?.net_cashflows,
+  )
+  const annualOperation = asObjectArray<FinancialEvaluationBlock['annual_operation'][number]>(
+    fin?.annual_operation,
+  )
+  const evalRows = asObjectArray<FinancialEvaluationBlock['evaluation']['rows'][number]>(
+    fin?.evaluation?.rows,
+  )
 
   const cfRowCount = fin
-    ? Math.max(fin.evaluation?.rows?.length ?? 0, fin.annual_net_flows?.length ?? 0)
+    ? Math.max(evalRows.length, Array.isArray(fin.annual_net_flows) ? fin.annual_net_flows.length : 0)
     : 0
 
   return (
@@ -101,7 +111,7 @@ export function FinancialTabView({
           {cfChart && cfChart.categories.length > 0 ? (
             <Card
               title={
-                (fin.evaluation?.rows?.length ?? 0) > 0
+                evalRows.length > 0
                   ? t('ies.result.fin_cf_table')
                   : t('ies.result.fin_tax_flows')
               }
@@ -121,8 +131,8 @@ export function FinancialTabView({
                 bars={cfChart.bars.map((b) => ({ ...b, label: cfLabelMap[b.key] ?? b.label }))}
                 lines={cfChart.lines.map((l) => ({ ...l, label: cfLabelMap[l.key] ?? l.label }))}
                 ariaLabel={t('ies.result.fin_cf_table')}
-                yLabel={fin.currency}
-                unit={fin.currency}
+                yLabel={fin.currency ?? ''}
+                unit={fin.currency ?? ''}
                 hoverHint={t('ies.result.chart_hover_hint')}
               />
             </Card>
@@ -146,8 +156,8 @@ export function FinancialTabView({
                 categories={opChart.categories}
                 series={opChart.series.map((s) => ({ ...s, label: opLabelMap[s.key] ?? s.label }))}
                 ariaLabel={t('ies.result.fin_yearly')}
-                yLabel={fin.currency}
-                unit={fin.currency}
+                yLabel={fin.currency ?? ''}
+                unit={fin.currency ?? ''}
                 hoverHint={t('ies.result.chart_hover_hint')}
               />
             </Card>
@@ -163,10 +173,10 @@ export function FinancialTabView({
                   <table className="ies-metric-table">
                     <tbody>
                       {paymentsApplied.map((p, index) => (
-                        <tr key={`${p.t}-${index}`}>
-                          <td>{t('ies.result.fin_t_payment', { year: p.t })}</td>
+                        <tr key={`${p.t ?? index}-${index}`}>
+                          <td>{t('ies.result.fin_t_payment', { year: p.t ?? '—' })}</td>
                           <td>
-                            {p.ratio} × C = {p.amount} {fin.currency}
+                            {p.ratio ?? '—'} × C = {p.amount ?? '—'} {fin.currency ?? ''}
                           </td>
                         </tr>
                       ))}
@@ -185,13 +195,16 @@ export function FinancialTabView({
                 {netCashflows.length > 0 ? (
                   <table className="ies-metric-table">
                     <tbody>
-                      {netCashflows.map((item) => (
-                        <tr key={`${item.t}-${item.id}`}>
+                      {netCashflows.map((item, index) => (
+                        <tr key={`${item.t ?? index}-${item.id ?? index}`}>
                           <td>
-                            {item.id} / CF[t={item.t}] / {t(`ies.result.fin_net_${item.direction}`)}
+                            {item.id ?? '—'} / CF[t={item.t ?? '—'}] /{' '}
+                            {item.direction === 'inflow' || item.direction === 'outflow'
+                              ? t(`ies.result.fin_net_${item.direction}`)
+                              : (item.direction ?? '—')}
                           </td>
                           <td>
-                            {item.amount} {fin.currency}
+                            {item.amount ?? '—'} {fin.currency ?? ''}
                           </td>
                         </tr>
                       ))}
@@ -209,7 +222,7 @@ export function FinancialTabView({
           <Card
             title={t('ies.result.comparison')}
             actions={
-              fin.comparison && fin.comparison.mode !== 'absolute' ? (
+              fin.comparison && fin.comparison.mode && fin.comparison.mode !== 'absolute' ? (
                 <Button
                   variant="secondary"
                   size="sm"
@@ -222,9 +235,9 @@ export function FinancialTabView({
             className="ies-section"
           >
             <p className="ies-text-secondary" style={{ marginBottom: 'var(--ies-space-2)' }}>
-              {fin.comparison?.mode ?? 'absolute'}
+              {fin.comparison?.mode || '—'}
             </p>
-            {fin.comparison && fin.comparison.mode !== 'absolute' ? (
+            {fin.comparison && fin.comparison.mode && fin.comparison.mode !== 'absolute' ? (
               <>
                 <p className="ies-text-note">
                   {fin.comparison.comparability?.service_basis}
@@ -237,8 +250,8 @@ export function FinancialTabView({
                     categories={cmpChart.categories}
                     series={cmpChart.series.map((s) => ({ ...s, label: cmpLabelMap[s.key] ?? s.label }))}
                     ariaLabel={t('ies.result.comparison')}
-                    yLabel={fin.currency}
-                    unit={fin.currency}
+                    yLabel={fin.currency ?? ''}
+                    unit={fin.currency ?? ''}
                     showAllLabel={t('ies.result.show_all_series')}
                     hoverHint={t('ies.result.chart_hover_hint')}
                   />

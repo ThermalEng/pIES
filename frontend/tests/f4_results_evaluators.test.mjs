@@ -15,7 +15,9 @@ const {
   FinancialTabView,
   SealedFinancialCore,
   TaxDetailsTabView,
+  buildAnnualOperationChartData,
   buildCashflowChartData,
+  buildVatPoolChartData,
   formatEvaluatorDetail,
 } = await import('../src/features/results/index.ts')
 const { I18nProvider } = await import('../src/i18n/index.ts')
@@ -171,46 +173,77 @@ assert.equal(
   '{"exit_code":1,"termination_reason":"failed"}',
 )
 
-// 5. Partial financial block renders safely without crashing (ResultsPage/FinancialTabView/TaxDetailsTabView)
+// 5. Partial & malformed nested financial blocks render safely without crashing or fabricating comparison.mode
 {
-  const partialFin = {}
-  const coreHtml = renderToStaticMarkup(
-    createElement(
-      I18nProvider,
-      null,
-      createElement(SealedFinancialCore, { fin: partialFin }),
-    ),
-  )
-  assert.equal(coreHtml, '')
-  assert.deepEqual(buildCashflowChartData(partialFin), { categories: [], bars: [], lines: [] })
-  const finHtml = renderToStaticMarkup(
-    createElement(
-      I18nProvider,
-      null,
-      createElement(FinancialTabView, {
-        fin: partialFin,
-        finAbsence: null,
-        outcome: 'normal_completion',
-        metrics: null,
-        currency: 'CNY',
-        onOpenDetail: () => {},
-      }),
-    ),
-  )
-  assert.ok(finHtml.length > 0)
-  const taxHtml = renderToStaticMarkup(
-    createElement(
-      I18nProvider,
-      null,
-      createElement(TaxDetailsTabView, {
-        fin: partialFin,
-        finAbsence: null,
-        outcome: 'normal_completion',
-        onOpenDetail: () => {},
-      }),
-    ),
-  )
-  assert.ok(taxHtml.length > 0)
+  const malformedFin = {
+    evaluation: { rows: [null, {}] },
+    annual_operation: [null, {}],
+    payments_applied: [null, {}],
+    net_cashflows: [null, {}],
+    monthly_demand: [null, {}],
+    cost_items: [null, {}],
+    amounts: [null, { axis: 'scalar', unit: 'CNY', values: [null] }],
+    assets: [null, { book_values: [null] }],
+    tax_cash: {
+      vat: [null, {}],
+      income: [null, {}],
+      depreciation: [null, {}],
+    },
+    comparison: {},
+  }
+  for (const [label, finCandidate] of [
+    ['empty', {}],
+    ['malformed', malformedFin],
+  ]) {
+    const coreHtml = renderToStaticMarkup(
+      createElement(
+        I18nProvider,
+        null,
+        createElement(SealedFinancialCore, { fin: finCandidate }),
+      ),
+    )
+    if (label === 'empty') {
+      assert.equal(coreHtml, '')
+    } else {
+      assert.ok(!coreHtml.includes('fin_pb_undefined'), 'missing payback status must not leak undefined i18n key')
+    }
+    assert.deepEqual(buildCashflowChartData({}), { categories: [], bars: [], lines: [] })
+    assert.doesNotThrow(() => buildCashflowChartData(finCandidate))
+    assert.doesNotThrow(() => buildAnnualOperationChartData(finCandidate))
+    assert.doesNotThrow(() => buildVatPoolChartData(finCandidate))
+
+    const finHtml = renderToStaticMarkup(
+      createElement(
+        I18nProvider,
+        null,
+        createElement(FinancialTabView, {
+          fin: finCandidate,
+          finAbsence: null,
+          outcome: 'normal_completion',
+          metrics: null,
+          currency: 'CNY',
+          onOpenDetail: () => {},
+        }),
+      ),
+    )
+    assert.ok(finHtml.length > 0)
+    assert.ok(finHtml.includes('—'), 'missing comparison.mode must render explicit absence marker')
+    assert.ok(!finHtml.includes('absolute'), 'missing comparison.mode must not default to absolute')
+
+    const taxHtml = renderToStaticMarkup(
+      createElement(
+        I18nProvider,
+        null,
+        createElement(TaxDetailsTabView, {
+          fin: finCandidate,
+          finAbsence: null,
+          outcome: 'normal_completion',
+          onOpenDetail: () => {},
+        }),
+      ),
+    )
+    assert.ok(taxHtml.length > 0)
+  }
 }
 
 console.log('ALL F4 RESULTS/EVALUATOR CHECKS PASSED')

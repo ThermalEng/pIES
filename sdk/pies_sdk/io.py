@@ -337,27 +337,143 @@ _FIN_EVAL_STR_FIELDS: tuple[str, ...] = (
     "construction_total_unit",
     "annual_fixed_om",
 )
-_FIN_EVAL_LIST_FIELDS: tuple[str, ...] = (
-    "payments_applied",
-    "net_cashflows",
-    "cost_items",
-    "amounts",
-    "cash_movements",
-    "assets",
-    "construction_units",
-    "annual_operation",
-    "monthly_demand",
-    "annual_net_flows",
+# Row field type specs: "str" (non-empty str), "int" (non-bool int),
+# "num" (non-empty numeric/formatted str or finite number), "map" (Mapping)
+_FIN_EVAL_ROW_SPECS: dict[str, tuple[tuple[str, str], ...]] = {
+    "payments_applied": (("t", "int"), ("ratio", "num"), ("amount", "num")),
+    "net_cashflows": (("id", "str"), ("t", "int"), ("direction", "str"), ("amount", "num")),
+    "cost_items": (
+        ("instance_id", "str"),
+        ("finance_type", "str"),
+        ("component", "str"),
+        ("item_id", "str"),
+        ("axis", "str"),
+        ("period", "int"),
+        ("unit", "str"),
+        ("raw", "num"),
+        ("gross", "num"),
+        ("deductible_input", "num"),
+        ("net_basis", "num"),
+    ),
+    "amounts": (("id", "str"), ("axis", "str"), ("unit", "str")),
+    "cash_movements": (
+        ("id", "str"),
+        ("axis", "str"),
+        ("period", "int"),
+        ("direction", "str"),
+        ("price_basis", "str"),
+        ("raw", "num"),
+        ("gross", "num"),
+        ("deductible_input", "num"),
+        ("net_basis", "num"),
+        ("output_tax", "num"),
+        ("net_revenue", "num"),
+        ("end_unpaid", "num"),
+    ),
+    "assets": (("id", "str"), ("basis", "num"), ("capitalized_at", "map"), ("available_from", "int")),
+    "annual_operation": (
+        ("financial_year", "int"),
+        ("energy_net", "num"),
+        ("variable_om", "num"),
+        ("fixed_om", "num"),
+        ("maintenance", "num"),
+        ("demand_charge", "num"),
+        ("net", "num"),
+    ),
+    "monthly_demand": (
+        ("billing_id", "str"),
+        ("charge_id", "str"),
+        ("calendar_year", "int"),
+        ("calendar_month", "int"),
+        ("financial_year", "int"),
+        ("peak_power", "num"),
+        ("peak_unit", "str"),
+        ("rate", "map"),
+        ("charge", "num"),
+    ),
+}
+_FIN_EVAL_TAX_ROW_SPECS: dict[str, tuple[tuple[str, str], ...]] = {
+    "vat": (
+        ("pool", "str"),
+        ("month", "int"),
+        ("paid", "num"),
+        ("refund_claimed", "num"),
+        ("refund_arrived", "num"),
+        ("carry", "num"),
+        ("receivable", "num"),
+    ),
+    "vat_rules": (
+        ("rule", "str"),
+        ("pool", "str"),
+        ("month", "int"),
+        ("output_tax", "num"),
+        ("deductible_input", "num"),
+    ),
+    "refunds": (("pool", "str"), ("period", "int"), ("arrival_period", "int"), ("amount", "num")),
+    "income": (
+        ("rule", "str"),
+        ("year", "int"),
+        ("taxable_base", "num"),
+        ("loss_used", "num"),
+        ("loss_generated", "num"),
+        ("loss_expired", "num"),
+        ("assessed", "num"),
+        ("tax", "num"),
+    ),
+    "depreciation": (("rule", "str"), ("base_from", "map"), ("year", "int"), ("amount", "num")),
+    "loss_balances": (
+        ("rule", "str"),
+        ("vintage_id", "str"),
+        ("year", "int"),
+        ("last_usable_year", "int"),
+        ("amount", "num"),
+    ),
+    "derived": (
+        ("rule", "str"),
+        ("axis", "str"),
+        ("period", "int"),
+        ("assessed", "num"),
+        ("payment_period", "int"),
+        ("paid", "num"),
+    ),
+}
+_FIN_EVAL_ROW_FIELDS: tuple[tuple[str, str], ...] = (
+    ("year", "int"),
+    ("net", "num"),
+    ("discounted", "num"),
+    ("cumulative", "num"),
+    ("cumulative_discounted", "num"),
 )
-_FIN_EVAL_TAX_LIST_FIELDS: tuple[str, ...] = (
-    "depreciation",
-    "derived",
-    "income",
-    "loss_balances",
-    "refunds",
-    "vat",
-    "vat_rules",
-)
+
+
+def _is_scalar_kind(value: Any, kind: str) -> bool:
+    if kind == "str":
+        return isinstance(value, str) and bool(value)
+    if kind == "int":
+        return not isinstance(value, bool) and isinstance(value, int)
+    if kind == "num":
+        return (isinstance(value, str) and bool(value)) or (
+            not isinstance(value, bool) and isinstance(value, (int, float))
+        )
+    if kind == "map":
+        return isinstance(value, Mapping)
+    return False
+
+
+def _validate_fin_row_list(
+    rows: Any,
+    label: str,
+    field_specs: tuple[tuple[str, str], ...],
+) -> list[Any]:
+    if not isinstance(rows, list):
+        raise StageIOError(f"{label} requires list")
+    for idx, row in enumerate(rows):
+        if not isinstance(row, Mapping):
+            raise StageIOError(f"{label}[{idx}] must be a JSON object")
+        for key, kind in field_specs:
+            if not _is_scalar_kind(row.get(key), kind):
+                raise StageIOError(f"{label}[{idx}] missing or invalid {kind} field {key!r}")
+    return rows
 
 
 def _validate_financial_evaluation_mapping(data: Any) -> dict[str, Any]:
@@ -371,15 +487,14 @@ def _validate_financial_evaluation_mapping(data: Any) -> dict[str, Any]:
         )
 
     for key in _FIN_EVAL_STR_FIELDS:
-        val = data.get(key)
-        if not isinstance(val, str) or not val:
+        if not _is_scalar_kind(data.get(key), "str"):
             raise StageIOError(f"FinancialEvaluation requires non-empty string {key!r}")
     if not isinstance(data.get("profile_id"), str):
         raise StageIOError("FinancialEvaluation requires string 'profile_id'")
 
     for key, minimum in _FIN_EVAL_INT_MINS:
         val = data.get(key)
-        if isinstance(val, bool) or not isinstance(val, int) or val < minimum:
+        if not _is_scalar_kind(val, "int") or val < minimum:
             raise StageIOError(
                 f"FinancialEvaluation requires integer {key!r} >= {minimum}, got {val!r}"
             )
@@ -390,34 +505,86 @@ def _validate_financial_evaluation_mapping(data: Any) -> dict[str, Any]:
             f"FinancialEvaluation requires finite number 'discount_rate', got {discount_rate!r}"
         )
 
-    for key in _FIN_EVAL_LIST_FIELDS:
-        if not isinstance(data.get(key), list):
-            raise StageIOError(f"FinancialEvaluation requires list {key!r}")
+    for key, specs in _FIN_EVAL_ROW_SPECS.items():
+        _validate_fin_row_list(data.get(key), f"FinancialEvaluation.{key}", specs)
+
+    for idx, amt in enumerate(data["amounts"]):
+        _validate_fin_row_list(
+            amt.get("values"),
+            f"FinancialEvaluation.amounts[{idx}].values",
+            (("period", "int"), ("value", "num")),
+        )
+    for idx, mov in enumerate(data["cash_movements"]):
+        _validate_fin_row_list(
+            mov.get("payments"),
+            f"FinancialEvaluation.cash_movements[{idx}].payments",
+            (("at", "map"), ("ratio", "num"), ("amount", "num")),
+        )
+    for idx, asset in enumerate(data["assets"]):
+        _validate_fin_row_list(
+            asset.get("book_values"),
+            f"FinancialEvaluation.assets[{idx}].book_values",
+            (("year", "int"), ("value", "num")),
+        )
+
+    units = data.get("construction_units")
+    if not isinstance(units, list):
+        raise StageIOError("FinancialEvaluation.construction_units requires list")
+    for idx, unit in enumerate(units):
+        if not isinstance(unit, Mapping):
+            raise StageIOError(f"FinancialEvaluation.construction_units[{idx}] must be a JSON object")
+        for key, kind in (("unit_id", "str"), ("instance_id", "str"), ("mode", "str")):
+            if not _is_scalar_kind(unit.get(key), kind):
+                raise StageIOError(
+                    f"FinancialEvaluation.construction_units[{idx}] invalid field {key!r}"
+                )
+        if not isinstance(unit.get("built"), bool):
+            raise StageIOError(f"FinancialEvaluation.construction_units[{idx}] requires bool 'built'")
+        _validate_fin_row_list(
+            unit.get("scales"),
+            f"FinancialEvaluation.construction_units[{idx}].scales",
+            (("planning_variable_id", "str"), ("unit", "str")),
+        )
+        for s_idx, scale in enumerate(unit["scales"]):
+            if not _is_scalar_kind(scale.get("value"), "num"):
+                raise StageIOError(
+                    f"FinancialEvaluation.construction_units[{idx}].scales[{s_idx}] invalid 'value'"
+                )
+
+    annual_flows = data.get("annual_net_flows")
+    if not isinstance(annual_flows, list) or not all(
+        _is_scalar_kind(v, "num") for v in annual_flows
+    ):
+        raise StageIOError("FinancialEvaluation.annual_net_flows requires list of numbers/strings")
 
     comparison = data.get("comparison")
-    if (
-        not isinstance(comparison, Mapping)
-        or not isinstance(comparison.get("mode"), str)
-        or not comparison["mode"]
-    ):
+    if not isinstance(comparison, Mapping) or not _is_scalar_kind(comparison.get("mode"), "str"):
         raise StageIOError("FinancialEvaluation requires 'comparison' object with non-empty 'mode'")
+    if comparison["mode"] == "difference":
+        eval_flows = comparison.get("evaluation_net_flows")
+        if not isinstance(eval_flows, list) or not all(
+            _is_scalar_kind(v, "num") for v in eval_flows
+        ):
+            raise StageIOError(
+                "FinancialEvaluation.comparison requires 'evaluation_net_flows' in difference mode"
+            )
 
     tax_cash = data.get("tax_cash")
     if not isinstance(tax_cash, Mapping):
         raise StageIOError("FinancialEvaluation requires 'tax_cash' object")
-    for key in _FIN_EVAL_TAX_LIST_FIELDS:
-        if not isinstance(tax_cash.get(key), list):
-            raise StageIOError(f"FinancialEvaluation.tax_cash requires list {key!r}")
+    for key, specs in _FIN_EVAL_TAX_ROW_SPECS.items():
+        _validate_fin_row_list(tax_cash.get(key), f"FinancialEvaluation.tax_cash.{key}", specs)
 
     evaluation = data.get("evaluation")
     if not isinstance(evaluation, Mapping):
         raise StageIOError("FinancialEvaluation requires 'evaluation' object")
-    if not isinstance(evaluation.get("rows"), list):
-        raise StageIOError("FinancialEvaluation.evaluation requires list 'rows'")
-    if (
-        "npv" not in evaluation
-        or not isinstance(evaluation.get("irr_status"), str)
-        or not evaluation["irr_status"]
+    _validate_fin_row_list(
+        evaluation.get("rows"),
+        "FinancialEvaluation.evaluation.rows",
+        _FIN_EVAL_ROW_FIELDS,
+    )
+    if not _is_scalar_kind(evaluation.get("npv"), "num") or not _is_scalar_kind(
+        evaluation.get("irr_status"), "str"
     ):
         raise StageIOError("FinancialEvaluation.evaluation requires 'npv' and non-empty 'irr_status'")
 

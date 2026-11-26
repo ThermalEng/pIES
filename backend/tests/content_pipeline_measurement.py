@@ -132,14 +132,22 @@ def main():
             executor = PreparationExecutor()
             policy = DeploymentPolicy(
                 executables=executor.descriptor.executables,
-                max_timeout_seconds=saved.bundle.manifest.command["timeout_seconds"],
+                max_timeout_seconds=600,
                 max_memory_mib=8192, max_cpu_cores=2,
             )
             runtime = SolverRuntime(registry=build_executor_registry([executor]), policy=policy)
 
             def prepare():
                 try:
-                    runtime.run(saved.bundle, context)
+                    runtime.run(
+                        saved.bundle,
+                        context,
+                        command={
+                            "executor": executor.ref,
+                            "executable": "ies.solver.highs@1.7.2",
+                            "timeout_seconds": 600,
+                        },
+                    )
                 except Prepared:
                     return
                 raise AssertionError("preparation-only executor was not called")

@@ -68,26 +68,110 @@ _FIN_EVAL_INT_MINS = (
     ("construction_period", 0),
     ("base_year", 1),
 )
-_FIN_EVAL_LIST_FIELDS = (
-    "payments_applied",
-    "net_cashflows",
-    "cost_items",
-    "amounts",
-    "cash_movements",
-    "assets",
-    "construction_units",
-    "annual_operation",
-    "monthly_demand",
-    "annual_net_flows",
-)
-_FIN_EVAL_TAX_LIST_FIELDS = (
-    "depreciation",
-    "derived",
-    "income",
-    "loss_balances",
-    "refunds",
-    "vat",
-    "vat_rules",
+_FIN_EVAL_ROW_SPECS: dict[str, tuple[tuple[str, str], ...]] = {
+    "payments_applied": (("t", "int"), ("ratio", "num"), ("amount", "num")),
+    "net_cashflows": (("id", "str"), ("t", "int"), ("direction", "str"), ("amount", "num")),
+    "cost_items": (
+        ("instance_id", "str"),
+        ("finance_type", "str"),
+        ("component", "str"),
+        ("item_id", "str"),
+        ("axis", "str"),
+        ("period", "int"),
+        ("unit", "str"),
+        ("raw", "num"),
+        ("gross", "num"),
+        ("deductible_input", "num"),
+        ("net_basis", "num"),
+    ),
+    "amounts": (("id", "str"), ("axis", "str"), ("unit", "str")),
+    "cash_movements": (
+        ("id", "str"),
+        ("axis", "str"),
+        ("period", "int"),
+        ("direction", "str"),
+        ("price_basis", "str"),
+        ("raw", "num"),
+        ("gross", "num"),
+        ("deductible_input", "num"),
+        ("net_basis", "num"),
+        ("output_tax", "num"),
+        ("net_revenue", "num"),
+        ("end_unpaid", "num"),
+    ),
+    "assets": (("id", "str"), ("basis", "num"), ("capitalized_at", "map"), ("available_from", "int")),
+    "annual_operation": (
+        ("financial_year", "int"),
+        ("energy_net", "num"),
+        ("variable_om", "num"),
+        ("fixed_om", "num"),
+        ("maintenance", "num"),
+        ("demand_charge", "num"),
+        ("net", "num"),
+    ),
+    "monthly_demand": (
+        ("billing_id", "str"),
+        ("charge_id", "str"),
+        ("calendar_year", "int"),
+        ("calendar_month", "int"),
+        ("financial_year", "int"),
+        ("peak_power", "num"),
+        ("peak_unit", "str"),
+        ("rate", "map"),
+        ("charge", "num"),
+    ),
+}
+_FIN_EVAL_TAX_ROW_SPECS: dict[str, tuple[tuple[str, str], ...]] = {
+    "vat": (
+        ("pool", "str"),
+        ("month", "int"),
+        ("paid", "num"),
+        ("refund_claimed", "num"),
+        ("refund_arrived", "num"),
+        ("carry", "num"),
+        ("receivable", "num"),
+    ),
+    "vat_rules": (
+        ("rule", "str"),
+        ("pool", "str"),
+        ("month", "int"),
+        ("output_tax", "num"),
+        ("deductible_input", "num"),
+    ),
+    "refunds": (("pool", "str"), ("period", "int"), ("arrival_period", "int"), ("amount", "num")),
+    "income": (
+        ("rule", "str"),
+        ("year", "int"),
+        ("taxable_base", "num"),
+        ("loss_used", "num"),
+        ("loss_generated", "num"),
+        ("loss_expired", "num"),
+        ("assessed", "num"),
+        ("tax", "num"),
+    ),
+    "depreciation": (("rule", "str"), ("base_from", "map"), ("year", "int"), ("amount", "num")),
+    "loss_balances": (
+        ("rule", "str"),
+        ("vintage_id", "str"),
+        ("year", "int"),
+        ("last_usable_year", "int"),
+        ("amount", "num"),
+    ),
+    "derived": (
+        ("rule", "str"),
+        ("axis", "str"),
+        ("period", "int"),
+        ("assessed", "num"),
+        ("payment_period", "int"),
+        ("paid", "num"),
+    ),
+}
+_FIN_EVAL_ROW_FIELDS: tuple[tuple[str, str], ...] = (
+    ("year", "int"),
+    ("net", "num"),
+    ("discounted", "num"),
+    ("cumulative", "num"),
+    ("cumulative_discounted", "num"),
 )
 
 
@@ -507,8 +591,38 @@ def validate_evaluation_report_doc(
     return dict(data)
 
 
+def _is_fin_scalar_kind(value: Any, kind: str) -> bool:
+    if kind == "str":
+        return isinstance(value, str) and bool(value)
+    if kind == "int":
+        return not isinstance(value, bool) and isinstance(value, int)
+    if kind == "num":
+        if isinstance(value, str):
+            return bool(value)
+        return not isinstance(value, bool) and isinstance(value, (int, float)) and math.isfinite(float(value))
+    if kind == "map":
+        return isinstance(value, Mapping)
+    return False
+
+
+def _validate_fin_row_list(
+    rows: Any,
+    label: str,
+    field_specs: tuple[tuple[str, str], ...],
+    fail: Callable[[str], NoReturn],
+) -> list[Any]:
+    row_list = _require_list(rows, label, fail)
+    for idx, row in enumerate(row_list):
+        if not isinstance(row, Mapping):
+            fail(f"{label}[{idx}] 须为 JSON 对象")
+        for key, kind in field_specs:
+            if not _is_fin_scalar_kind(row.get(key), kind):
+                fail(f"{label}[{idx}] 缺少或非法字段 {key!r} (期望 {kind})")
+    return row_list
+
+
 def validate_financial_evaluation_doc(data: Any) -> dict[str, Any]:
-    """Validate canonical ``ies.financial-evaluation@1.0.0`` structure and required facts."""
+    """Validate canonical ``ies.financial-evaluation@1.0.0`` structure and required nested rows."""
     fail = _default_raise
     if not isinstance(data, Mapping):
         fail("financial_evaluation.json 须为 JSON 对象")
@@ -529,8 +643,52 @@ def validate_financial_evaluation_doc(data: Any) -> dict[str, Any]:
 
     _require_finite_num(data.get("discount_rate"), "financial_evaluation.discount_rate", fail)
 
-    for key in _FIN_EVAL_LIST_FIELDS:
-        _require_list(data.get(key), f"financial_evaluation.{key}", fail)
+    for key, specs in _FIN_EVAL_ROW_SPECS.items():
+        _validate_fin_row_list(data.get(key), f"financial_evaluation.{key}", specs, fail)
+
+    for idx, amt in enumerate(data["amounts"]):
+        _validate_fin_row_list(
+            amt.get("values"),
+            f"financial_evaluation.amounts[{idx}].values",
+            (("period", "int"), ("value", "num")),
+            fail,
+        )
+    for idx, mov in enumerate(data["cash_movements"]):
+        _validate_fin_row_list(
+            mov.get("payments"),
+            f"financial_evaluation.cash_movements[{idx}].payments",
+            (("at", "map"), ("ratio", "num"), ("amount", "num")),
+            fail,
+        )
+    for idx, asset in enumerate(data["assets"]):
+        _validate_fin_row_list(
+            asset.get("book_values"),
+            f"financial_evaluation.assets[{idx}].book_values",
+            (("year", "int"), ("value", "num")),
+            fail,
+        )
+
+    units = _require_list(data.get("construction_units"), "financial_evaluation.construction_units", fail)
+    for idx, unit in enumerate(units):
+        if not isinstance(unit, Mapping):
+            fail(f"financial_evaluation.construction_units[{idx}] 须为 JSON 对象")
+        for key in ("unit_id", "instance_id", "mode"):
+            _require_str(unit.get(key), f"financial_evaluation.construction_units[{idx}].{key}", fail)
+        if not isinstance(unit.get("built"), bool):
+            fail(f"financial_evaluation.construction_units[{idx}].built 须为布尔值")
+        _validate_fin_row_list(
+            unit.get("scales"),
+            f"financial_evaluation.construction_units[{idx}].scales",
+            (("planning_variable_id", "str"), ("unit", "str"), ("value", "num")),
+            fail,
+        )
+
+    annual_flows = _require_list(
+        data.get("annual_net_flows"), "financial_evaluation.annual_net_flows", fail
+    )
+    for idx, flow in enumerate(annual_flows):
+        if not _is_fin_scalar_kind(flow, "num"):
+            fail(f"financial_evaluation.annual_net_flows[{idx}] 须为非空数值或字符串")
 
     comparison = data.get("comparison")
     if (
@@ -539,23 +697,36 @@ def validate_financial_evaluation_doc(data: Any) -> dict[str, Any]:
         or not comparison["mode"]
     ):
         fail("financial_evaluation.comparison 须包含非空字符串 mode")
+    if comparison["mode"] == "difference":
+        eval_flows = _require_list(
+            comparison.get("evaluation_net_flows"),
+            "financial_evaluation.comparison.evaluation_net_flows",
+            fail,
+        )
+        for idx, flow in enumerate(eval_flows):
+            if not _is_fin_scalar_kind(flow, "num"):
+                fail(f"financial_evaluation.comparison.evaluation_net_flows[{idx}] 须为非空数值或字符串")
 
     tax_cash = data.get("tax_cash")
     if not isinstance(tax_cash, Mapping):
         fail("financial_evaluation.tax_cash 须为 JSON 对象")
-    for key in _FIN_EVAL_TAX_LIST_FIELDS:
-        _require_list(tax_cash.get(key), f"financial_evaluation.tax_cash.{key}", fail)
+    for key, specs in _FIN_EVAL_TAX_ROW_SPECS.items():
+        _validate_fin_row_list(tax_cash.get(key), f"financial_evaluation.tax_cash.{key}", specs, fail)
 
     evaluation = data.get("evaluation")
     if not isinstance(evaluation, Mapping):
         fail("financial_evaluation.evaluation 须为 JSON 对象")
-    _require_list(evaluation.get("rows"), "financial_evaluation.evaluation.rows", fail)
+    _validate_fin_row_list(
+        evaluation.get("rows"),
+        "financial_evaluation.evaluation.rows",
+        _FIN_EVAL_ROW_FIELDS,
+        fail,
+    )
     if (
-        "npv" not in evaluation
-        or not isinstance(evaluation.get("irr_status"), str)
-        or not evaluation["irr_status"]
+        not _is_fin_scalar_kind(evaluation.get("npv"), "num")
+        or not _is_fin_scalar_kind(evaluation.get("irr_status"), "str")
     ):
-        fail("financial_evaluation.evaluation 须包含 npv 与非空字符串 irr_status")
+        fail("financial_evaluation.evaluation 须包含有效 npv 与非空字符串 irr_status")
 
     check_finite_json(data, "financial_evaluation.json")
     return dict(data)

@@ -1418,6 +1418,53 @@ def test_codex_r2_rejects_malformed_evaluator_outputs_and_contradictory_solution
             {"schema": "ies.financial-evaluation", "schema_version": "1.0.0", "status": "evaluated"}
         )
 
+    valid_fin_base = {
+        "schema": "ies.financial-evaluation",
+        "schema_version": "1.0.0",
+        "status": "evaluated",
+        "evaluation_years": 1,
+        "construction_period": 0,
+        "operation_years": 1,
+        "currency": "CNY",
+        "price_basis": "tax_inclusive",
+        "base_year": 2025,
+        "profile_id": "p",
+        "discount_rate": 0.08,
+        "construction_total": "0",
+        "construction_total_unit": "CNY",
+        "annual_fixed_om": "0",
+        "payments_applied": [],
+        "net_cashflows": [],
+        "cost_items": [],
+        "amounts": [],
+        "cash_movements": [],
+        "assets": [],
+        "construction_units": [],
+        "annual_operation": [],
+        "monthly_demand": [],
+        "tax_cash": {
+            "depreciation": [],
+            "derived": [],
+            "income": [],
+            "loss_balances": [],
+            "refunds": [],
+            "vat": [],
+            "vat_rules": [],
+        },
+        "annual_net_flows": ["0", "0"],
+        "comparison": {"mode": "absolute"},
+        "evaluation": {"rows": [], "npv": "0", "irr_status": "no_solution"},
+    }
+    for bad_fin in (
+        {**valid_fin_base, "annual_operation": [None]},
+        {**valid_fin_base, "payments_applied": [{"t": 0}]},
+        {**valid_fin_base, "tax_cash": {**valid_fin_base["tax_cash"], "vat": [None]}},
+        {**valid_fin_base, "evaluation": {"rows": [None], "npv": "0", "irr_status": "no_solution"}},
+        {**valid_fin_base, "annual_net_flows": [None]},
+    ):
+        with pytest.raises(ValueError):
+            validate_financial_evaluation_doc(bad_fin)
+
     # R2: contradictory solved + has_feasible_solution=false rejected at both validator and spawn child.
     contradictory = {
         "schema": "ies.engineering-solution",

@@ -187,13 +187,15 @@ export function SealedFinancialCore({ fin }: { fin: FinancialEvaluationBlock }) 
           </dd>
           <dt>{t('ies.result.fin_payback_static')}</dt>
           <dd>
-            {staticPb.value ?? '—'} {staticPb.value !== null ? t('ies.result.fin_year_unit') : ''}{' '}
-            {t(`ies.result.fin_pb_${staticPb.status}`)}
+            {staticPb.value ?? '—'}{' '}
+            {staticPb.value !== null && staticPb.value !== undefined ? t('ies.result.fin_year_unit') : ''}{' '}
+            {staticPb.status ? t(`ies.result.fin_pb_${staticPb.status}`) : ''}
           </dd>
           <dt>{t('ies.result.fin_payback_dynamic')}</dt>
           <dd>
-            {dynamicPb.value ?? '—'} {dynamicPb.value !== null ? t('ies.result.fin_year_unit') : ''}{' '}
-            {t(`ies.result.fin_pb_${dynamicPb.status}`)}
+            {dynamicPb.value ?? '—'}{' '}
+            {dynamicPb.value !== null && dynamicPb.value !== undefined ? t('ies.result.fin_year_unit') : ''}{' '}
+            {dynamicPb.status ? t(`ies.result.fin_pb_${dynamicPb.status}`) : ''}
           </dd>
         </dl>
       </div>

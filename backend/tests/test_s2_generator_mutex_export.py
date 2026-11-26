@@ -174,7 +174,7 @@ def _parse_mps_names(mps_bytes: bytes) -> tuple[list[str], list[str]]:
 def test_campus_exports_verified_technical_mutexes_matching_mps() -> None:
     artifact, models, materialized, finance, _, evaluation = _campus_inputs(seed=7)
     registry = build_registry((HIGHS_MILP_PROVIDER,))
-    cfg_on = _config_with_options({"acceleration": {"mode": "on_demand_mutex"}})
+    cfg_on = _config_with_options({"generator": {"acceleration": {"mode": "on_demand_mutex"}}})
     provider = registry.resolve(cfg_on)
 
     bundle = provider.generate(artifact, models, materialized, finance, cfg_on, evaluation)
@@ -183,12 +183,6 @@ def test_campus_exports_verified_technical_mutexes_matching_mps() -> None:
         for entry in bundle.manifest.inputs
     )
     assert ACCELERATION_PATH in bundle.files
-    assert list(bundle.manifest.command["arguments"])[-4:] == [
-        "--acceleration_mode",
-        "on_demand_mutex",
-        "--acceleration_file",
-        ACCELERATION_PATH,
-    ]
 
     model, _unit_map, _obj_unit, _facts, _components, _series, sources = (
         build_project_model_package(artifact, models, materialized, finance, cfg_on, evaluation)
@@ -374,10 +368,10 @@ def test_bundle_bytes_identical_when_off_and_mps_parameters_identical_when_on() 
     artifact, models, materialized, finance, _, evaluation = _campus_inputs(seed=7)
     registry = build_registry((HIGHS_MILP_PROVIDER,))
 
-    cfg_empty = _config_with_options({})
-    cfg_omitted = _config_with_options({"acceleration": {}})
-    cfg_off = _config_with_options({"acceleration": {"mode": "off"}})
-    cfg_on = _config_with_options({"acceleration": {"mode": "on_demand_mutex"}})
+    cfg_empty = _config_with_options({"generator": {}})
+    cfg_omitted = _config_with_options({"generator": {"acceleration": {}}})
+    cfg_off = _config_with_options({"generator": {"acceleration": {"mode": "off"}}})
+    cfg_on = _config_with_options({"generator": {"acceleration": {"mode": "on_demand_mutex"}}})
 
     b_empty = registry.resolve(cfg_empty).generate(
         artifact, models, materialized, finance, cfg_empty, evaluation
@@ -401,16 +395,10 @@ def test_bundle_bytes_identical_when_off_and_mps_parameters_identical_when_on() 
     bytes_on_2 = content_bytes(export_bundle_files(b_on_2))
     assert bytes_empty == bytes_on_1 == bytes_on_2
     assert ACCELERATION_PATH in bytes_empty
-    assert list(b_empty.manifest.command["arguments"])[-4:] == [
-        "--acceleration_mode",
-        "on_demand_mutex",
-        "--acceleration_file",
-        ACCELERATION_PATH,
-    ]
+    assert any(entry["path"] == ACCELERATION_PATH for entry in b_empty.manifest.inputs)
 
     bytes_off = content_bytes(export_bundle_files(b_off))
     assert ACCELERATION_PATH not in bytes_off
-    assert "--acceleration_mode" not in b_off.manifest.command["arguments"]
-    assert "--acceleration_file" not in b_off.manifest.command["arguments"]
+    assert all(entry["path"] != ACCELERATION_PATH for entry in b_off.manifest.inputs)
     for path in ("input/problem.mps", "input/parameters.json", "input/parameters.jsonl"):
         assert bytes_on_1[path] == bytes_off[path]

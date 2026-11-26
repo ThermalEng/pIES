@@ -421,13 +421,6 @@ def _execute_compute(ctx: RunContext) -> tuple[dict, dict | None]:
             ctx.sealed_output_files["hourly"] = {
                 worker_app.HOURLY_OBJECT_PATH: dict(evaluated.hourly_ref)
             }
-        summary = result.outputs.get("solver_summary")
-        summary_feasible = (
-            bool(summary["has_feasible_solution"])
-            if isinstance(summary, Mapping)
-            and isinstance(summary.get("has_feasible_solution"), bool)
-            else True
-        )
         evaluator_results, evaluation_reports, eval_financial = worker_app.run_evaluators_stage(
             plane=plane,
             attempt=attempt,
@@ -435,8 +428,7 @@ def _execute_compute(ctx: RunContext) -> tuple[dict, dict | None]:
             number=1,
             config=config,
             has_feasible_solution=(
-                result.math_status in ("solved", "feasible")
-                and summary_feasible
+                bool(result.outputs["solver_summary"]["has_feasible_solution"])
                 and solution_ref is not None
             ),
             solution_ref=solution_ref,

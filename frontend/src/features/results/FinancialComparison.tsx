@@ -19,15 +19,16 @@ export function FinancialComparison({
   defaultPageSize = 20,
 }: FinancialComparisonProps) {
   const { t } = useI18n()
-  const comparison = fin.comparison
+  const comparison = fin?.comparison
+  const netFlows = Array.isArray(fin?.annual_net_flows) ? fin.annual_net_flows : []
   const [page, setPage] = useState(1)
   const [pageSize, setPageSize] = useState(defaultPageSize)
 
   useEffect(() => {
     setPage(1)
-  }, [fin.annual_net_flows])
+  }, [fin?.annual_net_flows])
 
-  const rowIndices = fin.annual_net_flows.map((_, i) => i)
+  const rowIndices = netFlows.map((_, i) => i)
   const slice = paginated
     ? paginateItems(rowIndices, page, pageSize)
     : { items: rowIndices, page: 1, pageSize: rowIndices.length || 1, total: rowIndices.length, totalPages: 1 }
@@ -35,11 +36,11 @@ export function FinancialComparison({
   return (
     <section aria-label={t('ies.result.comparison')}>
       <h3>{t('ies.result.comparison')}</h3>
-      <p>{comparison.mode}</p>
-      {comparison.mode !== 'absolute' ? (
+      <p>{comparison?.mode || '—'}</p>
+      {comparison && comparison.mode && comparison.mode !== 'absolute' ? (
         <>
-          <p>{comparison.comparability.service_basis}</p>
-          <p>{comparison.comparability.differences}</p>
+          <p>{comparison.comparability?.service_basis}</p>
+          <p>{comparison.comparability?.differences}</p>
           <pre className="ies-pre">{JSON.stringify(comparison.baseline_source, null, 2)}</pre>
           <div style={{ overflowX: 'auto' }}>
             <table className="ies-metric-table" aria-label={t('ies.result.comparison')}>
@@ -59,11 +60,11 @@ export function FinancialComparison({
                 {slice.items.map((index) => (
                   <tr key={index}>
                     <td>{index}</td>
-                    <td>{fin.annual_net_flows[index]} {fin.currency}</td>
+                    <td>{netFlows[index]} {fin.currency ?? ''}</td>
                     {comparison.mode === 'difference' ? (
                       <>
-                        <td>{comparison.baseline_net_flows[index]} {fin.currency}</td>
-                        <td>{comparison.evaluation_net_flows[index]} {fin.currency}</td>
+                        <td>{comparison.baseline_net_flows?.[index] ?? '—'} {fin.currency ?? ''}</td>
+                        <td>{comparison.evaluation_net_flows?.[index] ?? '—'} {fin.currency ?? ''}</td>
                       </>
                     ) : null}
                   </tr>

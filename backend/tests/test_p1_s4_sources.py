@@ -9,7 +9,6 @@ from test_highs_milp_provider import _campus_inputs
 from test_project_model import TANK_YAML, _contribution, _inputs
 
 from iesplan.computation import HIGHS_MILP_PROVIDER, ComputationUnavailableError
-from iesplan.computation.generators.highs_milp import HighsMilpProvider
 from iesplan.computation.generators.linear import LoweringUnsupportedError
 from iesplan.computation.generators.project import _ProjectBuilder, build_project_model_package
 from iesplan.computation.generators.sources import SourceTrace
@@ -150,8 +149,10 @@ def test_same_model_instances_and_cross_year_state_have_separate_origins():
 
 @pytest.mark.parametrize("reason", ["cancelled", "fenced"])
 def test_stop_during_source_serialization_does_not_publish_bundle(monkeypatch, reason):
+    from iesplan.computation.generators import highs_milp as hm_mod
+
     stopped = False
-    original = HighsMilpProvider._metadata
+    original = hm_mod._variable_map_header_bytes
 
     def serialize(*args, **kwargs):
         nonlocal stopped
@@ -159,7 +160,7 @@ def test_stop_during_source_serialization_does_not_publish_bundle(monkeypatch, r
         stopped = True
         return metadata
 
-    monkeypatch.setattr(HighsMilpProvider, "_metadata", serialize)
+    monkeypatch.setattr(hm_mod, "_variable_map_header_bytes", serialize)
     with pytest.raises(ComputationUnavailableError) as raised:
         HIGHS_MILP_PROVIDER.generate_with_stop(*_campus_inputs(), stop=lambda: reason if stopped else None)
     assert raised.value.reason == reason

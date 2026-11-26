@@ -201,6 +201,27 @@ def test_generator_solver_evaluator_stage_io(tmp_path: Path) -> None:
     with pytest.raises(StageIOError, match="tax_cash"):
         validate_stage_outputs("evaluator", bad_tax_out, produces=("ies.financial-evaluation@1.0.0",))
 
+    for field, bad_val, match in (
+        ("annual_operation", [None], "annual_operation\\[0\\]"),
+        ("payments_applied", [{"t": 0}], "payments_applied\\[0\\]"),
+        ("annual_net_flows", [None], "annual_net_flows"),
+        ("construction_units", [{"unit_id": "u1"}], "construction_units\\[0\\]"),
+    ):
+        bad_nested_out = tmp_path / f"bad_nested_{field}"
+        write_json_file(bad_nested_out / "financial_evaluation.json", {**sample_fin_eval, field: bad_val})
+        with pytest.raises(StageIOError, match=match):
+            validate_stage_outputs(
+                "evaluator", bad_nested_out, produces=("ies.financial-evaluation@1.0.0",)
+            )
+
+    bad_eval_rows = tmp_path / "bad_eval_rows"
+    write_json_file(
+        bad_eval_rows / "financial_evaluation.json",
+        {**sample_fin_eval, "evaluation": {**sample_fin_eval["evaluation"], "rows": [None]}},
+    )
+    with pytest.raises(StageIOError, match="evaluation.rows\\[0\\]"):
+        validate_stage_outputs("evaluator", bad_eval_rows, produces=("ies.financial-evaluation@1.0.0",))
+
     bad_report_out = tmp_path / "bad_report_out"
     write_json_file(
         bad_report_out / "evaluation_report.json",
