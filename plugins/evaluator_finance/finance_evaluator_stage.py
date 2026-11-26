@@ -52,7 +52,7 @@ def _load_artifact(
     if raw_artifact is not None:
         if not isinstance(raw_artifact, Mapping):
             raise StageIOError("evaluator_finance 'artifact' must be a JSON object")
-        if "canonical_text" in raw_artifact and "validation" in raw_artifact:
+        if "canonical_text" in raw_artifact and "receipt" in raw_artifact:
             return artifact_from_frozen(raw_artifact)
         return raw_artifact
 
@@ -77,22 +77,50 @@ def _artifact_doc(artifact: ValidatedAssemblyArtifact | Mapping[str, Any]) -> Ma
     return artifact
 
 
-def _iter_system_series_refs(node: object) -> Iterable[AmountReference]:
+def _artifact_system_equations(
+    artifact: ValidatedAssemblyArtifact | Mapping[str, Any],
+    doc: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    if isinstance(artifact, ValidatedAssemblyArtifact):
+        return artifact.receipt.system_equations or {}
+    if isinstance(artifact, Mapping) and isinstance(artifact.get("receipt"), Mapping):
+        sys_eq = artifact["receipt"].get("system_equations")
+        if isinstance(sys_eq, Mapping) and sys_eq:
+            return sys_eq
+    sys_eq = doc.get("system_equations")
+    return sys_eq if isinstance(sys_eq, Mapping) else {}
+
+
+def _system_variable_units(system_equations: Mapping[str, Any]) -> dict[tuple[str, str], str]:
+    units: dict[tuple[str, str], str] = {}
+    for block_id, block_spec in system_equations.items():
+        if not isinstance(block_spec, Mapping):
+            continue
+        variables = block_spec.get("variables") or {}
+        if not isinstance(variables, Mapping):
+            continue
+        for var_id, var_spec in variables.items():
+            if isinstance(var_spec, Mapping) and var_spec.get("unit"):
+                units[(str(block_id), str(var_id))] = str(var_spec["unit"])
+    return units
+
+
+def _iter_system_quantity_refs(node: object) -> Iterable[AmountReference]:
     if isinstance(node, AmountReference):
-        if node.kind == "system_series":
+        if node.kind == "system_quantity":
             yield node
         return
     if is_dataclass(node):
         for dc_field in fields(node):
-            yield from _iter_system_series_refs(getattr(node, dc_field.name))
+            yield from _iter_system_quantity_refs(getattr(node, dc_field.name))
         return
     if isinstance(node, Mapping):
         for val in node.values():
-            yield from _iter_system_series_refs(val)
+            yield from _iter_system_quantity_refs(val)
         return
     if isinstance(node, (tuple, list)):
         for item in node:
-            yield from _iter_system_series_refs(item)
+            yield from _iter_system_quantity_refs(item)
 
 
 def _predefined_series_keys(
@@ -136,6 +164,7 @@ def _validate_solution_against_frozen_context(
     solution: EngineeringSolutionPayload,
     *,
     doc: Mapping[str, Any],
+    system_equations: Mapping[str, Any],
     finance: EffectiveFinanceConfig,
     evaluation: EvaluationInput,
     materialized: Any,
@@ -202,18 +231,24 @@ def _validate_solution_against_frozen_context(
 
     actual_sys = solution.system_series or {}
     by_sys_key = {(entry.block, entry.variable): entry for entry in actual_sys.values()}
-    for ref in _iter_system_series_refs(finance):
+    sys_var_units = _system_variable_units(system_equations)
+    for ref in _iter_system_quantity_refs(finance):
         if ref.block is None or ref.variable is None:
             continue
+        expected_sys_unit = sys_var_units.get((ref.block, ref.variable))
+        if expected_sys_unit is None:
+            raise StageIOError(
+                f"Frozen system_equations missing unit declaration for {ref.block}.{ref.variable}"
+            )
         entry = by_sys_key.get((ref.block, ref.variable))
         if entry is None:
             raise StageIOError(
                 f"EngineeringSolution missing required system_series {ref.block}.{ref.variable}"
             )
-        if ref.unit_ref is not None and entry.unit != ref.unit_ref:
+        if entry.unit != expected_sys_unit:
             raise StageIOError(
                 f"EngineeringSolution system_series {ref.block}.{ref.variable} unit mismatch: "
-                f"expected {ref.unit_ref!r}, got {entry.unit!r}"
+                f"expected {expected_sys_unit!r}, got {entry.unit!r}"
             )
 
     exp_series = {
@@ -228,7 +263,7 @@ def _validate_solution_against_frozen_context(
         sid: ExpectedSystemSeries(
             block=entry.block,
             variable=entry.variable,
-            unit=entry.unit,
+            unit=sys_var_units.get((entry.block, entry.variable), entry.unit),
         )
         for sid, entry in actual_sys.items()
     }
@@ -355,6 +390,7 @@ def evaluate(ctx: StageContext) -> None:
     _validate_solution_against_frozen_context(
         solution,
         doc=doc,
+        system_equations=_artifact_system_equations(artifact, doc),
         finance=finance,
         evaluation=evaluation,
         materialized=materialized,

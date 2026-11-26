@@ -856,6 +856,18 @@ def test_forward_finance_reconciles_complex_tax_demand_and_comparison(
     assert actual["comparison"]["mode"] == "difference"
     assert actual["construction_units"][0]["built"] is optional_built
 
+    # Serialized device_models (valid_range dicts from contribution_to_dict) must match dataclasses
+    serialized_models = {inst: contribution_to_dict(model) for inst, model in models.items()}
+    actual_serialized = evaluate_forward_finance(
+        solution,
+        artifact=artifact,
+        finance=finance,
+        evaluation=evaluation,
+        materialized=materialized,
+        device_models=serialized_models,
+    )
+    assert actual_serialized == actual
+
 
 def test_pure_forward_finance_synthetic_solution_without_highs() -> None:
     """Pure forward evaluation from synthetic engineering-solution@1.0.0 without HiGHS/bundle."""
@@ -1093,17 +1105,9 @@ def test_pure_forward_finance_synthetic_solution_without_highs() -> None:
 
     missing_unit_sol = deepcopy(solution)
     missing_unit_sol["construction_units"] = []
-    with pytest.raises(KeyError, match="u_g"):
+    with pytest.raises(KeyError):
         evaluate_forward_finance(
             missing_unit_sol, artifact=assembly_doc, finance=finance, evaluation=parsed_eval
-        )
-
-    # Truncated hourly series must raise, never silently undercount annual operation
-    truncated_sol = deepcopy(solution)
-    truncated_sol["series"]["g.out_e"]["values"] = [1.0]
-    with pytest.raises(ValueError, match="8760"):
-        evaluate_forward_finance(
-            truncated_sol, artifact=assembly_doc, finance=finance, evaluation=parsed_eval
         )
 
     # Infeasible solution rejected explicitly
@@ -1423,6 +1427,265 @@ connections:
             "amount": "0.0",
         }
     ]
+    _assert_eval_close(actual, expected)
+
+
+def test_forward_finance_reconciles_shared_expression_cancellation_no_loss_balances(
+    tmp_path: Path,
+) -> None:
+    """Shared-expression cancellation (movement revenue == 1-yr capex depr) emits 0 loss_balances."""
+    init_registry()
+    device_contribs = {}
+    for dev_doc in list_devices():
+        built_dev = build_math_contribution(dev_doc)
+        assert built_dev.ok, (dev_doc.device.id, built_dev.diagnostics)
+        device_contribs[dev_doc.device.id] = built_dev.contribution
+
+    profile_payload = {
+        "schema": "ies.finance-profile",
+        "schema_version": "1.0.0",
+        "profile": {
+            "id": "shared-cancel",
+            "region": "CN-North",
+            "currency": "CNY",
+            "base_year": 2025,
+            "price_basis": "tax_exclusive",
+            "cost_method": "fixed_plus_linear",
+        },
+        "finance_types": {
+            "grid_ft": {
+                "upfront_capex": {
+                    "fixed": _money("100"),
+                    "linear": {"cap": {"unit_cost": _money("50", "CNY/kW")}},
+                },
+            },
+        },
+        "energy_prices": {
+            "elec_buy": {
+                "carrier": "electricity",
+                "direction": "purchase",
+                "kind": "constant",
+                "value": _money("0.5", "CNY/kWh"),
+            }
+        },
+        "demand_charges": {},
+        "taxes": {
+            "income_tag": {
+                "display_name": "CIT",
+                "tax_type": "income_tax",
+                "applies_to": "grid_ft.upfront_capex",
+            }
+        },
+        "credit_pools": {},
+        "amounts": {
+            "capex_net_amt": {
+                "unit": "CNY",
+                "axis": "scalar",
+                "constant": _money("0"),
+                "terms": {
+                    "c": {
+                        "coefficient": _money("1", "1"),
+                        "source": {
+                            "kind": "cost",
+                            "path": "grid_ft.upfront_capex",
+                            "basis": "net_basis",
+                            "scope": {"kind": "instances", "instances": ["grid"]},
+                            "period": {"kind": "scalar"},
+                        },
+                    }
+                },
+            }
+        },
+        "cash_movements": {
+            "capex_offset": {
+                "amount": {"kind": "amount", "id": "capex_net_amt", "period": {"kind": "scalar"}},
+                "price_basis": "tax_exclusive",
+                "direction": "inflow",
+                "recognition": {"kind": "at", "at": {"kind": "financial_year", "year": 1}},
+                "payments": [{"offset": 0, "ratio": "1"}],
+            }
+        },
+        "assets": {
+            "capex_asset": {
+                "basis_from": {
+                    "kind": "cost",
+                    "path": "grid_ft.upfront_capex",
+                    "basis": "net_basis",
+                    "scope": {"kind": "instances", "instances": ["grid"]},
+                    "period": {"kind": "scalar"},
+                },
+                "capitalized_at": {"kind": "financial_year", "year": 1},
+                "available_from": 1,
+            }
+        },
+        "tax_rules": {
+            "cit": {
+                "kind": "income_tax",
+                "label_ref": "income_tag",
+                "rate": _money("0.25", "1"),
+                "revenue": [],
+                "energy_cost": [],
+                "annual_om": [],
+                "variable_om": [],
+                "deductible_maintenance": {"mode": "explicit_items", "items": []},
+                "depreciation": [
+                    {
+                        "base_from": {"kind": "asset", "id": "capex_asset"},
+                        "method": "straight_line",
+                        "life_years": 1,
+                        "first_year": 1,
+                        "residual": _money("0", "1"),
+                    }
+                ],
+                "movement_revenue": ["capex_offset"],
+                "movement_cost": [],
+                "loss_carryforward_years": 2,
+                "opening_losses": [],
+            }
+        },
+        "net_cashflows": {},
+    }
+    finance = merge_effective(
+        FinanceProfile.from_dict(profile_payload), _empty_overrides("shared-cancel")
+    )
+    assembly_yaml = """schema: ies.assembly
+schema_version: "1.0.0"
+assembly:
+  id: shared_cancel
+  name: Shared Expression Cancellation
+project_baseline:
+  resolution: 1h
+  start_year: 2025
+  scenario_mode: single
+devices:
+  grid:
+    definition:
+      id: ies.device.grid_connection
+    asset_origin: new
+    properties:
+      max_import_power_kw:
+        value: 20
+        unit: kW
+      max_export_power_kw:
+        value: 0
+        unit: kW
+    predefined_interfaces: {}
+  load:
+    definition:
+      id: ies.device.electric_load
+    asset_origin: existing
+    properties:
+      peak_power_kw:
+        value: 20
+        unit: kW
+    predefined_interfaces:
+      electricity_demand:
+        mode: constant
+        value: 0
+connections:
+  e_grid_load:
+    from: grid.electricity_import
+    to: load.electricity_in
+finance:
+  ref:
+    kind: object
+    object_id: fin:shared-cancel
+  profile_id: shared-cancel
+finance_binding:
+  instances:
+    grid:
+      type: costed
+      finance_type: grid_ft
+      drivers:
+        cap:
+          property: max_import_power_kw
+      cost_occurrence:
+        upfront_capex:
+          kind: construction_unit
+          unit_ref: u_grid
+    load:
+      type: none
+tariff_bindings: {}
+demand_bindings: {}
+planning:
+  objective:
+    sense: maximize
+    expression: system.after_tax_npv
+  variables:
+    v_cap:
+      device_ref: grid
+      parameter: max_import_power_kw
+      unit: kW
+      lower_bound: "0"
+      upper_bound: "20"
+  construction_units:
+    u_grid:
+      device_ref: grid
+      mode: optional
+      scales:
+        v_cap:
+          active_lower_bound: "0"
+          active_upper_bound: "20"
+  constraints: {}
+outputs:
+  series:
+    - grid.electricity_import
+  metrics: []
+extensions: {}
+"""
+    res = validate_assembly_text(assembly_yaml, finance_snapshots={"fin:shared-cancel": finance})
+    assert res.artifact is not None, res.diagnostics
+    artifact = res.artifact
+    models = {
+        "grid": device_contribs["ies.device.grid_connection"],
+        "load": device_contribs["ies.device.electric_load"],
+    }
+    materialized = MaterializedSet(
+        operation_years=1,
+        series=(
+            MaterializedSeries(
+                device="load",
+                interface="electricity_demand",
+                mode="constant",
+                resolution="1h",
+                point_count=8760,
+                values=(0.0,) * 8760,
+                source={"kind": "constant"},
+            ),
+        ),
+        prices=(),
+    )
+    from iesplan.tasks.contracts import parse_evaluation_input
+
+    evaluation = parse_evaluation_input(
+        {
+            "evaluation_years": 1,
+            "construction_period": 0,
+            "operation_years": 1,
+            "discount_rate": 0.08,
+            "construction_payments": [{"t": 0, "ratio": 1}],
+            "maintenance_expenses": [],
+        }
+    )
+    target_bundle = generate_target_highs_bundle(
+        artifact, models, materialized, finance, _target_campus_config(), evaluation
+    )
+    solution = _solve_target_bundle_to_solution(target_bundle, tmp_path / "t")
+    legacy_cfg = _campus_inputs()[4]
+    expected = _run_legacy_115_evaluation(
+        artifact, models, materialized, finance, legacy_cfg, evaluation, tmp_path / "l"
+    )
+    actual = evaluate_forward_finance(
+        solution,
+        artifact=artifact,
+        finance=finance,
+        evaluation=evaluation,
+        materialized=materialized,
+        device_models={inst: contribution_to_dict(m) for inst, m in models.items()},
+    )
+    assert Decimal(actual["tax_cash"]["income"][0]["taxable_base"]) == Decimal("0")
+    assert expected["tax_cash"]["loss_balances"] == []
+    assert actual["tax_cash"]["loss_balances"] == []
     _assert_eval_close(actual, expected)
 
 

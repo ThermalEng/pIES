@@ -151,6 +151,15 @@ def _attr_or_key(obj: Any, name: str, default: Any = None) -> Any:
     return getattr(obj, name, default)
 
 
+def _valid_range_bounds(entry: Any) -> tuple[Any, Any]:
+    vrange = _attr_or_key(entry, "valid_range")
+    if vrange is None:
+        return (None, None)
+    if isinstance(vrange, Mapping):
+        return (vrange.get("minimum"), vrange.get("maximum"))
+    return (vrange[0], vrange[1])
+
+
 def _interval_scale(bounds: tuple[float, float], coeff: float) -> tuple[float, float]:
     if coeff == 0.0:
         return (0.0, 0.0)
@@ -162,6 +171,35 @@ def _interval_scale(bounds: tuple[float, float], coeff: float) -> tuple[float, f
 
 def _interval_add(left: tuple[float, float], right: tuple[float, float]) -> tuple[float, float]:
     return (left[0] + right[0], left[1] + right[1])
+
+
+class _AffineExpr:
+    """Pure affine expression over bounded symbol keys, preserving cancellation."""
+
+    __slots__ = ("const", "terms")
+
+    def __init__(self, const: float = 0.0, terms: Mapping[tuple[Any, ...], float] | None = None) -> None:
+        self.const = float(const)
+        self.terms: dict[tuple[Any, ...], float] = (
+            {k: v for k, v in terms.items() if v != 0.0} if terms else {}
+        )
+
+    def add_scaled(self, other: _AffineExpr, scale: float = 1.0) -> None:
+        if scale == 0.0:
+            return
+        if other.const != 0.0:
+            self.const += other.const * scale
+        for sym, coeff in other.terms.items():
+            updated = self.terms.get(sym, 0.0) + coeff * scale
+            if abs(updated) <= 1e-15:
+                self.terms.pop(sym, None)
+            else:
+                self.terms[sym] = updated
+
+    def scaled(self, scale: float) -> _AffineExpr:
+        out = _AffineExpr()
+        out.add_scaled(self, scale)
+        return out
 
 
 # ---------------------------------------------------------------------------
@@ -965,7 +1003,7 @@ class _ForwardFinanceEvaluator:
             month: (start, end) for month, start, end in self.month_spans
         }
 
-        # Index resolved solution values and require declared construction units
+        # Index resolved solution values (public ingestion validates completeness)
         self.unit_by_inst: dict[str, Mapping[str, Any]] = {}
         self.unit_by_id: dict[str, Mapping[str, Any]] = {}
         self.plan_var_si: dict[str, float] = {}
@@ -976,9 +1014,6 @@ class _ForwardFinanceEvaluator:
                 self.plan_var_si[scale["planning_variable_id"]] = _to_internal(
                     float(scale["value"]), str(scale["unit"])
                 )
-        for unit_id in self.declared_units:
-            if unit_id not in self.unit_by_id:
-                raise KeyError(f"solution.construction_units 缺少已声明建设单元 {unit_id!r}")
 
         self.solver_series: dict[tuple[str, str], tuple[str, Sequence[float]]] = {}
         for entry in (solution.get("series") or {}).values():
@@ -996,6 +1031,7 @@ class _ForwardFinanceEvaluator:
 
         self._series_si_cache: dict[tuple[str, str], list[float]] = {}
         self._sys_si_cache: dict[tuple[str, str], list[float]] = {}
+        self._bound_symbols: dict[tuple[Any, ...], tuple[float, float]] = {}
 
         self.cost_specs = self._build_cost_specs()
         self.cost_tax_factors = self._build_cost_tax_factors()
@@ -1047,10 +1083,6 @@ class _ForwardFinanceEvaluator:
     def _prop_si(self, inst: str, prop: str) -> float:
         bound_var = self.bound_prop.get((inst, prop))
         if bound_var is not None:
-            if bound_var not in self.plan_var_si:
-                raise KeyError(
-                    f"缺少规划变量 {bound_var!r} ({inst}.{prop}) 的求解建设尺度；禁止回退静态属性"
-                )
             return self.plan_var_si[bound_var]
         overrides = self.devices[inst].get("properties") or {}
         if prop in overrides:
@@ -1072,12 +1104,11 @@ class _ForwardFinanceEvaluator:
         m_lo: float | None = None
         m_hi: float | None = None
         if model_entry is not None:
-            vrange = _attr_or_key(model_entry, "valid_range")
-            if vrange is not None:
-                if vrange[0] is not None and model_unit is not None:
-                    m_lo = _to_internal(float(vrange[0]), model_unit)
-                if vrange[1] is not None and model_unit is not None:
-                    m_hi = _to_internal(float(vrange[1]), model_unit)
+            vr_lo, vr_hi = _valid_range_bounds(model_entry)
+            if vr_lo is not None and model_unit is not None:
+                m_lo = _to_internal(float(vr_lo), model_unit)
+            if vr_hi is not None and model_unit is not None:
+                m_hi = _to_internal(float(vr_hi), model_unit)
         raw_lo = spec.get("lower_bound")
         raw_hi = spec.get("upper_bound")
         p_lo = _to_internal(float(raw_lo), p_unit) if raw_lo is not None else None
@@ -1139,13 +1170,13 @@ class _ForwardFinanceEvaluator:
         if flow is None:
             return (0.0, math.inf)
         f_unit = str(_attr_or_key(flow, "unit"))
-        vrange = _attr_or_key(flow, "valid_range") or (None, None)
+        vr_lo, vr_hi = _valid_range_bounds(flow)
         min_ref = _attr_or_key(flow, "minimum_property_ref")
         max_ref = _attr_or_key(flow, "maximum_property_ref")
 
         lo_candidates: list[float] = []
-        if vrange[0] is not None:
-            lo_candidates.append(_to_internal(float(vrange[0]), f_unit))
+        if vr_lo is not None:
+            lo_candidates.append(_to_internal(float(vr_lo), f_unit))
         if min_ref is not None:
             lo_candidates.append(self._prop_interval(inst, str(min_ref))[0])
         step_lo = max(lo_candidates) if lo_candidates else (
@@ -1153,18 +1184,12 @@ class _ForwardFinanceEvaluator:
         )
 
         hi_candidates: list[float] = []
-        if vrange[1] is not None:
-            hi_candidates.append(_to_internal(float(vrange[1]), f_unit))
+        if vr_hi is not None:
+            hi_candidates.append(_to_internal(float(vr_hi), f_unit))
         if max_ref is not None:
             hi_candidates.append(self._prop_interval(inst, str(max_ref))[1])
         step_hi = min(hi_candidates) if hi_candidates else math.inf
         return (step_lo * steps, step_hi * steps)
-
-    def _require_horizon_length(self, values: Sequence[float], label: str) -> None:
-        if len(values) != self.point_count:
-            raise ValueError(
-                f"序列 {label} 长度 {len(values)} 与求解域总步数 {self.point_count} 不一致"
-            )
 
     def _series_si(self, inst: str, iface: str) -> list[float]:
         key = (inst, iface)
@@ -1173,13 +1198,9 @@ class _ForwardFinanceEvaluator:
             return cached
         if key in self.predefined_series_si:
             cached = self.predefined_series_si[key]
-            self._require_horizon_length(cached, f"{inst}.{iface}")
-        elif key in self.solver_series:
-            unit, values = self.solver_series[key]
-            self._require_horizon_length(values, f"{inst}.{iface}")
-            cached = [_to_internal(float(v), unit) for v in values]
         else:
-            raise KeyError(f"缺少实例接口序列 {inst}.{iface}")
+            unit, values = self.solver_series[key]
+            cached = [_to_internal(float(v), unit) for v in values]
         self._series_si_cache[key] = cached
         return cached
 
@@ -1188,10 +1209,7 @@ class _ForwardFinanceEvaluator:
         cached = self._sys_si_cache.get(key)
         if cached is not None:
             return cached
-        if key not in self.sys_series:
-            raise KeyError(f"缺少系统序列 system:{block}.{variable}")
         unit, values = self.sys_series[key]
-        self._require_horizon_length(values, f"system:{block}.{variable}")
         cached = [_to_internal(float(v), unit) for v in values]
         self._sys_si_cache[key] = cached
         return cached
@@ -1434,7 +1452,6 @@ class _ForwardFinanceEvaluator:
         if price.kind not in ("time_series", "monthly_daily"):
             raise ValueError(f"计费绑定 {binding_id!r} 的价格类型未知: {price.kind!r}")
         p_vals = self.prices_si[price_id]
-        self._require_horizon_length(p_vals, f"price:{price_id}")
         total = 0.0
         for offset, flow in enumerate(values):
             total += sign * p_vals[start + offset] * factor * flow
@@ -1940,34 +1957,81 @@ class _ForwardFinanceEvaluator:
                 total += _money_to_internal(refund.amount)
         return total
 
-    # -- Structural interval bounds over frozen context (zero SolverBundle) --
+    # -- Structural affine lower bounds over frozen context (zero SolverBundle) --
 
-    def _cost_leaf_interval(
-        self, inst: str, component: str, leaf: str, start: int, stop: int
-    ) -> tuple[float, float]:
+    def _bound_var_affine(self, inst: str, prop: str) -> _AffineExpr:
+        bound_var = self.bound_prop.get((inst, prop))
+        if bound_var is None:
+            return _AffineExpr(const=self._prop_si(inst, prop))
+        sym = ("prop", inst, bound_var)
+        if sym not in self._bound_symbols:
+            self._bound_symbols[sym] = self._prop_interval(inst, prop)
+        return _AffineExpr(terms={sym: 1.0})
+
+    def _unit_affine(self, unit_ref: str) -> _AffineExpr:
+        unit = self.declared_units.get(unit_ref)
+        if unit is not None and unit.get("mode") != "optional":
+            return _AffineExpr(const=1.0)
+        sym = ("unit", unit_ref)
+        self._bound_symbols.setdefault(sym, (0.0, 1.0))
+        return _AffineExpr(terms={sym: 1.0})
+
+    def _expr_bounds(self, expr: _AffineExpr) -> tuple[float, float]:
+        lo = expr.const
+        hi = expr.const
+        for sym, coeff in expr.terms.items():
+            s_lo, s_hi = self._bound_symbols[sym]
+            a, b = _interval_scale((s_lo, s_hi), coeff)
+            lo += a
+            hi += b
+        return (lo, hi)
+
+    def _iface_affine(
+        self, inst: str, iface: str, start: int, stop: int, aggregation: str
+    ) -> _AffineExpr:
+        factor = self.step_s if aggregation == "integrate_positive" else 1.0
+        if (inst, iface) in self.predefined_series_si:
+            return _AffineExpr(const=sum(self.predefined_series_si[(inst, iface)][start:stop]) * factor)
+        sym = ("iface", inst, iface, start, stop, aggregation)
+        if sym not in self._bound_symbols:
+            self._bound_symbols[sym] = _interval_scale(
+                self._iface_step_interval(inst, iface, start, stop), factor
+            )
+        return _AffineExpr(terms={sym: 1.0})
+
+    def _cost_leaf_affine(self, inst: str, component: str, leaf: str, start: int, stop: int) -> _AffineExpr:
         spec = self.cost_specs[(inst, component)]
         fixed_val = spec.fixed_amount if leaf == "fixed" else dict(spec.fixed_items).get(leaf)
         if fixed_val is not None:
-            bounds = (fixed_val, fixed_val)
+            expr = _AffineExpr(const=fixed_val)
         else:
             term = next(t for t in spec.terms if t.leaf == leaf)
-            driver_bounds = (
-                self._prop_interval(inst, term.local)
+            driver_expr = (
+                self._bound_var_affine(inst, term.local)
                 if term.target_kind == "property"
-                else _interval_scale(
-                    self._iface_step_interval(inst, term.local, start, stop),
-                    self.step_s if term.aggregation == "integrate_positive" else 1.0,
-                )
+                else self._iface_affine(inst, term.local, start, stop, term.aggregation)
             )
-            bounds = _interval_scale(driver_bounds, term.coefficient)
+            expr = driver_expr.scaled(term.coefficient)
+
         condition = self._cost_occurrence_condition(inst, component, leaf)
         if condition["kind"] != "always":
-            unit = self.declared_units.get(condition["unit_ref"])
+            unit_ref = condition["unit_ref"]
+            unit = self.declared_units.get(unit_ref)
             if unit is None or unit.get("mode") == "optional":
-                return (min(bounds[0], 0.0), max(bounds[1], 0.0))
-        return bounds
+                if not expr.terms and fixed_val is not None:
+                    return self._unit_affine(unit_ref).scaled(fixed_val)
+                scales = unit.get("scales") if isinstance(unit, Mapping) else None
+                if expr.const == 0.0 and isinstance(scales, Mapping) and all(
+                    sym[0] == "prop" and sym[1] == inst and sym[2] in scales for sym in expr.terms
+                ):
+                    return expr
+                lo, hi = self._expr_bounds(expr)
+                sym = ("cond_cost", inst, component, leaf, start, stop)
+                self._bound_symbols[sym] = (min(lo, 0.0), max(hi, 0.0))
+                return _AffineExpr(terms={sym: 1.0})
+        return expr
 
-    def _cost_component_interval(
+    def _cost_component_affine(
         self,
         inst: str,
         component: str,
@@ -1977,80 +2041,117 @@ class _ForwardFinanceEvaluator:
         part: str | None = None,
         basis: str = "raw",
         annual_amount: bool = False,
-    ) -> tuple[float, float]:
+    ) -> _AffineExpr:
         end = self.point_count if stop is None else stop
         spec = self.cost_specs[(inst, component)]
         prefix = f"{spec.finance_type}.{component}"
-        acc = (0.0, 0.0)
+        acc = _AffineExpr()
         for leaf in spec.leaves:
             if part is not None and leaf != part and not leaf.startswith(f"{part}."):
                 continue
-            bounds = self._cost_leaf_interval(inst, component, leaf, start, end)
-            if component == "annual_fixed_om" and annual_amount:
-                bounds = _interval_scale(bounds, _YEAR_SECONDS)
+            leaf_expr = self._cost_leaf_affine(inst, component, leaf, start, end)
+            scale = _YEAR_SECONDS if (component == "annual_fixed_om" and annual_amount) else 1.0
             if basis != "raw":
                 mult, cred = self.cost_tax_factors.get(f"{prefix}.{leaf}", (1.0, 0.0))
-                bounds = _interval_scale(bounds, _amount_basis(1.0, mult, mult - cred, basis))
-            acc = _interval_add(acc, bounds)
+                scale *= _amount_basis(1.0, mult, mult - cred, basis)
+            acc.add_scaled(leaf_expr, scale)
         return acc
 
-    def _amount_source_interval(self, reference: Any, axis: str, period: int) -> tuple[float, float]:
+    def _tariff_affine(self, binding_id: str, start: int, stop: int) -> _AffineExpr:
+        binding = (self.doc.get("tariff_bindings") or {})[binding_id]
+        price_id = binding["price"]
+        price = self.finance.energy_prices[price_id]
+        sign = 1.0 if price.direction == "purchase" else -1.0
+        agg = binding["aggregation"]
+        inst, iface = binding["instance"], binding["interface"]
+        if price.kind == "constant":
+            price_si = _to_internal(float(price.value.value), price.value.unit)  # type: ignore[union-attr]
+            return self._iface_affine(inst, iface, start, stop, agg).scaled(sign * price_si)
+        agg_factor = self.step_s if agg == "integrate_positive" else 1.0
+        p_vals = self.prices_si[price_id]
+        if (inst, iface) in self.predefined_series_si:
+            e_vals = self.predefined_series_si[(inst, iface)][start:stop]
+            return _AffineExpr(
+                const=sum(sign * p_vals[start + i] * agg_factor * flow for i, flow in enumerate(e_vals))
+            )
+        sym = ("tariff", binding_id, start, stop)
+        if sym not in self._bound_symbols:
+            step_bounds = self._iface_step_interval(inst, iface, 0, 1)
+            acc = (0.0, 0.0)
+            for idx in range(start, stop):
+                acc = _interval_add(acc, _interval_scale(step_bounds, sign * p_vals[idx] * agg_factor))
+            self._bound_symbols[sym] = acc
+        return _AffineExpr(terms={sym: 1.0})
+
+    def _maintenance_affine(self, year: int, position: int) -> _AffineExpr:
+        pos = 0
+        for entry in self.evaluation.maintenance_expenses:
+            if entry.year == year:
+                pos += 1
+                if pos == position:
+                    acc = _AffineExpr(const=float(entry.amount))
+                    for term in entry.terms:
+                        if term.kind == "scale_unit_cost":
+                            factor = _unit_cost_to_internal(float(term.unit_cost.value), term.unit_cost.unit)
+                            acc.add_scaled(self._bound_var_affine(term.instance_id, term.property), factor)
+                        elif term.kind == "cost_component_share":
+                            if (term.instance_id, "upfront_capex") in self.cost_specs:
+                                acc.add_scaled(
+                                    self._cost_component_affine(term.instance_id, "upfront_capex"),
+                                    float(term.ratio),
+                                )
+                    return acc
+        return _AffineExpr()
+
+    def _amount_source_affine(self, reference: Any, axis: str, period: int) -> _AffineExpr:
         kind = reference.kind
         if kind == "amount":
             definition = self.finance.amounts[reference.id]
-            c_val = _money_to_internal(definition.constant)
-            acc = (c_val, c_val)
+            acc = _AffineExpr(const=_money_to_internal(definition.constant))
             for term in definition.terms.values():
                 if term.coefficient.value:
                     coeff = _money_to_internal(term.coefficient)
-                    acc = _interval_add(
-                        acc,
-                        _interval_scale(
-                            self._amount_reference_interval(term.source, definition.axis, period), coeff
-                        ),
-                    )
+                    acc.add_scaled(self._amount_reference_affine(term.source, definition.axis, period), coeff)
             return acc
         if kind == "baseline":
             fact = self.evaluation.comparison.facts[reference.id]
             index = period - 1 if axis == "tax_month" else period
-            val = _to_internal(float(fact.values[index]), fact.unit)
-            return (val, val)
+            return _AffineExpr(const=_to_internal(float(fact.values[index]), fact.unit))
         if kind == "movement":
             movement = self.finance.cash_movements[reference.id]
             mult, in_f, out_f = self._movement_vat_factors(reference.id)
-            factor = {
-                "raw": 1.0,
-                "gross": mult,
-                "net_basis": mult - in_f,
-                "net_revenue": mult - out_f,
-            }[reference.basis]
-            return _interval_scale(
-                self._amount_reference_interval(movement.amount, axis, period), factor
+            factor = _amount_basis(
+                1.0,
+                mult,
+                mult - (in_f if movement.direction == "outflow" else out_f),
+                reference.basis,
             )
+            return self._amount_reference_affine(movement.amount, axis, period).scaled(factor)
         if kind == "asset" and reference.measure == "basis":
-            bounds = self._amount_reference_interval(self.finance.assets[reference.id].basis_from)
-            return (max(bounds[0], 0.0), max(bounds[1], 0.0))
+            basis_expr = self._amount_reference_affine(self.finance.assets[reference.id].basis_from)
+            lo, hi = self._expr_bounds(basis_expr)
+            if lo >= -1e-9:
+                return basis_expr
+            sym = ("asset_basis", reference.id)
+            self._bound_symbols[sym] = (max(lo, 0.0), max(hi, 0.0))
+            return _AffineExpr(terms={sym: 1.0})
         if kind == "construction_unit":
-            unit = self.declared_units.get(reference.unit_ref)
-            if unit is None or unit.get("mode") == "optional":
-                return (0.0, 1.0)
-            return (1.0, 1.0)
+            return self._unit_affine(reference.unit_ref)
         start, end = self._amount_span(axis, period)
         if kind == "cost":
             _, component, *parts = reference.path.split(".")
             part = ".".join(parts) or None
-            acc = (0.0, 0.0)
+            acc = _AffineExpr()
             for inst in self._amount_instances(reference):
                 if self.devices[inst].get("asset_origin") != "new" and component not in _COMPONENTS_EXISTING:
                     continue
                 if axis != "scalar" and start == end:
                     continue
-                acc = _interval_add(
-                    acc,
-                    self._cost_component_interval(
+                acc.add_scaled(
+                    self._cost_component_affine(
                         inst, component, start, end,
                         part=part, basis=reference.basis, annual_amount=axis != "scalar",
-                    ),
+                    )
                 )
             return acc
         if kind == "tariff":
@@ -2060,78 +2161,32 @@ class _ForwardFinanceEvaluator:
                 self.purchase_tax_factors if price.direction == "purchase" else self.sale_tax_factors
             ).get(reference.price, (0.0, 1.0))
             factor = _amount_basis(1.0, markup, markup - credit, reference.basis)
-            acc = (0.0, 0.0)
+            acc = _AffineExpr()
             for binding_id in reference.bindings:
-                raw_b = _interval_scale(self._tariff_interval(binding_id, start, end), sign * factor)
-                acc = _interval_add(acc, raw_b)
+                acc.add_scaled(self._tariff_affine(binding_id, start, end), sign * factor)
             return acc
-        return (-math.inf, math.inf)
+        sym = ("unbounded", kind)
+        self._bound_symbols[sym] = (-math.inf, math.inf)
+        return _AffineExpr(terms={sym: 1.0})
 
-    def _amount_reference_interval(
+    def _amount_reference_affine(
         self, reference: Any, current_axis: str = "scalar", current_period: int = 0
-    ) -> tuple[float, float]:
+    ) -> _AffineExpr:
         if reference.kind == "maintenance":
-            m_bounds = self._maintenance_interval(reference.year, reference.position)
+            m_expr = self._maintenance_affine(reference.year, reference.position)
             if reference.basis == "net_basis":
                 credit = self.maint_credits.get((reference.year, reference.position), 0.0)
-                return _interval_scale(m_bounds, 1.0 - credit)
-            return m_bounds
+                return m_expr.scaled(1.0 - credit)
+            return m_expr
         axis, periods = expand_amount_period(reference.period, current_axis, current_period)
-        acc = (0.0, 0.0)
+        acc = _AffineExpr()
         for period in periods:
-            acc = _interval_add(acc, self._amount_source_interval(reference, axis, period))
+            acc.add_scaled(self._amount_source_affine(reference, axis, period))
         return acc
-
-    def _tariff_interval(self, binding_id: str, start: int, stop: int) -> tuple[float, float]:
-        binding = (self.doc.get("tariff_bindings") or {})[binding_id]
-        price_id = binding["price"]
-        price = self.finance.energy_prices[price_id]
-        sign = 1.0 if price.direction == "purchase" else -1.0
-        agg_factor = self.step_s if binding["aggregation"] == "integrate_positive" else 1.0
-        inst, iface = binding["instance"], binding["interface"]
-        if price.kind == "constant":
-            price_si = _to_internal(float(price.value.value), price.value.unit)  # type: ignore[union-attr]
-            return _interval_scale(
-                self._iface_step_interval(inst, iface, start, stop), sign * price_si * agg_factor
-            )
-        p_vals = self.prices_si[price_id]
-        if (inst, iface) in self.predefined_series_si:
-            e_vals = self.predefined_series_si[(inst, iface)][start:stop]
-            val = sum(sign * p_vals[start + i] * agg_factor * flow for i, flow in enumerate(e_vals))
-            return (val, val)
-        step_bounds = self._iface_step_interval(inst, iface, 0, 1)
-        acc = (0.0, 0.0)
-        for idx in range(start, stop):
-            acc = _interval_add(acc, _interval_scale(step_bounds, sign * p_vals[idx] * agg_factor))
-        return acc
-
-    def _maintenance_interval(self, year: int, position: int) -> tuple[float, float]:
-        pos = 0
-        for entry in self.evaluation.maintenance_expenses:
-            if entry.year == year:
-                pos += 1
-                if pos == position:
-                    acc = (float(entry.amount), float(entry.amount))
-                    for term in entry.terms:
-                        if term.kind == "scale_unit_cost":
-                            factor = _unit_cost_to_internal(float(term.unit_cost.value), term.unit_cost.unit)
-                            prop_bounds = self._prop_interval(term.instance_id, term.property)
-                            acc = _interval_add(acc, _interval_scale(prop_bounds, factor))
-                        elif term.kind == "cost_component_share":
-                            if (term.instance_id, "upfront_capex") in self.cost_specs:
-                                acc = _interval_add(
-                                    acc,
-                                    _interval_scale(
-                                        self._cost_component_interval(term.instance_id, "upfront_capex"),
-                                        float(term.ratio),
-                                    ),
-                                )
-                    return acc
-        return (0.0, 0.0)
 
     def _income_base_lower_bound(self, rule_id: str, rule: IncomeTaxRule, year: int) -> float:
-        """Structural lower bound of taxable base in ``year`` from frozen bounds alone."""
-        lo = 0.0
+        """Structural lower bound of taxable base in ``year`` preserving shared-expression cancellation."""
+        base_expr = _AffineExpr()
         span = self.span_by_year.get(year)
         if span is not None:
             start_step, end_step = span
@@ -2139,13 +2194,14 @@ class _ForwardFinanceEvaluator:
                 price_id = binding["price"]
                 if price_id in rule.revenue:
                     tax, markup = self.sale_tax_factors.get(price_id, (0.0, 1.0))
-                    t_bounds = self._tariff_interval(binding_id, start_step, end_step)
-                    lo += _interval_scale(t_bounds, -(markup - tax))[0]
+                    base_expr.add_scaled(
+                        self._tariff_affine(binding_id, start_step, end_step), -(markup - tax)
+                    )
                 elif price_id in rule.energy_cost:
                     credit, markup = self.purchase_tax_factors.get(price_id, (0.0, 1.0))
-                    lo += _interval_scale(
-                        self._tariff_interval(binding_id, start_step, end_step), -(markup - credit)
-                    )[0]
+                    base_expr.add_scaled(
+                        self._tariff_affine(binding_id, start_step, end_step), -(markup - credit)
+                    )
             demand_refs = set(rule.demand_cost)
             for row in self._demand_rows:
                 if row["charge_id"] in demand_refs and row["financial_year"] == year:
@@ -2153,10 +2209,11 @@ class _ForwardFinanceEvaluator:
                     binding = (self.doc.get("demand_bindings") or {})[row["billing_id"]]
                     rate_si = _money_to_internal(self.finance.demand_charges[row["charge_id"]].rate)
                     m_start, m_end = self.month_span_map.get(row["month"], _DEFAULT_MONTH_SPAN)
-                    step_bounds = self._iface_step_interval(
+                    sym = ("demand", row["billing_id"], row["charge_id"], row["month"])
+                    self._bound_symbols[sym] = self._iface_step_interval(
                         binding["instance"], binding["interface"], m_start, min(m_start + 1, m_end)
                     )
-                    lo += _interval_scale(step_bounds, -(gross - credit) * rate_si)[0]
+                    base_expr.add_scaled(_AffineExpr(terms={sym: 1.0}), -(gross - credit) * rate_si)
             for for_path, is_annual in (
                 *((p, True) for p in rule.annual_om),
                 *((p, False) for p in rule.variable_om),
@@ -2174,56 +2231,59 @@ class _ForwardFinanceEvaluator:
                         gross_f, credit_f = self.cost_tax_factors.get(
                             path, self.cost_tax_factors.get(prefix, (1.0, 0.0))
                         )
-                        bounds = (
-                            _interval_scale(
-                                self._cost_leaf_interval(inst, comp, leaf, 0, self.point_count),
-                                _YEAR_SECONDS,
+                        leaf_expr = (
+                            self._cost_leaf_affine(inst, comp, leaf, 0, self.point_count).scaled(
+                                _YEAR_SECONDS
                             )
                             if is_annual
-                            else self._cost_leaf_interval(inst, comp, leaf, start_step, end_step)
+                            else self._cost_leaf_affine(inst, comp, leaf, start_step, end_step)
                         )
-                        lo += _interval_scale(bounds, -(gross_f - credit_f))[0]
+                        base_expr.add_scaled(leaf_expr, -(gross_f - credit_f))
 
         for item in rule.deductible_maintenance.items:
             if item.year == year and item.deductible:
                 credit = self.maint_credits.get((item.year, item.position), 0.0)
-                m_bounds = self._maintenance_interval(item.year, item.position)
-                lo += _interval_scale(m_bounds, -(1.0 - credit))[0]
+                base_expr.add_scaled(self._maintenance_affine(item.year, item.position), -(1.0 - credit))
 
         construction = self.evaluation.construction_period
-        for entry in rule.depreciation:
+        for index, entry in enumerate(rule.depreciation):
             first = construction + entry.first_year
             if first <= year < first + entry.life_years:
                 src = entry.base_from
                 if src.kind == "asset":
-                    raw_b = self._amount_reference_interval(self.finance.assets[src.id].basis_from)
-                    src_bounds = (max(raw_b[0], 0.0), max(raw_b[1], 0.0))
+                    src_expr = self._amount_reference_affine(self.finance.assets[src.id].basis_from)
+                    s_lo, s_hi = self._expr_bounds(src_expr)
+                    if s_lo < -1e-9:
+                        sym = ("asset_depr_src", src.id)
+                        self._bound_symbols[sym] = (max(s_lo, 0.0), max(s_hi, 0.0))
+                        src_expr = _AffineExpr(terms={sym: 1.0})
+                        s_lo, s_hi = self._expr_bounds(src_expr)
                 elif src.kind == "upfront_capex_net":
-                    src_bounds = (0.0, 0.0)
+                    src_expr = _AffineExpr()
                     for inst in self._scoped_instances(src.finance_type, src.scope_kind, src.instances):
                         if (inst, "upfront_capex") in self.cost_specs:
-                            src_bounds = _interval_add(
-                                src_bounds,
-                                self._cost_component_interval(inst, "upfront_capex", basis="net_basis"),
+                            src_expr.add_scaled(
+                                self._cost_component_affine(inst, "upfront_capex", basis="net_basis")
                             )
+                    s_lo, s_hi = self._expr_bounds(src_expr)
                 else:
                     credit = self.maint_credits.get((src.year, src.position), 0.0)
-                    src_bounds = _interval_scale(
-                        self._maintenance_interval(src.year, src.position), 1.0 - credit
-                    )
+                    src_expr = self._maintenance_affine(src.year, src.position).scaled(1.0 - credit)
+                    s_lo, s_hi = self._expr_bounds(src_expr)
                 res_val = float(entry.residual.value)
                 life = float(entry.life_years)
                 if entry.residual.unit == "1":
-                    depr_hi = src_bounds[1] * (1.0 - res_val) / life
-                elif res_val > 0.0:
-                    depr_hi = (
-                        src_bounds[1] / life
-                        if src_bounds[0] <= 0.0
-                        else max(src_bounds[1] - res_val, 0.0) / life
-                    )
+                    base_expr.add_scaled(src_expr, -(1.0 - res_val) / life)
+                elif res_val == 0.0:
+                    base_expr.add_scaled(src_expr, -1.0 / life)
+                elif s_lo >= res_val:
+                    base_expr.add_scaled(src_expr, -1.0 / life)
+                    base_expr.const += res_val / life
                 else:
-                    depr_hi = src_bounds[1] / life
-                lo -= depr_hi
+                    depr_hi = s_hi / life if s_lo <= 0.0 else max(s_hi - res_val, 0.0) / life
+                    sym = ("depr_pw", rule_id, index, year)
+                    self._bound_symbols[sym] = (0.0, depr_hi)
+                    base_expr.add_scaled(_AffineExpr(terms={sym: 1.0}), -1.0)
 
         for movement_id in rule.movement_revenue:
             movement = self.finance.cash_movements[movement_id]
@@ -2231,30 +2291,28 @@ class _ForwardFinanceEvaluator:
             for at in cash_movement_occurrences(movement):
                 occ_year = max(1, at.period) if at.axis == "financial_year" else (at.period + 11) // 12
                 if occ_year == year:
-                    m_bounds = _interval_scale(
-                        self._amount_reference_interval(movement.amount, at.axis, at.period),
+                    base_expr.add_scaled(
+                        self._amount_reference_affine(movement.amount, at.axis, at.period),
                         mult - out_f,
                     )
-                    lo += m_bounds[0]
         for movement_id in rule.movement_cost:
             movement = self.finance.cash_movements[movement_id]
             mult, in_f, _ = self._movement_vat_factors(movement_id)
             for at in cash_movement_occurrences(movement):
                 occ_year = max(1, at.period) if at.axis == "financial_year" else (at.period + 11) // 12
                 if occ_year == year:
-                    m_bounds = _interval_scale(
-                        self._amount_reference_interval(movement.amount, at.axis, at.period),
-                        mult - in_f,
+                    base_expr.add_scaled(
+                        self._amount_reference_affine(movement.amount, at.axis, at.period),
+                        -(mult - in_f),
                     )
-                    lo -= m_bounds[1]
         for derived_id in rule.derived_tax_cost:
             d_rule = self.finance.tax_rules[derived_id]
             axis = d_rule.axis
             periods = (year,) if axis == "financial_year" else range(12 * (year - 1) + 1, 12 * year + 1)
             for p in periods:
                 assessed_val = float(self._financial_values[("tax_rule", derived_id, axis, p, "assessed")])
-                lo -= max(assessed_val, 0.0)
-        return lo
+                base_expr.const -= max(assessed_val, 0.0)
+        return self._expr_bounds(base_expr)[0]
 
     def _income_taxable_base(self, rule_id: str, rule: IncomeTaxRule, year: int) -> float:
         base = 0.0
@@ -2703,6 +2761,11 @@ class _ForwardFinanceEvaluator:
             for row in self._demand_rows
         ]
 
+        declared_or_units = (
+            [self.unit_by_id[uid] for uid in sorted(self.declared_units)]
+            if self.declared_units
+            else sorted(self.unit_by_id.values(), key=lambda u: u["unit_id"])
+        )
         construction_units = [
             {
                 "unit_id": unit["unit_id"],
@@ -2718,7 +2781,7 @@ class _ForwardFinanceEvaluator:
                     for scale in sorted(unit.get("scales") or (), key=lambda s: s["planning_variable_id"])
                 ],
             }
-            for unit in sorted(self.unit_by_id.values(), key=lambda u: u["unit_id"])
+            for unit in declared_or_units
         ]
 
         consumed = self._consumed_amounts()

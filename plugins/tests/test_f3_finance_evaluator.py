@@ -688,3 +688,145 @@ def test_f3_rejects_omitted_truncated_or_unit_mismatched_solution_and_loads_froz
             work_out=bad_unit_out,
             pies_version="1.2.0",
         )
+
+
+def test_f3_complex_tax_serialized_device_models_and_system_quantity_unit_mismatch(
+    tmp_path: Path,
+) -> None:
+    """Verify serialized device_models (valid_range dict) with income tax and system_quantity."""
+    minimal_in = EVAL_FINANCE_DIR / "tests" / "minimal" / "in"
+    base_doc = read_json_file(minimal_in / "assembly.json")
+    base_fin = read_json_file(minimal_in / "finance.json")
+    base_eval = read_json_file(minimal_in / "evaluation.json")
+    base_sol = read_json_file(minimal_in / "solution.json")
+
+    # 1) Serialized device_models.json with valid_range={"minimum":..., "maximum":...} + income_tax
+    init_registry()
+    pv_dev = next(d for d in list_devices() if d.device.id == "ies.device.pv")
+    pv_contrib = contribution_to_dict(build_math_contribution(pv_dev).contribution)
+    assert isinstance(
+        next(iter(pv_contrib["interfaces"].values()))["valid_range"], dict
+    ), "serialized valid_range must be a dict"
+
+    tax_doc = deepcopy(base_doc)
+    tax_doc["devices"]["g"]["properties"] = {"rated_capacity_kwp": {"value": 10.0, "unit": "kWp"}}
+    tax_doc["planning"]["variables"] = {
+        "cap_v": {"device_ref": "g", "parameter": "rated_capacity_kwp", "unit": "kWp"}
+    }
+    tax_doc["finance_binding"]["instances"]["g"]["drivers"] = {
+        "cap": {"property": "rated_capacity_kwp"},
+        "energy": {"interface": "electric_out", "aggregation": "integrate_positive"},
+    }
+    tax_doc["tariff_bindings"]["sell"]["interface"] = "electric_out"
+    tax_doc["demand_bindings"]["dem"]["interface"] = "electric_out"
+
+    tax_sol = deepcopy(base_sol)
+    tax_sol["construction_units"][0]["scales"][0]["unit"] = "kWp"
+    tax_sol["series"] = {
+        "g.electric_out": {
+            "instance_id": "g",
+            "variable_id": "electric_out",
+            "unit": "kW",
+            "values": [1.0] * 8760,
+        }
+    }
+
+    tax_in = tmp_path / "tax_in"
+    tax_out = tmp_path / "tax_out"
+    tax_in.mkdir()
+    write_json_file(tax_in / "assembly.json", tax_doc)
+    write_json_file(tax_in / "finance.json", base_fin)
+    write_json_file(tax_in / "evaluation.json", base_eval)
+    write_json_file(tax_in / "device_models.json", {"g": pv_contrib})
+    write_engineering_solution(tax_in / "solution.json", tax_sol)
+    run_plugin(
+        manifest_path=EVAL_FINANCE_MANIFEST,
+        work_in=tax_in,
+        work_out=tax_out,
+        pies_version="1.2.0",
+    )
+    tax_res = read_compute_result(tax_out)
+    assert Decimal(tax_res.outputs["financial_evaluation"]["evaluation"]["npv"]) == Decimal("5072.5")
+
+    # 2) system_quantity expects unit from frozen system_equations, rejecting solution unit spoofing
+    sys_doc = deepcopy(base_doc)
+    sys_doc["system_equations"] = {"plant": {"variables": {"output": {"unit": "kW"}}}}
+    sys_fin = deepcopy(base_fin)
+    sys_fin["amounts"] = {
+        "sys_rev": {
+            "axis": "financial_year",
+            "unit": "CNY",
+            "constant": {"unit": "CNY", "value": "0"},
+            "terms": {
+                "flow": {
+                    "coefficient": {"unit": "CNY/kWh", "value": "1"},
+                    "source": {
+                        "aggregation": "integrate_positive",
+                        "block": "plant",
+                        "kind": "system_quantity",
+                        "period": {"kind": "current"},
+                        "variable": "output",
+                    },
+                }
+            },
+        }
+    }
+    sys_sol = deepcopy(base_sol)
+    sys_sol["system_series"] = {
+        "plant.output": {
+            "block": "plant",
+            "variable": "output",
+            "unit": "kW",
+            "values": [1.0] * 8760,
+        }
+    }
+
+    sys_ok_in = tmp_path / "sys_ok_in"
+    sys_ok_out = tmp_path / "sys_ok_out"
+    sys_ok_in.mkdir()
+    write_json_file(sys_ok_in / "assembly.json", sys_doc)
+    write_json_file(sys_ok_in / "finance.json", sys_fin)
+    write_json_file(sys_ok_in / "evaluation.json", base_eval)
+    write_engineering_solution(sys_ok_in / "solution.json", sys_sol)
+    run_plugin(
+        manifest_path=EVAL_FINANCE_MANIFEST,
+        work_in=sys_ok_in,
+        work_out=sys_ok_out,
+        pies_version="1.2.0",
+    )
+    assert read_compute_result(sys_ok_out).math_status == "solved"
+
+    # Spoofed unit ("kWh" when system_equations declares "kW") must be rejected
+    bad_sys_sol = deepcopy(sys_sol)
+    bad_sys_sol["system_series"]["plant.output"]["unit"] = "kWh"
+    sys_bad_in = tmp_path / "sys_bad_in"
+    sys_bad_out = tmp_path / "sys_bad_out"
+    sys_bad_in.mkdir()
+    write_json_file(sys_bad_in / "assembly.json", sys_doc)
+    write_json_file(sys_bad_in / "finance.json", sys_fin)
+    write_json_file(sys_bad_in / "evaluation.json", base_eval)
+    write_engineering_solution(sys_bad_in / "solution.json", bad_sys_sol)
+    with pytest.raises(StageIOError, match="unit mismatch"):
+        run_plugin(
+            manifest_path=EVAL_FINANCE_MANIFEST,
+            work_in=sys_bad_in,
+            work_out=sys_bad_out,
+            pies_version="1.2.0",
+        )
+
+    # Missing required system_series referenced via system_quantity must be rejected
+    miss_sys_sol = deepcopy(base_sol)
+    miss_sys_in = tmp_path / "sys_miss_in"
+    miss_sys_out = tmp_path / "sys_miss_out"
+    miss_sys_in.mkdir()
+    write_json_file(miss_sys_in / "assembly.json", sys_doc)
+    write_json_file(miss_sys_in / "finance.json", sys_fin)
+    write_json_file(miss_sys_in / "evaluation.json", base_eval)
+    write_engineering_solution(miss_sys_in / "solution.json", miss_sys_sol)
+    with pytest.raises(StageIOError, match="missing required system_series"):
+        run_plugin(
+            manifest_path=EVAL_FINANCE_MANIFEST,
+            work_in=miss_sys_in,
+            work_out=miss_sys_out,
+            pies_version="1.2.0",
+        )
