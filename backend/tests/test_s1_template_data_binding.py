@@ -183,7 +183,7 @@ def test_template_data_binding_reaches_assembly(
     # CSV 的 device_id 是稳定设备 ID(不含项目作用域 _N 编号), 用户无需猜编号。
     vid = _upload_version(client, headers, pid, base_id)
     _bind_dataset(client, headers, pid, vid)
-    template_id, revision = _publish_template(client, headers, TEMPLATE_YAML, slug="electric-load")
+    template_id, _revision = _publish_template(client, headers, TEMPLATE_YAML, slug="electric-load")
 
     resp = _save(
         client,
@@ -192,7 +192,6 @@ def test_template_data_binding_reaches_assembly(
         "",
         source="template",
         template_id=template_id,
-        template_revision=revision,
         template_inputs=_template_inputs(dataset_export_path(vid)),
     )
     assert resp.status_code == 201, resp.text
@@ -243,7 +242,7 @@ def test_template_data_input_required_and_must_resolve(
     client, db_session: Session
 ) -> None:
     headers, pid = _make_owner(client, db_session, "s1_bind_required")
-    template_id, revision = _publish_template(client, headers, TEMPLATE_YAML, slug="electric-load")
+    template_id, _revision = _publish_template(client, headers, TEMPLATE_YAML, slug="electric-load")
 
     # 缺少数据叶子 → 拒绝(不静默保留模板值)
     missing = _save(
@@ -253,7 +252,6 @@ def test_template_data_input_required_and_must_resolve(
         "",
         source="template",
         template_id=template_id,
-        template_revision=revision,
         template_inputs={"properties": {"peak_power_kw": {"value": 120}}},
     )
     assert missing.status_code == 400, missing.text
@@ -268,7 +266,6 @@ def test_template_data_input_required_and_must_resolve(
         "",
         source="template",
         template_id=template_id,
-        template_revision=revision,
         template_inputs=_template_inputs("data/ds999999.data.csv"),
     )
     assert unresolved.status_code == 400, unresolved.text
@@ -299,7 +296,7 @@ def test_template_data_modes_declared_and_saved(
     template_yaml = TEMPLATE_YAML.replace(
         "electric_demand: {type: data_repeat}", f"electric_demand: {{type: {mode}}}"
     )
-    template_id, revision = _publish_template(
+    template_id, _revision = _publish_template(
         client, headers, template_yaml, slug=f"electric-load-{mode.replace('_', '-')}"
     )
     vid = _upload_version(client, headers, pid, base_id, mode)
@@ -311,7 +308,6 @@ def test_template_data_modes_declared_and_saved(
         "",
         source="template",
         template_id=template_id,
-        template_revision=revision,
         template_inputs=_template_inputs(dataset_export_path(vid)),
     )
     assert resp.status_code == 201, resp.text
@@ -328,10 +324,10 @@ def test_created_binding_is_not_reapplied_after_clear_and_rename(client, db_sess
     token = headers["Authorization"].replace("Bearer ", "")
     base_id = build_stable_id(_token_ns_map[token], "electric-load")
     vid = _upload_version(client, headers, pid, base_id)
-    template_id, revision = _publish_template(client, headers, TEMPLATE_YAML)
+    template_id, _revision = _publish_template(client, headers, TEMPLATE_YAML)
     saved = _save(
         client, pid, headers, "", source="template", template_id=template_id,
-        template_revision=revision, template_inputs=_template_inputs(dataset_export_path(vid)),
+        template_inputs=_template_inputs(dataset_export_path(vid)),
     )
     assert saved.status_code == 201, saved.text
     model_id = saved.json()["project_model"]["device_id"]
@@ -514,12 +510,12 @@ def test_template_prediction_created_then_confirmed_and_submitted(client, db_ses
     token = headers["Authorization"].replace("Bearer ", "")
     base_id = build_stable_id(_token_ns_map[token], "electric-load")
     template = TEMPLATE_YAML.replace("type: data_repeat", "type: data_predict")
-    template_id, revision = _publish_template(client, headers, template)
+    template_id, _revision = _publish_template(client, headers, template)
     vid = _upload_version(client, headers, pid, base_id, "data_predict")
     _bind_dataset(client, headers, pid, vid)
     saved = _save(
         client, pid, headers, "", source="template", template_id=template_id,
-        template_revision=revision, template_inputs=_template_inputs(dataset_export_path(vid)),
+        template_inputs=_template_inputs(dataset_export_path(vid)),
     )
     assert saved.status_code == 201, saved.text
     model_id = saved.json()["project_model"]["device_id"]

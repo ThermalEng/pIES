@@ -114,11 +114,9 @@ WRAPPER_KEYS: dict[str, frozenset[str]] = {
     "disable_template_endpoint": frozenset({"template"}),
     "enable_template_endpoint": frozenset({"template"}),
     "delete_template_endpoint": frozenset({"deleted", "ok"}),
-    "list_draft_revisions_endpoint": frozenset({"draft_revisions"}),
-    "get_draft_revision_endpoint": frozenset({"id", "revision", "yaml_object_id", "source", "created_by", "created_at", "document"}),
-    "get_template_revision_endpoint": frozenset(
+    "get_published_template_endpoint": frozenset(
         {"template", "revision", "document", "receipt", "summary", "diagnostics"}
-    ),  # application.model_templates.get_template_revision
+    ),  # application.model_templates.get_published_template
     # ---- results.py ----
     "get_result_endpoint": frozenset({"result"}),  # services.results.result_view
     "list_assessments_endpoint": frozenset({"items", "total"}),

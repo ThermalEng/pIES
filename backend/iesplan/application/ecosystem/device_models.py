@@ -34,7 +34,7 @@ from iesplan.ecosystem import (
     EcosystemValidationError,
 )
 from iesplan.identity.contracts import UserRecord
-from iesplan.storage import attach, get_object, put_object
+from iesplan.storage import attach, detach, find_refs_by_owner, get_object, put_object
 
 DEVICE_MODEL_MEDIA_TYPE = "application/json"
 
@@ -111,24 +111,89 @@ def import_device_model_case(
     install_status = "ready" if approval == "approved" else "pending"
 
     try:
-        existing = ecosystem_domain.get_artifact_by_identity(
-            db, "device_model", stable_id, version_str
-        )
+        existing = ecosystem_domain.get_artifact_by_stable_id(db, "device_model", stable_id)
         if existing is not None:
-            stored = get_object(db, existing.object_id)
-            if stored != canon_bytes:
-                raise EcosystemConflictError(
-                    "同稳定标识与修订号的设备模型已存在且内容不一致，禁止静默覆盖",
-                    params={"stable_id": stable_id, "revision": rev},
+            if existing.version == version_str:
+                stored = get_object(db, existing.object_id)
+                if stored != canon_bytes:
+                    raise EcosystemConflictError(
+                        "同稳定标识与修订号的设备模型已存在且内容不一致，禁止静默覆盖",
+                        params={"stable_id": stable_id, "revision": rev},
+                    )
+                install = ecosystem_domain.get_member_install(db, user.id, existing.id)
+                if existing.install_status == "ready" and install is None:
+                    install = ecosystem_domain.upsert_member_install(
+                        db, user_id=user.id, artifact=existing, enabled=True
+                    )
+                db.commit()
+                payload = serialize_artifact(existing, install=install)
+                payload["idempotent"] = True
+                payload["duplicate"] = True
+                return payload
+
+            # 不同版本覆盖升级：原地替换为唯一当前生效版本
+            prev_version = existing.version
+            stored_obj = put_object(
+                db,
+                canon_bytes,
+                DEVICE_MODEL_MEDIA_TYPE,
+                "ecosystem_device_model",
+            )
+            for ref in find_refs_by_owner(db, "local_artifact", existing.id, "local_artifacts"):
+                detach(
+                    db,
+                    ref["object_id"],
+                    "local_artifact",
+                    existing.id,
+                    ref_entity_type="local_artifacts",
                 )
-            install = ecosystem_domain.get_member_install(db, user.id, existing.id)
-            if existing.install_status == "ready" and install is None:
+            upgraded = ecosystem_domain.update_artifact(
+                db,
+                existing.id,
+                version=version_str,
+                source_origin=source_origin,
+                uploaded_by=user.id,
+                object_id=stored_obj.oid,
+                approval_status=approval,
+                install_status=install_status,
+                approved_by=user.id if approval == "approved" else None,
+                approved_at=datetime.now(UTC) if approval == "approved" else None,
+                metadata_json=metadata,
+                diagnostics=None,
+            )
+            assert upgraded is not None
+            attach(
+                db,
+                stored_obj.id,
+                "local_artifact",
+                upgraded.id,
+                ref_entity_type="local_artifacts",
+                purpose="生态设备模型规范文档",
+            )
+            install = None
+            if install_status == "ready":
                 install = ecosystem_domain.upsert_member_install(
-                    db, user_id=user.id, artifact=existing, enabled=True
+                    db, user_id=user.id, artifact=upgraded, enabled=True
                 )
+            audit_domain.audit(
+                db,
+                user.id,
+                "ecosystem.device_model_upgraded",
+                "local_artifact",
+                upgraded.id,
+                actor_type="admin" if admin_flag else "user",
+                result={
+                    "stable_id": stable_id,
+                    "from_revision": prev_version,
+                    "revision": rev,
+                    "approval_status": approval,
+                },
+            )
             db.commit()
-            payload = serialize_artifact(existing, install=install)
-            payload["idempotent"] = True
+            payload = serialize_artifact(upgraded, install=install)
+            payload["idempotent"] = False
+            payload["duplicate"] = False
+            payload["upgraded_from"] = prev_version
             return payload
 
         stored_obj = put_object(
@@ -179,6 +244,7 @@ def import_device_model_case(
         raise
     payload = serialize_artifact(artifact, install=install)
     payload["idempotent"] = False
+    payload["duplicate"] = False
     return payload
 
 

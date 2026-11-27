@@ -394,13 +394,12 @@ check('诊断: 裸 diagnostics 数组容错', (() => {
 })())
 
 // ---------------------------------------------------------------------------
-// 候选请求构建(source 判别; template 精确 revision + inputs)
+// 候选请求构建(source 判别; template 当前发布版 template_id + inputs, 不传 template_revision)
 // ---------------------------------------------------------------------------
 check('请求: template 来源', (() => {
   const req = md.buildCandidateRequest({
     source: 'template',
     template_id: 'ies.test.sample',
-    template_revision: 1,
     inputs_json: { properties: { x: { value: 1 } } },
     content_yaml: null,
     project_revision: 2,
@@ -409,7 +408,7 @@ check('请求: template 来源', (() => {
   return (
     req.source === 'template' &&
     req.template_id === 'ies.test.sample' &&
-    req.template_revision === 1 &&
+    !('template_revision' in req) &&
     req.template_inputs && req.template_inputs.properties.x.value === 1 &&
     req.expected_revision === 2 &&
     req.model_yaml === ''
@@ -417,15 +416,7 @@ check('请求: template 来源', (() => {
 })())
 check('请求: template 缺 template_id 抛错', (() => {
   try {
-    md.buildCandidateRequest({ source: 'template', template_id: null, template_revision: 1, inputs_json: {}, content_yaml: null, project_revision: 1, idempotency_key: 'k' })
-    return false
-  } catch (err) {
-    return err.name === 'MapperError'
-  }
-})())
-check('请求: template 缺 revision 抛错', (() => {
-  try {
-    md.buildCandidateRequest({ source: 'template', template_id: 't', template_revision: null, inputs_json: {}, content_yaml: null, project_revision: 1, idempotency_key: 'k' })
+    md.buildCandidateRequest({ source: 'template', template_id: null, inputs_json: {}, content_yaml: null, project_revision: 1, idempotency_key: 'k' })
     return false
   } catch (err) {
     return err.name === 'MapperError'
@@ -435,17 +426,16 @@ check('请求: yaml 来源', (() => {
   const req = md.buildCandidateRequest({
     source: 'yaml',
     template_id: null,
-    template_revision: null,
     inputs_json: null,
     content_yaml: 'schema: ies.device-model\n',
     project_revision: 2,
     idempotency_key: 'k2',
   })
-  return req.source === 'direct_yaml' && req.model_yaml.includes('ies.device-model') && req.template_id === null && req.expected_revision === 2
+  return req.source === 'direct_yaml' && req.model_yaml.includes('ies.device-model') && req.template_id === null && !('template_revision' in req) && req.expected_revision === 2
 })())
 check('请求: yaml 空内容抛错', (() => {
   try {
-    md.buildCandidateRequest({ source: 'yaml', template_id: null, template_revision: null, inputs_json: null, content_yaml: '   ', project_revision: 1, idempotency_key: 'k' })
+    md.buildCandidateRequest({ source: 'yaml', template_id: null, inputs_json: null, content_yaml: '   ', project_revision: 1, idempotency_key: 'k' })
     return false
   } catch (err) {
     return err.name === 'MapperError'

@@ -49,7 +49,7 @@ from iesplan import project as project_domain
 from iesplan import tasks as tasks_domain
 from iesplan.application.ecosystem import (
     augment_stage_registries_for_user,
-    lock_and_load_submission_artifacts,
+    verify_submission_ecosystem_artifacts,
 )
 from iesplan.application.models import (
     load_project_device_base_ids,
@@ -652,15 +652,11 @@ def _assemble_snapshot(
         except NotFoundError:
             consumed_local_device_ids.add(dtype)
 
-    pinned_local_devices = extensions.get("local_device_models")
-    frozen_local_devices, locked_local_device_docs = lock_and_load_submission_artifacts(
+    frozen_local_devices, local_device_docs = verify_submission_ecosystem_artifacts(
         db,
         user_id=actor.id,
         calc_config=calc_config,
         device_type_ids=consumed_local_device_ids,
-        pinned_device_revisions=(
-            pinned_local_devices if isinstance(pinned_local_devices, Mapping) else None
-        ),
     )
     if frozen_local_devices:
         extensions["local_device_models"] = frozen_local_devices
@@ -704,7 +700,7 @@ def _assemble_snapshot(
         content,
         task_type,
         operation_years=evaluation.operation_years,
-        local_device_documents=locked_local_device_docs,
+        local_device_documents=local_device_docs,
     )
     assert gate.artifact is not None
     artifact = gate.artifact

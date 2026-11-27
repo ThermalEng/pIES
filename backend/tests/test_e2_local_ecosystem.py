@@ -14,11 +14,9 @@ import hashlib
 import io
 import json
 import os
-import threading
 import uuid
 import zipfile
 from collections.abc import Iterator
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -28,7 +26,7 @@ import pytest
 import sqlalchemy as sa
 from auth_helpers import login_headers, make_user
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, select
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -554,9 +552,14 @@ def test_device_model_import_export_conflict_and_selector_integration(
         ecosystem_app.import_device_model_case(db, admin, yaml_text=yaml_v1_mod, revision=1)
     assert conflict_exc.value.http_status == 409
 
-    # Multi-version coexistence on revision=2
+    # Single active version overwrite upgrade on revision=2
     imp2 = ecosystem_app.import_device_model_case(db, admin, yaml_text=yaml_v1_mod, revision=2)
+    assert imp2["id"] == imp1["id"]
     assert imp2["version"] == "2"
+    all_dev = [
+        r for r in ecosystem_domain.list_artifacts(db, kind="device_model") if r.stable_id == stable_id
+    ]
+    assert len(all_dev) == 1
 
     # Pure technical YAML export has NO embedded revision, carries revision in metadata
     exported = ecosystem_app.export_device_model_case(db, admin, artifact_id=imp2["id"])
@@ -564,7 +567,7 @@ def test_device_model_import_export_conflict_and_selector_integration(
     assert "revision:" not in exported["yaml_text"]
     assert stable_id in exported["yaml_text"]
 
-    # Member installs revision=1 and checks project device selector
+    # Member installs current active artifact (revision=2) and checks project device selector
     proj = project_domain.create_project(
         db,
         owner_id=member.id,
@@ -606,15 +609,15 @@ def test_device_model_import_export_conflict_and_selector_integration(
     sel_other = models_app.list_project_device_types(db, other, other_proj.id)
     assert stable_id not in {item["type_id"] for item in sel_other["items"]}
 
-    ecosystem_app.install_artifact_for_user_case(db, member, imp1["id"], enabled=True)
+    ecosystem_app.install_artifact_for_user_case(db, member, imp2["id"], enabled=True)
     sel_member = models_app.list_project_device_types(db, member, proj.id)
     by_id = {item["type_id"]: item for item in sel_member["items"]}
     assert stable_id in by_id
-    assert by_id[stable_id]["local_revision"] == 1
-    assert by_id[stable_id]["parameters"]["cop"]["default"] == 3.5
+    assert by_id[stable_id]["local_revision"] == 2
+    assert by_id[stable_id]["parameters"]["cop"]["default"] == 4.5
 
     # Disabling member install removes it from member's selector
-    ecosystem_app.set_member_artifact_enabled_case(db, member, imp1["id"], enabled=False)
+    ecosystem_app.set_member_artifact_enabled_case(db, member, imp2["id"], enabled=False)
     sel_disabled = models_app.list_project_device_types(db, member, proj.id)
     assert stable_id not in {item["type_id"] for item in sel_disabled["items"]}
 
@@ -898,6 +901,22 @@ def test_two_phase_stateless_uninstall_protects_inflight_snapshots(
     assert disabled_rec is not None
     assert disabled_rec.install_status == "disabled"
 
+    # Rejecting a disabled artifact MUST fail (409) to protect in-flight tasks' stage resolution!
+    with pytest.raises(EcosystemConflictError) as rej_err:
+        ecosystem_app.reject_artifact_case(db, admin, art["id"], reason="cannot_reject_disabled")
+    assert rej_err.value.http_status == 409
+    plane = compute_cases.ComputeExecutionPlane(
+        generator_registry=build_generator_registry((HIGHS_MILP_PROVIDER,)),
+        predictor_registry=build_predictor_registry((NAIVE_PREDICTOR,)),
+        stage_runner=None,
+        stage_catalog=build_builtin_stage_catalog("pies-builtin-stages:1.2.0"),
+        session_factory=db_factory,
+    )
+    inflight_desc = compute_cases.resolve_stage_descriptor(
+        plane, "acme.algorithm.inflight@1.0.0", kind_label="algorithm"
+    )
+    assert inflight_desc.image == "pies-plugin/acme.algorithm.inflight:1.0.0"
+
     # Once task reaches terminal state, repeated stateless uninstall succeeds and deletes image
     tasks_domain.set_task_status(db, task.id, "completed")
     db.commit()
@@ -993,21 +1012,20 @@ def test_ecosystem_api_endpoints_smoke(engine: Engine, db_factory: sessionmaker[
     not os.environ.get("IESPLAN_TEST_PG_URL"),
     reason="需 IESPLAN_TEST_PG_URL 指向隔离 PostgreSQL 空库",
 )
-def test_postgres_migration_and_concurrent_uninstall_vs_submission(tmp_path: Path) -> None:
+def test_postgres_migration_single_active_upgrade_and_inflight_guard(tmp_path: Path) -> None:
     pg_url = os.environ["IESPLAN_TEST_PG_URL"]
     pg_engine = create_engine(pg_url, pool_pre_ping=True)
     try:
         Base.metadata.create_all(pg_engine)
-        # Verify migration idempotency on real PostgreSQL
-        apply_migrations(pg_engine)
-        apply_migrations(pg_engine)
-
-        cols = {col["name"] for col in sa.inspect(pg_engine).get_columns("local_artifacts")}
-        assert "sha256" not in cols
-        assert {"kind", "stable_id", "version", "install_status", "approval_status"} <= cols
-
         PgSession = sessionmaker(bind=pg_engine, autoflush=False, expire_on_commit=False)
         with PgSession() as db:
+            from iesplan import storage as storage_domain
+            from iesplan.model.persistence import (
+                ModelTemplate,
+                ModelTemplateDraftRevision,
+                ModelTemplateRevision,
+            )
+
             admin = make_user(db, f"pg_admin_{uuid.uuid4().hex[:6]}", role="admin")
             member = make_user(db, f"pg_member_{uuid.uuid4().hex[:6]}", role="engineer")
             proj = project_domain.create_project(
@@ -1015,10 +1033,8 @@ def test_postgres_migration_and_concurrent_uninstall_vs_submission(tmp_path: Pat
                 owner_id=member.id,
                 created_by=member.id,
                 baseline_start_year=2025,
-                name="PG Race Proj",
+                name="PG Upgrade Proj",
             )
-            from iesplan import storage as storage_domain
-
             ver_obj = storage_domain.put_object(
                 db, b"{}", "application/json", "project_version"
             )
@@ -1030,22 +1046,95 @@ def test_postgres_migration_and_concurrent_uninstall_vs_submission(tmp_path: Pat
                 content_object_id=ver_obj.id,
                 created_by=member.id,
             )
+            # Seed multi-revision Option B cleanup fixture before migration runs
+            tpl_obj = storage_domain.put_object(db, b"{}", "application/json", "model_template_draft")
+            tpl_row = ModelTemplate(
+                template_id=f"user.{generate_namespace()}.device.pgcleanup",
+                owner_id=member.id,
+                status="published",
+                slug="pgcleanup",
+                public_namespace=generate_namespace(),
+                draft_yaml_object_id=tpl_obj.id,
+                draft_revision=2,
+                published_revision=2,
+            )
+            db.add(tpl_row)
+            db.flush()
+            draft_rev_row = ModelTemplateDraftRevision(
+                entry_id=tpl_row.id,
+                revision=1,
+                yaml_object_id=tpl_obj.id,
+                source="yaml_editor",
+                created_by=member.id,
+            )
+            pub_old = ModelTemplateRevision(
+                template_id=tpl_row.id,
+                revision=1,
+                schema_version="1.0.0",
+                input_count=0,
+                yaml_object_id=tpl_obj.id,
+                receipt_object_id=tpl_obj.id,
+                summary_object_id=tpl_obj.id,
+                published_by=member.id,
+            )
+            pub_cur = ModelTemplateRevision(
+                template_id=tpl_row.id,
+                revision=2,
+                schema_version="1.0.0",
+                input_count=0,
+                yaml_object_id=tpl_obj.id,
+                receipt_object_id=tpl_obj.id,
+                summary_object_id=tpl_obj.id,
+                published_by=member.id,
+            )
+            db.add_all([draft_rev_row, pub_old, pub_cur])
+            db.flush()
+            tpl_row.current_draft_revision_id = draft_rev_row.id
+            tpl_row.current_published_revision_id = pub_cur.id
             db.commit()
+
+        # Verify migration idempotency, single active unique constraint, and Option B cleanup on PostgreSQL
+        apply_migrations(pg_engine)
+        apply_migrations(pg_engine)
+
+        insp = sa.inspect(pg_engine)
+        cols = {col["name"] for col in insp.get_columns("local_artifacts")}
+        assert "sha256" not in cols
+        assert {"kind", "stable_id", "version", "install_status", "approval_status"} <= cols
+        uqs = {
+            uq["name"]: list(uq["column_names"])
+            for uq in insp.get_unique_constraints("local_artifacts")
+        }
+        assert uqs.get("uq_local_artifacts_identity") == ["kind", "stable_id"]
+        with PgSession() as db:
+            from iesplan.model.persistence import (
+                ModelTemplate,
+                ModelTemplateDraftRevision,
+                ModelTemplateRevision,
+            )
+
+            assert db.execute(select(ModelTemplateDraftRevision)).scalars().all() == []
+            rem_revs = db.execute(
+                select(ModelTemplateRevision).where(ModelTemplateRevision.template_id == tpl_row.id)
+            ).scalars().all()
+            assert [r.revision for r in rem_revs] == [2]
+            refreshed_tpl = db.get(ModelTemplate, tpl_row.id)
+            assert refreshed_tpl is not None
+            assert refreshed_tpl.current_draft_revision_id is None
 
         storage_service._blob_store = FileSystemBlobStore()
         transport = _FakeJobRunnerTransport(
             stage_root=tmp_path / "pg_stages", plugin_source_root=tmp_path / "pg_builds"
         )
         jr_client = transport.make_client()
+        plugin_id = f"acme.algorithm.pgupg_{uuid.uuid4().hex[:6]}"
 
         with PgSession() as db:
-            zip_ok = _build_plugin_zip_bytes(
-                plugin_id=f"acme.algorithm.pgrace_{uuid.uuid4().hex[:6]}", version="1.0.0"
-            )
+            zip_v1 = _build_plugin_zip_bytes(plugin_id=plugin_id, version="1.0.0")
             art = ecosystem_app.upload_plugin_zip_case(
                 db,
                 admin,
-                zip_bytes=zip_ok,
+                zip_bytes=zip_v1,
                 job_runner_client=jr_client,
                 session_factory=PgSession,
                 plugin_source_root=tmp_path / "pg_builds",
@@ -1053,73 +1142,81 @@ def test_postgres_migration_and_concurrent_uninstall_vs_submission(tmp_path: Pat
             )
             ecosystem_app.install_artifact_for_user_case(db, member, art["id"], enabled=True)
 
-        barrier = threading.Barrier(2)
-        calc_cfg = {
-            "algorithm": art["ref"],
-            "generator": None,
-            "solver": None,
-            "predictions": [],
-            "evaluators": [],
-        }
+            calc_cfg = {
+                "algorithm": art["ref"],
+                "generator": None,
+                "solver": None,
+                "predictions": [],
+                "evaluators": [],
+            }
+            ecosystem_app.verify_submission_ecosystem_artifacts(
+                db, user_id=member.id, calc_config=calc_cfg
+            )
+            snap = tasks_domain.create_snapshot(
+                db,
+                project_version_id=ver.id,
+                dataset_version_ids=[],
+                calc_config_snapshot=calc_cfg,
+                random_seed=7,
+                created_by=member.id,
+                schema_version="1.0.0",
+                result_adapter="",
+                executor="",
+                device_models={},
+                evaluation={"operation_years": 1},
+            )
+            pg_task = tasks_domain.create_task(
+                db,
+                project_id=proj.id,
+                type="calc",
+                requested_by=member.id,
+                idempotency_key=f"pg-upg-{uuid.uuid4().hex[:6]}",
+                calc_snapshot_id=snap.id,
+            )
+            db.commit()
 
-        def _submit_side() -> str:
-            barrier.wait(timeout=5.0)
-            with PgSession() as s_db:
-                try:
-                    ecosystem_app.lock_and_verify_submission_artifacts(
-                        s_db, user_id=member.id, calc_config=calc_cfg
-                    )
-                    snap = tasks_domain.create_snapshot(
-                        s_db,
-                        project_version_id=ver.id,
-                        dataset_version_ids=[],
-                        calc_config_snapshot=calc_cfg,
-                        random_seed=7,
-                        created_by=member.id,
-                        schema_version="1.0.0",
-                        result_adapter="",
-                        executor="",
-                        device_models={},
-                        evaluation={"operation_years": 1},
-                    )
-                    tasks_domain.create_task(
-                        s_db,
-                        project_id=proj.id,
-                        type="calc",
-                        requested_by=member.id,
-                        idempotency_key=f"pg-race-{uuid.uuid4().hex[:6]}",
-                        calc_snapshot_id=snap.id,
-                    )
-                    s_db.commit()
-                    return "submitted"
-                except Exception:
-                    s_db.rollback()
-                    return "rejected"
+            # Non-terminal snapshot blocks both uninstall and plugin overwrite upgrade
+            zip_v2 = _build_plugin_zip_bytes(plugin_id=plugin_id, version="2.0.0")
+            with pytest.raises(EcosystemUninstallInUseError):
+                ecosystem_app.upload_plugin_zip_case(
+                    db,
+                    admin,
+                    zip_bytes=zip_v2,
+                    job_runner_client=jr_client,
+                    session_factory=PgSession,
+                    plugin_source_root=tmp_path / "pg_builds",
+                    stage_root=tmp_path / "pg_stages",
+                )
+            with pytest.raises(EcosystemUninstallInUseError):
+                ecosystem_app.uninstall_artifact_image_case(
+                    db, admin, art["id"], job_runner_client=jr_client
+                )
 
-        def _uninstall_side() -> str:
-            barrier.wait(timeout=5.0)
-            with PgSession() as u_db:
-                try:
-                    ecosystem_app.uninstall_artifact_image_case(
-                        u_db, admin, art["id"], job_runner_client=jr_client
-                    )
-                    return "uninstalled"
-                except EcosystemUninstallInUseError:
-                    return "blocked_409"
-
-        with ThreadPoolExecutor(max_workers=2) as pool:
-            f_sub = pool.submit(_submit_side)
-            f_un = pool.submit(_uninstall_side)
-            sub_outcome = f_sub.result(timeout=10.0)
-            un_outcome = f_un.result(timeout=10.0)
-
-        # Mutual exclusion invariant under PostgreSQL FOR UPDATE:
-        # Never both submitted AND uninstalled!
-        assert not (sub_outcome == "submitted" and un_outcome == "uninstalled")
-        assert (sub_outcome, un_outcome) in {
-            ("submitted", "blocked_409"),
-            ("rejected", "uninstalled"),
-        }
+            # Once task reaches terminal state, overwrite upgrade replaces in-place & cleans old image
+            tasks_domain.set_task_status(db, pg_task.id, "completed")
+            db.commit()
+            upgraded = ecosystem_app.upload_plugin_zip_case(
+                db,
+                admin,
+                zip_bytes=zip_v2,
+                job_runner_client=jr_client,
+                session_factory=PgSession,
+                plugin_source_root=tmp_path / "pg_builds",
+                stage_root=tmp_path / "pg_stages",
+            )
+            assert upgraded["id"] == art["id"]
+            assert upgraded["version"] == "2.0.0"
+            assert any(c.get("version") == "1.0.0" for c in transport.delete_calls)
+            all_rows = [
+                r
+                for r in ecosystem_domain.list_artifacts(db, kind="algorithm")
+                if r.stable_id == plugin_id
+            ]
+            assert len(all_rows) == 1
+            installs = ecosystem_domain.list_member_installs(db, user_id=member.id, kind="algorithm")
+            matched_inst = [inst for inst in installs if inst.stable_id == plugin_id]
+            assert len(matched_inst) == 1
+            assert matched_inst[0].version == "2.0.0"
     finally:
         pg_engine.dispose()
 
@@ -1361,7 +1458,7 @@ def test_full_manifest_compatibility_descriptor_projection_and_sdk_pack_fixture(
         assert len(sdk_transport.start_calls) == 1
 
 
-def test_lifecycle_pinning_stale_build_and_retryable_cleanup(
+def test_lifecycle_single_active_overwrite_stale_build_and_retryable_cleanup(
     db_factory: sessionmaker[Session],
     db: Session,
     tmp_path: Path,
@@ -1376,7 +1473,7 @@ def test_lifecycle_pinning_stale_build_and_retryable_cleanup(
     proj = projects_app.create_project(
         db,
         member,
-        name="Pinned Device Proj",
+        name="Single Active Device Proj",
         baseline_resolution="1h",
         baseline_start_year=2025,
         baseline_scenario_mode="single",
@@ -1384,16 +1481,13 @@ def test_lifecycle_pinning_stale_build_and_retryable_cleanup(
     db.commit()
 
     ns = generate_namespace()
-    dev_id = f"user.{ns}.device.pinned_hp"
+    dev_id = f"user.{ns}.device.single_hp"
     imp1 = ecosystem_app.import_device_model_case(
         db, admin, yaml_text=_sample_device_yaml(dev_id, power_rating=3.5), revision=1
     )
-    imp2 = ecosystem_app.import_device_model_case(
-        db, admin, yaml_text=_sample_device_yaml(dev_id, power_rating=6.5), revision=2
-    )
     ecosystem_app.install_artifact_for_user_case(db, member, imp1["id"], enabled=True)
 
-    # 1. lifecycle.update_draft accepts installed ecosystem device and pins revision=1
+    # 1. lifecycle.update_draft accepts installed ecosystem device without writing draft pins
     upd1 = projects_app.update_draft(
         db,
         member,
@@ -1415,33 +1509,35 @@ def test_lifecycle_pinning_stale_build_and_retryable_cleanup(
     )
     assert upd1["revision"] == 2
     draft_doc = projects_app.get_current_draft_content(db, proj.id)
-    assert draft_doc["extensions"]["local_device_models"] == {dev_id: "1"}
+    assert "local_device_models" not in (draft_doc.get("extensions") or {})
 
-    # Even after member installs revision=2, project stays pinned to revision=1 in selector & submission lock
-    ecosystem_app.install_artifact_for_user_case(db, member, imp2["id"], enabled=True)
+    # Overwrite upgrade to revision=2 updates active row in-place; selector & submission resolve revision=2
+    imp2 = ecosystem_app.import_device_model_case(
+        db, admin, yaml_text=_sample_device_yaml(dev_id, power_rating=6.5), revision=2
+    )
+    assert imp2["id"] == imp1["id"]
     sel_after = models_app.list_project_device_types(db, member, proj.id)
     by_id = {item["type_id"]: item for item in sel_after["items"]}
-    assert by_id[dev_id]["local_revision"] == 1
-    assert by_id[dev_id]["parameters"]["cop"]["default"] == 3.5
+    assert by_id[dev_id]["local_revision"] == 2
+    assert by_id[dev_id]["parameters"]["cop"]["default"] == 6.5
 
-    frozen_vers, locked_docs = ecosystem_app.lock_and_load_submission_artifacts(
+    frozen_vers, loaded_docs = ecosystem_app.verify_submission_ecosystem_artifacts(
         db,
         user_id=member.id,
         calc_config={},
         device_type_ids={dev_id},
-        pinned_device_revisions=draft_doc["extensions"]["local_device_models"],
     )
-    assert frozen_vers == {dev_id: "1"}
-    assert locked_docs[dev_id].properties["cop"].value == 3.5
+    assert frozen_vers == {dev_id: "2"}
+    assert loaded_docs[dev_id].properties["cop"].value == 6.5
 
     # Export does NOT invoke full parse_device_model_v2 re-validation
     def _forbid_reparse(*args: Any, **kwargs: Any) -> Any:
         raise AssertionError("export must not redundantly re-run parse_device_model_v2")
 
-    monkeypatch.setattr(eco_dev_mod, "parse_device_model_v2", _forbid_reparse)
-    exported = ecosystem_app.export_device_model_case(db, member, artifact_id=imp1["id"])
-    assert exported["revision"] == 1
-    monkeypatch.undo()
+    with monkeypatch.context() as mp:
+        mp.setattr(eco_dev_mod, "parse_device_model_v2", _forbid_reparse)
+        exported = ecosystem_app.export_device_model_case(db, member, artifact_id=imp2["id"])
+        assert exported["revision"] == 2
 
     # 2. Concurrent approve blocked while building, and stale build cannot overwrite disabled -> ready
     ecosystem_app.update_ecosystem_settings_case(
@@ -1486,18 +1582,18 @@ def test_lifecycle_pinning_stale_build_and_retryable_cleanup(
     def _forbid_reinspect(*args: Any, **kwargs: Any) -> Any:
         raise AssertionError("approve must not re-run _inspect_plugin_zip")
 
-    monkeypatch.setattr(eco_plg_mod, "_inspect_plugin_zip", _forbid_reinspect)
-    with pytest.raises(EcosystemConflictError):
-        ecosystem_app.approve_artifact_case(
-            db,
-            admin,
-            pending_plg["id"],
-            job_runner_client=_InterruptingJR(race_transport.make_client()),  # type: ignore[arg-type]
-            session_factory=db_factory,
-            plugin_source_root=tmp_path / "builds",
-            stage_root=tmp_path / "stages",
-        )
-    monkeypatch.undo()
+    with monkeypatch.context() as mp:
+        mp.setattr(eco_plg_mod, "_inspect_plugin_zip", _forbid_reinspect)
+        with pytest.raises(EcosystemConflictError):
+            ecosystem_app.approve_artifact_case(
+                db,
+                admin,
+                pending_plg["id"],
+                job_runner_client=_InterruptingJR(race_transport.make_client()),  # type: ignore[arg-type]
+                session_factory=db_factory,
+                plugin_source_root=tmp_path / "builds",
+                stage_root=tmp_path / "stages",
+            )
     race_rec = ecosystem_domain.get_artifact(db, pending_plg["id"])
     assert race_rec is not None
     assert race_rec.install_status == "disabled"
@@ -1565,4 +1661,40 @@ def test_lifecycle_pinning_stale_build_and_retryable_cleanup(
     )
     assert retried["image_deleted"] is True
     assert retried["artifact"]["image_ref"] is None
+
+    # 4. Disabling member install blocks submission for consumed local device
+    ecosystem_app.set_member_artifact_enabled_case(db, member, imp2["id"], enabled=False)
+    with pytest.raises(AppError) as missing_dev_err:
+        ecosystem_app.verify_submission_ecosystem_artifacts(
+            db,
+            user_id=member.id,
+            calc_config={},
+            device_type_ids={dev_id},
+        )
+    assert missing_dev_err.value.code == "TASK-REQ-007"
+
+    # 5. Build temp-dir rmtree failure is surfaced even when image build succeeded
+    ok_transport = _FakeJobRunnerTransport(
+        stage_root=tmp_path / "stages", plugin_source_root=tmp_path / "plugin_builds"
+    )
+
+    def _boom_rmtree(path: Any, *args: Any, **kwargs: Any) -> None:
+        if "plugin_builds" in str(path):
+            raise OSError("simulated build dir cleanup EBUSY")
+
+    with monkeypatch.context() as mp:
+        mp.setattr(eco_plg_mod.shutil, "rmtree", _boom_rmtree)
+        rmtree_zip = _build_plugin_zip_bytes(plugin_id="acme.algorithm.rmtree_fail", version="1.0.0")
+        with pytest.raises(EcosystemValidationError) as rmtree_err:
+            ecosystem_app.upload_plugin_zip_case(
+                db,
+                admin,
+                zip_bytes=rmtree_zip,
+                job_runner_client=ok_transport.make_client(),
+                session_factory=db_factory,
+                plugin_source_root=tmp_path / "plugin_builds",
+                stage_root=tmp_path / "stages",
+            )
+        assert rmtree_err.value.code == "ECO-BUILD-CLEANUP"
+
 

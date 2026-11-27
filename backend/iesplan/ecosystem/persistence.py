@@ -9,7 +9,6 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
-import sqlalchemy as sa
 from sqlalchemy import (
     BigInteger,
     Boolean,
@@ -72,11 +71,11 @@ class EcosystemSetting(Base):
 
 
 class LocalArtifact(Base):
-    """实例级共享本地模型/插件目录表（按 (kind, stable_id, version) 去重）。"""
+    """实例级共享本地模型/插件目录表（按 (kind, stable_id) 维护唯一当前生效版本）。"""
 
     __tablename__ = "local_artifacts"
     __table_args__ = (
-        UniqueConstraint("kind", "stable_id", "version", name="uq_local_artifacts_identity"),
+        UniqueConstraint("kind", "stable_id", name="uq_local_artifacts_identity"),
         CheckConstraint(f"kind IN {ARTIFACT_KINDS}", name="ck_local_artifacts_kind"),
         CheckConstraint(
             f"source_origin IN {SOURCE_ORIGINS}", name="ck_local_artifacts_source_origin"
@@ -115,7 +114,7 @@ class LocalArtifact(Base):
 
 
 class MemberArtifactInstall(Base):
-    """成员级安装与启用版本选择表（支持同稳定 ID 多精确版本共存）。"""
+    """成员级安装与启用状态表。"""
 
     __tablename__ = "member_artifact_installs"
     __table_args__ = (
@@ -237,13 +236,22 @@ def upsert_settings(
     return _row_to_settings(row)
 
 
-def get_artifact(
-    db: Session, artifact_id: int, *, for_update: bool = False
+def get_artifact(db: Session, artifact_id: int) -> LocalArtifactRecord | None:
+    """按主键读取本地制品记录。"""
+    row = db.get(LocalArtifact, artifact_id)
+    return _row_to_artifact(row) if row is not None else None
+
+
+def get_artifact_by_stable_id(
+    db: Session,
+    kind: str,
+    stable_id: str,
 ) -> LocalArtifactRecord | None:
-    """按主键读取本地制品记录；支持 ``FOR UPDATE`` 行锁。"""
-    stmt = select(LocalArtifact).where(LocalArtifact.id == artifact_id)
-    if for_update:
-        stmt = stmt.with_for_update().execution_options(populate_existing=True)
+    """按 (kind, stable_id) 读取唯一当前生效本地制品。"""
+    stmt = select(LocalArtifact).where(
+        LocalArtifact.kind == kind,
+        LocalArtifact.stable_id == stable_id,
+    )
     row = db.execute(stmt).scalar_one_or_none()
     return _row_to_artifact(row) if row is not None else None
 
@@ -253,17 +261,13 @@ def get_artifact_by_identity(
     kind: str,
     stable_id: str,
     version: str,
-    *,
-    for_update: bool = False,
 ) -> LocalArtifactRecord | None:
-    """按 (kind, stable_id, version) 精确读取本地制品。"""
+    """按 (kind, stable_id, version) 精确匹配本地制品（用于 Worker 按快照版本核对）。"""
     stmt = select(LocalArtifact).where(
         LocalArtifact.kind == kind,
         LocalArtifact.stable_id == stable_id,
         LocalArtifact.version == version,
     )
-    if for_update:
-        stmt = stmt.with_for_update().execution_options(populate_existing=True)
     row = db.execute(stmt).scalar_one_or_none()
     return _row_to_artifact(row) if row is not None else None
 
@@ -345,6 +349,10 @@ def update_artifact(
     db: Session,
     artifact_id: int,
     *,
+    version: Any = _UNSET,
+    source_origin: Any = _UNSET,
+    uploaded_by: Any = _UNSET,
+    object_id: Any = _UNSET,
     approval_status: Any = _UNSET,
     install_status: Any = _UNSET,
     approved_by: Any = _UNSET,
@@ -353,10 +361,24 @@ def update_artifact(
     diagnostics: Any = _UNSET,
     metadata_json: Any = _UNSET,
 ) -> LocalArtifactRecord | None:
-    """更新制品状态/镜像引用/诊断（只 flush）。"""
+    """更新制品状态/版本/镜像引用/诊断（支持覆盖升级，只 flush）。"""
     row = db.get(LocalArtifact, artifact_id)
     if row is None:
         return None
+    if version is not _UNSET:
+        row.version = version
+        installs = db.execute(
+            select(MemberArtifactInstall).where(MemberArtifactInstall.artifact_id == artifact_id)
+        ).scalars().all()
+        for inst in installs:
+            inst.version = version
+            inst.updated_at = _now()
+    if source_origin is not _UNSET:
+        row.source_origin = source_origin
+    if uploaded_by is not _UNSET:
+        row.uploaded_by = uploaded_by
+    if object_id is not _UNSET:
+        row.object_id = object_id
     if approval_status is not _UNSET:
         row.approval_status = approval_status
     if install_status is not _UNSET:
@@ -374,36 +396,6 @@ def update_artifact(
     row.updated_at = _now()
     db.flush()
     return _row_to_artifact(row)
-
-
-def lock_artifacts_for_submission(
-    db: Session,
-    *,
-    identities: list[tuple[str, str, str]],
-) -> list[LocalArtifactRecord]:
-    """按精确 (kind, stable_id, version) 清单对本地制品行加 ``FOR UPDATE`` 行锁。"""
-    if not identities:
-        return []
-    ordered = sorted(set(identities))
-    cond = sa.or_(
-        *[
-            sa.and_(
-                LocalArtifact.kind == kind,
-                LocalArtifact.stable_id == stable_id,
-                LocalArtifact.version == version,
-            )
-            for kind, stable_id, version in ordered
-        ]
-    )
-    stmt = (
-        select(LocalArtifact)
-        .where(cond)
-        .order_by(LocalArtifact.id)
-        .with_for_update()
-        .execution_options(populate_existing=True)
-    )
-    rows = db.execute(stmt).scalars().all()
-    return [_row_to_artifact(row) for row in rows]
 
 
 def get_member_install(

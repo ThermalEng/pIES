@@ -107,13 +107,12 @@ export async function deleteTemplate(templateId: string): Promise<void> {
   )
 }
 
-/** 精确发布 revision 详情(规范 YAML + 回执 + 摘要)。 */
-export async function getTemplateRevision(
+/** 当前唯一发布版详情(规范 YAML + 回执 + 摘要)。 */
+export async function getPublishedTemplate(
   templateId: string,
-  revision: number,
 ): Promise<TemplateRevisionDetailResponseDto> {
   return request<TemplateRevisionDetailResponseDto>(
-    `/model-templates/${encodeURIComponent(templateId)}/revisions/${revision}`,
+    `/model-templates/${encodeURIComponent(templateId)}/published`,
   )
 }
 

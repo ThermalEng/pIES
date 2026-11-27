@@ -489,9 +489,10 @@ def _save_draft(
         expected_stable = template.template_id
         _validate_device_id_match(validation.document.device.id, expected_stable)
 
-    # 校验通过: 规范 YAML 落盘, 形成新的不可变草稿 revision
+    # 校验通过: 规范 YAML 落盘, 覆盖更新当前草稿(expected_revision 乐观锁仍由 draft_revision 维护)
     handle = put_object(db, validation.canonical_text.encode("utf-8"), TEMPLATE_MEDIA_TYPE,
                         source_category="model_template_draft")
+    old_draft_yaml = template.draft_yaml_object_id
     old_diags = template.draft_diagnostics_object_id
     new_revision = template.draft_revision + 1
     fields: dict[str, Any] = {
@@ -500,36 +501,31 @@ def _save_draft(
         "draft_revision": new_revision,
         "draft_updated_at": datetime.now(UTC),
         "draft_diagnostics_object_id": None,
+        "current_draft_revision_id": None,
     }
     if description is not None:
         fields["description"] = description
     template = model_domain.update_template(db, template.id, **fields)
     attach(db, handle.id, TEMPLATE_OWNER_NAMESPACE, template.id,
            ref_entity_type=TEMPLATE_OWNER_NAMESPACE, purpose="draft_yaml")
-    # 旧 revision 不覆盖、不 detach（不可变草稿历史，任务书 §四）
-    # 仅当需要清理时由存储运维处理，不在保存时 detach
-    # 新增不可变草稿 revision 行
-    diag_handle2 = _put_json(db, [], "model_template_draft_diagnostics")
-    draft_rev = model_domain.create_draft_revision(
-        db,
-        entry_id=template.id,
-        revision=new_revision,
-        yaml_object_id=handle.id,
-        source="yaml_editor",
-        created_by=user.id,
-        diagnostics_object_id=diag_handle2.id,
-    )
-    attach(db, diag_handle2.id, TEMPLATE_OWNER_NAMESPACE, template.id,
-           ref_entity_type=TEMPLATE_OWNER_NAMESPACE, purpose="draft_revision")
-    template = model_domain.update_template(
-        db, template.id, current_draft_revision_id=draft_rev.id
-    )
-    if old_diags is not None:
-        try:
-            detach(db, old_diags, TEMPLATE_OWNER_NAMESPACE, template.id,
-                   ref_entity_type=TEMPLATE_OWNER_NAMESPACE)
-        except ReferenceNotFoundError:
-            pass
+    current_pub = model_domain.get_current_published_revision(db, template.id)
+    keep_ids: set[int] = {handle.id}
+    if current_pub is not None:
+        for pub_oid in (
+            current_pub.yaml_object_id,
+            current_pub.receipt_object_id,
+            current_pub.summary_object_id,
+            current_pub.diagnostics_object_id,
+        ):
+            if pub_oid is not None:
+                keep_ids.add(pub_oid)
+    for stale_id in (old_draft_yaml, old_diags):
+        if stale_id is not None and stale_id not in keep_ids:
+            try:
+                detach(db, stale_id, TEMPLATE_OWNER_NAMESPACE, template.id,
+                       ref_entity_type=TEMPLATE_OWNER_NAMESPACE)
+            except ReferenceNotFoundError:
+                pass
     audit_domain.append_entry(
         db,
         entity_type="model_template",
@@ -626,22 +622,6 @@ def create_template_draft(
         ) from exc
     attach(db, handle.id, TEMPLATE_OWNER_NAMESPACE, template.id,
            ref_entity_type=TEMPLATE_OWNER_NAMESPACE, purpose="draft_yaml")
-    # 初始不可变草稿 revision
-    _diag_h = _put_json(db, [], "model_template_draft_diagnostics")
-    _dr = model_domain.create_draft_revision(
-        db,
-        entry_id=template.id,
-        revision=1,
-        yaml_object_id=handle.id,
-        source="yaml_editor",
-        created_by=user.id,
-        diagnostics_object_id=_diag_h.id,
-    )
-    attach(db, _diag_h.id, TEMPLATE_OWNER_NAMESPACE, template.id,
-           ref_entity_type=TEMPLATE_OWNER_NAMESPACE, purpose="draft_revision")
-    template = model_domain.update_template(
-        db, template.id, current_draft_revision_id=_dr.id
-    )
     audit_domain.append_entry(
         db,
         entity_type="model_template",
@@ -661,18 +641,14 @@ def list_my_templates(db: Session, user) -> list[dict[str, Any]]:
 
 
 def get_template_detail(db: Session, user, template_id: str) -> dict[str, Any]:
-    """模板详情(草稿内容 + 聚合诊断; 已发布时附精确 revision 视图)。
-
-    ``template`` 与目录项同构: 已发布时携带 ``revision`` 字段(最新发布
-    revision 的精确视图), 供「新建模型」表单提交时引用固定 revision。
-    """
+    """模板详情(草稿内容 + 聚合诊断; 已发布时附当前发布视图)。"""
     template = _get_owned_template(db, user, template_id)
     document = None
     if template.draft_yaml_object_id is not None:
         document = _read_template_document_mapping(db, template.draft_yaml_object_id)
     item = _template_to_dict(template)
     if template.published_revision > 0:
-        rev = model_domain.get_published_revision(db, template.id, template.published_revision)
+        rev = model_domain.get_current_published_revision(db, template.id)
         if rev is not None:
             item["revision"] = _revision_to_dict(rev)
     return {
@@ -682,20 +658,15 @@ def get_template_detail(db: Session, user, template_id: str) -> dict[str, Any]:
     }
 
 
-def get_template_revision(db: Session, user, template_id: str, revision: int) -> dict[str, Any]:
-    """精确发布 revision 详情(规范 YAML + 校验回执 + 结构摘要)。
-
-    草稿内容与发布 revision 分开: 详情返回发布时固定的规范字节,
-    不读取当前草稿(模板更新不改变历史 revision)。
-    """
+def get_published_template(db: Session, user, template_id: str) -> dict[str, Any]:
+    """当前唯一发布版本详情(规范 YAML + 校验回执 + 结构摘要 + 聚合诊断)。"""
     template = _get_owned_template(db, user, template_id)
-    row = model_domain.get_published_revision(db, template.id, revision)
+    row = model_domain.get_current_published_revision(db, template.id)
     if row is None:
         raise TemplateNotFoundError(
-            "模板 revision 不存在",
-            params={"template_id": template_id, "revision": revision},
-            location={"object_type": "model_template", "template_id": template_id,
-                      "revision": revision},
+            "模板尚未发布",
+            params={"template_id": template_id},
+            location={"object_type": "model_template", "template_id": template_id},
         )
     return {
         "template": _template_to_dict(template),
@@ -707,23 +678,17 @@ def get_template_revision(db: Session, user, template_id: str, revision: int) ->
     }
 
 
-def validate_template_revision(
+def validate_published_template(
     db: Session,
     user,
     template_id: str,
-    revision: int,
 ) -> TemplateValidation:
-    """重新校验一个精确发布 revision；引用与存储错误保持标准错误信封。
-
-    API 层不得直接读取对象存储。文本文件只校验字头（schema/schema_version）。
-    """
-    ref = resolve_template_revision(
-        db, user, template_id, revision,
-    )
+    """重新校验当前唯一发布版本；引用与存储错误保持标准错误信封。"""
+    ref = resolve_published_template(db, user, template_id)
     document = _read_template_document_mapping(db, ref.yaml_object_id)
-    if document is None:  # 防御式分支；当前读取门面只会返回 Mapping 或抛错
+    if document is None:
         raise AppError(
-            "模板 revision 对象损坏",
+            "模板发布对象损坏",
             code="SYS-STORE-001",
             message_key="ies.diag.store.corrupt",
             location={"object_type": "model_template", "object_id": str(ref.yaml_object_id)},
@@ -818,12 +783,27 @@ def _publish(
             location={"object_type": "model_template", "template_id": template_id},
         )
 
+    # 相同内容 + 已发布状态下幂等返回当前版本
+    current_pub = model_domain.get_current_published_revision(db, template.id)
+    if (
+        current_pub is not None
+        and template.status == TEMPLATE_STATUS_PUBLISHED
+        and _read_template_document(db, current_pub.yaml_object_id) == validation.canonical_text
+    ):
+        return {"revision": _revision_to_dict(current_pub), "duplicate": True}
+
+    next_revision = (
+        max(template.published_revision, current_pub.revision) + 1
+        if current_pub is not None
+        else max(template.published_revision, 0) + 1
+    )
+
     # 发布内容对象: 规范 YAML + 校验回执 + 结构摘要(全部经对象存储门面)
     yaml_handle = put_object(db, validation.canonical_text.encode("utf-8"),
                              TEMPLATE_MEDIA_TYPE, source_category="model_template_revision")
     receipt = validation.receipt or canonical_receipt(document)
     receipt = {**dict(receipt), "template_id": template.template_id,
-               "revision": template.published_revision + 1,
+               "revision": next_revision,
                "schema": SCHEMA_ID, "schema_version": SCHEMA_VERSION,
                "input_count": validation.input_count}
     receipt_handle = _put_json(db, receipt, "model_template_receipt")
@@ -832,10 +812,10 @@ def _publish(
     diag_handle = _put_json(db, [], "model_template_diagnostics")
 
     try:
-        row = model_domain.create_published_revision(
+        row, superseded_object_ids = model_domain.replace_published_revision(
             db,
             template_row_id=template.id,
-            revision=template.published_revision + 1,
+            revision=next_revision,
             schema_version=SCHEMA_VERSION,
             input_count=validation.input_count,
             yaml_object_id=yaml_handle.id,
@@ -847,16 +827,8 @@ def _publish(
         )
     except ModelConflictError as exc:
         db.rollback()
-        # 并发幂等: 以 (template_id, revision) 或 idempotency_key 幂等，文本只校验字头
         if idempotency_key:
             same = model_domain.find_revision_by_idempotency(db, template.id, idempotency_key)
-            if same is not None:
-                return {"revision": _revision_to_dict(same), "duplicate": True}
-        else:
-            # 无幂等键时，按 revision 幂等（同一 revision 重放）
-            same = model_domain.get_published_revision(
-                db, template.id, template.published_revision + 1
-            )
             if same is not None:
                 return {"revision": _revision_to_dict(same), "duplicate": True}
         raise ConflictError(
@@ -868,6 +840,23 @@ def _publish(
     for handle in (yaml_handle, receipt_handle, summary_handle, diag_handle):
         attach(db, handle.id, TEMPLATE_OWNER_NAMESPACE, template.id,
                ref_entity_type=TEMPLATE_OWNER_NAMESPACE, purpose="revision")
+    keep_ids: set[int] = {
+        yaml_handle.id,
+        receipt_handle.id,
+        summary_handle.id,
+        diag_handle.id,
+    }
+    if template.draft_yaml_object_id is not None:
+        keep_ids.add(template.draft_yaml_object_id)
+    if template.draft_diagnostics_object_id is not None:
+        keep_ids.add(template.draft_diagnostics_object_id)
+    for old_obj_id in superseded_object_ids:
+        if old_obj_id not in keep_ids:
+            try:
+                detach(db, old_obj_id, TEMPLATE_OWNER_NAMESPACE, template.id,
+                       ref_entity_type=TEMPLATE_OWNER_NAMESPACE)
+            except ReferenceNotFoundError:
+                pass
     template = model_domain.update_template(
         db,
         template.id,
@@ -1008,19 +997,19 @@ def list_available_templates(db: Session, user) -> list[dict[str, Any]]:
             continue
         item = _template_to_dict(t)
         if t.published_revision > 0:
-            rev = model_domain.get_published_revision(db, t.id, t.published_revision)
+            rev = model_domain.get_current_published_revision(db, t.id)
             if rev is not None:
                 item["revision"] = _revision_to_dict(rev)
         out.append(item)
     return out
 
 
-def resolve_template_revision(
-    db: Session, user, template_id: str, revision: int
+def resolve_published_template(
+    db: Session, user, template_id: str
 ) -> TemplateRevisionRef:
-    """解析项目模型候选引用的精确模板 revision(权威内容)。
+    """解析项目模型候选引用的当前唯一已发布模板(权威内容)。
 
-    校验: 模板存在且属于当前用户、已发布、未停用, revision 匹配。文本文件只校验字头。
+    校验: 模板存在且属于当前用户、已发布、未停用。文本文件只校验字头。
     """
     template = _get_owned_template(db, user, template_id)
     if template.status != TEMPLATE_STATUS_PUBLISHED:
@@ -1029,13 +1018,12 @@ def resolve_template_revision(
             params={"template_id": template_id, "status": template.status},
             location={"object_type": "model_template", "template_id": template_id},
         )
-    row = model_domain.get_published_revision(db, template.id, revision)
+    row = model_domain.get_current_published_revision(db, template.id)
     if row is None:
         raise TemplateNotFoundError(
-            "模板 revision 不存在",
-            params={"template_id": template_id, "revision": revision},
-            location={"object_type": "model_template", "template_id": template_id,
-                      "revision": revision},
+            "模板尚未发布",
+            params={"template_id": template_id},
+            location={"object_type": "model_template", "template_id": template_id},
         )
     return TemplateRevisionRef(
         template_id=template.id,
@@ -1043,38 +1031,3 @@ def resolve_template_revision(
         yaml_object_id=row.yaml_object_id,
         schema_version=row.schema_version,
     )
-
-
-def list_draft_revisions(db: Session, user, template_id: str) -> list[dict[str, Any]]:
-    """列出模板的不可变草稿 revision 历史（旧 revision 可读，对象引用保留）。"""
-    template = _get_owned_template(db, user, template_id)
-    rows = model_domain.list_draft_revisions(db, template.id)
-    return [
-        {
-            "id": str(r.id),
-            "revision": r.revision,
-            "yaml_object_id": str(r.yaml_object_id),
-            "source": r.source,
-            "created_by": str(r.created_by),
-            "created_at": r.created_at,
-        }
-        for r in rows
-    ]
-
-
-def get_draft_revision(db: Session, user, template_id: str, revision: int) -> dict[str, Any]:
-    """读取精确草稿 revision（不可变，对象引用保留）。"""
-    template = _get_owned_template(db, user, template_id)
-    row = model_domain.get_draft_revision(db, template.id, revision)
-    if row is None:
-        raise TemplateNotFoundError("草稿 revision 不存在",
-                                    params={"template_id": template_id, "revision": revision})
-    return {
-        "id": str(row.id),
-        "revision": row.revision,
-        "yaml_object_id": str(row.yaml_object_id),
-        "source": row.source,
-        "created_by": str(row.created_by),
-        "created_at": row.created_at,
-        "document": _read_template_document_mapping(db, row.yaml_object_id),
-    }

@@ -7,11 +7,11 @@
  *   GET    /api/model-templates/{template_id}        模板详情 {template, document, diagnostics}
  *   PUT    /api/model-templates/{template_id}        保存草稿(expected_revision 乐观锁)
  *   POST   /api/model-templates/{template_id}/validate   模板完整校验 {valid, diagnostics}
- *   POST   /api/model-templates/{template_id}/publish    发布不可变 revision
+ *   POST   /api/model-templates/{template_id}/publish    发布/更新唯一当前发布版
  *   POST   /api/model-templates/{template_id}/disable    停用
  *   POST   /api/model-templates/{template_id}/enable     重新启用
  *   DELETE /api/model-templates/{template_id}        删除未发布草稿
- *   GET    /api/model-templates/{template_id}/revisions/{revision}  精确 revision 详情
+ *   GET    /api/model-templates/{template_id}/published  当前唯一发布版详情
  *
  * 依赖方向: features/customization → ../../types / ../../shared/http。
  */

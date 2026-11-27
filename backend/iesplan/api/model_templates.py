@@ -10,7 +10,7 @@
 - POST   /api/model-templates/{template_id}/disable    停用(只影响后续选择);
 - POST   /api/model-templates/{template_id}/enable     重新启用;
 - DELETE /api/model-templates/{template_id}      删除尚未发布的草稿;
-- GET    /api/model-templates/{template_id}/revisions/{revision}  精确发布 revision 详情;
+- GET    /api/model-templates/{template_id}/published   当前唯一发布版本详情;
 - GET    /api/model-templates/catalog            当前用户可用模板目录(已发布且启用)。
 
 语义:
@@ -41,16 +41,14 @@ from iesplan.api.deps import get_request_db
 from iesplan.application.model_templates import (
     create_template_draft,
     delete_template_draft,
-    get_draft_revision,
+    get_published_template,
     get_template_detail,
-    get_template_revision,
     list_available_templates,
-    list_draft_revisions,
     list_my_templates,
     publish_template,
     save_template_draft,
     set_template_status,
-    validate_template_revision,
+    validate_published_template,
     validate_template_yaml,
 )
 
@@ -83,8 +81,7 @@ class TemplateValidateRequest(BaseModel):
 
     支持两种形态:
     - ``model_yaml``: 直接提交候选 YAML 文本(在线编辑即时校验);
-    - ``template_id`` + ``template_revision``:
-      对已发布的精确 revision 重新校验(不读取当前草稿)。文本文件只校验字头。
+    - 省略 ``model_yaml``: 对当前已发布版本重新校验(不读取当前草稿)。文本文件只校验字头。
     """
 
     model_yaml: str | None = Field(
@@ -93,7 +90,6 @@ class TemplateValidateRequest(BaseModel):
         description="候选模板 YAML 文本(在线编辑)",
     )
     template_id: str | None = Field(default=None, description="已发布模板稳定 ID")
-    template_revision: int | None = Field(default=None, ge=1, description="精确发布 revision")
 
 
 class TemplateDraftUpdateRequest(BaseModel):
@@ -215,9 +211,7 @@ def validate_template_endpoint(
     if payload.model_yaml is not None and payload.model_yaml.strip():
         validation = validate_template_yaml(payload.model_yaml)
     else:
-        validation = validate_template_revision(
-            db, user, template_id, payload.template_revision or 0,
-        )
+        validation = validate_published_template(db, user, template_id)
     return {
         "valid": validation.ok,
         "diagnostics": [d.to_dict() for d in validation.diagnostics],
@@ -272,33 +266,11 @@ def delete_template_endpoint(
     return delete_template_draft(db, user, template_id)
 
 
-@router.get("/{template_id}/revisions/{revision}", summary="精确发布 revision 详情")
-def get_template_revision_endpoint(
-    template_id: str,
-    revision: int,
-    db: DbSession,
-    user: CurrentUser,
-) -> dict[str, Any]:
-    """精确发布 revision: 规范 YAML + 校验回执 + 结构摘要 + 聚合诊断。"""
-    return get_template_revision(db, user, template_id, revision)
-
-
-@router.get("/{template_id}/draft-revisions", summary="草稿不可变历史")
-def list_draft_revisions_endpoint(
+@router.get("/{template_id}/published", summary="当前唯一发布版本详情")
+def get_published_template_endpoint(
     template_id: str,
     db: DbSession,
     user: CurrentUser,
 ) -> dict[str, Any]:
-    """列出模板的不可变草稿 revision 历史（旧 revision 可读）。"""
-    return {"draft_revisions": list_draft_revisions(db, user, template_id)}
-
-
-@router.get("/{template_id}/draft-revisions/{revision}", summary="精确草稿 revision")
-def get_draft_revision_endpoint(
-    template_id: str,
-    revision: int,
-    db: DbSession,
-    user: CurrentUser,
-) -> dict[str, Any]:
-    """读取精确草稿 revision（不可变）。"""
-    return get_draft_revision(db, user, template_id, revision)
+    """当前发布版本详情: 规范 YAML + 校验回执 + 结构摘要 + 聚合诊断。"""
+    return get_published_template(db, user, template_id)

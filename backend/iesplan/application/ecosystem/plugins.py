@@ -58,7 +58,7 @@ from iesplan.ecosystem import (
     LocalArtifactRecord,
 )
 from iesplan.identity.contracts import UserRecord
-from iesplan.storage import attach, get_object, put_object
+from iesplan.storage import attach, detach, find_refs_by_owner, get_object, put_object
 
 PLUGIN_ARCHIVE_MEDIA_TYPE = "application/zip"
 _MAX_ZIP_BYTES = 50 * 1024 * 1024
@@ -666,9 +666,9 @@ def _execute_plugin_build_and_selftest(
     preextracted: tuple[dict[str, bytes], set[str]] | None = None,
     metadata: Mapping[str, Any] | None = None,
 ) -> LocalArtifactRecord:
-    """串行锁推进构建与断网自检门禁：防并发/下架回流 ready，清理失败保留 image_ref。"""
+    """推进构建与断网自检门禁：清理失败保留 image_ref 与构建目录异常传播。"""
     with session_factory() as db:
-        rec = ecosystem_domain.get_artifact(db, artifact_id, for_update=True)
+        rec = ecosystem_domain.get_artifact(db, artifact_id)
         if rec is None:
             raise EcosystemArtifactNotFoundError("生态制品不存在", params={"artifact_id": artifact_id})
         if rec.approval_status != "approved" or rec.install_status != "building":
@@ -684,7 +684,6 @@ def _execute_plugin_build_and_selftest(
         plugin_id = rec.stable_id
         version = rec.version
         kind = rec.kind
-        db.commit()
 
     if preextracted is not None:
         files, dirs = preextracted
@@ -696,7 +695,7 @@ def _execute_plugin_build_and_selftest(
     produces = list(meta.get("produces") or ())
     build_dir: Path | None = None
     built_image: str | None = None
-    cleanup_dir_error: str | None = None
+    primary_exc: BaseException | None = None
 
     try:
         build_dir, source_rel = _stage_zip_to_build_dir(
@@ -712,16 +711,17 @@ def _execute_plugin_build_and_selftest(
         built_image = build_result.image
 
         with session_factory() as db:
-            locked = ecosystem_domain.get_artifact(db, artifact_id, for_update=True)
+            current = ecosystem_domain.get_artifact(db, artifact_id)
             if (
-                locked is None
-                or locked.approval_status != "approved"
-                or locked.install_status != "building"
+                current is None
+                or current.approval_status != "approved"
+                or current.install_status != "building"
+                or current.version != version
             ):
                 del_err = _attempt_delete_built_image(
                     job_runner_client, plugin_id=plugin_id, version=version
                 )
-                if locked is not None and del_err is not None:
+                if current is not None and del_err is not None:
                     ecosystem_domain.update_artifact(
                         db,
                         artifact_id,
@@ -756,16 +756,17 @@ def _execute_plugin_build_and_selftest(
             )
 
         with session_factory() as db:
-            locked = ecosystem_domain.get_artifact(db, artifact_id, for_update=True)
+            current = ecosystem_domain.get_artifact(db, artifact_id)
             if (
-                locked is None
-                or locked.approval_status != "approved"
-                or locked.install_status != "testing"
+                current is None
+                or current.approval_status != "approved"
+                or current.install_status != "testing"
+                or current.version != version
             ):
                 del_err = _attempt_delete_built_image(
                     job_runner_client, plugin_id=plugin_id, version=version
                 )
-                if locked is not None:
+                if current is not None:
                     ecosystem_domain.update_artifact(
                         db,
                         artifact_id,
@@ -792,7 +793,8 @@ def _execute_plugin_build_and_selftest(
             db.commit()
             assert ready_rec is not None
             return ready_rec
-    except EcosystemConflictError:
+    except EcosystemConflictError as exc:
+        primary_exc = exc
         raise
     except Exception as exc:
         del_err: str | None = None
@@ -811,7 +813,7 @@ def _execute_plugin_build_and_selftest(
             diag["cleanup_error"] = del_err
             diag["cleanup_retryable"] = True
         with session_factory() as db:
-            cur = ecosystem_domain.get_artifact(db, artifact_id, for_update=True)
+            cur = ecosystem_domain.get_artifact(db, artifact_id)
             if cur is not None:
                 next_status = "disabled" if cur.install_status == "disabled" else "build_failed"
                 ecosystem_domain.update_artifact(
@@ -823,27 +825,39 @@ def _execute_plugin_build_and_selftest(
                 )
                 db.commit()
         if del_err is not None:
-            raise AppError(
+            err = AppError(
                 f"{hint}；且构建镜像删除失败，已保留 image_ref 以便重试清理: {del_err}",
                 code="ECO-IMAGE-CLEANUP-FAILED",
                 params={"detail": str(exc), "cleanup_error": del_err, "image_ref": built_image},
-            ) from exc
+            )
+            primary_exc = err
+            raise err from exc
         if isinstance(exc, EcosystemValidationError):
+            primary_exc = exc
             raise
-        raise EcosystemValidationError(
+        err2 = EcosystemValidationError(
             hint, code="ECO-BUILD-001", params={"detail": str(exc)}
-        ) from exc
+        )
+        primary_exc = err2
+        raise err2 from exc
     finally:
+        cleanup_dir_error: str | None = None
         if build_dir is not None and build_dir.exists():
             try:
                 shutil.rmtree(build_dir)
             except Exception as exc:
                 cleanup_dir_error = str(exc)
-        if cleanup_dir_error is not None and built_image is None:
+        if cleanup_dir_error is not None:
+            if primary_exc is None:
+                raise EcosystemValidationError(
+                    f"插件构建临时目录清理失败: {cleanup_dir_error}",
+                    code="ECO-BUILD-CLEANUP",
+                )
             raise EcosystemValidationError(
-                f"插件构建临时目录清理失败: {cleanup_dir_error}",
+                f"{primary_exc}（且构建临时目录清理失败: {cleanup_dir_error}）",
                 code="ECO-BUILD-CLEANUP",
-            )
+                params={"cleanup_error": cleanup_dir_error},
+            ) from primary_exc
 
 
 def upload_plugin_zip_case(
@@ -883,62 +897,160 @@ def upload_plugin_zip_case(
     initial_install = "building" if approval == "approved" else "pending"
 
     try:
-        existing = ecosystem_domain.get_artifact_by_identity(db, kind, stable_id, version)
+        existing = ecosystem_domain.get_artifact_by_stable_id(db, kind, stable_id)
         if existing is not None:
-            stored = get_object(db, existing.object_id)
-            if stored != raw_bytes:
-                raise EcosystemConflictError(
-                    "同稳定标识与精确版本的算法插件已存在且归档内容不一致，禁止静默覆盖",
-                    params={"kind": kind, "stable_id": stable_id, "version": version},
-                )
-            install = ecosystem_domain.get_member_install(db, user.id, existing.id)
-            if existing.install_status == "ready" and install is None:
-                install = ecosystem_domain.upsert_member_install(
-                    db, user_id=user.id, artifact=existing, enabled=True
-                )
-            db.commit()
-            payload = serialize_artifact(existing, install=install)
-            payload["idempotent"] = True
-            return payload
+            if existing.version == version:
+                stored = get_object(db, existing.object_id)
+                if stored != raw_bytes:
+                    raise EcosystemConflictError(
+                        "同稳定标识与精确版本的算法插件已存在且归档内容不一致，禁止静默覆盖",
+                        params={"kind": kind, "stable_id": stable_id, "version": version},
+                    )
+                install = ecosystem_domain.get_member_install(db, user.id, existing.id)
+                if existing.install_status == "ready" and install is None:
+                    install = ecosystem_domain.upsert_member_install(
+                        db, user_id=user.id, artifact=existing, enabled=True
+                    )
+                db.commit()
+                payload = serialize_artifact(existing, install=install)
+                payload["idempotent"] = True
+                payload["duplicate"] = True
+                return payload
 
-        stored_obj = put_object(
-            db,
-            raw_bytes,
-            PLUGIN_ARCHIVE_MEDIA_TYPE,
-            "ecosystem_plugin_archive",
-        )
-        artifact = ecosystem_domain.create_artifact(
-            db,
-            kind=kind,
-            stable_id=stable_id,
-            version=version,
-            source_origin=source_origin,
-            approval_status=approval,
-            install_status=initial_install,
-            uploaded_by=user.id,
-            approved_by=user.id if approval == "approved" else None,
-            approved_at=datetime.now(UTC) if approval == "approved" else None,
-            object_id=stored_obj.oid,
-            metadata_json=meta,
-        )
-        attach(
-            db,
-            stored_obj.id,
-            "local_artifact",
-            artifact.id,
-            ref_entity_type="local_artifacts",
-            purpose="生态算法插件压缩包",
-        )
-        audit_domain.audit(
-            db,
-            user.id,
-            "ecosystem.plugin_uploaded",
-            "local_artifact",
-            artifact.id,
-            actor_type="admin" if admin_flag else "user",
-            result={"kind": kind, "stable_id": stable_id, "version": version, "approval_status": approval},
-        )
-        db.commit()
+            # 不同版本覆盖升级：先核对旧版本无在途 CalcSnapshot 引用，再清理旧镜像并原地替换
+            prev_version = existing.version
+            inflight = tasks_domain.count_inflight_artifact_refs(
+                db, kind=kind, stable_id=stable_id, version=prev_version
+            )
+            if inflight > 0:
+                raise EcosystemUninstallInUseError(
+                    f"旧版本 {prev_version!r} 仍有 {inflight} 个在途任务使用中，禁止覆盖升级",
+                    params={
+                        "artifact_id": existing.id,
+                        "kind": kind,
+                        "stable_id": stable_id,
+                        "version": prev_version,
+                        "inflight_count": inflight,
+                    },
+                )
+            if existing.image_ref:
+                if job_runner_client is None:
+                    raise AppError(
+                        "job_runner 未装配，无法清理旧版本插件镜像",
+                        code="ECO-JR-UNAVAILABLE",
+                    )
+                del_err = _attempt_delete_built_image(
+                    job_runner_client, plugin_id=stable_id, version=prev_version
+                )
+                if del_err is not None:
+                    raise AppError(
+                        f"旧版本插件镜像清理失败，已保留 image_ref 以便重试清理: {del_err}",
+                        code="ECO-IMAGE-CLEANUP-FAILED",
+                        params={
+                            "artifact_id": existing.id,
+                            "image_ref": existing.image_ref,
+                            "cleanup_error": del_err,
+                        },
+                    )
+
+            stored_obj = put_object(
+                db,
+                raw_bytes,
+                PLUGIN_ARCHIVE_MEDIA_TYPE,
+                "ecosystem_plugin_archive",
+            )
+            for ref in find_refs_by_owner(db, "local_artifact", existing.id, "local_artifacts"):
+                detach(
+                    db,
+                    ref["object_id"],
+                    "local_artifact",
+                    existing.id,
+                    ref_entity_type="local_artifacts",
+                )
+            artifact = ecosystem_domain.update_artifact(
+                db,
+                existing.id,
+                version=version,
+                source_origin=source_origin,
+                uploaded_by=user.id,
+                object_id=stored_obj.oid,
+                approval_status=approval,
+                install_status=initial_install,
+                approved_by=user.id if approval == "approved" else None,
+                approved_at=datetime.now(UTC) if approval == "approved" else None,
+                image_ref=None,
+                diagnostics=None,
+                metadata_json=meta,
+            )
+            assert artifact is not None
+            attach(
+                db,
+                stored_obj.id,
+                "local_artifact",
+                artifact.id,
+                ref_entity_type="local_artifacts",
+                purpose="生态算法插件压缩包",
+            )
+            audit_domain.audit(
+                db,
+                user.id,
+                "ecosystem.plugin_upgraded",
+                "local_artifact",
+                artifact.id,
+                actor_type="admin" if admin_flag else "user",
+                result={
+                    "kind": kind,
+                    "stable_id": stable_id,
+                    "from_version": prev_version,
+                    "version": version,
+                    "approval_status": approval,
+                },
+            )
+            db.commit()
+        else:
+            stored_obj = put_object(
+                db,
+                raw_bytes,
+                PLUGIN_ARCHIVE_MEDIA_TYPE,
+                "ecosystem_plugin_archive",
+            )
+            artifact = ecosystem_domain.create_artifact(
+                db,
+                kind=kind,
+                stable_id=stable_id,
+                version=version,
+                source_origin=source_origin,
+                approval_status=approval,
+                install_status=initial_install,
+                uploaded_by=user.id,
+                approved_by=user.id if approval == "approved" else None,
+                approved_at=datetime.now(UTC) if approval == "approved" else None,
+                object_id=stored_obj.oid,
+                metadata_json=meta,
+            )
+            attach(
+                db,
+                stored_obj.id,
+                "local_artifact",
+                artifact.id,
+                ref_entity_type="local_artifacts",
+                purpose="生态算法插件压缩包",
+            )
+            audit_domain.audit(
+                db,
+                user.id,
+                "ecosystem.plugin_uploaded",
+                "local_artifact",
+                artifact.id,
+                actor_type="admin" if admin_flag else "user",
+                result={
+                    "kind": kind,
+                    "stable_id": stable_id,
+                    "version": version,
+                    "approval_status": approval,
+                },
+            )
+            db.commit()
     except Exception:
         db.rollback()
         raise
@@ -986,6 +1098,7 @@ def upload_plugin_zip_case(
         db.commit()
     payload = serialize_artifact(built, install=install)
     payload["idempotent"] = False
+    payload["duplicate"] = False
     return payload
 
 
@@ -1009,10 +1122,10 @@ def approve_artifact_case(
     stage_root: Path | None = None,
     wait_for_build: bool = True,
 ) -> dict[str, Any]:
-    """管理员并发安全审批通过待审生态制品；防重复并发构建及下架制品回流。"""
+    """管理员审批通过待审生态制品；防止构建中并发重复触发及已下架制品回流。"""
     require_admin(db, admin_user.id)
     try:
-        artifact = ecosystem_domain.get_artifact(db, artifact_id, for_update=True)
+        artifact = ecosystem_domain.get_artifact(db, artifact_id)
         if artifact is None:
             raise EcosystemArtifactNotFoundError("生态制品不存在", params={"artifact_id": artifact_id})
         if artifact.approval_status == "rejected":
@@ -1098,16 +1211,23 @@ def reject_artifact_case(
     *,
     reason: str = "",
 ) -> dict[str, Any]:
-    """管理员拒绝待审/构建失败的生态制品（已就绪或构建中制品须走下架流程）。"""
+    """管理员仅可拒绝未发布制品（pending / build_failed）；已下架或已就绪制品须保留审批血缘。"""
     require_admin(db, admin_user.id)
     try:
-        artifact = ecosystem_domain.get_artifact(db, artifact_id, for_update=True)
+        artifact = ecosystem_domain.get_artifact(db, artifact_id)
         if artifact is None:
             raise EcosystemArtifactNotFoundError("生态制品不存在", params={"artifact_id": artifact_id})
-        if artifact.install_status in ("ready", "building", "testing"):
+        if artifact.approval_status == "rejected":
+            db.commit()
+            return serialize_artifact(artifact)
+        if artifact.install_status not in ("pending", "build_failed"):
             raise EcosystemConflictError(
-                "已就绪或正在构建自检中的制品禁止直接 reject，请先下架",
-                params={"artifact_id": artifact_id, "install_status": artifact.install_status},
+                "仅待审批或构建失败的未发布制品允许 reject；已就绪、构建中或已下架制品须保留审批记录",
+                params={
+                    "artifact_id": artifact_id,
+                    "approval_status": artifact.approval_status,
+                    "install_status": artifact.install_status,
+                },
             )
         updated = ecosystem_domain.update_artifact(
             db,
@@ -1143,10 +1263,10 @@ def uninstall_artifact_image_case(
     job_runner_client: Any | None = None,
     force: bool = False,
 ) -> dict[str, Any]:
-    """两阶段无状态并发安全卸载：FOR UPDATE 下架防新引用 + 核对非终态任务 + delete_plugin_image。"""
+    """两阶段无状态在途保护卸载：停用下架防新引用 + 核对非终态 CalcSnapshot + delete_plugin_image。"""
     require_admin(db, admin_user.id)
     try:
-        artifact = ecosystem_domain.get_artifact(db, artifact_id, for_update=True)
+        artifact = ecosystem_domain.get_artifact(db, artifact_id)
         if artifact is None:
             raise EcosystemArtifactNotFoundError(
                 "生态制品不存在", params={"artifact_id": artifact_id}

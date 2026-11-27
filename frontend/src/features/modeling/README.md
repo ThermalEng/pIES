@@ -39,8 +39,8 @@ pages/model/NewModelPage.tsx        # 路由级组合(模板页签 + YAML 页签
 | 端点 | 请求 | 成功 | 失败 |
 |---|---|---|---|
 | `GET /api/model-templates/catalog` | — | `{items: [TemplateSummary]}` | 错误信封 |
-| `GET /api/model-templates/{id}` | — | `{template, document, diagnostics}` | 错误信封 |
-| `POST /api/projects/{pid}/models/validate` | `{source, model_yaml?, template_id?, template_revision?, template_inputs?}` | `{valid, diagnostics}` | 错误信封 |
+| `GET /api/model-templates/{id}/published` | — | `{template, revision, document, receipt, summary, diagnostics}` | 错误信封 |
+| `POST /api/projects/{pid}/models/validate` | `{source, model_yaml?, template_id?, template_inputs?}` | `{valid, diagnostics}` | 错误信封 |
 | `POST /api/projects/{pid}/models` | 同上 + `{expected_revision, idempotency_key}` | `201 {project_model, receipt, project_revision}` | `400` 错误信封, `params.diagnostics` 为聚合诊断 |
 
 e2e 场景 12 跑真实后端全链路(模板目录 → 表单填写项目相对 CSV 路径 →

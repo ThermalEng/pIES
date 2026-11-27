@@ -39,7 +39,7 @@ from iesplan import audit as audit_domain
 from iesplan import configuration as configuration_domain
 from iesplan import dataset as dataset_domain
 from iesplan import project as project_domain
-from iesplan.application.ecosystem import load_pinned_local_device_documents
+from iesplan.application.ecosystem import list_user_enabled_device_documents
 from iesplan.application.models import load_project_device_documents
 from iesplan.assembly import parse_predefined_source_declaration
 from iesplan.audit.contracts import AuditRecord
@@ -559,11 +559,13 @@ def _check_topology(
 def _check_model(db: Session, project_id: int, diags: list[Diagnostic]) -> None:
     """模型完整性: 拓扑/设备参数 + 电网连接/负荷/载体供给(草稿内容 2.0 名键事实)。"""
     content = _current_draft_content(db, project_id)
+    project = project_domain.require_project(db, project_id)
     devices, conns = _model_section(content)
     device_documents = {
-        **load_pinned_local_device_documents(db, content),
-        **load_project_device_documents(db, content),
+        rec.stable_id: doc
+        for rec, doc in list_user_enabled_device_documents(db, project.owner_id)
     }
+    device_documents.update(load_project_device_documents(db, content))
     by_name = {d.get("name"): d for d in devices if isinstance(d.get("name"), str)}
     specs = {name: _device_spec(dev, device_documents) for name, dev in by_name.items()}
     # 每台设备参数校验(类型未注册抛 NotFoundError，与旧行为一致先行阻断)

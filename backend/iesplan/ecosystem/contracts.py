@@ -73,7 +73,7 @@ class EcosystemSettingsRecord:
 
 @dataclass(frozen=True, slots=True)
 class LocalArtifactRecord:
-    """实例级共享本地制品目录记录（按 (kind, stable_id, version) 去重）。
+    """实例级共享本地制品目录记录（按 (kind, stable_id) 维护唯一当前生效版本）。
 
     遵守宪法 §2.6：对象入库后一律不存储、不重算 ``sha256``。
     """
@@ -102,7 +102,7 @@ class LocalArtifactRecord:
 
 @dataclass(frozen=True, slots=True)
 class MemberArtifactInstallRecord:
-    """成员级多版本并存安装与启用状态记录（member_artifact_installs）。"""
+    """成员级安装与启用状态记录（member_artifact_installs）。"""
 
     id: int
     user_id: int

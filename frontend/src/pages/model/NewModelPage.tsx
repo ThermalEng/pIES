@@ -94,7 +94,7 @@ export default function NewModelPage() {
     [save],
   )
 
-  /** 模板表单提交: 表单 → inputs JSON → 候选保存(携带精确模板引用)。 */
+  /** 模板表单提交: 表单 → inputs JSON → 候选保存(读取唯一当前发布版模板)。 */
   const handleSubmitTemplate = useCallback(async () => {
     if (!detail.document) return
     const result = formValuesToInputsOrErrors(detail.document.inputs, form.values)
@@ -103,11 +103,9 @@ export default function NewModelPage() {
       return
     }
     const summary = detail.document.summary
-    const revision = summary.revision
     const candidate: CandidateModel = {
       source: 'template',
       template_id: summary.template_id,
-      template_revision: revision ? revision.revision : null,
       inputs_json: result.inputs,
       content_yaml: null,
       project_revision: 0, // 由 useCandidateSave 在提交时读取项目草稿修订
@@ -122,7 +120,6 @@ export default function NewModelPage() {
     const candidate: CandidateModel = {
       source: 'yaml',
       template_id: null,
-      template_revision: null,
       inputs_json: null,
       content_yaml: yaml.yaml_text,
       project_revision: 0,

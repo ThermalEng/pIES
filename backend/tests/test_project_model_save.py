@@ -299,7 +299,6 @@ def _save(
     *,
     source: str = "direct_yaml",
     template_id: str | None = None,
-    template_revision: int | None = None,
     template_inputs: dict | None = None,
     idempotency_key: str | None = None,
     expected_revision: int | None = None,
@@ -317,7 +316,6 @@ def _save(
         body["template_inputs"] = template_inputs
         if template_id:
             body["template_id"] = template_id
-            body["template_revision"] = template_revision
     if idempotency_key:
         body["idempotency_key"] = idempotency_key
     return client.post(f"/api/projects/{pid}/models", json=body, headers=headers)
@@ -398,14 +396,13 @@ def test_validate_endpoint_yaml_parse_error(client: TestClient, db_session: Sess
 
 def test_validate_endpoint_template(client: TestClient, db_session: Session) -> None:
     headers, pid = _make_owner(client, db_session, "val_tpl")
-    # 模板走真实生命周期: 创建并发布后, 校验端点提交模板稳定引用
-    template_id, tpl_revision = _publish_template(client, headers, TEMPLATE_YAML)
+    # 模板走真实生命周期: 创建并发布后, 校验端点仅提交 template_id(解析当前唯一已发布版本)
+    template_id, _tpl_revision = _publish_template(client, headers, TEMPLATE_YAML)
     resp = client.post(
         f"/api/projects/{pid}/models/validate",
         json={
             "source": "template",
             "template_id": template_id,
-            "template_revision": tpl_revision,
             "template_inputs": TEMPLATE_INPUTS,
         },
         headers=headers,
@@ -419,7 +416,6 @@ def test_validate_endpoint_template(client: TestClient, db_session: Session) -> 
         json={
             "source": "template",
             "template_id": template_id,
-            "template_revision": tpl_revision,
             "template_inputs": {"properties": {"not_declared": {"value": 1}}},
         },
         headers=headers,
@@ -501,10 +497,10 @@ def test_save_and_load_preserve_bound_property_refs(
             "      value: {type: number, unit: kW, valid_range: {minimum: 0, maximum: 1000000}}\n"
             "properties:\n", 1,
         ).replace("acme.device.heat_pump", build_stable_id(_token_ns_map[token], "bound-refs"))
-        template_id, revision = _publish_template(client, headers, template, slug="bound-refs")
+        template_id, _revision = _publish_template(client, headers, template, slug="bound-refs")
         resp = _save(
             client, pid, headers, "", source="template", template_id=template_id,
-            template_revision=revision, template_inputs={"properties": {"rated_heat_kw": {"value": 600}}},
+            template_inputs={"properties": {"rated_heat_kw": {"value": 600}}},
         )
     else:
         resp = _save(client, pid, headers, yaml_text)
@@ -649,7 +645,6 @@ def test_template_and_direct_yaml_converge(client: TestClient, db_session: Sessi
         client, pid, headers, "",
         source="template",
         template_id=template_id,
-        template_revision=tpl_revision,
         template_inputs=TEMPLATE_INPUTS,
     )
     assert r_tpl.status_code == 201, r_tpl.text

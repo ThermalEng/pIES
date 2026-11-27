@@ -2217,8 +2217,6 @@ button {
 .ies-custom-card__head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .ies-custom-card__name { font-weight: 600; border: none; background: none; cursor: pointer; color: inherit; text-align: left; }
 .ies-custom-card__meta { display: flex; gap: 16px; flex-wrap: wrap; margin-top: 6px; color: var(--ies-color-text-secondary); font-size: var(--ies-fs-sm); }
-.ies-custom-card__revisions { margin-top: 8px; display: flex; gap: 6px; align-items: center; font-size: var(--ies-fs-sm); }
-.ies-custom-card__rev { border: 1px solid var(--ies-color-border); border-radius: var(--ies-radius-sm); padding: 2px 8px; color: var(--ies-color-text); background: none; cursor: pointer; }
 .ies-custom-card__actions { margin-top: 10px; display: flex; gap: 8px; }
 .ies-custom-empty { color: var(--ies-color-text-secondary); padding: 24px 0; }
 .ies-custom-editor { display: flex; flex-direction: column; gap: 12px; margin-top: 16px; }

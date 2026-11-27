@@ -46,7 +46,7 @@ export function useTemplates() {
   return { templates, loading, error, reload }
 }
 
-/** 选中模板的精确发布版详情; 切换模板时丢弃旧详情, 取消旧请求。 */
+/** 选中模板的当前发布版详情; 切换模板时丢弃旧详情, 取消旧请求。 */
 export function useTemplateDocument(template: TemplateSummary | null) {
   const { locale } = useI18n()
   const [document, setDocument] = useState<TemplateDocument | null>(null)
@@ -54,8 +54,8 @@ export function useTemplateDocument(template: TemplateSummary | null) {
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
-    const revision = template?.revision?.revision
-    if (!template || !revision) {
+    const publishedRevision = template?.published_revision ?? 0
+    if (!template || publishedRevision <= 0) {
       setDocument(null)
       setError(null)
       return
@@ -63,7 +63,7 @@ export function useTemplateDocument(template: TemplateSummary | null) {
     let cancelled = false
     setLoading(true)
     setError(null)
-    getTemplate(template.template_id, revision, locale)
+    getTemplate(template.template_id, locale)
       .then((doc) => {
         if (!cancelled) setDocument(doc)
       })
@@ -79,7 +79,7 @@ export function useTemplateDocument(template: TemplateSummary | null) {
     return () => {
       cancelled = true
     }
-  }, [template?.template_id, template?.revision?.revision, locale])
+  }, [template?.template_id, template?.published_revision, locale])
 
   return { document, loading, error }
 }

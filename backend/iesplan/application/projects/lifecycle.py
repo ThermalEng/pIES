@@ -485,24 +485,10 @@ def _update_draft(
         _validate_command_scope(cmd, project_id)
         if cmd.get("type") == "dataset.bind" and isinstance(cmd.get("payload"), dict):
             _validate_dataset_bind(db, project_id, cmd["payload"])
-        if cmd.get("type") == "project.set_extensions" and isinstance(cmd.get("payload"), dict):
-            cmd = _validate_extension_device_pins(db, user_id=user.id, cmd=cmd)
-        pinned_local_ref: tuple[str, str] | None = None
         if cmd.get("type") == "model.upsert_device" and isinstance(cmd.get("payload"), dict):
-            pinned_local_ref = _validate_device_type_ref(
-                db, content, cmd["payload"], user_id=user.id
-            )
+            _validate_device_type_ref(db, content, cmd["payload"], user_id=user.id)
             cmd = _with_created_source_bindings(db, content, cmd)
         result = _apply_command(content, cmd)
-        if pinned_local_ref is not None:
-            sid, ver_str = pinned_local_ref
-            ext_map = content.setdefault("extensions", {})
-            if not isinstance(ext_map, dict):
-                ext_map = {}
-                content["extensions"] = ext_map
-            pins = ext_map.setdefault("local_device_models", {})
-            if isinstance(pins, dict):
-                pins.setdefault(sid, ver_str)
         applied[cid] = {"revision": draft.revision + 1, "result": jsonable(result)}
         changed = True
         results.append(
@@ -610,37 +596,17 @@ def _apply_command(content: dict, cmd: dict) -> dict:
     return handler(content, payload)
 
 
-def _validate_extension_device_pins(db: Session, *, user_id: int, cmd: dict) -> dict:
-    """校验 project.set_extensions 中的 local_device_models 精确版本钉选并规范化。"""
-    payload = cmd.get("payload") or {}
-    ext = payload.get("extensions")
-    if not isinstance(ext, dict) or "local_device_models" not in ext:
-        return cmd
-    raw_pins = ext["local_device_models"]
-    if raw_pins is None:
-        return cmd
-    from iesplan.application.ecosystem import validate_and_normalize_local_device_pins
-
-    normalized = validate_and_normalize_local_device_pins(db, user_id=user_id, pins=raw_pins)
-    new_ext = {**ext, "local_device_models": normalized}
-    return {**cmd, "payload": {**payload, "extensions": new_ext}}
-
-
 def _validate_device_type_ref(
     db: Session,
     content: dict,
     payload: dict,
     *,
     user_id: int | None = None,
-) -> tuple[str, str] | None:
-    """device_type 引用边界: 公开目录、本项目 model 清单 或 当前成员已启用本地生态设备。
-
-    在命令应用前确认引用合法性；命中本地生态设备时优先消费项目已钉选版本，
-    并返回 ``(stable_id, version_str)`` 以便写入草稿 ``extensions.local_device_models``。
-    """
+) -> None:
+    """device_type 引用边界: 公开目录、本项目 model 清单 或 当前成员已启用本地生态设备。"""
     type_id = payload.get("device_type")
     if type_id is None:
-        return None
+        return
     if not isinstance(type_id, str) or not type_id:
         raise InvalidRequestError(
             "设备 device_type 必须为非空字符串",
@@ -651,23 +617,18 @@ def _validate_device_type_ref(
 
     try:
         get_device(type_id)
-        return None
+        return
     except NotFoundError:
         pass
     from iesplan.application.models import project_device_type_ids
 
     if type_id in project_device_type_ids(db, content):
-        return None
+        return
     if user_id is not None:
-        from iesplan.application.ecosystem import resolve_user_local_device_revision
+        from iesplan.application.ecosystem import resolve_enabled_local_device
 
-        pinned_map = (content.get("extensions") or {}).get("local_device_models")
-        pinned_rev = pinned_map.get(type_id) if isinstance(pinned_map, dict) else None
-        local_rec = resolve_user_local_device_revision(
-            db, user_id=user_id, stable_id=type_id, pinned_revision=pinned_rev
-        )
-        if local_rec is not None:
-            return (local_rec.stable_id, local_rec.version)
+        if resolve_enabled_local_device(db, user_id, type_id) is not None:
+            return
     raise InvalidRequestError(
         "设备 device_type 未注册",
         code="PROJ-CMD-005",

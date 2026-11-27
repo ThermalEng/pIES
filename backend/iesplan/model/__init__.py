@@ -29,22 +29,19 @@ from iesplan.model.contracts import (
 )
 
 allocate_project_model_suffix = persistence.allocate_project_model_suffix
-create_draft_revision = persistence.create_draft_revision
 create_project_model = persistence.create_project_model
-create_published_revision = persistence.create_published_revision
 create_template = persistence.create_template
 delete_project_model = persistence.delete_project_model
 delete_template = persistence.delete_template
 find_project_model_by_idempotency = persistence.find_project_model_by_idempotency
 find_revision_by_idempotency = persistence.find_revision_by_idempotency
-get_draft_revision = persistence.get_draft_revision
+get_current_published_revision = persistence.get_current_published_revision
 get_owned_template = persistence.get_owned_template
 get_project_model = persistence.get_project_model
-get_published_revision = persistence.get_published_revision
-list_draft_revisions = persistence.list_draft_revisions
 list_owned_templates = persistence.list_owned_templates
 list_owned_templates_by_status = persistence.list_owned_templates_by_status
 list_project_models = persistence.list_project_models
+replace_published_revision = persistence.replace_published_revision
 update_project_model = persistence.update_project_model
 update_template = persistence.update_template
 
@@ -69,22 +66,19 @@ __all__ = [
     "TEMPLATE_STATUS_PUBLISHED",
     "TemplateDraftRevisionRecord",
     "allocate_project_model_suffix",
-    "create_draft_revision",
     "create_project_model",
-    "create_published_revision",
     "create_template",
     "delete_project_model",
     "delete_template",
     "find_project_model_by_idempotency",
     "find_revision_by_idempotency",
-    "get_draft_revision",
+    "get_current_published_revision",
     "get_owned_template",
     "get_project_model",
-    "get_published_revision",
-    "list_draft_revisions",
     "list_owned_templates",
     "list_owned_templates_by_status",
     "list_project_models",
+    "replace_published_revision",
     "update_project_model",
     "update_template",
 ]

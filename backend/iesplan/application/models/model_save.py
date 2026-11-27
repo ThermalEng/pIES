@@ -26,9 +26,9 @@ from iesplan import audit as audit_domain
 from iesplan import dataset as dataset_domain
 from iesplan import model as model_domain
 from iesplan import project as project_domain
-from iesplan.application.model_templates import resolve_template_revision
+from iesplan.application.model_templates import resolve_published_template
+from iesplan.application.projects import ensure_access
 from iesplan.application.projects import (
-    ensure_access,
     replace_project_model_refs as _replace_project_model_refs,
 )
 from iesplan.core.diagnostics import (
@@ -38,8 +38,8 @@ from iesplan.core.diagnostics import (
 )
 from iesplan.core.errors import AppError, ConflictError, NotFoundError
 from iesplan.devices import (
-    DeviceModelDocument,
     MAX_CANDIDATE_YAML_BYTES,
+    DeviceModelDocument,
     canonical_bytes,
     canonical_receipt,
     instantiate_template,
@@ -187,14 +187,13 @@ def _load_template_authoritative_document(
     db: Session,
     user,
     template_id: str,
-    template_revision: int,
 ) -> tuple[Mapping[str, Any], dict[str, Any]]:
-    """读取项目模型候选引用的权威模板内容(经对象存储门面)。
+    """读取项目模型候选引用的当前唯一已发布权威模板内容(经对象存储门面)。
 
-    模板来源候选只提交稳定模板 ID 与精确 revision, 后端
-    从模板 revision 的对象引用读取权威规范字节。文本文件只校验字头。返回 (模板原始映射, 模板溯源)。
+    模板来源候选只提交稳定模板 ID, 后端从当前已发布版本读取权威规范字节。
+    文本文件只校验字头。返回 (模板原始映射, 模板溯源)。
     """
-    ref = resolve_template_revision(db, user, template_id, template_revision)
+    ref = resolve_published_template(db, user, template_id)
     raw = get_object(db, ref.yaml_object_id)
     try:
         parsed = json.loads(raw.decode("utf-8"))
@@ -336,7 +335,6 @@ def validate_candidate(
     model_yaml: str,
     source: str = MODEL_SOURCE_DIRECT,
     template_id: str | None = None,
-    template_revision: int | None = None,
     template_inputs: Mapping[str, Any] | None = None,
 ) -> CandidateValidation:
     """候选模型完整校验(门禁, 不保存)。
@@ -344,10 +342,9 @@ def validate_candidate(
     依次执行: 项目 view 授权 → YAML 安全解析 → devices 2.0 完整校验(或模板
     实例化)。任何失败聚合诊断返回, 不写对象、不登记清单、不分配编号。
 
-    ``source=template`` 时若携带模板稳定 ID/精确 revision, 后端
-    从模板 revision 读取权威内容并实例化(候选提交的 model_yaml 被覆盖为
-    权威规范字节, 不信任客户端自带的模板字节); 未携带模板引用时为旧契约
-    路径(model_yaml 即模板 YAML, 校验用, 正式保存仍以权威内容为准)。文本文件只校验字头。
+    ``source=template`` 时若携带模板稳定 ID, 后端从当前已发布版本读取
+    权威内容并实例化(候选提交的 model_yaml 被覆盖为权威规范字节,
+    不信任客户端自带的模板字节); 未携带模板引用时为内联模板 YAML 路径。文本文件只校验字头。
     """
     ensure_access(db, user, project_id, "view")
     project_domain.require_project(db, project_id)
@@ -365,10 +362,10 @@ def validate_candidate(
         )
     raw: Mapping[str, Any] | None = None
     provenance: dict[str, Any] | None = None
-    if source == MODEL_SOURCE_TEMPLATE and template_id and template_revision:
+    if source == MODEL_SOURCE_TEMPLATE and template_id:
         try:
             template_raw, provenance = _load_template_authoritative_document(
-                db, user, template_id, template_revision
+                db, user, template_id
             )
         except (AppError, ConflictError, NotFoundError) as exc:
             return CandidateValidation(
@@ -380,7 +377,6 @@ def validate_candidate(
                         field="template_id",
                         params={
                             "template_id": template_id,
-                            "template_revision": template_revision,
                             "detail": str(exc),
                         },
                     )
@@ -521,15 +517,14 @@ def _save_project_model(
     model_yaml: str,
     source: str = MODEL_SOURCE_DIRECT,
     template_id: str | None = None,
-    template_revision: int | None = None,
     template_inputs: Mapping[str, Any] | None = None,
     idempotency_key: str | None = None,
     expected_revision: int,
 ) -> dict[str, Any]:
     """正式保存项目模型(候选校验 → 编号分配 → 规范化 → 原子保存)。
 
-    模板来源候选提交模板稳定 ID、精确 revision 与 inputs,
-    后端读取权威模板内容并实例化(``model_yaml`` 为权威模板的规范字节);
+    模板来源候选提交模板稳定 ID 与 inputs,
+    后端读取当前唯一已发布权威模板内容并实例化(``model_yaml`` 为权威模板的规范字节);
     直接 YAML 来源提交完整 ``model_yaml``。两条路径汇入同一候选校验与
     保存用例。返回 ``{project_model, receipt, project_revision, duplicate}``;
     公共 application 用例拥有提交/回滚边界。文本文件只校验字头。
@@ -572,7 +567,6 @@ def _save_project_model(
         model_yaml=model_yaml,
         source=source,
         template_id=template_id,
-        template_revision=template_revision,
         template_inputs=template_inputs,
     )
     if not validation.ok or validation.document is None:
@@ -585,6 +579,11 @@ def _save_project_model(
             location={"object_type": "project_model", "project_id": project_id},
         )
     template_provenance = validation.template_provenance
+    resolved_template_revision = (
+        template_provenance["template_revision"]
+        if template_provenance is not None
+        else None
+    )
     document = validation.document
     base_device_id = document.device.id if document.device is not None else ""
 
@@ -634,7 +633,7 @@ def _save_project_model(
             receipt_object_id=receipt_handle.id,
             source=source,
             template_id=template_id,
-            template_revision=template_revision,
+            template_revision=resolved_template_revision,
             idempotency_key=idempotency_key,
             created_by=user.id,
         )
@@ -675,7 +674,7 @@ def _save_project_model(
             "suffix": suffix,
             "source": source,
             "template_id": template_id,
-            "template_revision": template_revision,
+            "template_revision": resolved_template_revision,
         },
     )
     new_draft = _replace_project_model_refs(
@@ -703,7 +702,6 @@ def save_project_model_in_transaction(
     expected_revision: int,
     source: str = MODEL_SOURCE_DIRECT,
     template_id: str | None = None,
-    template_revision: int | None = None,
     template_inputs: Mapping[str, Any] | None = None,
     idempotency_key: str | None = None,
 ) -> dict[str, Any]:
@@ -720,7 +718,6 @@ def save_project_model_in_transaction(
         expected_revision=expected_revision,
         source=source,
         template_id=template_id,
-        template_revision=template_revision,
         template_inputs=template_inputs,
         idempotency_key=idempotency_key,
     )
@@ -735,7 +732,6 @@ def save_project_model(
     expected_revision: int,
     source: str = MODEL_SOURCE_DIRECT,
     template_id: str | None = None,
-    template_revision: int | None = None,
     template_inputs: Mapping[str, Any] | None = None,
     idempotency_key: str | None = None,
 ) -> dict[str, Any]:
@@ -749,7 +745,6 @@ def save_project_model(
             expected_revision=expected_revision,
             source=source,
             template_id=template_id,
-            template_revision=template_revision,
             template_inputs=template_inputs,
             idempotency_key=idempotency_key,
         )

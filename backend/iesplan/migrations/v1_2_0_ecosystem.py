@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from sqlalchemy import text
+from sqlalchemy import inspect, text
 from sqlalchemy.engine import Connection
 
 MIGRATION_VERSION = "20261127_120_ecosystem"
@@ -67,7 +67,7 @@ def upgrade_ecosystem(conn: Connection) -> int:
                 diagnostics {json_col},
                 created_at {ts_col} NOT NULL,
                 updated_at {ts_col} NOT NULL,
-                CONSTRAINT uq_local_artifacts_identity UNIQUE (kind, stable_id, version)
+                CONSTRAINT uq_local_artifacts_identity UNIQUE (kind, stable_id)
             )
             """
         )
@@ -115,6 +115,52 @@ def upgrade_ecosystem(conn: Connection) -> int:
         ),
         {"updated_at": now_iso},
     )
+
+    inspector = inspect(conn)
+    if is_pg and inspector.has_table("local_artifacts"):
+        for uq in inspector.get_unique_constraints("local_artifacts"):
+            if uq.get("name") == "uq_local_artifacts_identity" and list(
+                uq.get("column_names") or []
+            ) != ["kind", "stable_id"]:
+                conn.execute(
+                    text(
+                        "DELETE FROM local_artifacts a USING local_artifacts b "
+                        "WHERE a.kind = b.kind AND a.stable_id = b.stable_id AND a.id < b.id"
+                    )
+                )
+                conn.execute(
+                    text(
+                        "ALTER TABLE local_artifacts "
+                        "DROP CONSTRAINT IF EXISTS uq_local_artifacts_identity"
+                    )
+                )
+                conn.execute(
+                    text(
+                        "ALTER TABLE local_artifacts "
+                        "ADD CONSTRAINT uq_local_artifacts_identity UNIQUE (kind, stable_id)"
+                    )
+                )
+                break
+
+    if inspector.has_table("model_templates"):
+        if inspector.has_table("model_template_draft_revisions"):
+            conn.execute(
+                text(
+                    "UPDATE model_templates SET current_draft_revision_id = NULL "
+                    "WHERE current_draft_revision_id IS NOT NULL"
+                )
+            )
+            conn.execute(text("DELETE FROM model_template_draft_revisions"))
+        if inspector.has_table("model_template_revisions"):
+            conn.execute(
+                text(
+                    "DELETE FROM model_template_revisions "
+                    "WHERE id NOT IN ("
+                    "SELECT current_published_revision_id FROM model_templates "
+                    "WHERE current_published_revision_id IS NOT NULL"
+                    ")"
+                )
+            )
     return 1
 
 

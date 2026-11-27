@@ -241,16 +241,16 @@ test.describe('场景 12: 新建项目模型(真实后端模板与 YAML)', () =>
     await expect(page.getByRole('status', { name: /正式已保存|Saved/i })).toBeVisible()
     await expect(page.locator('.ies-modeling__saved').getByText('acme.device.e2e_direct_2').first()).toBeVisible() // 项目内编号递增
 
-    // 12h. 一级菜单「自定义」: 模板管理页显示已发布模板(真实列表)并可查看精确 revision 详情
+    // 12h. 一级菜单「自定义」: 模板管理页显示已发布模板(真实列表)并可查看当前唯一发布版详情
     await page.getByRole('navigation', { name: /项目|Projects/i }).getByText(/自定义|Custom/i).click()
     await expect(page).toHaveURL(/\/custom$/)
     await expect(page.getByText(templateDeviceId)).toBeVisible()
     await expect(page.getByText(/已发布|Published/i).first()).toBeVisible()
 
-    // 窄切片 /custom 回归: 查看精确 revision 详情，断言实际 schema_version 真实值 1.0.0 (非仅标签)
-    const v1Btn = page.locator('.ies-custom-card__rev', { hasText: 'v1' }).first()
-    await expect(v1Btn).toBeVisible()
-    await v1Btn.click()
+    // 窄切片 /custom 回归: 查看当前发布版详情，断言实际 schema_version 真实值 1.0.0 (非仅标签)
+    const viewPublishedBtn = page.getByRole('button', { name: /查看发布版|View published/i }).first()
+    await expect(viewPublishedBtn).toBeVisible()
+    await viewPublishedBtn.click()
     const revBox = page.locator('.ies-custom-revision')
     await expect(revBox).toBeVisible()
     await expect(revBox.getByText(/v1/)).toBeVisible()
