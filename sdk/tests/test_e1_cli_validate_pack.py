@@ -323,20 +323,40 @@ def test_validate_market_mode_and_no_tests_with_requirements(tmp_path: Path) -> 
     with pytest.raises(PluginValidationError, match="README.md"):
         validate_plugin_package(EXAMPLES_DIR / "reference_algorithm", require_market_fields=True)
 
-    # Local user.<ns>.* passes non-market validate, fails --market
+    # Local user.<ns>.* (Crockford Base32) passes non-market validate, fails --market
     local_dir = tmp_path / "local_user"
     shutil.copytree(EXAMPLES_DIR / "reference_algorithm", local_dir)
     (local_dir / "README.md").write_text("# Local\n", encoding="utf-8")
     (local_dir / "LICENSE").write_text("MPL-2.0\n", encoding="utf-8")
     ns = generate_public_namespace()
-    text = (local_dir / "plugin.yaml").read_text(encoding="utf-8").replace(
-        "acme.algorithm.reference_dispatch",
-        f"user.{ns}.algorithm.my_dispatch",
+    assert set(ns) <= set("0123456789abcdefghjkmnpqrstvwxyz")
+    base_yaml = (local_dir / "plugin.yaml").read_text(encoding="utf-8")
+    for valid_ns in (ns, "0189zxcvbnmk"):
+        text = base_yaml.replace(
+            "acme.algorithm.reference_dispatch",
+            f"user.{valid_ns}.algorithm.my_dispatch",
+        )
+        (local_dir / "plugin.yaml").write_text(text, encoding="utf-8")
+        assert validate_plugin_package(local_dir, run_tests=True, require_market_fields=False)["ok"] is True
+        with pytest.raises(PluginValidationError, match="public market"):
+            validate_plugin_package(local_dir, run_tests=False, require_market_fields=True)
+
+    # Disallowed Crockford chars (i/l/o/u) and invalid namespace lengths rejected by validate
+    bad_namespaces = (
+        "0189zxcvbni0",
+        "0189zxcvbnl0",
+        "0189zxcvbno0",
+        "0189zxcvbnu0",
+        "0189zxcvb",
+        "0189zxcvbnmk0",
     )
-    (local_dir / "plugin.yaml").write_text(text, encoding="utf-8")
-    assert validate_plugin_package(local_dir, run_tests=True, require_market_fields=False)["ok"] is True
-    with pytest.raises(PluginValidationError, match="public market"):
-        validate_plugin_package(local_dir, run_tests=False, require_market_fields=True)
+    for bad_ns in bad_namespaces:
+        (local_dir / "plugin.yaml").write_text(
+            base_yaml.replace("acme.algorithm.reference_dispatch", f"user.{bad_ns}.algorithm.my_dispatch"),
+            encoding="utf-8",
+        )
+        with pytest.raises(PluginValidationError, match="public_namespace"):
+            validate_plugin_package(local_dir, run_tests=False, require_market_fields=False)
 
     # --no-tests validates AST entrypoint even when runtime.requirements imports uninstalled pkg
     req_dir = tmp_path / "req_algo"

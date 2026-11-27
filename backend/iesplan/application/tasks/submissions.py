@@ -47,6 +47,11 @@ from iesplan import identity as identity_domain
 from iesplan import modeling as modeling_domain
 from iesplan import project as project_domain
 from iesplan import tasks as tasks_domain
+from iesplan.application.ecosystem import (
+    augment_stage_registries_for_user,
+    list_user_enabled_device_documents,
+    lock_and_verify_submission_artifacts,
+)
 from iesplan.application.models import (
     load_project_device_base_ids,
     load_project_device_documents,
@@ -631,7 +636,22 @@ def _assemble_snapshot(
     if not isinstance(random_seed, int) or isinstance(random_seed, bool):
         random_seed = _derive_random_seed(version.id)
     dataset_ids = _bound_dataset_ids(content)
-    extensions = content.get("extensions") or {}
+    extensions = dict(content.get("extensions") or {})
+    (
+        predictor_registry,
+        generator_registry,
+        solver_registry,
+        evaluator_registry,
+        algorithm_registry,
+    ) = augment_stage_registries_for_user(
+        db,
+        user_id=actor.id,
+        predictor_registry=predictor_registry,
+        generator_registry=generator_registry,
+        solver_registry=solver_registry,
+        evaluator_registry=evaluator_registry,
+        algorithm_registry=algorithm_registry,
+    )
     # 执行引用与快照同事务冻结: 同一已解析 generator/algorithm 派生配套对。
     # 描述符能力元组一并带回，供税务闸门复用，不二次取目录。
     result_adapter, executor, generator_capabilities = _resolve_execution_refs(
@@ -653,9 +673,26 @@ def _assemble_snapshot(
     gate, effective = _assembly_gate(
         db, project_id, content, task_type,
         operation_years=evaluation.operation_years,
+        actor_id=actor.id,
     )
     assert gate.artifact is not None
     artifact = gate.artifact
+    canonical_doc = json.loads(artifact.canonical_text)
+    used_device_ids = {
+        str((dev.get("definition") or {}).get("id"))
+        for dev in (canonical_doc.get("devices") or {}).values()
+        if isinstance(dev, Mapping)
+        and isinstance(dev.get("definition"), Mapping)
+        and (dev.get("definition") or {}).get("id")
+    }
+    frozen_local_devices = lock_and_verify_submission_artifacts(
+        db,
+        user_id=actor.id,
+        calc_config=calc_config,
+        device_type_ids=used_device_ids,
+    )
+    if frozen_local_devices:
+        extensions["local_device_models"] = frozen_local_devices
     from iesplan.application.tasks.baselines import check_comparison_inputs, resolve_comparison
 
     evaluation = resolve_comparison(db, actor, evaluation, effective.currency)
@@ -1673,6 +1710,7 @@ def _assembly_gate(
     db: Session, project_id: int, content: dict, task_type: str,
     *,
     operation_years: int | None = None,
+    actor_id: int | None = None,
 ) -> tuple[AssemblyValidationResult, EffectiveFinanceConfig]:
     """计算任务统一装配闸门: 完整四阶段校验后签发规范二件套。
 
@@ -1716,6 +1754,10 @@ def _assembly_gate(
     # 合并解析; 冻结链继续消费闸门结果, 不二次读取当前模型清单。
     device_documents = load_project_device_documents(db, content)
     device_base_ids = load_project_device_base_ids(db, content)
+    if actor_id is not None:
+        for rec, local_doc in list_user_enabled_device_documents(db, actor_id):
+            device_documents.setdefault(rec.stable_id, local_doc)
+            device_base_ids.setdefault(rec.stable_id, rec.stable_id)
     result = validate_project_export(
         export_content,
         dataset_contents=contents,

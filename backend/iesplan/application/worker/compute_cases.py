@@ -44,6 +44,10 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from iesplan import configuration as configuration_domain
+from iesplan.application.ecosystem import (
+    resolve_local_evaluator_produces,
+    resolve_local_stage_descriptor,
+)
 from iesplan.application.worker.lease_cases import Claim, LeaseRejectedError
 from iesplan.application.worker.transactions import run_worker_transaction
 from iesplan.assembly import ValidatedAssemblyArtifact, ValidationReceipt
@@ -175,6 +179,8 @@ class ComputeExecutionPlane:
     evaluator_registry: Any | None = None
     algorithm_registry: Any | None = None
     evaluator_max_concurrency: int = 1
+    session_factory: Any | None = None
+    stage_descriptor_resolver: Callable[[str, str], Any] | None = None
 
 
 def _receipt_from_frozen(data: Mapping[str, Any]) -> ValidationReceipt:
@@ -412,14 +418,35 @@ def complete_materialized(
     )
 
 
-def _stage_descriptor(plane: ComputeExecutionPlane, ref: str, *, kind_label: str) -> Any:
+def resolve_stage_descriptor(
+    plane: ComputeExecutionPlane,
+    ref: str,
+    *,
+    kind_label: str,
+    session_factory: Callable[[], Session] | None = None,
+) -> Any:
+    """解析计算阶段容器描述符：先查内置 stage_catalog，未命中再查已审批本地生态插件镜像。"""
     try:
         return plane.stage_catalog.get_by_ref(ref)
     except KeyError:
+        resolver = getattr(plane, "stage_descriptor_resolver", None)
+        if resolver is not None:
+            resolved = resolver(ref, kind_label)
+            if resolved is not None:
+                return resolved
+        sf = session_factory or getattr(plane, "session_factory", None)
+        if sf is not None:
+            with sf() as db:
+                resolved = resolve_local_stage_descriptor(db, ref, kind_label=kind_label)
+                if resolved is not None:
+                    return resolved
         raise ComputationUnavailableError(
             f"{kind_label}阶段容器未发布: {ref!r}",
             reason="no-provider",
         ) from None
+
+
+_stage_descriptor = resolve_stage_descriptor
 
 
 def _handle_non_succeeded_stage(
@@ -590,8 +617,18 @@ def predict_round_stage(
                 raise KeyError(key)
             entry = by_target[key]
             algo_ref = str(entry["algorithm"])
-            plane.predictor_registry.get(algo_ref)
-            descriptor = _stage_descriptor(plane, algo_ref, kind_label="predictor")
+            descriptor = _stage_descriptor(
+                plane, algo_ref, kind_label="predictor", session_factory=session_factory
+            )
+            try:
+                plane.predictor_registry.get(algo_ref)
+            except ComputationUnavailableError:
+                if descriptor.image == getattr(
+                    getattr(plane.stage_catalog, "get_by_kind", lambda _k: None)("predictor"),
+                    "image",
+                    None,
+                ):
+                    raise
             object_id = str(binding["content"]["object_id"])
             if object_id not in resources:
                 raise ValueError(
@@ -792,11 +829,18 @@ def generate_bundle(
     del models, evaluation
     if config.generator is None or config.solver is None:
         raise ValueError("generate_bundle requires config.generator and config.solver")
-    provider = plane.generator_registry.get(config.generator)
-    gen_stage = _stage_descriptor(plane, provider.ref, kind_label="generator")
-    _stage_descriptor(plane, config.solver, kind_label="solver")
+    gen_stage = _stage_descriptor(
+        plane, config.generator, kind_label="generator", session_factory=session_factory
+    )
+    try:
+        gen_ref = plane.generator_registry.get(config.generator).ref
+    except ComputationUnavailableError:
+        gen_ref = config.generator
+    _stage_descriptor(plane, config.solver, kind_label="solver", session_factory=session_factory)
     for ev in config.evaluators:
-        _stage_descriptor(plane, str(ev["evaluator"]), kind_label="evaluator")
+        _stage_descriptor(
+            plane, str(ev["evaluator"]), kind_label="evaluator", session_factory=session_factory
+        )
 
     request_payload: dict[str, Any] = {
         "artifact": {
@@ -825,10 +869,10 @@ def generate_bundle(
             read_content(stage_result.outputs["bundle/bundle.yaml"]).decode("utf-8")
         )
         manifest = SolverBundleManifest(**manifest_raw)
-        if manifest.bundle["generator"] != provider.ref:
+        if manifest.bundle["generator"] != gen_ref:
             raise ComputationUnavailableError(
                 "Bundle 声明生成器与计算配置不一致 "
-                f"(bundle={manifest.bundle['generator']!r}, config={provider.ref!r})",
+                f"(bundle={manifest.bundle['generator']!r}, config={gen_ref!r})",
                 reason="frozen-provider-mismatch",
             )
         bundle_files: dict[str, Content] = {
@@ -1155,13 +1199,19 @@ def _execute_one_evaluator(
         )
 
     try:
-        eval_stage = _stage_descriptor(plane, evaluator_ref, kind_label="evaluator")
-        eval_spec = (
-            plane.evaluator_registry.get(evaluator_ref)
-            if plane.evaluator_registry is not None
-            else None
+        eval_stage = _stage_descriptor(
+            plane, evaluator_ref, kind_label="evaluator", session_factory=session_factory
         )
-        declared_produces = tuple(eval_spec.produces) if eval_spec is not None else ()
+        declared_produces: tuple[str, ...] = ()
+        if plane.evaluator_registry is not None:
+            try:
+                declared_produces = tuple(plane.evaluator_registry.get(evaluator_ref).produces)
+            except ComputationUnavailableError:
+                with session_factory() as db:
+                    local_prod = resolve_local_evaluator_produces(db, evaluator_ref)
+                if local_prod is None:
+                    raise
+                declared_produces = local_prod
         input_files = _build_evaluator_input_files(
             engineering_solution=sol_content,
             snapshot=snapshot,
@@ -1491,9 +1541,15 @@ def run_algorithm_stage(
     """一体化 algorithm 模式容器化执行，消费标准 ``solution.json`` 并在 cleanup 前持久化检查点。"""
     if config.algorithm is None:
         raise ValueError("run_algorithm_stage requires config.algorithm")
+    algo_stage = _stage_descriptor(
+        plane, config.algorithm, kind_label="algorithm", session_factory=session_factory
+    )
     if plane.algorithm_registry is not None:
-        plane.algorithm_registry.get(config.algorithm)
-    algo_stage = _stage_descriptor(plane, config.algorithm, kind_label="algorithm")
+        try:
+            plane.algorithm_registry.get(config.algorithm)
+        except ComputationUnavailableError:
+            if algo_stage is None:
+                raise
 
     request_payload: dict[str, Any] = {
         "artifact": {

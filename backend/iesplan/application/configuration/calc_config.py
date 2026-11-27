@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 
 from iesplan import configuration as configuration_domain
 from iesplan import project as project_domain
+from iesplan.application.ecosystem import augment_stage_registries_for_user
 from iesplan.application.projects import ensure_access
 from iesplan.computation import CalculationConfig, validate_calculation_config
 from iesplan.computation.config import build_stage_plugin_map
@@ -129,6 +130,21 @@ def save_calculation_config_case(
     """保存 13 字段计算配置（用户输入入口唯一校验；成功追加不可变 revision）。"""
     ensure_access(db, user, project_id, "edit")
     project_domain.require_project(db, project_id)
+    (
+        predictor_registry,
+        generator_registry,
+        solver_registry,
+        evaluator_registry,
+        algorithm_registry,
+    ) = augment_stage_registries_for_user(
+        db,
+        user_id=user.id,
+        predictor_registry=predictor_registry,
+        generator_registry=generator_registry,
+        solver_registry=solver_registry,
+        evaluator_registry=evaluator_registry,
+        algorithm_registry=algorithm_registry,
+    )
     try:
         validated = validate_calculation_config(calculation_config)
         _check_predictor_parameters(validated, predictor_registry, project_id)

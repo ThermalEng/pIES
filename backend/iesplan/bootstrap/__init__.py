@@ -32,6 +32,7 @@ from typing import Any
 from iesplan import audit as audit_domain
 from iesplan import configuration as configuration_domain
 from iesplan import dataset as dataset_domain
+from iesplan import ecosystem as ecosystem_domain
 from iesplan import identity as identity_domain
 from iesplan import model as model_domain
 from iesplan import package as package_domain  # noqa: F401 - 加载本域 ORM 声明
@@ -94,6 +95,7 @@ class ApplicationContext:
             solver_registry=self.solver_registry,
             evaluator_registry=self.evaluator_registry,
             algorithm_registry=self.algorithm_registry,
+            session_factory=self.session_factory,
             evaluator_max_concurrency=int(
                 self.container_stage_policy.evaluator_max_concurrency
                 if self.container_stage_policy is not None
@@ -254,6 +256,7 @@ def collect_trigger_statements() -> tuple[str, ...]:
     statements.extend(results_domain.install_triggers())
     statements.extend(audit_domain.install_triggers())
     statements.extend(configuration_domain.install_triggers())
+    statements.extend(ecosystem_domain.install_triggers())
     return tuple(statements)
 
 
@@ -271,6 +274,7 @@ def collect_immutable_tables() -> tuple[str, ...]:
     tables.extend(getattr(results_domain, "IMMUTABLE_TABLES", ()))
     tables.extend(getattr(audit_domain, "IMMUTABLE_TABLES", ()))
     tables.extend(getattr(configuration_domain, "IMMUTABLE_TABLES", ()))
+    tables.extend(getattr(ecosystem_domain, "IMMUTABLE_TABLES", ()))
     tables.extend(getattr(model_domain, "IMMUTABLE_TABLES", ()))
     return tuple(tables)
 

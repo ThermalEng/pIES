@@ -255,6 +255,7 @@ def _register_business_routers(application: FastAPI) -> None:
         config_revisions,
         datasets,
         deployment,
+        ecosystem,
         exports,
         health,
         model,
@@ -279,6 +280,8 @@ def _register_business_routers(application: FastAPI) -> None:
     application.include_router(project_models.router)
     # 用户自定义模型模板(切片 dm2: 完整生命周期 + 项目模板目录)
     application.include_router(model_templates.router)
+    # 本地模型与插件生态(切片 E2)
+    application.include_router(ecosystem.router)
     # 设备类型注册表(公开; 项目建模写入走项目草稿语义命令)
     application.include_router(model.registry_router)
     # 项目作用域设备选择器(公开目录 + 本项目已保存模型)

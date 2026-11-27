@@ -15,6 +15,7 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
+from iesplan.application.ecosystem import list_user_enabled_device_documents
 from iesplan.application.models.project_devices import load_project_device_documents
 from iesplan.application.projects import ensure_access, get_current_draft_content
 from iesplan.devices import DeviceModelDocument, list_devices
@@ -74,6 +75,10 @@ def list_project_device_types(
     items: dict[str, dict[str, Any]] = {
         item["type_id"]: item for item in list_device_types()["items"]
     }
+    for rec, document in list_user_enabled_device_documents(db, user.id):
+        schema = _device_type_schema(document)
+        schema["local_revision"] = int(rec.version)
+        items[rec.stable_id] = schema
     for type_id, document in sorted(
         load_project_device_documents(db, content).items()
     ):

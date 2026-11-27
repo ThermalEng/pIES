@@ -159,9 +159,11 @@ def test_market_index_rejects_invalid_versions_duplicates_and_user_ns() -> None:
 
 
 def test_namespace_identity_and_kind_matching() -> None:
+    crockford_chars = set("0123456789abcdefghjkmnpqrstvwxyz")
     ns = generate_public_namespace()
     assert len(ns) == 12
-    assert set(ns) <= set("abcdefghijklmnopqrstuvwxyz234567")
+    assert set(ns) <= crockford_chars
+    assert set(ns).isdisjoint({"i", "l", "o", "u"})
     assert ns != generate_public_namespace()
 
     official = parse_artifact_id("ies.solver.highs", kind="solver")
@@ -169,10 +171,11 @@ def test_namespace_identity_and_kind_matching() -> None:
     assert official.publisher == "ies"
     assert official.public_namespace is None
 
-    local_user = validate_artifact_id(f"user.{ns}.device.custom_hp", kind="device_model")
-    assert local_user.scope == "user"
-    assert local_user.public_namespace == ns
-    assert local_user.artifact_type == "device"
+    for valid_ns in (ns, "0123456789ab", "0189abcdefgh", "abcdefghjkm0"):
+        local_user = validate_artifact_id(f"user.{valid_ns}.device.custom_hp", kind="device_model")
+        assert local_user.scope == "user"
+        assert local_user.public_namespace == valid_ns
+        assert local_user.artifact_type == "device"
 
     pub = parse_artifact_id("acme.evaluator.carbon", kind="evaluator", allow_user_namespace=False)
     assert pub.scope == "publisher"
@@ -187,9 +190,20 @@ def test_namespace_identity_and_kind_matching() -> None:
     with pytest.raises(PluginValidationError, match="forbidden in public market"):
         parse_artifact_id(f"user.{ns}.algorithm.my_algo", kind="algorithm", allow_user_namespace=False)
 
-    # Invalid public_namespace (not 12-char Base32)
-    with pytest.raises(PluginValidationError, match="public_namespace"):
-        parse_artifact_id("user.too_short.device.hp", kind="device_model")
+    # Invalid public_namespace (wrong length, uppercase, or excluded Crockford chars i/l/o/u)
+    invalid_namespaces = (
+        "too_short",
+        "0123456789a",
+        "0123456789abc",
+        "0123456789aA",
+        "0123456789ai",
+        "0123456789al",
+        "0123456789ao",
+        "0123456789au",
+    )
+    for bad_ns in invalid_namespaces:
+        with pytest.raises(PluginValidationError, match="public_namespace"):
+            parse_artifact_id(f"user.{bad_ns}.device.hp", kind="device_model")
 
     # Kind-type mismatch rejected
     with pytest.raises(PluginValidationError, match="does not match kind"):

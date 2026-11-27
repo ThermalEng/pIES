@@ -38,8 +38,8 @@ RESERVED_PUBLISHERS: frozenset[str] = frozenset({"ies", "user", "admin", "system
 
 _SCHEMA_PATH = Path(__file__).parent / "schema" / "market-index-1.0.0.schema.json"
 _SEGMENT_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
-_PUBLIC_NAMESPACE_RE = re.compile(r"^[a-z2-7]{12}$")
-_BASE32_ALPHABET = "abcdefghijklmnopqrstuvwxyz234567"
+_CROCKFORD_BASE32_ALPHABET = "0123456789abcdefghjkmnpqrstvwxyz"
+_PUBLIC_NAMESPACE_RE = re.compile(r"^[0-9a-hjkmnp-tv-z]{12}$")
 _SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 _CONSTRAINT_CLAUSE_RE = re.compile(r"^(>=|<=|>|<|==|!=)?\s*(\d+\.\d+\.\d+)$")
 
@@ -57,8 +57,8 @@ class ParsedArtifactIdentity:
 
 
 def generate_public_namespace() -> str:
-    """Generate a 12-character lowercase Base32 namespace (60 bits of CSPRNG entropy)."""
-    return "".join(secrets.choice(_BASE32_ALPHABET) for _ in range(12))
+    """Generate a 12-character lowercase Crockford Base32 namespace (60 bits of CSPRNG entropy)."""
+    return "".join(secrets.choice(_CROCKFORD_BASE32_ALPHABET) for _ in range(12))
 
 
 def parse_artifact_id(
@@ -86,7 +86,7 @@ def parse_artifact_id(
         _, pub_ns, art_type, slug = parts
         if not _PUBLIC_NAMESPACE_RE.fullmatch(pub_ns):
             raise PluginValidationError(
-                f"Invalid user public_namespace {pub_ns!r}; expected [a-z2-7]{{12}}"
+                f"Invalid user public_namespace {pub_ns!r}; expected [0-9a-hjkmnp-tv-z]{{12}}"
             )
         scope = "user"
         publisher = f"user.{pub_ns}"
