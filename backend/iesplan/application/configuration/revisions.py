@@ -777,6 +777,7 @@ def _save_planning_config(
     if any(c.type == "step_relation" for c in config.constraints.values()):
         # 规划保存是真实公开边界；使用当前项目实例键和设备目录完成
         # 逐步关系的引用/表达式校验。无需等待草稿全部可计算。
+        from iesplan.application.ecosystem import load_pinned_local_device_documents
         from iesplan.application.models import load_project_device_documents
         from iesplan.assembly import check_step_relations, device_instance_refs
         from iesplan.devices import list_devices
@@ -795,6 +796,7 @@ def _save_planning_config(
             for ref, device in zip(refs, items, strict=True)
         }
         catalog = {doc.device.id: doc for doc in list_devices() if doc.device is not None}
+        catalog.update(load_pinned_local_device_documents(db, content))
         catalog.update(load_project_device_documents(db, content))
         step_diags = []
         check_step_relations(config.to_dict(), instances, catalog, step_diags)

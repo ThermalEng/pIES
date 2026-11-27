@@ -163,6 +163,9 @@ def _build_plugin_zip_bytes(
     tests: list[dict[str, str]] | None = None,
     extra_files: dict[str, bytes] | None = None,
     dir_mode_outputs: dict[str, bytes] | None = None,
+    compat_pies: str = ">=1.2.0,<2.0.0",
+    advanced: dict[str, Any] | None = None,
+    extensions: dict[str, Any] | None = None,
 ) -> bytes:
     consumes_list = consumes or ["ies.stage-input@1.0.0"]
     produces_list = produces or ["ies.engineering-solution@1.0.0"]
@@ -175,9 +178,10 @@ def _build_plugin_zip_bytes(
         "name:",
         "  zh_cn: 测试插件",
         "  en_us: Test Plugin",
+        "description: Test algorithm plugin for E2 verification",
         "license: MPL-2.0",
         "compatibility:",
-        '  pies: ">=1.2.0,<2.0.0"',
+        f'  pies: "{compat_pies}"',
         "consumes:",
         *[f"  - {c}" for c in consumes_list],
         "produces:",
@@ -199,13 +203,37 @@ def _build_plugin_zip_bytes(
             "      type: integer",
             "      minimum: 1",
             "      default: 10",
+            "resources:",
+            "  default:",
+            "    cpu: 1",
+            "    memory_mb: 512",
+            "    timeout_seconds: 60",
+            "    process_limit: 8",
+            "  maximum:",
+            "    cpu: 2",
+            "    memory_mb: 1024",
+            "    timeout_seconds: 120",
+            "    process_limit: 16",
         ]
     )
+    if advanced is not None:
+        from iesplan.core.yamlmini import dump as _yaml_dump
+
+        adv_yaml = _yaml_dump({"advanced": advanced}).rstrip()
+        lines.extend(adv_yaml.splitlines())
+    if extensions is not None:
+        from iesplan.core.yamlmini import dump as _yaml_dump
+
+        ext_yaml = _yaml_dump({"extensions": extensions}).rstrip()
+        lines.extend(ext_yaml.splitlines())
     if tests:
         lines.append("tests:")
         for tc in tests:
             lines.append(f"  - id: {tc['id']}")
-            lines.append(f"    input: {tc['input']}")
+            if "in" in tc:
+                lines.append(f"    in: {tc['in']}")
+            else:
+                lines.append(f"    input: {tc['input']}")
             lines.append(f"    expected: {tc['expected']}")
 
     files: dict[str, bytes] = {
@@ -421,13 +449,37 @@ def test_orthogonal_switches_prevent_bypass_and_validate_pip_index_url(
     assert up_plugin["approval_status"] == "pending"
     assert up_plugin["install_status"] == "pending"
 
-    # Online market vetted download skips local approval; admin self-upload also skips approval
+    # Untrusted caller cannot self-declare source_origin="online_market" to bypass local approval!
+    with pytest.raises(EcosystemValidationError) as exc_origin:
+        ecosystem_app.import_device_model_case(
+            db,
+            member,
+            yaml_text=_sample_device_yaml("acme.device.forged_mkt"),
+            revision=1,
+            source_origin="online_market",
+        )
+    assert exc_origin.value.code == "ECO-ORIGIN-FORBIDDEN"
+
+    with pytest.raises(EcosystemValidationError) as exc_plg_origin:
+        ecosystem_app.upload_plugin_zip_case(
+            db,
+            member,
+            zip_bytes=zip_bytes,
+            source_origin="online_market",
+            job_runner_client=fake_jr,
+            plugin_source_root=tmp_path / "builds",
+            stage_root=tmp_path / "stages",
+        )
+    assert exc_plg_origin.value.code == "ECO-ORIGIN-FORBIDDEN"
+
+    # Only trusted server-side market download (trusted_market=True) skips local approval; admin also skips
     mkt_dev = ecosystem_app.import_device_model_case(
         db,
         member,
         yaml_text=_sample_device_yaml("acme.device.market_hp"),
         revision=1,
         source_origin="online_market",
+        trusted_market=True,
     )
     assert mkt_dev["approval_status"] == "approved"
     assert mkt_dev["install_status"] == "ready"
@@ -639,7 +691,7 @@ def test_plugin_zip_security_scheduler_build_dual_selftest_and_calc_config(
             },
             {
                 "id": "dir_case",
-                "input": "tests/dir_case/in",
+                "in": "tests/dir_case/in",
                 "expected": "tests/dir_case/expected",
             },
         ],
@@ -916,6 +968,26 @@ def test_ecosystem_api_endpoints_smoke(engine: Engine, db_factory: sessionmaker[
     assert r_exp.status_code == 200
     assert r_exp.json()["revision"] == 1
 
+    # API upload/import endpoints reject caller-supplied source_origin="online_market" (422)
+    r_forged_dev = client.post(
+        "/api/ecosystem/device-models/import",
+        json={
+            "yaml_text": _sample_device_yaml(f"user.{ns}.device.forged"),
+            "revision": 1,
+            "source_origin": "online_market",
+        },
+        headers=member_hdrs,
+    )
+    assert r_forged_dev.status_code == 422
+
+    r_forged_plg = client.post(
+        "/api/ecosystem/plugins/upload",
+        data={"source_origin": "online_market"},
+        files={"file": ("plugin.zip", _build_plugin_zip_bytes(), "application/zip")},
+        headers=member_hdrs,
+    )
+    assert r_forged_plg.status_code == 422
+
 
 @pytest.mark.skipif(
     not os.environ.get("IESPLAN_TEST_PG_URL"),
@@ -1050,3 +1122,447 @@ def test_postgres_migration_and_concurrent_uninstall_vs_submission(tmp_path: Pat
         }
     finally:
         pg_engine.dispose()
+
+
+def test_full_manifest_compatibility_descriptor_projection_and_sdk_pack_fixture(
+    db_factory: sessionmaker[Session],
+    db: Session,
+    tmp_path: Path,
+) -> None:
+    admin = make_user(db, "cfg_admin", role="admin")
+    member = make_user(db, "cfg_member", role="engineer")
+    proj = project_domain.create_project(
+        db,
+        owner_id=member.id,
+        created_by=member.id,
+        baseline_start_year=2025,
+        name="Generator Projection Proj",
+    )
+    db.commit()
+
+    # 1. Bundled schema matches sdk/pies_sdk/schema/plugin-1.0.0.schema.json when sdk is present
+    repo_root = Path(__file__).resolve().parents[2]
+    sdk_schema = repo_root / "sdk" / "pies_sdk" / "schema" / "plugin-1.0.0.schema.json"
+    backend_schema = (
+        Path(__file__).resolve().parents[1]
+        / "iesplan"
+        / "computation"
+        / "schema"
+        / "plugin-1.0.0.schema.json"
+    )
+    if sdk_schema.is_file():
+        assert json.loads(backend_schema.read_text(encoding="utf-8")) == json.loads(
+            sdk_schema.read_text(encoding="utf-8")
+        )
+
+    transport = _FakeJobRunnerTransport(
+        stage_root=tmp_path / "stages", plugin_source_root=tmp_path / "builds"
+    )
+    jr_client = transport.make_client()
+
+    # 2. Invalid no-test plugins (incompatible pies / missing additionalProperties) rejected at ingress
+    bad_compat = _build_plugin_zip_bytes(
+        plugin_id="acme.generator.bad_compat",
+        kind="generator",
+        produces=["ies.solver-bundle.mps@1.0.0"],
+        compat_pies=">=9.0.0",
+    )
+    with pytest.raises(EcosystemValidationError) as compat_err:
+        ecosystem_app.upload_plugin_zip_case(
+            db, admin, zip_bytes=bad_compat, job_runner_client=jr_client
+        )
+    assert compat_err.value.code == "ECO-COMPAT-001"
+    assert (
+        ecosystem_domain.get_artifact_by_identity(
+            db, "generator", "acme.generator.bad_compat", "1.0.0"
+        )
+        is None
+    )
+
+    bad_nested_schema = io.BytesIO()
+    with zipfile.ZipFile(bad_nested_schema, mode="w") as zf:
+        zf.writestr("main.py", "def solve(ctx): return {}\n")
+        zf.writestr(
+            "plugin.yaml",
+            (
+                "schema: ies.algorithm-plugin\n"
+                'schema_version: "1.0.0"\n'
+                "plugin_id: acme.algorithm.nested_bad\n"
+                'version: "1.0.0"\n'
+                "kind: algorithm\n"
+                "name:\n  en_us: Bad Nested\n"
+                "description: Missing nested additionalProperties\n"
+                "compatibility:\n  pies: '>=1.2.0,<2.0.0'\n"
+                "consumes:\n  - ies.stage-input@1.0.0\n"
+                "produces:\n  - ies.engineering-solution@1.0.0\n"
+                "runtime:\n  language: python\n  python: '3.12'\n"
+                "entrypoint: main:solve\n"
+                "parameters_schema:\n"
+                "  type: object\n"
+                "  additionalProperties: false\n"
+                "  properties:\n"
+                "    nested:\n"
+                "      type: object\n"
+                "resources:\n"
+                "  default:\n    cpu: 1\n    memory_mb: 512\n"
+                "    timeout_seconds: 60\n    process_limit: 8\n"
+                "  maximum:\n    cpu: 2\n    memory_mb: 1024\n"
+                "    timeout_seconds: 120\n    process_limit: 16\n"
+            ),
+        )
+    with pytest.raises(EcosystemValidationError):
+        ecosystem_app.upload_plugin_zip_case(
+            db, admin, zip_bytes=bad_nested_schema.getvalue(), job_runner_client=jr_client
+        )
+
+    # 3. Local generator projects advanced/extensions/companions into GeneratorDescriptor
+    gen_zip = _build_plugin_zip_bytes(
+        plugin_id="acme.generator.custom_milp",
+        version="1.0.0",
+        kind="generator",
+        consumes=["ies.stage-input@1.0.0"],
+        produces=["ies.solver-bundle.mps@1.0.0"],
+        advanced={
+            "supported_modes": ["planning"],
+            "supported_precisions": ["medium"],
+            "companions": {"solver": "ies.solver.highs@1.7.2"},
+        },
+        extensions={
+            "supported_outputs": ["metrics"],
+            "unit_system": "SI",
+            "seed_semantics": "config.seed injected cleanly",
+        },
+    )
+    gen_res = ecosystem_app.upload_plugin_zip_case(
+        db,
+        admin,
+        zip_bytes=gen_zip,
+        job_runner_client=jr_client,
+        session_factory=db_factory,
+        plugin_source_root=tmp_path / "builds",
+        stage_root=tmp_path / "stages",
+    )
+    ecosystem_app.install_artifact_for_user_case(db, member, gen_res["id"], enabled=True)
+
+    # Widened output ("solution" not in supported_outputs=["metrics"]) MUST be rejected!
+    bad_cfg = {
+        "schema": "ies.calculation-config",
+        "schema_version": "1.0.0",
+        "mode": "planning",
+        "predictions": [],
+        "generator": "acme.generator.custom_milp@1.0.0",
+        "solver": "ies.solver.highs@1.7.2",
+        "algorithm": None,
+        "evaluators": [],
+        "precision": "medium",
+        "time_limit_seconds": 60,
+        "options": {"generator": {}, "solver": {}},
+        "seed": 42,
+        "outputs": ["solution"],
+    }
+    with pytest.raises(AppError):
+        config_app.save_calculation_config_case(
+            db,
+            member,
+            proj.id,
+            bad_cfg,
+            expected_revision=None,
+            predictor_registry=build_predictor_registry((NAIVE_PREDICTOR,)),
+            generator_registry=build_generator_registry((HIGHS_MILP_PROVIDER,)),
+            solver_registry=build_solver_registry((BUILTIN_SOLVER_HIGHS_SPEC,)),
+            evaluator_registry=build_evaluator_registry((BUILTIN_EVALUATOR_FINANCE_SPEC,)),
+            algorithm_registry=build_algorithm_registry(()),
+        )
+
+    ok_cfg = {**bad_cfg, "outputs": ["metrics"]}
+    saved_gen_cfg = config_app.save_calculation_config_case(
+        db,
+        member,
+        proj.id,
+        ok_cfg,
+        expected_revision=None,
+        predictor_registry=build_predictor_registry((NAIVE_PREDICTOR,)),
+        generator_registry=build_generator_registry((HIGHS_MILP_PROVIDER,)),
+        solver_registry=build_solver_registry((BUILTIN_SOLVER_HIGHS_SPEC,)),
+        evaluator_registry=build_evaluator_registry((BUILTIN_EVALUATOR_FINANCE_SPEC,)),
+        algorithm_registry=build_algorithm_registry(()),
+    )
+    assert saved_gen_cfg["revision"] == 1
+
+    # 4. Real pies-sdk pack fixture (`in:` + `expected:`) passes upload & --network=none selftest
+    sdk_root = repo_root / "sdk"
+    if (sdk_root / "pies_sdk").is_dir():
+        import sys
+
+        if str(sdk_root) not in sys.path:
+            sys.path.insert(0, str(sdk_root))
+        from pies_sdk.packaging import pack_plugin_package
+
+        pkg_src = tmp_path / "packed_plugin"
+        (pkg_src / "tests" / "dir_case" / "in").mkdir(parents=True, exist_ok=True)
+        (pkg_src / "tests" / "dir_case" / "expected").mkdir(parents=True, exist_ok=True)
+        (pkg_src / "plugin.yaml").write_text(
+            (
+                "schema: ies.algorithm-plugin\n"
+                'schema_version: "1.0.0"\n'
+                "plugin_id: acme.algorithm.sdk_packed\n"
+                'version: "1.0.0"\n'
+                "kind: algorithm\n"
+                "name:\n  en_us: SDK Packed Plugin\n"
+                "description: Packed by pies-sdk pack\n"
+                "license: MPL-2.0\n"
+                "compatibility:\n  pies: '>=1.2.0,<2.0.0'\n"
+                "consumes:\n  - ies.stage-input@1.0.0\n"
+                "produces:\n  - ies.engineering-solution@1.0.0\n"
+                "runtime:\n  language: python\n  python: '3.12'\n"
+                "entrypoint: algo:run\n"
+                "parameters_schema:\n"
+                "  type: object\n"
+                "  additionalProperties: false\n"
+                "  properties: {}\n"
+                "resources:\n"
+                "  default:\n    cpu: 1\n    memory_mb: 512\n"
+                "    timeout_seconds: 60\n    process_limit: 8\n"
+                "  maximum:\n    cpu: 2\n    memory_mb: 1024\n"
+                "    timeout_seconds: 120\n    process_limit: 16\n"
+                "tests:\n"
+                "  - id: dir_case\n"
+                "    in: tests/dir_case/in\n"
+                "    expected: tests/dir_case/expected\n"
+            ),
+            encoding="utf-8",
+        )
+        (pkg_src / "algo.py").write_text("def run(ctx):\n    return {'ok': True}\n", encoding="utf-8")
+        (pkg_src / "tests" / "dir_case" / "in" / "request.json").write_text("{}", encoding="utf-8")
+        exp_dir_sol = b'{"ok": true}'
+        (pkg_src / "tests" / "dir_case" / "expected" / "solution.json").write_bytes(exp_dir_sol)
+
+        packed = pack_plugin_package(
+            pkg_src,
+            output_path=tmp_path / "acme.algorithm.sdk_packed-1.0.0.algorithm.zip",
+            run_validate=False,
+        )
+        sdk_transport = _FakeJobRunnerTransport(
+            stage_root=tmp_path / "stages",
+            plugin_source_root=tmp_path / "builds",
+            stage_outputs={"test-dir_case": {"solution.json": exp_dir_sol}},
+        )
+        packed_res = ecosystem_app.upload_plugin_zip_case(
+            db,
+            admin,
+            zip_bytes=Path(packed["archive_path"]).read_bytes(),
+            expected_sha256=packed["sha256"],
+            job_runner_client=sdk_transport.make_client(),
+            session_factory=db_factory,
+            plugin_source_root=tmp_path / "builds",
+            stage_root=tmp_path / "stages",
+        )
+        assert packed_res["install_status"] == "ready"
+        assert len(sdk_transport.start_calls) == 1
+
+
+def test_lifecycle_pinning_stale_build_and_retryable_cleanup(
+    db_factory: sessionmaker[Session],
+    db: Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from iesplan.application import projects as projects_app
+    from iesplan.application.ecosystem import device_models as eco_dev_mod
+    from iesplan.application.ecosystem import plugins as eco_plg_mod
+
+    admin = make_user(db, "life_admin", role="admin")
+    member = make_user(db, "life_member", role="engineer")
+    proj = projects_app.create_project(
+        db,
+        member,
+        name="Pinned Device Proj",
+        baseline_resolution="1h",
+        baseline_start_year=2025,
+        baseline_scenario_mode="single",
+    )
+    db.commit()
+
+    ns = generate_namespace()
+    dev_id = f"user.{ns}.device.pinned_hp"
+    imp1 = ecosystem_app.import_device_model_case(
+        db, admin, yaml_text=_sample_device_yaml(dev_id, power_rating=3.5), revision=1
+    )
+    imp2 = ecosystem_app.import_device_model_case(
+        db, admin, yaml_text=_sample_device_yaml(dev_id, power_rating=6.5), revision=2
+    )
+    ecosystem_app.install_artifact_for_user_case(db, member, imp1["id"], enabled=True)
+
+    # 1. lifecycle.update_draft accepts installed ecosystem device and pins revision=1
+    upd1 = projects_app.update_draft(
+        db,
+        member,
+        proj.id,
+        commands=[
+            {
+                "id": "cmd-eco-dev-1",
+                "unit": "model",
+                "type": "model.upsert_device",
+                "payload": {
+                    "name": "hp1",
+                    "device_type": dev_id,
+                    "kind": "new",
+                    "params": {"cop": 3.5},
+                },
+            }
+        ],
+        expected_revision=1,
+    )
+    assert upd1["revision"] == 2
+    draft_doc = projects_app.get_current_draft_content(db, proj.id)
+    assert draft_doc["extensions"]["local_device_models"] == {dev_id: "1"}
+
+    # Even after member installs revision=2, project stays pinned to revision=1 in selector & submission lock
+    ecosystem_app.install_artifact_for_user_case(db, member, imp2["id"], enabled=True)
+    sel_after = models_app.list_project_device_types(db, member, proj.id)
+    by_id = {item["type_id"]: item for item in sel_after["items"]}
+    assert by_id[dev_id]["local_revision"] == 1
+    assert by_id[dev_id]["parameters"]["cop"]["default"] == 3.5
+
+    frozen_vers, locked_docs = ecosystem_app.lock_and_load_submission_artifacts(
+        db,
+        user_id=member.id,
+        calc_config={},
+        device_type_ids={dev_id},
+        pinned_device_revisions=draft_doc["extensions"]["local_device_models"],
+    )
+    assert frozen_vers == {dev_id: "1"}
+    assert locked_docs[dev_id].properties["cop"].value == 3.5
+
+    # Export does NOT invoke full parse_device_model_v2 re-validation
+    def _forbid_reparse(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("export must not redundantly re-run parse_device_model_v2")
+
+    monkeypatch.setattr(eco_dev_mod, "parse_device_model_v2", _forbid_reparse)
+    exported = ecosystem_app.export_device_model_case(db, member, artifact_id=imp1["id"])
+    assert exported["revision"] == 1
+    monkeypatch.undo()
+
+    # 2. Concurrent approve blocked while building, and stale build cannot overwrite disabled -> ready
+    ecosystem_app.update_ecosystem_settings_case(
+        db,
+        admin,
+        market_mode="local",
+        local_upload_requires_approval=True,
+    )
+    pending_zip = _build_plugin_zip_bytes(
+        plugin_id=f"user.{ns}.algorithm.stale_race", version="1.0.0"
+    )
+    pending_plg = ecosystem_app.upload_plugin_zip_case(db, member, zip_bytes=pending_zip)
+    assert pending_plg["install_status"] == "pending"
+
+    # Simulate concurrent admin disabling during build_plugin before testing/ready commit
+    race_transport = _FakeJobRunnerTransport(
+        stage_root=tmp_path / "stages", plugin_source_root=tmp_path / "builds"
+    )
+
+    class _InterruptingJR:
+        def __init__(self, inner: JobRunnerClient) -> None:
+            self.inner = inner
+
+        def build_plugin(self, *args: Any, **kwargs: Any) -> Any:
+            res = self.inner.build_plugin(*args, **kwargs)
+            with db_factory() as race_db:
+                # Duplicate approve during building MUST return 409 conflict
+                with pytest.raises(EcosystemConflictError):
+                    ecosystem_app.approve_artifact_case(
+                        race_db, admin, pending_plg["id"], job_runner_client=self.inner
+                    )
+                # Disable artifact mid-build
+                ecosystem_app.uninstall_artifact_image_case(
+                    race_db, admin, pending_plg["id"], job_runner_client=self.inner
+                )
+            return res
+
+        def delete_plugin_image(self, *args: Any, **kwargs: Any) -> Any:
+            return self.inner.delete_plugin_image(*args, **kwargs)
+
+    # Approve must NOT call _inspect_plugin_zip again (no redundant post-ingress validation)
+    def _forbid_reinspect(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("approve must not re-run _inspect_plugin_zip")
+
+    monkeypatch.setattr(eco_plg_mod, "_inspect_plugin_zip", _forbid_reinspect)
+    with pytest.raises(EcosystemConflictError):
+        ecosystem_app.approve_artifact_case(
+            db,
+            admin,
+            pending_plg["id"],
+            job_runner_client=_InterruptingJR(race_transport.make_client()),  # type: ignore[arg-type]
+            session_factory=db_factory,
+            plugin_source_root=tmp_path / "builds",
+            stage_root=tmp_path / "stages",
+        )
+    monkeypatch.undo()
+    race_rec = ecosystem_domain.get_artifact(db, pending_plg["id"])
+    assert race_rec is not None
+    assert race_rec.install_status == "disabled"
+    assert len(race_transport.delete_calls) == 1
+
+    # 3. Failed delete_plugin_image during selftest failure preserves image_ref and remains retryable
+    base_transport = _FakeJobRunnerTransport(
+        stage_root=tmp_path / "stages",
+        plugin_source_root=tmp_path / "builds",
+        stage_outputs={"test-single_json": {"solution.json": b'{"mismatch": true}'}},
+    )
+
+    class _FailFirstDeleteJR:
+        def __init__(self, inner: JobRunnerClient) -> None:
+            self.inner = inner
+            self.fail_delete = True
+
+        def __getattr__(self, name: str) -> Any:
+            return getattr(self.inner, name)
+
+        def delete_plugin_image(self, plugin_id: str, version: str, *, force: bool = False) -> Any:
+            if self.fail_delete:
+                self.fail_delete = False
+                raise RuntimeError("transient docker daemon timeout")
+            return self.inner.delete_plugin_image(plugin_id, version, force=force)
+
+    proxy_jr = _FailFirstDeleteJR(base_transport.make_client())
+    fail_zip = _build_plugin_zip_bytes(
+        plugin_id="acme.algorithm.cleanup_retry",
+        version="1.0.0",
+        tests=[
+            {
+                "id": "single_json",
+                "input": "tests/single/input.json",
+                "expected": "tests/single/expected.json",
+            }
+        ],
+        dir_mode_outputs={
+            "tests/single/input.json": b"{}",
+            "tests/single/expected.json": b'{"ok": true}',
+        },
+    )
+    with pytest.raises(AppError) as clean_err:
+        ecosystem_app.upload_plugin_zip_case(
+            db,
+            admin,
+            zip_bytes=fail_zip,
+            job_runner_client=proxy_jr,  # type: ignore[arg-type]
+            session_factory=db_factory,
+            plugin_source_root=tmp_path / "builds",
+            stage_root=tmp_path / "stages",
+        )
+    assert clean_err.value.code == "ECO-IMAGE-CLEANUP-FAILED"
+    kept_rec = ecosystem_domain.get_artifact_by_identity(
+        db, "algorithm", "acme.algorithm.cleanup_retry", "1.0.0"
+    )
+    assert kept_rec is not None
+    assert kept_rec.install_status == "build_failed"
+    assert kept_rec.image_ref == "pies-plugin/acme.algorithm.cleanup_retry:1.0.0"
+    assert kept_rec.diagnostics["cleanup_retryable"] is True
+
+    # Retry cleanup via uninstall_artifact_image_case -> succeeds and clears image_ref
+    retried = ecosystem_app.uninstall_artifact_image_case(
+        db, admin, kept_rec.id, job_runner_client=proxy_jr  # type: ignore[arg-type]
+    )
+    assert retried["image_deleted"] is True
+    assert retried["artifact"]["image_ref"] is None
+

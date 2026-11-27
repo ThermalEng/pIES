@@ -47,6 +47,7 @@ from iesplan.tasks import InvalidRequestError
 @dataclass(frozen=True, slots=True)
 class _MetadataPredictor:
     descriptor: PredictorDescriptor
+    stage_spec: StagePluginSpec
 
     def validate_parameters(self, parameters: Mapping[str, object]) -> None:
         if self.descriptor.parameters_schema is not None:
@@ -88,83 +89,269 @@ class _MetadataAlgorithmProvider:
 
 
 def _stage_spec_from_artifact(record: LocalArtifactRecord) -> StagePluginSpec:
+    """将持久化元数据无损投影为 StagePluginSpec（忠实保留 advanced / extensions / companions）。"""
     meta = record.metadata_json
+    advanced = meta.get("advanced") or {}
+    extensions = meta.get("extensions") or {}
+
+    raw_modes = advanced.get("supported_modes") if "supported_modes" in advanced else meta.get("modes")
+    if raw_modes is not None:
+        modes = tuple(raw_modes)
+    elif record.kind in ("generator", "algorithm"):
+        modes = ("planning",)
+    else:
+        modes = ()
+
+    raw_precisions = (
+        advanced.get("supported_precisions")
+        if "supported_precisions" in advanced
+        else meta.get("precisions")
+    )
+    if raw_precisions is not None:
+        precisions = tuple(raw_precisions)
+    elif record.kind in ("generator", "algorithm"):
+        precisions = ("low", "medium", "high")
+    else:
+        precisions = ()
+
+    raw_outputs = (
+        extensions.get("supported_outputs")
+        if "supported_outputs" in extensions
+        else meta.get("outputs")
+    )
+    if raw_outputs is not None:
+        outputs = tuple(raw_outputs)
+    elif record.kind in ("generator", "algorithm", "evaluator"):
+        outputs = ("solution", "metrics")
+    else:
+        outputs = ()
+
     return StagePluginSpec(
         plugin_id=record.stable_id,
         version=record.version,
         kind=record.kind,
         consumes=tuple(meta.get("consumes") or ()),
         produces=tuple(meta.get("produces") or ()),
-        modes=tuple(meta.get("modes") or ("calc", "optimization")),
-        precisions=tuple(meta.get("precisions") or ("low", "medium", "high")),
-        outputs=tuple(meta.get("outputs") or ("solution", "metrics")),
+        modes=modes,
+        precisions=precisions,
+        outputs=outputs,
         parameters_schema=dict(
             meta.get("parameters_schema")
             or {"type": "object", "properties": {}, "additionalProperties": False}
         ),
+        companions=dict(advanced.get("companions") or {}),
     )
 
 
 def _generator_descriptor_from_artifact(record: LocalArtifactRecord) -> GeneratorDescriptor:
     meta = record.metadata_json
-    params_schema = dict(
-        meta.get("parameters_schema")
-        or {"type": "object", "properties": {}, "additionalProperties": False}
+    spec = _stage_spec_from_artifact(record)
+    advanced = meta.get("advanced") or {}
+    advanced_ext = advanced.get("extensions") or {}
+    extensions = meta.get("extensions") or {}
+    companions = dict(spec.companions)
+
+    solvers = list(extensions.get("solvers") or advanced_ext.get("solvers") or meta.get("solvers") or ())
+    if "solver" in companions and companions["solver"] not in solvers:
+        solvers.append(companions["solver"])
+    evaluators = list(
+        extensions.get("evaluators") or advanced_ext.get("evaluators") or meta.get("evaluators") or ()
     )
+    if "evaluator" in companions and companions["evaluator"] not in evaluators:
+        evaluators.append(companions["evaluator"])
+
     return GeneratorDescriptor(
         generator_id=record.stable_id,
         version=record.version,
-        options_schema=params_schema,
-        outputs=tuple(meta.get("outputs") or ("solution", "metrics")),
-        assembly_schema_version="1.0.0",
-        modes=tuple(meta.get("modes") or ("calc", "optimization")),
-        precisions=tuple(meta.get("precisions") or ("low", "medium", "high")),
-        capabilities=tuple(meta.get("capabilities") or ()),
-        solvers=tuple(meta.get("solvers") or ()),
-        executors=(f"{record.stable_id}@{record.version}",),
-        evaluators=tuple(meta.get("evaluators") or ()),
-        media_types=tuple(meta.get("produces") or ("ies.solver-bundle.mps@1.0.0",)),
+        options_schema=spec.parameters_schema,
+        outputs=spec.outputs,
+        assembly_schema_version=str(extensions.get("assembly_schema_version") or "1.0.0"),
+        modes=spec.modes,
+        precisions=spec.precisions,
+        capabilities=tuple(
+            extensions.get("capabilities")
+            or advanced_ext.get("capabilities")
+            or meta.get("capabilities")
+            or ()
+        ),
+        solvers=tuple(solvers),
+        executors=tuple(extensions.get("executors") or (record.ref,)),
+        equation_contracts=tuple(extensions.get("equation_contracts") or ()),
+        evaluators=tuple(evaluators),
+        deterministic=bool(extensions.get("deterministic", True)),
+        resource_limits=dict(meta.get("resources") or {}),
+        unit_system=str(extensions.get("unit_system") or advanced_ext.get("unit_system") or "SI"),
+        media_types=spec.produces or ("ies.solver-bundle.mps@1.0.0",),
+        seed_semantics=str(
+            extensions.get("seed_semantics")
+            or advanced_ext.get("seed_semantics")
+            or "config.seed 透传至隔离容器 /work/in/request.json"
+        ),
+        consumes=spec.consumes or ("ies.stage-input@1.0.0",),
+        produces=spec.produces or ("ies.solver-bundle.mps@1.0.0",),
+        companions=companions,
     )
 
 
 def _algorithm_descriptor_from_artifact(record: LocalArtifactRecord) -> AlgorithmDescriptor:
     meta = record.metadata_json
-    params_schema = dict(
-        meta.get("parameters_schema")
-        or {"type": "object", "properties": {}, "additionalProperties": False}
+    spec = _stage_spec_from_artifact(record)
+    advanced = meta.get("advanced") or {}
+    advanced_ext = advanced.get("extensions") or {}
+    extensions = meta.get("extensions") or {}
+    companions = dict(spec.companions)
+
+    evaluators = list(
+        extensions.get("evaluators") or advanced_ext.get("evaluators") or meta.get("evaluators") or ()
     )
-    raw_evs = meta.get("evaluators")
+    if "evaluator" in companions and companions["evaluator"] not in evaluators:
+        evaluators.append(companions["evaluator"])
+
     return AlgorithmDescriptor(
         algorithm_id=record.stable_id,
         version=record.version,
-        parameters_schema=params_schema,
-        modes=tuple(meta.get("modes") or ("planning",)),
-        precisions=tuple(meta.get("precisions") or ("low", "medium", "high")),
-        outputs=tuple(meta.get("outputs") or ("solution", "metrics")),
-        capabilities=tuple(meta.get("capabilities") or ()),
-        evaluators=tuple(raw_evs) if raw_evs else None,
-        consumes=tuple(meta.get("consumes") or ("ies.stage-input@1.0.0",)),
-        produces=tuple(meta.get("produces") or ("ies.engineering-solution@1.0.0",)),
+        parameters_schema=spec.parameters_schema,
+        modes=spec.modes,
+        precisions=spec.precisions,
+        outputs=spec.outputs,
+        capabilities=tuple(
+            extensions.get("capabilities")
+            or advanced_ext.get("capabilities")
+            or meta.get("capabilities")
+            or ()
+        ),
+        evaluators=tuple(evaluators) if evaluators else None,
+        consumes=spec.consumes or ("ies.stage-input@1.0.0",),
+        produces=spec.produces or ("ies.engineering-solution@1.0.0",),
+        companions=companions,
     )
+
+
+def _deserialize_device_document(db: Session, rec: LocalArtifactRecord) -> DeviceModelDocument:
+    raw = get_object(db, rec.object_id)
+    return from_dict(json.loads(raw.decode("utf-8")))
+
+
+def _parse_positive_revision_str(raw: object) -> str | None:
+    if isinstance(raw, bool):
+        return None
+    if isinstance(raw, int):
+        return str(raw) if raw >= 1 else None
+    if isinstance(raw, str) and raw.strip().isdigit():
+        val = int(raw.strip())
+        return str(val) if val >= 1 else None
+    return None
 
 
 def list_user_enabled_device_documents(
     db: Session, user_id: int
 ) -> list[tuple[LocalArtifactRecord, DeviceModelDocument]]:
-    """查询成员已安装且启用（approved + ready）的本地设备模型，按最新版本去重。"""
+    """查询成员已安装且启用（approved + ready）的本地设备模型，按最新版本汇总供默认选择。"""
     records = ecosystem_domain.list_enabled_artifacts_for_user(db, user_id, kind="device_model")
     latest_by_id: dict[str, LocalArtifactRecord] = {}
     for rec in records:
         prev = latest_by_id.get(rec.stable_id)
         if prev is None or int(rec.version) >= int(prev.version):
             latest_by_id[rec.stable_id] = rec
-    out: list[tuple[LocalArtifactRecord, DeviceModelDocument]] = []
-    for stable_id in sorted(latest_by_id):
-        rec = latest_by_id[stable_id]
-        raw = get_object(db, rec.object_id)
-        doc = from_dict(json.loads(raw.decode("utf-8")))
-        out.append((rec, doc))
+    return [
+        (latest_by_id[stable_id], _deserialize_device_document(db, latest_by_id[stable_id]))
+        for stable_id in sorted(latest_by_id)
+    ]
+
+
+def resolve_user_local_device_revision(
+    db: Session,
+    *,
+    user_id: int,
+    stable_id: str,
+    pinned_revision: object | None = None,
+) -> LocalArtifactRecord | None:
+    """解析成员已安装且启用的本地设备模型；若已钉选 revision 则精确匹配该版本，绝不悄然跳最新版本。"""
+    if pinned_revision is not None:
+        rev_str = _parse_positive_revision_str(pinned_revision)
+        if rev_str is None:
+            return None
+        rec = ecosystem_domain.get_artifact_by_identity(db, "device_model", stable_id, rev_str)
+        if rec is None or rec.approval_status != "approved" or rec.install_status != "ready":
+            return None
+        install = ecosystem_domain.get_member_install(db, user_id, rec.id)
+        if install is None or not install.enabled:
+            return None
+        return rec
+
+    records = [
+        rec
+        for rec in ecosystem_domain.list_enabled_artifacts_for_user(db, user_id, kind="device_model")
+        if rec.stable_id == stable_id
+    ]
+    if not records:
+        return None
+    return max(records, key=lambda item: int(item.version))
+
+
+def validate_and_normalize_local_device_pins(
+    db: Session,
+    *,
+    user_id: int,
+    pins: object,
+) -> dict[str, str]:
+    """校验项目 extensions.local_device_models 精确版本钉选映射并规范化为 {stable_id: 'rev'}。"""
+    if not isinstance(pins, Mapping):
+        raise InvalidRequestError(
+            "extensions.local_device_models 须为对象映射", code="PROJ-CMD-005"
+        )
+    normalized: dict[str, str] = {}
+    for raw_id, raw_rev in pins.items():
+        if not isinstance(raw_id, str) or not raw_id:
+            raise InvalidRequestError("local_device_models 键须为非空设备稳定 ID", code="PROJ-CMD-005")
+        rev_str = _parse_positive_revision_str(raw_rev)
+        if rev_str is None:
+            raise InvalidRequestError(
+                f"设备 {raw_id!r} 的修订号须为正整数: {raw_rev!r}",
+                code="PROJ-CMD-005",
+                params={"device_id": raw_id, "revision": raw_rev},
+            )
+        rec = resolve_user_local_device_revision(
+            db, user_id=user_id, stable_id=raw_id, pinned_revision=rev_str
+        )
+        if rec is None:
+            raise InvalidRequestError(
+                f"引用的本地设备模型 {raw_id!r} (revision={rev_str}) 未审批、已下架或未对当前成员启用",
+                code="PROJ-CMD-005",
+                params={"device_id": raw_id, "revision": rev_str},
+            )
+        normalized[raw_id] = rev_str
+    return normalized
+
+
+def load_pinned_local_device_records(
+    db: Session, content: Mapping[str, Any]
+) -> dict[str, tuple[LocalArtifactRecord, DeviceModelDocument]]:
+    """按项目草稿/版本内容 extensions.local_device_models 精确加载已审批本地设备模型（不折叠最新版）。"""
+    pins = (content.get("extensions") or {}).get("local_device_models")
+    if not isinstance(pins, Mapping) or not pins:
+        return {}
+    out: dict[str, tuple[LocalArtifactRecord, DeviceModelDocument]] = {}
+    for stable_id in sorted(pins):
+        rev_str = _parse_positive_revision_str(pins[stable_id])
+        if rev_str is None:
+            continue
+        rec = ecosystem_domain.get_artifact_by_identity(
+            db, "device_model", str(stable_id), rev_str
+        )
+        if rec is not None and rec.approval_status == "approved":
+            out[str(stable_id)] = (rec, _deserialize_device_document(db, rec))
     return out
+
+
+def load_pinned_local_device_documents(
+    db: Session, content: Mapping[str, Any]
+) -> dict[str, DeviceModelDocument]:
+    """供选择器/预检/规划读取项目内容精确钉选的本地设备模型文档。"""
+    return {
+        stable_id: doc
+        for stable_id, (_rec, doc) in load_pinned_local_device_records(db, content).items()
+    }
 
 
 def augment_stage_registries_for_user(
@@ -208,19 +395,43 @@ def augment_stage_registries_for_user(
             if rec.ref in existing_refs:
                 continue
             meta = rec.metadata_json
+            advanced = meta.get("advanced") or {}
+            advanced_ext = advanced.get("extensions") or {}
+            extensions = meta.get("extensions") or {}
+            spec = _stage_spec_from_artifact(rec)
             desc = PredictorDescriptor(
                 ref=rec.ref,
-                depends_on_solve_result=bool(meta.get("depends_on_solve_result", False)),
-                accepts_any_target_type=bool(meta.get("accepts_any_target_type", True)),
-                target_types=tuple(meta.get("target_types") or ()),
-                needs_history=bool(meta.get("needs_history", True)),
-                description=str(meta.get("description") or ""),
-                parameters_schema=dict(
-                    meta.get("parameters_schema")
-                    or {"type": "object", "properties": {}, "additionalProperties": False}
+                depends_on_solve_result=bool(
+                    advanced.get(
+                        "depends_on_solve_result",
+                        advanced_ext.get(
+                            "depends_on_solve_result",
+                            meta.get("depends_on_solve_result", False),
+                        ),
+                    )
                 ),
+                accepts_any_target_type=bool(
+                    advanced_ext.get(
+                        "accepts_any_target_type",
+                        extensions.get("accepts_any_target_type", meta.get("accepts_any_target_type", True)),
+                    )
+                ),
+                target_types=tuple(
+                    advanced_ext.get("target_types")
+                    or extensions.get("target_types")
+                    or meta.get("target_types")
+                    or ()
+                ),
+                needs_history=bool(
+                    advanced_ext.get(
+                        "needs_history",
+                        extensions.get("needs_history", meta.get("needs_history", True)),
+                    )
+                ),
+                description=str(meta.get("description") or ""),
+                parameters_schema=spec.parameters_schema,
             )
-            existing_preds.append(_MetadataPredictor(desc))
+            existing_preds.append(_MetadataPredictor(desc, stage_spec=spec))
         predictor_registry = build_predictor_registry(existing_preds)
 
     if by_kind["generator"] and generator_registry is not None:
@@ -281,17 +492,15 @@ def _split_ref(ref: str) -> tuple[str, str] | None:
     return (stable_id, version) if stable_id and version else None
 
 
-def lock_and_verify_submission_artifacts(
+def lock_and_load_submission_artifacts(
     db: Session,
     *,
     user_id: int,
     calc_config: Mapping[str, Any],
     device_type_ids: set[str] | tuple[str, ...] = (),
-) -> dict[str, str]:
-    """提交冻结快照前对引用的本地生态制品加 FOR UPDATE 锁，与卸载互斥并发竞态。
-
-    返回冻结快照应记录的本地设备模型版本映射 ``{stable_id: version}``。
-    """
+    pinned_device_revisions: Mapping[str, Any] | None = None,
+) -> tuple[dict[str, str], dict[str, DeviceModelDocument]]:
+    """装配前对消费的生态插件与项目精确钉选设备模型加 FOR UPDATE 锁，并发互斥与文档一致性一次完成。"""
     plugin_identities: list[tuple[str, str, str]] = []
     for entry in calc_config.get("predictions") or ():
         if isinstance(entry, Mapping) and entry.get("algorithm"):
@@ -309,24 +518,44 @@ def lock_and_verify_submission_artifacts(
             if parts is not None:
                 plugin_identities.append(("evaluator", parts[0], parts[1]))
 
-    local_devices = list_user_enabled_device_documents(db, user_id)
-    local_dev_map = {
-        rec.stable_id: rec
-        for rec, _doc in local_devices
-        if rec.stable_id in device_type_ids
-    }
-    all_identities = list(plugin_identities) + [
-        ("device_model", rec.stable_id, rec.version) for rec in local_dev_map.values()
-    ]
+    user_installs = ecosystem_domain.list_member_installs(db, user_id, enabled_only=True)
+    user_install_ids = {rec.artifact_id: rec for rec in user_installs}
+    pins = dict(pinned_device_revisions or {})
+
+    target_device_identities: dict[str, tuple[str, str, str]] = {}
+    for stable_id in sorted(set(device_type_ids)):
+        if stable_id in pins:
+            rev_str = _parse_positive_revision_str(pins[stable_id])
+            if rev_str is None:
+                raise InvalidRequestError(
+                    f"项目钉选的本地设备模型 {stable_id!r} 修订号非法: {pins[stable_id]!r}",
+                    code="TASK-REQ-007",
+                    params={"device_id": stable_id, "revision": pins[stable_id]},
+                )
+            target_device_identities[stable_id] = ("device_model", stable_id, rev_str)
+            continue
+        matching_installs = [
+            inst
+            for inst in user_installs
+            if inst.kind == "device_model" and inst.stable_id == stable_id
+        ]
+        if matching_installs:
+            chosen = max(matching_installs, key=lambda inst: int(inst.version))
+            target_device_identities[stable_id] = ("device_model", stable_id, chosen.version)
+            continue
+        if ecosystem_domain.list_artifacts(db, kind="device_model", stable_id=stable_id):
+            raise InvalidRequestError(
+                f"引用的本地设备模型 {stable_id!r} 未对当前成员安装或启用，无法提交计算任务",
+                code="TASK-REQ-007",
+                params={"device_id": stable_id},
+            )
+
+    all_identities = list(plugin_identities) + list(target_device_identities.values())
     if not all_identities:
-        return {}
+        return {}, {}
 
     locked = ecosystem_domain.lock_artifacts_for_submission(db, identities=all_identities)
     locked_map = {(rec.kind, rec.stable_id, rec.version): rec for rec in locked}
-    user_installs = {
-        rec.artifact_id: rec
-        for rec in ecosystem_domain.list_member_installs(db, user_id, enabled_only=True)
-    }
 
     for ident in plugin_identities:
         rec = locked_map.get(ident)
@@ -335,7 +564,7 @@ def lock_and_verify_submission_artifacts(
         if (
             rec.approval_status != "approved"
             or rec.install_status != "ready"
-            or rec.id not in user_installs
+            or rec.id not in user_install_ids
         ):
             raise InvalidRequestError(
                 f"引用的生态插件 {rec.ref!r} 已下架或未启用，无法提交计算任务",
@@ -344,21 +573,43 @@ def lock_and_verify_submission_artifacts(
             )
 
     frozen_dev_versions: dict[str, str] = {}
-    for stable_id, orig in local_dev_map.items():
-        rec = locked_map.get(("device_model", orig.stable_id, orig.version))
+    locked_dev_docs: dict[str, DeviceModelDocument] = {}
+    for stable_id, ident in target_device_identities.items():
+        rec = locked_map.get(ident)
         if (
             rec is None
             or rec.approval_status != "approved"
             or rec.install_status != "ready"
-            or rec.id not in user_installs
+            or rec.id not in user_install_ids
         ):
             raise InvalidRequestError(
-                f"引用的本地设备模型 {stable_id!r} 已下架或未启用，无法提交计算任务",
+                f"引用的本地设备模型 {stable_id!r} (revision={ident[2]}) "
+                "已下架、未审批或未启用，无法提交计算任务",
                 code="TASK-REQ-007",
-                params={"device_id": stable_id},
+                params={"device_id": stable_id, "revision": ident[2]},
             )
         frozen_dev_versions[rec.stable_id] = rec.version
-    return frozen_dev_versions
+        locked_dev_docs[rec.stable_id] = _deserialize_device_document(db, rec)
+    return frozen_dev_versions, locked_dev_docs
+
+
+def lock_and_verify_submission_artifacts(
+    db: Session,
+    *,
+    user_id: int,
+    calc_config: Mapping[str, Any],
+    device_type_ids: set[str] | tuple[str, ...] = (),
+    pinned_device_revisions: Mapping[str, Any] | None = None,
+) -> dict[str, str]:
+    """兼容调用入口：对引用的本地生态制品加 FOR UPDATE 锁并返回冻结设备修订映射。"""
+    frozen, _docs = lock_and_load_submission_artifacts(
+        db,
+        user_id=user_id,
+        calc_config=calc_config,
+        device_type_ids=device_type_ids,
+        pinned_device_revisions=pinned_device_revisions,
+    )
+    return frozen
 
 
 def resolve_local_stage_descriptor(

@@ -15,6 +15,7 @@ from iesplan.application.ecosystem.common import (
     is_admin_user,
     serialize_artifact,
     validate_artifact_stable_id,
+    validate_ingest_source_origin,
     verify_external_sha256,
 )
 from iesplan.core.yamlmini import dump as _yaml_dump
@@ -22,12 +23,12 @@ from iesplan.devices import (
     SCHEMA_ID,
     SCHEMA_VERSION,
     canonical_bytes,
+    from_dict,
     parse_candidate_text,
     parse_device_model_v2,
     to_dict,
 )
 from iesplan.ecosystem import (
-    SOURCE_ORIGINS,
     EcosystemArtifactNotFoundError,
     EcosystemConflictError,
     EcosystemValidationError,
@@ -55,13 +56,11 @@ def import_device_model_case(
     expected_sha256: str | None = None,
     revision: int = 1,
     source_origin: str = "local_upload",
+    trusted_market: bool = False,
 ) -> dict[str, Any]:
     """导入/上传 ies.device-model@1.0.0：边界核对可选摘要、严格保留 ID 与 revision、409 防覆盖。"""
     rev = _parse_revision(revision)
-    if source_origin not in SOURCE_ORIGINS:
-        raise EcosystemValidationError(
-            f"source_origin 非法: {source_origin!r}", params={"source_origin": source_origin}
-        )
+    validate_ingest_source_origin(source_origin, trusted_market=trusted_market)
     raw_bytes = yaml_text.encode("utf-8") if isinstance(yaml_text, str) else bytes(yaml_text)
     verify_external_sha256(raw_bytes, expected_sha256)
 
@@ -104,7 +103,10 @@ def import_device_model_case(
     settings_rec = ecosystem_domain.get_settings(db)
     admin_flag = is_admin_user(db, user.id)
     approval = initial_approval_status(
-        settings_rec, is_admin=admin_flag, source_origin=source_origin
+        settings_rec,
+        is_admin=admin_flag,
+        source_origin=source_origin,
+        trusted_market=trusted_market,
     )
     install_status = "ready" if approval == "approved" else "pending"
 
@@ -205,11 +207,12 @@ def export_device_model_case(
             "本地生态设备模型不存在",
             params={"artifact_id": artifact_id, "stable_id": stable_id, "revision": revision},
         )
-    canon = json.loads(get_object(db, record.object_id).decode("utf-8"))
-    parsed = parse_device_model_v2(canon)
-    if not parsed.ok or parsed.document is None:
-        raise EcosystemValidationError("已存储设备模型反序列化失败")
-    doc_dict = to_dict(parsed.document)
+    try:
+        canon = json.loads(get_object(db, record.object_id).decode("utf-8"))
+        doc = from_dict(canon)
+    except Exception as exc:
+        raise EcosystemValidationError("已存储设备模型反序列化失败") from exc
+    doc_dict = to_dict(doc)
     yaml_text = _yaml_dump(doc_dict)
     return {
         "artifact_id": record.id,

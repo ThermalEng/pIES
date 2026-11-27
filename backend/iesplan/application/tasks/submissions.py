@@ -49,12 +49,12 @@ from iesplan import project as project_domain
 from iesplan import tasks as tasks_domain
 from iesplan.application.ecosystem import (
     augment_stage_registries_for_user,
-    list_user_enabled_device_documents,
-    lock_and_verify_submission_artifacts,
+    lock_and_load_submission_artifacts,
 )
 from iesplan.application.models import (
     load_project_device_base_ids,
     load_project_device_documents,
+    project_device_type_ids,
 )
 from iesplan.application.projects import (
     current_version_matches_draft as _current_version_matches_draft,
@@ -637,6 +637,34 @@ def _assemble_snapshot(
         random_seed = _derive_random_seed(version.id)
     dataset_ids = _bound_dataset_ids(content)
     extensions = dict(content.get("extensions") or {})
+    from iesplan.devices import get_device
+
+    project_model_ids = project_device_type_ids(db, content)
+    consumed_local_device_ids: set[str] = set()
+    for dev in (content.get("model") or {}).get("devices") or ():
+        if not isinstance(dev, Mapping):
+            continue
+        dtype = dev.get("device_type")
+        if not isinstance(dtype, str) or not dtype or dtype in project_model_ids:
+            continue
+        try:
+            get_device(dtype)
+        except NotFoundError:
+            consumed_local_device_ids.add(dtype)
+
+    pinned_local_devices = extensions.get("local_device_models")
+    frozen_local_devices, locked_local_device_docs = lock_and_load_submission_artifacts(
+        db,
+        user_id=actor.id,
+        calc_config=calc_config,
+        device_type_ids=consumed_local_device_ids,
+        pinned_device_revisions=(
+            pinned_local_devices if isinstance(pinned_local_devices, Mapping) else None
+        ),
+    )
+    if frozen_local_devices:
+        extensions["local_device_models"] = frozen_local_devices
+
     (
         predictor_registry,
         generator_registry,
@@ -671,28 +699,15 @@ def _assemble_snapshot(
     # 闸门同时带回本次实际消费的不可变财务快照, 供提交边界覆盖核对复用,
     # 不另行二次解析。
     gate, effective = _assembly_gate(
-        db, project_id, content, task_type,
+        db,
+        project_id,
+        content,
+        task_type,
         operation_years=evaluation.operation_years,
-        actor_id=actor.id,
+        local_device_documents=locked_local_device_docs,
     )
     assert gate.artifact is not None
     artifact = gate.artifact
-    canonical_doc = json.loads(artifact.canonical_text)
-    used_device_ids = {
-        str((dev.get("definition") or {}).get("id"))
-        for dev in (canonical_doc.get("devices") or {}).values()
-        if isinstance(dev, Mapping)
-        and isinstance(dev.get("definition"), Mapping)
-        and (dev.get("definition") or {}).get("id")
-    }
-    frozen_local_devices = lock_and_verify_submission_artifacts(
-        db,
-        user_id=actor.id,
-        calc_config=calc_config,
-        device_type_ids=used_device_ids,
-    )
-    if frozen_local_devices:
-        extensions["local_device_models"] = frozen_local_devices
     from iesplan.application.tasks.baselines import check_comparison_inputs, resolve_comparison
 
     evaluation = resolve_comparison(db, actor, evaluation, effective.currency)
@@ -1707,10 +1722,13 @@ def _frozen_finance_ref(content: Mapping, project_id: int) -> tuple[str, int]:
 
 
 def _assembly_gate(
-    db: Session, project_id: int, content: dict, task_type: str,
+    db: Session,
+    project_id: int,
+    content: dict,
+    task_type: str,
     *,
     operation_years: int | None = None,
-    actor_id: int | None = None,
+    local_device_documents: Mapping[str, Any] | None = None,
 ) -> tuple[AssemblyValidationResult, EffectiveFinanceConfig]:
     """计算任务统一装配闸门: 完整四阶段校验后签发规范二件套。
 
@@ -1751,13 +1769,14 @@ def _assembly_gate(
     export_content["name"] = f"project_{project_id}"
     contents = _dataset_contents_for(db, content)
     # 本项目已保存模型: 按版本内容精确引用一次读取并经构造器/校验器同一次
-    # 合并解析; 冻结链继续消费闸门结果, 不二次读取当前模型清单。
+    # 合并解析; 本地生态设备已在上游 FOR UPDATE 锁后以精确版本注入,
+    # 冻结链继续消费闸门结果, 不二次读取当前模型清单。
     device_documents = load_project_device_documents(db, content)
     device_base_ids = load_project_device_base_ids(db, content)
-    if actor_id is not None:
-        for rec, local_doc in list_user_enabled_device_documents(db, actor_id):
-            device_documents.setdefault(rec.stable_id, local_doc)
-            device_base_ids.setdefault(rec.stable_id, rec.stable_id)
+    if local_device_documents:
+        for stable_id, local_doc in local_device_documents.items():
+            device_documents.setdefault(stable_id, local_doc)
+            device_base_ids.setdefault(stable_id, stable_id)
     result = validate_project_export(
         export_content,
         dataset_contents=contents,

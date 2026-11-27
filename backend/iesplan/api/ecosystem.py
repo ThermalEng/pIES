@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, File, Form, Request, UploadFile
 from pydantic import BaseModel, Field
@@ -31,9 +31,9 @@ class DeviceModelImportRequest(BaseModel):
     yaml_text: str = Field(description="ies.device-model@1.0.0 YAML 文本")
     expected_sha256: str | None = Field(default=None, description="可选外部期望 64 位 SHA-256")
     revision: int = Field(default=1, ge=1, description="发布正整数修订号")
-    source_origin: str = Field(
+    source_origin: Literal["local_upload", "offline_import"] = Field(
         default="local_upload",
-        description="来源：local_upload | offline_import | online_market",
+        description="来源：local_upload | offline_import（公共市场下载不经本上传端点）",
     )
 
 
@@ -122,7 +122,7 @@ async def upload_plugin_endpoint(
     user: CurrentUser,
     file: Annotated[UploadFile, File(...)],
     expected_sha256: Annotated[str | None, Form()] = None,
-    source_origin: Annotated[str, Form()] = "local_upload",
+    source_origin: Annotated[Literal["local_upload", "offline_import"], Form()] = "local_upload",
 ) -> dict[str, Any]:
     zip_bytes = await file.read()
     scheduler, job_runner_client, session_factory = _runtime_handles(request)

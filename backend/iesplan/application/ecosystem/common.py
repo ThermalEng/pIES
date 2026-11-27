@@ -14,11 +14,14 @@ from iesplan.core.errors import ForbiddenError
 from iesplan.core.namespace import is_valid_namespace, is_valid_slug
 from iesplan.ecosystem import (
     ARTIFACT_KINDS,
+    SOURCE_ORIGINS,
     EcosystemSettingsRecord,
     EcosystemValidationError,
     LocalArtifactRecord,
     MemberArtifactInstallRecord,
 )
+
+LOCAL_SOURCE_ORIGINS: tuple[str, ...] = ("local_upload", "offline_import")
 
 _KIND_TO_TYPE_SEGMENT: dict[str, str] = {
     "device_model": "device",
@@ -142,14 +145,40 @@ def validate_artifact_stable_id(stable_id: str, *, expected_kind: str) -> None:
         )
 
 
+def validate_ingest_source_origin(
+    source_origin: str,
+    *,
+    trusted_market: bool = False,
+) -> str:
+    """校验导入/上传来源；仅受信任的市场下载内部用例可使用 online_market，禁止用户自报绕过审批。"""
+    if source_origin not in SOURCE_ORIGINS:
+        raise EcosystemValidationError(
+            f"source_origin 非法: {source_origin!r}",
+            params={"source_origin": source_origin},
+        )
+    if source_origin == "online_market" and not trusted_market:
+        raise EcosystemValidationError(
+            "本地上传或离线导入入口不允许声明 source_origin='online_market'",
+            code="ECO-ORIGIN-FORBIDDEN",
+            params={"source_origin": source_origin},
+        )
+    if not trusted_market and source_origin not in LOCAL_SOURCE_ORIGINS:
+        raise EcosystemValidationError(
+            f"source_origin 非法: {source_origin!r}",
+            params={"source_origin": source_origin},
+        )
+    return source_origin
+
+
 def initial_approval_status(
     settings_rec: EcosystemSettingsRecord,
     *,
     is_admin: bool,
     source_origin: str,
+    trusted_market: bool = False,
 ) -> str:
-    """正交审批判定：要求审批时无论 local 或 online 模式均拦截非管理员未审上架。"""
-    if source_origin == "online_market":
+    """正交审批判定：仅受信任的市场下载可免审批；本地/离线非管理员按开关强制 pending。"""
+    if trusted_market and source_origin == "online_market":
         return "approved"
     if is_admin:
         return "approved"
