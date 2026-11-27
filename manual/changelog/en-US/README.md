@@ -6,14 +6,29 @@ This page records only implemented and accepted changes in reverse chronological
 
 | Scope | Current Status |
 |---|---|
-| Official product version (`backend/pyproject.toml`) | `1.1.5` |
-| Latest released version | `1.1.5` (2026-11-25 ephemeral container pipeline, unified plugin contract & backend scheduler convergence) |
-| General modeling & computation upgrade | Declarative device/system equations, monthly TOU prices, monthly peak demand, embedded tax modeling, structural acceleration, and isolated ephemeral compute pipeline delivered |
-| Next development target | `1.2.0` (Models & Algorithms Ecosystem, Provider SDK, and Device Extensions) |
-| Limited pilot release version | `1.1.5` |
+| Official product version (`backend/pyproject.toml`) | `1.1.6` |
+| Latest released version | `1.1.6` (2026-11-27 `1.2.0` computation core refactoring `F1–F4`, unidirectional pipeline, parallel evaluators & `G0` exit gate closure) |
+| General modeling & computation upgrade | Declarative device/system equations, monthly TOU prices, monthly peak demand, embedded tax modeling, structural acceleration, bounded subprocess restoration, and unidirectional parallel evaluation pipeline delivered |
+| Next development target | `1.2.0` (`P1: E1–E5` Open Models & Algorithms Ecosystem and `pIES Market`) |
+| Limited pilot release version | `1.1.6` |
 | First general public release version | `2.0.0` |
 
-> Authoritative product metadata (`backend/pyproject.toml`, `sdk/pyproject.toml`, `job_runner`, and Help Center manifest) has been bumped to **`1.1.5`** on 2026-11-25. When upgrading from `1.1.0`, run `docker compose up -d --build --remove-orphans` (or `docker compose down --remove-orphans` first) to clean up retired `io_worker`/`compute_worker` containers. Starting from `1.2.0`, development moves to the Models & Algorithms ecosystem and `pIES Market`.
+> Authoritative product metadata (`backend/pyproject.toml`, `job_runner`, and Help Center manifest; alongside `sdk/pyproject.toml` and `pies-builtin-stages:1.2.0` upgraded to the `1.2.0` computation contracts) has been bumped to **`1.1.6`** on 2026-11-27. Upgrading from `1.1.5` runs a one-pass migration converting editable calculation configs to the 13-field contract while keeping historical `CalcSnapshot` and `EvidencePackage` records strictly read-only. Development next proceeds to `E1–E5` for the open ecosystem and `pIES-Market`.
+
+## `1.1.6` — 2026-11-27 — `1.2.0` Computation Core Refactoring (`F1–F4`) and `G0` Closure
+
+### 2026-11-27 — Unidirectional Computation Pipeline, Bounded Subprocess Restoration & Parallel Retryable Evaluators (`F1–F4` / `G0`) Delivery
+
+- **When completed**: 2026-11-27, completing all four `P0` core slices (`F1–F4`) plus `G0` closure fixes (PRs `#81`–`#86`) merged to `master` after full Docker CI and independent Herdr Codex reviews, bumping the product version from `1.1.5` to **`1.1.6`**.
+- **What changed**:
+  - **Core Contracts & Standalone SDK (`F1`)**: Finalized the 13-field `CalculationConfig` (removing `convergence`, adding slotted `options` and parallel `evaluators[]`), contract-decoupled `SolverBundle`, manifest `consumes`/`produces` contracts, and canonical schemas for `ies.primal-solution@1.0.0`, `ies.engineering-solution@1.0.0`, and self-describing `ies.evaluation-report@1.0.0`; updated `pies-sdk` (`1.2.0`) with streaming and canonical stage I/O helpers.
+  - **HiGHS Quality Cohesion & Bounded `spawn` Restoration (`F2`)**: Consolidated full original-model tolerance and continuous monthly demand envelope tightness checks inside `ies-highs-solver`; retired `ResultAdapterRegistry` and legacy `evaluator_highs`, and built a universal `backend` `ResultAdapter` using zero-copy read-only input reuse (direct local path / `os.link` / read-only symlink) and a bounded `spawn` child subprocess to restore engineering solutions and hourly projections before releasing memory on exit.
+  - **Forward Financial Evaluator & Independent Baseline Reconciliation (`F3` / `G0`)**: Added `backend/iesplan/finance/forward.py` and standalone plugin `ies.evaluator.finance@1.0.0` (packaged in `pies-builtin-stages:1.2.0`), reconciled against 6 frozen golden JSON baselines extracted from commit `b490989e` (`1.1.5` reconciliation benchmark).
+  - **Unidirectional Pipeline, Parallel Evaluators, Non-Destructive Retry & Migration (`F4` / `G0`)**: Switched production execution to the single-pass unidirectional pipeline with `os.link` hardlink handoffs; added plugin-grouped joint multi-target `predictor` execution and unified `Algorithm` emission of isomorphic `solution.json`; delivered `0..N` parallel isolated evaluators (`[stage].evaluator_max_concurrency = 1` default resource budget, configurable per host) with independent `analysis` child-task single-evaluator retry preserving `completed` source tasks and newer core tasks' `ResultIndex.is_latest`; added one-pass migration ([v1_2_0_calc_config.py](../../../backend/iesplan/migrations/v1_2_0_calc_config.py)) with active-task drain gating and immutable history protection.
+- **What problem it solved**:
+  - Eliminated the outer cross-container iteration loop and legacy 14-field / HiGHS-specific evaluator coupling, enabling drop-in replacement across `Solver` (`.mps`), unified `Algorithm`, and multi-`Evaluator` plugins, isolating per-evaluator failures with selective retry without re-solving core engineering models, and isolating control-plane memory on long-horizon solution restoration.
+  - **Upgrading from `1.1.5`**: Run `docker compose up -d --build` to update `builtin_stages` (`pies-builtin-stages:1.2.0`), `backend`, `job_runner`, and `web`; before migrating configs, [v1_2_0_calc_config.py](../../../backend/iesplan/migrations/v1_2_0_calc_config.py) enforces draining all `queued`/`running`/`cancelling` tasks and then preserves original evaluator intent and read-only historical snapshots/evidence intact.
+- **Where the release stands**: `1.1.6` completes the `P0` computation core foundation and satisfies all `12/12` mandatory `G0` exit gate checks; next per [Roadmap](roadmap.md) is `P1` (`E1–E5` open ecosystem and `pIES-Market`) leading to **`1.2.0`**.
 
 ## `1.1.5` — 2026-11-25 — Ephemeral Container Computation Pipeline, Unified Plugin Contract, and Backend Orchestration Convergence
 

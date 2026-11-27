@@ -6,14 +6,29 @@
 
 | 口径 | 当前状态 |
 | --- | --- |
-| 正式产品版本（`backend/pyproject.toml`） | `1.1.5` |
-| 最新正式发布版本 | `1.1.5`（2026-11-25 完成临时计算容器流水线、统一插件契约与后端资源调度收敛） |
-| 通用建模与计算升级 | 声明式设备/系统方程、分月电价、自然月需量、嵌入式税务、结构加速与断网临时计算容器流水线均已交付 |
-| 下一开发目标 | `1.2.0`（模型与算法、Provider SDK 生态与设备扩展） |
-| 小范围测试版本 | `1.1.5` |
+| 正式产品版本（`backend/pyproject.toml`） | `1.1.6` |
+| 最新正式发布版本 | `1.1.6`（2026-11-27 完成 `1.2.0` 计算底座重构 `F1–F4`、单向计算流水线、并联评价与 `G0` 门禁收口） |
+| 通用建模与计算升级 | 声明式设备/系统方程、分月电价、自然月需量、嵌入式税务、结构加速、受限子进程还原与单向并联评价流水线均已交付 |
+| 下一开发目标 | `1.2.0`（`P1: E1–E5` 开放模型与算法插件生态及 `pIES Market`） |
+| 小范围测试版本 | `1.1.6` |
 | 首个面向公众发布的版本 | `2.0.0` |
 
-> 产品元数据（`backend/pyproject.toml`、`sdk/pyproject.toml`、`job_runner` 与帮助中心清单）已于 2026-11-25 统一升级至 **`1.1.5`**；从 `1.1.0` 升级部署时请使用 `docker compose up -d --build --remove-orphans`（或先执行 `docker compose down --remove-orphans`）以清理已退役的 `io_worker`/`compute_worker` 容器。下一阶段 `1.2.0` 将推进“模型与算法”模块与 `pIES-Market` 生态。
+> 产品元数据（`backend/pyproject.toml`、`job_runner` 与帮助中心清单；计算插件 SDK `sdk/pyproject.toml` 与内置计算阶段镜像 `pies-builtin-stages:1.2.0` 已同步升级至 `1.2.0` 契约）已于 2026-11-27 统一升级至 **`1.1.6`**；从 `1.1.5` 升级前会通过数据库迁移门禁一次性转换可编辑 13 字段计算配置并原样保留历史冻结快照与证据。下一阶段将推进 `E1–E5` 开放生态与 `pIES-Market`。
+
+## `1.1.6` — 2026-11-27 — `1.2.0` 计算底座重构（`F1–F4`）与 `G0` 门禁收口
+
+### 2026-11-27 — 计算底座单向流水线、受限子进程还原与并联可重试评价（`F1–F4` / `G0`）交付
+
+- **什么时候完成**：2026-11-27 完成 `P0` 阶段 `F1–F4` 四个切片及 `G0` 收口修复（PR `#81`–`#86`），并通过全量 Docker CI 与 Herdr Codex 独立审查合入 `master`，产品版本由 `1.1.5` 升级至 **`1.1.6`**。
+- **更新了什么**：
+  - **核心契约与独立 SDK（`F1`）**：定稿 13 字段 `CalculationConfig`（移除 `convergence`，引入分槽 `options` 与并联 `evaluators[]`）、与特定求解器/适配器解绑的 `SolverBundle`、插件 `consumes`/`produces` 清单契约，以及标准原变量解（`ies.primal-solution@1.0.0`）、标准工程解（`ies.engineering-solution@1.0.0`）与自描述评价报告（`ies.evaluation-report@1.0.0`）Schema；更新 `pies-sdk`（`1.2.0`）流式与规范文件读写辅助。
+  - **HiGHS 质量内聚与受限 `spawn` 子进程还原（`F2`）**：将原模型容差核查与连续需量上包络紧度检查全部收归 `ies-highs-solver` 内部；移除旧 `ResultAdapterRegistry` 与 `evaluator_highs`，在 `backend` 建立通用可信 `ResultAdapter`，通过零拷贝输入复用（直接路径/`os.link`/跨盘只读 symlink）与受限 `spawn` 子进程还原工程解及步序列投影、退出即由内核释放内存。
+  - **同源正向财务评价与独立基准核验（`F3` / `G0`）**：新增 `backend/iesplan/finance/forward.py` 与独立插件 `ies.evaluator.finance@1.0.0`（镜像 `pies-builtin-stages:1.2.0`），并在测试库固化 6 份 `1.1.5` 提交 `b490989e` 导出的冻结黄金 JSON 基线，完成跨版本数值等价核验。
+  - **单向流水线、并联评价、独立重试与迁移（`F4` / `G0`）**：切换单趟单向流水线与 `os.link` 硬链接交接；按 `predictor` 插件同层分组联合预测；支持一体化 `Algorithm` 直出同构 `solution.json`；落地 `0..N` 评价器并联隔离（默认 `[stage].evaluator_max_concurrency = 1`，部署可调）与单评价器 `analysis` 子任务独立重试（保持原已 `completed` 任务与更新核心任务的 `ResultIndex.is_latest` 顺序不被倒拨）；完成 `1.1.5 → 1.2.0` 一次性数据库迁移（[v1_2_0_calc_config.py](../../backend/iesplan/migrations/v1_2_0_calc_config.py)）及历史冻结 `CalcSnapshot`/`Evidence` 只读保护。
+- **解决了什么问题**：
+  - 彻底清除跨容器外循环与旧 14 字段/HiGHS 专属评价耦合，实现求解器（如第三方 `.mps` `Solver`）、一体化算法与多评价器的插件化可替换，隔离单个评价器异常、支持局部失败后不重跑主求解的单独重试，并消除长周期大工程解还原对控制面进程的内存放大风险。
+  - **从 `1.1.5` 升级提示**：请使用 `docker compose up -d --build` 重新构建 `builtin_stages`（`pies-builtin-stages:1.2.0`）、`backend`、`job_runner` 与 `web`；运行数据库迁移前，[v1_2_0_calc_config.py](../../backend/iesplan/migrations/v1_2_0_calc_config.py) 会自动拦截并要求先收口所有 `queued`/`running`/`cancelling` 未终结任务，随后按原意图保留或映射评价器配置并原样保留历史冻结快照与证据。
+- **版本进展到哪里**：`1.1.6` 已完成 `P0` 计算底座重构并通过全部 `12/12` `G0` 强制门禁；下一阶段按 [Roadmap](roadmap.md) 启动 `P1`（`E1–E5` 开放生态与 `pIES-Market`），交付后将发布 **`1.2.0`**。
 
 ## `1.1.5` — 2026-11-25 — 临时计算容器流水线、统一插件契约与后端资源调度收敛
 
