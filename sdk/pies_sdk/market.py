@@ -218,8 +218,12 @@ def validate_market_index(data: Mapping[str, Any]) -> dict[str, Any]:
         raise PluginValidationError(f"Market index invalid [{loc}]: {first.message}")
 
     generated_at = data["generated_at"]
+    if not isinstance(generated_at, str) or "T" not in generated_at or not generated_at.endswith("Z"):
+        raise PluginValidationError(
+            f"Market index generated_at must be a UTC ISO-8601 string ending in 'Z': {generated_at!r}"
+        )
     try:
-        datetime.fromisoformat(generated_at.replace("Z", "+00:00"))
+        datetime.fromisoformat(f"{generated_at[:-1]}+00:00")
     except ValueError as exc:
         raise PluginValidationError(f"Invalid market index generated_at: {generated_at!r}") from exc
 

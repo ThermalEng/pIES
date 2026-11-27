@@ -150,6 +150,13 @@ def test_market_index_rejects_invalid_versions_duplicates_and_user_ns() -> None:
     with pytest.raises(StageIOError, match="non-finite"):
         validate_market_index(non_finite)
 
+    # date-only, naive, and non-UTC generated_at timestamps rejected
+    for bad_ts in ("2026-11-27", "2026-11-27T12:00:00", "2026-11-27T12:00:00+08:00"):
+        bad_ts_idx = _sample_market_index()
+        bad_ts_idx["generated_at"] = bad_ts
+        with pytest.raises(PluginValidationError, match="UTC ISO-8601"):
+            validate_market_index(bad_ts_idx)
+
 
 def test_namespace_identity_and_kind_matching() -> None:
     ns = generate_public_namespace()

@@ -353,6 +353,95 @@ def test_validate_market_mode_and_no_tests_with_requirements(tmp_path: Path) -> 
     )
     assert cli_main(["validate", str(req_dir), "--no-tests", "--json"]) == 0
 
+    # Re-exported public callable (from impl import run) allowed by validate (--no-tests & runtime)
+    reexport_dir = _write_dir_plugin(
+        tmp_path / "reexport",
+        plugin_id="acme.algorithm.reexport_demo",
+        kind="algorithm",
+        consumes=["ies.stage-input@1.0.0"],
+        produces=["ies.engineering-solution@1.0.0"],
+        main_code="from impl import run\n",
+        test_in_files={"request.json": {}},
+        test_expected_files={
+            "solution.json": {
+                "schema": "ies.engineering-solution",
+                "schema_version": "1.0.0",
+                "solver_summary": {
+                    "math_status": "infeasible",
+                    "termination_reason": "infeasible",
+                    "has_feasible_solution": False,
+                    "objective_value": None,
+                    "objective_unit": None,
+                    "best_bound": None,
+                    "relative_gap": None,
+                },
+            }
+        },
+    )
+    (reexport_dir / "impl.py").write_text(
+        "from pies_sdk import EngineeringSolutionPayload, SolverSummary, StageContext\n"
+        "def run(ctx: StageContext) -> None:\n"
+        "    ctx.write_engineering_solution(EngineeringSolutionPayload(\n"
+        "        solver_summary=SolverSummary(\n"
+        "            math_status='infeasible', termination_reason='infeasible',\n"
+        "            has_feasible_solution=False, objective_value=None,\n"
+        "            objective_unit=None, best_bound=None, relative_gap=None,\n"
+        "        )\n"
+        "    ))\n",
+        encoding="utf-8",
+    )
+    assert validate_plugin_package(reexport_dir, run_tests=False)["ok"] is True
+    assert validate_plugin_package(reexport_dir, run_tests=True)["ok"] is True
+
+    # Empty in/ directory preserved across pack -> validate roundtrip + unsafe test.id rejected cleanly
+    empty_in_dir = _write_dir_plugin(
+        tmp_path / "empty_in",
+        plugin_id="acme.algorithm.empty_in",
+        kind="algorithm",
+        consumes=["ies.stage-input@1.0.0"],
+        produces=["ies.engineering-solution@1.0.0"],
+        main_code=(
+            "from pies_sdk import EngineeringSolutionPayload, SolverSummary, StageContext\n"
+            "def run(ctx: StageContext) -> None:\n"
+            "    ctx.write_engineering_solution(EngineeringSolutionPayload(\n"
+            "        solver_summary=SolverSummary(\n"
+            "            math_status='infeasible', termination_reason='infeasible',\n"
+            "            has_feasible_solution=False, objective_value=None,\n"
+            "            objective_unit=None, best_bound=None, relative_gap=None,\n"
+            "        )\n"
+            "    ))\n"
+        ),
+        test_in_files={},
+        test_expected_files={
+            "solution.json": {
+                "schema": "ies.engineering-solution",
+                "schema_version": "1.0.0",
+                "solver_summary": {
+                    "math_status": "infeasible",
+                    "termination_reason": "infeasible",
+                    "has_feasible_solution": False,
+                    "objective_value": None,
+                    "objective_unit": None,
+                    "best_bound": None,
+                    "relative_gap": None,
+                },
+            }
+        },
+    )
+    (empty_in_dir / "tests" / "dir_case" / "in").mkdir(parents=True, exist_ok=True)
+    empty_in_zip = tmp_path / "empty_in.algorithm.zip"
+    pack_plugin_package(empty_in_dir, output_path=empty_in_zip, run_validate=True)
+    assert validate_plugin_package(empty_in_zip, run_tests=True)["ok"] is True
+
+    # Traversal-like test.id cannot escape temp dir when running offline tests
+    weird_id_dir = tmp_path / "weird_id"
+    shutil.copytree(empty_in_dir, weird_id_dir)
+    weird_yaml = (weird_id_dir / "plugin.yaml").read_text(encoding="utf-8").replace(
+        "id: dir_case", "id: ../../weird_case"
+    )
+    (weird_id_dir / "plugin.yaml").write_text(weird_yaml, encoding="utf-8")
+    assert validate_plugin_package(weird_id_dir, run_tests=True)["test_ids"] == ["../../weird_case"]
+
 
 def test_validate_rejects_archive_and_directory_security_violations(tmp_path: Path) -> None:
     base_zip = tmp_path / "base.algorithm.zip"
@@ -392,6 +481,15 @@ def test_validate_rejects_archive_and_directory_security_violations(tmp_path: Pa
         dst_z.writestr("Main.py", b"x = 1\n")
     with pytest.raises(PluginValidationError, match="collision"):
         validate_plugin_package(coll_zip, run_tests=False)
+
+    # 4b) Dotted alias collision (main.py + ./main.py) rejected before extraction
+    dot_coll_zip = tmp_path / "dot_coll.algorithm.zip"
+    with zipfile.ZipFile(base_zip, "r") as src_z, zipfile.ZipFile(dot_coll_zip, "w") as dst_z:
+        for info in src_z.infolist():
+            dst_z.writestr(info, src_z.read(info))
+        dst_z.writestr("./main.py", b"x = 1\n")
+    with pytest.raises(PluginValidationError, match="collision"):
+        validate_plugin_package(dot_coll_zip, run_tests=False)
 
     # 5) Symlink inside ZIP
     sym_zip = tmp_path / "sym.algorithm.zip"

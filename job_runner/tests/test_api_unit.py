@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import json
 import tarfile
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -808,6 +809,84 @@ def test_build_plugin_pip_index_url_network_none_and_timeout(tmp_path: Path, mon
     )
     assert timed_out.status_code == 400
     assert "timed out" in timed_out.json()["detail"]
+
+
+def test_build_plugin_hard_deadline_interrupts_blocked_and_slow_streams(
+    tmp_path: Path,
+) -> None:
+    _, fake_docker, settings = _make_client(tmp_path)
+    fast_settings = settings.model_copy(update={"default_build_timeout_seconds": 0.05})
+    client = TestClient(
+        create_app(
+            settings=fast_settings,
+            service=DockerJobRunnerService(fast_settings, client=fake_docker),  # type: ignore[arg-type]
+        )
+    )
+    src_dir = settings.plugin_source_root / "acme.hang" / "1.0.0"
+    src_dir.mkdir(parents=True)
+    (src_dir / "plugin.yaml").write_text("schema: ies.algorithm-plugin\n", encoding="utf-8")
+    (src_dir / "main.py").write_text("def solve(ctx): pass\n", encoding="utf-8")
+
+    # 1. Stream permanently blocked inside next(stream) must abort promptly at deadline.
+    release_stream = threading.Event()
+    blocked_closed = threading.Event()
+
+    class _BlockedStream:
+        def __init__(self) -> None:
+            self._step = 0
+
+        def __iter__(self) -> _BlockedStream:
+            return self
+
+        def __next__(self) -> dict[str, str]:
+            if self._step == 0:
+                self._step = 1
+                return {"stream": "Step 1/2 : FROM pies-plugin-base:latest\n"}
+            release_stream.wait(10.0)
+            raise StopIteration
+
+        def close(self) -> None:
+            blocked_closed.set()
+
+    fake_docker.api.build = lambda **kwargs: _BlockedStream()  # type: ignore[method-assign]
+    started = time.monotonic()
+    try:
+        blocked_resp = client.post(
+            "/v1/plugins/build",
+            json={
+                "plugin_id": "acme.hang",
+                "version": "1.0.0",
+                "source_rel": "acme.hang/1.0.0",
+            },
+        )
+    finally:
+        release_stream.set()
+    elapsed = time.monotonic() - started
+    assert blocked_resp.status_code == 400
+    assert "timed out" in blocked_resp.json()["detail"]
+    assert elapsed < 1.0
+    assert blocked_closed.is_set()
+
+    # 2. Multi-chunk stream whose per-chunk gap < budget still aborts when total > budget.
+    def _slow_chunks(**kwargs: Any):
+        for idx in range(6):
+            time.sleep(0.025)
+            yield {"stream": f"Step {idx + 1}/6\n"}
+
+    fake_docker.api.build = _slow_chunks  # type: ignore[method-assign]
+    slow_started = time.monotonic()
+    slow_resp = client.post(
+        "/v1/plugins/build",
+        json={
+            "plugin_id": "acme.hang",
+            "version": "1.0.0",
+            "source_rel": "acme.hang/1.0.0",
+        },
+    )
+    slow_elapsed = time.monotonic() - slow_started
+    assert slow_resp.status_code == 400
+    assert "timed out" in slow_resp.json()["detail"]
+    assert slow_elapsed < 1.0
 
 
 def test_delete_plugin_image_whitelist_labels_and_conflicts(tmp_path: Path) -> None:

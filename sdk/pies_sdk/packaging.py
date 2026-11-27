@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import ast
 import hashlib
 import os
 import re
@@ -15,7 +14,7 @@ from typing import Any
 
 from pies_sdk.contracts import check_relative_path, read_json_file
 from pies_sdk.errors import PiesSdkError, PluginValidationError
-from pies_sdk.io import extract_stage_parameters, validate_stage_outputs
+from pies_sdk.io import extract_stage_parameters
 from pies_sdk.manifest import PluginManifest, load_plugin_manifest
 from pies_sdk.market import parse_artifact_id
 from pies_sdk.runner import run_plugin
@@ -39,10 +38,12 @@ def _check_entry_name(rel_posix: str, seen_lower: set[str]) -> str:
         or rel_posix.startswith("/")
         or "\\" in rel_posix
         or _DRIVE_PREFIX_RE.match(rel_posix)
-        or ".." in rel_posix.split("/")
     ):
         raise PluginValidationError(f"Unsafe path in plugin package: {rel_posix!r}")
-    parts = [part for part in rel_posix.split("/") if part]
+    raw_parts = rel_posix.split("/")
+    if "" in raw_parts or ".." in raw_parts:
+        raise PluginValidationError(f"Unsafe path in plugin package: {rel_posix!r}")
+    parts = [part for part in raw_parts if part != "."]
     if not parts:
         raise PluginValidationError(f"Empty path segment in plugin package: {rel_posix!r}")
     if parts[-1].lower() in _FORBIDDEN_FILENAMES:
@@ -83,7 +84,7 @@ def _extract_and_validate_zip(archive_path: Path, dest_dir: Path) -> None:
                 raise PluginValidationError(
                     f"Non-regular entry mode is forbidden in plugin archive: {info.filename!r}"
                 )
-            if info.is_dir() and info.filename.rstrip("/") == "":
+            if info.is_dir() and info.filename.rstrip("/") in {"", "."}:
                 continue
 
             clean_rel = _check_entry_name(info.filename.rstrip("/"), seen_lower)
@@ -99,16 +100,17 @@ def _extract_and_validate_zip(archive_path: Path, dest_dir: Path) -> None:
                 target.write_bytes(zf.read(info))
 
 
-def _scan_directory_files(
+def _scan_directory_entries(
     root: Path,
     *,
     ignore_paths: frozenset[Path] = frozenset(),
-) -> list[Path]:
-    """Validate directory safety (no symlinks/hardlinks/collisions/Dockerfiles) and list files."""
+) -> tuple[list[Path], list[Path]]:
+    """Validate directory safety (no symlinks/hardlinks/collisions/Dockerfiles) and list entries."""
     if not root.is_dir():
         raise PluginValidationError(f"Plugin directory does not exist: {root}")
     root_resolved = root.resolve()
     seen_lower: set[str] = set()
+    empty_dirs: list[Path] = []
     collected: list[Path] = []
 
     for dirpath, dirnames, filenames in os.walk(root, topdown=True, followlinks=False):
@@ -132,6 +134,7 @@ def _scan_directory_files(
             kept_dirs.append(dname)
         dirnames[:] = kept_dirs
 
+        dir_files: list[Path] = []
         for fname in sorted(filenames):
             full_file = current_dir / fname
             if full_file.resolve() in ignore_paths:
@@ -155,9 +158,13 @@ def _scan_directory_files(
             _check_entry_name(rel_file, seen_lower)
             if not full_file.resolve().is_relative_to(root_resolved):
                 raise PluginValidationError(f"File escapes plugin root: {full_file}")
+            dir_files.append(full_file)
             collected.append(full_file)
 
-    return collected
+        if current_dir != root and not kept_dirs and not dir_files:
+            empty_dirs.append(current_dir)
+
+    return empty_dirs, collected
 
 
 def _check_entrypoint_source(manifest: PluginManifest, root: Path) -> None:
@@ -171,27 +178,6 @@ def _check_entrypoint_source(manifest: PluginManifest, root: Path) -> None:
     if not target.is_file():
         raise PluginValidationError(
             f"Entrypoint module {module_name!r} not found in plugin package"
-        )
-    try:
-        tree = ast.parse(target.read_text(encoding="utf-8"), filename=str(target))
-    except (OSError, UnicodeDecodeError, SyntaxError) as exc:
-        raise PluginValidationError(
-            f"Failed to parse entrypoint module {target.name}: {exc}"
-        ) from exc
-
-    defined = {
-        node.name
-        for node in tree.body
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-    }
-    for node in tree.body:
-        if isinstance(node, ast.Assign):
-            for assign_target in node.targets:
-                if isinstance(assign_target, ast.Name):
-                    defined.add(assign_target.id)
-    if func_name not in defined and not pkg_init.is_file():
-        raise PluginValidationError(
-            f"Entrypoint callable {func_name!r} not defined in {target.name}"
         )
 
 
@@ -261,7 +247,7 @@ def _run_offline_tests(manifest: PluginManifest, root: Path) -> None:
     root_resolved = root.resolve()
     with tempfile.TemporaryDirectory(prefix="pies-sdk-validate-") as tmp_str:
         tmp_root = Path(tmp_str)
-        for test_spec in manifest.tests:
+        for idx, test_spec in enumerate(manifest.tests):
             in_rel = check_relative_path(test_spec.input, f"tests[{test_spec.id!r}].input")
             exp_rel = check_relative_path(test_spec.expected, f"tests[{test_spec.id!r}].expected")
             src_in = (root / in_rel).resolve()
@@ -269,8 +255,8 @@ def _run_offline_tests(manifest: PluginManifest, root: Path) -> None:
             if not src_in.is_relative_to(root_resolved) or not src_exp.is_relative_to(root_resolved):
                 raise PluginValidationError(f"Test {test_spec.id!r} escapes plugin root")
 
-            work_in = tmp_root / test_spec.id / "in"
-            work_out = tmp_root / test_spec.id / "out"
+            work_in = tmp_root / f"case_{idx}" / "in"
+            work_out = tmp_root / f"case_{idx}" / "out"
             work_in.mkdir(parents=True, exist_ok=True)
             work_out.mkdir(parents=True, exist_ok=True)
 
@@ -295,7 +281,6 @@ def _run_offline_tests(manifest: PluginManifest, root: Path) -> None:
                 work_in=work_in,
                 work_out=work_out,
             )
-            validate_stage_outputs(manifest.kind, work_out, produces=manifest.produces)
 
             if test_spec.mode == "file":
                 out_name = _resolve_single_output_filename(manifest)
@@ -400,7 +385,7 @@ def validate_plugin_package(
     """Validate a plugin directory or `*.algorithm.zip` archive and optionally run offline tests."""
     target = Path(path)
     if target.is_dir():
-        _scan_directory_files(target)
+        _scan_directory_entries(target)
         return _validate_extracted_root(
             target,
             run_tests=run_tests,
@@ -431,7 +416,7 @@ def pack_plugin_package(
         raise PluginValidationError(f"Plugin source directory does not exist: {src}")
 
     ignore_paths = frozenset({Path(output_path).resolve()}) if output_path is not None else frozenset()
-    files = _scan_directory_files(src, ignore_paths=ignore_paths)
+    empty_dirs, files = _scan_directory_entries(src, ignore_paths=ignore_paths)
 
     if run_validate:
         _validate_extracted_root(
@@ -454,8 +439,15 @@ def pack_plugin_package(
     )
     dest.parent.mkdir(parents=True, exist_ok=True)
 
+    sorted_dirs = sorted(empty_dirs, key=lambda p: p.relative_to(src).as_posix())
     sorted_files = sorted(files, key=lambda p: p.relative_to(src).as_posix())
     with zipfile.ZipFile(dest, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for dir_path in sorted_dirs:
+            rel_posix = f"{dir_path.relative_to(src).as_posix()}/"
+            info = zipfile.ZipInfo(filename=rel_posix, date_time=_DETERMINISTIC_ZIP_TIME)
+            info.compress_type = zipfile.ZIP_STORED
+            info.external_attr = (stat.S_IFDIR | 0o755) << 16
+            zf.writestr(info, b"")
         for file_path in sorted_files:
             rel_posix = file_path.relative_to(src).as_posix()
             info = zipfile.ZipInfo(filename=rel_posix, date_time=_DETERMINISTIC_ZIP_TIME)

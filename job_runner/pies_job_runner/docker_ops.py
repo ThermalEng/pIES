@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import queue
 import shutil
 import socket
 import tarfile
@@ -160,6 +161,24 @@ def _build_plugin_tar_context(source_dir: Path, dockerfile_content: str) -> io.B
 
     buf.seek(0)
     return buf
+
+
+def _close_stream_best_effort(stream: Any) -> None:
+    """Close a Docker build stream and any underlying HTTP response to abort blocked reads."""
+    if stream is None:
+        return
+    frame = getattr(stream, "gi_frame", None)
+    resp = frame.f_locals.get("response") if frame is not None else None
+    if hasattr(resp, "close"):
+        try:
+            resp.close()
+        except Exception:
+            pass
+    if hasattr(stream, "close"):
+        try:
+            stream.close()
+        except Exception:
+            pass
 
 
 class DockerJobRunnerService:
@@ -493,27 +512,59 @@ class DockerJobRunnerService:
             "forcerm": True,
             "pull": False,
             "decode": True,
-            "timeout": int(effective_timeout),
+            "timeout": effective_timeout,
         }
         if requirements_rel is None:
             build_kwargs["network_mode"] = "none"
 
         deadline = _monotonic() + float(effective_timeout)
-        stream: Any = None
+        chunk_queue: queue.Queue[tuple[str, Any]] = queue.Queue()
+        cancelled = threading.Event()
+        stream_holder: list[Any] = []
+
+        def _drain_build_stream() -> None:
+            stream: Any = None
+            try:
+                stream = client.api.build(**build_kwargs)
+                stream_holder.append(stream)
+                for item in stream:
+                    if cancelled.is_set():
+                        break
+                    chunk_queue.put(("chunk", item))
+            except Exception as exc:
+                chunk_queue.put(("error", exc))
+            finally:
+                _close_stream_best_effort(stream)
+                chunk_queue.put(("eof", None))
+
+        worker = threading.Thread(
+            target=_drain_build_stream,
+            name=f"pies-build-{request.plugin_id}",
+            daemon=True,
+        )
+        worker.start()
         try:
-            stream = client.api.build(**build_kwargs)
-            for chunk in stream:
+            while True:
+                remaining = deadline - _monotonic()
+                if remaining <= 0:
+                    raise PluginBuildError(f"plugin image build timed out after {effective_timeout}s")
+                try:
+                    kind, payload = chunk_queue.get(timeout=remaining)
+                except queue.Empty as exc:
+                    raise PluginBuildError(
+                        f"plugin image build timed out after {effective_timeout}s"
+                    ) from exc
                 if _monotonic() > deadline:
                     raise PluginBuildError(f"plugin image build timed out after {effective_timeout}s")
-                if "error" in chunk:
-                    raise PluginBuildError(f"plugin image build failed: {chunk['error']}")
-                line = chunk.get("stream")
+                if kind == "eof":
+                    break
+                if kind == "error":
+                    raise payload
+                if "error" in payload:
+                    raise PluginBuildError(f"plugin image build failed: {payload['error']}")
+                line = payload.get("stream")
                 if isinstance(line, str) and line.strip():
                     logs.append(line.strip())
-            if _monotonic() > deadline:
-                raise PluginBuildError(f"plugin image build timed out after {effective_timeout}s")
-        except PluginBuildError:
-            raise
         except TimeoutError as exc:
             raise PluginBuildError(
                 f"plugin image build timed out after {effective_timeout}s"
@@ -521,11 +572,9 @@ class DockerJobRunnerService:
         except DockerException as exc:
             raise DockerUnavailableError(f"docker build failed: {exc}") from exc
         finally:
-            if hasattr(stream, "close"):
-                try:
-                    stream.close()
-                except Exception:
-                    pass
+            cancelled.set()
+            for active_stream in stream_holder:
+                _close_stream_best_effort(active_stream)
 
         return BuildPluginResponse(
             image=image_tag,
