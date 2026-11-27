@@ -52,6 +52,7 @@ class JobRunnerSettings(BaseSettings):
     cgroup_root: Path = Field(default=Path("/sys/fs/cgroup"))
     container_user: str = Field(default="10001:10001")
     required_images: str = Field(default="")
+    default_build_timeout_seconds: int = Field(default=600, ge=10, le=3600)
 
     def parsed_required_images(self) -> tuple[str, ...]:
         """Parse comma-separated ``required_images`` into deduplicated non-empty image refs."""

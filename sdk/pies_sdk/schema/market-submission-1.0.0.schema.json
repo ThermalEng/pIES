@@ -1,0 +1,86 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "ies.market-submission/1.0.0",
+  "title": "ies.market-submission 1.0.0 Contract",
+  "description": "Stateless market submission metadata contract forbidding plaintext emails.",
+  "oneOf": [
+    {
+      "type": "object",
+      "required": [
+        "schema",
+        "schema_version",
+        "artifact_id",
+        "kind",
+        "revision",
+        "publisher",
+        "publisher_email_digest",
+        "package_filename",
+        "sha256"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "schema": { "const": "ies.market-submission" },
+        "schema_version": { "const": "1.0.0" },
+        "artifact_id": { "$ref": "#/$defs/artifact_id" },
+        "kind": { "const": "device_model" },
+        "revision": { "type": "integer", "minimum": 1 },
+        "publisher": { "$ref": "#/$defs/publisher_name" },
+        "publisher_email_digest": { "$ref": "#/$defs/sha256_hex" },
+        "package_filename": { "$ref": "#/$defs/relative_path" },
+        "sha256": { "$ref": "#/$defs/sha256_hex" },
+        "notes": { "type": "string" }
+      }
+    },
+    {
+      "type": "object",
+      "required": [
+        "schema",
+        "schema_version",
+        "artifact_id",
+        "kind",
+        "version",
+        "publisher",
+        "publisher_email_digest",
+        "package_filename",
+        "sha256"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "schema": { "const": "ies.market-submission" },
+        "schema_version": { "const": "1.0.0" },
+        "artifact_id": { "$ref": "#/$defs/artifact_id" },
+        "kind": {
+          "enum": ["predictor", "generator", "solver", "evaluator", "algorithm"]
+        },
+        "version": { "$ref": "#/$defs/semver" },
+        "publisher": { "$ref": "#/$defs/publisher_name" },
+        "publisher_email_digest": { "$ref": "#/$defs/sha256_hex" },
+        "package_filename": { "$ref": "#/$defs/relative_path" },
+        "sha256": { "$ref": "#/$defs/sha256_hex" },
+        "notes": { "type": "string" }
+      }
+    }
+  ],
+  "$defs": {
+    "artifact_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9_-]*\\.[a-z0-9_-]+\\.[a-z0-9][a-z0-9_-]*$"
+    },
+    "publisher_name": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9_-]*$"
+    },
+    "semver": {
+      "type": "string",
+      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"
+    },
+    "relative_path": {
+      "type": "string",
+      "pattern": "^(?!/)(?!.*(^|/)\\.\\.(/|$)).+$"
+    },
+    "sha256_hex": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    }
+  }
+}

@@ -11,6 +11,7 @@ import tarfile
 import threading
 from datetime import UTC, datetime
 from pathlib import Path
+from time import monotonic as _monotonic
 from typing import Any
 
 import docker
@@ -23,6 +24,8 @@ from pies_job_runner.models import (
     BuildPluginRequest,
     BuildPluginResponse,
     CleanupStageResponse,
+    DeletePluginImageRequest,
+    DeletePluginImageResponse,
     StageInspectResponse,
     StageListResponse,
     StartStageRequest,
@@ -32,6 +35,8 @@ from pies_job_runner.models import (
 from pies_job_runner.paths import UnsafePathError, resolve_relative_subpath
 
 LABEL_MANAGED = "pies.managed"
+LABEL_PLUGIN_ID = "pies.plugin_id"
+LABEL_PLUGIN_VERSION = "pies.plugin_version"
 LABEL_ATTEMPT_ID = "pies.attempt_id"
 LABEL_STAGE_ID = "pies.stage_id"
 LABEL_STAGE_EXECUTION_ID = "pies.stage_execution_id"
@@ -90,6 +95,7 @@ def render_plugin_dockerfile(
     plugin_id: str,
     version: str,
     requirements_rel: str | None,
+    pip_index_url: str | None = None,
     runtime_user: str = "10001:10001",
 ) -> str:
     """Render the controlled official Dockerfile template atop ``pies-plugin-base``."""
@@ -100,10 +106,14 @@ def render_plugin_dockerfile(
     ]
     if requirements_rel:
         target_req = f"/plugin/{requirements_rel}"
+        pip_cmd = ["pip", "install", "--no-cache-dir"]
+        if pip_index_url:
+            pip_cmd.extend(["--index-url", pip_index_url])
+        pip_cmd.extend(["-r", target_req])
         lines.extend(
             [
                 f"COPY {json.dumps([requirements_rel, target_req])}",
-                f"RUN {json.dumps(['pip', 'install', '--no-cache-dir', '-r', target_req])}",
+                f"RUN {json.dumps(pip_cmd)}",
             ]
         )
     lines.extend(
@@ -112,9 +122,9 @@ def render_plugin_dockerfile(
             "RUN chmod -R a+rX /plugin",
             "ENV PYTHONPATH=/plugin",
             (
-                'LABEL pies.managed="true" '
-                f'pies.plugin_id="{plugin_id}" '
-                f'pies.plugin_version="{version}"'
+                f'LABEL {LABEL_MANAGED}="true" '
+                f'{LABEL_PLUGIN_ID}="{plugin_id}" '
+                f'{LABEL_PLUGIN_VERSION}="{version}"'
             ),
             f"USER {runtime_user}",
             'ENTRYPOINT ["python", "-m", "pies_sdk.runner"]',
@@ -457,11 +467,17 @@ class DockerJobRunnerService:
             except UnsafePathError as exc:
                 raise BadRequestError(str(exc)) from exc
 
+        effective_timeout = (
+            request.timeout_seconds
+            if "timeout_seconds" in request.model_fields_set
+            else self.settings.default_build_timeout_seconds
+        )
         dockerfile_content = render_plugin_dockerfile(
             base_image=self.settings.plugin_base_image,
             plugin_id=request.plugin_id,
             version=request.version,
             requirements_rel=requirements_rel,
+            pip_index_url=request.pip_index_url,
             runtime_user=self.settings.container_user,
         )
         tar_ctx = _build_plugin_tar_context(source_dir, dockerfile_content)
@@ -469,26 +485,47 @@ class DockerJobRunnerService:
 
         client = self._get_client()
         logs: list[str] = []
+        build_kwargs: dict[str, Any] = {
+            "fileobj": tar_ctx,
+            "custom_context": True,
+            "tag": image_tag,
+            "rm": True,
+            "forcerm": True,
+            "pull": False,
+            "decode": True,
+            "timeout": int(effective_timeout),
+        }
+        if requirements_rel is None:
+            build_kwargs["network_mode"] = "none"
+
+        deadline = _monotonic() + float(effective_timeout)
+        stream: Any = None
         try:
-            stream = client.api.build(
-                fileobj=tar_ctx,
-                custom_context=True,
-                tag=image_tag,
-                rm=True,
-                forcerm=True,
-                pull=False,
-                decode=True,
-            )
+            stream = client.api.build(**build_kwargs)
             for chunk in stream:
+                if _monotonic() > deadline:
+                    raise PluginBuildError(f"plugin image build timed out after {effective_timeout}s")
                 if "error" in chunk:
                     raise PluginBuildError(f"plugin image build failed: {chunk['error']}")
                 line = chunk.get("stream")
                 if isinstance(line, str) and line.strip():
                     logs.append(line.strip())
+            if _monotonic() > deadline:
+                raise PluginBuildError(f"plugin image build timed out after {effective_timeout}s")
         except PluginBuildError:
             raise
+        except TimeoutError as exc:
+            raise PluginBuildError(
+                f"plugin image build timed out after {effective_timeout}s"
+            ) from exc
         except DockerException as exc:
             raise DockerUnavailableError(f"docker build failed: {exc}") from exc
+        finally:
+            if hasattr(stream, "close"):
+                try:
+                    stream.close()
+                except Exception:
+                    pass
 
         return BuildPluginResponse(
             image=image_tag,
@@ -496,6 +533,65 @@ class DockerJobRunnerService:
             version=request.version,
             built_at=_utc_now_iso(),
             logs=logs[-50:],
+        )
+
+    def delete_plugin_image(self, request: DeletePluginImageRequest) -> DeletePluginImageResponse:
+        """Delete a managed plugin image strictly matching prefix and managed labels."""
+        prefix = self.settings.plugin_image_prefix.strip("/")
+        if not prefix or prefix.startswith(("pies-builtin-stages", "pies-plugin-base")):
+            raise BadRequestError(f"invalid plugin image prefix: {self.settings.plugin_image_prefix!r}")
+        image_tag = f"{prefix}/{request.plugin_id}:{request.version}"
+
+        client = self._get_client()
+        try:
+            image = client.images.get(image_tag)
+        except ImageNotFound:
+            return DeletePluginImageResponse(
+                image=image_tag,
+                plugin_id=request.plugin_id,
+                version=request.version,
+                deleted=False,
+                status="not_found",
+            )
+        except DockerException as exc:
+            raise DockerUnavailableError(f"docker inspect image failed: {exc}") from exc
+
+        attrs = getattr(image, "attrs", None)
+        if not isinstance(attrs, dict):
+            attrs = image if isinstance(image, dict) else {}
+        labels = (attrs.get("Config") or {}).get("Labels") or getattr(image, "labels", None) or {}
+        if (
+            labels.get(LABEL_MANAGED) != "true"
+            or labels.get(LABEL_PLUGIN_ID) != request.plugin_id
+            or labels.get(LABEL_PLUGIN_VERSION) != request.version
+        ):
+            raise BadRequestError(
+                f"refusing to delete unmanaged or label-mismatched image: {image_tag}"
+            )
+
+        try:
+            client.images.remove(image=image_tag, force=bool(request.force))
+        except ImageNotFound:
+            return DeletePluginImageResponse(
+                image=image_tag,
+                plugin_id=request.plugin_id,
+                version=request.version,
+                deleted=False,
+                status="not_found",
+            )
+        except APIError as exc:
+            if getattr(exc, "status_code", None) == 409:
+                raise ConflictError(f"plugin image is still in use: {image_tag}") from exc
+            raise DockerUnavailableError(f"docker remove image failed: {exc}") from exc
+        except DockerException as exc:
+            raise DockerUnavailableError(f"docker remove image failed: {exc}") from exc
+
+        return DeletePluginImageResponse(
+            image=image_tag,
+            plugin_id=request.plugin_id,
+            version=request.version,
+            deleted=True,
+            status="deleted",
         )
 
     def start_stage(self, request: StartStageRequest) -> StageInspectResponse:
