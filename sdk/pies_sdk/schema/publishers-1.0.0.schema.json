@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "ies.publishers/1.0.0",
+  "title": "ies.publishers 1.0.0 Contract",
+  "description": "Public publisher namespace registry binding publisher prefixes to HMAC-SHA256 email digests (zero plaintext emails).",
+  "type": "object",
+  "required": ["schema", "schema_version", "publishers"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": { "const": "ies.publishers" },
+    "schema_version": { "const": "1.0.0" },
+    "publishers": {
+      "type": "object",
+      "propertyNames": {
+        "type": "string",
+        "pattern": "^[a-z0-9][a-z0-9_-]*$"
+      },
+      "additionalProperties": {
+        "type": "object",
+        "required": ["email_digest"],
+        "additionalProperties": false,
+        "properties": {
+          "email_digest": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "created_at": {
+            "type": "string",
+            "minLength": 1
+          },
+          "status": {
+            "enum": ["active", "suspended"]
+          }
+        }
+      }
+    }
+  }
+}

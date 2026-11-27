@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from typing import Any, Literal
+from urllib.parse import urlparse
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -30,6 +31,18 @@ def _check_safe_id(value: str, field_name: str) -> str:
     return value
 
 
+def _check_plugin_id(value: str) -> str:
+    if not _PLUGIN_ID_RE.match(value) or ".." in value:
+        raise ValueError("plugin_id must be a lowercase namespace identifier without '..'")
+    return value
+
+
+def _check_version(value: str) -> str:
+    if not _VERSION_RE.match(value) or ".." in value:
+        raise ValueError("version must be a valid image tag segment without '..'")
+    return value
+
+
 class _StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -39,19 +52,29 @@ class BuildPluginRequest(_StrictModel):
     version: str
     source_rel: str = Field(min_length=1, max_length=256)
     requirements_rel: str | None = Field(default=None, min_length=1, max_length=256)
+    pip_index_url: str | None = None
+    timeout_seconds: int = Field(default=600, ge=10, le=3600)
 
     @field_validator("plugin_id")
     @classmethod
     def _validate_plugin_id(cls, value: str) -> str:
-        if not _PLUGIN_ID_RE.match(value) or ".." in value:
-            raise ValueError("plugin_id must be a lowercase namespace identifier without '..'")
-        return value
+        return _check_plugin_id(value)
 
     @field_validator("version")
     @classmethod
     def _validate_version(cls, value: str) -> str:
-        if not _VERSION_RE.match(value) or ".." in value:
-            raise ValueError("version must be a valid image tag segment without '..'")
+        return _check_version(value)
+
+    @field_validator("pip_index_url")
+    @classmethod
+    def _validate_pip_index_url(cls, value: str | None) -> str | None:
+        if value is None or value == "":
+            return None
+        if any(ch.isspace() or ord(ch) < 32 or ord(ch) == 127 for ch in value):
+            raise ValueError("pip_index_url must not contain whitespace or control characters")
+        parsed = urlparse(value)
+        if parsed.scheme.lower() not in ("http", "https") or not parsed.netloc or not parsed.hostname:
+            raise ValueError("pip_index_url must be a valid http:// or https:// URL with host")
         return value
 
 
@@ -61,6 +84,30 @@ class BuildPluginResponse(_StrictModel):
     version: str
     built_at: str
     logs: list[str] = Field(default_factory=list)
+
+
+class DeletePluginImageRequest(_StrictModel):
+    plugin_id: str
+    version: str
+    force: bool = False
+
+    @field_validator("plugin_id")
+    @classmethod
+    def _validate_plugin_id(cls, value: str) -> str:
+        return _check_plugin_id(value)
+
+    @field_validator("version")
+    @classmethod
+    def _validate_version(cls, value: str) -> str:
+        return _check_version(value)
+
+
+class DeletePluginImageResponse(_StrictModel):
+    image: str
+    plugin_id: str
+    version: str
+    deleted: bool
+    status: Literal["deleted", "not_found"]
 
 
 class StartStageRequest(_StrictModel):

@@ -1,0 +1,139 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "ies.market-index/1.0.0",
+  "title": "ies.market-index 1.0.0 Contract",
+  "description": "Public static market index contract consumed by pIES clients and static market pages.",
+  "type": "object",
+  "required": ["schema", "schema_version", "generated_at", "artifacts"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": { "const": "ies.market-index" },
+    "schema_version": { "const": "1.0.0" },
+    "generated_at": { "type": "string", "minLength": 1 },
+    "artifacts": {
+      "type": "array",
+      "items": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "id",
+              "kind",
+              "revision",
+              "name",
+              "description",
+              "publisher",
+              "license",
+              "compatibility",
+              "url",
+              "sha256",
+              "size_bytes"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "id": { "$ref": "#/$defs/artifact_id" },
+              "kind": { "const": "device_model" },
+              "revision": { "type": "integer", "minimum": 1 },
+              "name": { "$ref": "#/$defs/localized_name" },
+              "description": { "type": "string", "minLength": 1 },
+              "publisher": { "$ref": "#/$defs/publisher_name" },
+              "license": { "type": "string", "minLength": 1 },
+              "compatibility": { "$ref": "#/$defs/compatibility" },
+              "url": { "$ref": "#/$defs/relative_path" },
+              "readme_url": { "$ref": "#/$defs/relative_path" },
+              "sha256": { "$ref": "#/$defs/sha256_hex" },
+              "size_bytes": { "type": "integer", "minimum": 1 }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "id",
+              "kind",
+              "version",
+              "name",
+              "description",
+              "publisher",
+              "license",
+              "compatibility",
+              "url",
+              "sha256",
+              "size_bytes"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "id": { "$ref": "#/$defs/artifact_id" },
+              "kind": {
+                "enum": ["predictor", "generator", "solver", "evaluator", "algorithm"]
+              },
+              "version": { "$ref": "#/$defs/semver" },
+              "name": { "$ref": "#/$defs/localized_name" },
+              "description": { "type": "string", "minLength": 1 },
+              "publisher": { "$ref": "#/$defs/publisher_name" },
+              "license": { "type": "string", "minLength": 1 },
+              "compatibility": { "$ref": "#/$defs/compatibility" },
+              "consumes": {
+                "type": "array",
+                "items": { "$ref": "#/$defs/contract_ref" },
+                "uniqueItems": true
+              },
+              "produces": {
+                "type": "array",
+                "items": { "$ref": "#/$defs/contract_ref" },
+                "uniqueItems": true
+              },
+              "url": { "$ref": "#/$defs/relative_path" },
+              "readme_url": { "$ref": "#/$defs/relative_path" },
+              "sha256": { "$ref": "#/$defs/sha256_hex" },
+              "size_bytes": { "type": "integer", "minimum": 1 }
+            }
+          }
+        ]
+      }
+    }
+  },
+  "$defs": {
+    "artifact_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9_-]*\\.[a-z0-9_-]+\\.[a-z0-9][a-z0-9_-]*$"
+    },
+    "publisher_name": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9_-]*$"
+    },
+    "semver": {
+      "type": "string",
+      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"
+    },
+    "contract_ref": {
+      "type": "string",
+      "pattern": "^[a-z0-9_-]+(\\.[a-z0-9_-]+)+@[0-9]+\\.[0-9]+\\.[0-9]+$"
+    },
+    "localized_name": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": false,
+      "properties": {
+        "zh_cn": { "type": "string", "minLength": 1 },
+        "en_us": { "type": "string", "minLength": 1 }
+      }
+    },
+    "compatibility": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": false,
+      "properties": {
+        "pies": { "type": "string", "minLength": 1 },
+        "sdk": { "type": "string", "minLength": 1 }
+      }
+    },
+    "relative_path": {
+      "type": "string",
+      "pattern": "^(?!/)(?!.*(^|/)\\.\\.(/|$)).+$"
+    },
+    "sha256_hex": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    }
+  }
+}

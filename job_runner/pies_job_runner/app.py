@@ -13,6 +13,8 @@ from pies_job_runner.models import (
     BuildPluginResponse,
     CleanupStageRequest,
     CleanupStageResponse,
+    DeletePluginImageRequest,
+    DeletePluginImageResponse,
     StageInspectResponse,
     StageListResponse,
     StartStageRequest,
@@ -64,6 +66,13 @@ def create_app(
         svc: ServiceDep,
     ) -> BuildPluginResponse:
         return svc.build_plugin(payload)
+
+    @app.post("/v1/plugins/images/delete", response_model=DeletePluginImageResponse)
+    def delete_plugin_image(
+        payload: DeletePluginImageRequest,
+        svc: ServiceDep,
+    ) -> DeletePluginImageResponse:
+        return svc.delete_plugin_image(payload)
 
     @app.post("/v1/stages/start", response_model=StageInspectResponse)
     def start_stage(

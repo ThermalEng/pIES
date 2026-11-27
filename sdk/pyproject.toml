@@ -21,6 +21,7 @@ dev = [
 
 [project.scripts]
 pies-plugin-run = "pies_sdk.runner:main"
+pies-sdk = "pies_sdk.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["pies_sdk*"]

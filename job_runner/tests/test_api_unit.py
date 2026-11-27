@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import http.client
 import io
 import json
+import socket
 import tarfile
+import threading
+import time
 from pathlib import Path
 from typing import Any
 
-from docker.errors import DockerException, ImageNotFound
+from docker.errors import APIError, DockerException, ImageNotFound
 from fastapi.testclient import TestClient
 
 from pies_job_runner.app import create_app
@@ -17,6 +21,8 @@ from pies_job_runner.docker_ops import (
     LABEL_ATTEMPT_ID,
     LABEL_FENCING_TOKEN,
     LABEL_MANAGED,
+    LABEL_PLUGIN_ID,
+    LABEL_PLUGIN_VERSION,
     LABEL_STAGE_EXECUTION_ID,
     LABEL_STAGE_ID,
     LABEL_WORKSPACE_REL,
@@ -145,26 +151,54 @@ class _FakeContainersManager:
 
 
 class _FakeDockerAPI:
-    def __init__(self) -> None:
+    def __init__(self, *, stream_delay: float = 0.0) -> None:
         self.build_calls: list[dict[str, Any]] = []
+        self.stream_delay = stream_delay
 
     def build(self, **kwargs: Any):
         raw_tar = kwargs["fileobj"].read()
         self.build_calls.append({"kwargs": kwargs, "tar_bytes": raw_tar})
         yield {"stream": "Step 1/6 : FROM pies-plugin-base:latest\n"}
+        if self.stream_delay > 0:
+            time.sleep(self.stream_delay)
         yield {"stream": "Successfully built fake123\n"}
 
 
-class _FakeImagesManager:
-    def __init__(self, present_images: set[str] | None = None) -> None:
-        self.present_images = set(present_images or ())
-        self.get_calls: list[str] = []
+class _FakeImageObj:
+    def __init__(self, name: str, labels: dict[str, str] | None = None) -> None:
+        self.id = f"sha256:{name}"
+        self.labels = dict(labels or {})
+        self.attrs = {"Id": self.id, "Config": {"Labels": dict(self.labels)}}
 
-    def get(self, name: str) -> dict[str, str]:
+
+class _FakeImagesManager:
+    def __init__(self, present_images: set[str] | dict[str, dict[str, str]] | None = None) -> None:
+        if isinstance(present_images, dict):
+            self.present_images: dict[str, dict[str, str]] = {
+                k: dict(v) for k, v in present_images.items()
+            }
+        else:
+            self.present_images = {k: {} for k in (present_images or ())}
+        self.get_calls: list[str] = []
+        self.remove_calls: list[dict[str, Any]] = []
+        self.remove_conflict_images: set[str] = set()
+
+    def get(self, name: str) -> _FakeImageObj:
         self.get_calls.append(name)
         if name not in self.present_images:
             raise ImageNotFound(f"No such image: {name}")
-        return {"Id": f"sha256:{name}"}
+        return _FakeImageObj(name, self.present_images[name])
+
+    def remove(self, *, image: str, force: bool = False) -> None:
+        self.remove_calls.append({"image": image, "force": force})
+        if image not in self.present_images:
+            raise ImageNotFound(f"No such image: {image}")
+        if image in self.remove_conflict_images and not force:
+            import httpx
+
+            resp = httpx.Response(status_code=409, text="image in use")
+            raise APIError("conflict: image is being used by running container", response=resp)
+        del self.present_images[image]
 
 
 class _FakeDockerClient:
@@ -172,15 +206,16 @@ class _FakeDockerClient:
         self,
         *,
         ping_ok: bool = True,
-        present_images: set[str] | None = None,
+        present_images: set[str] | dict[str, dict[str, str]] | None = None,
         ncpu: int = 16,
+        stream_delay: float = 0.0,
     ) -> None:
         self.ping_ok = ping_ok
         self.ncpu = ncpu
         self.info_calls = 0
         self.containers = _FakeContainersManager()
         self.images = _FakeImagesManager(present_images=present_images)
-        self.api = _FakeDockerAPI()
+        self.api = _FakeDockerAPI(stream_delay=stream_delay)
 
     def ping(self) -> bool:
         if not self.ping_ok:
@@ -198,8 +233,10 @@ def _make_client(
     ping_ok: bool = True,
     cgroup_root: Path | None = None,
     required_images: str = "",
-    present_images: set[str] | None = None,
+    present_images: set[str] | dict[str, dict[str, str]] | None = None,
     ncpu: int = 16,
+    default_build_timeout_seconds: int = 600,
+    stream_delay: float = 0.0,
 ) -> tuple[TestClient, _FakeDockerClient, JobRunnerSettings]:
     stage_root = tmp_path / "stages"
     plugin_root = tmp_path / "plugin_builds"
@@ -211,8 +248,14 @@ def _make_client(
         plugin_source_root=plugin_root,
         cgroup_root=cgroup_root or (tmp_path / "nonexistent_cgroup"),
         required_images=required_images,
+        default_build_timeout_seconds=default_build_timeout_seconds,
     )
-    fake_docker = _FakeDockerClient(ping_ok=ping_ok, present_images=present_images, ncpu=ncpu)
+    fake_docker = _FakeDockerClient(
+        ping_ok=ping_ok,
+        present_images=present_images,
+        ncpu=ncpu,
+        stream_delay=stream_delay,
+    )
     service = DockerJobRunnerService(settings, client=fake_docker)  # type: ignore[arg-type]
     app = create_app(settings=settings, service=service)
     return TestClient(app), fake_docker, settings
@@ -229,6 +272,7 @@ def test_only_fixed_endpoints_are_exposed(tmp_path: Path) -> None:
         ("/healthz", ("GET",)),
         ("/readyz", ("GET",)),
         ("/v1/plugins/build", ("POST",)),
+        ("/v1/plugins/images/delete", ("POST",)),
         ("/v1/stages/start", ("POST",)),
         ("/v1/stages", ("GET",)),
         ("/v1/stages/{stage_execution_id}", ("GET",)),
@@ -655,3 +699,346 @@ def test_start_stage_clamps_cpu_cores_to_host_ncpu_and_logs_errors(tmp_path: Pat
         missing = client.get("/v1/stages/does-not-exist")
     assert missing.status_code == 404
     assert any("job_runner 404:" in rec.message for rec in caplog.records)
+
+
+def test_build_plugin_pip_index_url_network_none_and_timeout(tmp_path: Path, monkeypatch: Any) -> None:
+    client, fake_docker, settings = _make_client(tmp_path, default_build_timeout_seconds=120)
+    src_dir = settings.plugin_source_root / "acme.idx" / "1.0.0"
+    src_dir.mkdir(parents=True)
+    (src_dir / "plugin.yaml").write_text("schema: ies.algorithm-plugin\n", encoding="utf-8")
+    (src_dir / "main.py").write_text("def solve(ctx): pass\n", encoding="utf-8")
+    (src_dir / "requirements.txt").write_text("numpy>=1.26\n", encoding="utf-8")
+
+    # 1. Valid custom pip_index_url emits ONLY --index-url (never --extra-index-url).
+    ok_idx = client.post(
+        "/v1/plugins/build",
+        json={
+            "plugin_id": "acme.idx",
+            "version": "1.0.0",
+            "source_rel": "acme.idx/1.0.0",
+            "requirements_rel": "requirements.txt",
+            "pip_index_url": "https://pypi.internal.example/simple",
+            "timeout_seconds": 300,
+        },
+    )
+    assert ok_idx.status_code == 200, ok_idx.text
+    call0 = fake_docker.api.build_calls[0]
+    assert call0["kwargs"]["timeout"] == 300
+    assert "network_mode" not in call0["kwargs"]
+    with tarfile.open(fileobj=io.BytesIO(call0["tar_bytes"]), mode="r") as tar:
+        df_text = tar.extractfile("Dockerfile").read().decode("utf-8")  # type: ignore[union-attr]
+    assert (
+        'RUN ["pip", "install", "--no-cache-dir", "--index-url", '
+        '"https://pypi.internal.example/simple", "-r", "/plugin/requirements.txt"]'
+    ) in df_text
+    assert "--extra-index-url" not in df_text
+
+    # 2. Empty pip_index_url -> None (default PyPI), omitted timeout -> default_build_timeout_seconds.
+    no_idx = client.post(
+        "/v1/plugins/build",
+        json={
+            "plugin_id": "acme.idx",
+            "version": "1.0.0",
+            "source_rel": "acme.idx/1.0.0",
+            "requirements_rel": "requirements.txt",
+            "pip_index_url": "",
+        },
+    )
+    assert no_idx.status_code == 200
+    call1 = fake_docker.api.build_calls[1]
+    assert call1["kwargs"]["timeout"] == 120
+    with tarfile.open(fileobj=io.BytesIO(call1["tar_bytes"]), mode="r") as tar:
+        df_text1 = tar.extractfile("Dockerfile").read().decode("utf-8")  # type: ignore[union-attr]
+    assert "--index-url" not in df_text1
+    assert "--extra-index-url" not in df_text1
+
+    # 3. No requirements_rel enforces network_mode="none".
+    no_req = client.post(
+        "/v1/plugins/build",
+        json={
+            "plugin_id": "acme.idx",
+            "version": "1.0.0",
+            "source_rel": "acme.idx/1.0.0",
+        },
+    )
+    assert no_req.status_code == 200
+    assert fake_docker.api.build_calls[2]["kwargs"]["network_mode"] == "none"
+
+    # 4. Invalid pip_index_url and out-of-range timeout_seconds fail with 422.
+    for bad_url in (
+        "   ",
+        "https://pypi.example/simple --extra-index-url https://evil",
+        "https://pypi.example/simple\nRUN evil",
+        "ftp://pypi.example/simple",
+        "http://",
+        "/relative/path",
+    ):
+        r_bad = client.post(
+            "/v1/plugins/build",
+            json={
+                "plugin_id": "acme.idx",
+                "version": "1.0.0",
+                "source_rel": "acme.idx/1.0.0",
+                "requirements_rel": "requirements.txt",
+                "pip_index_url": bad_url,
+            },
+        )
+        assert r_bad.status_code == 422, (bad_url, r_bad.text)
+
+    for bad_timeout in (9, 3601):
+        r_to = client.post(
+            "/v1/plugins/build",
+            json={
+                "plugin_id": "acme.idx",
+                "version": "1.0.0",
+                "source_rel": "acme.idx/1.0.0",
+                "timeout_seconds": bad_timeout,
+            },
+        )
+        assert r_to.status_code == 422
+
+    # 5. Monotonic deadline enforcement across slow build stream.
+    ticks = iter([100.0, 115.0, 115.0])
+    monkeypatch.setattr("pies_job_runner.docker_ops._monotonic", lambda: next(ticks))
+    timed_out = client.post(
+        "/v1/plugins/build",
+        json={
+            "plugin_id": "acme.idx",
+            "version": "1.0.0",
+            "source_rel": "acme.idx/1.0.0",
+            "timeout_seconds": 10,
+        },
+    )
+    assert timed_out.status_code == 400
+    assert "timed out" in timed_out.json()["detail"]
+
+
+def test_build_plugin_hard_deadline_interrupts_blocked_and_slow_streams(
+    tmp_path: Path,
+) -> None:
+    _, fake_docker, settings = _make_client(tmp_path)
+    fast_settings = settings.model_copy(update={"default_build_timeout_seconds": 0.05})
+    client = TestClient(
+        create_app(
+            settings=fast_settings,
+            service=DockerJobRunnerService(fast_settings, client=fake_docker),  # type: ignore[arg-type]
+        )
+    )
+    src_dir = settings.plugin_source_root / "acme.hang" / "1.0.0"
+    src_dir.mkdir(parents=True)
+    (src_dir / "plugin.yaml").write_text("schema: ies.algorithm-plugin\n", encoding="utf-8")
+    (src_dir / "main.py").write_text("def solve(ctx): pass\n", encoding="utf-8")
+
+    # 1. Stream permanently blocked inside next(stream) must abort promptly at deadline.
+    release_stream = threading.Event()
+    blocked_closed = threading.Event()
+
+    class _BlockedStream:
+        def __init__(self) -> None:
+            self._step = 0
+
+        def __iter__(self) -> _BlockedStream:
+            return self
+
+        def __next__(self) -> dict[str, str]:
+            if self._step == 0:
+                self._step = 1
+                return {"stream": "Step 1/2 : FROM pies-plugin-base:latest\n"}
+            release_stream.wait(10.0)
+            raise StopIteration
+
+        def close(self) -> None:
+            blocked_closed.set()
+
+    fake_docker.api.build = lambda **kwargs: _BlockedStream()  # type: ignore[method-assign]
+    started = time.monotonic()
+    try:
+        blocked_resp = client.post(
+            "/v1/plugins/build",
+            json={
+                "plugin_id": "acme.hang",
+                "version": "1.0.0",
+                "source_rel": "acme.hang/1.0.0",
+            },
+        )
+    finally:
+        release_stream.set()
+    elapsed = time.monotonic() - started
+    assert blocked_resp.status_code == 400
+    assert "timed out" in blocked_resp.json()["detail"]
+    assert elapsed < 1.0
+    assert blocked_closed.wait(timeout=1.0)
+
+    # 2. Real stdlib BufferedReader-backed HTTPResponse blocked on recv() must abort promptly
+    # without deadlocking on resp.close(), and must unblock/terminate the reader generator.
+    server_release = threading.Event()
+    generator_finished = threading.Event()
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(1)
+    srv_port = srv.getsockname()[1]
+
+    def _serve_stalled_http() -> None:
+        conn_sock, _ = srv.accept()
+        try:
+            conn_sock.recv(4096)
+            chunk_body = b'{"stream": "Step 1/2 : FROM pies-plugin-base:latest\\n"}\n'
+            payload = (
+                b"HTTP/1.1 200 OK\r\n"
+                b"Transfer-Encoding: chunked\r\n\r\n"
+                + f"{len(chunk_body):x}\r\n".encode("ascii")
+                + chunk_body
+                + b"\r\n"
+            )
+            conn_sock.sendall(payload)
+            server_release.wait(10.0)
+        finally:
+            conn_sock.close()
+
+    srv_thread = threading.Thread(target=_serve_stalled_http, daemon=True)
+    srv_thread.start()
+
+    def _http_stream_build(**kwargs: Any):
+        conn = http.client.HTTPConnection("127.0.0.1", srv_port, timeout=10.0)
+        conn.request("GET", "/build")
+        response = conn.getresponse()
+        try:
+            while True:
+                line = response.fp.readline()
+                if not line:
+                    break
+                if line.startswith(b"{"):
+                    yield json.loads(line.decode("utf-8"))
+        finally:
+            try:
+                response.close()
+            finally:
+                conn.close()
+                generator_finished.set()
+
+    fake_docker.api.build = _http_stream_build  # type: ignore[method-assign]
+    http_started = time.monotonic()
+    try:
+        http_resp = client.post(
+            "/v1/plugins/build",
+            json={
+                "plugin_id": "acme.hang",
+                "version": "1.0.0",
+                "source_rel": "acme.hang/1.0.0",
+            },
+        )
+        http_elapsed = time.monotonic() - http_started
+        assert http_resp.status_code == 400
+        assert "timed out" in http_resp.json()["detail"]
+        assert http_elapsed < 1.0
+        # Reader generator must unblock and finish BEFORE server releases the socket.
+        assert generator_finished.wait(timeout=1.0)
+    finally:
+        server_release.set()
+        srv.close()
+        srv_thread.join(timeout=1.0)
+
+    # 3. Multi-chunk stream whose per-chunk gap < budget still aborts when total > budget.
+    def _slow_chunks(**kwargs: Any):
+        for idx in range(6):
+            time.sleep(0.025)
+            yield {"stream": f"Step {idx + 1}/6\n"}
+
+    fake_docker.api.build = _slow_chunks  # type: ignore[method-assign]
+    slow_started = time.monotonic()
+    slow_resp = client.post(
+        "/v1/plugins/build",
+        json={
+            "plugin_id": "acme.hang",
+            "version": "1.0.0",
+            "source_rel": "acme.hang/1.0.0",
+        },
+    )
+    slow_elapsed = time.monotonic() - slow_started
+    assert slow_resp.status_code == 400
+    assert "timed out" in slow_resp.json()["detail"]
+    assert slow_elapsed < 1.0
+
+
+def test_delete_plugin_image_whitelist_labels_and_conflicts(tmp_path: Path) -> None:
+    present = {
+        "pies-plugin/acme.algo:1.0.0": {
+            LABEL_MANAGED: "true",
+            LABEL_PLUGIN_ID: "acme.algo",
+            LABEL_PLUGIN_VERSION: "1.0.0",
+        },
+        "pies-plugin/unmanaged.algo:1.0.0": {
+            LABEL_PLUGIN_ID: "unmanaged.algo",
+            LABEL_PLUGIN_VERSION: "1.0.0",
+        },
+        "pies-plugin/mismatch.algo:1.0.0": {
+            LABEL_MANAGED: "true",
+            LABEL_PLUGIN_ID: "other.algo",
+            LABEL_PLUGIN_VERSION: "1.0.0",
+        },
+        "pies-plugin/busy.algo:1.0.0": {
+            LABEL_MANAGED: "true",
+            LABEL_PLUGIN_ID: "busy.algo",
+            LABEL_PLUGIN_VERSION: "1.0.0",
+        },
+    }
+    client, fake_docker, settings = _make_client(tmp_path, present_images=present)
+    fake_docker.images.remove_conflict_images.add("pies-plugin/busy.algo:1.0.0")
+
+    # Delete managed matching image -> deleted=True, then idempotent not_found.
+    resp_del = client.post(
+        "/v1/plugins/images/delete",
+        json={"plugin_id": "acme.algo", "version": "1.0.0"},
+    )
+    assert resp_del.status_code == 200, resp_del.text
+    assert resp_del.json() == {
+        "image": "pies-plugin/acme.algo:1.0.0",
+        "plugin_id": "acme.algo",
+        "version": "1.0.0",
+        "deleted": True,
+        "status": "deleted",
+    }
+
+    resp_missing = client.post(
+        "/v1/plugins/images/delete",
+        json={"plugin_id": "acme.algo", "version": "1.0.0"},
+    )
+    assert resp_missing.status_code == 200
+    assert resp_missing.json()["deleted"] is False
+    assert resp_missing.json()["status"] == "not_found"
+
+    # Unmanaged or label-mismatched images are rejected 400 and never removed.
+    for pid in ("unmanaged.algo", "mismatch.algo"):
+        r_bad = client.post(
+            "/v1/plugins/images/delete",
+            json={"plugin_id": pid, "version": "1.0.0"},
+        )
+        assert r_bad.status_code == 400
+        assert f"pies-plugin/{pid}:1.0.0" in fake_docker.images.present_images
+
+    # Docker 409 in-use conflict maps to 409; force=True removes cleanly.
+    r_busy = client.post(
+        "/v1/plugins/images/delete",
+        json={"plugin_id": "busy.algo", "version": "1.0.0", "force": False},
+    )
+    assert r_busy.status_code == 409
+    r_force = client.post(
+        "/v1/plugins/images/delete",
+        json={"plugin_id": "busy.algo", "version": "1.0.0", "force": True},
+    )
+    assert r_force.status_code == 200
+    assert r_force.json()["deleted"] is True
+
+    # Prefix tampering toward builtin/base images is blocked.
+    bad_settings = settings.model_copy(update={"plugin_image_prefix": "pies-builtin-stages"})
+    bad_client = TestClient(
+        create_app(
+            settings=bad_settings,
+            service=DockerJobRunnerService(bad_settings, client=fake_docker),  # type: ignore[arg-type]
+        )
+    )
+    r_prefix = bad_client.post(
+        "/v1/plugins/images/delete",
+        json={"plugin_id": "acme.algo", "version": "1.0.0"},
+    )
+    assert r_prefix.status_code == 400

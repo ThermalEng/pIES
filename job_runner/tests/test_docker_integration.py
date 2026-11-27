@@ -451,3 +451,68 @@ def test_real_docker_start_stage_clamps_cpu_cores_to_host_ncpu(docker_harness) -
     assert done["exit_code"] == 0
     assert done["resources"]["cpu_limit_cores"] == {"status": "limited", "value": float(host_ncpu)}
     assert client.post(f"/v1/stages/{exec_id}/cleanup", json={}).status_code == 200
+
+
+def test_real_docker_build_no_requirements_network_none_and_delete_plugin_image(
+    docker_harness,
+) -> None:
+    client, settings, docker_client, _run_id = docker_harness
+
+    src_dir = settings.plugin_source_root / "acme.noreq" / "1.0.0"
+    src_dir.mkdir(parents=True)
+    (src_dir / "plugin.yaml").write_text(
+        "schema: ies.algorithm-plugin\nschema_version: '1.0.0'\n",
+        encoding="utf-8",
+    )
+    (src_dir / "main.py").write_text(
+        "import json\n"
+        "def solve(in_dir, out_dir):\n"
+        "    (out_dir / 'ok.json').write_text(json.dumps({'ok': True}), encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+
+    build_resp = client.post(
+        "/v1/plugins/build",
+        json={
+            "plugin_id": "acme.noreq",
+            "version": "1.0.0",
+            "source_rel": "acme.noreq/1.0.0",
+            "timeout_seconds": 120,
+        },
+    )
+    assert build_resp.status_code == 200, build_resp.text
+    built_tag = build_resp.json()["image"]
+    built_img = docker_client.images.get(built_tag)
+    labels = (built_img.attrs.get("Config") or {}).get("Labels") or {}
+    assert labels.get(LABEL_MANAGED) == "true"
+    assert labels.get("pies.plugin_id") == "acme.noreq"
+    assert labels.get("pies.plugin_version") == "1.0.0"
+
+    # Delete managed image -> deleted=True, repeat -> not_found.
+    del_resp = client.post(
+        "/v1/plugins/images/delete",
+        json={"plugin_id": "acme.noreq", "version": "1.0.0"},
+    )
+    assert del_resp.status_code == 200, del_resp.text
+    assert del_resp.json()["deleted"] is True
+    assert del_resp.json()["status"] == "deleted"
+
+    del_again = client.post(
+        "/v1/plugins/images/delete",
+        json={"plugin_id": "acme.noreq", "version": "1.0.0"},
+    )
+    assert del_again.status_code == 200, del_again.text
+    assert del_again.json()["deleted"] is False
+    assert del_again.json()["status"] == "not_found"
+
+    # Unmanaged image under plugin prefix without pies.managed labels must be refused (400).
+    unmanaged_tag = f"{settings.plugin_image_prefix}/unmanaged.ref:1.0.0"
+    docker_client.images.get(settings.plugin_base_image).tag(unmanaged_tag)
+    try:
+        refused = client.post(
+            "/v1/plugins/images/delete",
+            json={"plugin_id": "unmanaged.ref", "version": "1.0.0"},
+        )
+        assert refused.status_code == 400
+    finally:
+        docker_client.images.remove(unmanaged_tag, force=True)

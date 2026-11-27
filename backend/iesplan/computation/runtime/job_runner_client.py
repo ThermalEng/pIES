@@ -3,6 +3,7 @@
 Talks strictly to job_runner's fixed endpoints:
 - GET  /readyz
 - POST /v1/plugins/build
+- POST /v1/plugins/images/delete
 - POST /v1/stages/start
 - GET  /v1/stages
 - GET  /v1/stages/{stage_execution_id}
@@ -68,6 +69,27 @@ class BuildPluginResult:
             version=str(data["version"]),
             built_at=str(data["built_at"]),
             logs=tuple(str(line) for line in (data.get("logs") or ())),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class DeletePluginImageResult:
+    """Response from POST /v1/plugins/images/delete."""
+
+    image: str
+    plugin_id: str
+    version: str
+    deleted: bool
+    status: str
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> DeletePluginImageResult:
+        return cls(
+            image=str(data["image"]),
+            plugin_id=str(data["plugin_id"]),
+            version=str(data["version"]),
+            deleted=bool(data["deleted"]),
+            status=str(data["status"]),
         )
 
 
@@ -272,6 +294,8 @@ class JobRunnerClient:
         source_rel: str,
         *,
         requirements_rel: str | None = None,
+        pip_index_url: str | None = None,
+        timeout_seconds: int | None = None,
     ) -> BuildPluginResult:
         """Build a plugin image via POST /v1/plugins/build."""
         body: dict[str, Any] = {
@@ -281,13 +305,39 @@ class JobRunnerClient:
         }
         if requirements_rel is not None:
             body["requirements_rel"] = requirements_rel
+        if pip_index_url is not None:
+            body["pip_index_url"] = pip_index_url
+        if timeout_seconds is not None:
+            body["timeout_seconds"] = int(timeout_seconds)
+        req_timeout = (
+            float(timeout_seconds) if timeout_seconds is not None else self.build_timeout_seconds
+        )
         data = self._request(
             "POST",
             "/v1/plugins/build",
             json_body=body,
-            timeout=self.build_timeout_seconds,
+            timeout=req_timeout,
         )
         return BuildPluginResult.from_dict(data)
+
+    def delete_plugin_image(
+        self,
+        plugin_id: str,
+        version: str,
+        *,
+        force: bool = False,
+    ) -> DeletePluginImageResult:
+        """Delete a managed plugin image via POST /v1/plugins/images/delete."""
+        data = self._request(
+            "POST",
+            "/v1/plugins/images/delete",
+            json_body={
+                "plugin_id": plugin_id,
+                "version": version,
+                "force": bool(force),
+            },
+        )
+        return DeletePluginImageResult.from_dict(data)
 
     def start_stage(self, spec: StartStageSpec) -> StageInspection:
         """Start an ephemeral isolated stage container via POST /v1/stages/start."""
@@ -367,6 +417,7 @@ class JobRunnerClient:
 __all__ = [
     "BuildPluginResult",
     "CleanupStageResult",
+    "DeletePluginImageResult",
     "JobRunnerBadRequestError",
     "JobRunnerClient",
     "JobRunnerClientError",
