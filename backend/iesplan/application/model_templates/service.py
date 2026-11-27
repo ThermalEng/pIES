@@ -811,6 +811,32 @@ def _publish(
     summary_handle = _put_json(db, summary, "model_template_summary")
     diag_handle = _put_json(db, [], "model_template_diagnostics")
 
+    # 条件认领发布权限: 若并发请求已推进 draft_revision 或 published_revision，直接 409 拒绝
+    claimed = model_domain.claim_template_publish(
+        db,
+        template.id,
+        expected_draft_revision=template.draft_revision,
+        expected_published_revision=template.published_revision,
+        published_revision=next_revision,
+        published_at=datetime.now(UTC),
+        status=TEMPLATE_STATUS_PUBLISHED,
+    )
+    if not claimed:
+        db.rollback()
+        if idempotency_key:
+            same = model_domain.find_revision_by_idempotency(db, template.id, idempotency_key)
+            if same is not None:
+                return {"revision": _revision_to_dict(same), "duplicate": True}
+        raise TemplateConflictError(
+            "模板草稿或发布版本已被并发修改，请刷新后重试",
+            params={
+                "template_id": template_id,
+                "expected_revision": expected_revision,
+                "current_revision": template.draft_revision,
+            },
+            location={"object_type": "model_template", "template_id": template_id},
+        )
+
     try:
         row, superseded_object_ids = model_domain.replace_published_revision(
             db,
@@ -860,10 +886,7 @@ def _publish(
     template = model_domain.update_template(
         db,
         template.id,
-        published_revision=row.revision,
         current_published_revision_id=row.id,
-        published_at=datetime.now(UTC),
-        status=TEMPLATE_STATUS_PUBLISHED,
     )
     audit_domain.append_entry(
         db,

@@ -192,7 +192,13 @@ class ValidationReport:
 # ---------------------------------------------------------------------------
 
 
-def validate_project(db: Session, project_id: int, include_data: bool = True) -> ValidationReport:
+def validate_project(
+    db: Session,
+    project_id: int,
+    include_data: bool = True,
+    *,
+    user_id: int | None = None,
+) -> ValidationReport:
     """执行项目完整预检(REQ-CALC-007 校验门禁), 一次返回全部问题。
 
     聚合检查: 模型完整性/拓扑、参数与变量、数据绑定与质量、配置兼容与 IRR 硬约束、
@@ -204,6 +210,7 @@ def validate_project(db: Session, project_id: int, include_data: bool = True) ->
         db: 数据库会话。
         project_id: 项目 id(不存在或已删除抛 NotFoundError)。
         include_data: 是否包含数据检查(任意方案评价等场景可跳过大数据项)。
+        user_id: 当前操作成员 ID（决定本地生态设备模型的成员启用视图；未传则回退项目所有者）。
 
     返回:
         ValidationReport: 诊断一次返回全部; error/blocking 级阻断提交,
@@ -211,7 +218,7 @@ def validate_project(db: Session, project_id: int, include_data: bool = True) ->
     """
     project = project_domain.require_project(db, project_id)
     diags: list[Diagnostic] = []
-    _check_model(db, project_id, diags)
+    _check_model(db, project_id, diags, user_id=user_id)
     _check_config(db, project_id, diags)
     if include_data:
         _check_data(db, project, diags)
@@ -556,14 +563,21 @@ def _check_topology(
             seen[key] = cname
 
 
-def _check_model(db: Session, project_id: int, diags: list[Diagnostic]) -> None:
+def _check_model(
+    db: Session,
+    project_id: int,
+    diags: list[Diagnostic],
+    *,
+    user_id: int | None = None,
+) -> None:
     """模型完整性: 拓扑/设备参数 + 电网连接/负荷/载体供给(草稿内容 2.0 名键事实)。"""
     content = _current_draft_content(db, project_id)
     project = project_domain.require_project(db, project_id)
     devices, conns = _model_section(content)
+    effective_user_id = user_id if user_id is not None else project.owner_id
     device_documents = {
         rec.stable_id: doc
-        for rec, doc in list_user_enabled_device_documents(db, project.owner_id)
+        for rec, doc in list_user_enabled_device_documents(db, effective_user_id)
     }
     device_documents.update(load_project_device_documents(db, content))
     by_name = {d.get("name"): d for d in devices if isinstance(d.get("name"), str)}

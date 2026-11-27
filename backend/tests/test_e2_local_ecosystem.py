@@ -1698,3 +1698,231 @@ def test_lifecycle_single_active_overwrite_stale_build_and_retryable_cleanup(
         assert rmtree_err.value.code == "ECO-BUILD-CLEANUP"
 
 
+def test_codex_r3_queued_build_version_binding_replace_order_and_collaborator_precheck(
+    db_factory: sessionmaker[Session],
+    db: Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from iesplan.application import projects as projects_app
+    from iesplan.application.ecosystem import plugins as eco_plg_mod
+    from iesplan.application.validations import run_validation_case
+
+    admin = make_user(db, "r3_admin", role="admin")
+    owner = make_user(db, "r3_owner", role="engineer")
+    db.commit()
+
+    # 1. Queued v1 build overwritten by v2 MUST NOT tag/overwrite v2 state or image
+    class _DeferredScheduler:
+        def __init__(self) -> None:
+            self.jobs: list[Any] = []
+
+        def submit_plugin_build(self, fn: Any) -> Any:
+            self.jobs.append(fn)
+            return SimpleNamespace(result=fn)
+
+    pid = "acme.algorithm.r3_queue"
+    zip_v1 = _build_plugin_zip_bytes(plugin_id=pid, version="1.0.0")
+    zip_v2 = _build_plugin_zip_bytes(plugin_id=pid, version="2.0.0")
+    sched_v1 = _DeferredScheduler()
+    queued_v1 = ecosystem_app.upload_plugin_zip_case(
+        db, admin, zip_bytes=zip_v1, scheduler=sched_v1, wait_for_build=False,
+        job_runner_client=_FakeJobRunnerTransport(
+            stage_root=tmp_path / "r3_stages", plugin_source_root=tmp_path / "r3_builds"
+        ).make_client(),
+        session_factory=db_factory,
+        plugin_source_root=tmp_path / "r3_builds",
+        stage_root=tmp_path / "r3_stages",
+    )
+    art_id = queued_v1["id"]
+    assert queued_v1["install_status"] == "building"
+    assert len(sched_v1.jobs) == 1
+
+    # Overwrite to v2 before the stale v1 build job executes
+    jr_v2 = _FakeJobRunnerTransport(
+        stage_root=tmp_path / "r3_stages", plugin_source_root=tmp_path / "r3_builds"
+    ).make_client()
+    upgraded_v2 = ecosystem_app.upload_plugin_zip_case(
+        db,
+        admin,
+        zip_bytes=zip_v2,
+        job_runner_client=jr_v2,
+        session_factory=db_factory,
+        plugin_source_root=tmp_path / "r3_builds",
+        stage_root=tmp_path / "r3_stages",
+    )
+    assert upgraded_v2["version"] == "2.0.0"
+    assert upgraded_v2["install_status"] == "ready"
+
+    # Now execute the real queued v1 job bound to expected_version="1.0.0"
+    with pytest.raises(EcosystemConflictError):
+        sched_v1.jobs[0]()
+    after_stale = ecosystem_domain.get_artifact(db, art_id)
+    assert after_stale is not None
+    assert after_stale.version == "2.0.0"
+    assert after_stale.install_status == "ready"
+    assert after_stale.image_ref == f"pies-plugin/{pid}:2.0.0"
+
+    # Also guard mid-build overwrite between initial check and testing commit
+    class _MidBuildOverwriteJR:
+        def __init__(self, inner: Any) -> None:
+            self.inner = inner
+
+        def build_plugin(self, plugin_id: str, ver: str, *args: Any, **kwargs: Any) -> Any:
+            res = self.inner.build_plugin(plugin_id, ver, *args, **kwargs)
+            if ver == "1.0.0":
+                with db_factory() as race_db:
+                    ecosystem_domain.update_artifact(
+                        race_db, race_art.id, version="2.0.0", install_status="ready",
+                        image_ref=f"pies-plugin/{plugin_id}:2.0.0",
+                    )
+                    race_db.commit()
+            return res
+
+        def delete_plugin_image(self, *args: Any, **kwargs: Any) -> Any:
+            return self.inner.delete_plugin_image(*args, **kwargs)
+
+    race_pid = "acme.algorithm.r3_midrace"
+    race_zip_v1 = _build_plugin_zip_bytes(plugin_id=race_pid, version="1.0.0")
+    race_transport = _FakeJobRunnerTransport(
+        stage_root=tmp_path / "r3_stages", plugin_source_root=tmp_path / "r3_builds"
+    )
+    sched_race = _DeferredScheduler()
+    race_rec = ecosystem_app.upload_plugin_zip_case(
+        db, admin, zip_bytes=race_zip_v1, scheduler=sched_race, wait_for_build=False,
+        job_runner_client=_MidBuildOverwriteJR(race_transport.make_client()),
+        session_factory=db_factory,
+        plugin_source_root=tmp_path / "r3_builds",
+        stage_root=tmp_path / "r3_stages",
+    )
+    race_art = ecosystem_domain.get_artifact(db, race_rec["id"])
+    assert race_art is not None
+    assert race_art.install_status == "building"
+    with pytest.raises(EcosystemConflictError):
+        sched_race.jobs[0]()
+    assert any(c.get("version") == "1.0.0" for c in race_transport.delete_calls)
+    protected_v2 = ecosystem_domain.get_artifact(db, race_art.id)
+    assert protected_v2 is not None
+    assert protected_v2.version == "2.0.0"
+    assert protected_v2.install_status == "ready"
+    assert protected_v2.image_ref == f"pies-plugin/{race_pid}:2.0.0"
+
+    # 2. Replacement DB failure MUST NOT delete old ready image; post-commit delete fail preserves retry
+    ord_pid = "acme.algorithm.r3_order"
+    ord_transport = _FakeJobRunnerTransport(
+        stage_root=tmp_path / "r3_stages", plugin_source_root=tmp_path / "r3_builds"
+    )
+    ord_v1 = ecosystem_app.upload_plugin_zip_case(
+        db,
+        admin,
+        zip_bytes=_build_plugin_zip_bytes(plugin_id=ord_pid, version="1.0.0"),
+        job_runner_client=ord_transport.make_client(),
+        session_factory=db_factory,
+        plugin_source_root=tmp_path / "r3_builds",
+        stage_root=tmp_path / "r3_stages",
+    )
+    assert len(ord_transport.delete_calls) == 0
+
+    def _fail_put(*args: Any, **kwargs: Any) -> Any:
+        raise RuntimeError("simulated object store outage before commit")
+
+    with monkeypatch.context() as mp:
+        mp.setattr(eco_plg_mod, "put_object", _fail_put)
+        with pytest.raises(RuntimeError, match="simulated object store outage"):
+            ecosystem_app.upload_plugin_zip_case(
+                db,
+                admin,
+                zip_bytes=_build_plugin_zip_bytes(plugin_id=ord_pid, version="2.0.0"),
+                job_runner_client=ord_transport.make_client(),
+                session_factory=db_factory,
+                plugin_source_root=tmp_path / "r3_builds",
+                stage_root=tmp_path / "r3_stages",
+            )
+    assert len(ord_transport.delete_calls) == 0
+    still_v1 = ecosystem_domain.get_artifact(db, ord_v1["id"])
+    assert still_v1 is not None
+    assert still_v1.version == "1.0.0"
+    assert still_v1.install_status == "ready"
+    assert still_v1.image_ref == f"pies-plugin/{ord_pid}:1.0.0"
+
+    class _FailOldDeleteJR:
+        def __init__(self, inner: Any) -> None:
+            self.inner = inner
+
+        def __getattr__(self, name: str) -> Any:
+            return getattr(self.inner, name)
+
+        def delete_plugin_image(self, *args: Any, **kwargs: Any) -> Any:
+            raise RuntimeError("docker rm timeout post-commit")
+
+    with pytest.raises(AppError) as post_del_err:
+        ecosystem_app.upload_plugin_zip_case(
+            db,
+            admin,
+            zip_bytes=_build_plugin_zip_bytes(plugin_id=ord_pid, version="2.0.0"),
+            job_runner_client=_FailOldDeleteJR(ord_transport.make_client()),  # type: ignore[arg-type]
+            session_factory=db_factory,
+            plugin_source_root=tmp_path / "r3_builds",
+            stage_root=tmp_path / "r3_stages",
+        )
+    assert post_del_err.value.code == "ECO-IMAGE-CLEANUP-FAILED"
+    post_rec = ecosystem_domain.get_artifact(db, ord_v1["id"])
+    assert post_rec is not None
+    assert post_rec.version == "2.0.0"
+    assert post_rec.install_status == "build_failed"
+    assert post_rec.diagnostics is not None
+    assert post_rec.diagnostics["cleanup_retryable"] is True
+    assert post_rec.diagnostics["stale_image_ref"] == f"pies-plugin/{ord_pid}:1.0.0"
+
+    # 3. Acting user precheck resolves acting user's enabled devices (not project.owner_id)
+    ns = generate_namespace()
+    collab_dev_id = f"user.{ns}.device.collab_hp"
+    imp_dev = ecosystem_app.import_device_model_case(
+        db, admin, yaml_text=_sample_device_yaml(collab_dev_id, power_rating=4.0), revision=1
+    )
+    ecosystem_app.install_artifact_for_user_case(db, owner, imp_dev["id"], enabled=True)
+    ecosystem_app.set_member_artifact_enabled_case(db, admin, imp_dev["id"], enabled=False)
+    collab_proj = projects_app.create_project(
+        db,
+        owner,
+        name="Collab Precheck Proj",
+        baseline_resolution="1h",
+        baseline_start_year=2025,
+        baseline_scenario_mode="single",
+    )
+    db.commit()
+    projects_app.update_draft(
+        db,
+        owner,
+        collab_proj.id,
+        commands=[
+            {
+                "id": "cmd-collab-dev",
+                "unit": "model",
+                "type": "model.upsert_device",
+                "payload": {
+                    "name": "hp_collab",
+                    "device_type": collab_dev_id,
+                    "kind": "new",
+                    "params": {"cop": 4.0},
+                },
+            }
+        ],
+        expected_revision=1,
+    )
+    # Admin has view access; when admin has NOT installed collab_dev_id, admin precheck raises
+    from iesplan.core.errors import NotFoundError
+
+    assert "report" in run_validation_case(db, owner, collab_proj.id)
+    with pytest.raises(NotFoundError):
+        run_validation_case(db, admin, collab_proj.id)
+
+    # Flip installation: enable for admin and disable for owner -> admin succeeds, owner fails
+    ecosystem_app.set_member_artifact_enabled_case(db, admin, imp_dev["id"], enabled=True)
+    ecosystem_app.set_member_artifact_enabled_case(db, owner, imp_dev["id"], enabled=False)
+    assert "report" in run_validation_case(db, admin, collab_proj.id)
+    with pytest.raises(NotFoundError):
+        run_validation_case(db, owner, collab_proj.id)
+
+
+

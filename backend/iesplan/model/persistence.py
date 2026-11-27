@@ -206,6 +206,34 @@ def create_template(
     return _row_to_template(row)
 
 
+def claim_template_publish(
+    db: Session,
+    template_row_id: int,
+    *,
+    expected_draft_revision: int,
+    expected_published_revision: int,
+    published_revision: int,
+    published_at: Any,
+    status: str,
+) -> bool:
+    """按期望草稿与发布 revision 条件认领发布，防止并发覆盖丢更新（只 flush）。"""
+    res = db.execute(
+        sa.update(ModelTemplate)
+        .where(
+            ModelTemplate.id == template_row_id,
+            ModelTemplate.draft_revision == expected_draft_revision,
+            ModelTemplate.published_revision == expected_published_revision,
+        )
+        .values(
+            published_revision=published_revision,
+            published_at=published_at,
+            status=status,
+        )
+    )
+    db.flush()
+    return (res.rowcount or 0) > 0
+
+
 def update_template(db: Session, template_row_id: int, **fields: Any) -> ModelTemplateRecord:
     """更新模板主表字段（仅提供字段）并返回新视图；缺失抛 ModelNotFoundError。"""
     row = db.get(ModelTemplate, template_row_id)

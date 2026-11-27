@@ -599,3 +599,59 @@ def test_empty_db_builds_current_schema(tmp_path: Path) -> None:
     assert "project_models" in tables
     assert "schema_migrations" not in tables
     fresh.dispose()
+
+
+def test_codex_r3_publish_rejects_concurrent_draft_or_publish_lost_update(
+    client: TestClient,
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """并发草稿修改或并发发布推进后，旧 publish 必须 409 拒绝且不得覆盖新版本。"""
+    from iesplan import model as model_domain
+    from iesplan.application.model_templates import service as tpl_service
+    from iesplan.identity.persistence import User
+
+    headers = _make_owner(client, db_session, "tpl_r3_race")
+    tpl = _create(client, headers)
+    _publish(client, headers, tpl["template_id"], 1, key="r3-pub-1")
+    yaml_v2 = _yaml_for_user(TEMPLATE_V2_YAML, "electric-load", headers)
+    upd = client.put(
+        f"/api/model-templates/{tpl['template_id']}",
+        json={"model_yaml": yaml_v2, "expected_revision": 1},
+        headers=headers,
+    )
+    assert upd.status_code == 200
+    owner_user = db_session.execute(
+        select(User).where(User.username == "tpl_r3_race")
+    ).scalar_one()
+
+    # Simulate another transaction advancing published_revision before claim_template_publish
+    orig_validate = tpl_service.validate_template_raw
+    bumped = {"done": False}
+
+    def _interleaved_validate(raw):
+        res = orig_validate(raw)
+        if not bumped["done"]:
+            bumped["done"] = True
+            stored = model_domain.get_owned_template(db_session, owner_user.id, tpl["template_id"])
+            assert stored is not None
+            model_domain.update_template(db_session, stored.id, draft_revision=3)
+            db_session.commit()
+        return res
+
+    with monkeypatch.context() as mp:
+        mp.setattr(tpl_service, "validate_template_raw", _interleaved_validate)
+        with pytest.raises(tpl_service.TemplateConflictError) as conflict_err:
+            tpl_service.publish_template(
+                db_session,
+                owner_user,
+                tpl["template_id"],
+                expected_revision=2,
+            )
+    assert conflict_err.value.http_status == 409
+    pub_detail = client.get(
+        f"/api/model-templates/{tpl['template_id']}/published", headers=headers
+    )
+    assert pub_detail.status_code == 200
+    assert pub_detail.json()["revision"]["revision"] == 1
+

@@ -658,6 +658,7 @@ def _execute_plugin_build_and_selftest(
     *,
     session_factory: Callable[[], Session],
     artifact_id: int,
+    expected_version: str | None = None,
     zip_bytes: bytes | None,
     job_runner_client: Any,
     plugin_source_root: Path,
@@ -666,23 +667,30 @@ def _execute_plugin_build_and_selftest(
     preextracted: tuple[dict[str, bytes], set[str]] | None = None,
     metadata: Mapping[str, Any] | None = None,
 ) -> LocalArtifactRecord:
-    """推进构建与断网自检门禁：清理失败保留 image_ref 与构建目录异常传播。"""
+    """推进构建与断网自检门禁：绑定 expected_version，清理失败保留 image_ref 并传播目录异常。"""
     with session_factory() as db:
         rec = ecosystem_domain.get_artifact(db, artifact_id)
         if rec is None:
             raise EcosystemArtifactNotFoundError("生态制品不存在", params={"artifact_id": artifact_id})
-        if rec.approval_status != "approved" or rec.install_status != "building":
+        target_version = expected_version or rec.version
+        if (
+            rec.approval_status != "approved"
+            or rec.install_status != "building"
+            or rec.version != target_version
+        ):
             raise EcosystemConflictError(
-                "制品当前状态不允许继续构建（可能已下架或变更状态）",
+                "制品当前状态或版本不允许继续构建（可能已下架、变更状态或被新版本覆盖）",
                 params={
                     "artifact_id": artifact_id,
+                    "expected_version": target_version,
+                    "current_version": rec.version,
                     "approval_status": rec.approval_status,
                     "install_status": rec.install_status,
                 },
             )
         meta = dict(metadata or rec.metadata_json)
         plugin_id = rec.stable_id
-        version = rec.version
+        version = target_version
         kind = rec.kind
 
     if preextracted is not None:
@@ -712,35 +720,39 @@ def _execute_plugin_build_and_selftest(
 
         with session_factory() as db:
             current = ecosystem_domain.get_artifact(db, artifact_id)
+            updated_testing: LocalArtifactRecord | None = None
             if (
-                current is None
-                or current.approval_status != "approved"
-                or current.install_status != "building"
-                or current.version != version
+                current is not None
+                and current.approval_status == "approved"
+                and current.install_status == "building"
+                and current.version == version
             ):
+                updated_testing = ecosystem_domain.update_artifact(
+                    db,
+                    artifact_id,
+                    expected_version=version,
+                    install_status="testing",
+                    image_ref=built_image,
+                    diagnostics={"build_logs": list(build_result.logs)},
+                )
+            if updated_testing is None:
                 del_err = _attempt_delete_built_image(
                     job_runner_client, plugin_id=plugin_id, version=version
                 )
-                if current is not None and del_err is not None:
+                if current is not None and current.version == version and del_err is not None:
                     ecosystem_domain.update_artifact(
                         db,
                         artifact_id,
+                        expected_version=version,
                         image_ref=built_image,
                         diagnostics={"cleanup_error": del_err, "cleanup_retryable": True},
                     )
                     db.commit()
                 raise EcosystemConflictError(
-                    "制品在构建期间已被下架或改变状态，已中止发布"
+                    "制品在构建期间已被下架、改变状态或覆盖为新版本，已中止发布"
                     + (f"（镜像清理失败: {del_err}）" if del_err else ""),
                     params={"artifact_id": artifact_id, "cleanup_error": del_err},
                 )
-            ecosystem_domain.update_artifact(
-                db,
-                artifact_id,
-                install_status="testing",
-                image_ref=built_image,
-                diagnostics={"build_logs": list(build_result.logs)},
-            )
             db.commit()
 
         for case in meta.get("tests") or ():
@@ -757,19 +769,30 @@ def _execute_plugin_build_and_selftest(
 
         with session_factory() as db:
             current = ecosystem_domain.get_artifact(db, artifact_id)
+            ready_rec: LocalArtifactRecord | None = None
             if (
-                current is None
-                or current.approval_status != "approved"
-                or current.install_status != "testing"
-                or current.version != version
+                current is not None
+                and current.approval_status == "approved"
+                and current.install_status == "testing"
+                and current.version == version
             ):
+                ready_rec = ecosystem_domain.update_artifact(
+                    db,
+                    artifact_id,
+                    expected_version=version,
+                    install_status="ready",
+                    image_ref=built_image,
+                    diagnostics={"build_logs": list(build_result.logs), "selftest": "passed"},
+                )
+            if ready_rec is None:
                 del_err = _attempt_delete_built_image(
                     job_runner_client, plugin_id=plugin_id, version=version
                 )
-                if current is not None:
+                if current is not None and current.version == version:
                     ecosystem_domain.update_artifact(
                         db,
                         artifact_id,
+                        expected_version=version,
                         image_ref=built_image if del_err is not None else None,
                         diagnostics=(
                             {"cleanup_error": del_err, "cleanup_retryable": True}
@@ -779,19 +802,11 @@ def _execute_plugin_build_and_selftest(
                     )
                     db.commit()
                 raise EcosystemConflictError(
-                    "制品在自检期间已被下架或改变状态，禁止回流为 ready"
+                    "制品在自检期间已被下架、改变状态或覆盖为新版本，禁止回流为 ready"
                     + (f"（镜像清理失败: {del_err}）" if del_err else ""),
                     params={"artifact_id": artifact_id, "cleanup_error": del_err},
                 )
-            ready_rec = ecosystem_domain.update_artifact(
-                db,
-                artifact_id,
-                install_status="ready",
-                image_ref=built_image,
-                diagnostics={"build_logs": list(build_result.logs), "selftest": "passed"},
-            )
             db.commit()
-            assert ready_rec is not None
             return ready_rec
     except EcosystemConflictError as exc:
         primary_exc = exc
@@ -814,16 +829,18 @@ def _execute_plugin_build_and_selftest(
             diag["cleanup_retryable"] = True
         with session_factory() as db:
             cur = ecosystem_domain.get_artifact(db, artifact_id)
-            if cur is not None:
+            if cur is not None and cur.version == version:
                 next_status = "disabled" if cur.install_status == "disabled" else "build_failed"
-                ecosystem_domain.update_artifact(
+                updated_err = ecosystem_domain.update_artifact(
                     db,
                     artifact_id,
+                    expected_version=version,
                     install_status=next_status,
                     image_ref=image_ref_to_keep,
                     diagnostics=diag,
                 )
-                db.commit()
+                if updated_err is not None:
+                    db.commit()
         if del_err is not None:
             err = AppError(
                 f"{hint}；且构建镜像删除失败，已保留 image_ref 以便重试清理: {del_err}",
@@ -896,6 +913,8 @@ def upload_plugin_zip_case(
     )
     initial_install = "building" if approval == "approved" else "pending"
 
+    prev_image_ref: str | None = None
+    prev_version: str | None = None
     try:
         existing = ecosystem_domain.get_artifact_by_stable_id(db, kind, stable_id)
         if existing is not None:
@@ -917,8 +936,9 @@ def upload_plugin_zip_case(
                 payload["duplicate"] = True
                 return payload
 
-            # 不同版本覆盖升级：先核对旧版本无在途 CalcSnapshot 引用，再清理旧镜像并原地替换
+            # 不同版本覆盖升级：先核对旧版本无在途 CalcSnapshot 引用，先落库提交替换后再清理旧镜像
             prev_version = existing.version
+            prev_image_ref = existing.image_ref
             inflight = tasks_domain.count_inflight_artifact_refs(
                 db, kind=kind, stable_id=stable_id, version=prev_version
             )
@@ -933,25 +953,11 @@ def upload_plugin_zip_case(
                         "inflight_count": inflight,
                     },
                 )
-            if existing.image_ref:
-                if job_runner_client is None:
-                    raise AppError(
-                        "job_runner 未装配，无法清理旧版本插件镜像",
-                        code="ECO-JR-UNAVAILABLE",
-                    )
-                del_err = _attempt_delete_built_image(
-                    job_runner_client, plugin_id=stable_id, version=prev_version
+            if prev_image_ref and job_runner_client is None:
+                raise AppError(
+                    "job_runner 未装配，无法清理旧版本插件镜像",
+                    code="ECO-JR-UNAVAILABLE",
                 )
-                if del_err is not None:
-                    raise AppError(
-                        f"旧版本插件镜像清理失败，已保留 image_ref 以便重试清理: {del_err}",
-                        code="ECO-IMAGE-CLEANUP-FAILED",
-                        params={
-                            "artifact_id": existing.id,
-                            "image_ref": existing.image_ref,
-                            "cleanup_error": del_err,
-                        },
-                    )
 
             stored_obj = put_object(
                 db,
@@ -970,6 +976,7 @@ def upload_plugin_zip_case(
             artifact = ecosystem_domain.update_artifact(
                 db,
                 existing.id,
+                expected_version=prev_version,
                 version=version,
                 source_origin=source_origin,
                 uploaded_by=user.id,
@@ -982,7 +989,11 @@ def upload_plugin_zip_case(
                 diagnostics=None,
                 metadata_json=meta,
             )
-            assert artifact is not None
+            if artifact is None:
+                raise EcosystemConflictError(
+                    "制品在覆盖升级期间已被并发修改，请重试",
+                    params={"artifact_id": existing.id, "stable_id": stable_id},
+                )
             attach(
                 db,
                 stored_obj.id,
@@ -1055,6 +1066,34 @@ def upload_plugin_zip_case(
         db.rollback()
         raise
 
+    if prev_image_ref and prev_version is not None:
+        del_err = _attempt_delete_built_image(
+            job_runner_client, plugin_id=stable_id, version=prev_version
+        )
+        if del_err is not None:
+            ecosystem_domain.update_artifact(
+                db,
+                artifact.id,
+                expected_version=version,
+                install_status="build_failed" if initial_install == "building" else initial_install,
+                image_ref=None,
+                diagnostics={
+                    "cleanup_error": del_err,
+                    "cleanup_retryable": True,
+                    "stale_image_ref": prev_image_ref,
+                },
+            )
+            db.commit()
+            raise AppError(
+                f"旧版本插件镜像清理失败，已保留重试状态: {del_err}",
+                code="ECO-IMAGE-CLEANUP-FAILED",
+                params={
+                    "artifact_id": artifact.id,
+                    "image_ref": prev_image_ref,
+                    "cleanup_error": del_err,
+                },
+            )
+
     if approval == "pending":
         return serialize_artifact(artifact)
 
@@ -1072,6 +1111,7 @@ def upload_plugin_zip_case(
         return _execute_plugin_build_and_selftest(
             session_factory=sf,
             artifact_id=artifact.id,
+            expected_version=artifact.version,
             zip_bytes=None,
             job_runner_client=job_runner_client,
             plugin_source_root=src_root,
@@ -1184,6 +1224,7 @@ def approve_artifact_case(
         return _execute_plugin_build_and_selftest(
             session_factory=sf,
             artifact_id=updated.id,
+            expected_version=updated.version,
             zip_bytes=raw_bytes,
             job_runner_client=job_runner_client,
             plugin_source_root=src_root,

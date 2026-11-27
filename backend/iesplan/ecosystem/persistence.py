@@ -9,6 +9,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
+import sqlalchemy as sa
 from sqlalchemy import (
     BigInteger,
     Boolean,
@@ -349,6 +350,7 @@ def update_artifact(
     db: Session,
     artifact_id: int,
     *,
+    expected_version: str | None = None,
     version: Any = _UNSET,
     source_origin: Any = _UNSET,
     uploaded_by: Any = _UNSET,
@@ -361,41 +363,48 @@ def update_artifact(
     diagnostics: Any = _UNSET,
     metadata_json: Any = _UNSET,
 ) -> LocalArtifactRecord | None:
-    """更新制品状态/版本/镜像引用/诊断（支持覆盖升级，只 flush）。"""
-    row = db.get(LocalArtifact, artifact_id)
-    if row is None:
+    """更新制品状态/版本/镜像引用/诊断（支持 expected_version 条件写库，只 flush）。"""
+    values: dict[str, Any] = {"updated_at": _now()}
+    if version is not _UNSET:
+        values["version"] = version
+    if source_origin is not _UNSET:
+        values["source_origin"] = source_origin
+    if uploaded_by is not _UNSET:
+        values["uploaded_by"] = uploaded_by
+    if object_id is not _UNSET:
+        values["object_id"] = object_id
+    if approval_status is not _UNSET:
+        values["approval_status"] = approval_status
+    if install_status is not _UNSET:
+        values["install_status"] = install_status
+    if approved_by is not _UNSET:
+        values["approved_by"] = approved_by
+    if approved_at is not _UNSET:
+        values["approved_at"] = approved_at
+    if image_ref is not _UNSET:
+        values["image_ref"] = image_ref
+    if diagnostics is not _UNSET:
+        values["diagnostics"] = diagnostics
+    if metadata_json is not _UNSET:
+        values["metadata_json"] = dict(metadata_json)
+
+    stmt = sa.update(LocalArtifact).where(LocalArtifact.id == artifact_id)
+    if expected_version is not None:
+        stmt = stmt.where(LocalArtifact.version == expected_version)
+    res = db.execute(stmt.values(**values))
+    if (res.rowcount or 0) == 0:
         return None
     if version is not _UNSET:
-        row.version = version
         installs = db.execute(
             select(MemberArtifactInstall).where(MemberArtifactInstall.artifact_id == artifact_id)
         ).scalars().all()
         for inst in installs:
             inst.version = version
             inst.updated_at = _now()
-    if source_origin is not _UNSET:
-        row.source_origin = source_origin
-    if uploaded_by is not _UNSET:
-        row.uploaded_by = uploaded_by
-    if object_id is not _UNSET:
-        row.object_id = object_id
-    if approval_status is not _UNSET:
-        row.approval_status = approval_status
-    if install_status is not _UNSET:
-        row.install_status = install_status
-    if approved_by is not _UNSET:
-        row.approved_by = approved_by
-    if approved_at is not _UNSET:
-        row.approved_at = approved_at
-    if image_ref is not _UNSET:
-        row.image_ref = image_ref
-    if diagnostics is not _UNSET:
-        row.diagnostics = diagnostics
-    if metadata_json is not _UNSET:
-        row.metadata_json = dict(metadata_json)
-    row.updated_at = _now()
     db.flush()
-    return _row_to_artifact(row)
+    db.expire_all()
+    row = db.get(LocalArtifact, artifact_id)
+    return _row_to_artifact(row) if row is not None else None
 
 
 def get_member_install(

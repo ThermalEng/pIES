@@ -29,6 +29,7 @@ from iesplan.model.contracts import (
 )
 
 allocate_project_model_suffix = persistence.allocate_project_model_suffix
+claim_template_publish = persistence.claim_template_publish
 create_project_model = persistence.create_project_model
 create_template = persistence.create_template
 delete_project_model = persistence.delete_project_model
@@ -66,6 +67,7 @@ __all__ = [
     "TEMPLATE_STATUS_PUBLISHED",
     "TemplateDraftRevisionRecord",
     "allocate_project_model_suffix",
+    "claim_template_publish",
     "create_project_model",
     "create_template",
     "delete_project_model",
