@@ -22,8 +22,8 @@ import {
   createTemplate,
   deleteTemplate,
   diagnosticsFromApiError,
+  getPublishedTemplate,
   getTemplateDetail,
-  getTemplateRevision,
   listMyTemplates,
   publishTemplate,
   saveTemplateDraft,
@@ -88,14 +88,17 @@ export default function CustomizationPage() {
   const [actionError, setActionError] = useState<string | null>(null)
   const [revisionDetail, setRevisionDetail] = useState<{ revision: TemplateRevisionDto; summary: Record<string, unknown> | null } | null>(null)
 
-  const reload = useCallback(async () => {
+  const reload = useCallback(async (): Promise<TemplateDto[] | null> => {
     setLoading(true)
     setListError(null)
     try {
-      setTemplates(await listMyTemplates())
+      const items = await listMyTemplates()
+      setTemplates(items)
+      return items
     } catch (err) {
       setListError(err instanceof Error ? err.message : String(err))
       setTemplates(null)
+      return null
     } finally {
       setLoading(false)
     }
@@ -189,7 +192,7 @@ export default function CustomizationPage() {
     }
   }, [selected, yamlText, description, reload])
 
-  /** 发布草稿为不可变 revision(幂等键避免重复发布)。 */
+  /** 发布草稿为当前唯一发布版(支持修改草稿后再次发布)。 */
   const handlePublish = useCallback(async () => {
     if (!selected) return
     setBusy(true)
@@ -202,7 +205,9 @@ export default function CustomizationPage() {
       )
       setRevisionDetail({ revision: result.revision, summary: {} })
       setDiagnostics([])
-      await reload()
+      const list = await reload()
+      const updated = list?.find((item) => item.template_id === selected.template_id) ?? null
+      if (updated) setSelected(updated)
     } catch (err) {
       const diags = diagnosticsFromApiError(err)
       if (diags.length > 0) {
@@ -242,12 +247,12 @@ export default function CustomizationPage() {
     }
   }, [reload])
 
-  const showRevision = useCallback(async (tpl: TemplateDto, revision: number) => {
+  const showPublished = useCallback(async (tpl: TemplateDto) => {
     setBusy(true)
     setActionError(null)
     try {
-      const detail = await getTemplateRevision(tpl.template_id, revision)
-      setSelected(tpl)
+      const detail = await getPublishedTemplate(tpl.template_id)
+      setSelected(detail.template)
       setRevisionDetail({ revision: detail.revision, summary: detail.summary })
       if (detail.document) {
         setYamlText(JSON.stringify(detail.document, null, 2))
@@ -306,19 +311,12 @@ export default function CustomizationPage() {
                   {pt('ies.custom.published_rev')}: {tpl.published_revision}
                 </span>
               </div>
-              {tpl.published_revision > 0 ? (
-                <div className="ies-custom-card__revisions">
-                  {pt('ies.custom.revisions')}:{' '}
-                  {Array.from({ length: tpl.published_revision }, (_, i) => i + 1).map((rev) => (
-                    <button key={rev} type="button" className="ies-custom-card__rev" onClick={() => void showRevision(tpl, rev)}>
-                      v{rev}
-                    </button>
-                  ))}
-                </div>
-              ) : null}
               <div className="ies-custom-card__actions">
                 {tpl.published_revision > 0 ? (
                   <>
+                    <Button variant="secondary" size="sm" disabled={busy} onClick={() => void showPublished(tpl)}>
+                      {pt('ies.custom.view_published')}
+                    </Button>
                     <Button variant="secondary" size="sm" disabled={busy} onClick={() => void handleToggleEnabled(tpl, tpl.status === 'disabled')}>
                       {tpl.status === 'disabled' ? pt('ies.custom.enable') : pt('ies.custom.disable')}
                     </Button>
@@ -422,7 +420,7 @@ export default function CustomizationPage() {
               {selected ? pt('ies.custom.save_draft') : pt('ies.custom.create')}
             </Button>
             {selected ? (
-              <Button variant="primary" disabled={busy || selected.published_revision > 0} loading={busy} onClick={() => void handlePublish()}>
+              <Button variant="primary" disabled={busy} loading={busy} onClick={() => void handlePublish()}>
                 {pt('ies.custom.publish')}
               </Button>
             ) : null}

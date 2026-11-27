@@ -3,14 +3,13 @@
  *
  * 端点清单(prefix /api):
  *   GET  /api/model-templates/catalog                    可用模板目录 → {items: [...]}
- *   GET  /api/model-templates/{template_id}/revisions/{revision}
- *                                                        固定发布版详情
+ *   GET  /api/model-templates/{template_id}/published    当前唯一发布版详情
  *   GET  /api/projects/{pid}/device-types                公开目录 ∪ 本项目已保存模型
  *                                                        → {items: [...]}
  *   GET  /api/projects/{pid}/models                      项目模型清单 → {project_models: [...]}
  *   POST /api/projects/{pid}/models/validate             候选模型门禁 → {valid, diagnostics}
  *   POST /api/projects/{pid}/models                      正式保存:
- *        source=template: {template_id, template_revision, template_inputs}
+ *        source=template: {template_id, template_inputs}
  *        source=yaml:     {model_yaml}
  *        成功 201 → {project_model, receipt, project_revision}; 失败 400 → 标准
  *        错误信封, params.diagnostics 为聚合诊断(message_key/字段路径/YAML 行列/
@@ -56,18 +55,16 @@ export async function listTemplates(locale?: string): Promise<TemplateSummary[]>
 }
 
 /**
- * 精确发布版模板详情(供项目模型表单生成)。
+ * 当前发布版模板详情(供项目模型表单生成)。
  *
- * 项目建模必须读取目录选中时的不可变 revision，不能读取随后可能继续编辑的
- * 管理草稿，否则表单 inputs 与保存请求携带的 revision/hash 会来自不同内容。
+ * 项目建模读取唯一当前发布版(`/published`), 不读取未发布的编辑草稿。
  */
 export async function getTemplate(
   templateId: string,
-  revision: number,
   locale?: string,
 ): Promise<TemplateDetail> {
   const body = await request<TemplateRevisionDetailDto>(
-    `/model-templates/${encodeURIComponent(templateId)}/revisions/${revision}`,
+    `/model-templates/${encodeURIComponent(templateId)}/published`,
   )
   return templateDetailFromServer(body, locale)
 }

@@ -23,6 +23,43 @@ test_wrapper_keys_registered)即失败。
 由协议基线测试显式豁免(见 test_protocol_baseline.py test_wrapper_keys_registered)。
 """
 
+#: 本地生态设置与制品视图共用顶层键集合
+_ECOSYSTEM_SETTINGS_KEYS = frozenset(
+    {
+        "market_mode",
+        "local_upload_requires_approval",
+        "pip_index_url",
+        "market_index_url",
+        "submission_gateway_url",
+        "updated_by",
+        "updated_at",
+    }
+)
+
+_ECOSYSTEM_ARTIFACT_KEYS = frozenset(
+    {
+        "id",
+        "kind",
+        "stable_id",
+        "version",
+        "ref",
+        "source_origin",
+        "approval_status",
+        "install_status",
+        "uploaded_by",
+        "approved_by",
+        "approved_at",
+        "object_id",
+        "metadata",
+        "image_ref",
+        "diagnostics",
+        "installed",
+        "enabled",
+        "created_at",
+        "updated_at",
+    }
+)
+
 #: 路由端点函数名 → 允许的顶层键集(并集)
 WRAPPER_KEYS: dict[str, frozenset[str]] = {
     # ---- admin.py ----
@@ -114,11 +151,9 @@ WRAPPER_KEYS: dict[str, frozenset[str]] = {
     "disable_template_endpoint": frozenset({"template"}),
     "enable_template_endpoint": frozenset({"template"}),
     "delete_template_endpoint": frozenset({"deleted", "ok"}),
-    "list_draft_revisions_endpoint": frozenset({"draft_revisions"}),
-    "get_draft_revision_endpoint": frozenset({"id", "revision", "yaml_object_id", "source", "created_by", "created_at", "document"}),
-    "get_template_revision_endpoint": frozenset(
+    "get_published_template_endpoint": frozenset(
         {"template", "revision", "document", "receipt", "summary", "diagnostics"}
-    ),  # application.model_templates.get_template_revision
+    ),  # application.model_templates.get_published_template
     # ---- results.py ----
     "get_result_endpoint": frozenset({"result"}),  # services.results.result_view
     "list_assessments_endpoint": frozenset({"items", "total"}),
@@ -160,4 +195,24 @@ WRAPPER_KEYS: dict[str, frozenset[str]] = {
     "list_finance_profiles_endpoint": frozenset({"items", "count"}),
     "register_finance_profile_endpoint": frozenset({"finance_profile", "row"}),
     "get_finance_profile_endpoint": frozenset({"finance_profile", "row"}),
+    # ---- ecosystem.py (1.2.0 本地模型与算法插件生态) ----
+    "get_ecosystem_settings_endpoint": _ECOSYSTEM_SETTINGS_KEYS,
+    "update_ecosystem_settings_endpoint": _ECOSYSTEM_SETTINGS_KEYS,
+    "list_artifacts_endpoint": frozenset({"items"}),
+    "import_device_model_endpoint": (
+        _ECOSYSTEM_ARTIFACT_KEYS | frozenset({"idempotent", "duplicate", "upgraded_from"})
+    ),
+    "export_device_model_endpoint": frozenset(
+        {"artifact_id", "kind", "stable_id", "revision", "filename", "yaml_text", "metadata"}
+    ),
+    "upload_plugin_endpoint": _ECOSYSTEM_ARTIFACT_KEYS | frozenset({"idempotent", "duplicate"}),
+    "approve_artifact_endpoint": _ECOSYSTEM_ARTIFACT_KEYS,
+    "reject_artifact_endpoint": _ECOSYSTEM_ARTIFACT_KEYS,
+    "install_artifact_endpoint": _ECOSYSTEM_ARTIFACT_KEYS,
+    "enable_artifact_endpoint": _ECOSYSTEM_ARTIFACT_KEYS,
+    "disable_artifact_endpoint": _ECOSYSTEM_ARTIFACT_KEYS,
+    "uninstall_member_artifact_endpoint": frozenset({"artifact_id", "uninstalled"}),
+    "uninstall_artifact_image_endpoint": frozenset(
+        {"artifact", "image_deleted", "image_status"}
+    ),
 }

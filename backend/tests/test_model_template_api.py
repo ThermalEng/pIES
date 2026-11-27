@@ -28,12 +28,6 @@ from sqlalchemy.engine import Engine  # noqa: E402
 from sqlalchemy.orm import Session, sessionmaker  # noqa: E402
 from sqlalchemy.pool import StaticPool  # noqa: E402
 
-from iesplan.api.deps import get_request_db  # noqa: E402
-from iesplan.config import settings  # noqa: E402
-from iesplan.db import Base  # noqa: E402
-from iesplan.main import create_app  # noqa: E402
-from iesplan.audit.persistence import AuditLog  # noqa: E402
-from iesplan.model.persistence import ModelTemplateRevision  # noqa: E402
 import iesplan.configuration.persistence  # noqa: E402,F401
 import iesplan.dataset.persistence  # noqa: E402,F401
 import iesplan.identity.persistence  # noqa: E402,F401
@@ -42,6 +36,12 @@ import iesplan.project.persistence  # noqa: E402,F401
 import iesplan.results.persistence  # noqa: E402,F401
 import iesplan.storage.persistence  # noqa: E402,F401
 import iesplan.tasks.persistence  # noqa: E402,F401
+from iesplan.api.deps import get_request_db  # noqa: E402
+from iesplan.audit.persistence import AuditLog  # noqa: E402
+from iesplan.config import settings  # noqa: E402
+from iesplan.db import Base  # noqa: E402
+from iesplan.main import create_app  # noqa: E402
+from iesplan.model.persistence import ModelTemplateRevision  # noqa: E402
 
 PASSWORD = "Test12345"
 
@@ -182,7 +182,7 @@ def test_create_template_draft(client: TestClient, db_session: Session) -> None:
     from iesplan.storage import find_refs_by_entity_type
 
     refs = find_refs_by_entity_type(db_session, "model_template")
-    assert len(refs) == 2  # draft_yaml + draft_revision diagnostics
+    assert len(refs) == 1  # draft_yaml (Option B 单草稿无独立 draft_revision 历史对象)
     audit = db_session.execute(
         select(AuditLog).where(AuditLog.entity_type == "model_template")
     ).scalars().all()
@@ -350,7 +350,9 @@ def test_publish_revision_immutable_and_idempotent(client: TestClient, db_sessio
     assert len(rows) == 1
 
 
-def test_publish_after_update_creates_new_revision(client: TestClient, db_session: Session) -> None:
+def test_publish_after_update_replaces_single_published_revision(
+    client: TestClient, db_session: Session
+) -> None:
     headers = _make_owner(client, db_session, "tpl_pub2")
     tpl = _create(client, headers)
     _publish(client, headers, tpl["template_id"], 1, key="pub-a")
@@ -363,10 +365,32 @@ def test_publish_after_update_creates_new_revision(client: TestClient, db_sessio
     assert resp.status_code == 200
     body = _publish(client, headers, tpl["template_id"], 2, key="pub-b")
     assert body["revision"]["revision"] == 2
-    # 两个 revision 均可精确读取; 内容不同
-    r1 = client.get(f"/api/model-templates/{tpl['template_id']}/revisions/1", headers=headers)
-    r2 = client.get(f"/api/model-templates/{tpl['template_id']}/revisions/2", headers=headers)
-    assert r1.status_code == r2.status_code == 200
+    # Option B 单当前发布版本: 只保留 1 条发布行且 /published 返回新版本; 多版本端点已移除
+    pub_resp = client.get(
+        f"/api/model-templates/{tpl['template_id']}/published", headers=headers
+    )
+    assert pub_resp.status_code == 200, pub_resp.text
+    assert pub_resp.json()["revision"]["revision"] == 2
+    detail = client.get(f"/api/model-templates/{tpl['template_id']}", headers=headers).json()
+    rows = db_session.execute(
+        select(ModelTemplateRevision).where(
+            ModelTemplateRevision.template_id == int(detail["template"]["id"])
+        )
+    ).scalars().all()
+    assert len(rows) == 1
+    assert rows[0].revision == 2
+    assert (
+        client.get(
+            f"/api/model-templates/{tpl['template_id']}/revisions/1", headers=headers
+        ).status_code
+        == 404
+    )
+    assert (
+        client.get(
+            f"/api/model-templates/{tpl['template_id']}/draft-revisions", headers=headers
+        ).status_code
+        == 404
+    )
 
 
 def test_publish_idempotency_key_replay(client: TestClient, db_session: Session) -> None:
@@ -385,12 +409,19 @@ def test_publish_idempotency_key_replay(client: TestClient, db_session: Session)
     assert body2["revision"]["revision"] == body1["revision"]["revision"]
 
 
-def test_publish_revision_detail_exact(client: TestClient, db_session: Session) -> None:
+def test_publish_detail_endpoint(client: TestClient, db_session: Session) -> None:
     headers = _make_owner(client, db_session, "tpl_detail")
     tpl = _create(client, headers)
-    body = _publish(client, headers, tpl["template_id"], 1, key="pub-det")
+    # 未发布模板查询 /published → 404
+    assert (
+        client.get(
+            f"/api/model-templates/{tpl['template_id']}/published", headers=headers
+        ).status_code
+        == 404
+    )
+    _publish(client, headers, tpl["template_id"], 1, key="pub-det")
     resp = client.get(
-        f"/api/model-templates/{tpl['template_id']}/revisions/{body['revision']['revision']}",
+        f"/api/model-templates/{tpl['template_id']}/published",
         headers=headers,
     )
     assert resp.status_code == 200
@@ -399,12 +430,9 @@ def test_publish_revision_detail_exact(client: TestClient, db_session: Session) 
     assert detail["receipt"]["schema"] == "ies.device-model"
     assert detail["summary"]["property_count"] == 1
     assert detail["summary"]["interface_count"] == 1
-    # 契约: revision 详情 document 为已解析的嵌套 JSON 对象
+    # 契约: 发布详情 document 为已解析的嵌套 JSON 对象
     assert isinstance(detail["document"], dict)
     assert "inputs" in detail["document"]
-    # 不存在的 revision → 404
-    resp2 = client.get(f"/api/model-templates/{tpl['template_id']}/revisions/99", headers=headers)
-    assert resp2.status_code == 404
 
 
 # ---------------------------------------------------------------------------
@@ -513,21 +541,17 @@ def test_validate_endpoint_direct_yaml(client: TestClient, db_session: Session) 
     assert any(d["code"] == "TPL-MDL-001" for d in resp2.json()["diagnostics"])
 
 
-def test_validate_endpoint_exact_revision_and_reference_errors(
+def test_validate_endpoint_published_template_and_reference_errors(
     client: TestClient, db_session: Session,
 ) -> None:
-    """精确发布版可重校验。"""
+    """当前唯一发布版可重校验。"""
     headers = _make_owner(client, db_session, "tpl_val_rev")
     tpl = _create(client, headers)
-    published = _publish(client, headers, tpl["template_id"], 1, key="val-rev")
-    revision = published["revision"]
+    _publish(client, headers, tpl["template_id"], 1, key="val-rev")
 
     ok = client.post(
         f"/api/model-templates/{tpl['template_id']}/validate",
-        json={
-            "template_id": tpl["template_id"],
-            "template_revision": revision["revision"],
-        },
+        json={"template_id": tpl["template_id"]},
         headers=headers,
     )
     assert ok.status_code == 200, ok.text
@@ -546,7 +570,7 @@ def test_catalog_available_templates(client: TestClient, db_session: Session) ->
     resp = client.get("/api/model-templates/catalog", headers=headers)
     assert resp.json()["items"] == []
     # 发布后出现(同模板发布)
-    body = _publish(client, headers, tpl["template_id"], 1, key="cat-1")
+    _publish(client, headers, tpl["template_id"], 1, key="cat-1")
     resp2 = client.get("/api/model-templates/catalog", headers=headers)
     items = resp2.json()["items"]
     assert len(items) == 1
@@ -575,3 +599,59 @@ def test_empty_db_builds_current_schema(tmp_path: Path) -> None:
     assert "project_models" in tables
     assert "schema_migrations" not in tables
     fresh.dispose()
+
+
+def test_codex_r3_publish_rejects_concurrent_draft_or_publish_lost_update(
+    client: TestClient,
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """并发草稿修改或并发发布推进后，旧 publish 必须 409 拒绝且不得覆盖新版本。"""
+    from iesplan import model as model_domain
+    from iesplan.application.model_templates import service as tpl_service
+    from iesplan.identity.persistence import User
+
+    headers = _make_owner(client, db_session, "tpl_r3_race")
+    tpl = _create(client, headers)
+    _publish(client, headers, tpl["template_id"], 1, key="r3-pub-1")
+    yaml_v2 = _yaml_for_user(TEMPLATE_V2_YAML, "electric-load", headers)
+    upd = client.put(
+        f"/api/model-templates/{tpl['template_id']}",
+        json={"model_yaml": yaml_v2, "expected_revision": 1},
+        headers=headers,
+    )
+    assert upd.status_code == 200
+    owner_user = db_session.execute(
+        select(User).where(User.username == "tpl_r3_race")
+    ).scalar_one()
+
+    # Simulate another transaction advancing published_revision before claim_template_publish
+    orig_validate = tpl_service.validate_template_raw
+    bumped = {"done": False}
+
+    def _interleaved_validate(raw):
+        res = orig_validate(raw)
+        if not bumped["done"]:
+            bumped["done"] = True
+            stored = model_domain.get_owned_template(db_session, owner_user.id, tpl["template_id"])
+            assert stored is not None
+            model_domain.update_template(db_session, stored.id, draft_revision=3)
+            db_session.commit()
+        return res
+
+    with monkeypatch.context() as mp:
+        mp.setattr(tpl_service, "validate_template_raw", _interleaved_validate)
+        with pytest.raises(tpl_service.TemplateConflictError) as conflict_err:
+            tpl_service.publish_template(
+                db_session,
+                owner_user,
+                tpl["template_id"],
+                expected_revision=2,
+            )
+    assert conflict_err.value.http_status == 409
+    pub_detail = client.get(
+        f"/api/model-templates/{tpl['template_id']}/published", headers=headers
+    )
+    assert pub_detail.status_code == 200
+    assert pub_detail.json()["revision"]["revision"] == 1
+

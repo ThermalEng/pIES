@@ -1,0 +1,222 @@
+"""本地模型与算法生态 API 路由（/api/ecosystem）。
+
+本层仅负责 HTTP 参数校验、会话认证与调用 application.ecosystem 公开门面；
+绝不导入 ORM/db、绝不直接导入 job_runner_client/stage_runner/worker。
+"""
+
+from __future__ import annotations
+
+from typing import Annotated, Any, Literal
+
+from fastapi import APIRouter, Depends, File, Form, Request, UploadFile
+from pydantic import BaseModel, Field
+from sqlalchemy.orm import Session
+
+from iesplan.api.auth import CurrentAdmin, CurrentUser
+from iesplan.api.deps import get_request_db
+from iesplan.application import ecosystem as ecosystem_app
+
+router = APIRouter(prefix="/api/ecosystem", tags=["ecosystem"])
+
+
+class EcosystemSettingsUpdateRequest(BaseModel):
+    market_mode: str = Field(description="市场模式：online | local")
+    local_upload_requires_approval: bool = Field(description="非管理员本地上传/离线导入是否需审批")
+    pip_index_url: str | None = Field(default=None, description="可选单源 HTTP(S) pip index URL")
+    market_index_url: str | None = Field(default=None, description="可选公共市场 index.json URL")
+    submission_gateway_url: str | None = Field(default=None, description="可选无状态投稿网关 URL")
+
+
+class DeviceModelImportRequest(BaseModel):
+    yaml_text: str = Field(description="ies.device-model@1.0.0 YAML 文本")
+    expected_sha256: str | None = Field(default=None, description="可选外部期望 64 位 SHA-256")
+    revision: int = Field(default=1, ge=1, description="发布正整数修订号")
+    source_origin: Literal["local_upload", "offline_import"] = Field(
+        default="local_upload",
+        description="来源：local_upload | offline_import（公共市场下载不经本上传端点）",
+    )
+
+
+class RejectArtifactRequest(BaseModel):
+    reason: str = Field(default="", max_length=500)
+
+
+class UninstallImageRequest(BaseModel):
+    force: bool = Field(default=False)
+
+
+def _runtime_handles(request: Request) -> tuple[Any, Any, Any]:
+    bootstrap = getattr(request.app.state, "bootstrap_context", None)
+    scheduler = getattr(request.app.state, "scheduler", None)
+    job_runner_client = getattr(bootstrap, "job_runner_client", None) if bootstrap is not None else None
+    session_factory = getattr(bootstrap, "session_factory", None) if bootstrap is not None else None
+    return scheduler, job_runner_client, session_factory
+
+
+@router.get("/settings", summary="读取实例级生态模式与审批开关")
+def get_ecosystem_settings_endpoint(
+    db: Annotated[Session, Depends(get_request_db)],
+    user: CurrentUser,
+) -> dict[str, Any]:
+    return ecosystem_app.get_ecosystem_settings_case(db, user)
+
+
+@router.put("/settings", summary="管理员更新实例级生态设置")
+def update_ecosystem_settings_endpoint(
+    body: EcosystemSettingsUpdateRequest,
+    db: Annotated[Session, Depends(get_request_db)],
+    admin: CurrentAdmin,
+) -> dict[str, Any]:
+    return ecosystem_app.update_ecosystem_settings_case(
+        db,
+        admin,
+        market_mode=body.market_mode,
+        local_upload_requires_approval=body.local_upload_requires_approval,
+        pip_index_url=body.pip_index_url,
+        market_index_url=body.market_index_url,
+        submission_gateway_url=body.submission_gateway_url,
+    )
+
+
+@router.get("/artifacts", summary="列出本地生态目录条目（含成员安装态）")
+def list_artifacts_endpoint(
+    db: Annotated[Session, Depends(get_request_db)],
+    user: CurrentUser,
+    kind: str | None = None,
+    approval_status: str | None = None,
+) -> dict[str, Any]:
+    return ecosystem_app.list_catalog_artifacts_case(
+        db, user, kind=kind, approval_status=approval_status
+    )
+
+
+@router.post("/device-models/import", status_code=201, summary="导入或上传本地设备模型 YAML")
+def import_device_model_endpoint(
+    body: DeviceModelImportRequest,
+    db: Annotated[Session, Depends(get_request_db)],
+    user: CurrentUser,
+) -> dict[str, Any]:
+    return ecosystem_app.import_device_model_case(
+        db,
+        user,
+        yaml_text=body.yaml_text,
+        expected_sha256=body.expected_sha256,
+        revision=body.revision,
+        source_origin=body.source_origin,
+    )
+
+
+@router.get("/device-models/{artifact_id}/export", summary="导出纯技术设备模型 YAML")
+def export_device_model_endpoint(
+    artifact_id: int,
+    db: Annotated[Session, Depends(get_request_db)],
+    user: CurrentUser,
+) -> dict[str, Any]:
+    return ecosystem_app.export_device_model_case(db, user, artifact_id=artifact_id)
+
+
+@router.post("/plugins/upload", status_code=201, summary="上传算法插件 ZIP")
+async def upload_plugin_endpoint(
+    request: Request,
+    db: Annotated[Session, Depends(get_request_db)],
+    user: CurrentUser,
+    file: Annotated[UploadFile, File(...)],
+    expected_sha256: Annotated[str | None, Form()] = None,
+    source_origin: Annotated[Literal["local_upload", "offline_import"], Form()] = "local_upload",
+) -> dict[str, Any]:
+    zip_bytes = await file.read()
+    scheduler, job_runner_client, session_factory = _runtime_handles(request)
+    return ecosystem_app.upload_plugin_zip_case(
+        db,
+        user,
+        zip_bytes=zip_bytes,
+        expected_sha256=expected_sha256,
+        source_origin=source_origin,
+        scheduler=scheduler,
+        job_runner_client=job_runner_client,
+        session_factory=session_factory,
+        wait_for_build=scheduler is None,
+    )
+
+
+@router.post("/artifacts/{artifact_id}/approve", summary="管理员审批通过生态制品")
+def approve_artifact_endpoint(
+    artifact_id: int,
+    request: Request,
+    db: Annotated[Session, Depends(get_request_db)],
+    admin: CurrentAdmin,
+) -> dict[str, Any]:
+    scheduler, job_runner_client, session_factory = _runtime_handles(request)
+    return ecosystem_app.approve_artifact_case(
+        db,
+        admin,
+        artifact_id,
+        scheduler=scheduler,
+        job_runner_client=job_runner_client,
+        session_factory=session_factory,
+        wait_for_build=scheduler is None,
+    )
+
+
+@router.post("/artifacts/{artifact_id}/reject", summary="管理员拒绝生态制品")
+def reject_artifact_endpoint(
+    artifact_id: int,
+    body: RejectArtifactRequest,
+    db: Annotated[Session, Depends(get_request_db)],
+    admin: CurrentAdmin,
+) -> dict[str, Any]:
+    return ecosystem_app.reject_artifact_case(db, admin, artifact_id, reason=body.reason)
+
+
+@router.post("/artifacts/{artifact_id}/install", summary="当前成员安装并启用精确版本制品")
+def install_artifact_endpoint(
+    artifact_id: int,
+    db: Annotated[Session, Depends(get_request_db)],
+    user: CurrentUser,
+) -> dict[str, Any]:
+    return ecosystem_app.install_artifact_for_user_case(db, user, artifact_id, enabled=True)
+
+
+@router.post("/artifacts/{artifact_id}/enable", summary="当前成员启用已安装制品")
+def enable_artifact_endpoint(
+    artifact_id: int,
+    db: Annotated[Session, Depends(get_request_db)],
+    user: CurrentUser,
+) -> dict[str, Any]:
+    return ecosystem_app.set_member_artifact_enabled_case(db, user, artifact_id, enabled=True)
+
+
+@router.post("/artifacts/{artifact_id}/disable", summary="当前成员停用已安装制品")
+def disable_artifact_endpoint(
+    artifact_id: int,
+    db: Annotated[Session, Depends(get_request_db)],
+    user: CurrentUser,
+) -> dict[str, Any]:
+    return ecosystem_app.set_member_artifact_enabled_case(db, user, artifact_id, enabled=False)
+
+
+@router.post("/artifacts/{artifact_id}/uninstall", summary="当前成员卸载个人安装记录")
+def uninstall_member_artifact_endpoint(
+    artifact_id: int,
+    db: Annotated[Session, Depends(get_request_db)],
+    user: CurrentUser,
+) -> dict[str, Any]:
+    return ecosystem_app.uninstall_member_artifact_case(db, user, artifact_id)
+
+
+@router.post("/admin/artifacts/{artifact_id}/uninstall-image", summary="管理员并发安全下架并清理插件镜像")
+def uninstall_artifact_image_endpoint(
+    artifact_id: int,
+    request: Request,
+    db: Annotated[Session, Depends(get_request_db)],
+    admin: CurrentAdmin,
+    body: UninstallImageRequest | None = None,
+) -> dict[str, Any]:
+    _, job_runner_client, _ = _runtime_handles(request)
+    return ecosystem_app.uninstall_artifact_image_case(
+        db,
+        admin,
+        artifact_id,
+        job_runner_client=job_runner_client,
+        force=bool(body.force) if body is not None else False,
+    )

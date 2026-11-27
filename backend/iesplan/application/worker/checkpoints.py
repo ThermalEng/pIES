@@ -21,7 +21,6 @@ from iesplan.computation import (
     COMPUTE_RESULT_SCHEMA,
     COMPUTE_RESULT_VERSION,
     AttemptContext,
-    ComputationUnavailableError,
     ComputeResult,
     ExecutionReceipt,
     MaterializedSeries,
@@ -263,13 +262,11 @@ def execute_saved_bundle(
     stop=None,
     detach: Any = None,
 ) -> tuple[ExecutionReceipt, Mapping[str, Content], dict]:
-    try:
-        solver_stage = plane.stage_catalog.get_by_ref(solver_ref)
-    except KeyError:
-        raise ComputationUnavailableError(
-            f"solver阶段容器未发布: {solver_ref!r}",
-            reason="no-provider",
-        ) from None
+    from iesplan.application.worker.compute_cases import resolve_stage_descriptor
+
+    solver_stage = resolve_stage_descriptor(
+        plane, solver_ref, kind_label="solver", session_factory=session_factory
+    )
 
     input_files: dict[str, Any] = {
         f"bundle/{rel}": content for rel, content in export_bundle_files(bundle).items()

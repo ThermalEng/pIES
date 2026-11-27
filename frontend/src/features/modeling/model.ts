@@ -107,8 +107,6 @@ export interface CandidateModel {
   source: ModelSource
   /** source=template 时必填。 */
   template_id: string | null
-  /** source=template: 精确发布 revision(固定不可变)。 */
-  template_revision: number | null
   /** source=template: 表单 JSON inputs 树。 */
   inputs_json: unknown | null
   /** source=yaml: 候选 YAML 文本。 */

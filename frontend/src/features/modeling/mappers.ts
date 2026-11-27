@@ -608,14 +608,10 @@ export function diagnosticsFromError(error: unknown): ModelDiagnostic[] {
 export function buildCandidateRequest(candidate: CandidateModel): CandidateSaveRequestDto {
   if (candidate.source === 'template') {
     if (!candidate.template_id) throw new MapperError('source=template 必须提供 template_id')
-    if (!candidate.template_revision) {
-      throw new MapperError('source=template 必须提供 template_revision')
-    }
     return {
       source: 'template',
       model_yaml: '',
       template_id: candidate.template_id,
-      template_revision: candidate.template_revision,
       template_inputs: candidate.inputs_json ?? {},
       expected_revision: candidate.project_revision,
       idempotency_key: candidate.idempotency_key,
@@ -628,7 +624,6 @@ export function buildCandidateRequest(candidate: CandidateModel): CandidateSaveR
     source: 'direct_yaml',
     model_yaml: candidate.content_yaml,
     template_id: null,
-    template_revision: null,
     template_inputs: null,
     expected_revision: candidate.project_revision,
     idempotency_key: candidate.idempotency_key,

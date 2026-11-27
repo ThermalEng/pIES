@@ -41,7 +41,7 @@ from iesplan.identity.contracts import UserRecord
 def run_validation(db: Session, user: UserRecord, project_id: int) -> dict:
     """执行完整预检并持久化(原路由顺序：view 授权 → 预检 → 存报告)。"""
     ensure_access(db, user, project_id, "view")
-    report = _validate_project(db, project_id)
+    report = _validate_project(db, project_id, user_id=user.id)
     stored = _store_report(db, project_id, report)
     return {"report": report.to_dict(), "stored": stored}
 
@@ -68,7 +68,7 @@ def get_validation_report(db: Session, user: UserRecord, project_id: int) -> dic
     stored = _get_latest_report(db, project_id)
     if stored is not None:
         return {"report": stored, "stored": True}
-    report = _validate_project(db, project_id)
+    report = _validate_project(db, project_id, user_id=user.id)
     return {"report": report.to_dict(), "stored": False}
 
 

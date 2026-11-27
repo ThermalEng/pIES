@@ -274,6 +274,74 @@ def list_snapshots_for_version(db: Session, project_version_id: int) -> list[Cal
     return [_row_to_snapshot(row) for row in rows]
 
 
+def count_inflight_artifact_refs(
+    db: Session,
+    *,
+    kind: str,
+    stable_id: str,
+    version: str,
+) -> int:
+    """统计仍处于非终态（queued/running/cancelling）且快照引用指定生态制品版本的任务数。"""
+    import json
+
+    stmt = (
+        select(Task.id, CalcSnapshot)
+        .join(CalcSnapshot, Task.calc_snapshot_id == CalcSnapshot.id)
+        .where(Task.status.in_(("queued", "running", "cancelling")))
+    )
+    rows = db.execute(stmt).all()
+    if not rows:
+        return 0
+
+    ref = f"{stable_id}@{version}"
+    count = 0
+    for _task_id, snap in rows:
+        if kind == "device_model":
+            local_devs = (snap.extension_versions or {}).get("local_device_models")
+            if isinstance(local_devs, Mapping) and local_devs.get(stable_id) == version:
+                count += 1
+                continue
+            raw_text = snap.canonical_assembly_text or ""
+            if version == "1" and stable_id in raw_text:
+                try:
+                    doc = json.loads(raw_text)
+                    devices = doc.get("devices") or {}
+                    if any(
+                        isinstance(dev, Mapping)
+                        and isinstance(dev.get("definition"), Mapping)
+                        and dev["definition"].get("id") == stable_id
+                        for dev in devices.values()
+                    ):
+                        count += 1
+                except ValueError:
+                    pass
+            continue
+
+        cfg = snap.calc_config_snapshot or {}
+        if not isinstance(cfg, Mapping):
+            continue
+        matched = False
+        if kind == "predictor":
+            matched = any(
+                isinstance(entry, Mapping) and entry.get("algorithm") == ref
+                for entry in (cfg.get("predictions") or ())
+            )
+        elif kind == "generator":
+            matched = cfg.get("generator") == ref
+        elif kind == "solver":
+            matched = cfg.get("solver") == ref
+        elif kind == "algorithm":
+            matched = cfg.get("algorithm") == ref
+        elif kind == "evaluator":
+            matched = any(
+                isinstance(entry, Mapping) and entry.get("evaluator") == ref
+                for entry in (cfg.get("evaluators") or ())
+            )
+        if matched:
+            count += 1
+    return count
+
+
 # ---------------------------------------------------------------------------
 # 任务
 # ---------------------------------------------------------------------------

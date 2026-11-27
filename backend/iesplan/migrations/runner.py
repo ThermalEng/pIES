@@ -9,9 +9,14 @@ from sqlalchemy import text
 from sqlalchemy.engine import Connection, Engine
 
 from iesplan.migrations.v1_2_0_calc_config import MIGRATION_VERSION, upgrade_calc_configs
+from iesplan.migrations.v1_2_0_ecosystem import (
+    MIGRATION_VERSION as ECOSYSTEM_MIGRATION_VERSION,
+)
+from iesplan.migrations.v1_2_0_ecosystem import upgrade_ecosystem
 
 MIGRATIONS: tuple[tuple[str, Callable[[Connection], int]], ...] = (
     (MIGRATION_VERSION, upgrade_calc_configs),
+    (ECOSYSTEM_MIGRATION_VERSION, upgrade_ecosystem),
 )
 
 

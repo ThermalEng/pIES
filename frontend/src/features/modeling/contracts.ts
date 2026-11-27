@@ -8,14 +8,14 @@
  *
  * 端点(与后端 /api 路由一致):
  *   GET  /api/model-templates/catalog                    可用模板目录 {items: [...]}
- *   GET  /api/model-templates/{template_id}              模板详情 {template, document, diagnostics}
+ *   GET  /api/model-templates/{template_id}/published    当前唯一发布版详情 {template, revision, document, receipt, summary, diagnostics}
  *   GET  /api/projects/{pid}/models                      项目模型清单 {project_models: [...]}
  *   POST /api/projects/{pid}/models/validate             候选模型门禁 {valid, diagnostics}
  *   POST /api/projects/{pid}/models                      正式保存 {project_model, receipt, project_revision}
  *
  * 候选保存判别字段 source:
- *   - source=template: template_id + template_revision + template_inputs;
- *     后端读取权威模板内容并实例化(不信任客户端自带的模板字节);
+ *   - source=template: template_id + template_inputs;
+ *     后端读取当前发布版权威模板内容并实例化(不信任客户端自带的模板字节);
  *   - source=yaml: model_yaml(候选 YAML 文本)由后端直接解析校验。
  * 两条路径汇合为同一个后端用例。
  *
@@ -134,8 +134,8 @@ export interface CandidateValidateResponseDto {
 
 /**
  * 候选校验/保存请求(判别字段 source):
- * - source=template: template_id + template_revision + template_inputs;
- *   后端读取权威模板内容并实例化;
+ * - source=template: template_id + template_inputs;
+ *   后端读取当前发布版权威模板内容并实例化;
  * - source=yaml: model_yaml(候选 YAML 文本)由后端直接解析校验。
  */
 export interface CandidateSaveRequestDto {
@@ -144,8 +144,6 @@ export interface CandidateSaveRequestDto {
   model_yaml: string
   /** source=template: 稳定模板 ID(不透明字符串)。 */
   template_id: string | null
-  /** source=template: 精确发布 revision(固定不可变)。 */
-  template_revision: number | null
   /** source=template: 表单 JSON inputs 树(只含模板已声明路径)。 */
   template_inputs: unknown | null
   /** 预期项目草稿修订(乐观锁, 与后端 ModelSaveRequest.expected_revision 对应)。 */

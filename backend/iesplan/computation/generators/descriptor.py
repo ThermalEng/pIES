@@ -63,6 +63,9 @@ class GeneratorDescriptor:
     unit_system: str = ""
     media_types: tuple[str, ...] = ()
     seed_semantics: str = ""
+    consumes: tuple[str, ...] = ("ies.stage-input@1.0.0",)
+    produces: tuple[str, ...] = ("ies.solver-bundle.mps@1.0.0",)
+    companions: Mapping[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         check_provider_ref(f"{self.generator_id}@{self.version}", "generator")
@@ -113,6 +116,24 @@ class GeneratorDescriptor:
         for attr in ("unit_system", "seed_semantics"):
             if not isinstance(getattr(self, attr), str) or not getattr(self, attr):
                 raise ValueError(f"{attr} 须为非空字符串")
+        object.__setattr__(
+            self,
+            "consumes",
+            tuple(check_provider_ref(c, "consumes") for c in self.consumes),
+        )
+        object.__setattr__(
+            self,
+            "produces",
+            tuple(check_provider_ref(p, "produces") for p in self.produces),
+        )
+        if not isinstance(self.companions, Mapping):
+            raise TypeError("companions 须为 Mapping")
+        normalized_companions: dict[str, str] = {}
+        for role, ref in self.companions.items():
+            if role not in ("predictor", "generator", "solver", "evaluator"):
+                raise ValueError(f"companions 角色非法: {role!r}")
+            normalized_companions[role] = check_provider_ref(ref, f"companions.{role}")
+        object.__setattr__(self, "companions", freeze_json_value(normalized_companions))
 
     @property
     def ref(self) -> str:
@@ -125,22 +146,19 @@ class GeneratorDescriptor:
 
     def to_stage_spec(self) -> Any:
         """投影为统一阶段契约 ``StagePluginSpec``。"""
-        from iesplan.computation.contracts.compatibility import (
-            SOLVER_BUNDLE_MPS_CONTRACT,
-            STAGE_INPUT_CONTRACT,
-            StagePluginSpec,
-        )
+        from iesplan.computation.contracts.compatibility import StagePluginSpec
 
         return StagePluginSpec(
             plugin_id=self.generator_id,
             version=self.version,
             kind="generator",
             parameters_schema=self.options_schema,
-            consumes=(STAGE_INPUT_CONTRACT,),
-            produces=(SOLVER_BUNDLE_MPS_CONTRACT,),
+            consumes=self.consumes,
+            produces=self.produces,
             modes=self.modes,
             precisions=self.precisions,
             outputs=self.outputs,
+            companions=self.companions,
         )
 
     def to_dict(self) -> dict[str, Any]:

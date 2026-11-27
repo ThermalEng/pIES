@@ -34,8 +34,7 @@ from iesplan import model as model_domain  # noqa: E402
 from iesplan import project as project_domain  # noqa: E402
 from iesplan.application.model_templates import (  # noqa: E402
     create_template_draft,
-    get_draft_revision,
-    list_draft_revisions,
+    get_published_template,
     publish_template,
 )
 from iesplan.application.models import save_project_model  # noqa: E402
@@ -202,20 +201,15 @@ def test_template_lifecycle_reads_writes_via_model_repository(db_session: Sessio
     assert stored.draft_yaml_object_id is not None
     assert created["id"] == str(stored.id)
 
-    drafts = model_domain.list_draft_revisions(db_session, stored.id)
-    assert [d.revision for d in drafts] == [1]
-    assert drafts[0].yaml_object_id == stored.draft_yaml_object_id
-    assert list_draft_revisions(db_session, user, template_id)[0]["revision"] == 1
-    assert get_draft_revision(db_session, user, template_id, 1)["revision"] == 1
-
     published = publish_template(
         db_session, user, template_id, expected_revision=1, idempotency_key="w1-k1"
     )
     assert published["duplicate"] is False
-    rev = model_domain.get_published_revision(db_session, stored.id, 1)
+    rev = model_domain.get_current_published_revision(db_session, stored.id)
     assert rev is not None
     assert rev.yaml_object_id is not None
     assert published["revision"]["id"] == str(rev.id)
+    assert get_published_template(db_session, user, template_id)["revision"]["id"] == str(rev.id)
 
     replay = publish_template(
         db_session, user, template_id, expected_revision=1, idempotency_key="w1-k1"

@@ -486,7 +486,7 @@ def _update_draft(
         if cmd.get("type") == "dataset.bind" and isinstance(cmd.get("payload"), dict):
             _validate_dataset_bind(db, project_id, cmd["payload"])
         if cmd.get("type") == "model.upsert_device" and isinstance(cmd.get("payload"), dict):
-            _validate_device_type_ref(db, content, cmd["payload"])
+            _validate_device_type_ref(db, content, cmd["payload"], user_id=user.id)
             cmd = _with_created_source_bindings(db, content, cmd)
         result = _apply_command(content, cmd)
         applied[cid] = {"revision": draft.revision + 1, "result": jsonable(result)}
@@ -596,13 +596,14 @@ def _apply_command(content: dict, cmd: dict) -> dict:
     return handler(content, payload)
 
 
-def _validate_device_type_ref(db: Session, content: dict, payload: dict) -> None:
-    """device_type 引用边界: 公开目录已注册 或 当前草稿内容精确引用的本项目模型。
-
-    在命令应用前经 devices 公开门面与项目设备描述确认；引用集取自当前
-    草稿内容声明的 ``project_models``（恢复版本后随之变化），跨项目模型
-    不可引用，未注册类型与既有行为一致当场拒绝（PROJ-CMD-005）。
-    """
+def _validate_device_type_ref(
+    db: Session,
+    content: dict,
+    payload: dict,
+    *,
+    user_id: int | None = None,
+) -> None:
+    """device_type 引用边界: 公开目录、本项目 model 清单 或 当前成员已启用本地生态设备。"""
     type_id = payload.get("device_type")
     if type_id is None:
         return
@@ -623,6 +624,11 @@ def _validate_device_type_ref(db: Session, content: dict, payload: dict) -> None
 
     if type_id in project_device_type_ids(db, content):
         return
+    if user_id is not None:
+        from iesplan.application.ecosystem import resolve_enabled_local_device
+
+        if resolve_enabled_local_device(db, user_id, type_id) is not None:
+            return
     raise InvalidRequestError(
         "设备 device_type 未注册",
         code="PROJ-CMD-005",

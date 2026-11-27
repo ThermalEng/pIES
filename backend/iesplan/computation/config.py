@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 import pathlib
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
 from iesplan.computation.contracts.common import (
@@ -25,6 +25,7 @@ from iesplan.computation.errors import ComputationUnavailableError
 from iesplan.computation.protocols import (
     CalculationConfig,
     check_provider_ref,
+    freeze_json_value,
     thaw_json_value,
 )
 
@@ -332,7 +333,11 @@ def build_stage_plugin_map(
     specs: dict[str, StagePluginSpec] = {}
     if predictor_registry is not None:
         for desc in predictor_registry.snapshot():
-            if desc.ref == BUILTIN_PREDICTOR_NAIVE_SPEC.ref:
+            provider = predictor_registry.get(desc.ref)
+            custom_spec = getattr(provider, "stage_spec", None)
+            if isinstance(custom_spec, StagePluginSpec):
+                specs[desc.ref] = custom_spec
+            elif desc.ref == BUILTIN_PREDICTOR_NAIVE_SPEC.ref:
                 specs[desc.ref] = BUILTIN_PREDICTOR_NAIVE_SPEC
             else:
                 pid, ver = desc.ref.split("@", 1)
@@ -379,6 +384,7 @@ class AlgorithmDescriptor:
     evaluators: tuple[str, ...] | None = None
     consumes: tuple[str, ...] = ("ies.stage-input@1.0.0",)
     produces: tuple[str, ...] = ("ies.engineering-solution@1.0.0",)
+    companions: Mapping[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         check_provider_ref(f"{self.algorithm_id}@{self.version}", "algorithm")
@@ -405,7 +411,15 @@ class AlgorithmDescriptor:
             check_provider_ref(ev, "evaluators")
         object.__setattr__(self, "evaluators", evaluators)
         object.__setattr__(self, "consumes", tuple(check_provider_ref(c, "consumes") for c in self.consumes))
-        object.__setattr__(self, "produces", tuple(check_provider_ref(c, "produces") for c in self.produces))
+        object.__setattr__(self, "produces", tuple(check_provider_ref(p, "produces") for p in self.produces))
+        if not isinstance(self.companions, Mapping):
+            raise TypeError("companions 须为 Mapping")
+        normalized_companions: dict[str, str] = {}
+        for role, ref in self.companions.items():
+            if role not in ("predictor", "generator", "solver", "evaluator"):
+                raise ValueError(f"companions 角色非法: {role!r}")
+            normalized_companions[role] = check_provider_ref(ref, f"companions.{role}")
+        object.__setattr__(self, "companions", freeze_json_value(normalized_companions))
         object.__setattr__(
             self,
             "parameters_schema",
@@ -435,6 +449,7 @@ class AlgorithmDescriptor:
             modes=self.modes,
             precisions=self.precisions,
             outputs=self.outputs,
+            companions=self.companions,
         )
 
     def to_dict(self) -> dict[str, Any]:

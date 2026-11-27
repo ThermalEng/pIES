@@ -11,8 +11,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Collection
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 import sqlalchemy as sa
@@ -22,22 +21,15 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     Index,
-    Numeric,
     Text,
     UniqueConstraint,
-    delete,
     select,
     text,
 )
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Mapped, Session, mapped_column
 
-from iesplan.db import (
-    Base,
-    JSONB,
-    bigint_pk,
-)
-
+from iesplan.db import Base, bigint_pk
 from iesplan.model.contracts import (
     ModelConflictError,
     ModelNotFoundError,
@@ -46,7 +38,6 @@ from iesplan.model.contracts import (
     ProjectModelRecord,
     TemplateDraftRevisionRecord,
 )
-
 
 
 def _iso(value: datetime | None) -> str | None:
@@ -215,6 +206,34 @@ def create_template(
     return _row_to_template(row)
 
 
+def claim_template_publish(
+    db: Session,
+    template_row_id: int,
+    *,
+    expected_draft_revision: int,
+    expected_published_revision: int,
+    published_revision: int,
+    published_at: Any,
+    status: str,
+) -> bool:
+    """按期望草稿与发布 revision 条件认领发布，防止并发覆盖丢更新（只 flush）。"""
+    res = db.execute(
+        sa.update(ModelTemplate)
+        .where(
+            ModelTemplate.id == template_row_id,
+            ModelTemplate.draft_revision == expected_draft_revision,
+            ModelTemplate.published_revision == expected_published_revision,
+        )
+        .values(
+            published_revision=published_revision,
+            published_at=published_at,
+            status=status,
+        )
+    )
+    db.flush()
+    return (res.rowcount or 0) > 0
+
+
 def update_template(db: Session, template_row_id: int, **fields: Any) -> ModelTemplateRecord:
     """更新模板主表字段（仅提供字段）并返回新视图；缺失抛 ModelNotFoundError。"""
     row = db.get(ModelTemplate, template_row_id)
@@ -240,74 +259,26 @@ def delete_template(db: Session, template_row_id: int) -> None:
 # ---------------------------------------------------------------------------
 
 
-def create_draft_revision(
-    db: Session,
-    *,
-    entry_id: int,
-    revision: int,
-    yaml_object_id: int,
-    source: str,
-    created_by: int,
-    diagnostics_object_id: int | None,
-) -> TemplateDraftRevisionRecord:
-    """新增不可变草稿 revision 行；冲突抛 ModelConflictError。"""
-    row = ModelTemplateDraftRevision(
-        entry_id=entry_id,
-        revision=revision,
-        yaml_object_id=yaml_object_id,
-        source=source,
-        created_by=created_by,
-        diagnostics_object_id=diagnostics_object_id,
-    )
-    try:
-        with db.begin_nested():
-            db.add(row)
-            db.flush()
-    except IntegrityError as exc:
-        raise ModelConflictError(
-            "草稿 revision 冲突",
-            params={"entry_id": entry_id, "revision": revision},
-        ) from exc
-    return _row_to_draft_revision(row)
-
-
-def list_draft_revisions(db: Session, entry_id: int) -> list[TemplateDraftRevisionRecord]:
-    """模板草稿 revision 历史（revision 升序）。"""
-    rows = (
-        db.execute(
-            select(ModelTemplateDraftRevision)
-            .where(ModelTemplateDraftRevision.entry_id == entry_id)
-            .order_by(ModelTemplateDraftRevision.revision)
-        )
-        .scalars()
-        .all()
-    )
-    return [_row_to_draft_revision(row) for row in rows]
-
-
-def get_draft_revision(
-    db: Session, entry_id: int, revision: int
-) -> TemplateDraftRevisionRecord | None:
-    """取精确草稿 revision；无返回 None。"""
-    row = db.execute(
-        select(ModelTemplateDraftRevision).where(
-            ModelTemplateDraftRevision.entry_id == entry_id,
-            ModelTemplateDraftRevision.revision == revision,
-        )
-    ).scalar_one_or_none()
-    return _row_to_draft_revision(row) if row is not None else None
-
-
-def get_published_revision(
-    db: Session, template_row_id: int, revision: int
+def get_current_published_revision(
+    db: Session, template_row_id: int
 ) -> ModelTemplateRevisionRecord | None:
-    """取精确发布 revision；无返回 None。"""
-    row = db.execute(
-        select(ModelTemplateRevision).where(
-            ModelTemplateRevision.template_id == template_row_id,
-            ModelTemplateRevision.revision == revision,
+    """取模板当前唯一发布 revision；无返回 None。"""
+    template = db.get(ModelTemplate, template_row_id)
+    if template is None:
+        return None
+    row: ModelTemplateRevision | None = None
+    if template.current_published_revision_id is not None:
+        row = db.get(ModelTemplateRevision, template.current_published_revision_id)
+    if row is None:
+        row = (
+            db.execute(
+                select(ModelTemplateRevision)
+                .where(ModelTemplateRevision.template_id == template_row_id)
+                .order_by(ModelTemplateRevision.revision.desc())
+            )
+            .scalars()
+            .first()
         )
-    ).scalar_one_or_none()
     return _row_to_template_revision(row) if row is not None else None
 
 
@@ -324,7 +295,7 @@ def find_revision_by_idempotency(
     return _row_to_template_revision(row) if row is not None else None
 
 
-def create_published_revision(
+def replace_published_revision(
     db: Session,
     *,
     template_row_id: int,
@@ -337,30 +308,76 @@ def create_published_revision(
     diagnostics_object_id: int | None,
     idempotency_key: str | None,
     published_by: int,
-) -> ModelTemplateRevisionRecord:
-    """新增不可变发布 revision 行；冲突抛 ModelConflictError。"""
-    row = ModelTemplateRevision(
-        template_id=template_row_id,
-        revision=revision,
-        schema_version=schema_version,
-        input_count=input_count,
-        yaml_object_id=yaml_object_id,
-        receipt_object_id=receipt_object_id,
-        summary_object_id=summary_object_id,
-        diagnostics_object_id=diagnostics_object_id,
-        idempotency_key=idempotency_key,
-        published_by=published_by,
+) -> tuple[ModelTemplateRevisionRecord, list[int]]:
+    """覆盖更新当前唯一发布 revision 行，并返回被替换的对象 ID 列表。"""
+    existing_rows = (
+        db.execute(
+            select(ModelTemplateRevision)
+            .where(ModelTemplateRevision.template_id == template_row_id)
+            .order_by(ModelTemplateRevision.id.desc())
+        )
+        .scalars()
+        .all()
     )
+    superseded_object_ids: list[int] = []
+    for old_row in existing_rows:
+        for obj_id in (
+            old_row.yaml_object_id,
+            old_row.receipt_object_id,
+            old_row.summary_object_id,
+            old_row.diagnostics_object_id,
+        ):
+            if obj_id is not None and obj_id not in superseded_object_ids:
+                superseded_object_ids.append(obj_id)
+
+    if existing_rows:
+        row = existing_rows[0]
+        row.revision = revision
+        row.schema_version = schema_version
+        row.input_count = input_count
+        row.yaml_object_id = yaml_object_id
+        row.receipt_object_id = receipt_object_id
+        row.summary_object_id = summary_object_id
+        row.diagnostics_object_id = diagnostics_object_id
+        row.idempotency_key = idempotency_key
+        row.published_by = published_by
+        row.published_at = datetime.now(UTC)
+        extra_ids = [r.id for r in existing_rows[1:]]
+        if extra_ids:
+            db.execute(
+                sa.update(ModelTemplate)
+                .where(
+                    ModelTemplate.id == template_row_id,
+                    ModelTemplate.current_published_revision_id.in_(extra_ids),
+                )
+                .values(current_published_revision_id=row.id)
+            )
+            for extra_row in existing_rows[1:]:
+                db.delete(extra_row)
+    else:
+        row = ModelTemplateRevision(
+            template_id=template_row_id,
+            revision=revision,
+            schema_version=schema_version,
+            input_count=input_count,
+            yaml_object_id=yaml_object_id,
+            receipt_object_id=receipt_object_id,
+            summary_object_id=summary_object_id,
+            diagnostics_object_id=diagnostics_object_id,
+            idempotency_key=idempotency_key,
+            published_by=published_by,
+        )
+        db.add(row)
+
     try:
         with db.begin_nested():
-            db.add(row)
             db.flush()
     except IntegrityError as exc:
         raise ModelConflictError(
             "模板发布冲突(并发)",
             params={"template_row_id": template_row_id, "revision": revision},
         ) from exc
-    return _row_to_template_revision(row)
+    return _row_to_template_revision(row), superseded_object_ids
 
 
 # ---------------------------------------------------------------------------

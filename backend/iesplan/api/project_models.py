@@ -47,9 +47,9 @@ class ModelCandidateRequest(BaseModel):
 
     来源判别:
     - ``source=direct_yaml``: ``model_yaml`` 为完整候选模型 YAML(必填);
-    - ``source=template``: ``template_id`` + ``template_revision``
-      固定精确模板 revision(后端读取权威内容实例化,
-      不信任客户端自带的模板字节); ``template_inputs`` 为用户 inputs。
+    - ``source=template``: ``template_id`` 指定已发布模板(后端读取当前唯一
+      已发布权威内容实例化, 不信任客户端自带的模板字节);
+      ``template_inputs`` 为用户 inputs。
       ``model_yaml`` 可省略(校验端点允许内联模板 YAML 形态)。文本文件只校验字头。
     """
 
@@ -57,9 +57,6 @@ class ModelCandidateRequest(BaseModel):
     source: Literal["direct_yaml", "template"] = "direct_yaml"
     template_id: str | None = Field(
         default=None, description="模板来源: 稳定模板 ID(不透明字符串)",
-    )
-    template_revision: int | None = Field(
-        default=None, ge=1, description="模板来源: 精确发布 revision(固定不可变)",
     )
     template_inputs: dict[str, Any] | None = Field(
         default=None, description="模板来源时用户提交的 inputs(未声明字段拒绝)"
@@ -70,10 +67,8 @@ class ModelCandidateRequest(BaseModel):
         if self.source == "direct_yaml" and not self.model_yaml.strip():
             raise ValueError("source=direct_yaml 必须提供 model_yaml")
         if self.source == "template":
-            if not self.template_id or not self.template_revision:
-                raise ValueError(
-                    "source=template 必须携带 template_id 与 template_revision"
-                )
+            if not self.template_id:
+                raise ValueError("source=template 必须携带 template_id")
             if self.template_inputs is None:
                 raise ValueError("source=template 必须携带 template_inputs")
         return self
@@ -118,7 +113,6 @@ def validate_project_model_candidate(
         model_yaml=payload.model_yaml,
         source=payload.source,
         template_id=payload.template_id,
-        template_revision=payload.template_revision,
         template_inputs=payload.template_inputs,
     )
     return {
@@ -155,7 +149,6 @@ def save_project_model_endpoint(
         model_yaml=payload.model_yaml,
         source=payload.source,
         template_id=payload.template_id,
-        template_revision=payload.template_revision,
         template_inputs=payload.template_inputs,
         idempotency_key=payload.idempotency_key,
         expected_revision=payload.expected_revision,

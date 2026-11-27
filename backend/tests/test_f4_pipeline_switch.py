@@ -369,7 +369,7 @@ def test_migration_drain_gate_and_readonly_history(tmp_path: Path) -> None:
                 )
             )
         applied = apply_migrations(eng)
-        assert applied == [MIGRATION_VERSION]
+        assert MIGRATION_VERSION in applied
         assert apply_migrations(eng) == []
 
         # Verify calc_configs migrated to 13-field, calc_snapshots untouched!
