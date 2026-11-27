@@ -642,16 +642,115 @@ def _run_selftest_case_via_job_runner(
 
 
 def _attempt_delete_built_image(
-    job_runner_client: Any, *, plugin_id: str, version: str
+    job_runner_client: Any, *, plugin_id: str, version: str, force: bool = True
 ) -> str | None:
     """尝试删除构建镜像；成功返回 None，失败返回错误信息字符串（不吞异常）。"""
     try:
-        del_res = job_runner_client.delete_plugin_image(plugin_id, version, force=True)
+        del_res = job_runner_client.delete_plugin_image(plugin_id, version, force=force)
         if not (del_res.deleted or del_res.status == "not_found"):
             return f"delete_plugin_image 未完成清理 (status={del_res.status!r})"
         return None
     except Exception as exc:
         return str(exc)
+
+
+def _stale_image_info(artifact: LocalArtifactRecord) -> tuple[str | None, str | None]:
+    """从制品 diagnostics 中提取未清理的残留旧镜像引用与对应版本。"""
+    diag = artifact.diagnostics
+    if not isinstance(diag, Mapping):
+        return None, None
+    stale_ref = diag.get("stale_image_ref")
+    if not isinstance(stale_ref, str) or not stale_ref:
+        return None, None
+    stale_ver = diag.get("stale_version")
+    if not isinstance(stale_ver, str) or not stale_ver:
+        _, _, stale_ver = stale_ref.rpartition(":")
+    return stale_ref, (stale_ver or None)
+
+
+def _clear_stale_diag(diag: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    """移除 diagnostics 中的残留镜像清理重试标记。"""
+    if not isinstance(diag, Mapping):
+        return None
+    cleaned = {
+        k: v
+        for k, v in diag.items()
+        if k not in ("stale_image_ref", "stale_version", "cleanup_error", "cleanup_retryable")
+    }
+    return cleaned or None
+
+
+def _retry_stale_image_cleanup(
+    db: Session,
+    artifact: LocalArtifactRecord,
+    *,
+    job_runner_client: Any,
+    force: bool = True,
+) -> tuple[LocalArtifactRecord, bool, str | None]:
+    """若制品 diagnostics 存在 stale_image_ref，先重试清理残留旧镜像并在成功后清除标记。"""
+    stale_ref, stale_ver = _stale_image_info(artifact)
+    if not stale_ref or not stale_ver:
+        return artifact, False, None
+    if job_runner_client is None:
+        raise AppError("job_runner 未装配，无法清理残留旧版本镜像", code="ECO-JR-UNAVAILABLE")
+    try:
+        del_res = job_runner_client.delete_plugin_image(
+            artifact.stable_id, stale_ver, force=bool(force)
+        )
+    except JobRunnerConflictError as exc:
+        raise EcosystemUninstallInUseError(
+            "残留旧版本镜像正被运行容器使用，请待容器退出后再执行镜像清理",
+            params={"artifact_id": artifact.id, "image_ref": stale_ref, "detail": str(exc)},
+        ) from exc
+    except Exception as exc:
+        del_err: str | None = str(exc)
+        deleted = False
+        status_str: str | None = None
+    else:
+        deleted = bool(del_res.deleted)
+        status_str = str(del_res.status)
+        del_err = (
+            None
+            if (del_res.deleted or del_res.status == "not_found")
+            else f"delete_plugin_image 未完成清理 (status={del_res.status!r})"
+        )
+
+    if del_err is not None:
+        diag = dict(artifact.diagnostics or {})
+        diag.update(
+            {
+                "cleanup_error": del_err,
+                "cleanup_retryable": True,
+                "stale_image_ref": stale_ref,
+                "stale_version": stale_ver,
+            }
+        )
+        ecosystem_domain.update_artifact(
+            db,
+            artifact.id,
+            expected_version=artifact.version,
+            diagnostics=diag,
+        )
+        db.commit()
+        raise AppError(
+            f"残留旧版本插件镜像清理失败，已保留重试状态: {del_err}",
+            code="ECO-IMAGE-CLEANUP-FAILED",
+            params={
+                "artifact_id": artifact.id,
+                "image_ref": stale_ref,
+                "cleanup_error": del_err,
+            },
+        )
+
+    cleared = ecosystem_domain.update_artifact(
+        db,
+        artifact.id,
+        expected_version=artifact.version,
+        diagnostics=_clear_stale_diag(artifact.diagnostics),
+    )
+    assert cleared is not None
+    db.commit()
+    return cleared, deleted, status_str
 
 
 def _execute_plugin_build_and_selftest(
@@ -915,9 +1014,56 @@ def upload_plugin_zip_case(
 
     prev_image_ref: str | None = None
     prev_version: str | None = None
-    try:
-        existing = ecosystem_domain.get_artifact_by_stable_id(db, kind, stable_id)
-        if existing is not None:
+    artifact: LocalArtifactRecord | None = None
+    existing = ecosystem_domain.get_artifact_by_stable_id(db, kind, stable_id)
+    if existing is not None and _stale_image_info(existing)[0] is not None:
+        if existing.version == version:
+            stored = get_object(db, existing.object_id)
+            if stored != raw_bytes:
+                raise EcosystemConflictError(
+                    "同稳定标识与精确版本的算法插件已存在且归档内容不一致，禁止静默覆盖",
+                    params={"kind": kind, "stable_id": stable_id, "version": version},
+                )
+        else:
+            inflight_prev = tasks_domain.count_inflight_artifact_refs(
+                db, kind=kind, stable_id=stable_id, version=existing.version
+            )
+            if inflight_prev > 0:
+                raise EcosystemUninstallInUseError(
+                    f"旧版本 {existing.version!r} 仍有 {inflight_prev} 个在途任务使用中，禁止覆盖升级",
+                    params={
+                        "artifact_id": existing.id,
+                        "kind": kind,
+                        "stable_id": stable_id,
+                        "version": existing.version,
+                        "inflight_count": inflight_prev,
+                    },
+                )
+        existing, _, _ = _retry_stale_image_cleanup(
+            db, existing, job_runner_client=job_runner_client
+        )
+        # 若此前仅因旧镜像清理失败导致新版本停留在 build_failed，清理成功后继续推进构建
+        if (
+            existing.version == version
+            and approval == "approved"
+            and existing.approval_status == "approved"
+            and existing.install_status == "build_failed"
+            and existing.image_ref is None
+        ):
+            rebuilt_row = ecosystem_domain.update_artifact(
+                db,
+                existing.id,
+                expected_version=version,
+                install_status="building",
+                diagnostics=None,
+            )
+            assert rebuilt_row is not None
+            db.commit()
+            artifact = rebuilt_row
+            existing = None
+
+    if existing is not None:
+        try:
             if existing.version == version:
                 stored = get_object(db, existing.object_id)
                 if stored != raw_bytes:
@@ -1018,7 +1164,11 @@ def upload_plugin_zip_case(
                 },
             )
             db.commit()
-        else:
+        except Exception:
+            db.rollback()
+            raise
+    elif artifact is None:
+        try:
             stored_obj = put_object(
                 db,
                 raw_bytes,
@@ -1062,9 +1212,9 @@ def upload_plugin_zip_case(
                 },
             )
             db.commit()
-    except Exception:
-        db.rollback()
-        raise
+        except Exception:
+            db.rollback()
+            raise
 
     if prev_image_ref and prev_version is not None:
         del_err = _attempt_delete_built_image(
@@ -1081,6 +1231,7 @@ def upload_plugin_zip_case(
                     "cleanup_error": del_err,
                     "cleanup_retryable": True,
                     "stale_image_ref": prev_image_ref,
+                    "stale_version": prev_version,
                 },
             )
             db.commit()
@@ -1180,8 +1331,18 @@ def approve_artifact_case(
                 params={"artifact_id": artifact_id, "install_status": artifact.install_status},
             )
         if artifact.approval_status == "approved" and artifact.install_status == "ready":
-            db.commit()
+            if _stale_image_info(artifact)[0] is not None:
+                artifact, _, _ = _retry_stale_image_cleanup(
+                    db, artifact, job_runner_client=job_runner_client
+                )
+            else:
+                db.commit()
             return serialize_artifact(artifact)
+
+        if _stale_image_info(artifact)[0] is not None:
+            artifact, _, _ = _retry_stale_image_cleanup(
+                db, artifact, job_runner_client=job_runner_client
+            )
 
         settings_rec = ecosystem_domain.get_settings(db)
         next_install = "ready" if artifact.kind == "device_model" else "building"
@@ -1270,6 +1431,18 @@ def reject_artifact_case(
                     "install_status": artifact.install_status,
                 },
             )
+        reject_diag: dict[str, Any] = {}
+        stale_ref, stale_ver = _stale_image_info(artifact)
+        if stale_ref and stale_ver:
+            reject_diag.update(
+                {
+                    "stale_image_ref": stale_ref,
+                    "stale_version": stale_ver,
+                    "cleanup_retryable": True,
+                }
+            )
+        if reason:
+            reject_diag["rejected_reason"] = reason
         updated = ecosystem_domain.update_artifact(
             db,
             artifact_id,
@@ -1277,7 +1450,7 @@ def reject_artifact_case(
             install_status="disabled",
             approved_by=admin_user.id,
             approved_at=datetime.now(UTC),
-            diagnostics={"rejected_reason": reason} if reason else None,
+            diagnostics=reject_diag or None,
         )
         assert updated is not None
         audit_domain.audit(
@@ -1350,6 +1523,13 @@ def uninstall_artifact_image_case(
 
     image_deleted = False
     image_status = "not_applicable"
+    if _stale_image_info(disabled)[0] is not None:
+        disabled, stale_deleted, stale_status = _retry_stale_image_cleanup(
+            db, disabled, job_runner_client=job_runner_client, force=bool(force)
+        )
+        image_deleted = stale_deleted
+        if stale_status is not None:
+            image_status = stale_status
     if disabled.kind != "device_model" and disabled.image_ref:
         if job_runner_client is None:
             raise AppError("job_runner 未装配，无法清理插件镜像", code="ECO-JR-UNAVAILABLE")
@@ -1362,11 +1542,16 @@ def uninstall_artifact_image_case(
                 "镜像正被运行容器使用，请待容器退出后再执行镜像清理",
                 params={"artifact_id": artifact_id, "detail": str(exc)},
             ) from exc
-        image_deleted = bool(del_res.deleted)
+        image_deleted = bool(del_res.deleted) or image_deleted
         image_status = str(del_res.status)
 
     try:
-        final_rec = ecosystem_domain.update_artifact(db, artifact_id, image_ref=None)
+        final_rec = ecosystem_domain.update_artifact(
+            db,
+            artifact_id,
+            image_ref=None,
+            diagnostics=_clear_stale_diag(disabled.diagnostics),
+        )
         assert final_rec is not None
         audit_domain.audit(
             db,

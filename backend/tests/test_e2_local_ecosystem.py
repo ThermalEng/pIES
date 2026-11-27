@@ -1873,6 +1873,169 @@ def test_codex_r3_queued_build_version_binding_replace_order_and_collaborator_pr
     assert post_rec.diagnostics is not None
     assert post_rec.diagnostics["cleanup_retryable"] is True
     assert post_rec.diagnostics["stale_image_ref"] == f"pies-plugin/{ord_pid}:1.0.0"
+    assert post_rec.diagnostics["stale_version"] == "1.0.0"
+
+    # 2b. Retrying same-version upload cleans stale_image_ref, clears markers, and rebuilds v2 -> ready
+    ord_retry_transport = _FakeJobRunnerTransport(
+        stage_root=tmp_path / "r3_stages", plugin_source_root=tmp_path / "r3_builds"
+    )
+    recovered_v2 = ecosystem_app.upload_plugin_zip_case(
+        db,
+        admin,
+        zip_bytes=_build_plugin_zip_bytes(plugin_id=ord_pid, version="2.0.0"),
+        job_runner_client=ord_retry_transport.make_client(),
+        session_factory=db_factory,
+        plugin_source_root=tmp_path / "r3_builds",
+        stage_root=tmp_path / "r3_stages",
+    )
+    assert recovered_v2["version"] == "2.0.0"
+    assert recovered_v2["install_status"] == "ready"
+    assert any(c.get("version") == "1.0.0" for c in ord_retry_transport.delete_calls)
+    recovered_rec = ecosystem_domain.get_artifact(db, ord_v1["id"])
+    assert recovered_rec is not None
+    assert "stale_image_ref" not in (recovered_rec.diagnostics or {})
+
+    # 2c. Uninstall retries stale_image_ref even when image_ref is None
+    uninst_pid = "acme.algorithm.r4_uninst_stale"
+    uninst_transport = _FakeJobRunnerTransport(
+        stage_root=tmp_path / "r3_stages", plugin_source_root=tmp_path / "r3_builds"
+    )
+    uninst_v1 = ecosystem_app.upload_plugin_zip_case(
+        db,
+        admin,
+        zip_bytes=_build_plugin_zip_bytes(plugin_id=uninst_pid, version="1.0.0"),
+        job_runner_client=uninst_transport.make_client(),
+        session_factory=db_factory,
+        plugin_source_root=tmp_path / "r3_builds",
+        stage_root=tmp_path / "r3_stages",
+    )
+    with pytest.raises(AppError) as uninst_stale_err:
+        ecosystem_app.upload_plugin_zip_case(
+            db,
+            admin,
+            zip_bytes=_build_plugin_zip_bytes(plugin_id=uninst_pid, version="2.0.0"),
+            job_runner_client=_FailOldDeleteJR(uninst_transport.make_client()),  # type: ignore[arg-type]
+            session_factory=db_factory,
+            plugin_source_root=tmp_path / "r3_builds",
+            stage_root=tmp_path / "r3_stages",
+        )
+    assert uninst_stale_err.value.code == "ECO-IMAGE-CLEANUP-FAILED"
+    uninst_res = ecosystem_app.uninstall_artifact_image_case(
+        db, admin, uninst_v1["id"], job_runner_client=uninst_transport.make_client()
+    )
+    assert uninst_res["image_deleted"] is True
+    assert any(c.get("version") == "1.0.0" for c in uninst_transport.delete_calls)
+    uninst_rec = ecosystem_domain.get_artifact(db, uninst_v1["id"])
+    assert uninst_rec is not None
+    assert uninst_rec.install_status == "disabled"
+    assert uninst_rec.diagnostics is None
+
+    # 2d. Approval & v2->v3 overwrite also retry and clear stale_image_ref before clearing diagnostics
+    appr_pid = "acme.algorithm.r4_appr_stale"
+    appr_transport = _FakeJobRunnerTransport(
+        stage_root=tmp_path / "r3_stages", plugin_source_root=tmp_path / "r3_builds"
+    )
+    appr_v1 = ecosystem_app.upload_plugin_zip_case(
+        db,
+        admin,
+        zip_bytes=_build_plugin_zip_bytes(plugin_id=appr_pid, version="1.0.0"),
+        job_runner_client=appr_transport.make_client(),
+        session_factory=db_factory,
+        plugin_source_root=tmp_path / "r3_builds",
+        stage_root=tmp_path / "r3_stages",
+    )
+    ecosystem_app.update_ecosystem_settings_case(
+        db, admin, market_mode="local", local_upload_requires_approval=True
+    )
+    try:
+        with pytest.raises(AppError) as pend_err:
+            ecosystem_app.upload_plugin_zip_case(
+                db,
+                owner,
+                zip_bytes=_build_plugin_zip_bytes(plugin_id=appr_pid, version="2.0.0"),
+                job_runner_client=_FailOldDeleteJR(appr_transport.make_client()),  # type: ignore[arg-type]
+                session_factory=db_factory,
+                plugin_source_root=tmp_path / "r3_builds",
+                stage_root=tmp_path / "r3_stages",
+            )
+        assert pend_err.value.code == "ECO-IMAGE-CLEANUP-FAILED"
+        # First approve while delete still fails -> preserves pending & stale_image_ref
+        with pytest.raises(AppError) as appr_fail_err:
+            ecosystem_app.approve_artifact_case(
+                db,
+                admin,
+                appr_v1["id"],
+                job_runner_client=_FailOldDeleteJR(appr_transport.make_client()),  # type: ignore[arg-type]
+                session_factory=db_factory,
+                plugin_source_root=tmp_path / "r3_builds",
+                stage_root=tmp_path / "r3_stages",
+            )
+        assert appr_fail_err.value.code == "ECO-IMAGE-CLEANUP-FAILED"
+        still_pend = ecosystem_domain.get_artifact(db, appr_v1["id"])
+        assert still_pend is not None
+        assert still_pend.approval_status == "pending"
+        assert (still_pend.diagnostics or {}).get("stale_image_ref") == f"pies-plugin/{appr_pid}:1.0.0"
+
+        # Subsequent v2->v3 overwrite cleans v1 stale_image_ref before installing v3
+        v3_transport = _FakeJobRunnerTransport(
+            stage_root=tmp_path / "r3_stages", plugin_source_root=tmp_path / "r3_builds"
+        )
+        v3_res = ecosystem_app.upload_plugin_zip_case(
+            db,
+            admin,
+            zip_bytes=_build_plugin_zip_bytes(plugin_id=appr_pid, version="3.0.0"),
+            job_runner_client=v3_transport.make_client(),
+            session_factory=db_factory,
+            plugin_source_root=tmp_path / "r3_builds",
+            stage_root=tmp_path / "r3_stages",
+        )
+        assert v3_res["version"] == "3.0.0"
+        assert v3_res["install_status"] == "ready"
+        assert any(c.get("version") == "1.0.0" for c in v3_transport.delete_calls)
+
+        # Also test direct approve recovery on a pending stale record
+        appr_pid2 = "acme.algorithm.r4_appr_direct"
+        appr2_v1 = ecosystem_app.upload_plugin_zip_case(
+            db,
+            admin,
+            zip_bytes=_build_plugin_zip_bytes(plugin_id=appr_pid2, version="1.0.0"),
+            job_runner_client=appr_transport.make_client(),
+            session_factory=db_factory,
+            plugin_source_root=tmp_path / "r3_builds",
+            stage_root=tmp_path / "r3_stages",
+        )
+        with pytest.raises(AppError):
+            ecosystem_app.upload_plugin_zip_case(
+                db,
+                owner,
+                zip_bytes=_build_plugin_zip_bytes(plugin_id=appr_pid2, version="2.0.0"),
+                job_runner_client=_FailOldDeleteJR(appr_transport.make_client()),  # type: ignore[arg-type]
+                session_factory=db_factory,
+                plugin_source_root=tmp_path / "r3_builds",
+                stage_root=tmp_path / "r3_stages",
+            )
+        appr_ok_transport = _FakeJobRunnerTransport(
+            stage_root=tmp_path / "r3_stages", plugin_source_root=tmp_path / "r3_builds"
+        )
+        appr2_ok = ecosystem_app.approve_artifact_case(
+            db,
+            admin,
+            appr2_v1["id"],
+            job_runner_client=appr_ok_transport.make_client(),
+            session_factory=db_factory,
+            plugin_source_root=tmp_path / "r3_builds",
+            stage_root=tmp_path / "r3_stages",
+        )
+        assert appr2_ok["version"] == "2.0.0"
+        assert appr2_ok["install_status"] == "ready"
+        assert any(c.get("version") == "1.0.0" for c in appr_ok_transport.delete_calls)
+        appr2_rec = ecosystem_domain.get_artifact(db, appr2_v1["id"])
+        assert appr2_rec is not None
+        assert "stale_image_ref" not in (appr2_rec.diagnostics or {})
+    finally:
+        ecosystem_app.update_ecosystem_settings_case(
+            db, admin, market_mode="local", local_upload_requires_approval=False
+        )
 
     # 3. Acting user precheck resolves acting user's enabled devices (not project.owner_id)
     ns = generate_namespace()
