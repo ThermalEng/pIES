@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import http.client
 import io
 import json
+import socket
 import tarfile
 import threading
 import time
@@ -865,9 +867,78 @@ def test_build_plugin_hard_deadline_interrupts_blocked_and_slow_streams(
     assert blocked_resp.status_code == 400
     assert "timed out" in blocked_resp.json()["detail"]
     assert elapsed < 1.0
-    assert blocked_closed.is_set()
+    assert blocked_closed.wait(timeout=1.0)
 
-    # 2. Multi-chunk stream whose per-chunk gap < budget still aborts when total > budget.
+    # 2. Real stdlib BufferedReader-backed HTTPResponse blocked on recv() must abort promptly
+    # without deadlocking on resp.close(), and must unblock/terminate the reader generator.
+    server_release = threading.Event()
+    generator_finished = threading.Event()
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(1)
+    srv_port = srv.getsockname()[1]
+
+    def _serve_stalled_http() -> None:
+        conn_sock, _ = srv.accept()
+        try:
+            conn_sock.recv(4096)
+            chunk_body = b'{"stream": "Step 1/2 : FROM pies-plugin-base:latest\\n"}\n'
+            payload = (
+                b"HTTP/1.1 200 OK\r\n"
+                b"Transfer-Encoding: chunked\r\n\r\n"
+                + f"{len(chunk_body):x}\r\n".encode("ascii")
+                + chunk_body
+                + b"\r\n"
+            )
+            conn_sock.sendall(payload)
+            server_release.wait(10.0)
+        finally:
+            conn_sock.close()
+
+    srv_thread = threading.Thread(target=_serve_stalled_http, daemon=True)
+    srv_thread.start()
+
+    def _http_stream_build(**kwargs: Any):
+        conn = http.client.HTTPConnection("127.0.0.1", srv_port, timeout=10.0)
+        conn.request("GET", "/build")
+        response = conn.getresponse()
+        try:
+            while True:
+                line = response.fp.readline()
+                if not line:
+                    break
+                if line.startswith(b"{"):
+                    yield json.loads(line.decode("utf-8"))
+        finally:
+            try:
+                response.close()
+            finally:
+                conn.close()
+                generator_finished.set()
+
+    fake_docker.api.build = _http_stream_build  # type: ignore[method-assign]
+    http_started = time.monotonic()
+    try:
+        http_resp = client.post(
+            "/v1/plugins/build",
+            json={
+                "plugin_id": "acme.hang",
+                "version": "1.0.0",
+                "source_rel": "acme.hang/1.0.0",
+            },
+        )
+        http_elapsed = time.monotonic() - http_started
+        assert http_resp.status_code == 400
+        assert "timed out" in http_resp.json()["detail"]
+        assert http_elapsed < 1.0
+        # Reader generator must unblock and finish BEFORE server releases the socket.
+        assert generator_finished.wait(timeout=1.0)
+    finally:
+        server_release.set()
+        srv.close()
+        srv_thread.join(timeout=1.0)
+
+    # 3. Multi-chunk stream whose per-chunk gap < budget still aborts when total > budget.
     def _slow_chunks(**kwargs: Any):
         for idx in range(6):
             time.sleep(0.025)

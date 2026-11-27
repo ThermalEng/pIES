@@ -163,8 +163,44 @@ def _build_plugin_tar_context(source_dir: Path, dockerfile_content: str) -> io.B
     return buf
 
 
+def _interrupt_stream_sockets(root: Any) -> int:
+    """Shut down underlying transport sockets on a blocked stream without acquiring buffer locks."""
+    if root is None:
+        return 0
+    pending: list[Any] = [root]
+    seen: set[int] = set()
+    interrupted = 0
+    while pending:
+        obj = pending.pop()
+        if obj is None or id(obj) in seen:
+            continue
+        seen.add(id(obj))
+        shutdown = getattr(obj, "shutdown", None)
+        if isinstance(obj, socket.socket) or callable(shutdown):
+            try:
+                shutdown(socket.SHUT_RDWR)
+                interrupted += 1
+            except OSError:
+                pass
+            continue
+        frame = getattr(obj, "gi_frame", None)
+        if frame is not None:
+            try:
+                pending.extend(frame.f_locals.values())
+            except Exception:
+                pass
+        for attr in ("response", "raw", "_fp", "fp", "_connection", "sock", "_sock"):
+            try:
+                child = getattr(obj, attr, None)
+            except Exception:
+                child = None
+            if child is not None:
+                pending.append(child)
+    return interrupted
+
+
 def _close_stream_best_effort(stream: Any) -> None:
-    """Close a Docker build stream and any underlying HTTP response to abort blocked reads."""
+    """Close a Docker build stream and any underlying HTTP response inside its owning worker."""
     if stream is None:
         return
     frame = getattr(stream, "gi_frame", None)
@@ -573,8 +609,18 @@ class DockerJobRunnerService:
             raise DockerUnavailableError(f"docker build failed: {exc}") from exc
         finally:
             cancelled.set()
-            for active_stream in stream_holder:
-                _close_stream_best_effort(active_stream)
+            if not worker.is_alive():
+                for active_stream in stream_holder:
+                    _close_stream_best_effort(active_stream)
+            else:
+                for active_stream in stream_holder:
+                    if _interrupt_stream_sockets(active_stream) == 0:
+                        threading.Thread(
+                            target=_close_stream_best_effort,
+                            args=(active_stream,),
+                            name=f"pies-build-close-{request.plugin_id}",
+                            daemon=True,
+                        ).start()
 
         return BuildPluginResponse(
             image=image_tag,
