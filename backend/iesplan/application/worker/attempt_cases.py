@@ -60,10 +60,9 @@ from iesplan.application.worker.lease_cases import (
     create_evidence_record,
     fail_task,
     fenced_release_attempt,
-    flip_result_index,
     get_snapshot_record,
     get_task_record,
-    insert_result_index,
+    publish_result_index,
     record_task_progress,
     store_result_blob,
     timeout_task_record,
@@ -318,14 +317,14 @@ def submit_attempt_result(
                 detail=assessment.get("detail"),
             )
 
-            # 结果索引: 每项目版本至多一条 is_latest(01 §8.3; 先置旧行 false 再插新行)
-            flip_result_index(db, project_version_id=snapshot.project_version_id)
-            index_id = insert_result_index(
+            # 结果索引: 每项目版本至多一条 is_latest(01 §8.3; 重试仅当原任务仍最新时更新 is_latest)
+            index_id = publish_result_index(
                 db,
                 project_id=task.project_id,
                 project_version_id=snapshot.project_version_id,
                 evidence_package_id=evidence_id,
                 assessment_id=assessment_id,
+                only_if_latest_owner_task_id=evidence_task_id,
             )
 
         # 释放(带 token 校验, 0 行 → 整笔回滚)

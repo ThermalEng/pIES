@@ -31,6 +31,8 @@ Default web entry point is `http://localhost:8080`. Persistent services converge
 
 **Task concurrency configuration**: Actual computation concurrency is bounded by `[worker]` slot ceilings in the deployment config and host container capacity; each computation step executes inside an independent ephemeral network-disabled container that is cleaned up alongside its temporary files after status and valid outputs are persisted, replacing standalone persistent `compute_worker` and `io_worker` daemons.
 
+**Evaluator concurrency budget (`[stage].evaluator_max_concurrency`)**: Once core solving produces a feasible engineering solution, all configured `evaluators[]` remain logically parallel with independent checkpoints and failure isolation. `[stage].evaluator_max_concurrency` defaults to `1` so each compute slot limits peak ephemeral stage containers to `1` during evaluation on modest hosts, avoiding CPU/memory oversubscription; raising this setting on larger hosts enables physical multi-container concurrency across evaluators within a single task.
+
 **Empty database cold-start note**: On an uninitialized database, a single `backend` control-plane instance MUST create tables and seed built-in identities before scaling additional replicas; if initialization fails, inspect logs and database state first.
 
 ### Moving or Renaming the Repository Directory

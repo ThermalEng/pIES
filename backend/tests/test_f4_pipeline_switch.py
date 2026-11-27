@@ -2145,3 +2145,123 @@ def test_p2_03_evaluator_start_failure_isolated_and_control_signals_propagated(
     finally:
         env["db"].close()
         env["engine"].dispose()
+
+
+def test_evaluator_retry_preserves_newer_version_latest_result_index(tmp_path: Path) -> None:
+    """Retry updates ResultIndex.is_latest only when source task still holds version latest."""
+    fail_finance = {"should_fail": True}
+
+    def _finance_handler(work_in: Path, work_out: Path) -> None:
+        if fail_finance["should_fail"]:
+            raise RuntimeError("transient finance error")
+        from stage_testkit import _artifact_from_json
+
+        from iesplan.finance import (
+            EffectiveFinanceConfig,
+            EvaluationInput,
+            evaluate_forward_finance,
+        )
+
+        sol = json.loads((work_in / "solution.json").read_text(encoding="utf-8"))
+        req = json.loads((work_in / "request.json").read_text(encoding="utf-8"))
+        fin_eval = evaluate_forward_finance(
+            sol,
+            artifact=_artifact_from_json(req["artifact"]),
+            finance=EffectiveFinanceConfig.from_dict(req["finance"]),
+            evaluation=EvaluationInput.from_frozen(req["evaluation"]),
+            device_models=req.get("device_models"),
+        )
+        (work_out / "financial_evaluation.json").write_text(json.dumps(fin_eval), encoding="utf-8")
+
+    env = _setup_pipeline_env(tmp_path)
+    try:
+        plane = build_test_compute_plane(
+            tmp_path / "stages",
+            evaluator_handlers={"/app/plugins/evaluator_finance/plugin.yaml": _finance_handler},
+        )
+        headers = login_headers(env["client"], env["user"])
+
+        # Case (a): Retrying current latest task T1 promotes T1's new evidence to is_latest=True.
+        t1_id = _save_and_submit(env, _valid_13_config(), idempotency_key="idx-t1")
+        assert _run(env["engine"], _claim(env["db"], t1_id), plane) == "completed"
+        with env["sf"]() as db:
+            t1_ev1 = results_store.latest_evidence_for_task(db, t1_id)
+            assert t1_ev1 is not None
+            snap_version_id = tasks_store.get_snapshot(
+                db, tasks_store.get_task(db, t1_id).calc_snapshot_id
+            ).project_version_id
+            idx1 = results_store.latest_index_for_version(db, snap_version_id)
+            assert idx1 is not None and idx1.evidence_package_id == t1_ev1.id
+
+        fail_finance["should_fail"] = False
+        r1 = env["client"].post(
+            f"/api/projects/{env['pid']}/tasks/{t1_id}/result/evaluators/retry",
+            json={"evaluator": "ies.evaluator.finance@1.0.0", "idempotency_key": "idx-t1-retry"},
+            headers=headers,
+        )
+        assert r1.status_code == 201, r1.text
+        assert _run(env["engine"], _claim(env["db"], r1.json()["task"]["id"]), plane) == "completed"
+        with env["sf"]() as db:
+            t1_ev2 = results_store.latest_evidence_for_task(db, t1_id)
+            assert t1_ev2 is not None and t1_ev2.id != t1_ev1.id
+            idx2 = results_store.latest_index_for_version(db, snap_version_id)
+            assert idx2 is not None and idx2.evidence_package_id == t1_ev2.id
+            assert results_store.list_package_index(db, t1_ev1.id)[0].is_latest is False
+
+        # Case (b): Submit T_old (fails finance) -> newer T2 completes on same project_version_id ->
+        # retrying T_old updates T_old's evidence package, with is_latest=False, keeping T2 as latest.
+        fail_finance["should_fail"] = True
+        t_old_status, t_old_body = _submit_task(
+            env["client"],
+            env["pid"],
+            env["user"],
+            config={"config_revision": 1},
+            idempotency_key="idx-told",
+        )
+        assert t_old_status == 201, t_old_body
+        t_old_id = int(t_old_body["task"]["id"])
+        assert _run(env["engine"], _claim(env["db"], t_old_id), plane) == "completed"
+
+        fail_finance["should_fail"] = False
+        t2_status, t2_body = _submit_task(
+            env["client"],
+            env["pid"],
+            env["user"],
+            config={"config_revision": 1},
+            idempotency_key="idx-t2",
+        )
+        assert t2_status == 201, t2_body
+        t2_id = int(t2_body["task"]["id"])
+        assert _run(env["engine"], _claim(env["db"], t2_id), plane) == "completed"
+        with env["sf"]() as db:
+            t_old_ev1 = results_store.latest_evidence_for_task(db, t_old_id)
+            t2_ev = results_store.latest_evidence_for_task(db, t2_id)
+            assert t_old_ev1 is not None and t2_ev is not None
+            idx_t2 = results_store.latest_index_for_version(db, snap_version_id)
+            assert idx_t2 is not None and idx_t2.evidence_package_id == t2_ev.id
+
+        r_old = env["client"].post(
+            f"/api/projects/{env['pid']}/tasks/{t_old_id}/result/evaluators/retry",
+            json={"evaluator": "ies.evaluator.finance@1.0.0", "idempotency_key": "idx-told-retry"},
+            headers=headers,
+        )
+        assert r_old.status_code == 201, r_old.text
+        assert _run(env["engine"], _claim(env["db"], r_old.json()["task"]["id"]), plane) == "completed"
+
+        with env["sf"]() as db:
+            t_old_ev2 = results_store.latest_evidence_for_task(db, t_old_id)
+            assert t_old_ev2 is not None and t_old_ev2.id != t_old_ev1.id
+            idx_after = results_store.latest_index_for_version(db, snap_version_id)
+            assert idx_after is not None and idx_after.evidence_package_id == t2_ev.id
+            retry_idx_rows = results_store.list_package_index(db, t_old_ev2.id)
+            assert len(retry_idx_rows) == 1 and retry_idx_rows[0].is_latest is False
+
+        res_old = env["client"].get(
+            f"/api/projects/{env['pid']}/tasks/{t_old_id}/result", headers=headers
+        )
+        assert res_old.status_code == 200
+        assert res_old.json()["result"]["evidence"]["id"] == t_old_ev2.id
+        assert res_old.json()["result"]["financial_evaluation"] is not None
+    finally:
+        env["db"].close()
+        env["engine"].dispose()
