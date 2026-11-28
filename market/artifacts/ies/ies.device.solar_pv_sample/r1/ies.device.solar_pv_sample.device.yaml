@@ -1,0 +1,40 @@
+schema: ies.device-model
+schema_version: "1.0.0"
+device:
+  id: ies.device.solar_pv_sample
+  names:
+    zh-CN: 光伏示例组件
+    en-US: Sample Solar PV Device
+properties:
+  rated_capacity_kwp:
+    value: 100
+    unit: kWp
+    valid_range:
+      minimum: 0
+      maximum: 1000000
+  reference_irradiance:
+    value: 1000
+    unit: W/m2
+    valid_range:
+      minimum: 1
+      maximum: null
+interfaces:
+  solar_irradiance:
+    type: predefined
+    carrier: solar
+    unit: W/m2
+    valid_range:
+      minimum: 0
+      maximum: 2000
+  electric_out:
+    type: out
+    carrier: electricity
+    unit: kW
+    valid_range:
+      minimum: 0
+      maximum: null
+equations:
+  variables: {}
+  relations:
+    - id: pv_generation
+      expression: "electric_out[t] = rated_capacity_kwp * solar_irradiance[t] / reference_irradiance"

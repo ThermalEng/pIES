@@ -1,0 +1,45 @@
+name: Market PR Check
+
+# Strictly read-only PR validation (never pull_request_target; zero secrets).
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: market-pr-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  PIES_PLUGIN_BASE_IMAGE: ghcr.io/thermaleng/pies-plugin-base:1.2.0
+
+jobs:
+  validate_market_pr:
+    name: Validate Registry, Schemas & Offline Plugin Self-Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Pull plugin runtime base image for --network=none self-tests
+        run: docker pull "$PIES_PLUGIN_BASE_IMAGE"
+
+      - name: Run read-only market PR validation with --network=none Docker self-tests
+        run: |
+          MKT_WORK="$RUNNER_TEMP/pies-market-${{ github.run_id }}"
+          mkdir -p "$MKT_WORK"
+          docker run --rm \
+            -v "$(command -v docker):/usr/local/bin/docker:ro" \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -v "$PWD:/repo:ro" \
+            -v "$MKT_WORK:/mkt-work" \
+            -e PIES_TEST_CONTAINER_ROOT=/mkt-work \
+            -e PIES_TEST_HOST_ROOT="$MKT_WORK" \
+            -e PIES_PLUGIN_BASE_IMAGE="$PIES_PLUGIN_BASE_IMAGE" \
+            -e PIES_RUN_DOCKER_TESTS=1 \
+            python:3.12-slim \
+            sh -c 'cp -a /repo /tmp/repo && cd /tmp/repo && pip install --no-cache-dir ".[dev]" && ruff check pies_market tests && python -m pies_market.check_pr --market-root . --docker-selftest --json && pytest -vv -ra tests'
+          rm -rf "$MKT_WORK" || true

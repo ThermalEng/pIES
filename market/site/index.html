@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>pIES Market — 公共模型与算法市场</title>
+  <link rel="stylesheet" href="./styles.css" />
+  <script defer src="./app.js"></script>
+</head>
+<body>
+  <header class="market-header">
+    <div class="market-container market-header__inner">
+      <div class="market-brand">
+        <h1 id="brand-title" class="market-brand__title">pIES Market</h1>
+        <p id="brand-subtitle" class="market-brand__subtitle">
+          独立静态公共设备模型与算法插件目录（只读离线包分发，零后端依赖）
+        </p>
+      </div>
+      <div class="market-lang" role="group" aria-label="Language switch">
+        <button type="button" id="lang-zh" class="market-btn market-btn--toggle" data-lang="zh_cn" aria-pressed="true">
+          中文
+        </button>
+        <button type="button" id="lang-en" class="market-btn market-btn--toggle" data-lang="en_us" aria-pressed="false">
+          English
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <main class="market-container market-main">
+    <section class="market-toolbar" aria-label="Catalog filters">
+      <div class="market-search">
+        <label id="search-label" class="market-search__label" for="search-input">搜索制品</label>
+        <input
+          id="search-input"
+          class="market-search__input"
+          type="search"
+          placeholder="按 ID、名称、说明或发布者搜索…"
+          autocomplete="off"
+        />
+      </div>
+      <div id="kind-filters" class="market-filters" role="group" aria-label="Artifact kind filters"></div>
+    </section>
+
+    <div class="market-meta-bar">
+      <span id="catalog-count" class="market-meta-bar__count"></span>
+      <span id="catalog-updated" class="market-meta-bar__updated"></span>
+    </div>
+
+    <div id="status-alert" class="market-alert" role="alert" hidden>
+      <div class="market-alert__content">
+        <strong id="status-alert-title"></strong>
+        <p id="status-alert-detail"></p>
+      </div>
+      <button type="button" id="retry-btn" class="market-btn market-btn--secondary">重试</button>
+    </div>
+
+    <div id="loading-box" class="market-state" hidden>正在加载市场索引…</div>
+    <div id="empty-box" class="market-state" hidden></div>
+
+    <section id="artifact-grid" class="market-grid" aria-label="Artifacts"></section>
+  </main>
+
+  <dialog id="artifact-modal" class="market-modal" aria-labelledby="modal-title">
+    <div class="market-modal__panel">
+      <div class="market-modal__head">
+        <div>
+          <span id="modal-kind" class="market-badge"></span>
+          <h2 id="modal-title" class="market-modal__title"></h2>
+          <code id="modal-id" class="market-code"></code>
+        </div>
+        <button type="button" id="modal-close" class="market-btn market-btn--ghost" aria-label="Close">✕</button>
+      </div>
+
+      <div class="market-modal__body">
+        <p id="modal-desc" class="market-modal__desc"></p>
+        <dl id="modal-meta" class="market-kv"></dl>
+
+        <div id="modal-contracts" class="market-modal__contracts" hidden>
+          <div class="market-modal__contract-group">
+            <h3 id="modal-consumes-title" class="market-modal__subhead"></h3>
+            <div id="modal-consumes-list" class="market-tags"></div>
+          </div>
+          <div class="market-modal__contract-group">
+            <h3 id="modal-produces-title" class="market-modal__subhead"></h3>
+            <div id="modal-produces-list" class="market-tags"></div>
+          </div>
+        </div>
+
+        <div class="market-modal__sha">
+          <span id="modal-sha-label" class="market-modal__subhead">SHA-256</span>
+          <div class="market-sha-row">
+            <code id="modal-sha-value" class="market-code market-code--wrap"></code>
+            <button type="button" id="modal-copy-sha" class="market-btn market-btn--secondary market-btn--sm">复制</button>
+          </div>
+        </div>
+
+        <div class="market-modal__readme">
+          <h3 id="modal-readme-title" class="market-modal__subhead">README</h3>
+          <div id="modal-readme-error" class="market-readme-error" hidden></div>
+          <pre id="modal-readme-body" class="market-readme-pre"></pre>
+        </div>
+      </div>
+
+      <div class="market-modal__foot">
+        <a id="modal-download" class="market-btn market-btn--primary" href="#" download>下载离线包</a>
+      </div>
+    </div>
+  </dialog>
+</body>
+</html>

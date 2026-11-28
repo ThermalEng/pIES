@@ -1,0 +1,22 @@
+{
+  "schema": "ies.evaluation-report",
+  "schema_version": "1.0.0",
+  "title": "Sample Carbon Emission Report",
+  "evaluator": "ies.evaluator.sample_carbon@1.0.0",
+  "metrics": [
+    {
+      "id": "total_grid_import_kwh",
+      "label": "Total Grid Import Energy",
+      "value": 1000.0,
+      "unit": "kWh"
+    },
+    {
+      "id": "total_co2_tonnes",
+      "label": "Total CO2 Emissions",
+      "value": 0.5,
+      "unit": "t"
+    }
+  ],
+  "charts": [],
+  "tables": []
+}
