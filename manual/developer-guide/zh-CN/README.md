@@ -34,10 +34,10 @@
 | 隔离执行求解命令与回执采集 | [求解运行时](modules/solver-runtime.md) |
 | 计算全链路、预测算法与结果适配 | [计算生成与求解](modules/engines.md) |
 | 敏感性、批量扫描与系统四维评估 | [结果分析](modules/analysis.md) |
-| 不可变对象存储、引用生命周期与清理恢复 | [对象存储](modules/storage.md) |
+| 不可变对象存储、引用生命周期与孤儿对象清理 | [对象存储](modules/storage.md) |
 | 跨模块业务编排与事务边界 | [应用用例](modules/application.md) |
 | HTTP 路由、DTO 映射与错误响应 | [API 适配](modules/api.md) |
-| 后台守护进程、租约、检查点与重试 | [Worker](modules/worker.md) |
+| 控制面调度、阶段检查点与任务状态 | [Worker](modules/worker.md) |
 | 领域表归属、Repository 与数据库迁移 | [持久化](modules/persistence.md) |
 | 前端页面、Feature 分层、浏览器验收与帮助中心 | [前端与帮助中心](frontend.md) |
 | 本地模型库、算法插件与 pIES Market（`1.2.0` 已交付） | [模型与算法](customization-center.md) |

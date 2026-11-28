@@ -34,8 +34,8 @@ app / pages → features → shared
 
 Core interaction rules:
 
-1. **Distinguish states rather than guessing empty states**: Clearly distinguish "loading", "empty successful list", "network failure", "unauthorized", "version conflict (409)", and "server error". On failure, display the error and a retry action—never masquerade failures as "No data"; canvas saves and sign-in follow actual HTTP request results.
-2. **Optimistic locking and edit protection**: On concurrent conflicts (`409`) or validation errors (`400`/`422`), retain unsubmitted user edits, display field-level diagnostics near offending fields alongside a summary overview, and let the user choose whether to reload the latest revision or overwrite.
+1. **Distinguish states rather than guessing empty states**: Clearly distinguish "loading", "empty successful list", "network failure", "unauthorized", "state conflict (409)", and "server error". On failure, display the error and a retry action—never masquerade failures as "No data"; canvas saves and sign-in follow actual HTTP request results.
+2. **Normal saves and edit protection**: Single-owner edits follow last-write-wins without requiring client-side optimistic locking or concurrent-conflict queues; on state conflicts (`409`) or validation errors (`400`/`422`), retain unsubmitted user edits and display field-level diagnostics near offending fields alongside a summary overview so the user can fix and resubmit or manually refresh.
 3. **Sessions and async tasks**: Only real user interactions on visible pages trigger idle session renewal—background polling and auto-refresh do not keep sessions alive; task list and result polling stop upon leaving the page or reaching terminal task state; paginated step-curve fetching cancels stale requests so out-of-order responses never overwrite newer selections.
 4. **Immutable result presentation**: Result metrics, financial breakdowns, construction decisions, calendar-month demand bills, and charts all render sealed facts of the chosen task without recomputing financials client-side or backfilling fields from the live project draft.
 
@@ -59,7 +59,7 @@ Browser acceptance runs exclusively against real Chromium inside Docker, startin
 The top-bar "Help Center" reads `manual/` directly during the frontend build (`frontend/scripts/generate-help.mjs`) to generate a read-only `manifest.json`:
 
 - `manual/SUMMARY.md` registers available locales, while `manual/SUMMARY.<locale>.md` defines the three top-level trees ("User Guide", "Developer Guide", "Changelog"), deriving stable cross-locale chapter IDs from file basenames.
-- Supports deep links, heading anchors, previous/next navigation, collapsible mobile navigation, and keyboard focus management; the renderer strictly strips raw HTML, scripts, and unsafe URL schemes.
+- Supports deep links, heading anchors, previous/next navigation, collapsible mobile navigation, and keyboard focus management; the renderer renders repo-bundled static Markdown safely via React (with `dangerouslySetInnerHTML` prohibited and in-app routes for internal links) without layering untrusted-input sanitization pipelines over static repository documentation.
 - Served completely statically at runtime, remaining readable even when the backend or database is unavailable; when a target locale is unavailable, explicitly lists available languages without silently substituting another language.
 
 ## Definition of Done

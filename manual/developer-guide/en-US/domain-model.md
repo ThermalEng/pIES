@@ -8,7 +8,7 @@ pIES classifies all business data into three categories by mutability and author
 
 | Category | Typical Entities | Lifecycle Rules |
 |---|---|---|
-| Editable Working State | Project drafts, unsubmitted forms | Mutable; each save increments `revision` under optimistic locking |
+| Editable Working State | Project drafts, unsubmitted forms | Mutable; each save MAY increment `revision` to track changes, with single-owner edits following last-write-wins without mandatory optimistic locking |
 | Immutable Business Evidence | Project versions, dataset versions, calc snapshots, execution receipts, compute results, assessment records | Append-only, never mutated in place; supports full historical traceability |
 | Rebuildable Runtime State | Redis queue hints, sub-second progress, caches, query index projections | Rebuildable from authoritative database or raw evidence if lost or corrupted |
 
@@ -43,8 +43,8 @@ Three configuration pillars carry distinct responsibilities and revision histori
 The `1.2.0` models and algorithms ecosystem separates mutable drafts from immutable single-active-version publications and installations:
 
 - Forms, online YAML editing, and imports all converge to the same canonical `ies.device-model` YAML object maintaining one active `revision` per `(kind, stable_id)` without per-device semantic versions; cross-instance market or imported artifacts preserve their original stable namespaced IDs, while personal local drafts use a CSPRNG `public_namespace`;
-- Algorithm plugins are validated and executed inside isolated runners so API and ordinary Worker processes never load user source code; installed plugins maintain one active version and managed image per `(kind, stable_id)` and become selectable for subsequent calculations without service restarts (overwrite upgrades guard against active in-flight `CalcSnapshot` refs without cross-version compatibility shims);
-- Local administrators toggle between **Local Mode** (remote market disabled) and **Online Mode** (browse, download/install, and submit via email verification) orthogonally to `local_upload_requires_approval`; installing, disabling, or uninstalling affects only newly submitted calculations, which freeze exact artifacts into `CalcSnapshot` at submission (SHA-256 is checked solely at the external download/import boundary and never stored or re-verified internally), preserving in-flight and historical task traceability.
+- Algorithm plugins are validated and executed inside isolated runners so API and scheduler control-plane processes never load user source code; installed plugins maintain one active version and managed image per `(kind, stable_id)` and become selectable for subsequent calculations without service restarts (direct overwrite upgrades replace the active entry and clean up old images on a best-effort basis without cross-version compatibility shims);
+- Local administrators toggle between **Local Mode** (remote market disabled) and **Online Mode** (browse, download/install, and submit via email verification) orthogonally to `local_upload_requires_approval`; SHA-256 is checked solely once prior to ingest for public market remote downloads (local uploads and offline imports do not require or check `expected_sha256`, and internal persistence/snapshots never store or re-verify digests). Artifact upgrades, disabling, and uninstalls use a direct-operation model without guaranteeing completion of in-flight tasks that have not yet entered affected stages (missing plugins or images fail explicitly), while frozen inputs and persisted results/evidence remain intact.
 
 ## Traceability Chain Across Snapshots, Tasks, and Results
 
@@ -84,7 +84,7 @@ Project Version + Dataset Versions + Planning / Finance / Calc Config Revisions
 
 When adding new business data, choose its storage and versioning shape as follows:
 
-1. **Repeatedly edited**: Model a working draft table protected by `revision` optimistic locking;
+1. **Repeatedly edited**: Model a working draft table that MAY track `revision` numbers (single-owner edits follow last-write-wins without mandatory optimistic locking);
 2. **Referenced by tasks, approvals, or external callers**: Create immutable versions and forbid in-place updates;
 3. **Large payload or file stream**: Store bytes in object storage and persist only `ObjectHandle` in the database;
 4. **Recomputable from database truth if lost**: Treat as rebuildable cache or projection index, never an authoritative source of truth.

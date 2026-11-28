@@ -7,7 +7,7 @@ Generators act as the "model compiler": accepting trusted inputs already validat
 ## Responsibilities and Boundaries
 
 - **Responsible for**: Declaring `GeneratorDescriptor` and independent registration; consuming the six frozen inputs directly to construct math models; combining technical contributions, planning objectives/constraints, and financial/tax rules; converting business units to solver internal units; and emitting canonical Bundles (chunked streams, commands, output manifests, and paired `ResultAdapter` refs).
-- **Not responsible for**: Database queries, object-storage I/O, network requests, spawning solver processes, task leases, or publishing business results.
+- **Not responsible for**: Database queries, object-storage I/O, network requests, spawning solver processes, task scheduling, or publishing business results.
 - **Unified ephemeral container boundary (`1.1.5` target)**: Built-in and third-party generators adhere uniformly to the [Algorithm Plugin Package](../formats/algorithm-plugin-package.md) (`kind: generator`) contract, consuming frozen inputs from `/work/in` and streaming standard `Solver Bundle` outputs to `/work/out` inside isolated network-disabled ephemeral containers launched via `job_runner`.
 
 ## Direct Inputs and Capability Gate

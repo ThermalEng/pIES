@@ -7,7 +7,7 @@
 ## Responsibilities and Boundaries
 
 - **Owns**: Pure engineering and environmental metric computations; single-factor sensitivity, parameter sweep, and multi-scenario comparison logic; public contracts and rules for four-dimensional system assessment (physical feasibility, optimality, financial viability, and reliability).
-- **Does not own**: Worker task leases and scheduling, manual assessment persistence (system assessment and manual assessment MUST remain distinct commands and never substitute for one another), or report file download management.
+- **Does not own**: Task scheduling and execution state management, manual assessment persistence (system assessment and manual assessment MUST remain distinct commands and never substitute for one another), or report file download management.
 
 ## Input and Output Contracts
 

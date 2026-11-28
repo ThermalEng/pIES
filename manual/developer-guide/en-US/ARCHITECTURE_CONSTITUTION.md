@@ -1,7 +1,7 @@
 # pIES Architecture Constitution
 
 > Status: Effective
-> Version: 1.24.0
+> Version: 1.24.1
 > Effective Date: 2026-08-20
 > Last Updated: 2026-11-28
 > Scope: Repository root entry points, `manual/`, `docs/`, `backend/`, `frontend/`, database, object storage, Worker, tests, and subsequent plugins
@@ -65,11 +65,29 @@ Cross-module code MUST NOT:
 
 Module initialization, registration, persistence, and task execution MUST satisfy all-or-nothing publication semantics ("all succeed or publish no new state"). Clearing state first and writing item by item, partial registration, partial compatibility, or swallowing exceptions is prohibited.
 
+State integrity constrains only normal business publication within a single module and does not require cross-module, cross-database-and-filesystem, or cross-container operations to form a single atomic transaction.
+
 ### 2.6 Validate Only at True Boundaries
 
 Validation belongs solely at user-input boundaries and public-output boundaries of user-defined capabilities, and is scoped strictly to **structure, required fields, data types, and public contract constraints**. Device model YAML, device data CSV, assembly YAML, finance YAML, planning/calculation config YAML, and Solver Bundle descriptors validate headers (`schema`/`schema_version`) and domain constraints before entering business facts; public outputs of user plugins or custom generators validate their public contracts before entering result models. Neither the platform nor the artifact market endorses the mathematical, physical, optimality, or economic correctness of third-party device models, predictors, generators, solvers, algorithms, or evaluators, nor duplicates downstream domain rules across modules.
 
 Internal file handoffs, reads, persistence, snapshots, and runtime transitions MUST trust typed data and transactional state that have already crossed the boundary; code MUST NOT recompute, compare, or store SHA-256 hashes, content digests, checksums, or similar integrity fields, nor add tests for them. Runtime failures MUST report the actual business or execution error rather than duplicating checks as pre-validation.
+
+### 2.7 Scientific Engineering Positioning and Proportionate Defense
+
+pIES is a scientific and engineering software tool designed for domain professionals, primarily serving single-host, small-team, and trusted-organization low-frequency workflows rather than large-scale internet services, high-frequency trading systems, or distributed high-availability platforms.
+
+The system supports necessary computational parallelism, execution isolation, and asynchronous operations, but does not require administrative operations to remain consistent or self-recover under arbitrary concurrent interleaving, unexpected mid-operation interruption, non-standard storage, or external tampering.
+
+Each module is responsible for its own implementation and domain correctness; coordinating modules handle only public contracts, data handoffs, and normal business orchestration without crossing responsibility boundaries to provide compensation, duplicate validation, or correctness endorsement for other modules.
+
+Implementations SHOULD prioritize working normal functionality within supported scenarios, clear module boundaries, simple state models, and real computational performance. For abnormal conditions outside supported scope, explicitly reporting the error and letting the user retry is sufficient.
+
+Neither development nor code review may cite theoretical races, extreme edge cases, generic internet best practices, or unapproved future requirements to introduce extra locks, state fields, duplicate validations, automated recovery, compatibility layers, or compensation mechanisms.
+
+Genuine external input boundaries, third-party computation isolation, and essential baseline permissions remain enforced per actual deployment scope without spreading defensive responsibilities into trusted internal modules.
+
+This principle governs design, implementation, testing, and code review alike, taking precedence over any reliability, atomicity, state-integrity, or recovery requirements elsewhere in this document that might otherwise be interpreted too broadly.
 
 ## 3. System Boundaries and Overall Data Flow
 
@@ -414,7 +432,7 @@ System-wide principles: failures MUST be visible, MUST NOT fall back, MUST NOT f
 - Unavailable database, storage, or queue: reflect clearly in readiness or task status and fail dependent requests explicitly; real write failures MUST fail the operation rather than substituting capacity guesses; health endpoints read only dependency state and storage metadata;
 - Missing or unreadable object: return the real error; never substitute empty content or stale copies;
 - Invalid project/assembly input: return full diagnostics and block task submission;
-- Retryable external failure: retry under explicit policy while preserving attempts and causes;
+- External failures: report failure explicitly and preserve the cause by default so the user can decide whether to re-run; implement simple retries (preserving attempts and causes) only when explicitly required by business needs with clear practical benefit;
 - Internal exceptions: log request ID and stack trace server-side while returning a standard error envelope to the client.
 
 `healthz` indicates process liveness only; `readyz` indicates all dependencies necessary to serve traffic/tasks are available. "Degraded" health statuses MUST NOT mask states that cannot actually serve requests properly.
@@ -438,6 +456,18 @@ Complete rules for test layers, static architecture gates, definition of done, a
 User-visible features MUST undergo browser-level acceptance before merge: start from page entry points and execute real business actions using accessible locators; GUI workflows including canvas drag-and-drop and port connections uniformly use Playwright; skipping tested steps via state injection is prohibited; both Playwright and the system under test MUST run in Docker. Pure HTTP contract tests cannot substitute for browser acceptance.
 
 Complete browser acceptance workflows and coverage rules appear in [Frontend and Help Center](frontend.md).
+
+### 14.4 Proportionate Defense Review Gate
+
+Code reviews MUST be grounded in the scientific engineering positioning, operational assumptions, and module responsibilities established by this Architecture Constitution rather than generic best practices for large-scale public internet, high-concurrency, or high-availability systems.
+
+Before raising a blocking review finding, a reviewer MUST verify that the issue occurs under an explicitly supported usage scenario, violates an explicit public contract or normal business semantics, and falls within the responsibility of the module under review.
+
+Hypotheses involving arbitrary concurrent races, non-standard storage, external tampering, arbitrary mid-step interruption recovery, or potential errors in peer modules MUST NOT be used as grounds to add defensive implementation.
+
+Where implementations are functionally equivalent, prefer the design with fewer states, fewer branches, fewer dependencies, and clearer ownership.
+
+Defensive requirements retired by architectural rulings and their corresponding tests no longer constitute acceptance gates; reviewers MUST NOT ask developers to reintroduce retired mechanisms in another form.
 
 ## 15. Project Documentation
 
@@ -594,7 +624,7 @@ An open, clear pIES system satisfies:
 - Adding a new solver primarily adds generator/result-adapter/executor providers without having Workers assemble command strings;
 - Swapping object storage requires no changes to projects, datasets, results, or frontend;
 - Failure in any module never exposes half-initialized state;
-- Historical tasks can rebuild the exact same Solver Bundle from their snapshot and versioned dependencies and explain actual execution via the Bundle and receipt;
+- Historical tasks can trace and explain their execution from frozen inputs, persisted Solver Bundles, execution receipts, and result evidence, without promising to regenerate identical computation artifacts in later versions or changed runtime environments;
 - The frontend submits canonical inputs demanded by backend public contracts without offloading simple UI conversions to the backend;
 - Modules invoke only other modules' public interfaces without penetrating internal directories or ORMs;
 - Errors are never masked by compatibility layers, fallbacks, or fabricated empty data;

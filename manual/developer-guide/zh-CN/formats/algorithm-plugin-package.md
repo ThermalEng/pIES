@@ -121,7 +121,7 @@ extensions: {}
 ## 构建信任边界、断网自检与执行生命周期
 
 - **安装期构建信任边界与单一指定源规则**：
-  - 无 `requirements` 插件强制以 `--network=none` 直接基于 `pies-plugin-base` 构建；含 `requirements` 插件在 `job_runner` 内存受控上下文中构建（零宿主机业务目录挂载、零业务凭证注入、带硬构建超时）；`pip_index_url` 留空时使用默认公网 PyPI，**非空时仅传 `--index-url <pip_index_url>`**（不拼接 `--extra-index-url`，避免 `pip` 多源无优先级混合选版与企业内网依赖混淆；上游缓存与公网代理回退由镜像服务端自身负责）；依赖安装失败时标记 `build_failed` 并明确弹窗提示所缺插件/依赖及联系管理员处理；
+  - 无 `requirements` 插件强制以 `--network=none` 直接基于 `pies-plugin-base` 构建；含 `requirements` 插件在 `job_runner` 内存受控上下文中构建（零宿主机业务目录挂载、零业务凭证注入；镜像构建与长时 Docker 调用在独立执行单元中进行以避免阻塞 HTTP 请求与计算调度，超时采用明确、简单的执行单元终止机制，不深入第三方 Docker SDK 私有对象、底层 socket 或响应流内部实现建设额外中断逻辑）；`pip_index_url` 留空时使用默认公网 PyPI，**非空时仅传 `--index-url <pip_index_url>`**（不拼接 `--extra-index-url`，避免 `pip` 多源无优先级混合选版与企业内网依赖混淆；上游缓存与公网代理回退由镜像服务端自身负责）；依赖安装失败时标记 `build_failed` 并明确弹窗提示所缺插件/依赖及联系管理员处理；
   - 构建完成后，声明的 `tests` 强制在 `--network=none` 容器内全部通过才转入 `ready`。`pies-sdk validate` 与 `pies-sdk pack` 统一覆盖全部五类插件。
 - **运行期隔离、同源财务评价与直接卸载**：
   - 所有计算环节均以 `--network=none`、只读挂载 `/work/in` 与独立 CPU/内存限额的临时容器运行；内置财务评价器复用同源财务领域规则对标准工程解做正向全量评价（与内置生成器优化目标数学口径严格一致），**平台与自检门禁仅校验公开契约结构合法性，不复核插件物理最优性，也不为任何第三方插件的计算正确性背书**；

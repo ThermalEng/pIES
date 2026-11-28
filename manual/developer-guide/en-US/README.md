@@ -34,10 +34,10 @@ Before designing or implementing changes, read the [Architecture Constitution](A
 | Isolated execution of solver commands and receipt collection | [Solver Runtime](modules/solver-runtime.md) |
 | Full computation pipeline, prediction algorithms, and result adaptation | [Computation Generation and Solving](modules/engines.md) |
 | Sensitivity analysis, batch sweeps, and four-dimensional system assessment | [Result Analysis](modules/analysis.md) |
-| Immutable object storage, reference lifecycle, and cleanup/reconciliation | [Object Storage](modules/storage.md) |
+| Immutable object storage, reference lifecycle, and orphan cleanup | [Object Storage](modules/storage.md) |
 | Cross-module use-case orchestration and transaction boundaries | [Application Use Cases](modules/application.md) |
 | HTTP routing, DTO mapping, and error responses | [API Adapter](modules/api.md) |
-| Background daemon, leases, checkpoints, and retries | [Worker](modules/worker.md) |
+| Control-plane scheduling, stage checkpoints, and task status | [Worker](modules/worker.md) |
 | Domain table ownership, repositories, and database migrations | [Persistence](modules/persistence.md) |
 | Frontend pages, feature layering, browser acceptance, and Help Center | [Frontend and Help Center](frontend.md) |
 | Local model library, algorithm plugins, and pIES Market (delivered in `1.2.0`) | [Models and Algorithms](customization-center.md) |

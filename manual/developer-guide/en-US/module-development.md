@@ -46,10 +46,10 @@ Domain Repos     ──→ Persistence Adapters ──→ PostgreSQL
 | [computation](modules/engines.md) | Orchestrate series materialization, predictions, and result adaptation | Assembly artifact, Providers, receipts | `ComputeResult` |
 | [finance](modules/finance.md) | Merge finance triplet, planning financial relations, and project evaluation | Finance config, eval confirmation, same solve | Financial relations, cash flows, evaluation metrics |
 | [analysis](modules/analysis.md) | Metric calculation, parameter sweeps, and four-dimensional system assessment | Computation results, eval facts, analysis commands | Analysis results & assessment reports |
-| [storage](modules/storage.md) | Immutable large-object I/O, owner references, cleanup & recovery | Byte streams, media types, Owner | `ObjectHandle` & reference state |
+| [storage](modules/storage.md) | Immutable large-object I/O, owner references, and orphan cleanup | Byte streams, media types, Owner | `ObjectHandle` & reference state |
 | [application](modules/application.md) | Control transaction boundaries & cross-module use-case orchestration | `ActorContext`, use-case commands | Application results, events, or background tasks |
 | [api](modules/api.md) | HTTP routing, auth adaptation, DTO mapping | HTTP requests | Standardized JSON responses or error envelopes |
-| [worker](modules/worker.md) | Background daemon, lease management, stage recovery | Task queue, leases, `CalcSnapshot` | Attempt progress, stage assets, terminal state |
+| [worker](modules/worker.md) | Control-plane embedded scheduling, task ownership & stage checkpoints | Task queue, `CalcSnapshot` | Attempt progress, stage assets, terminal state |
 | [persistence](modules/persistence.md) | Isolate domain facts from database table implementations | Repository commands | Transactional state protected by DB constraints |
 
 ## Module Boundary Inspection Principles

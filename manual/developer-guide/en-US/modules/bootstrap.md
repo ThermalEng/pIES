@@ -6,7 +6,7 @@
 
 ## Responsibilities and Boundaries
 
-- **Responsible for**: Reading and strictly validating process-level TOML deployment config; establishing database, Redis, and storage connections per process role (API vs. Worker); discovering and cross-validating candidate Providers for devices, equations, generators, executors, result adapters, and storage; atomically publishing each module's registry; and releasing resources in reverse order on shutdown.
+- **Responsible for**: Reading and strictly validating process-level TOML deployment config; establishing database, Redis, and storage connections per deployment config; discovering and cross-validating candidate Providers for devices, equations, generators, executors, result adapters, and storage; atomically publishing each module's registry; and releasing resources in reverse order on shutdown.
 - **Not responsible for**: Implementing domain rules, reading module-private registries or merging them into a global authoritative table, or mutating business data at startup.
 - **Computation & plugin boundary**: Under `1.1.5`, the composition root inside the `backend` control plane statically wires APIs, lightweight scheduling orchestration, built-in computation image descriptors, and the `job_runner` proxy client (`backend` holds no Docker socket); installed user algorithm plugins reside as immutable records, freeze into task snapshots at submission, and run inside per-step ephemeral network-disabled containers without startup discovery or runtime hot-reloading.
 
@@ -24,7 +24,7 @@ Atomically publish independent registry state per module
 Wire application / API / Worker entry points ──→ Expose readyz
 ```
 
-- **Separated database initialization**: Table creation, trigger installation, and built-in admin seeding run exclusively inside the API service initialization entry; Worker task subprocesses assemble runtime dependencies independently without re-executing DDL initialization, preventing lock contention with ordinary business transactions.
+- **Separated database initialization**: Table creation and built-in admin seeding run exclusively inside the main service initialization entry (without requiring startup deployment of database immutability triggers); computation subprocesses and ephemeral computation containers never execute DDL initialization.
 - **Atomicity and failure semantics**: If any required config is missing or mistyped, or if any required Provider fails construction, the entire candidate state is discarded and startup or readiness blocks without clearing existing state or silently falling back to static defaults; optional capabilities report degraded status only where explicitly permitted by contract.
 - **Shutdown order**: Stop accepting new requests or tasks → wait for or cancel in-flight work → release Providers and underlying connection pools.
 

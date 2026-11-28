@@ -46,10 +46,10 @@ HTTP API ──→ 应用用例 ──→ 上述领域模块 / 对象存储
 | [computation](modules/engines.md) | 编排序列物化、预测调度与结果适配 | 装配产物、Provider 与回执 | `ComputeResult` |
 | [finance](modules/finance.md) | 财务三件套合并、规划财务关系与项目评价 | 财务配置、评价确认、同次解 | 财务关系、现金流与评价指标 |
 | [analysis](modules/analysis.md) | 指标计算、参数扫描与四维系统评估 | 计算结果、评价事实、分析命令 | 分析结果与评估报告 |
-| [storage](modules/storage.md) | 不可变大对象读写、Owner 引用与清理恢复 | 字节流、媒体类型、Owner | `ObjectHandle` 与引用状态 |
+| [storage](modules/storage.md) | 不可变大对象读写、Owner 引用与孤儿对象清理 | 字节流、媒体类型、Owner | `ObjectHandle` 与引用状态 |
 | [application](modules/application.md) | 控制事务边界与跨模块用例编排 | `ActorContext`、用例命令 | 应用结果、事件或后台任务 |
 | [api](modules/api.md) | HTTP 路由、认证适配与 DTO 映射 | HTTP 请求 | 标准化 JSON 响应或错误信封 |
-| [worker](modules/worker.md) | 后台守护进程、租约管理与阶段恢复 | 任务队列、租约、`CalcSnapshot` | Attempt 进度、阶段资产与终态 |
+| [worker](modules/worker.md) | 控制面内嵌调度、唯一任务所有权与阶段检查点 | 任务队列、`CalcSnapshot` | Attempt 进度、阶段资产与终态 |
 | [persistence](modules/persistence.md) | 隔离领域事实与数据库表实现 | Repository 命令 | 受数据库约束保护的事务状态 |
 
 ## 模块边界检查原则
