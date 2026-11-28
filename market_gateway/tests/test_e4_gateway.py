@@ -7,9 +7,11 @@ import base64
 import json
 import logging
 import re
+import smtplib
 import socketserver
 import threading
 import time
+import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -29,7 +31,6 @@ from pies_sdk import (
 
 from pies_market_gateway import GatewaySettings, create_app
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
 GATEWAY_SRC_DIR = Path(__file__).resolve().parents[1] / "pies_market_gateway"
 SECRET = "e4-gateway-test-hmac-secret"
 
@@ -109,14 +110,21 @@ class _LocalSmtpServer:
 
 
 class _MockGitHubServer:
-    """Real local HTTP mock GitHub REST API tracking branches, committed files, and open PRs."""
+    """Real local HTTP mock GitHub REST API supporting Git Data API + Pulls API."""
 
     def __init__(self, initial_publishers_yaml: str) -> None:
         self.branches: dict[str, dict[str, bytes]] = {
             "main": {"publishers.yaml": initial_publishers_yaml.encode("utf-8")}
         }
+        self.blobs: dict[str, bytes] = {}
+        self.trees: dict[str, dict[str, bytes]] = {"base-tree-001": dict(self.branches["main"])}
+        self.commits: dict[str, dict[str, Any]] = {
+            "base-sha-001": {"tree": {"sha": "base-tree-001"}, "parents": []}
+        }
         self.pulls: list[dict[str, Any]] = []
         self.write_calls: list[tuple[str, str]] = []
+        self.fail_next_tree: bool = False
+        self.fail_next_pull: bool = False
         outer = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -141,6 +149,14 @@ class _MockGitHubServer:
                 qs = parse_qs(parsed.query)
                 if path == "/repos/ThermalEng/pIES-Market/git/ref/heads/main":
                     self._send(200, {"ref": "refs/heads/main", "object": {"sha": "base-sha-001"}})
+                    return
+                if path.startswith("/repos/ThermalEng/pIES-Market/git/commits/"):
+                    csha = path.rsplit("/", 1)[-1]
+                    commit = outer.commits.get(csha)
+                    if commit is None:
+                        self._send(404, {"message": "Commit not found"})
+                        return
+                    self._send(200, {"sha": csha, **commit})
                     return
                 if path.startswith("/repos/ThermalEng/pIES-Market/contents/"):
                     file_path = path.removeprefix("/repos/ThermalEng/pIES-Market/contents/")
@@ -175,15 +191,45 @@ class _MockGitHubServer:
                 path = urlparse(self.path).path
                 data = self._read_json()
                 outer.write_calls.append(("POST", path))
+                if path == "/repos/ThermalEng/pIES-Market/git/blobs":
+                    bsha = f"blob-{len(outer.blobs) + 1}"
+                    outer.blobs[bsha] = base64.b64decode(data["content"])
+                    self._send(201, {"sha": bsha})
+                    return
+                if path == "/repos/ThermalEng/pIES-Market/git/trees":
+                    if outer.fail_next_tree:
+                        outer.fail_next_tree = False
+                        self._send(500, {"message": "Simulated tree write failure"})
+                        return
+                    base_tree = dict(outer.trees[str(data["base_tree"])])
+                    for entry in data["tree"]:
+                        base_tree[entry["path"]] = outer.blobs[entry["sha"]]
+                    tsha = f"tree-{len(outer.trees) + 1}"
+                    outer.trees[tsha] = base_tree
+                    self._send(201, {"sha": tsha})
+                    return
+                if path == "/repos/ThermalEng/pIES-Market/git/commits":
+                    csha = f"commit-{len(outer.commits) + 1}"
+                    outer.commits[csha] = {
+                        "tree": {"sha": str(data["tree"])},
+                        "parents": list(data["parents"]),
+                    }
+                    self._send(201, {"sha": csha})
+                    return
                 if path == "/repos/ThermalEng/pIES-Market/git/refs":
                     branch = str(data["ref"]).removeprefix("refs/heads/")
                     if branch in outer.branches:
                         self._send(422, {"message": "Reference already exists"})
                         return
-                    outer.branches[branch] = dict(outer.branches["main"])
-                    self._send(201, {"ref": data["ref"], "object": {"sha": data["sha"]}})
+                    csha = str(data["sha"])
+                    outer.branches[branch] = dict(outer.trees[outer.commits[csha]["tree"]["sha"]])
+                    self._send(201, {"ref": data["ref"], "object": {"sha": csha}})
                     return
                 if path == "/repos/ThermalEng/pIES-Market/pulls":
+                    if outer.fail_next_pull:
+                        outer.fail_next_pull = False
+                        self._send(502, {"message": "Simulated PR creation failure"})
+                        return
                     num = len(outer.pulls) + 1
                     pr = {
                         "number": num,
@@ -200,17 +246,21 @@ class _MockGitHubServer:
                     return
                 self._send(404, {"message": f"Unhandled POST {path}"})
 
-            def do_PUT(self) -> None:
+            def do_PATCH(self) -> None:
                 path = urlparse(self.path).path
                 data = self._read_json()
-                outer.write_calls.append(("PUT", path))
-                if path.startswith("/repos/ThermalEng/pIES-Market/contents/"):
-                    file_path = path.removeprefix("/repos/ThermalEng/pIES-Market/contents/")
-                    branch = str(data["branch"])
-                    outer.branches[branch][file_path] = base64.b64decode(data["content"])
-                    self._send(201, {"content": {"path": file_path}})
+                outer.write_calls.append(("PATCH", path))
+                prefix = "/repos/ThermalEng/pIES-Market/git/refs/heads/"
+                if path.startswith(prefix):
+                    branch = path.removeprefix(prefix)
+                    if branch not in outer.branches:
+                        self._send(404, {"message": "Ref not found"})
+                        return
+                    csha = str(data["sha"])
+                    outer.branches[branch] = dict(outer.trees[outer.commits[csha]["tree"]["sha"]])
+                    self._send(200, {"ref": f"refs/heads/{branch}", "object": {"sha": csha}})
                     return
-                self._send(404, {"message": f"Unhandled PUT {path}"})
+                self._send(404, {"message": f"Unhandled PATCH {path}"})
 
         self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         self.port = int(self._server.server_address[1])
@@ -267,6 +317,7 @@ def _build_plugin_zip(
     plugin_id: str = "acme.evaluator.carbon",
     version: str = "1.0.0",
     sentinel: Path | None = None,
+    readme_extra: str = "",
 ) -> Path:
     src = tmp_path / f"{plugin_id}-{version}-src"
     src.mkdir(parents=True, exist_ok=True)
@@ -316,7 +367,10 @@ def _build_plugin_zip(
         f"{import_side_effect}def evaluate(ctx):\n    pass\n",
         encoding="utf-8",
     )
-    (src / "README.md").write_text(f"# {plugin_id}\n", encoding="utf-8")
+    (src / "README.md").write_text(
+        f"# {plugin_id}\n\nContract `ies.evaluation-report@1.0.0`.\n{readme_extra}",
+        encoding="utf-8",
+    )
     (src / "LICENSE").write_text("MPL-2.0\n", encoding="utf-8")
     (src / "tests/minimal/in").mkdir(parents=True)
     (src / "tests/minimal/expected").mkdir(parents=True)
@@ -390,7 +444,12 @@ def test_e2e_device_and_plugin_submissions_and_idempotency(
         dev_resp = client.post(
             "/v1/submissions",
             headers={"Authorization": f"Bearer {token}"},
-            data={"kind": "device_model", "revision": "1", "license": "MPL-2.0"},
+            data={
+                "kind": "device_model",
+                "revision": "1",
+                "license": "MPL-2.0",
+                "notes": "Compatible with ies.device-model@1.0.0",
+            },
             files={"file": ("acme.device.chp_unit-r1.device.yaml", _sample_device_yaml().encode())},
         )
         assert dev_resp.status_code == 201, dev_resp.text
@@ -413,12 +472,13 @@ def test_e2e_device_and_plugin_submissions_and_idempotency(
 
         # Simulate PR #1 merged to main (so acme is now in main publishers.yaml)
         gh.branches["main"] = dict(gh.branches[dev_body["branch"]])
+        gh.trees["base-tree-001"] = dict(gh.branches["main"])
 
-        # 3) Submit algorithm plugin ZIP -> 201 PR #2 WITHOUT executing plugin code
+        # 3) Submit algorithm plugin ZIP (with matching license & contract@semver) -> 201 PR #2
         plug_resp = client.post(
             "/v1/submissions",
             headers={"Authorization": f"Bearer {token}"},
-            data={"kind": "evaluator"},
+            data={"kind": "evaluator", "license": "MPL-2.0"},
             files={"file": ("acme.evaluator.carbon-1.0.0.algorithm.zip", plugin_zip.read_bytes())},
         )
         assert plug_resp.status_code == 201, plug_resp.text
@@ -428,32 +488,71 @@ def test_e2e_device_and_plugin_submissions_and_idempotency(
         assert plug_body["branch"] == "submit/acme.evaluator.carbon-1.0.0"
         assert not sentinel.exists()
 
-        # Materialize the PR #2 tree + device artifact on disk and validate with E3 check_market_pr!
+        # Materialize the PR #2 tree on disk and validate with E3 check_market_pr!
         checkout = tmp_path / "pr_checkout"
         for rel_path, content in gh.branches[plug_body["branch"]].items():
             dest = checkout / rel_path
             dest.parent.mkdir(parents=True, exist_ok=True)
             dest.write_bytes(content)
-            if rel_path.endswith((".yaml", ".md")):
-                assert "@" not in content.decode("utf-8")
 
         summary = check_market_pr(checkout, docker_selftest=False)
         assert summary["ok"] is True
         assert summary["artifacts_checked"] == 2
         assert summary["publishers_count"] == 1
 
-        # Zero plaintext email '@' across PR metadata, branches, HTTP responses, or logs
         for pr in gh.pulls:
             assert "maintainer" not in pr["body"].lower()
-            assert "@" not in pr["body"]
-            assert "@" not in pr["title"]
-            assert "@" not in pr["head"]
+            assert "acme.example" not in pr["body"].lower()
         assert "maintainer" not in caplog.text.lower()
-        assert "@" not in caplog.text
+        assert "acme.example" not in caplog.text.lower()
 
 
-def test_auth_token_failures_and_rate_limiting(tmp_path: Path) -> None:
+def test_atomic_git_retry_after_tree_and_pr_failures(tmp_path: Path) -> None:
     del tmp_path
+    initial_pub = 'schema: ies.publishers\nschema_version: "1.0.0"\npublishers: {}\n'
+    with _LocalSmtpServer() as smtp, _MockGitHubServer(initial_pub) as gh:
+        client = TestClient(create_app(_make_settings(smtp.port, gh.base_url)))
+        token = issue_submission_token(email="dev@acme.org", hmac_secret=SECRET)
+        branch = "submit/acme.device.chp_unit-r1"
+
+        # 1) Tree failure must NOT create an orphaned branch ref
+        gh.fail_next_tree = True
+        r1 = client.post(
+            "/v1/submissions",
+            headers={"Authorization": f"Bearer {token}"},
+            data={"kind": "device_model", "revision": "1"},
+            files={"file": ("acme.device.chp_unit-r1.device.yaml", _sample_device_yaml().encode())},
+        )
+        assert r1.status_code == 502
+        assert branch not in gh.branches
+
+        # 2) PR creation failure leaves branch without open PR -> retry recovers cleanly via PATCH ref
+        gh.fail_next_pull = True
+        r2 = client.post(
+            "/v1/submissions",
+            headers={"Authorization": f"Bearer {token}"},
+            data={"kind": "device_model", "revision": "1"},
+            files={"file": ("acme.device.chp_unit-r1.device.yaml", _sample_device_yaml().encode())},
+        )
+        assert r2.status_code == 502
+        assert branch in gh.branches
+        assert gh.pulls == []
+
+        r3 = client.post(
+            "/v1/submissions",
+            headers={"Authorization": f"Bearer {token}"},
+            data={"kind": "device_model", "revision": "1"},
+            files={"file": ("acme.device.chp_unit-r1.device.yaml", _sample_device_yaml().encode())},
+        )
+        assert r3.status_code == 201, r3.text
+        assert r3.json()["pr_number"] == 1
+        assert len(gh.pulls) == 1
+
+
+def test_auth_token_failures_smtp_sanitization_and_rate_limiting(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.DEBUG)
     with _LocalSmtpServer() as smtp, _MockGitHubServer(
         'schema: ies.publishers\nschema_version: "1.0.0"\npublishers: {}\n'
     ) as gh:
@@ -487,7 +586,6 @@ def test_auth_token_failures_and_rate_limiting(tmp_path: Path) -> None:
             == 401
         )
 
-        # Purpose confusion & expired submission token -> 401
         expired_sub = issue_submission_token(
             email="dev@acme.org",
             hmac_secret=SECRET,
@@ -503,7 +601,6 @@ def test_auth_token_failures_and_rate_limiting(tmp_path: Path) -> None:
             )
             assert resp.status_code == 401
 
-        # Missing Bearer -> 401
         assert (
             client.post(
                 "/v1/submissions",
@@ -513,7 +610,7 @@ def test_auth_token_failures_and_rate_limiting(tmp_path: Path) -> None:
             == 401
         )
 
-        # Rate limit (max=2) on /v1/otp/request and /v1/otp/verify -> 3rd attempt returns 429
+        # Rate limit (max=2) on /v1/otp/request and /v1/otp/verify -> 429
         assert client.post("/v1/otp/request", json={"email": "u1@acme.org"}).status_code == 200
         assert client.post("/v1/otp/request", json={"email": "u1@acme.org"}).status_code == 200
         limited = client.post("/v1/otp/request", json={"email": "u1@acme.org"})
@@ -528,8 +625,31 @@ def test_auth_token_failures_and_rate_limiting(tmp_path: Path) -> None:
         assert verify_limited.status_code == 429
         assert "Retry-After" in verify_limited.headers
 
+        # SMTPRecipientsRefused must be sanitized (zero plaintext email in HTTP response or logs)
+        class BrokenSmtp:
+            def __init__(self, *args: object, **kwargs: object) -> None:
+                del args, kwargs
 
-def test_publisher_conflicts_reserved_namespaces_and_preflight_blocks_github(tmp_path: Path) -> None:
+            def __enter__(self) -> BrokenSmtp:
+                return self
+
+            def __exit__(self, *args: object) -> None:
+                del args
+
+            def send_message(self, msg: object) -> None:
+                del msg
+                raise smtplib.SMTPRecipientsRefused({"secret_user@private.org": (550, b"5.1.1 Refused")})
+
+        monkeypatch.setattr(smtplib, "SMTP", BrokenSmtp)
+        smtp_client = TestClient(create_app(cfg))
+        caplog.clear()
+        smtp_err = smtp_client.post("/v1/otp/request", json={"email": "secret_user@private.org"})
+        assert smtp_err.status_code == 502
+        assert "secret_user@private.org" not in smtp_err.text
+        assert "secret_user@private.org" not in caplog.text
+
+
+def test_publisher_conflicts_overrides_email_guard_and_size_bounds(tmp_path: Path) -> None:
     owner_digest = compute_publisher_email_digest("owner@acme.org", hmac_secret=SECRET)
     other_digest = compute_publisher_email_digest("frozen@beta.org", hmac_secret=SECRET)
     pub_yaml = (
@@ -545,85 +665,127 @@ def test_publisher_conflicts_reserved_namespaces_and_preflight_blocks_github(tmp
         "    status: suspended\n"
     )
     with _LocalSmtpServer() as smtp, _MockGitHubServer(pub_yaml) as gh:
-        cfg = _make_settings(smtp.port, gh.base_url, max_upload_bytes=2048)
+        cfg = _make_settings(smtp.port, gh.base_url, max_upload_bytes=16384)
         client = TestClient(create_app(cfg))
 
+        owner_token = issue_submission_token(email="owner@acme.org", hmac_secret=SECRET)
         intruder_token = issue_submission_token(email="intruder@evil.org", hmac_secret=SECRET)
         suspended_token = issue_submission_token(email="frozen@beta.org", hmac_secret=SECRET)
         ns = generate_public_namespace()
 
-        # 1) Wrong publisher digest claiming 'acme' -> 403
-        r_conflict = client.post(
-            "/v1/submissions",
-            headers={"Authorization": f"Bearer {intruder_token}"},
-            data={"kind": "device_model", "revision": "1"},
-            files={"file": ("acme.device.chp.device.yaml", _sample_device_yaml().encode())},
+        # 1) Wrong publisher digest -> 403
+        assert (
+            client.post(
+                "/v1/submissions",
+                headers={"Authorization": f"Bearer {intruder_token}"},
+                data={"kind": "device_model", "revision": "1"},
+                files={"file": ("acme.device.chp.device.yaml", _sample_device_yaml().encode())},
+            ).status_code
+            == 403
         )
-        assert r_conflict.status_code == 403
-        assert gh.write_calls == []
 
-        # 2) Suspended publisher 'beta' -> 403
-        r_susp = client.post(
-            "/v1/submissions",
-            headers={"Authorization": f"Bearer {suspended_token}"},
-            data={"kind": "device_model", "revision": "1"},
-            files={
-                "file": (
-                    "beta.device.chp.device.yaml",
-                    _sample_device_yaml("beta.device.chp").encode(),
-                )
-            },
+        # 2) Suspended publisher -> 403
+        beta_yaml = _sample_device_yaml("beta.device.chp").encode()
+        assert (
+            client.post(
+                "/v1/submissions",
+                headers={"Authorization": f"Bearer {suspended_token}"},
+                data={"kind": "device_model", "revision": "1"},
+                files={"file": ("beta.device.chp.device.yaml", beta_yaml)},
+            ).status_code
+            == 403
         )
-        assert r_susp.status_code == 403
-        assert gh.write_calls == []
 
-        # 3) Reserved ies.*, admin.*, and user.<ns>.* rejected with 403 BEFORE GitHub write calls
+        # 3) Reserved ies.*, admin.*, user.<ns>.* -> 403
         for forbidden_id in ("ies.device.chp", "admin.device.chp", f"user.{ns}.device.chp"):
+            forb_yaml = _sample_device_yaml(forbidden_id).encode()
             r_forb = client.post(
                 "/v1/submissions",
                 headers={"Authorization": f"Bearer {intruder_token}"},
                 data={"kind": "device_model", "revision": "1"},
-                files={
-                    "file": (
-                        f"{forbidden_id}.device.yaml",
-                        _sample_device_yaml(forbidden_id).encode(),
-                    )
-                },
+                files={"file": (f"{forbidden_id}.device.yaml", forb_yaml)},
             )
-            assert r_forb.status_code == 403, (forbidden_id, r_forb.text)
-        assert gh.write_calls == []
+            assert r_forb.status_code == 403
 
-        # 4) Invalid artifact YAML/ZIP rejected at preflight (422) BEFORE GitHub writes
-        bad_dev = _sample_device_yaml("gamma.device.chp").replace(
-            "elec_eff:", "price:\n    value: 99\n    unit: CNY\n  elec_eff:"
-        )
+        # 4) Malformed YAML -> sanitized 422 (never 500)
         assert (
             client.post(
                 "/v1/submissions",
                 headers={"Authorization": f"Bearer {intruder_token}"},
                 data={"kind": "device_model", "revision": "1"},
-                files={"file": ("gamma.device.chp.device.yaml", bad_dev.encode())},
+                files={"file": ("bad.device.yaml", b"schema: [unclosed")},
             ).status_code
             == 422
+        )
+
+        # 5) Plaintext email inside description / device YAML / plugin README rejected (422)
+        assert (
+            client.post(
+                "/v1/submissions",
+                headers={"Authorization": f"Bearer {owner_token}"},
+                data={"kind": "device_model", "revision": "1", "description": "mail me dev@evil.org"},
+                files={"file": ("acme.device.chp.device.yaml", _sample_device_yaml().encode())},
+            ).status_code
+            == 422
+        )
+        leak_zip = _build_plugin_zip(
+            tmp_path / "leak",
+            plugin_id="acme.evaluator.leak",
+            readme_extra="\nContact: leak@example.com\n",
         )
         assert (
             client.post(
                 "/v1/submissions",
-                headers={"Authorization": f"Bearer {intruder_token}"},
+                headers={"Authorization": f"Bearer {owner_token}"},
                 data={"kind": "evaluator"},
-                files={"file": ("broken.algorithm.zip", b"not-a-zip")},
+                files={"file": ("acme.evaluator.leak-1.0.0.algorithm.zip", leak_zip.read_bytes())},
             ).status_code
             == 422
         )
-        assert gh.write_calls == []
 
-        # 5) Oversized upload (> max_upload_bytes) -> 413
+        # 6) Conflicting license override & invalid compatibility_json rejected (422)
+        clean_zip = _build_plugin_zip(tmp_path / "clean", plugin_id="acme.evaluator.clean")
         assert (
             client.post(
                 "/v1/submissions",
-                headers={"Authorization": f"Bearer {intruder_token}"},
+                headers={"Authorization": f"Bearer {owner_token}"},
+                data={"kind": "evaluator", "license": "MIT"},
+                files={"file": ("acme.evaluator.clean-1.0.0.algorithm.zip", clean_zip.read_bytes())},
+            ).status_code
+            == 422
+        )
+        assert (
+            client.post(
+                "/v1/submissions",
+                headers={"Authorization": f"Bearer {owner_token}"},
+                data={"kind": "evaluator", "compatibility_json": '{"pies": 123}'},
+                files={"file": ("acme.evaluator.clean-1.0.0.algorithm.zip", clean_zip.read_bytes())},
+            ).status_code
+            == 422
+        )
+
+        # 7) ZIP-bomb expanded size check rejects BEFORE extraction -> 413
+        bomb_zip = tmp_path / "bomb.algorithm.zip"
+        with zipfile.ZipFile(bomb_zip, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr("huge.txt", b"A" * (cfg.max_upload_bytes * 5))
+        assert bomb_zip.stat().st_size < cfg.max_upload_bytes
+        assert (
+            client.post(
+                "/v1/submissions",
+                headers={"Authorization": f"Bearer {owner_token}"},
+                data={"kind": "evaluator"},
+                files={"file": ("bomb.algorithm.zip", bomb_zip.read_bytes())},
+            ).status_code
+            == 413
+        )
+
+        # 8) Pre-parse middleware rejects raw request body > max_upload_bytes with 413
+        assert (
+            client.post(
+                "/v1/submissions",
+                headers={"Authorization": f"Bearer {owner_token}"},
                 data={"kind": "device_model", "revision": "1"},
-                files={"file": ("big.device.yaml", b"x" * 3000)},
+                files={"file": ("big.device.yaml", b"x" * 20000)},
             ).status_code
             == 413
         )

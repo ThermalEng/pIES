@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import re
 import secrets
 import tempfile
 import zipfile
@@ -25,6 +26,7 @@ from pies_sdk import (
     PUBLISHERS_SCHEMA,
     PUBLISHERS_VERSION,
     RESERVED_PUBLISHERS,
+    PiesSdkError,
     PluginValidationError,
     compute_publisher_email_digest,
     issue_otp_challenge,
@@ -33,6 +35,7 @@ from pies_sdk import (
     load_safe_yaml,
     normalize_email,
     parse_artifact_id,
+    parse_semver,
     validate_market_submission,
     validate_plugin_package,
     validate_publishers_registry,
@@ -43,8 +46,79 @@ from pydantic import BaseModel, ConfigDict
 
 from pies_market_gateway.config import GatewaySettings, load_settings_from_env
 from pies_market_gateway.github_client import GitHubGatewayError, GitHubSubmissionClient
-from pies_market_gateway.mailer import send_otp_email
+from pies_market_gateway.mailer import MailerDeliveryError, send_otp_email
 from pies_market_gateway.rate_limit import RateLimitExceededError, SlidingWindowRateLimiter
+
+_COMPAT_CLAUSE_RE = re.compile(r"^(>=|<=|>|<|==|!=)?\s*(\d+\.\d+\.\d+)$")
+_EMAIL_ADDR_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+_TEXT_EXTS = frozenset({".yaml", ".yml", ".md", ".txt", ".py", ".json", ".toml", ".cfg", ".ini"})
+
+
+class _BodyLimitExceeded(Exception):
+    """Internal control-flow signal raised before multipart parsing finishes."""
+
+
+class _RequestBodyLimitMiddleware:
+    """ASGI middleware bounding raw request body bytes before multipart form parsing."""
+
+    def __init__(self, app: Any, *, max_body_bytes: int) -> None:
+        self.app = app
+        self.max_body_bytes = max_body_bytes
+
+    async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        headers = {k.lower(): v for k, v in scope.get("headers", [])}
+        raw_cl = headers.get(b"content-length")
+        if raw_cl is not None:
+            try:
+                if int(raw_cl.decode("ascii")) > self.max_body_bytes:
+                    await self._send_413(send)
+                    return
+            except ValueError:
+                pass
+
+        received = 0
+        response_started = False
+
+        async def bounded_receive() -> dict[str, Any]:
+            nonlocal received
+            message = await receive()
+            if message["type"] == "http.request":
+                received += len(message.get("body", b""))
+                if received > self.max_body_bytes:
+                    raise _BodyLimitExceeded()
+            return message
+
+        async def tracking_send(message: dict[str, Any]) -> None:
+            nonlocal response_started
+            if message["type"] == "http.response.start":
+                response_started = True
+            await send(message)
+
+        try:
+            await self.app(scope, bounded_receive, tracking_send)
+        except _BodyLimitExceeded:
+            if not response_started:
+                await self._send_413(send)
+
+    async def _send_413(self, send: Any) -> None:
+        payload = json.dumps(
+            {"detail": f"Upload exceeds MAX_UPLOAD_BYTES ({self.max_body_bytes})"}
+        ).encode("utf-8")
+        await send(
+            {
+                "type": "http.response.start",
+                "status": 413,
+                "headers": [
+                    (b"content-type", b"application/json"),
+                    (b"content-length", str(len(payload)).encode("ascii")),
+                ],
+            }
+        )
+        await send({"type": "http.response.body", "body": payload})
 
 
 class OtpRequestBody(BaseModel):
@@ -89,8 +163,96 @@ def _device_localized_names(raw_names: Mapping[str, Any]) -> dict[str, str]:
     return out
 
 
+def _assert_no_public_email(text: str, *, label: str) -> None:
+    lowered = text.lower()
+    if "mailto:" in lowered or _EMAIL_ADDR_RE.search(text):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Public {label} must not contain plaintext email addresses",
+        )
+
+
+def _validate_compat_override(raw_json: str) -> dict[str, str]:
+    try:
+        parsed = json.loads(raw_json)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Invalid compatibility_json: {exc}",
+        ) from exc
+    if not isinstance(parsed, Mapping) or not parsed:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="compatibility_json must be a non-empty JSON object",
+        )
+    extra = sorted(set(parsed) - {"pies", "sdk"})
+    if extra:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"compatibility_json contains unsupported keys: {extra!r}",
+        )
+    out: dict[str, str] = {}
+    for target, expr in parsed.items():
+        if not isinstance(expr, str) or not expr.strip():
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"compatibility_json.{target} must be a non-empty string",
+            )
+        for clause in (part.strip() for part in expr.split(",")):
+            match = _COMPAT_CLAUSE_RE.fullmatch(clause)
+            if not match:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail=f"Invalid compatibility_json.{target} constraint: {expr!r}",
+                )
+            parse_semver(match.group(2))
+        out[str(target)] = expr.strip()
+    return out
+
+
+def _check_zip_bounds(zip_path: Path, *, max_expanded_bytes: int) -> None:
+    try:
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            total_uncompressed = 0
+            for info in zf.infolist():
+                if info.file_size < 0 or info.compress_size < 0:
+                    raise HTTPException(
+                        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                        detail="ZIP entry has negative size metadata",
+                    )
+                if info.file_size > max_expanded_bytes:
+                    raise HTTPException(
+                        status_code=413,
+                        detail=f"ZIP entry {info.filename!r} expanded size exceeds limit",
+                    )
+                total_uncompressed += info.file_size
+                if total_uncompressed > max_expanded_bytes:
+                    raise HTTPException(
+                        status_code=413,
+                        detail=f"ZIP total uncompressed size exceeds limit ({max_expanded_bytes})",
+                    )
+                if info.compress_size > 0 and info.file_size > 1_000_000:
+                    if info.file_size / info.compress_size > 100:
+                        raise HTTPException(
+                            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                            detail="ZIP compression ratio exceeds safety threshold",
+                        )
+    except zipfile.BadZipFile as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Invalid plugin ZIP archive: {exc}",
+        ) from exc
+
+
 def _read_plugin_meta_from_zip(zip_path: Path) -> tuple[Any, bytes | None]:
     with zipfile.ZipFile(zip_path, "r") as zf:
+        for info in zf.infolist():
+            if info.is_dir():
+                continue
+            name_lower = info.filename.lower()
+            if Path(name_lower).suffix in _TEXT_EXTS or Path(name_lower).name in {"license", "readme"}:
+                raw_text = zf.read(info).decode("utf-8", errors="replace")
+                _assert_no_public_email(raw_text, label=f"plugin archive file {info.filename!r}")
         with tempfile.TemporaryDirectory(prefix="pies-gw-manifest-") as tmp_dir:
             zf.extract("plugin.yaml", tmp_dir)
             manifest = load_plugin_manifest(Path(tmp_dir) / "plugin.yaml", check_compat=True)
@@ -100,22 +262,6 @@ def _read_plugin_meta_from_zip(zip_path: Path) -> tuple[Any, bytes | None]:
                 readme_bytes = zf.read(name)
                 break
         return manifest, readme_bytes
-
-
-async def _read_upload_bounded(upload: UploadFile, max_bytes: int) -> bytes:
-    chunks: list[bytes] = []
-    total = 0
-    while chunk := await upload.read(65536):
-        total += len(chunk)
-        if total > max_bytes:
-            raise HTTPException(
-                status_code=status.HTTP_413_CONTENT_ENTITY_TOO_LARGE
-                if hasattr(status, "HTTP_413_CONTENT_ENTITY_TOO_LARGE")
-                else 413,
-                detail=f"Upload exceeds MAX_UPLOAD_BYTES ({max_bytes})",
-            )
-        chunks.append(chunk)
-    return b"".join(chunks)
 
 
 def _reject_reserved_or_user_id(artifact_id: str, kind: str) -> Any:
@@ -153,6 +299,7 @@ def create_app(
     )
 
     app = FastAPI(title="pIES Market Submission Gateway", version="1.0.0")
+    app.add_middleware(_RequestBodyLimitMiddleware, max_body_bytes=cfg.max_upload_bytes)
 
     @app.get("/healthz")
     def healthz() -> dict[str, str]:
@@ -180,12 +327,19 @@ def create_app(
             ) from exc
 
         otp_code = f"{secrets.randbelow(1_000_000):06d}"
-        send_otp_email(
-            settings=cfg,
-            to_email=normalized,
-            otp_code=otp_code,
-            ttl_seconds=cfg.otp_ttl_seconds,
-        )
+        try:
+            send_otp_email(
+                settings=cfg,
+                to_email=normalized,
+                otp_code=otp_code,
+                ttl_seconds=cfg.otp_ttl_seconds,
+            )
+        except MailerDeliveryError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="Verification email delivery failed",
+            ) from exc
+
         challenge_token = issue_otp_challenge(
             email=normalized,
             otp_code=otp_code,
@@ -270,26 +424,30 @@ def create_app(
                 detail=f"Unsupported artifact kind: {kind!r}",
             )
 
-        raw_bytes = await _read_upload_bounded(file, cfg.max_upload_bytes)
+        for field_name, val in (
+            ("name_zh_cn", name_zh_cn),
+            ("name_en_us", name_en_us),
+            ("description", description),
+            ("license", license),
+            ("readme_markdown", readme_markdown),
+            ("notes", notes),
+        ):
+            if val:
+                _assert_no_public_email(val, label=field_name)
+
+        raw_bytes = await file.read()
         if not raw_bytes:
             raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Empty upload file")
+        if len(raw_bytes) > cfg.max_upload_bytes:
+            raise HTTPException(
+                status_code=413,
+                detail=f"Upload exceeds MAX_UPLOAD_BYTES ({cfg.max_upload_bytes})",
+            )
         sha256 = hashlib.sha256(raw_bytes).hexdigest()
 
         compat_override: dict[str, str] | None = None
         if compatibility_json is not None and compatibility_json.strip():
-            try:
-                parsed_compat = json.loads(compatibility_json)
-            except ValueError as exc:
-                raise HTTPException(
-                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                    detail=f"Invalid compatibility_json: {exc}",
-                ) from exc
-            if not isinstance(parsed_compat, Mapping) or not parsed_compat:
-                raise HTTPException(
-                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                    detail="compatibility_json must be a non-empty JSON object",
-                )
-            compat_override = {str(k): str(v) for k, v in parsed_compat.items()}
+            compat_override = _validate_compat_override(compatibility_json)
 
         files_to_commit: dict[str, bytes] = {}
         with tempfile.TemporaryDirectory(prefix="pies-gw-preflight-") as tmp_dir:
@@ -302,9 +460,10 @@ def create_app(
                     )
                 try:
                     yaml_text = raw_bytes.decode("utf-8")
+                    _assert_no_public_email(yaml_text, label="device_model YAML")
                     raw_doc = load_safe_yaml(yaml_text)
                     device_doc = validate_device_model_mapping(raw_doc, allow_user_namespace=False)
-                except (UnicodeDecodeError, PluginValidationError) as exc:
+                except (UnicodeDecodeError, PiesSdkError) as exc:
                     msg = str(exc).lower()
                     if isinstance(exc, PluginValidationError) and (
                         "forbidden in public market" in msg or "reserved" in msg
@@ -371,6 +530,7 @@ def create_app(
                     )
                 zip_path = tmp_root / "submission.algorithm.zip"
                 zip_path.write_bytes(raw_bytes)
+                _check_zip_bounds(zip_path, max_expanded_bytes=cfg.max_upload_bytes * 4)
                 try:
                     # Strictly read-only preflight: never import or execute plugin code in gateway.
                     validate_plugin_package(
@@ -379,7 +539,7 @@ def create_app(
                         require_market_fields=True,
                     )
                     manifest, readme_bytes = _read_plugin_meta_from_zip(zip_path)
-                except PluginValidationError as exc:
+                except PiesSdkError as exc:
                     msg = str(exc)
                     if "public market" in msg.lower() or "reserved" in msg.lower():
                         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=msg) from exc
@@ -393,6 +553,14 @@ def create_app(
                         status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                         detail=f"Uploaded plugin.yaml kind {manifest.kind!r} does not match {kind!r}",
                     )
+                if license is not None and license.strip() and license.strip() != manifest.license:
+                    raise HTTPException(
+                        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                        detail=(
+                            f"Submitted license {license.strip()!r} conflicts with plugin.yaml "
+                            f"license {manifest.license!r}"
+                        ),
+                    )
                 artifact_id = manifest.plugin_id
                 parsed_id = _reject_reserved_or_user_id(artifact_id, kind)
                 publisher = parsed_id.publisher
@@ -405,7 +573,7 @@ def create_app(
                 if name_en_us and name_en_us.strip():
                     names_map["en_us"] = name_en_us.strip()
                 desc_text = (description or "").strip() or manifest.description
-                lic_text = (license or "").strip() or manifest.license
+                lic_text = manifest.license
                 compat_map = compat_override or dict(manifest.compatibility)
 
                 meta_doc = {
@@ -444,21 +612,23 @@ def create_app(
                 }
 
         if notes and notes.strip():
-            if "@" in notes:
-                raise HTTPException(
-                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                    detail="Submission notes must not contain plaintext '@' email addresses",
-                )
             submission_payload["notes"] = notes.strip()
 
         try:
             validated_submission = validate_market_submission(submission_payload)
-        except PluginValidationError as exc:
+        except PiesSdkError as exc:
             raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+
+        for rel_path, file_bytes in files_to_commit.items():
+            if not rel_path.endswith(".zip"):
+                _assert_no_public_email(
+                    file_bytes.decode("utf-8", errors="replace"),
+                    label=f"committed file {rel_path!r}",
+                )
 
         try:
             publishers_doc, publishers_sha = gh.fetch_publishers_registry()
-        except (GitHubGatewayError, PluginValidationError) as exc:
+        except (GitHubGatewayError, PiesSdkError) as exc:
             raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
 
         existing_pub = publishers_doc["publishers"].get(publisher)

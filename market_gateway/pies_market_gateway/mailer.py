@@ -8,6 +8,10 @@ from email.message import EmailMessage
 from pies_market_gateway.config import GatewaySettings
 
 
+class MailerDeliveryError(Exception):
+    """Sanitized SMTP delivery failure never retaining recipient email addresses."""
+
+
 def send_otp_email(
     *,
     settings: GatewaySettings,
@@ -29,11 +33,15 @@ def send_otp_email(
         charset="utf-8",
     )
 
-    with smtplib.SMTP(settings.smtp_host, settings.smtp_port, timeout=15) as smtp:
-        if settings.smtp_use_tls:
-            smtp.ehlo()
-            smtp.starttls()
-            smtp.ehlo()
-        if settings.smtp_username:
-            smtp.login(settings.smtp_username, settings.smtp_password)
-        smtp.send_message(msg)
+    try:
+        with smtplib.SMTP(settings.smtp_host, settings.smtp_port, timeout=15) as smtp:
+            if settings.smtp_use_tls:
+                smtp.ehlo()
+                smtp.starttls()
+                smtp.ehlo()
+            if settings.smtp_username:
+                smtp.login(settings.smtp_username, settings.smtp_password)
+            smtp.send_message(msg)
+    except (smtplib.SMTPException, OSError):
+        # Suppress raw SMTP exception chain (SMTPRecipientsRefused embeds plaintext email).
+        raise MailerDeliveryError("Failed to deliver verification email via SMTP") from None

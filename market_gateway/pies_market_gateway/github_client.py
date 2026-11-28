@@ -115,7 +115,8 @@ class GitHubSubmissionClient:
         pr_title: str,
         commit_message: str,
     ) -> PullRequestResult:
-        """Create deterministic branch, commit files without PII, and open PR (idempotent on 422 race)."""
+        """Atomically build Git blobs/tree/commit before creating/updating ref and opening PR."""
+        del publishers_sha
         existing = self.find_open_pr_for_branch(branch_name)
         if existing is not None:
             return existing
@@ -129,40 +130,81 @@ class GitHubSubmissionClient:
                     f"Failed to resolve base branch {self._settings.market_base_branch!r}: "
                     f"HTTP {ref_resp.status_code}"
                 )
-            base_sha = str(ref_resp.json()["object"]["sha"])
+            base_commit_sha = str(ref_resp.json()["object"]["sha"])
+
+            base_commit_resp = client.get(
+                f"/repos/{self._owner}/{self._repo}/git/commits/{base_commit_sha}"
+            )
+            if base_commit_resp.status_code >= 400:
+                raise GitHubGatewayError(
+                    f"Failed to read base commit {base_commit_sha!r}: HTTP {base_commit_resp.status_code}"
+                )
+            base_tree_sha = str(base_commit_resp.json()["tree"]["sha"])
+
+            tree_entries: list[dict[str, str]] = []
+            for rel_path in sorted(files):
+                blob_resp = client.post(
+                    f"/repos/{self._owner}/{self._repo}/git/blobs",
+                    json={
+                        "content": base64.b64encode(files[rel_path]).decode("ascii"),
+                        "encoding": "base64",
+                    },
+                )
+                if blob_resp.status_code >= 400:
+                    raise GitHubGatewayError(
+                        f"Failed to create blob for {rel_path!r}: HTTP {blob_resp.status_code}"
+                    )
+                tree_entries.append(
+                    {
+                        "path": rel_path,
+                        "mode": "100644",
+                        "type": "blob",
+                        "sha": str(blob_resp.json()["sha"]),
+                    }
+                )
+
+            tree_resp = client.post(
+                f"/repos/{self._owner}/{self._repo}/git/trees",
+                json={"base_tree": base_tree_sha, "tree": tree_entries},
+            )
+            if tree_resp.status_code >= 400:
+                raise GitHubGatewayError(f"Failed to create git tree: HTTP {tree_resp.status_code}")
+            new_tree_sha = str(tree_resp.json()["sha"])
+
+            commit_resp = client.post(
+                f"/repos/{self._owner}/{self._repo}/git/commits",
+                json={
+                    "message": commit_message,
+                    "tree": new_tree_sha,
+                    "parents": [base_commit_sha],
+                },
+            )
+            if commit_resp.status_code >= 400:
+                raise GitHubGatewayError(f"Failed to create git commit: HTTP {commit_resp.status_code}")
+            new_commit_sha = str(commit_resp.json()["sha"])
 
             create_ref = client.post(
                 f"/repos/{self._owner}/{self._repo}/git/refs",
-                json={"ref": f"refs/heads/{branch_name}", "sha": base_sha},
+                json={"ref": f"refs/heads/{branch_name}", "sha": new_commit_sha},
             )
             if create_ref.status_code == 422:
                 raced = self.find_open_pr_for_branch(branch_name)
                 if raced is not None:
                     return raced
-                raise GitHubGatewayError(
-                    f"Branch {branch_name!r} already exists without an open PR"
+                # Branch exists without an open PR (e.g. retry after transient PR creation error).
+                patch_ref = client.patch(
+                    f"/repos/{self._owner}/{self._repo}/git/refs/heads/{branch_name}",
+                    json={"sha": new_commit_sha, "force": True},
                 )
-            if create_ref.status_code >= 400:
+                if patch_ref.status_code >= 400:
+                    raise GitHubGatewayError(
+                        f"Failed to update existing submission branch {branch_name!r}: "
+                        f"HTTP {patch_ref.status_code}"
+                    )
+            elif create_ref.status_code >= 400:
                 raise GitHubGatewayError(
                     f"Failed to create branch {branch_name!r}: HTTP {create_ref.status_code}"
                 )
-
-            for rel_path in sorted(files):
-                payload: dict[str, Any] = {
-                    "message": commit_message,
-                    "content": base64.b64encode(files[rel_path]).decode("ascii"),
-                    "branch": branch_name,
-                }
-                if rel_path == "publishers.yaml" and publishers_sha is not None:
-                    payload["sha"] = publishers_sha
-                put_resp = client.put(
-                    f"/repos/{self._owner}/{self._repo}/contents/{rel_path}",
-                    json=payload,
-                )
-                if put_resp.status_code >= 400:
-                    raise GitHubGatewayError(
-                        f"Failed to commit {rel_path!r}: HTTP {put_resp.status_code}"
-                    )
 
             pr_body = (
                 "Automated pIES Market artifact submission (stateless gateway; zero plaintext email).\n\n"
@@ -179,6 +221,10 @@ class GitHubSubmissionClient:
                     "body": pr_body,
                 },
             )
+            if pr_resp.status_code == 422:
+                raced = self.find_open_pr_for_branch(branch_name)
+                if raced is not None:
+                    return raced
             if pr_resp.status_code >= 400:
                 raise GitHubGatewayError(f"Failed to create PR: HTTP {pr_resp.status_code}")
             pr_data = pr_resp.json()
