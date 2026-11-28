@@ -38,7 +38,8 @@ jobs:
             -v "$MKT_WORK:/mkt-work" \
             -e PIES_TEST_CONTAINER_ROOT=/mkt-work \
             -e PIES_TEST_HOST_ROOT="$MKT_WORK" \
+            -e PIES_PLUGIN_BASE_IMAGE="$PIES_PLUGIN_BASE_IMAGE" \
             -e PIES_RUN_DOCKER_TESTS=1 \
             python:3.12-slim \
-            sh -c 'cp -a /repo /tmp/repo && cd /tmp/repo && pip install --no-cache-dir ".[dev]" && ruff check pies_market tests && python -m pies_market.check_pr --market-root . --docker-selftest --docker-image "'"$PIES_PLUGIN_BASE_IMAGE"'" --json && pytest -vv -ra tests'
+            sh -c 'cp -a /repo /tmp/repo && cd /tmp/repo && pip install --no-cache-dir ".[dev]" && ruff check pies_market tests && python -m pies_market.check_pr --market-root . --docker-selftest --json && pytest -vv -ra tests'
           rm -rf "$MKT_WORK" || true

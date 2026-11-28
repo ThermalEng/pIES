@@ -18,7 +18,6 @@ from pies_sdk import (
     PiesSdkError,
     pack_plugin_package,
     validate_market_index,
-    verify_external_sha256,
     write_json_file,
 )
 
@@ -77,7 +76,6 @@ def build_market_index(
             raw_bytes = entry.source_path.read_bytes()
             dest_pkg.write_bytes(raw_bytes)
             digest = hashlib.sha256(raw_bytes).hexdigest()
-            verify_external_sha256(dest_pkg, digest, required=True)
 
             item: dict[str, Any] = {
                 "id": entry.id,
@@ -115,7 +113,6 @@ def build_market_index(
                 dest_pkg.write_bytes(raw_bytes)
                 digest = hashlib.sha256(raw_bytes).hexdigest()
                 size_bytes = len(raw_bytes)
-            verify_external_sha256(dest_pkg, digest, required=True)
 
             item = {
                 "id": entry.id,

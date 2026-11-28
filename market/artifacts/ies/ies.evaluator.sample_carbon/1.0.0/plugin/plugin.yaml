@@ -27,6 +27,10 @@ parameters_schema:
       type: number
       exclusiveMinimum: 0
       default: 0.5703
+    step_hours:
+      type: number
+      exclusiveMinimum: 0
+      default: 1.0
 resources:
   default:
     cpu: 1
@@ -42,4 +46,7 @@ tests:
   - id: minimal
     in: tests/minimal/in
     expected: tests/minimal/expected
+  - id: quarter_hour
+    in: tests/quarter_hour/in
+    expected: tests/quarter_hour/expected
 extensions: {}

@@ -1,0 +1,6 @@
+{
+  "parameters": {
+    "emission_factor_t_per_mwh": 0.6,
+    "step_hours": 0.25
+  }
+}

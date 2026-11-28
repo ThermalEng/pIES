@@ -10,15 +10,16 @@ from pies_sdk import (
 
 
 def evaluate(ctx: StageContext) -> None:
-    """Compute total CO2 emissions from imported electricity series."""
+    """Integrate imported electricity power series over `step_hours` and compute CO2 emissions."""
     solution = ctx.read_engineering_solution()
     factor = float(ctx.parameters.get("emission_factor_t_per_mwh", 0.5703))
+    step_hours = float(ctx.parameters.get("step_hours", 1.0))
 
     total_kwh = 0.0
     if solution.solver_summary.has_feasible_solution and solution.series:
         for entry in solution.series.values():
             if entry.variable_id == "grid_import_kw" and entry.unit == "kW":
-                total_kwh += sum(float(v) for v in entry.values)
+                total_kwh += sum(float(v) * step_hours for v in entry.values)
 
     total_co2_tonnes = round((total_kwh / 1000.0) * factor, 6)
     report = EvaluationReportPayload(

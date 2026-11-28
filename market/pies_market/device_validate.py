@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import math
 import re
 from collections.abc import Mapping
@@ -50,10 +51,8 @@ _FORBIDDEN_MARKET_KEYS = frozenset(
         "subprocess",
     }
 )
-_UNSAFE_EXPR_RE = re.compile(
-    r"(\b__import__\b|\beval\s*\(|\bexec\s*\(|\bopen\s*\(|\bcompile\s*\(|\bimport\b|\blambda\b|__)"
-)
-_INDEX_RE = re.compile(r"\[\s*([^\]]+)\s*\]")
+_ALLOWED_BINOPS = (ast.Add, ast.Sub, ast.Mult, ast.Div, ast.Pow, ast.Mod)
+_ALLOWED_UNARYOPS = (ast.UAdd, ast.USub)
 
 
 def _check_no_forbidden_keys(node: Any, path: str) -> None:
@@ -71,7 +70,11 @@ def _check_no_forbidden_keys(node: Any, path: str) -> None:
 
 
 def _is_finite_number(value: object) -> bool:
-    return not isinstance(value, bool) and isinstance(value, (int, float)) and math.isfinite(float(value))
+    return (
+        not isinstance(value, bool)
+        and isinstance(value, (int, float))
+        and math.isfinite(float(value))
+    )
 
 
 def _validate_range(
@@ -106,20 +109,126 @@ def _validate_range(
         raise MarketValidationError(f"{path}.minimum ({lo}) exceeds maximum ({hi})")
 
 
-def _validate_expression_safety(expr: object, *, path: str, allow_time_index: bool) -> str:
+def _split_relation(expr: object, *, path: str) -> tuple[str, str]:
     if not isinstance(expr, str) or not expr.strip():
         raise MarketValidationError(f"{path} must be a non-empty string")
-    if _UNSAFE_EXPR_RE.search(expr):
-        raise MarketValidationError(f"{path} contains forbidden code or reflection tokens")
-    if not allow_time_index and ("[" in expr or "]" in expr):
-        raise MarketValidationError(f"{path} forbids time indexing")
-    for idx_match in _INDEX_RE.finditer(expr):
-        token = idx_match.group(1).replace(" ", "")
-        if token not in ("t", "t-1"):
+    parts = re.split(r"\s*=\s*", expr, maxsplit=1)
+    if len(parts) != 2:
+        raise MarketValidationError(f"{path} must be of form 'lhs = rhs'")
+    lhs, rhs = parts[0].strip(), parts[1].strip()
+    if not lhs or not rhs or "=" in rhs:
+        raise MarketValidationError(f"{path} must contain exactly one '=' with non-empty sides")
+    return lhs, rhs
+
+
+def _is_valid_time_slice(node: ast.AST) -> bool:
+    if isinstance(node, ast.Name) and node.id == "t":
+        return True
+    if (
+        isinstance(node, ast.BinOp)
+        and isinstance(node.op, ast.Sub)
+        and isinstance(node.left, ast.Name)
+        and node.left.id == "t"
+        and isinstance(node.right, ast.Constant)
+        and not isinstance(node.right.value, bool)
+        and isinstance(node.right.value, int)
+        and node.right.value == 1
+    ):
+        return True
+    return False
+
+
+def _validate_math_ast(
+    expr: object,
+    *,
+    path: str,
+    allowed_names: set[str],
+    allow_time_index: bool,
+    time_indexed_names: set[str],
+) -> tuple[str, ...]:
+    """Parse expression with restricted AST whitelist and return referenced identifier names."""
+    if not isinstance(expr, str) or not expr.strip():
+        raise MarketValidationError(f"{path} must be a non-empty string")
+    try:
+        tree = ast.parse(expr.strip(), mode="eval")
+    except SyntaxError as exc:
+        raise MarketValidationError(f"{path} has invalid expression syntax: {exc.msg}") from exc
+
+    refs: list[str] = []
+
+    def _visit(node: ast.AST) -> None:
+        if isinstance(node, ast.Expression):
+            _visit(node.body)
+        elif isinstance(node, ast.BinOp):
+            if not isinstance(node.op, _ALLOWED_BINOPS):
+                raise MarketValidationError(f"{path} uses unsupported operator: {type(node.op).__name__}")
+            _visit(node.left)
+            _visit(node.right)
+        elif isinstance(node, ast.UnaryOp):
+            if not isinstance(node.op, _ALLOWED_UNARYOPS):
+                raise MarketValidationError(
+                    f"{path} uses unsupported unary operator: {type(node.op).__name__}"
+                )
+            _visit(node.operand)
+        elif isinstance(node, ast.Constant):
+            if not _is_finite_number(node.value):
+                raise MarketValidationError(f"{path} only allows finite numeric literals: {node.value!r}")
+        elif isinstance(node, ast.Name):
+            if node.id not in allowed_names:
+                raise MarketValidationError(f"{path} references undeclared symbol {node.id!r}")
+            refs.append(node.id)
+        elif isinstance(node, ast.Subscript):
+            if not allow_time_index:
+                raise MarketValidationError(f"{path} forbids time indexing")
+            if not isinstance(node.value, ast.Name):
+                raise MarketValidationError(f"{path} subscript target must be a declared identifier")
+            target = node.value.id
+            if target not in allowed_names:
+                raise MarketValidationError(f"{path} references undeclared symbol {target!r}")
+            if target not in time_indexed_names:
+                raise MarketValidationError(
+                    f"{path} cannot time-index scalar symbol {target!r}"
+                )
+            if not _is_valid_time_slice(node.slice):
+                raise MarketValidationError(
+                    f"{path} uses unsupported time index on {target!r}; only [t] and [t-1] allowed"
+                )
+            refs.append(target)
+        else:
             raise MarketValidationError(
-                f"{path} uses unsupported time index [{idx_match.group(1)}]; only [t] and [t-1] allowed"
+                f"{path} contains forbidden expression construct: {type(node).__name__}"
             )
-    return expr
+
+    _visit(tree)
+    return tuple(refs)
+
+
+def _check_variable_cycles(var_names: set[str], edges: list[tuple[str, tuple[str, ...]]]) -> None:
+    graph: dict[str, set[str]] = {vid: set() for vid in var_names}
+    for out_var, refs in edges:
+        if out_var in graph:
+            graph[out_var].update(r for r in refs if r in graph and r != out_var)
+    white, gray, black = 0, 1, 2
+    color = {vid: white for vid in graph}
+    stack: list[str] = []
+
+    def _visit(vid: str) -> None:
+        color[vid] = gray
+        stack.append(vid)
+        for nxt in sorted(graph[vid]):
+            if color[nxt] == gray:
+                cycle = stack[stack.index(nxt) :] + [nxt]
+                raise MarketValidationError(
+                    f"equations contains cyclic variable dependency: {' -> '.join(cycle)}"
+                )
+            if color[nxt] == white:
+                _visit(nxt)
+        stack.pop()
+        color[vid] = black
+
+    for vid in sorted(graph):
+        if color[vid] == white:
+            _visit(vid)
 
 
 def validate_device_model_mapping(
@@ -192,6 +301,7 @@ def validate_device_model_mapping(
     ifaces = data["interfaces"]
     if not isinstance(ifaces, Mapping):
         raise MarketValidationError("interfaces must be a mapping")
+    iface_names: set[str] = set()
     for iid, iraw in ifaces.items():
         if not isinstance(iid, str) or not _ID_RE.fullmatch(iid):
             raise MarketValidationError(f"Invalid interface id: {iid!r}")
@@ -219,6 +329,7 @@ def validate_device_model_mapping(
             allow_property_ref=True,
             property_names=prop_names,
         )
+        iface_names.add(iid)
 
     equations = data["equations"]
     if not isinstance(equations, Mapping) or set(equations) != {"variables", "relations"}:
@@ -226,6 +337,7 @@ def validate_device_model_mapping(
     variables = equations["variables"]
     if not isinstance(variables, Mapping):
         raise MarketValidationError("equations.variables must be a mapping")
+    var_names: set[str] = set()
     for vid, vraw in variables.items():
         if not isinstance(vid, str) or not _ID_RE.fullmatch(vid):
             raise MarketValidationError(f"Invalid equations.variables key: {vid!r}")
@@ -255,16 +367,22 @@ def validate_device_model_mapping(
                         f"{init['property_ref']!r}"
                     )
             else:
-                _validate_expression_safety(
+                _validate_math_ast(
                     init["expression"],
                     path=f"equations.variables.{vid}.initial.expression",
+                    allowed_names=prop_names,
                     allow_time_index=False,
+                    time_indexed_names=set(),
                 )
+        var_names.add(vid)
 
     relations = equations["relations"]
     if not isinstance(relations, list):
         raise MarketValidationError("equations.relations must be a list")
+    allowed_rel_names = prop_names | iface_names | var_names | {"step_duration"}
+    time_indexed_names = iface_names | var_names
     seen_rel_ids: set[str] = set()
+    relation_edges: list[tuple[str, tuple[str, ...]]] = []
     for idx, rel in enumerate(relations):
         if not isinstance(rel, Mapping) or set(rel) != {"id", "expression"}:
             raise MarketValidationError(
@@ -276,14 +394,33 @@ def validate_device_model_mapping(
         if rid in seen_rel_ids:
             raise MarketValidationError(f"Duplicate relation id: {rid!r}")
         seen_rel_ids.add(rid)
-        expr = _validate_expression_safety(
+        lhs, rhs = _split_relation(
             rel["expression"],
             path=f"equations.relations[{idx}].expression",
-            allow_time_index=True,
         )
-        if "=" not in expr:
-            raise MarketValidationError(f"Relation {rid!r} expression must contain '='")
+        lhs_refs = _validate_math_ast(
+            lhs,
+            path=f"equations.relations[{idx}].expression(lhs)",
+            allowed_names=allowed_rel_names,
+            allow_time_index=True,
+            time_indexed_names=time_indexed_names,
+        )
+        lhs_series_refs = [name for name in lhs_refs if name in time_indexed_names]
+        if len(lhs_refs) not in (1, 2) or not lhs_series_refs:
+            raise MarketValidationError(
+                f"equations.relations[{idx}].expression LHS must reference 1 or 2 declared "
+                "interfaces/variables"
+            )
+        rhs_refs = _validate_math_ast(
+            rhs,
+            path=f"equations.relations[{idx}].expression(rhs)",
+            allowed_names=allowed_rel_names,
+            allow_time_index=True,
+            time_indexed_names=time_indexed_names,
+        )
+        relation_edges.append((lhs_series_refs[0], rhs_refs))
 
+    _check_variable_cycles(var_names, relation_edges)
     return dict(data)
 
 
