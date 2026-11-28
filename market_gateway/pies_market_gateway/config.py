@@ -41,6 +41,7 @@ class GatewaySettings:
     otp_rate_limit_max: int = 5
     otp_rate_limit_window_seconds: int = 600
     max_upload_bytes: int = 20_000_000
+    max_zip_entries: int = 256
     http_timeout_seconds: float = 30.0
 
 
@@ -76,6 +77,9 @@ def load_settings_from_env() -> GatewaySettings:
         ),
         max_upload_bytes=_parse_int(
             os.environ.get("MAX_UPLOAD_BYTES"), default=20_000_000, minimum=1
+        ),
+        max_zip_entries=_parse_int(
+            os.environ.get("MAX_ZIP_ENTRIES"), default=256, minimum=1
         ),
         http_timeout_seconds=float(os.environ.get("HTTP_TIMEOUT_SECONDS", "30.0")),
     )

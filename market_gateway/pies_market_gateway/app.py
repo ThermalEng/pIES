@@ -45,13 +45,16 @@ from pies_sdk import (
 from pydantic import BaseModel, ConfigDict
 
 from pies_market_gateway.config import GatewaySettings, load_settings_from_env
-from pies_market_gateway.github_client import GitHubGatewayError, GitHubSubmissionClient
+from pies_market_gateway.github_client import (
+    GitHubGatewayError,
+    GitHubSubmissionClient,
+    SubmissionConflictError,
+)
 from pies_market_gateway.mailer import MailerDeliveryError, send_otp_email
 from pies_market_gateway.rate_limit import RateLimitExceededError, SlidingWindowRateLimiter
 
 _COMPAT_CLAUSE_RE = re.compile(r"^(>=|<=|>|<|==|!=)?\s*(\d+\.\d+\.\d+)$")
 _EMAIL_ADDR_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
-_TEXT_EXTS = frozenset({".yaml", ".yml", ".md", ".txt", ".py", ".json", ".toml", ".cfg", ".ini"})
 
 
 class _BodyLimitExceeded(Exception):
@@ -210,11 +213,22 @@ def _validate_compat_override(raw_json: str) -> dict[str, str]:
     return out
 
 
-def _check_zip_bounds(zip_path: Path, *, max_expanded_bytes: int) -> None:
+def _check_zip_bounds(
+    zip_path: Path,
+    *,
+    max_expanded_bytes: int,
+    max_entries: int = 256,
+) -> None:
     try:
         with zipfile.ZipFile(zip_path, "r") as zf:
+            infos = zf.infolist()
+            if len(infos) > max_entries:
+                raise HTTPException(
+                    status_code=413,
+                    detail=f"ZIP entry count ({len(infos)}) exceeds limit ({max_entries})",
+                )
             total_uncompressed = 0
-            for info in zf.infolist():
+            for info in infos:
                 if info.file_size < 0 or info.compress_size < 0:
                     raise HTTPException(
                         status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -249,10 +263,14 @@ def _read_plugin_meta_from_zip(zip_path: Path) -> tuple[Any, bytes | None]:
         for info in zf.infolist():
             if info.is_dir():
                 continue
-            name_lower = info.filename.lower()
-            if Path(name_lower).suffix in _TEXT_EXTS or Path(name_lower).name in {"license", "readme"}:
-                raw_text = zf.read(info).decode("utf-8", errors="replace")
-                _assert_no_public_email(raw_text, label=f"plugin archive file {info.filename!r}")
+            raw_bytes = zf.read(info)
+            if b"\x00" in raw_bytes:
+                continue
+            try:
+                raw_text = raw_bytes.decode("utf-8")
+            except UnicodeDecodeError:
+                continue
+            _assert_no_public_email(raw_text, label=f"plugin archive file {info.filename!r}")
         with tempfile.TemporaryDirectory(prefix="pies-gw-manifest-") as tmp_dir:
             zf.extract("plugin.yaml", tmp_dir)
             manifest = load_plugin_manifest(Path(tmp_dir) / "plugin.yaml", check_compat=True)
@@ -530,7 +548,11 @@ def create_app(
                     )
                 zip_path = tmp_root / "submission.algorithm.zip"
                 zip_path.write_bytes(raw_bytes)
-                _check_zip_bounds(zip_path, max_expanded_bytes=cfg.max_upload_bytes * 4)
+                _check_zip_bounds(
+                    zip_path,
+                    max_expanded_bytes=cfg.max_upload_bytes * 4,
+                    max_entries=cfg.max_zip_entries,
+                )
                 try:
                     # Strictly read-only preflight: never import or execute plugin code in gateway.
                     validate_plugin_package(
@@ -627,10 +649,11 @@ def create_app(
                 )
 
         try:
-            publishers_doc, publishers_sha = gh.fetch_publishers_registry()
+            registry_snapshot = gh.fetch_publishers_registry()
         except (GitHubGatewayError, PiesSdkError) as exc:
             raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
 
+        publishers_doc = registry_snapshot.publishers_doc
         existing_pub = publishers_doc["publishers"].get(publisher)
         if existing_pub is not None:
             if existing_pub.get("status") != "active":
@@ -666,11 +689,16 @@ def create_app(
             pr_result = gh.create_submission_pr(
                 branch_name=branch_name,
                 files=files_to_commit,
-                publishers_sha=publishers_sha,
+                base_commit_sha=registry_snapshot.base_commit_sha,
+                base_tree_sha=registry_snapshot.base_tree_sha,
+                publisher=publisher,
+                submission_prefix=f"{base_dir}/",
                 submission_metadata=validated_submission,
                 pr_title=f"market: submit {artifact_id} ({ver_label})",
                 commit_message=f"market: submit {artifact_id} {ver_label}",
             )
+        except SubmissionConflictError as exc:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
         except GitHubGatewayError as exc:
             raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
 

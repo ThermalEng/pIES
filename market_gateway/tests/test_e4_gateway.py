@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import base64
+import hashlib
 import json
 import logging
 import re
@@ -12,6 +13,7 @@ import socketserver
 import threading
 import time
 import zipfile
+from collections.abc import Callable
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -116,6 +118,7 @@ class _MockGitHubServer:
         self.branches: dict[str, dict[str, bytes]] = {
             "main": {"publishers.yaml": initial_publishers_yaml.encode("utf-8")}
         }
+        self.branch_heads: dict[str, str] = {"main": "base-sha-001"}
         self.blobs: dict[str, bytes] = {}
         self.trees: dict[str, dict[str, bytes]] = {"base-tree-001": dict(self.branches["main"])}
         self.commits: dict[str, dict[str, Any]] = {
@@ -125,6 +128,27 @@ class _MockGitHubServer:
         self.write_calls: list[tuple[str, str]] = []
         self.fail_next_tree: bool = False
         self.fail_next_pull: bool = False
+        self.on_read_publishers_done: Callable[[], None] | None = None
+        self.on_before_create_ref: Callable[[], None] | None = None
+
+    def register_blob(self, content: bytes) -> str:
+        bsha = f"blob-{hashlib.sha256(content).hexdigest()[:16]}"
+        self.blobs[bsha] = content
+        return bsha
+
+    def advance_main(self, new_files: dict[str, bytes]) -> str:
+        tsha = f"tree-{len(self.trees) + 1}"
+        self.trees[tsha] = dict(new_files)
+        csha = f"commit-{len(self.commits) + 1}"
+        self.commits[csha] = {
+            "tree": {"sha": tsha},
+            "parents": [self.branch_heads["main"]],
+        }
+        self.branches["main"] = dict(new_files)
+        self.branch_heads["main"] = csha
+        return csha
+
+    def _start_server(self) -> None:
         outer = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -147,8 +171,14 @@ class _MockGitHubServer:
                 parsed = urlparse(self.path)
                 path = parsed.path
                 qs = parse_qs(parsed.query)
-                if path == "/repos/ThermalEng/pIES-Market/git/ref/heads/main":
-                    self._send(200, {"ref": "refs/heads/main", "object": {"sha": "base-sha-001"}})
+                ref_prefix = "/repos/ThermalEng/pIES-Market/git/ref/heads/"
+                if path.startswith(ref_prefix):
+                    branch = path.removeprefix(ref_prefix)
+                    csha = outer.branch_heads.get(branch)
+                    if csha is None:
+                        self._send(404, {"message": "Branch not found"})
+                        return
+                    self._send(200, {"ref": f"refs/heads/{branch}", "object": {"sha": csha}})
                     return
                 if path.startswith("/repos/ThermalEng/pIES-Market/git/commits/"):
                     csha = path.rsplit("/", 1)[-1]
@@ -158,10 +188,45 @@ class _MockGitHubServer:
                         return
                     self._send(200, {"sha": csha, **commit})
                     return
+                if path.startswith("/repos/ThermalEng/pIES-Market/git/trees/"):
+                    tsha = path.removeprefix("/repos/ThermalEng/pIES-Market/git/trees/")
+                    tree = outer.trees.get(tsha)
+                    if tree is None:
+                        self._send(404, {"message": "Tree not found"})
+                        return
+                    entries = [
+                        {
+                            "path": rel_path,
+                            "mode": "100644",
+                            "type": "blob",
+                            "sha": outer.register_blob(content),
+                        }
+                        for rel_path, content in sorted(tree.items())
+                    ]
+                    self._send(200, {"sha": tsha, "tree": entries})
+                    return
+                if path.startswith("/repos/ThermalEng/pIES-Market/git/blobs/"):
+                    bsha = path.removeprefix("/repos/ThermalEng/pIES-Market/git/blobs/")
+                    raw = outer.blobs.get(bsha)
+                    if raw is None:
+                        self._send(404, {"message": "Blob not found"})
+                        return
+                    self._send(
+                        200,
+                        {
+                            "sha": bsha,
+                            "encoding": "base64",
+                            "content": base64.b64encode(raw).decode("ascii"),
+                        },
+                    )
+                    return
                 if path.startswith("/repos/ThermalEng/pIES-Market/contents/"):
                     file_path = path.removeprefix("/repos/ThermalEng/pIES-Market/contents/")
                     ref = qs.get("ref", ["main"])[0]
-                    tree = outer.branches.get(ref, {})
+                    if ref in outer.commits:
+                        tree = outer.trees[outer.commits[ref]["tree"]["sha"]]
+                    else:
+                        tree = outer.branches.get(ref, {})
                     if file_path not in tree:
                         self._send(404, {"message": "Not Found"})
                         return
@@ -170,10 +235,14 @@ class _MockGitHubServer:
                         200,
                         {
                             "path": file_path,
-                            "sha": f"blob-sha-{len(raw)}",
+                            "sha": outer.register_blob(raw),
                             "content": base64.b64encode(raw).decode("ascii"),
                         },
                     )
+                    if file_path == "publishers.yaml" and outer.on_read_publishers_done is not None:
+                        cb = outer.on_read_publishers_done
+                        outer.on_read_publishers_done = None
+                        cb()
                     return
                 if path == "/repos/ThermalEng/pIES-Market/pulls":
                     state = qs.get("state", ["open"])[0]
@@ -192,8 +261,7 @@ class _MockGitHubServer:
                 data = self._read_json()
                 outer.write_calls.append(("POST", path))
                 if path == "/repos/ThermalEng/pIES-Market/git/blobs":
-                    bsha = f"blob-{len(outer.blobs) + 1}"
-                    outer.blobs[bsha] = base64.b64decode(data["content"])
+                    bsha = outer.register_blob(base64.b64decode(data["content"]))
                     self._send(201, {"sha": bsha})
                     return
                 if path == "/repos/ThermalEng/pIES-Market/git/trees":
@@ -217,12 +285,17 @@ class _MockGitHubServer:
                     self._send(201, {"sha": csha})
                     return
                 if path == "/repos/ThermalEng/pIES-Market/git/refs":
+                    if outer.on_before_create_ref is not None:
+                        cb = outer.on_before_create_ref
+                        outer.on_before_create_ref = None
+                        cb()
                     branch = str(data["ref"]).removeprefix("refs/heads/")
                     if branch in outer.branches:
                         self._send(422, {"message": "Reference already exists"})
                         return
                     csha = str(data["sha"])
                     outer.branches[branch] = dict(outer.trees[outer.commits[csha]["tree"]["sha"]])
+                    outer.branch_heads[branch] = csha
                     self._send(201, {"ref": data["ref"], "object": {"sha": csha}})
                     return
                 if path == "/repos/ThermalEng/pIES-Market/pulls":
@@ -248,19 +321,9 @@ class _MockGitHubServer:
 
             def do_PATCH(self) -> None:
                 path = urlparse(self.path).path
-                data = self._read_json()
+                self._read_json()
                 outer.write_calls.append(("PATCH", path))
-                prefix = "/repos/ThermalEng/pIES-Market/git/refs/heads/"
-                if path.startswith(prefix):
-                    branch = path.removeprefix(prefix)
-                    if branch not in outer.branches:
-                        self._send(404, {"message": "Ref not found"})
-                        return
-                    csha = str(data["sha"])
-                    outer.branches[branch] = dict(outer.trees[outer.commits[csha]["tree"]["sha"]])
-                    self._send(200, {"ref": f"refs/heads/{branch}", "object": {"sha": csha}})
-                    return
-                self._send(404, {"message": f"Unhandled PATCH {path}"})
+                self._send(404, {"message": f"Unexpected PATCH {path}"})
 
         self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         self.port = int(self._server.server_address[1])
@@ -271,6 +334,7 @@ class _MockGitHubServer:
         return f"http://127.0.0.1:{self.port}"
 
     def __enter__(self) -> _MockGitHubServer:
+        self._start_server()
         self._thread.start()
         return self
 
@@ -471,8 +535,7 @@ def test_e2e_device_and_plugin_submissions_and_idempotency(
         assert len(gh.pulls) == 1
 
         # Simulate PR #1 merged to main (so acme is now in main publishers.yaml)
-        gh.branches["main"] = dict(gh.branches[dev_body["branch"]])
-        gh.trees["base-tree-001"] = dict(gh.branches["main"])
+        gh.advance_main(gh.branches[dev_body["branch"]])
 
         # 3) Submit algorithm plugin ZIP (with matching license & contract@semver) -> 201 PR #2
         plug_resp = client.post(
@@ -526,7 +589,7 @@ def test_atomic_git_retry_after_tree_and_pr_failures(tmp_path: Path) -> None:
         assert r1.status_code == 502
         assert branch not in gh.branches
 
-        # 2) PR creation failure leaves branch without open PR -> retry recovers cleanly via PATCH ref
+        # 2) PR creation failure leaves branch without open PR -> retry reuses branch cleanly (no PATCH)
         gh.fail_next_pull = True
         r2 = client.post(
             "/v1/submissions",
@@ -547,6 +610,186 @@ def test_atomic_git_retry_after_tree_and_pr_failures(tmp_path: Path) -> None:
         assert r3.status_code == 201, r3.text
         assert r3.json()["pr_number"] == 1
         assert len(gh.pulls) == 1
+        assert all(method != "PATCH" for method, _ in gh.write_calls)
+
+
+def test_pinned_base_commit_and_concurrent_conflict_409(tmp_path: Path) -> None:
+    del tmp_path
+    owner_digest = compute_publisher_email_digest("dev@acme.org", hmac_secret=SECRET)
+    concurrent_digest = compute_publisher_email_digest("beta@beta.org", hmac_secret=SECRET)
+    initial_pub = 'schema: ies.publishers\nschema_version: "1.0.0"\npublishers: {}\n'
+    concurrent_pub = (
+        'schema: ies.publishers\nschema_version: "1.0.0"\n'
+        "publishers:\n"
+        "  beta:\n"
+        f'    email_digest: "{concurrent_digest}"\n'
+        '    created_at: "2026-11-28T00:00:00Z"\n'
+        "    status: active\n"
+    )
+    with _LocalSmtpServer() as smtp, _MockGitHubServer(initial_pub) as gh:
+        client = TestClient(create_app(_make_settings(smtp.port, gh.base_url)))
+        token = issue_submission_token(email="dev@acme.org", hmac_secret=SECRET)
+        branch = "submit/acme.device.chp_unit-r1"
+
+        # 1) Base branch moves after fetch_publishers_registry -> PR branch stays pinned to base-sha-001
+        gh.on_read_publishers_done = lambda: gh.advance_main(
+            {"publishers.yaml": concurrent_pub.encode("utf-8")}
+        )
+        r_pinned = client.post(
+            "/v1/submissions",
+            headers={"Authorization": f"Bearer {token}"},
+            data={"kind": "device_model", "revision": "1"},
+            files={"file": ("acme.device.chp_unit-r1.device.yaml", _sample_device_yaml().encode())},
+        )
+        assert r_pinned.status_code == 201, r_pinned.text
+        branch_commit = gh.branch_heads[branch]
+        assert gh.commits[branch_commit]["parents"] == ["base-sha-001"]
+        assert gh.branches["main"]["publishers.yaml"] == concurrent_pub.encode("utf-8")
+
+        # Simulate PR merged and acme registered on main for next tests
+        gh.advance_main(
+            {
+                "publishers.yaml": (
+                    'schema: ies.publishers\nschema_version: "1.0.0"\n'
+                    "publishers:\n"
+                    "  acme:\n"
+                    f'    email_digest: "{owner_digest}"\n'
+                    '    created_at: "2026-11-28T00:00:00Z"\n'
+                    "    status: active\n"
+                ).encode()
+            }
+        )
+
+        # 2) Concurrent PR race on same branch with DIFFERENT YAML -> 409 without overwriting PR #2
+        branch_r2 = "submit/acme.device.chp_unit-r2"
+        winner_yaml = _sample_device_yaml().replace("0.4", "0.45").encode("utf-8")
+        loser_yaml = _sample_device_yaml().replace("0.4", "0.50").encode("utf-8")
+
+        def _inject_raced_pr() -> None:
+            tsha = "tree-race-winner"
+            gh.trees[tsha] = {
+                **gh.branches["main"],
+                "artifacts/acme/acme.device.chp_unit/r2/acme.device.chp_unit.device.yaml": winner_yaml,
+            }
+            csha = "commit-race-winner"
+            gh.commits[csha] = {"tree": {"sha": tsha}, "parents": [gh.branch_heads["main"]]}
+            gh.branches[branch_r2] = dict(gh.trees[tsha])
+            gh.branch_heads[branch_r2] = csha
+            gh.pulls.append(
+                {
+                    "number": 99,
+                    "html_url": "https://github.com/ThermalEng/pIES-Market/pull/99",
+                    "state": "open",
+                    "head": branch_r2,
+                    "head_label": f"ThermalEng:{branch_r2}",
+                    "base": "main",
+                    "title": "Raced PR",
+                    "body": "{}",
+                }
+            )
+
+        gh.on_before_create_ref = _inject_raced_pr
+        r_conflict = client.post(
+            "/v1/submissions",
+            headers={"Authorization": f"Bearer {token}"},
+            data={"kind": "device_model", "revision": "2"},
+            files={"file": ("acme.device.chp_unit-r2.device.yaml", loser_yaml)},
+        )
+        assert r_conflict.status_code == 409, r_conflict.text
+        assert (
+            gh.branches[branch_r2]["artifacts/acme/acme.device.chp_unit/r2/acme.device.chp_unit.device.yaml"]
+            == winner_yaml
+        )
+
+        # 3) Orphaned branch without an open PR and different payload -> 409 (no force-overwrite)
+        branch_r3 = "submit/acme.device.chp_unit-r3"
+        tsha_orphan = "tree-orphan-r3"
+        gh.trees[tsha_orphan] = {
+            **gh.branches["main"],
+            "artifacts/acme/acme.device.chp_unit/r3/acme.device.chp_unit.device.yaml": winner_yaml,
+        }
+        csha_orphan = "commit-orphan-r3"
+        gh.commits[csha_orphan] = {"tree": {"sha": tsha_orphan}, "parents": [gh.branch_heads["main"]]}
+        gh.branches[branch_r3] = dict(gh.trees[tsha_orphan])
+        gh.branch_heads[branch_r3] = csha_orphan
+        r_orphan_conflict = client.post(
+            "/v1/submissions",
+            headers={"Authorization": f"Bearer {token}"},
+            data={"kind": "device_model", "revision": "3"},
+            files={"file": ("acme.device.chp_unit-r3.device.yaml", loser_yaml)},
+        )
+        assert r_orphan_conflict.status_code == 409, r_orphan_conflict.text
+        assert gh.branch_heads[branch_r3] == csha_orphan
+        assert all(method != "PATCH" for method, _ in gh.write_calls)
+
+
+def test_zip_entry_count_and_non_allowlist_email_scan(tmp_path: Path) -> None:
+    owner_digest = compute_publisher_email_digest("owner@acme.org", hmac_secret=SECRET)
+    pub_yaml = (
+        'schema: ies.publishers\nschema_version: "1.0.0"\n'
+        "publishers:\n"
+        "  acme:\n"
+        f'    email_digest: "{owner_digest}"\n'
+        '    created_at: "2026-11-28T00:00:00Z"\n'
+        "    status: active\n"
+    )
+    with _LocalSmtpServer() as smtp, _MockGitHubServer(pub_yaml) as gh:
+        cfg = _make_settings(smtp.port, gh.base_url, max_zip_entries=256)
+        client = TestClient(create_app(cfg))
+        owner_token = issue_submission_token(email="owner@acme.org", hmac_secret=SECRET)
+
+        # 1) >256 0-byte ZIP entries rejected with 413 before extraction
+        many_zip = tmp_path / "many.algorithm.zip"
+        with zipfile.ZipFile(many_zip, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            for idx in range(260):
+                zf.writestr(f"empty_{idx:03d}.txt", b"")
+        r_many = client.post(
+            "/v1/submissions",
+            headers={"Authorization": f"Bearer {owner_token}"},
+            data={"kind": "evaluator"},
+            files={"file": ("many.algorithm.zip", many_zip.read_bytes())},
+        )
+        assert r_many.status_code == 413
+
+        # 2) Email inside contacts.csv or extensionless text file rejected (422)
+        base_csv_zip = _build_plugin_zip(tmp_path / "csv_leak", plugin_id="acme.evaluator.csvleak")
+        with zipfile.ZipFile(base_csv_zip, "a") as zf:
+            zf.writestr("contacts.csv", "name,email\nMaintainer,maintainer@example.com\n")
+        assert (
+            client.post(
+                "/v1/submissions",
+                headers={"Authorization": f"Bearer {owner_token}"},
+                data={"kind": "evaluator"},
+                files={"file": ("csvleak.algorithm.zip", base_csv_zip.read_bytes())},
+            ).status_code
+            == 422
+        )
+
+        base_extless_zip = _build_plugin_zip(tmp_path / "extless_leak", plugin_id="acme.evaluator.extleak")
+        with zipfile.ZipFile(base_extless_zip, "a") as zf:
+            zf.writestr("CONTACTS", "Maintainer: maintainer@example.com\n")
+        assert (
+            client.post(
+                "/v1/submissions",
+                headers={"Authorization": f"Bearer {owner_token}"},
+                data={"kind": "evaluator"},
+                files={"file": ("extleak.algorithm.zip", base_extless_zip.read_bytes())},
+            ).status_code
+            == 422
+        )
+
+        # 3) @<semver> inside extensionless file and binary bytes with NUL are allowed
+        clean_extless_zip = _build_plugin_zip(tmp_path / "extless_ok", plugin_id="acme.evaluator.extok")
+        with zipfile.ZipFile(clean_extless_zip, "a") as zf:
+            zf.writestr("CONTRACTS", "ies.evaluation-report@1.0.0\n")
+            zf.writestr("weights.bin", b"\x00\xff\xfe\x80maintainer@example.com")
+        r_ok = client.post(
+            "/v1/submissions",
+            headers={"Authorization": f"Bearer {owner_token}"},
+            data={"kind": "evaluator"},
+            files={"file": ("acme.evaluator.extok-1.0.0.algorithm.zip", clean_extless_zip.read_bytes())},
+        )
+        assert r_ok.status_code == 201, r_ok.text
 
 
 def test_auth_token_failures_smtp_sanitization_and_rate_limiting(
