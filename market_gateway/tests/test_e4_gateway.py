@@ -570,6 +570,29 @@ def test_e2e_device_and_plugin_submissions_and_idempotency(
         assert "acme.example" not in caplog.text.lower()
 
 
+def test_missing_publishers_registry_returns_502_without_github_writes() -> None:
+    initial_pub = 'schema: ies.publishers\nschema_version: "1.0.0"\npublishers: {}\n'
+    with _LocalSmtpServer() as smtp, _MockGitHubServer(initial_pub) as gh:
+        gh.advance_main({})
+        client = TestClient(create_app(_make_settings(smtp.port, gh.base_url)))
+        token = issue_submission_token(email="dev@acme.org", hmac_secret=SECRET)
+
+        response = client.post(
+            "/v1/submissions",
+            headers={"Authorization": f"Bearer {token}"},
+            data={"kind": "device_model", "revision": "1"},
+            files={"file": ("acme.device.chp_unit-r1.device.yaml", _sample_device_yaml().encode())},
+        )
+
+        assert response.status_code == 502, response.text
+        assert response.json() == {
+            "detail": "Failed to read publishers.yaml from GitHub: HTTP 404"
+        }
+        assert gh.write_calls == []
+        assert set(gh.branches) == {"main"}
+        assert gh.pulls == []
+
+
 def test_atomic_git_retry_after_tree_and_pr_failures(tmp_path: Path) -> None:
     del tmp_path
     initial_pub = 'schema: ies.publishers\nschema_version: "1.0.0"\npublishers: {}\n'

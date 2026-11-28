@@ -183,15 +183,6 @@ class GitHubSubmissionClient:
             )
             url = f"/repos/{self._owner}/{self._repo}/contents/publishers.yaml"
             resp = client.get(url, params={"ref": base_commit_sha})
-            if resp.status_code == 404:
-                empty = validate_publishers_registry(
-                    {"schema": "ies.publishers", "schema_version": "1.0.0", "publishers": {}}
-                )
-                return BaseRegistrySnapshot(
-                    publishers_doc=empty,
-                    base_commit_sha=base_commit_sha,
-                    base_tree_sha=base_tree_sha,
-                )
             if resp.status_code >= 400:
                 raise GitHubGatewayError(
                     f"Failed to read publishers.yaml from GitHub: HTTP {resp.status_code}"
