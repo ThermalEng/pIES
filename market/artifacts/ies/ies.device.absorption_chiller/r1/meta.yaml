@@ -1,0 +1,15 @@
+schema: ies.market-artifact-meta
+schema_version: "1.0.0"
+id: ies.device.absorption_chiller
+kind: device_model
+revision: 1
+name:
+  zh_cn: 吸收式制冷机
+  en_us: Absorption Chiller
+description: Reference heat-driven absorption chiller converting thermal input and auxiliary electricity into cooling output.
+publisher: ies
+license: MPL-2.0
+compatibility:
+  pies: ">=1.2.0,<2.0.0"
+  sdk: ">=1.2.0,<2.0.0"
+delisted: false

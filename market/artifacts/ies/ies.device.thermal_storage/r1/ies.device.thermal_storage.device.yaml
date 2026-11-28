@@ -1,0 +1,104 @@
+schema: ies.device-model
+schema_version: "1.0.0"
+device:
+  id: ies.device.thermal_storage
+  names:
+    zh-CN: 蓄热储能罐
+    en-US: Thermal Energy Storage Tank
+properties:
+  capacity_kwh:
+    value: 2000
+    unit: kWh
+    valid_range:
+      minimum: 0
+      maximum: 10000000
+  rated_power_kw:
+    value: 500
+    unit: kW
+    valid_range:
+      minimum: 0
+      maximum: 1000000
+  charge_efficiency:
+    value: 0.96
+    unit: "1"
+    valid_range:
+      minimum: 0.5
+      maximum: 1
+  discharge_efficiency:
+    value: 0.96
+    unit: "1"
+    valid_range:
+      minimum: 0.5
+      maximum: 1
+  standby_retention:
+    value: 0.99
+    unit: "1"
+    valid_range:
+      minimum: 0.5
+      maximum: 1
+  initial_soc:
+    value: 0.5
+    unit: "1"
+    valid_range:
+      minimum: 0
+      maximum: 1
+  min_soc:
+    value: 0.1
+    unit: "1"
+    valid_range:
+      minimum: 0
+      maximum: 0.5
+  max_soc:
+    value: 0.95
+    unit: "1"
+    valid_range:
+      minimum: 0.5
+      maximum: 1
+interfaces:
+  heat:
+    type: bidirectional
+    carrier: heat
+    unit: kW
+    valid_range:
+      minimum: null
+      maximum: null
+equations:
+  variables:
+    stored_energy:
+      unit: kWh
+      valid_range:
+        minimum: 0
+        maximum: null
+      initial:
+        expression: "initial_soc * capacity_kwh"
+    above_minimum:
+      unit: kWh
+      valid_range:
+        minimum: 0
+        maximum: null
+    below_maximum:
+      unit: kWh
+      valid_range:
+        minimum: 0
+        maximum: null
+    charge:
+      unit: kW
+      valid_range:
+        minimum: 0
+        maximum: {property_ref: rated_power_kw}
+    discharge:
+      unit: kW
+      valid_range:
+        minimum: 0
+        maximum: {property_ref: rated_power_kw}
+  relations:
+    - id: thermal_balance
+      expression: "heat[t] = discharge[t] - charge[t]"
+    - id: charge_discharge_exclusivity
+      expression: "charge[t] * discharge[t] = 0"
+    - id: energy_update
+      expression: "stored_energy[t] = stored_energy[t-1] * standby_retention + (charge[t] * charge_efficiency - discharge[t] / discharge_efficiency) * step_duration"
+    - id: minimum_energy
+      expression: "above_minimum[t] = stored_energy[t] - min_soc * capacity_kwh"
+    - id: maximum_energy
+      expression: "below_maximum[t] = max_soc * capacity_kwh - stored_energy[t]"

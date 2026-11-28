@@ -1,0 +1,15 @@
+schema: ies.market-artifact-meta
+schema_version: "1.0.0"
+id: ies.device.wind_turbine
+kind: device_model
+revision: 1
+name:
+  zh_cn: 风力发电机组
+  en_us: Wind Turbine
+description: Reference wind turbine generator converting normalized wind capacity factor time series into electrical output.
+publisher: ies
+license: MPL-2.0
+compatibility:
+  pies: ">=1.2.0,<2.0.0"
+  sdk: ">=1.2.0,<2.0.0"
+delisted: false

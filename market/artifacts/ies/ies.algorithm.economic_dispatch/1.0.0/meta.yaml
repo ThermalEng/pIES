@@ -1,0 +1,15 @@
+schema: ies.market-artifact-meta
+schema_version: "1.0.0"
+id: ies.algorithm.economic_dispatch
+kind: algorithm
+version: "1.0.0"
+name:
+  zh_cn: 经济调度迭代算法
+  en_us: Iterative Economic Dispatch Algorithm
+description: Reference deterministic Lagrangian dual-bisection economic dispatch algorithm streaming iteration progress and canonical engineering solution.
+publisher: ies
+license: MPL-2.0
+compatibility:
+  pies: ">=1.2.0,<2.0.0"
+  sdk: ">=1.2.0,<2.0.0"
+delisted: false

@@ -1,0 +1,13 @@
+{
+  "best_bound": 24.0,
+  "column_count": 2,
+  "has_feasible_solution": true,
+  "math_status": "solved",
+  "objective_value": 24.0,
+  "receipt": {"original_model_verified": true, "solve_domain": "original", "solver": "ies.solver.highspy_ref@1.0.0", "solver_diagnostics": {"is_mip": false, "model_status": "HighsModelStatus.kOptimal"}},
+  "relative_gap": 0.0,
+  "schema": "ies.primal-solution",
+  "schema_version": "1.0.0",
+  "termination_reason": "optimal",
+  "values": [6.0, 4.0]
+}

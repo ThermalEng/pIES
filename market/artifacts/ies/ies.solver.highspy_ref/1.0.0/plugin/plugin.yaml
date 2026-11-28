@@ -1,0 +1,45 @@
+schema: ies.algorithm-plugin
+schema_version: "1.0.0"
+plugin_id: ies.solver.highspy_ref
+version: "1.0.0"
+kind: solver
+name:
+  zh_cn: HiGHSpy 参考求解器
+  en_us: HiGHSpy Reference Solver
+description: Reference MILP/LP Python solver plugin built with highspy==1.7.2 streaming 0-based ies.primal-solution@1.0.0 outputs.
+license: MPL-2.0
+compatibility:
+  pies: ">=1.2.0,<2.0.0"
+  sdk: ">=1.2.0,<2.0.0"
+consumes:
+  - ies.solver-bundle.mps@1.0.0
+produces:
+  - ies.primal-solution@1.0.0
+runtime:
+  language: python
+  python: "3.12"
+  requirements: requirements.txt
+entrypoint: solver:solve
+parameters_schema:
+  type: object
+  additionalProperties: false
+  properties:
+    threads:
+      type: integer
+      minimum: 1
+resources:
+  default:
+    cpu: 2
+    memory_mb: 1024
+    timeout_seconds: 300
+    process_limit: 16
+  maximum:
+    cpu: 4
+    memory_mb: 2048
+    timeout_seconds: 1800
+    process_limit: 32
+tests:
+  - id: minimal_mps
+    in: tests/minimal_mps/in
+    expected: tests/minimal_mps/expected
+extensions: {}

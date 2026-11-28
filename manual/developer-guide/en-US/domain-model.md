@@ -36,15 +36,15 @@ Three configuration pillars carry distinct responsibilities and revision histori
 
 - **Planning configuration**: Declares the objective function, planning variables (bound to instance technical parameters and bounds), construction units, and planning/system constraints. Existing devices (`existing`) treat historical outlays as sunk costs excluded from new construction capex; new devices (`new`) follow explicit cost bindings.
 - **Finance triplet**: Comprises regional `FinanceProfile` (reusable regional baseline), project `FinanceOverrides` (sparse atomic overrides over existing profile items), and deterministic merger output immutable `EffectiveFinanceConfig`. Assembly, planning, and financial evaluation consume the same `EffectiveFinanceConfig` snapshot without dynamically inheriting external prices at runtime.
-- **Calculation configuration**: Defines calculation mode, prediction algorithms and parameters, exact generator and solver refs, precision, coupled prediction convergence criteria, time limit, solver options, random seed, and requested outputs. Calculation configuration does not enter `ValidatedAssemblyArtifact`; instead, it freezes alongside the canonical assembly inside `CalcSnapshot` at task submission.
+- **Calculation configuration**: Defines calculation mode, single-pass `predictions[]`, split or unified solver plugin references, precision, time limit, slotted options, random seed, `outputs`, and parallel post-solve `evaluators[]`. Calculation configuration does not enter `ValidatedAssemblyArtifact`; instead, it freezes alongside the canonical assembly inside `CalcSnapshot` at task submission.
 
-## Models, Algorithm Plugins, and Market Artifacts (`1.2.0` Target)
+## Models, Algorithm Plugins, and Market Artifacts (Delivered in `1.2.0`)
 
-The models and algorithms ecosystem targeted for `1.2.0` separates mutable drafts from immutable publications and installations:
+The `1.2.0` models and algorithms ecosystem separates mutable drafts from immutable single-active-version publications and installations:
 
-- Forms, online YAML editing, and imports all converge to the same canonical `ies.device-model` YAML object pinned by publication `revision` without per-device semantic versions; cross-instance market or imported artifacts preserve their original stable namespaced IDs, while personal local drafts use a CSPRNG `public_namespace`;
-- Algorithm plugins are validated and executed inside isolated runners so API and ordinary Worker processes never load user source code; installed plugins reside as immutable records and managed objects and become selectable for subsequent calculations without service restarts;
-- Local administrators toggle between **Local Mode** (remote market disabled; local sharing reaches administrator level only) and **Online Mode** (browse, download/install, and submit via email verification), referencing immutable artifacts via a unified catalog view; installing, disabling, or uninstalling affects only newly submitted calculations, which freeze exact artifacts into `CalcSnapshot` at submission (SHA-256 is checked solely at the external download/import boundary and never stored or re-verified internally), preserving in-flight and historical task traceability.
+- Forms, online YAML editing, and imports all converge to the same canonical `ies.device-model` YAML object maintaining one active `revision` per `(kind, stable_id)` without per-device semantic versions; cross-instance market or imported artifacts preserve their original stable namespaced IDs, while personal local drafts use a CSPRNG `public_namespace`;
+- Algorithm plugins are validated and executed inside isolated runners so API and ordinary Worker processes never load user source code; installed plugins maintain one active version and managed image per `(kind, stable_id)` and become selectable for subsequent calculations without service restarts (overwrite upgrades guard against active in-flight `CalcSnapshot` refs without cross-version compatibility shims);
+- Local administrators toggle between **Local Mode** (remote market disabled) and **Online Mode** (browse, download/install, and submit via email verification) orthogonally to `local_upload_requires_approval`; installing, disabling, or uninstalling affects only newly submitted calculations, which freeze exact artifacts into `CalcSnapshot` at submission (SHA-256 is checked solely at the external download/import boundary and never stored or re-verified internally), preserving in-flight and historical task traceability.
 
 ## Traceability Chain Across Snapshots, Tasks, and Results
 
@@ -57,11 +57,9 @@ Project Version + Dataset Versions + Planning / Finance / Calc Config Revisions
                                     ↓
                              Task → Attempt
                                     ↓
-                Full-Horizon Materialization → Solver Bundle
+     Single-Pass Prediction → Materialization → Core Solve → Restoration
                                     ↓
-                        ExecutionReceipt → Result
-                                    ↓
-       [Coupled Prediction: feedback updates series & rebuilds solve]
+                        Parallel Evaluators[]
                                     ↓
                       Evidence / Assessment / Export
 ```

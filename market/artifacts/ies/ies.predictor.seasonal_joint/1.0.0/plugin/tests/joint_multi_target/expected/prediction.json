@@ -1,0 +1,128 @@
+{
+  "artifacts": [
+    "artifacts/load_1__electricity_demand.json",
+    "artifacts/wind_1__wind_capacity_factor.json"
+  ],
+  "predictions": [
+    {
+      "artifact_media_type": "application/json",
+      "artifact_path": "artifacts/load_1__electricity_demand.json",
+      "history_object_id": "hist-load-01",
+      "instance": "load_1",
+      "interface": "electricity_demand",
+      "receipt": {
+        "algorithm": "ies.predictor.seasonal_joint@1.0.0",
+        "covariate_refs": {},
+        "feature_order": [
+          "seasonal_profile",
+          "recent_moving_average",
+          "joint_peers"
+        ],
+        "joint_summary": {
+          "joint_target_count": 2,
+          "peer_means": {
+            "load_1.electricity_demand": 160.0,
+            "wind_1.wind_capacity_factor": 0.42
+          },
+          "peer_targets": [
+            "load_1.electricity_demand",
+            "wind_1.wind_capacity_factor"
+          ]
+        },
+        "output_series": {
+          "device": "load_1",
+          "interface": "electricity_demand",
+          "mode": "data_predict",
+          "point_count": 6
+        },
+        "parameters": {
+          "season_length": 3,
+          "seasonal_weight": 0.7,
+          "smoothing_window": 2
+        },
+        "seed": 42,
+        "target_order": [
+          "load_1.electricity_demand",
+          "wind_1.wind_capacity_factor"
+        ],
+        "target_type": "device_interface",
+        "training_input_refs": {
+          "history": "hist-load-01"
+        },
+        "training_target_refs": {
+          "electricity_demand": "hist-load-01"
+        }
+      },
+      "target_type": "device_interface",
+      "values": [
+        135.5,
+        205.5,
+        170.5,
+        135.5,
+        205.5,
+        170.5
+      ]
+    },
+    {
+      "artifact_media_type": "application/json",
+      "artifact_path": "artifacts/wind_1__wind_capacity_factor.json",
+      "history_object_id": "hist-wind-01",
+      "instance": "wind_1",
+      "interface": "wind_capacity_factor",
+      "receipt": {
+        "algorithm": "ies.predictor.seasonal_joint@1.0.0",
+        "covariate_refs": {},
+        "feature_order": [
+          "seasonal_profile",
+          "recent_moving_average",
+          "joint_peers"
+        ],
+        "joint_summary": {
+          "joint_target_count": 2,
+          "peer_means": {
+            "load_1.electricity_demand": 160.0,
+            "wind_1.wind_capacity_factor": 0.42
+          },
+          "peer_targets": [
+            "load_1.electricity_demand",
+            "wind_1.wind_capacity_factor"
+          ]
+        },
+        "output_series": {
+          "device": "wind_1",
+          "interface": "wind_capacity_factor",
+          "mode": "data_predict",
+          "point_count": 6
+        },
+        "parameters": {
+          "season_length": 3,
+          "seasonal_weight": 0.7,
+          "smoothing_window": 2
+        },
+        "seed": 42,
+        "target_order": [
+          "load_1.electricity_demand",
+          "wind_1.wind_capacity_factor"
+        ],
+        "target_type": "device_interface",
+        "training_input_refs": {
+          "history": "hist-wind-01"
+        },
+        "training_target_refs": {
+          "wind_capacity_factor": "hist-wind-01"
+        }
+      },
+      "target_type": "device_interface",
+      "values": [
+        0.375,
+        0.375,
+        0.585,
+        0.375,
+        0.375,
+        0.585
+      ]
+    }
+  ],
+  "schema": "ies.prediction-output",
+  "schema_version": "1.0.0"
+}

@@ -1,6 +1,6 @@
 # Algorithm Plugin Package
 
-> Contract ID: `ies.algorithm-plugin`; Target `schema_version`: `"1.0.0"`; Manifest File: `plugin.yaml`; Filename Extension: `*.algorithm.zip`; Target Product Version: `1.1.5` (unified built-in contract & ephemeral container foundation) / `1.2.0` (framework zero-copy handoffs, runtime engineering-solution restoration, parallel self-describing evaluators & open market distribution)
+> Contract ID: `ies.algorithm-plugin`; `schema_version`: `"1.0.0"`; Manifest File: `plugin.yaml`; Filename Extension: `*.algorithm.zip`; Effective Product Version: `1.2.0` (framework zero-copy handoffs, runtime engineering-solution restoration, parallel self-describing evaluators & open market distribution)
 
 The Algorithm Plugin Package defines the unified packaging and runtime contract for all computable extensions in pIES. **Both official built-in computation stages and local/market third-party plugins follow this exact contract**, executed by `backend` orchestration through the allowlisted proxy `job_runner` along a **strict single-pass unidirectional pipeline** as network-disabled ephemeral containers—ensuring control-plane processes never load or execute user Python code.
 

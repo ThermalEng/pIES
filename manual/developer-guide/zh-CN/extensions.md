@@ -1,6 +1,6 @@
 # 扩展体系
 
-> 文档状态：生效蓝图；规范版本：1.1.0；上位规范：[架构宪法](ARCHITECTURE_CONSTITUTION.md)
+> 文档状态：生效蓝图；规范版本：`1.2.0`；上位规范：[架构宪法](ARCHITECTURE_CONSTITUTION.md)
 
 pIES 将“声明式业务内容”与“可执行计算能力”分开扩展：设备模型以纯数据文档接入，计算生成、受控执行、结果适配与存储则通过所属模块的公开 Protocol 注册。
 
@@ -9,7 +9,7 @@ pIES 将“声明式业务内容”与“可执行计算能力”分开扩展：
 | 扩展类型 | 所属模块 | 固定内容与版本机制 | 发现与运行方式 |
 |---|---|---|---|
 | 设备技术模型 | `devices` | 稳定 `device.id` + 发布 `revision` + 统一 `ies.device-model` schema（无单设备语义版本） | 声明式 YAML 解析发布，所有设备共用统一解析器与方程 AST |
-| 计算环节与算法插件（`1.1.5` / `1.2.0` 目标） | `computation` / `customization` | 统一 `ies.algorithm-plugin@1.0.0`（`plugin.yaml`），覆盖 `predictor`、`generator`、`solver`、`evaluator` 与 `algorithm` 五类，按 ID + 三段式语义版本固定 | 内置与第三方插件统一封装为计算镜像，由 `backend` 经 `job_runner` 拉起临时断网容器执行，永不热加载进控制面进程 |
+| 计算环节与算法插件（`1.2.0` 生效） | `computation` / `customization` | 统一 `ies.algorithm-plugin@1.0.0`（`plugin.yaml`），覆盖 `predictor`、`generator`、`solver`、`evaluator` 与 `algorithm` 五类，按 `(kind, stable_id)` 维护唯一当前生效语义版本 | 内置与第三方插件统一封装为计算镜像，由 `backend` 经 `job_runner` 拉起临时断网容器执行，永不热加载进控制面进程 |
 | 存储适配器 | `storage` | 命名空间 ID + 三段式语义版本 | 组合根注入，仅负责字节级存取与健康状态 |
 
 受信任的平台基础能力（如存储适配器、`job_runner` 容器执行桥接与内置还原层）在进程启动时由组合根完成静态发现、校验与原子发布；而设备模型与五类 `ies.algorithm-plugin` 容器插件作为受管数据库与对象存储中的不可变记录管理，支持免服务重启动态安装与启停，控制面进程永不热加载用户代码，亦不存在跨模块的全局注册表。

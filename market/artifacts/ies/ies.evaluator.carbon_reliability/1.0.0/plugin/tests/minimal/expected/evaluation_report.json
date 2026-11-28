@@ -1,0 +1,170 @@
+{
+  "charts": [
+    {
+      "chart_type": "line",
+      "id": "hourly_dispatch_and_emissions",
+      "series": [
+        {
+          "id": "grid_import_kw",
+          "label": "Grid Import",
+          "unit": "kW",
+          "values": [
+            100.0,
+            200.0
+          ]
+        },
+        {
+          "id": "renewable_output_kw",
+          "label": "Renewable Output",
+          "unit": "kW",
+          "values": [
+            200.0,
+            200.0
+          ]
+        },
+        {
+          "id": "step_co2_kg",
+          "label": "Step CO2",
+          "unit": "kg",
+          "values": [
+            78.65,
+            157.3
+          ]
+        }
+      ],
+      "title": "Stepwise Grid Import, Renewable Output & CO2",
+      "x_label": "Step",
+      "x_values": [
+        "t0",
+        "t1"
+      ],
+      "y_label": "Power / CO2",
+      "y_unit": "kW"
+    },
+    {
+      "chart_type": "bar",
+      "id": "co2_source_breakdown",
+      "series": [
+        {
+          "id": "co2_tonnes",
+          "label": "CO2 Emissions",
+          "unit": "t",
+          "values": [
+            0.17109,
+            0.06486
+          ]
+        }
+      ],
+      "title": "CO2 Emissions by Source",
+      "x_label": "Source",
+      "x_values": [
+        "Grid Electricity",
+        "Natural Gas"
+      ],
+      "y_label": "Emissions",
+      "y_unit": "t"
+    }
+  ],
+  "evaluator": "ies.evaluator.carbon_reliability@1.0.0",
+  "metrics": [
+    {
+      "id": "total_co2_tonnes",
+      "label": "Total CO2 Emissions",
+      "unit": "t",
+      "value": 0.23595
+    },
+    {
+      "id": "grid_co2_tonnes",
+      "label": "Grid Electricity CO2",
+      "unit": "t",
+      "value": 0.17109
+    },
+    {
+      "id": "gas_co2_tonnes",
+      "label": "Natural Gas CO2",
+      "unit": "t",
+      "value": 0.06486
+    },
+    {
+      "id": "supply_reliability_pct",
+      "label": "Supply Reliability",
+      "unit": "%",
+      "value": 100.0
+    },
+    {
+      "id": "renewable_share_pct",
+      "label": "Renewable Electricity Share",
+      "unit": "%",
+      "value": 57.1429
+    },
+    {
+      "id": "total_grid_import_kwh",
+      "label": "Grid Electricity Import",
+      "unit": "kWh",
+      "value": 300.0
+    },
+    {
+      "id": "total_gas_consumption_m3",
+      "label": "Natural Gas Consumption",
+      "unit": "m3",
+      "value": 30.0
+    }
+  ],
+  "schema": "ies.evaluation-report",
+  "schema_version": "1.0.0",
+  "summary": "Total CO2: 0.23595 t (grid 0.17109 t, gas 0.06486 t); supply reliability 100.0%.",
+  "tables": [
+    {
+      "columns": [
+        {
+          "id": "source",
+          "label": "Source"
+        },
+        {
+          "id": "consumption",
+          "label": "Consumption"
+        },
+        {
+          "id": "unit",
+          "label": "Unit"
+        },
+        {
+          "id": "co2_tonnes",
+          "label": "CO2",
+          "unit": "t"
+        },
+        {
+          "id": "share_pct",
+          "label": "CO2 Share",
+          "unit": "%"
+        }
+      ],
+      "id": "carbon_reliability_summary",
+      "rows": [
+        [
+          "Grid Electricity",
+          300.0,
+          "kWh",
+          0.17109,
+          72.5111
+        ],
+        [
+          "Natural Gas",
+          30.0,
+          "m3",
+          0.06486,
+          27.4889
+        ],
+        [
+          "Total",
+          0.23595,
+          "tCO2",
+          0.23595,
+          100.0
+        ]
+      ],
+      "title": "Carbon & Reliability Summary"
+    }
+  ],
+  "title": "Carbon & Reliability Report"
+}

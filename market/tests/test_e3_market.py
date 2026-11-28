@@ -14,12 +14,14 @@ from types import SimpleNamespace
 import pytest
 from pies_sdk import (
     PluginValidationError,
+    StageIOError,
     compute_publisher_email_digest,
     generate_public_namespace,
     validate_market_index,
     validate_publishers_registry,
     verify_external_sha256,
 )
+from pies_sdk.runner import run_plugin
 
 from pies_market import (
     MarketValidationError,
@@ -84,8 +86,8 @@ def test_publishers_registry_and_zero_plaintext(tmp_path: Path) -> None:
 def test_seed_market_pr_check_and_publisher_ownership_rules(tmp_path: Path) -> None:
     res = check_market_pr(MARKET_ROOT, docker_selftest=False)
     assert res["ok"] is True
-    assert res["artifacts_checked"] == 2
-    assert res["active_artifacts"] == 2
+    assert res["artifacts_checked"] == 10
+    assert res["active_artifacts"] == 10
     assert res["delisted_artifacts"] == 0
     assert res["docker_tests_run"] == 0
 
@@ -116,7 +118,7 @@ def test_seed_market_pr_check_and_publisher_ownership_rules(tmp_path: Path) -> N
         encoding="utf-8",
     )
     (acme_dir / "README.md").write_text("# ACME Pump\n", encoding="utf-8")
-    assert check_market_pr(active_market)["artifacts_checked"] == 3
+    assert check_market_pr(active_market)["artifacts_checked"] == 11
 
     # Missing status in publishers.yaml must be rejected (must not default to active)
     (active_market / "publishers.yaml").write_text(
@@ -465,6 +467,9 @@ def test_docker_selftest_builds_requirements_sets_limits_and_cleans_on_timeout(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     mkt = _copy_market(tmp_path / "req_mkt")
+    for other in (mkt / "artifacts/ies").iterdir():
+        if other.name != "ies.evaluator.sample_carbon":
+            shutil.rmtree(other)
     plugin_dir = mkt / "artifacts/ies/ies.evaluator.sample_carbon/1.0.0/plugin"
     (plugin_dir / "requirements.txt").write_text("jsonschema>=4.0\n", encoding="utf-8")
     plugin_yaml = plugin_dir / "plugin.yaml"
@@ -524,12 +529,32 @@ def test_build_index_deterministic_sha256_and_delisted_exclusion(tmp_path: Path)
 
     assert validate_market_index(idx1) == idx2
     assert (dist1 / "index.json").read_bytes() == (dist2 / "index.json").read_bytes()
-    assert len(idx1["artifacts"]) == 2
+    assert len(idx1["artifacts"]) == 10
 
+    expected_official_ids = {
+        "ies.device.solar_pv_sample",
+        "ies.device.chp",
+        "ies.device.thermal_storage",
+        "ies.device.absorption_chiller",
+        "ies.device.wind_turbine",
+        "ies.predictor.seasonal_joint",
+        "ies.solver.highspy_ref",
+        "ies.algorithm.economic_dispatch",
+        "ies.evaluator.sample_carbon",
+        "ies.evaluator.carbon_reliability",
+    }
     by_id = {entry["id"]: entry for entry in idx1["artifacts"]}
-    assert set(by_id) == {"ies.device.solar_pv_sample", "ies.evaluator.sample_carbon"}
+    assert set(by_id) == expected_official_ids
     assert by_id["ies.evaluator.sample_carbon"]["consumes"] == ["ies.engineering-solution@1.0.0"]
     assert by_id["ies.evaluator.sample_carbon"]["produces"] == ["ies.evaluation-report@1.0.0"]
+    assert by_id["ies.predictor.seasonal_joint"]["consumes"] == ["ies.stage-input@1.0.0"]
+    assert by_id["ies.predictor.seasonal_joint"]["produces"] == ["ies.prediction-output@1.0.0"]
+    assert by_id["ies.solver.highspy_ref"]["consumes"] == ["ies.solver-bundle.mps@1.0.0"]
+    assert by_id["ies.solver.highspy_ref"]["produces"] == ["ies.primal-solution@1.0.0"]
+    assert by_id["ies.algorithm.economic_dispatch"]["consumes"] == ["ies.stage-input@1.0.0"]
+    assert by_id["ies.algorithm.economic_dispatch"]["produces"] == ["ies.engineering-solution@1.0.0"]
+    assert by_id["ies.evaluator.carbon_reliability"]["consumes"] == ["ies.engineering-solution@1.0.0"]
+    assert by_id["ies.evaluator.carbon_reliability"]["produces"] == ["ies.evaluation-report@1.0.0"]
 
     for entry in idx1["artifacts"]:
         pkg_file = dist1 / entry["url"]
@@ -554,7 +579,9 @@ def test_build_index_deterministic_sha256_and_delisted_exclusion(tmp_path: Path)
     delisted_idx = build_market_index(delisted_market, dist_delisted, generated_at=ts)
     assert not (dist_delisted / "stale_dir").exists()
     assert not (dist_delisted / "stale_file.txt").exists()
-    assert [a["id"] for a in delisted_idx["artifacts"]] == ["ies.evaluator.sample_carbon"]
+    assert sorted(a["id"] for a in delisted_idx["artifacts"]) == sorted(
+        expected_official_ids - {"ies.device.solar_pv_sample"}
+    )
     assert not (dist_delisted / "artifacts/ies.device.solar_pv_sample-r1.device.yaml").exists()
 
 
@@ -581,7 +608,7 @@ def test_cli_check_pr_and_build_index(tmp_path: Path) -> None:
         check=False,
     )
     assert chk.returncode == 0, chk.stderr
-    assert json.loads(chk.stdout)["artifacts_checked"] == 2
+    assert json.loads(chk.stdout)["artifacts_checked"] == 10
 
     out_dir = tmp_path / "cli_dist"
     bld = subprocess.run(
@@ -602,7 +629,7 @@ def test_cli_check_pr_and_build_index(tmp_path: Path) -> None:
         check=False,
     )
     assert bld.returncode == 0, bld.stderr
-    assert json.loads(bld.stdout)["artifact_count"] == 2
+    assert json.loads(bld.stdout)["artifact_count"] == 10
     assert (out_dir / "index.json").is_file()
 
 
@@ -613,7 +640,7 @@ def test_cli_check_pr_and_build_index(tmp_path: Path) -> None:
 def test_real_docker_network_none_selftest(tmp_path: Path) -> None:
     summary = check_market_pr(MARKET_ROOT, docker_selftest=True)
     assert summary["ok"] is True
-    assert summary["docker_tests_run"] == 2
+    assert summary["docker_tests_run"] == 6
 
     # Real Docker timeout cleanup: sleeping plugin with timeout_seconds=1 is forcibly removed
     slow_mkt = _copy_market(tmp_path / "slow_mkt")
@@ -629,3 +656,134 @@ def test_real_docker_network_none_selftest(tmp_path: Path) -> None:
     )
     with pytest.raises(MarketValidationError, match="timed out after 1s"):
         check_market_pr(slow_mkt, docker_selftest=True)
+
+
+def test_reference_plugin_boundary_and_clean_fixture_paths(tmp_path: Path) -> None:
+    # 1) Never place fixtures under gitignored 'data/' subdirectories inside market/artifacts/
+    data_dirs = [p for p in (MARKET_ROOT / "artifacts").rglob("data") if p.is_dir()]
+    assert data_dirs == []
+
+    # 2) economic_dispatch consumes FrozenSeriesInputs and rejects missing assembly inputs
+    algo_manifest = MARKET_ROOT / "artifacts/ies/ies.algorithm.economic_dispatch/1.0.0/plugin/plugin.yaml"
+    bad_in = tmp_path / "algo_bad_in"
+    bad_in.mkdir()
+    (bad_in / "request.json").write_text(json.dumps({"parameters": {}}), encoding="utf-8")
+    with pytest.raises(StageIOError, match="artifact.canonical_text"):
+        run_plugin(manifest_path=algo_manifest, work_in=bad_in, work_out=tmp_path / "algo_bad_out")
+
+    frozen_in = tmp_path / "algo_frozen_in"
+    (frozen_in / "objects").mkdir(parents=True)
+    (frozen_in / "objects/obj-load").write_text(
+        "step,electricity_demand\n0,100\n1,200\n2,300\n", encoding="utf-8"
+    )
+    assembly_doc = {
+        "schema": "ies.assembly",
+        "schema_version": "1.0.0",
+        "assembly": {"id": "frozen_test"},
+        "project_baseline": {"resolution": "1h", "start_year": 2026},
+        "devices": {
+            "my_chp": {
+                "definition": {"id": "ies.device.chp"},
+                "properties": {"rated_electric_kw": {"value": 500, "unit": "kW"}},
+                "predefined_interfaces": {},
+            },
+            "my_grid": {
+                "definition": {"id": "ies.device.grid_connection"},
+                "properties": {"max_import_power_kw": {"value": 1000, "unit": "kW"}},
+                "predefined_interfaces": {},
+            },
+            "my_load": {
+                "definition": {"id": "ies.device.electric_load"},
+                "properties": {"peak_power_kw": {"value": 500, "unit": "kW"}},
+                "predefined_interfaces": {
+                    "electricity_demand": {"mode": "data_repeat", "content": {"object_id": "obj-load"}}
+                },
+            },
+        },
+        "planning": {
+            "variables": {
+                "chp_cap": {
+                    "device_ref": "my_chp",
+                    "parameter": "rated_electric_kw",
+                    "lower_bound": "0",
+                    "upper_bound": "500",
+                    "unit": "kW",
+                }
+            },
+            "construction_units": {
+                "u_chp": {
+                    "device_ref": "my_chp",
+                    "mode": "optional",
+                    "scales": {
+                        "chp_cap": {"active_lower_bound": "0", "active_upper_bound": "500"}
+                    },
+                }
+            },
+        },
+    }
+    (frozen_in / "request.json").write_text(
+        json.dumps(
+            {
+                "artifact": {"canonical_text": json.dumps(assembly_doc), "receipt": {}},
+                "device_models": {},
+                "evaluation": {"operation_years": 1},
+                "frozen_series_inputs": {"fixed_resources": {"obj-load": "objects/obj-load"}},
+                "parameters": {"max_iterations": 8, "tolerance": 0.01},
+            }
+        ),
+        encoding="utf-8",
+    )
+    frozen_out = tmp_path / "algo_frozen_out"
+    run_plugin(manifest_path=algo_manifest, work_in=frozen_in, work_out=frozen_out)
+    sol = json.loads((frozen_out / "solution.json").read_text(encoding="utf-8"))
+    assert "my_chp__electric_out" in sol["series"]
+    assert "my_grid__electricity_import" in sol["series"]
+    assert "my_load__electricity_in" in sol["series"]
+    assert len(sol["series"]["my_load__electricity_in"]["values"]) == 8760
+    assert sol["construction_units"][0]["instance_id"] == "my_chp"
+
+    # 3) carbon_reliability ignores arbitrary instance-name substrings & reports null when no demand bound
+    eval_manifest = MARKET_ROOT / "artifacts/ies/ies.evaluator.carbon_reliability/1.0.0/plugin/plugin.yaml"
+    eval_in = tmp_path / "eval_unbound_in"
+    eval_in.mkdir()
+    (eval_in / "request.json").write_text(json.dumps({"parameters": {}}), encoding="utf-8")
+    (eval_in / "solution.json").write_text(
+        json.dumps(
+            {
+                "schema": "ies.engineering-solution",
+                "schema_version": "1.0.0",
+                "solver_summary": {
+                    "termination_reason": "optimal",
+                    "math_status": "solved",
+                    "has_feasible_solution": True,
+                    "objective_value": 50.0,
+                    "objective_unit": "CNY",
+                    "best_bound": 50.0,
+                    "relative_gap": 0.0,
+                },
+                "construction_units": [],
+                "series": {
+                    "wind_named_chp__electric_out": {
+                        "instance_id": "wind_named_chp",
+                        "variable_id": "electric_out",
+                        "unit": "kW",
+                        "values": [100.0, 100.0],
+                    },
+                    "load_named_chiller__electricity_in": {
+                        "instance_id": "load_named_chiller",
+                        "variable_id": "electricity_in",
+                        "unit": "kW",
+                        "values": [50.0, 50.0],
+                    },
+                },
+                "system_series": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    eval_out = tmp_path / "eval_unbound_out"
+    run_plugin(manifest_path=eval_manifest, work_in=eval_in, work_out=eval_out)
+    rep = json.loads((eval_out / "evaluation_report.json").read_text(encoding="utf-8"))
+    by_metric = {m["id"]: m["value"] for m in rep["metrics"]}
+    assert by_metric["supply_reliability_pct"] is None
+    assert by_metric["renewable_share_pct"] == 0.0

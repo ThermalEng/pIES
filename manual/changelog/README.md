@@ -6,14 +6,37 @@
 
 | 口径 | 当前状态 |
 | --- | --- |
-| 正式产品版本（`backend/pyproject.toml`） | `1.1.6` |
-| 最新正式发布版本 | `1.1.6`（2026-11-27 完成 `1.2.0` 计算底座重构 `F1–F4`、单向计算流水线、并联评价与 `G0` 门禁收口） |
-| 通用建模与计算升级 | 声明式设备/系统方程、分月电价、自然月需量、嵌入式税务、结构加速、受限子进程还原与单向并联评价流水线均已交付 |
-| 下一开发目标 | `1.2.0`（`P1: E1–E5` 开放模型与算法插件生态及 `pIES Market`） |
-| 小范围测试版本 | `1.1.6` |
+| 正式产品版本（`backend/pyproject.toml`） | `1.2.0` |
+| 最新正式发布版本 | `1.2.0`（2026-11-28 完成 `E1–E5b` 开放模型与算法插件生态、`pIES-Market`、无状态投稿网关与精选参考件交付） |
+| 通用建模与计算升级 | 声明式设备/系统方程、分月电价、自然月需量、嵌入式税务、单向并联评价流水线、开放插件与模型生态、参考件均已交付 |
+| 下一开发目标 | `1.3.0`（规划—运行闭环与场景分析） |
+| 小范围测试版本 | `1.2.0` |
 | 首个面向公众发布的版本 | `2.0.0` |
 
-> 产品元数据（`backend/pyproject.toml`、`job_runner` 与帮助中心清单；计算插件 SDK `sdk/pyproject.toml` 与内置计算阶段镜像 `pies-builtin-stages:1.2.0` 已同步升级至 `1.2.0` 契约）已于 2026-11-27 统一升级至 **`1.1.6`**；从 `1.1.5` 升级前会通过数据库迁移门禁一次性转换可编辑 13 字段计算配置并原样保留历史冻结快照与证据。下一阶段将推进 `E1–E5` 开放生态与 `pIES-Market`。
+> 产品元数据（`backend/pyproject.toml`、`job_runner`、`sdk/pyproject.toml`、内置计算阶段镜像 `pies-builtin-stages:1.2.0` 与帮助中心清单）已于 2026-11-28 统一升级至 **`1.2.0`**。从 `1.1.5`/`1.1.6` 升级前须先收口在途任务，再运行数据库迁移将可编辑计算配置升级为 13 字段并建立开放生态目录表，历史冻结快照与证据严格只读保留。
+
+## `1.2.0` — 2026-11-28 — 开放模型与算法插件生态（`E1–E5b`）与 `pIES Market`
+
+### 2026-11-28 — 开放模型与算法插件生态、静态公共市场与工程参考件（`E1–E5b`）全量交付
+
+- **什么时候完成**：2026-11-28 完成 `P1` 阶段全部六个切片（`E1`、`E2`、`E3`、`E4`、`E5a`、`E5b`），并通过全量 Docker CI 与独立 Herdr Codex 审查合入主线，产品版本由 `1.1.6` 正式升级至 **`1.2.0`**。
+- **更新了什么**：
+  - **公共契约与 SDK 打包校验（`E1`）**：定稿 `ies.market-index@1.0.0`、`ies.submission@1.0.0` 公共索引与投稿契约，并在 `pies-sdk` 新增纯本地静态契约校验 `validate` 与归档打包 `pack` 工具。
+  - **本地生态治理、Plan B 单活动版本与受控构建（`E2`）**：交付本地制品与插件镜像（`pies-plugin/*`）生命周期管理；**严格采用单活动版本策略（Plan B，不提供同 ID 多版本切换或历史任务版本钉死，不引入跨版本迁移层）**；非依赖插件强制 `--network=none` 构建与自检，设 `pip_index_url` 时仅传单一 `--index-url` 防止依赖混淆；采用事务行锁防在途竞态，在途任务使用中返回 `409 ECO-UNINSTALL-IN-USE`；规范 `user.<ns>.*` 本地草稿与 `<publisher>.*` 市场命名空间及外部入口三分 SHA-256 核验边界。
+  - **独立静态公共市场仓库（`E3`）**：交付可独立部署的 `ThermalEng/pIES-Market` 纯静态市场仓库与 `--network=none` 只读 PR 自检 CI，构建生成权威 `index.json` 与同源免登录静态浏览/下载页（远端下架不影响本地已安装实例）。
+  - **极薄无状态隐私投稿网关（`E4`）**：交付 `market_gateway/`（SMTP 邮箱验证码 + HMAC 挑战凭证 → 短期无状态投稿凭证 → 基于市场 `MARKET_HMAC_SECRET` 的 `publishers.yaml` 邮箱摘要核对 → 幂等创建 GitHub PR），全程零明文邮箱落库或日志记录。
+  - **统一前端市场、动态编排、通用评价报告与后端接通（`E5a`）**：
+    - 升级 `/custom` 为“模型与算法”双页签（默认保留「我的创作/草稿」以兼容既有用例，支持常用字段与 `.device.yaml` 五类标准端口 `in`/`out`/`bidirectional`/`predefined`/`blind` 双向同步及本地导入导出；「市场与已安装」提供三态目录、版本折叠、未就绪状态护栏及联网模式 OTP 投稿向导）；
+    - 新增管理员 `/admin/ecosystem` 页（正交配置 `market_mode` × `local_upload_requires_approval`、单源 URL、待审批队列与在途保护镜像清理）；
+    - 升级“计算配置”页消费 `/api/ecosystem/stage-catalog`，按 `parameters_schema` 动态生成槽位表单并装配符合 13 字段契约的 `{target: {instance, interface}, algorithm, parameters}` 预测项与并联 `evaluators[]`；
+    - 升级“结果分析”页通用渲染 `EvaluationReportView`（`summary`、`metrics`、`line`/`bar`/`area`/`scatter` 图表、`tables`）与失败评价器单点重试，并在 Excel 导出中为非财务自描述评价报告增设独立清洗且 `<=31` 字符的工作表（原有官方财务工作表保持不变）。
+  - **精选工程参考件与 1.2.0 正式发布（`E5b`）**：
+    - 交付 **4 个参考设备模型**（`ies.device.chp` 燃气热电联产、`ies.device.thermal_storage` 蓄热/蓄冷水罐、`ies.device.absorption_chiller` 吸收式制冷机、`ies.device.wind_turbine` 风电机组）与 **4 个可替换参考 Python 插件**（`ies.predictor.seasonal_joint` 多目标联合季节预测、`ies.solver.highspy_ref` 带 `requirements.txt` `highspy==1.7.2` 的外部 `.mps` 求解器、`ies.algorithm.economic_dispatch` 带 `iterations.jsonl` 迭代输出的一体化经济调度、`ies.evaluator.carbon_reliability` 自描述碳排放与可靠性评价器）；
+    - 统一提升 `backend`、`job_runner`、`sdk` 与帮助中心元数据至 `1.2.0`，并同步全部中英文开发者/使用者文档、变更日志与升级手册。
+- **解决了什么问题**：
+  - 彻底打通第三方设备模型与算法插件从本地开发、离线审批或公开市场拉取、安全断网构建自检，到配置编排、并行评价渲染、Excel 导出及合规镜像清理的全链路，并以 Plan B 单活动版本设计保持核心域简洁可审计。
+  - **从 `1.1.5` / `1.1.6` 升级提示**：先排空或收口全部 `queued` / `running` / `cancelling` 在途任务，执行 `v1_2_0_calc_config`（如自 `1.1.5` 升级）与 `20261127_120_ecosystem` 数据库迁移，再运行 `docker compose up -d --build` 重建 `builtin_stages`（`pies-builtin-stages:1.2.0`）、`backend`、`job_runner` 与 `web`，并按需启用可选的 `market/` 与 `market_gateway/`；历史 `CalcSnapshot` 与 `Evidence` 原样只读保留。
+- **版本进展到哪里**：`1.2.0`（`P0 F1–F4/G0` 与 `P1 E1–E5b`）已全部交付并完成端到端验收；下一里程碑按 [Roadmap](roadmap.md) 推进 **`1.3.0`**（规划—运行闭环与场景分析）。
 
 ## `1.1.6` — 2026-11-27 — `1.2.0` 计算底座重构（`F1–F4`）与 `G0` 门禁收口
 

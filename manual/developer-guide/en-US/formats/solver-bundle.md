@@ -1,6 +1,6 @@
 # Solver Bundle
 
-> Contract ID: `ies.solver-bundle`; Target `schema_version`: `"1.0.0"`; Producer: `GeneratorProvider`; Consumers: `SolverRuntime` and `ResultAdapter`
+> Contract ID: `ies.solver-bundle`; `schema_version`: `"1.0.0"`; Producer: `GeneratorProvider`; Consumers: `SolverRuntime` and `ResultAdapter`
 
 Solver Bundle is the immutable handoff package bridging computation generation and isolated process execution: the generator compiles validated assembly, configuration, materialized series, and financial rules into solver input files and a structured execution command, while the runtime safely executes the command and collects outputs—decoupling "mathematical modeling" completely from "secure process control".
 

@@ -14,7 +14,7 @@
     <img src="https://img.shields.io/badge/Backend-Python%203.12%20%7C%20FastAPI-3776AB?style=flat-square&logo=python&logoColor=white" alt="Python 3.12 FastAPI" />
     <img src="https://img.shields.io/badge/Frontend-React%2018%20%7C%20TypeScript-0891b2?style=flat-square&logo=react&logoColor=white" alt="React 18 TypeScript" />
     <img src="https://img.shields.io/badge/Solver-HiGHS%201.7.2%20MILP-1e7d32?style=flat-square" alt="Solver: HiGHS 1.7.2" />
-    <a href="manual/changelog/README.md#当前版本状态"><img src="https://img.shields.io/badge/Release-v1.1.6-1e7d32?style=flat-square" alt="版本 1.1.6 已发布" /></a>
+    <a href="manual/changelog/README.md#当前版本状态"><img src="https://img.shields.io/badge/Release-v1.2.0-1e7d32?style=flat-square" alt="版本 1.2.0 已发布" /></a>
   </p>
 
   <p>
@@ -183,7 +183,7 @@ docker build --target build -f frontend/Dockerfile -t pies-fe-check . && \
 
 ## 🗺️ 开发状态与开源许可
 
-- **当前版本**：正式发布版本 **`1.1.6`**（[pyproject.toml](backend/pyproject.toml)，已完成 `1.2.0` 前置计算底座重构 `F1–F4` 与 `G0` 门禁收口）；下一演进目标 **`1.2.0`** 将交付开放模型与算法生态及 `pIES Market`（`P1: E1–E5`），详见 [更新日志](manual/changelog/README.md) 与 [Roadmap](manual/changelog/roadmap.md)。
+- **当前版本**：正式发布版本 **`1.2.0`**（[pyproject.toml](backend/pyproject.toml)，已完整交付开放模型与算法生态、`pIES Market` 无状态投稿/索引分发、`13` 字段单向流水线与 4 项参考设备模型及 4 项参考算法插件），详见 [更新日志](manual/changelog/README.md) 与 [Roadmap](manual/changelog/roadmap.md)。
 - **开源协议**：本项目基于 **[Mozilla Public License 2.0 (MPL-2.0)](LICENSE)** 开源发布。
 
 <p align="center">

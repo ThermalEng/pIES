@@ -1,6 +1,6 @@
 # Solver Bundle
 
-> 契约标识：`ies.solver-bundle`；目标 `schema_version`：`"1.0.0"`；生产者：`GeneratorProvider`；消费者：`SolverRuntime` 与 `ResultAdapter`
+> 契约标识：`ies.solver-bundle`；`schema_version`：`"1.0.0"`；生产者：`GeneratorProvider`；消费者：`SolverRuntime` 与 `ResultAdapter`
 
 Solver Bundle 是计算生成与进程隔离执行之间的不可变交接包：生成器将已校验的装配、配置、物化序列与财务规则编译为求解器输入文件和结构化运行命令；运行时只负责按命令安全执行并采集结果，使“数学构模”和“安全进程控制”彻底解耦。
 

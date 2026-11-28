@@ -1,0 +1,58 @@
+schema: ies.algorithm-plugin
+schema_version: "1.0.0"
+plugin_id: ies.predictor.seasonal_joint
+version: "1.0.0"
+kind: predictor
+name:
+  zh_cn: 季节性联合多目标预测器
+  en_us: Seasonal Joint Multi-Target Predictor
+description: Deterministic seasonal moving-average predictor supporting joint multi-target batch inference from inline histories or CSV inputs.
+license: MPL-2.0
+compatibility:
+  pies: ">=1.2.0,<2.0.0"
+  sdk: ">=1.2.0,<2.0.0"
+consumes:
+  - ies.stage-input@1.0.0
+produces:
+  - ies.prediction-output@1.0.0
+runtime:
+  language: python
+  python: "3.12"
+entrypoint: predict:predict
+parameters_schema:
+  type: object
+  additionalProperties: false
+  properties:
+    season_length:
+      type: integer
+      minimum: 1
+      default: 24
+    seasonal_weight:
+      type: number
+      minimum: 0
+      maximum: 1
+      default: 0.7
+    smoothing_window:
+      type: integer
+      minimum: 1
+      default: 3
+resources:
+  default:
+    cpu: 1
+    memory_mb: 512
+    timeout_seconds: 120
+    process_limit: 16
+  maximum:
+    cpu: 2
+    memory_mb: 1024
+    timeout_seconds: 300
+    process_limit: 32
+tests:
+  - id: joint_multi_target
+    in: tests/joint_multi_target/in
+    expected: tests/joint_multi_target/expected
+advanced:
+  extensions:
+    accepts_any_target_type: true
+    needs_history: true
+extensions: {}

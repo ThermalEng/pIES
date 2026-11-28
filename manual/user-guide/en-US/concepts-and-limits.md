@@ -4,12 +4,13 @@
 
 | Concept | Meaning and Purpose |
 |---|---|
-| Product version | pIES software release version (e.g., `1.1.0`), used to identify UI capabilities and report issues |
+| Product version | pIES software release version (currently `1.2.0`), used to identify UI capabilities and report issues |
 | Project draft | Editable working state in the workbench; autosave updates the draft only and does not create permanent versions |
 | Project version | Immutable design baseline created manually in **Versions** or automatically when submitting a task, used for history tracking and restore |
 | Dataset version | Immutable snapshot created each time a data file is uploaded and validated; project bindings do not auto-advance on new uploads |
 | Config revision | New revision created each time **Calc Config** or **Planning config** is saved; task submission freezes the active revision |
 | Snapshot and evidence | Complete frozen inputs captured at submission time and the sole source for resulting outputs |
+| Ecosystem artifact (Single Active Version) | Global device models and algorithm plugins follow the Plan B single active version policy: one active revision/version per ID (`<publisher>.*` for market releases, `user.<ns>.*` for personal drafts) |
 
 ## Unit and Time Rules
 
@@ -28,13 +29,13 @@
 - **Annual O&M and renewals**: Recurring fixed O&M goes into `annual_fixed_om`; usage-dependent O&M goes into `period_variable_om`; specific-year overhauls or equipment replacements are entered explicitly in `maintenance_expenses` at task submission (timeless scalar whole-horizon O&M lump sums are rejected). *(Volumetric fuel flows currently use supported units such as `m³` / `m³/h`.)*
 - **Optional construction and fixed costs**: Whether an optional construction unit is built and whether conditional fixed costs trigger are explicitly linked via construction units and `cost_occurrence`; fixed costs without an occurrence condition apply unconditionally.
 
-## Current `1.1.0` Limits
+## Current `1.2.0` Boundaries and Limits
 
-- In the `1.1.0` release, only automated four-dimensional system assessment is supported (manual assessment score saving is not exposed in the UI).
-- Project package import supports uploading proposals and confirming creation, without a pending-proposal management list.
-- Dataset **Versions** does not currently render a row-by-row table preview of uploaded values.
-- Administrator **Audit log** supports read-only inspection; maintenance reconciliation and backup/restore run on the server side.
-- Custom model library, algorithm plugin import, and open plugin market (pIES Market) capabilities are planned for subsequent `1.x` releases.
+- `1.2.0` delivers the unified `/custom` (Models & Algorithms) dual-tab workspace, `/admin/ecosystem` orthogonal governance, dynamic stage plugin catalog orchestration, parallel retryable evaluation, generic self-describing report rendering, and decoupled `pIES-Market` plus stateless OTP submission gateway;
+- Ecosystem artifacts enforce **Plan B single active version**: per-ID multi-version switching, parallel multi-version installs, historical task version pinning, and cross-version config migration layers are not maintained (`1.1.5 → 1.2.0` uses a one-pass migration for editable configs while keeping historical snapshots/evidence strictly read-only);
+- External digest checks apply the three-way boundary rule (required `sha256` verification on market downloads, check when provided on offline packages, archive/contract checks only on bare offline uploads) without storing or recomputing `sha256` internally;
+- System assessment focuses on automated four-dimensional checks (manual score saving is unsupported), and project package import omits a pending-proposal management queue;
+- Dataset **Versions** does not currently preview uploaded rows inline, and administrator **Audit log** provides read-only inspection while maintenance and backup/restore run server-side;
 - Help Center publishes Simplified Chinese and English editions.
 
-See [Roadmap](../../changelog/en-US/roadmap.md) for upcoming milestones.
+See [Roadmap](../../changelog/en-US/roadmap.md) for upcoming `1.3.0+` milestones.

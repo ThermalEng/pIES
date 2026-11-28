@@ -1,0 +1,40 @@
+schema: ies.device-model
+schema_version: "1.0.0"
+device:
+  id: ies.device.wind_turbine
+  names:
+    zh-CN: 风力发电机组
+    en-US: Wind Turbine
+properties:
+  rated_capacity_kw:
+    value: 1000
+    unit: kW
+    valid_range:
+      minimum: 0
+      maximum: 1000000
+  availability_factor:
+    value: 0.98
+    unit: "1"
+    valid_range:
+      minimum: 0
+      maximum: 1
+interfaces:
+  wind_capacity_factor:
+    type: predefined
+    carrier: wind
+    unit: "1"
+    valid_range:
+      minimum: 0
+      maximum: 1
+  electric_out:
+    type: out
+    carrier: electricity
+    unit: kW
+    valid_range:
+      minimum: 0
+      maximum: {property_ref: rated_capacity_kw}
+equations:
+  variables: {}
+  relations:
+    - id: wind_generation
+      expression: "electric_out[t] = rated_capacity_kw * availability_factor * wind_capacity_factor[t]"

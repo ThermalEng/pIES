@@ -1,0 +1,61 @@
+schema: ies.device-model
+schema_version: "1.0.0"
+device:
+  id: ies.device.chp
+  names:
+    zh-CN: 燃气热电联产机组
+    en-US: Gas CHP Unit
+properties:
+  rated_electric_kw:
+    value: 1000
+    unit: kW
+    valid_range:
+      minimum: 0
+      maximum: 1000000
+  electric_efficiency:
+    value: 0.4
+    unit: "1"
+    valid_range:
+      minimum: 0.1
+      maximum: 0.7
+  thermal_efficiency:
+    value: 0.45
+    unit: "1"
+    valid_range:
+      minimum: 0.1
+      maximum: 0.8
+  lhv_kwh_per_m3:
+    value: 9.97
+    unit: kWh/m3
+    valid_range:
+      minimum: 5
+      maximum: 20
+interfaces:
+  gas_in:
+    type: in
+    carrier: gas
+    unit: m3/h
+    valid_range:
+      minimum: 0
+      maximum: null
+  electric_out:
+    type: out
+    carrier: electricity
+    unit: kW
+    valid_range:
+      minimum: 0
+      maximum: {property_ref: rated_electric_kw}
+  heat_out:
+    type: out
+    carrier: heat
+    unit: kW
+    valid_range:
+      minimum: 0
+      maximum: null
+equations:
+  variables: {}
+  relations:
+    - id: electric_generation
+      expression: "electric_out[t] = gas_in[t] * lhv_kwh_per_m3 * electric_efficiency"
+    - id: heat_generation
+      expression: "heat_out[t] = gas_in[t] * lhv_kwh_per_m3 * thermal_efficiency"
