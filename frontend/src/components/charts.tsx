@@ -606,6 +606,7 @@ export interface CategoryLineChartProps {
   height?: number
   includeZero?: boolean
   toggleable?: boolean
+  fillArea?: boolean
   showAllLabel?: string
   hoverHint?: string
 }
@@ -621,6 +622,7 @@ export function CategoryLineChart({
   height = 240,
   includeZero = true,
   toggleable = true,
+  fillArea = false,
   showAllLabel = '显示全部',
   hoverHint,
 }: CategoryLineChartProps) {
@@ -758,8 +760,25 @@ export function CategoryLineChart({
         ))}
         {activeSeries.map((s) => {
           const segs = toPolylineSegments(s.values, x, y)
+          const baselineY = y(Math.min(Math.max(0, yMin), yMax))
           return (
             <g key={s.key} style={{ pointerEvents: 'none' }}>
+              {fillArea
+                ? segs.map((pts, segIdx) => {
+                    const tokens = pts.split(' ')
+                    const firstX = tokens[0]?.split(',')[0]
+                    const lastX = tokens[tokens.length - 1]?.split(',')[0]
+                    if (!firstX || !lastX) return null
+                    return (
+                      <polygon
+                        key={`area-${segIdx}`}
+                        fill={s.color}
+                        fillOpacity="0.18"
+                        points={`${firstX},${baselineY.toFixed(1)} ${pts} ${lastX},${baselineY.toFixed(1)}`}
+                      />
+                    )
+                  })
+                : null}
               {segs.map((pts, segIdx) => (
                 <polyline
                   key={segIdx}

@@ -51,7 +51,7 @@ BROWSER_GROUPS = {
     "package": ("project-import.spec.ts", "project-restore.spec.ts"),
     "config": ("config-revision.spec.ts", "task-selection.spec.ts"),
     "datasets": ("data-preview-d5.spec.ts", "device-data-upload.spec.ts"),
-    "devices": ("model-new.spec.ts", "model-load-state.spec.ts"),
+    "devices": ("model-new.spec.ts", "model-load-state.spec.ts", "e5a-open-ecosystem.spec.ts"),
     "modeling": ("model-new.spec.ts", "model-electricity-carrier.spec.ts"),
     "assembly": ("economic-bindings-issue03.spec.ts", "s1-template-data-binding.spec.ts"),
     "finance": ("economic-bindings-issue03.spec.ts", "financial-evaluation.spec.ts", "finance-named-amounts-f1.spec.ts",
@@ -97,9 +97,10 @@ ALIASES = {
 # classify reliably (EconomicBindingsPage, DataPage, etc.).
 PAGE_SPECS = {
     "AdminAuditPage.tsx": ("admin-audit.spec.ts",),
+    "AdminEcosystemPage.tsx": ("e5a-open-ecosystem.spec.ts",),
     "AdminUsersPage.tsx": ("admin-help-lang.spec.ts",),
-    "ConfigPage.tsx": ("config-revision.spec.ts",),
-    "CustomizationPage.tsx": ("model-new.spec.ts",),
+    "ConfigPage.tsx": ("config-revision.spec.ts", "e5a-open-ecosystem.spec.ts"),
+    "CustomizationPage.tsx": ("model-new.spec.ts", "e5a-open-ecosystem.spec.ts"),
     "DataPage.tsx": ("data-config-tasks.spec.ts", "data-preview-d5.spec.ts", "device-data-upload.spec.ts"),
     "EconomicBindingsPage.tsx": ("economic-bindings-issue03.spec.ts",),
     "ExportPage.tsx": ("excel-export-lang.spec.ts", "export-assessment-r7.spec.ts"),
@@ -112,7 +113,7 @@ PAGE_SPECS = {
     "ProjectListPage.tsx": ("data-project-d3.spec.ts",),
     "ProjectPage.tsx": ("data-project-d3.spec.ts",),
     "ProjectsPage.tsx": ("data-project-d3.spec.ts",),
-    "ResultsPage.tsx": ("result-planning-solution.spec.ts",),
+    "ResultsPage.tsx": ("result-planning-solution.spec.ts", "e5a-open-ecosystem.spec.ts"),
     "SettingsPage.tsx": ("admin-help-lang.spec.ts",),
     "TasksPage.tsx": ("task-selection.spec.ts", "task-draft-load.spec.ts"),
     "ValidationPage.tsx": ("evaluation-empty-gate.spec.ts",),
@@ -170,9 +171,9 @@ FRONTEND_GROUPS = {
     "admin": ("auth_admin_contracts.test.mjs",),
     "project": ("project_draft_commands.test.mjs", "project_versions_mapper.test.mjs"),
     "package": ("export_no_implicit_assessment.test.mjs",),
-    "config": ("config_validation_mappers.test.mjs",),
+    "config": ("config_validation_mappers.test.mjs", "e5a_ecosystem_mappers.test.mjs"),
     "datasets": ("dataset-version-mapping.test.mjs", "upload_head_scan.test.mjs"),
-    "devices": ("modeling_mappers.test.mjs",),
+    "devices": ("modeling_mappers.test.mjs", "e5a_ecosystem_mappers.test.mjs"),
     "modeling": ("modeling_mappers.test.mjs", "modeling_draft_mapper.test.mjs"),
     "assembly": ("project_draft_commands.test.mjs",),
     "finance": ("export_no_implicit_assessment.test.mjs", "financial_relations.test.mjs"),
@@ -180,6 +181,7 @@ FRONTEND_GROUPS = {
     "analysis": ("result_view_no_synthetic_diagnostics.test.mjs",),
     "computation": ("config_validation_mappers.test.mjs",),
     "results": ("result_view_no_synthetic_diagnostics.test.mjs",
+                "f4_results_evaluators.test.mjs",
                 "hourly_absence.test.mjs", "hourly_consume.test.mjs",
                 "hourly_pages.test.mjs", "task_selection.test.mjs"),
     "tasks": ("tasks_mappers.test.mjs", "task_selection.test.mjs",
@@ -192,12 +194,14 @@ FRONTEND_GROUPS = {
     "ui": (),
 }
 PAGE_LOGIC = {
-    "ConfigPage.tsx": ("config_validation_mappers.test.mjs",),
+    "AdminEcosystemPage.tsx": ("e5a_ecosystem_mappers.test.mjs",),
+    "ConfigPage.tsx": ("config_validation_mappers.test.mjs", "e5a_ecosystem_mappers.test.mjs"),
+    "CustomizationPage.tsx": ("e5a_ecosystem_mappers.test.mjs",),
     "DataPage.tsx": ("dataset-version-mapping.test.mjs", "upload_head_scan.test.mjs"),
     "HelpPage.tsx": ("help_markdown.test.mjs",),
     "ModelPage.tsx": ("modeling_mappers.test.mjs",),
     "EconomicBindingsPage.tsx": ("project_draft_commands.test.mjs",),
-    "ResultsPage.tsx": ("result_view_no_synthetic_diagnostics.test.mjs",),
+    "ResultsPage.tsx": ("result_view_no_synthetic_diagnostics.test.mjs", "f4_results_evaluators.test.mjs"),
     "TasksPage.tsx": ("tasks_mappers.test.mjs", "task_selection.test.mjs"),
     "VersionsPage.tsx": ("project_versions_mapper.test.mjs",),
     "model/canvasModel.ts": ("modeling_draft_mapper.test.mjs",),
@@ -985,6 +989,10 @@ def self_test() -> None:
     assert "help_markdown.test.mjs" in pick(["manual/user-guide/zh-CN/quickstart.md"])["frontend_tests"]
     assert "modeling_mappers.test.mjs" in pick(["frontend/src/features/modeling/form.ts"])["frontend_tests"]
     assert "dataset-version-mapping.test.mjs" in pick(["frontend/src/pages/DataPage.tsx"])["frontend_tests"]
+    assert "e5a_ecosystem_mappers.test.mjs" in pick(["frontend/src/pages/AdminEcosystemPage.tsx"])["frontend_tests"]
+    assert "e5a-open-ecosystem.spec.ts" in pick(["frontend/src/pages/AdminEcosystemPage.tsx"])["browser_specs"]
+    assert "e5a_ecosystem_mappers.test.mjs" in pick(["frontend/src/features/customization/mappers.ts"])["frontend_tests"]
+    assert "e5a-open-ecosystem.spec.ts" in pick(["frontend/src/features/customization/mappers.ts"])["browser_specs"]
     assert pick(["docs/development/note.md"])["frontend_run"] == "false"
     assert pick(["frontend/src/pages/model/model.css"])["browser_run"] == "true"
     assert len(pick(["frontend/src/pages/model/model.css"])["browser_specs"].split()) < 8

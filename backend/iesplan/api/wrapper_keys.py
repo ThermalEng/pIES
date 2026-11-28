@@ -215,4 +215,14 @@ WRAPPER_KEYS: dict[str, frozenset[str]] = {
     "uninstall_artifact_image_endpoint": frozenset(
         {"artifact", "image_deleted", "image_status"}
     ),
+    "get_stage_catalog_endpoint": frozenset(
+        {"predictors", "generators", "solvers", "evaluators", "algorithms"}
+    ),
+    "get_market_index_endpoint": frozenset({"items", "generated_at", "market_index_url"}),
+    "install_from_market_endpoint": frozenset({"artifact", "installed"}),
+    "market_otp_request_endpoint": frozenset({"challenge_token", "expires_in"}),
+    "market_otp_verify_endpoint": frozenset({"submission_token", "expires_in"}),
+    "submit_to_market_endpoint": frozenset(
+        {"duplicate", "pr_number", "pr_url", "branch", "artifact_id", "kind"}
+    ),
 }

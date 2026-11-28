@@ -12,6 +12,7 @@ const { api } = await import('../src/api/client.ts')
 const { mapResultViewDtoToModel } = await import('../src/features/results/mappers.ts')
 const { selectDefaultTaskId, selectEvidencePackage } = await import('../src/lib/taskSelection.ts')
 const {
+  EvaluationReportSection,
   FinancialAbsenceAlert,
   FinancialTabView,
   SealedFinancialCore,
@@ -277,6 +278,104 @@ assert.equal(
     )
     assert.ok(taxHtml.length > 0)
   }
+}
+
+// 6. E5a generic EvaluationReportSection renders summary, metrics, charts (bar + line), and tables
+{
+  const reportHtml = renderToStaticMarkup(
+    createElement(
+      I18nProvider,
+      null,
+      createElement(EvaluationReportSection, {
+        reports: [
+          {
+            evaluator: 'acme.evaluator.carbon@1.0.0',
+            schema: 'ies.evaluation-report',
+            schema_version: '1.0.0',
+            title: 'Carbon Footprint Report',
+            summary: 'Annual operational emissions summary',
+            metrics: [{ id: 'co2', label: 'Annual CO2', value: 42.5, unit: 'tCO2' }],
+            charts: [
+              {
+                id: 'monthly_co2',
+                title: 'Monthly Emissions Bar',
+                chart_type: 'bar',
+                x_label: 'Month',
+                y_label: 'Emissions',
+                y_unit: 'tCO2',
+                x_values: ['Jan', 'Feb'],
+                series: [{ id: 'grid', label: 'Grid', values: [20, 22.5] }],
+              },
+              {
+                id: 'cumulative_co2',
+                title: 'Cumulative Line',
+                chart_type: 'line',
+                x_label: 'Month',
+                y_label: 'Total',
+                y_unit: 'tCO2',
+                x_values: ['Jan', 'Feb'],
+                series: [{ id: 'cum', label: 'Cumulative', values: [20, 42.5] }],
+              },
+              {
+                id: 'area_co2',
+                title: 'Intensity Area',
+                chart_type: 'area',
+                x_label: 'Month',
+                y_label: 'Intensity',
+                y_unit: 'tCO2/MWh',
+                x_values: ['Jan', 'Feb'],
+                series: [{ id: 'int', label: 'Intensity', values: [0.5, 0.45] }],
+              },
+              {
+                id: 'scatter_co2',
+                title: 'Cost vs CO2 Scatter',
+                chart_type: 'scatter',
+                x_label: 'Cost',
+                y_label: 'Emissions',
+                y_unit: 'tCO2',
+                x_values: [10, 20],
+                series: [{ id: 'pts', label: 'Cases', values: [25, 18] }],
+              },
+              {
+                id: 'unsupported_radar',
+                title: 'Unsupported Radar',
+                chart_type: 'radar',
+                x_label: 'Axis',
+                y_label: 'Score',
+                y_unit: '1',
+                x_values: ['A', 'B'],
+                series: [{ id: 'r', label: 'R', values: [1, 2] }],
+              },
+            ],
+            tables: [
+              {
+                id: 'breakdown',
+                title: 'Emission Breakdown',
+                columns: [
+                  { id: 'source', label: 'Source' },
+                  { id: 'amount', label: 'Amount', unit: 'tCO2' },
+                ],
+                rows: [['Grid Electricity', 42.5]],
+              },
+            ],
+          },
+        ],
+      }),
+    ),
+  )
+  assert.ok(reportHtml.includes('Carbon Footprint Report'))
+  assert.ok(reportHtml.includes('Annual operational emissions summary'))
+  assert.ok(reportHtml.includes('42.5 tCO2'))
+  assert.ok(reportHtml.includes('<svg'), 'bar, line, area, scatter charts must render SVG graphics')
+  assert.ok(reportHtml.includes('<polygon'), 'area chart must render filled SVG polygon')
+  assert.ok(reportHtml.includes('(10, 25)'), 'scatter chart must preserve numeric X/Y coordinates')
+  assert.ok(reportHtml.includes('Monthly Emissions Bar'))
+  assert.ok(reportHtml.includes('Cumulative Line'))
+  assert.ok(reportHtml.includes('Intensity Area'))
+  assert.ok(reportHtml.includes('Cost vs CO2 Scatter'))
+  assert.ok(reportHtml.includes('Unsupported chart_type: radar'))
+  assert.ok(reportHtml.includes('<table'), 'self-describing table must render HTML table')
+  assert.ok(reportHtml.includes('Grid Electricity'))
 }
 
 console.log('ALL F4 RESULTS/EVALUATOR CHECKS PASSED')

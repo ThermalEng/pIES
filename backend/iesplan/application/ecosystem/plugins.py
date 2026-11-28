@@ -765,6 +765,7 @@ def _execute_plugin_build_and_selftest(
     pip_index_url: str | None,
     preextracted: tuple[dict[str, bytes], set[str]] | None = None,
     metadata: Mapping[str, Any] | None = None,
+    enable_for_user_id: int | None = None,
 ) -> LocalArtifactRecord:
     """推进构建与断网自检门禁：绑定 expected_version，清理失败保留 image_ref 并传播目录异常。"""
     with session_factory() as db:
@@ -904,6 +905,10 @@ def _execute_plugin_build_and_selftest(
                     "制品在自检期间已被下架、改变状态或覆盖为新版本，禁止回流为 ready"
                     + (f"（镜像清理失败: {del_err}）" if del_err else ""),
                     params={"artifact_id": artifact_id, "cleanup_error": del_err},
+                )
+            if enable_for_user_id is not None:
+                ecosystem_domain.upsert_member_install(
+                    db, user_id=enable_for_user_id, artifact=ready_rec, enabled=True
                 )
             db.commit()
             return ready_rec
@@ -1270,6 +1275,7 @@ def upload_plugin_zip_case(
             pip_index_url=settings_rec.pip_index_url,
             preextracted=(files, dirs),
             metadata=meta,
+            enable_for_user_id=user.id if source_origin == "online_market" else None,
         )
 
     if scheduler is not None:

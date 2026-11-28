@@ -127,3 +127,176 @@ export interface ModelDiagnosticDto {
   fix_hint_key: string | null
   ref_ids: string[]
 }
+
+// ---------------------------------------------------------------------------
+// 开放生态与 pIES-Market 契约(/api/ecosystem)
+// ---------------------------------------------------------------------------
+
+export type ArtifactKindDto =
+  | 'device_model'
+  | 'predictor'
+  | 'generator'
+  | 'solver'
+  | 'evaluator'
+  | 'algorithm'
+
+export type MarketModeDto = 'local' | 'online'
+export type ApprovalStatusDto = 'pending' | 'approved' | 'rejected'
+export type InstallStatusDto =
+  | 'pending'
+  | 'building'
+  | 'testing'
+  | 'ready'
+  | 'build_failed'
+  | 'disabled'
+export type MemberArtifactStateDto = 'remote' | 'local_uninstalled' | 'local_installed'
+
+/** 实例级正交生态设置(GET/PUT /api/ecosystem/settings)。 */
+export interface EcosystemSettingsDto {
+  market_mode: MarketModeDto
+  local_upload_requires_approval: boolean
+  pip_index_url: string | null
+  market_index_url: string | null
+  submission_gateway_url: string | null
+  updated_by?: number | null
+  updated_at?: string | null
+}
+
+/** 管理员更新生态设置请求体(PUT /api/ecosystem/settings)。 */
+export interface EcosystemSettingsUpdateRequestDto {
+  market_mode: MarketModeDto
+  local_upload_requires_approval: boolean
+  pip_index_url?: string | null
+  market_index_url?: string | null
+  submission_gateway_url?: string | null
+}
+
+/** 本地生态制品条目(对应 backend serialize_artifact)。 */
+export interface LocalArtifactDto {
+  id: number
+  kind: ArtifactKindDto
+  stable_id: string
+  version: string
+  ref: string
+  source_origin: string
+  approval_status: ApprovalStatusDto
+  install_status: InstallStatusDto
+  uploaded_by: number | null
+  approved_by: number | null
+  approved_at: string | null
+  object_id: string
+  metadata: Record<string, unknown>
+  image_ref: string | null
+  diagnostics: Record<string, unknown> | null
+  installed: boolean
+  enabled: boolean
+  created_at: string | null
+  updated_at: string | null
+  idempotent?: boolean
+  duplicate?: boolean
+  upgraded_from?: string
+}
+
+/** 本地生态列表响应(GET /api/ecosystem/artifacts)。 */
+export interface ArtifactListResponseDto {
+  items: LocalArtifactDto[]
+}
+
+/** 本地设备模型导入请求(POST /api/ecosystem/device-models/import)。 */
+export interface DeviceModelImportRequestDto {
+  yaml_text: string
+  expected_sha256?: string | null
+  revision?: number
+  source_origin?: 'local_upload' | 'offline_import'
+}
+
+/** 本地设备模型导出响应(GET /api/ecosystem/device-models/{id}/export)。 */
+export interface DeviceModelExportResponseDto {
+  artifact_id: number
+  kind: 'device_model'
+  stable_id: string
+  revision: number
+  filename: string
+  yaml_text: string
+  metadata: Record<string, unknown>
+}
+
+/** 管理员拒绝制品请求(POST /api/ecosystem/artifacts/{id}/reject)。 */
+export interface RejectArtifactRequestDto {
+  reason: string
+}
+
+/** 管理员卸载镜像响应(POST /api/ecosystem/admin/artifacts/{id}/uninstall-image)。 */
+export interface AdminUninstallImageResponseDto {
+  artifact: LocalArtifactDto
+  image_deleted: boolean
+  image_status: string
+}
+
+/** 远端市场目录条目(GET /api/ecosystem/market/index)。 */
+export interface MarketIndexItemDto {
+  id: string
+  kind: ArtifactKindDto
+  version?: string | null
+  revision?: number | null
+  name: { zh_cn?: string; en_us?: string }
+  description: string
+  publisher: string
+  license: string
+  compatibility: Record<string, string>
+  consumes?: string[]
+  produces?: string[]
+  sha256: string
+  size_bytes: number
+  readme_url?: string | null
+  member_state: MemberArtifactStateDto
+  local_artifact_id: number | null
+  local_version: string | null
+  update_available: boolean
+}
+
+/** 远端市场目录响应(GET /api/ecosystem/market/index)。 */
+export interface MarketIndexResponseDto {
+  items: MarketIndexItemDto[]
+  generated_at: string
+  market_index_url: string
+}
+
+/** 从远端市场安装请求(POST /api/ecosystem/market/install)。 */
+export interface MarketInstallRequestDto {
+  artifact_id: string
+  kind: ArtifactKindDto
+  version_or_revision?: string | number | null
+}
+
+/** 从远端市场安装响应(POST /api/ecosystem/market/install)。 */
+export interface MarketInstallResponseDto {
+  artifact: LocalArtifactDto
+  installed: boolean
+}
+
+/** 成员个人卸载响应(POST /api/ecosystem/artifacts/{id}/uninstall)。 */
+export interface MemberUninstallResponseDto {
+  artifact_id: number
+  uninstalled: boolean
+}
+
+/** 投稿网关 OTP 请求/校验/投稿响应。 */
+export interface MarketOtpRequestResponseDto {
+  challenge_token: string
+  expires_in: number
+}
+
+export interface MarketOtpVerifyResponseDto {
+  submission_token: string
+  expires_in: number
+}
+
+export interface MarketSubmitResponseDto {
+  duplicate: boolean
+  pr_number: number
+  pr_url: string
+  branch: string
+  artifact_id: string
+  kind: ArtifactKindDto
+}

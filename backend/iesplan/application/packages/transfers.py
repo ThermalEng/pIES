@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import io
 import json
+import re
 import zipfile
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from typing import Any
 
@@ -2150,6 +2152,150 @@ def _write_frozen_relation_table(ws, headers: tuple[str, ...], rows: list[tuple[
         ws.append(tuple(_excel_safe(value) for value in values))
 
 
+_SHEET_ILLEGAL_CHARS_RE = re.compile(r"[\\/:*?\[\]]")
+_FINANCIAL_EVALUATOR_REF = "ies.evaluator.finance@1.0.0"
+_FINANCIAL_CONTRACT_REF = "ies.financial-evaluation@1.0.0"
+
+
+def _make_unique_sheet_name(raw_title: str, used_lower: set[str]) -> str:
+    """规范化工作表名：过滤非法字符、限制 31 字符并保持大小写不敏感唯一。"""
+    cleaned = _SHEET_ILLEGAL_CHARS_RE.sub("_", str(raw_title or "")).strip().strip("'")
+    if not cleaned:
+        cleaned = "Evaluator"
+    base = cleaned[:31].rstrip("'") or "Evaluator"
+    candidate = base
+    suffix_idx = 2
+    while candidate.lower() in used_lower:
+        suffix = f"_{suffix_idx}"
+        prefix = base[: 31 - len(suffix)].rstrip("'") or "Eval"
+        candidate = f"{prefix}{suffix}"
+        suffix_idx += 1
+    used_lower.add(candidate.lower())
+    return candidate
+
+
+def _extract_evaluator_sheet_items(evidence_content: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """收集非财务后置评价器结果（仅消费规范 evaluation_reports 与 evaluator_results 状态）。"""
+    reports_by_eval: dict[str, Mapping[str, Any]] = {}
+    for rep in evidence_content.get("evaluation_reports") or ():
+        if isinstance(rep, Mapping) and isinstance(rep.get("evaluator"), str):
+            reports_by_eval[rep["evaluator"]] = rep
+
+    items: list[dict[str, Any]] = []
+    for entry in evidence_content.get("evaluator_results") or ():
+        if not isinstance(entry, Mapping):
+            continue
+        evaluator_ref = str(entry.get("evaluator") or "")
+        contract = entry.get("contract")
+        if evaluator_ref == _FINANCIAL_EVALUATOR_REF or contract == _FINANCIAL_CONTRACT_REF:
+            reports_by_eval.pop(evaluator_ref, None)
+            continue
+        report = reports_by_eval.pop(evaluator_ref, None)
+        items.append(
+            {
+                "evaluator": evaluator_ref or "unknown",
+                "status": entry.get("status") or "evaluated",
+                "contract": contract,
+                "error": entry.get("error"),
+                "title": (
+                    report["title"]
+                    if isinstance(report, Mapping) and isinstance(report.get("title"), str)
+                    else evaluator_ref or "第三方评价 / Evaluator"
+                ),
+                "summary": report.get("summary") if isinstance(report, Mapping) else None,
+                "metrics": report.get("metrics") if isinstance(report, Mapping) else None,
+                "tables": report.get("tables") if isinstance(report, Mapping) else None,
+            }
+        )
+
+    for evaluator_ref, report in reports_by_eval.items():
+        if evaluator_ref == _FINANCIAL_EVALUATOR_REF:
+            continue
+        items.append(
+            {
+                "evaluator": evaluator_ref,
+                "status": "succeeded",
+                "contract": "ies.evaluation-report@1.0.0",
+                "error": None,
+                "title": report.get("title") or evaluator_ref,
+                "summary": report.get("summary"),
+                "metrics": report.get("metrics"),
+                "tables": report.get("tables"),
+            }
+        )
+    return items
+
+
+def _write_non_financial_evaluator_sheets(wb: Workbook, evidence_content: Mapping[str, Any]) -> None:
+    """为非财务规范评价报告生成独立工作表（保留官方财务表原样不变）。"""
+    items = _extract_evaluator_sheet_items(evidence_content)
+    if not items:
+        return
+    used_lower = {name.lower() for name in wb.sheetnames}
+    for item in items:
+        raw_name = str(item.get("title") or item["evaluator"])
+        sheet_name = _make_unique_sheet_name(raw_name, used_lower)
+        ws = wb.create_sheet(sheet_name)
+        _set_sheet_title(ws, str(item["title"]), str(item["evaluator"]))
+        meta_rows: list[tuple[str, Any]] = [
+            ("评价器 / Evaluator", item["evaluator"]),
+            ("状态 / Status", item["status"]),
+            ("输出契约 / Contract", item.get("contract") or "—"),
+        ]
+        if item.get("summary"):
+            meta_rows.append(("摘要 / Summary", item["summary"]))
+        if item.get("error"):
+            err = item["error"]
+            err_msg = err.get("message") if isinstance(err, Mapping) and err.get("message") else err
+            meta_rows.append(("错误信息 / Error", err_msg))
+        _write_kv(ws, meta_rows, blank_row=False)
+
+        metrics = item.get("metrics")
+        if isinstance(metrics, list) and metrics:
+            ws.append(())
+            m_title = WriteOnlyCell(ws, value="指标明细 / Metrics")
+            m_title.font = Font(bold=True)
+            ws.append((m_title,))
+            ws.append(("指标 ID / ID", "指标 / Metric", "值 / Value", "单位 / Unit"))
+            for m in metrics:
+                if not isinstance(m, Mapping):
+                    continue
+                mval = m["value"]
+                ws.append(
+                    (
+                        _excel_safe(str(m["id"])),
+                        _excel_safe(str(m["label"])),
+                        _excel_safe("—" if mval is None else mval),
+                        _excel_safe(str(m["unit"])),
+                    )
+                )
+
+        tables = item.get("tables")
+        if isinstance(tables, list):
+            for tbl in tables:
+                if not isinstance(tbl, Mapping):
+                    continue
+                cols = tbl.get("columns") or []
+                headers: list[Any] = []
+                for col in cols:
+                    if not isinstance(col, Mapping):
+                        continue
+                    label = str(col["label"])
+                    unit = col.get("unit")
+                    headers.append(_excel_safe(f"{label} ({unit})" if unit else label))
+                if not headers:
+                    continue
+                ws.append(())
+                raw_title = str(tbl.get("title") or tbl.get("id") or "Table")
+                t_title = WriteOnlyCell(ws, value=_excel_safe(raw_title))
+                t_title.font = Font(bold=True)
+                ws.append((t_title,))
+                ws.append(tuple(headers))
+                for row in tbl.get("rows") or ():
+                    if isinstance(row, (list, tuple)):
+                        ws.append(tuple(_excel_safe(cell) for cell in row))
+
+
 def _write_sealed_transactions(wb, fin: dict[str, Any]) -> None:
     """Separate occurrence, payment, asset, book value and tax facts, including post-horizon records."""
     ccy = fin["currency"]
@@ -2449,6 +2595,8 @@ def export_excel(
             amount_sheet = wb.create_sheet("命名金额")
             _write_sealed_amounts(amount_sheet, section)
             _write_sealed_transactions(wb, section)
+
+    _write_non_financial_evaluator_sheets(wb, evidence_content)
 
     refs = evidence_content.get("hourly_refs") or []
     if refs:
