@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import csv
 import json
-import math
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -19,7 +18,6 @@ from pies_sdk import (
     StageContext,
     StageIOError,
     SystemSeries,
-    check_relative_path,
     read_algorithm_request,
     read_json_file,
 )
@@ -29,6 +27,11 @@ _POINT_COUNTS = {
     "15min": (35040, 35136),
     "30min": (17520, 17568),
     "1h": (8760, 8784),
+}
+_RESOLUTION_HOURS = {
+    "15min": 0.25,
+    "30min": 0.5,
+    "1h": 1.0,
 }
 
 
@@ -48,15 +51,19 @@ def _horizon_point_count(resolution: str, start_year: int, years: int) -> int:
     return total
 
 
-def _safe_work_in_file(work_in: Path, rel_path: str, label: str) -> Path:
-    rel = check_relative_path(rel_path, label)
-    root = work_in.resolve()
-    target = (root / rel).resolve()
-    if target != root and root not in target.parents:
-        raise StageIOError(f"{label} escapes stage input directory: {rel_path!r}")
-    if not target.is_file():
-        raise StageIOError(f"Missing required stage input file for {label}: {rel_path!r}")
-    return target
+def _step_hours_from_baseline(doc: Mapping[str, Any]) -> float:
+    baseline = doc.get("project_baseline")
+    if not isinstance(baseline, Mapping):
+        raise StageIOError("Assembly artifact missing 'project_baseline'")
+    if baseline.get("step_duration") is not None:
+        step_hours = float(baseline["step_duration"])
+        if step_hours <= 0.0:
+            raise StageIOError(f"project_baseline.step_duration must be > 0, got {step_hours!r}")
+        return step_hours
+    resolution = str(baseline.get("resolution") or "")
+    if resolution not in _RESOLUTION_HOURS:
+        raise StageIOError(f"Unsupported project_baseline.resolution: {resolution!r}")
+    return _RESOLUTION_HOURS[resolution]
 
 
 def _project_csv_column(csv_path: Path, column_name: str) -> list[float]:
@@ -73,15 +80,11 @@ def _project_csv_column(csv_path: Path, column_name: str) -> list[float]:
     if key not in header:
         raise StageIOError(f"CSV resource {csv_path.name} missing column {column_name!r}")
     col_idx = header.index(key)
-    out: list[float] = []
-    for cells in rows[1:]:
-        if not any(cell.strip() for cell in cells):
-            continue
-        val = float(cells[col_idx].strip())
-        if not math.isfinite(val):
-            raise StageIOError(f"Non-finite CSV value in {csv_path.name}: {val!r}")
-        out.append(val)
-    return out
+    return [
+        float(cells[col_idx].strip())
+        for cells in rows[1:]
+        if any(cell.strip() for cell in cells)
+    ]
 
 
 def _materialize_series_map(
@@ -112,12 +115,7 @@ def _materialize_series_map(
         raw_fixed = frozen_inputs.get("fixed_resources") or {}
         if not isinstance(raw_fixed, Mapping):
             raise StageIOError("frozen_series_inputs.fixed_resources must be a JSON object")
-        object_paths = {
-            str(oid): _safe_work_in_file(
-                ctx.work_in, str(rel), f"frozen_series_inputs.fixed_resources[{oid!r}]"
-            )
-            for oid, rel in raw_fixed.items()
-        }
+        object_paths = {str(oid): ctx.work_in / str(rel) for oid, rel in raw_fixed.items()}
 
         predicted_map: dict[tuple[str, str], list[float]] = {}
         raw_pred = frozen_inputs.get("predicted_series") or ()
@@ -217,9 +215,6 @@ def _materialize_series_map(
         if not dev or not iface or not isinstance(raw_vals, list) or not raw_vals:
             raise StageIOError(f"Invalid materialized series entry: {entry!r}")
         vals = [float(v) for v in raw_vals]
-        for val in vals:
-            if not math.isfinite(val):
-                raise StageIOError(f"Non-finite value in materialized series {dev}.{iface}")
         if point_count == 0:
             point_count = len(vals)
         elif len(vals) != point_count:
@@ -232,6 +227,10 @@ def _resolve_device_roles(
     doc: Mapping[str, Any],
     device_models: Mapping[str, Any],
 ) -> tuple[str, str, list[str]]:
+    sys_eq = doc.get("system_equations")
+    if isinstance(sys_eq, Mapping) and sys_eq:
+        raise StageIOError("ies.algorithm.economic_dispatch does not support system_equations")
+
     devices = doc["devices"]
     grid_insts: list[str] = []
     gen_insts: list[str] = []
@@ -239,7 +238,7 @@ def _resolve_device_roles(
 
     for inst_id, dev_spec in sorted(devices.items()):
         if not isinstance(dev_spec, Mapping):
-            continue
+            raise StageIOError(f"Device entry {inst_id!r} must be a mapping")
         def_block = dev_spec.get("definition")
         model_id = str(def_block.get("id") or "") if isinstance(def_block, Mapping) else ""
         if not model_id:
@@ -249,41 +248,59 @@ def _resolve_device_roles(
             iface_meta = {}
 
         if model_id == "ies.device.grid_connection" or (
-            isinstance(iface_meta.get("electricity_import"), Mapping)
+            not model_id
+            and isinstance(iface_meta.get("electricity_import"), Mapping)
             and iface_meta["electricity_import"].get("carrier") == "electricity"
         ):
             grid_insts.append(str(inst_id))
             continue
 
         if model_id == "ies.device.electric_load" or (
-            isinstance(iface_meta.get("electricity_demand"), Mapping)
+            not model_id
+            and isinstance(iface_meta.get("electricity_demand"), Mapping)
             and iface_meta["electricity_demand"].get("carrier") == "electricity"
         ):
             load_insts.append(str(inst_id))
             continue
 
-        if model_id in {"ies.device.wind_turbine", "ies.device.pv", "ies.device.solar_pv_sample"}:
+        is_supported_gen = model_id in {
+            "ies.device.chp",
+            "ies.device.gas_turbine",
+            "ies.device.diesel_generator",
+        } or (
+            not model_id
+            and any(
+                isinstance(spec, Mapping)
+                and spec.get("type") == "out"
+                and spec.get("carrier") == "electricity"
+                for spec in iface_meta.values()
+            )
+            and not any(
+                isinstance(spec, Mapping)
+                and spec.get("type") == "predefined"
+                and spec.get("carrier") in {"solar", "wind"}
+                for spec in iface_meta.values()
+            )
+        )
+        if is_supported_gen:
+            gen_insts.append(str(inst_id))
             continue
 
-        if model_id in {"ies.device.chp", "ies.device.gas_turbine", "ies.device.diesel_generator"}:
-            gen_insts.append(str(inst_id))
-        elif any(
-            isinstance(spec, Mapping)
-            and spec.get("type") == "out"
-            and spec.get("carrier") == "electricity"
-            for spec in iface_meta.values()
-        ) and not any(
-            isinstance(spec, Mapping)
-            and spec.get("type") == "predefined"
-            and spec.get("carrier") in {"solar", "wind"}
-            for spec in iface_meta.values()
-        ):
-            gen_insts.append(str(inst_id))
+        raise StageIOError(
+            f"Unsupported device {inst_id!r} ({model_id or 'custom'}) for "
+            "ies.algorithm.economic_dispatch: only grid_connection, dispatchable electric "
+            "generator, and electric_load topologies are supported"
+        )
 
-    if not grid_insts:
-        raise StageIOError("Assembly artifact missing an electric grid connection device")
-    if not gen_insts:
-        raise StageIOError("Assembly artifact missing a dispatchable electric generator device")
+    if len(grid_insts) != 1:
+        raise StageIOError(
+            f"ies.algorithm.economic_dispatch requires exactly 1 grid_connection, got {len(grid_insts)}"
+        )
+    if len(gen_insts) != 1:
+        raise StageIOError(
+            "ies.algorithm.economic_dispatch requires exactly 1 dispatchable generator, "
+            f"got {len(gen_insts)}"
+        )
     if not load_insts:
         raise StageIOError("Assembly artifact missing an electric load device")
     return grid_insts[0], gen_insts[0], load_insts
@@ -299,11 +316,107 @@ def _property_float(dev_spec: Mapping[str, Any], prop_name: str) -> float | None
     return None
 
 
+def _resolve_generator_bounds(
+    doc: Mapping[str, Any],
+    *,
+    gen_inst: str,
+    rated_cap: float,
+) -> tuple[str, float, float, bool]:
+    """Resolve pre-solve generator [min_cap, max_cap] and mandatory/optional mode."""
+    planning = doc.get("planning") or {}
+    plan_vars = planning.get("variables") or {}
+    raw_units = planning.get("construction_units") or {}
+    if not isinstance(plan_vars, Mapping) or not isinstance(raw_units, Mapping):
+        raise StageIOError("planning.variables and planning.construction_units must be mappings")
+
+    min_cap = 0.0
+    max_cap = rated_cap
+    mode = "mandatory"
+
+    for unit_id, unit_spec in sorted(raw_units.items()):
+        if not isinstance(unit_spec, Mapping):
+            raise StageIOError(f"planning.construction_units.{unit_id} must be a mapping")
+        raw_scales = unit_spec.get("scales")
+        if not isinstance(raw_scales, Mapping) or not raw_scales:
+            raise StageIOError(
+                f"planning.construction_units.{unit_id}.scales must be a non-empty mapping"
+            )
+        if str(unit_spec.get("device_ref") or "") != gen_inst:
+            continue
+        raw_mode = str(unit_spec.get("mode") or "")
+        if raw_mode not in {"mandatory", "optional"}:
+            raise StageIOError(f"Invalid construction_unit mode for {unit_id!r}: {raw_mode!r}")
+        mode = raw_mode
+        for pvar_id, scale_spec in sorted(raw_scales.items()):
+            if not isinstance(scale_spec, Mapping):
+                raise StageIOError(
+                    f"construction_units.{unit_id}.scales.{pvar_id} must be a mapping"
+                )
+            pvar_spec = plan_vars.get(pvar_id)
+            if not isinstance(pvar_spec, Mapping):
+                raise StageIOError(f"Unknown planning variable {pvar_id!r} in unit {unit_id!r}")
+            var_lo = (
+                float(pvar_spec["lower_bound"]) if pvar_spec.get("lower_bound") is not None else 0.0
+            )
+            var_hi = (
+                float(pvar_spec["upper_bound"])
+                if pvar_spec.get("upper_bound") is not None
+                else None
+            )
+            act_lo = (
+                float(scale_spec["active_lower_bound"])
+                if scale_spec.get("active_lower_bound") is not None
+                else None
+            )
+            act_hi = (
+                float(scale_spec["active_upper_bound"])
+                if scale_spec.get("active_upper_bound") is not None
+                else None
+            )
+            eff_lo = max(var_lo, act_lo) if act_lo is not None else var_lo
+            eff_hi = var_hi
+            if act_hi is not None:
+                eff_hi = min(eff_hi, act_hi) if eff_hi is not None else act_hi
+            if eff_hi is not None and eff_lo > eff_hi:
+                raise StageIOError(
+                    f"Inconsistent active bounds on {unit_id}.{pvar_id}: [{eff_lo}, {eff_hi}]"
+                )
+            min_cap = max(min_cap, eff_lo)
+            if eff_hi is not None:
+                max_cap = min(max_cap, eff_hi)
+
+    for pvar_id, pvar_spec in sorted(plan_vars.items()):
+        if not isinstance(pvar_spec, Mapping):
+            continue
+        if str(pvar_spec.get("device_ref") or "") != gen_inst:
+            continue
+        param = str(pvar_spec.get("parameter") or "")
+        if "electric" not in param and "capacity" not in param and "power" not in param:
+            continue
+        var_lo = (
+            float(pvar_spec["lower_bound"]) if pvar_spec.get("lower_bound") is not None else 0.0
+        )
+        var_hi = (
+            float(pvar_spec["upper_bound"]) if pvar_spec.get("upper_bound") is not None else None
+        )
+        if var_hi is not None and var_lo > var_hi:
+            raise StageIOError(
+                f"Inconsistent planning variable bounds on {pvar_id!r}: [{var_lo}, {var_hi}]"
+            )
+        min_cap = max(min_cap, var_lo)
+        if var_hi is not None:
+            max_cap = min(max_cap, var_hi)
+
+    feasible_bounds = min_cap <= max_cap + 1e-9
+    return mode, min_cap, max_cap, feasible_bounds
+
+
 def _bind_planning_outputs(
     doc: Mapping[str, Any],
     *,
     gen_inst: str,
-    peak_dispatch: float,
+    installed_cap: float,
+    built_gen: bool,
 ) -> tuple[tuple[ConstructionUnit, ...], tuple[ConstructionScale, ...]]:
     planning = doc.get("planning") or {}
     plan_vars = planning.get("variables") or {}
@@ -316,33 +429,22 @@ def _bind_planning_outputs(
         if dev_ref == gen_inst and (
             "electric" in param or "capacity" in param or "power" in param
         ):
-            val = round(peak_dispatch, 6)
-        else:
-            dev_spec = devices.get(dev_ref) or {}
-            prop_val = _property_float(dev_spec, param) if isinstance(dev_spec, Mapping) else None
-            if prop_val is None:
-                raise StageIOError(
-                    f"Cannot resolve numeric binding for planning variable {pvar_id!r} "
-                    f"({dev_ref}.{param})"
-                )
-            val = round(prop_val, 6)
-        lo = pvar_spec.get("lower_bound")
-        hi = pvar_spec.get("upper_bound")
-        if lo is not None:
-            val = max(float(lo), val)
-        if hi is not None:
-            val = min(float(hi), val)
-        return round(val, 6)
+            return round(installed_cap, 6)
+        dev_spec = devices.get(dev_ref) or {}
+        prop_val = _property_float(dev_spec, param) if isinstance(dev_spec, Mapping) else None
+        if prop_val is None:
+            raise StageIOError(
+                f"Cannot resolve numeric binding for planning variable {pvar_id!r} "
+                f"({dev_ref}.{param})"
+            )
+        return round(prop_val, 6)
 
     units: list[ConstructionUnit] = []
     unit_pvars: set[str] = set()
     for unit_id, unit_spec in sorted(raw_units.items()):
-        if not isinstance(unit_spec, Mapping):
-            continue
-        raw_scales = unit_spec.get("scales") or ()
-        scale_ids = list(raw_scales.keys()) if isinstance(raw_scales, Mapping) else list(raw_scales)
+        raw_scales = unit_spec["scales"]
         scales: list[ConstructionScale] = []
-        for pvar_id in scale_ids:
+        for pvar_id in sorted(raw_scales):
             unit_pvars.add(str(pvar_id))
             pvar_spec = plan_vars[pvar_id]
             scales.append(
@@ -353,12 +455,13 @@ def _bind_planning_outputs(
                 )
             )
         inst_ref = str(unit_spec["device_ref"])
-        built = (peak_dispatch > 0.0) if inst_ref == gen_inst else True
+        unit_mode = str(unit_spec["mode"])
+        built = True if unit_mode == "mandatory" else (built_gen if inst_ref == gen_inst else True)
         units.append(
             ConstructionUnit(
                 unit_id=str(unit_id),
                 instance_id=inst_ref,
-                mode=str(unit_spec["mode"]),
+                mode=unit_mode,
                 built=built,
                 scales=tuple(scales),
             )
@@ -403,6 +506,7 @@ def solve_dispatch(ctx: StageContext) -> None:
     if not isinstance(device_models, Mapping):
         raise StageIOError("request.device_models must be a JSON object")
 
+    step_hours = _step_hours_from_baseline(doc)
     series_map, steps = _materialize_series_map(ctx, request, doc)
     grid_inst, gen_inst, load_insts = _resolve_device_roles(doc, device_models)
 
@@ -434,9 +538,9 @@ def solve_dispatch(ctx: StageContext) -> None:
         or _property_float(gen_spec, "rated_capacity_kw")
     )
     if "generator_capacity_kw" in params:
-        gen_cap = float(params["generator_capacity_kw"])
+        rated_cap = float(params["generator_capacity_kw"])
     elif default_cap is not None:
-        gen_cap = default_cap
+        rated_cap = default_cap
     else:
         raise StageIOError(f"Generator instance {gen_inst!r} missing rated capacity property")
 
@@ -445,12 +549,47 @@ def solve_dispatch(ctx: StageContext) -> None:
     if tolerance <= 0:
         raise StageIOError(f"tolerance must be > 0, got {tolerance!r}")
 
-    total_demand = sum(demand)
-    energy_cap = share_cap * total_demand
+    unit_mode, min_cap, max_cap, bounds_feasible = _resolve_generator_bounds(
+        doc, gen_inst=gen_inst, rated_cap=rated_cap
+    )
+    if not bounds_feasible and unit_mode == "mandatory":
+        with ctx.iteration_writer(truncate=True) as writer:
+            writer.append(
+                IterationRecord(
+                    iteration=1,
+                    metric="relative_gap",
+                    value=0.0,
+                    unit="1",
+                    status="stopped",
+                    details={"reason": "inconsistent_mandatory_bounds"},
+                )
+            )
+        ctx.write_engineering_solution(
+            EngineeringSolutionPayload(
+                solver_summary=SolverSummary(
+                    termination_reason="infeasible",
+                    math_status="infeasible",
+                    has_feasible_solution=False,
+                    objective_value=None,
+                    objective_unit="CNY",
+                    best_bound=None,
+                    relative_gap=None,
+                    solver_diagnostics={
+                        "algorithm": f"{ctx.manifest.plugin_id}@{ctx.manifest.version}",
+                        "iterations": 1,
+                    },
+                )
+            )
+        )
+        return
+
+    gen_cap = max_cap
+    total_demand_kwh = sum(demand) * step_hours
+    energy_cap_kwh = share_cap * total_demand_kwh
 
     def _subproblem(lam: float) -> tuple[list[float], float]:
         g_raw: list[float] = []
-        dual_val = -lam * energy_cap
+        dual_val = -lam * energy_cap_kwh
         for d_t in demand:
             upper = min(d_t, gen_cap)
             if grid_cost <= gen_cost + lam:
@@ -459,16 +598,19 @@ def solve_dispatch(ctx: StageContext) -> None:
                 g_t = min(upper, max(0.0, (grid_cost - gen_cost - lam) / _REG_QUAD))
             g_raw.append(g_t)
             m_t = d_t - g_t
-            dual_val += (gen_cost + lam) * g_t + 0.5 * _REG_QUAD * (g_t * g_t) + grid_cost * m_t
+            dual_val += (
+                ((gen_cost + lam) * g_t + 0.5 * _REG_QUAD * (g_t * g_t) + grid_cost * m_t)
+                * step_hours
+            )
         return g_raw, dual_val
 
     def _project_primal(g_raw: list[float]) -> tuple[list[float], list[float], float]:
-        raw_sum = sum(g_raw)
-        scale = min(1.0, energy_cap / raw_sum) if raw_sum > 1e-12 else 1.0
+        raw_kwh = sum(g_raw) * step_hours
+        scale = min(1.0, energy_cap_kwh / raw_kwh) if raw_kwh > 1e-12 else 1.0
         g_feas = [round(v * scale, 6) for v in g_raw]
         m_feas = [round(max(0.0, d_t - g_t), 6) for d_t, g_t in zip(demand, g_feas, strict=True)]
         primal_obj = sum(
-            gen_cost * g_t + 0.5 * _REG_QUAD * (g_t * g_t) + grid_cost * m_t
+            (gen_cost * g_t + 0.5 * _REG_QUAD * (g_t * g_t) + grid_cost * m_t) * step_hours
             for g_t, m_t in zip(g_feas, m_feas, strict=True)
         )
         return g_feas, m_feas, primal_obj
@@ -477,16 +619,13 @@ def solve_dispatch(ctx: StageContext) -> None:
     hi = max(0.0, grid_cost - gen_cost)
     best_g: list[float] = [0.0] * steps
     best_m: list[float] = list(demand)
-    best_primal = sum(grid_cost * d_t for d_t in demand)
+    best_primal = sum(grid_cost * d_t * step_hours for d_t in demand)
     best_dual = best_primal
     final_gap = 0.0
     iters_run = 0
 
-    g_zero, dual_zero = _subproblem(0.0)
-    if sum(g_zero) <= energy_cap + 1e-9:
-        best_g, best_m, best_primal = _project_primal(g_zero)
-        best_dual = dual_zero
-        final_gap = 0.0
+    if not bounds_feasible:
+        # Optional unit whose active bounds are mutually infeasible stays unbuilt (g=0).
         iters_run = 1
         with ctx.iteration_writer(truncate=True) as writer:
             writer.append(
@@ -504,54 +643,89 @@ def solve_dispatch(ctx: StageContext) -> None:
                 )
             )
     else:
-        with ctx.iteration_writer(truncate=True) as writer:
-            for k in range(1, max_iterations + 1):
-                lam = 0.5 * (lo + hi)
-                g_raw, dual_val = _subproblem(lam)
-                g_feas, m_feas, primal_obj = _project_primal(g_raw)
-                if sum(g_raw) > energy_cap:
-                    lo = lam
-                else:
-                    hi = lam
-                if primal_obj <= best_primal:
-                    best_primal = primal_obj
-                    best_g = g_feas
-                    best_m = m_feas
-                best_dual = max(best_dual if k > 1 else dual_val, dual_val)
-                best_dual = min(best_dual, best_primal)
-                gap = max(0.0, best_primal - best_dual) / max(1.0, abs(best_primal))
-                final_gap = gap
-                iters_run = k
-
-                if gap <= tolerance:
-                    status = "converged"
-                elif k == max_iterations:
-                    status = "max_iterations_reached"
-                else:
-                    status = "running"
-
+        g_zero, dual_zero = _subproblem(0.0)
+        if sum(g_zero) * step_hours <= energy_cap_kwh + 1e-9:
+            best_g, best_m, best_primal = _project_primal(g_zero)
+            best_dual = min(dual_zero, best_primal)
+            final_gap = 0.0
+            iters_run = 1
+            with ctx.iteration_writer(truncate=True) as writer:
                 writer.append(
                     IterationRecord(
-                        iteration=k,
+                        iteration=1,
                         metric="relative_gap",
-                        value=round(gap, 8),
+                        value=0.0,
                         unit="1",
-                        status=status,
+                        status="converged",
                         details={
-                            "lambda": round(lam, 6),
+                            "lambda": 0.0,
                             "primal_obj": round(best_primal, 6),
                             "dual_bound": round(best_dual, 6),
                         },
                     )
                 )
-                if status in ("converged", "max_iterations_reached"):
-                    break
+        else:
+            with ctx.iteration_writer(truncate=True) as writer:
+                for k in range(1, max_iterations + 1):
+                    lam = 0.5 * (lo + hi)
+                    g_raw, dual_val = _subproblem(lam)
+                    g_feas, m_feas, primal_obj = _project_primal(g_raw)
+                    if sum(g_raw) * step_hours > energy_cap_kwh:
+                        lo = lam
+                    else:
+                        hi = lam
+                    if primal_obj <= best_primal:
+                        best_primal = primal_obj
+                        best_g = g_feas
+                        best_m = m_feas
+                    best_dual = max(best_dual if k > 1 else dual_val, dual_val)
+                    best_dual = min(best_dual, best_primal)
+                    gap = max(0.0, best_primal - best_dual) / max(1.0, abs(best_primal))
+                    final_gap = gap
+                    iters_run = k
 
-    total_dispatch = round(sum(best_g), 6)
-    total_grid = round(sum(best_m), 6)
+                    if gap <= tolerance:
+                        status = "converged"
+                    elif k == max_iterations:
+                        status = "max_iterations_reached"
+                    else:
+                        status = "running"
+
+                    writer.append(
+                        IterationRecord(
+                            iteration=k,
+                            metric="relative_gap",
+                            value=round(gap, 8),
+                            unit="1",
+                            status=status,
+                            details={
+                                "lambda": round(lam, 6),
+                                "primal_obj": round(best_primal, 6),
+                                "dual_bound": round(best_dual, 6),
+                            },
+                        )
+                    )
+                    if status in ("converged", "max_iterations_reached"):
+                        break
+
     peak_dispatch = max(best_g) if best_g else 0.0
+    if unit_mode == "mandatory":
+        built_gen = True
+        installed_cap = max(min_cap, peak_dispatch)
+    elif peak_dispatch > 0.0 and bounds_feasible:
+        built_gen = True
+        installed_cap = max(min_cap, peak_dispatch)
+    else:
+        built_gen = False
+        installed_cap = 0.0
+
+    total_dispatch_kwh = round(sum(best_g) * step_hours, 6)
+    total_grid_kwh = round(sum(best_m) * step_hours, 6)
     units, standalone_pvars = _bind_planning_outputs(
-        doc, gen_inst=gen_inst, peak_dispatch=peak_dispatch
+        doc,
+        gen_inst=gen_inst,
+        installed_cap=installed_cap,
+        built_gen=built_gen,
     )
     term_reason = "optimal" if final_gap <= tolerance else "not_solved"
     math_stat = "solved" if final_gap <= tolerance else "feasible"
@@ -605,10 +779,11 @@ def solve_dispatch(ctx: StageContext) -> None:
         },
         metrics={
             "iterations": iters_run,
+            "step_hours": step_hours,
             "total_cost_cny": round(best_primal, 6),
-            "total_demand_kwh": round(total_demand, 6),
-            "total_dispatch_kwh": total_dispatch,
-            "total_grid_import_kwh": total_grid,
+            "total_demand_kwh": round(total_demand_kwh, 6),
+            "total_dispatch_kwh": total_dispatch_kwh,
+            "total_grid_import_kwh": total_grid_kwh,
         },
         model_sources={
             "algorithm": f"{ctx.manifest.plugin_id}@{ctx.manifest.version}",

@@ -511,6 +511,7 @@ def test_four_reference_plugins_validate_and_execute_with_exact_parity(
 ) -> None:
     _ensure_repo_module_path("sdk")
     from pies_sdk import (
+        StageIOError,
         read_iterations,
         read_prediction_output,
         validate_plugin_package,
@@ -625,13 +626,184 @@ def test_four_reference_plugins_validate_and_execute_with_exact_parity(
             eng_r["series"][skey]["values"], rel=1e-6, abs=1e-6
         )
 
-    # 4. Execute ies.algorithm.economic_dispatch@1.0.0 on run_algorithm_stage-shaped input
+    # 4a. Negative contract test: economic_dispatch rejects multi-energy assembly with StageIOError
     algo_dir = market_dir / "ies.algorithm.economic_dispatch" / "1.0.0" / "plugin"
+    algo_reject_in = tmp_path / "algo_reject_in"
+    algo_reject_out = tmp_path / "algo_reject_out"
+    algo_reject_in.mkdir(parents=True)
+    reject_req: dict[str, Any] = {
+        "artifact": {"canonical_text": artifact.canonical_text, "receipt": {}},
+        "device_models": {},
+        "finance": finance.to_dict(),
+        "calculation_config": {
+            "schema": "ies.calculation-config",
+            "schema_version": "1.0.0",
+            "mode": "planning",
+            "predictions": [],
+            "generator": None,
+            "solver": None,
+            "algorithm": "ies.algorithm.economic_dispatch@1.0.0",
+            "evaluators": [],
+            "precision": "medium",
+            "time_limit_seconds": 60,
+            "options": {"algorithm": {"max_iterations": 12, "tolerance": 1e-4}},
+            "seed": 7,
+            "outputs": ["solution", "metrics"],
+        },
+        "parameters": {"max_iterations": 12, "tolerance": 1e-4},
+        "evaluation": {"evaluation_years": 1, "construction_period": 0, "operation_years": 1},
+        "time_limit_seconds": 60,
+        "seed": 7,
+    }
+    _attach_series_inputs(reject_req, {}, FrozenSeriesInputs(operation_years=1))
+    (algo_reject_in / "request.json").write_text(json.dumps(reject_req), encoding="utf-8")
+    with pytest.raises(StageIOError, match="Unsupported device"):
+        run_plugin(manifest_path=algo_dir / "plugin.yaml", work_in=algo_reject_in, work_out=algo_reject_out)
+
+    # 4b. Supported 30min electric-dispatch assembly with construction_units & FrozenSeriesInputs
+    gt_yaml = """
+schema: ies.device-model
+schema_version: "1.0.0"
+device:
+  id: ies.device.gas_turbine
+  names:
+    zh-CN: 燃气轮机
+    en-US: Gas Turbine
+properties:
+  rated_electric_kw:
+    value: 1000
+    unit: kW
+    valid_range:
+      minimum: 0
+      maximum: 1000000
+interfaces:
+  electric_out:
+    type: out
+    carrier: electricity
+    unit: kW
+    valid_range:
+      minimum: 0
+      maximum: {property_ref: rated_electric_kw}
+equations:
+  variables: {}
+  relations: []
+"""
+    gt_parsed = parse_device_model_v2(yaml_load(gt_yaml), file="gas_turbine.yaml")
+    assert gt_parsed.ok, gt_parsed.diagnostics
+    elec_devices_map = {doc.device.id: doc for doc in list_devices()}
+    elec_devices_map[gt_parsed.document.device.id] = gt_parsed.document
+    elec_assembly_doc: dict[str, Any] = {
+        "schema": "ies.assembly",
+        "schema_version": "1.0.0",
+        "assembly": {"id": "e5b_electric_dispatch", "name": "E5b Electric Dispatch"},
+        "project_baseline": {"resolution": "30min", "start_year": 2026, "scenario_mode": "single"},
+        "devices": {
+            "grid_main": {
+                "definition": {"id": "ies.device.grid_connection"},
+                "asset_origin": "existing",
+                "properties": {
+                    "max_import_power_kw": {"value": 2000, "unit": "kW"},
+                    "max_export_power_kw": {"value": 0, "unit": "kW"},
+                },
+                "predefined_interfaces": {},
+            },
+            "gt_unit": {
+                "definition": {"id": "ies.device.gas_turbine"},
+                "asset_origin": "new",
+                "properties": {"rated_electric_kw": {"value": 1000, "unit": "kW"}},
+                "predefined_interfaces": {},
+            },
+            "load_main": {
+                "definition": {"id": "ies.device.electric_load"},
+                "asset_origin": "existing",
+                "properties": {"peak_power_kw": {"value": 800, "unit": "kW"}},
+                "predefined_interfaces": {"electricity_demand": {"mode": "constant", "value": 600}},
+            },
+        },
+        "connections": {
+            "grid_to_load": {"from": "grid_main.electricity_import", "to": "load_main.electricity_in"},
+            "gt_to_load": {"from": "gt_unit.electric_out", "to": "load_main.electricity_in"},
+        },
+        "finance": {
+            "ref": {"kind": "object", "object_id": "obj-finance", "media_type": "application/yaml"},
+            "profile_id": "e5b-ref-finance",
+        },
+        "finance_binding": {
+            "instances": {
+                "grid_main": {"type": "none"},
+                "load_main": {"type": "none"},
+                "gt_unit": {
+                    "type": "costed",
+                    "finance_type": "chp_sys",
+                    "drivers": {"rated_kw": {"property": "rated_electric_kw"}},
+                },
+            }
+        },
+        "tariff_bindings": {
+            "grid_meter": {
+                "price": "grid_import",
+                "instance": "grid_main",
+                "interface": "electricity_import",
+                "aggregation": "integrate_positive",
+            }
+        },
+        "demand_bindings": {},
+        "planning": {
+            "objective": {
+                "sense": "minimize",
+                "expression": "gt_unit__upfront_capex + grid_meter__period_energy_purchase",
+            },
+            "variables": {
+                "gt_cap": {
+                    "device_ref": "gt_unit",
+                    "parameter": "rated_electric_kw",
+                    "lower_bound": "0",
+                    "upper_bound": "1000",
+                    "unit": "kW",
+                },
+                "grid_cap": {
+                    "device_ref": "grid_main",
+                    "parameter": "max_import_power_kw",
+                    "lower_bound": "0",
+                    "upper_bound": "2000",
+                    "unit": "kW",
+                },
+            },
+            "construction_units": {
+                "unit_gt": {
+                    "device_ref": "gt_unit",
+                    "mode": "mandatory",
+                    "scales": {
+                        "gt_cap": {
+                            "active_lower_bound": "50",
+                            "active_upper_bound": "450",
+                        }
+                    },
+                }
+            },
+            "constraints": {},
+        },
+        "outputs": {
+            "series": ["grid_main.electricity_import", "gt_unit.electric_out"],
+            "metrics": ["system.total_energy_cost"],
+        },
+        "extensions": {},
+    }
+    elec_checked = validate_assembly_doc(
+        elec_assembly_doc,
+        device_documents=elec_devices_map,
+        finance_snapshots={"obj-finance": finance},
+    )
+    assert elec_checked.ok, [
+        (d.code, d.location, d.params) for d in elec_checked.diagnostics if d.blocking
+    ]
+    assert elec_checked.artifact is not None
+
     algo_in = tmp_path / "algo_in"
     algo_out = tmp_path / "algo_out"
     algo_in.mkdir(parents=True)
     algo_req = {
-        "artifact": {"canonical_text": artifact.canonical_text, "receipt": {}},
+        "artifact": {"canonical_text": elec_checked.artifact.canonical_text, "receipt": {}},
         "device_models": {},
         "finance": finance.to_dict(),
         "calculation_config": {
@@ -668,21 +840,40 @@ def test_four_reference_plugins_validate_and_execute_with_exact_parity(
 
     raw_algo = json.loads((algo_out / "solution.json").read_text(encoding="utf-8"))
     assert set(raw_algo["series"]) == {
-        "chp__electric_out",
-        "grid__electricity_import",
-        "elec_load__electricity_in",
+        "gt_unit__electric_out",
+        "grid_main__electricity_import",
+        "load_main__electricity_in",
     }
-    chp_vals = raw_algo["series"]["chp__electric_out"]["values"]
-    grid_vals = raw_algo["series"]["grid__electricity_import"]["values"]
-    load_vals = raw_algo["series"]["elec_load__electricity_in"]["values"]
-    assert len(chp_vals) == len(grid_vals) == len(load_vals) == 8760
+    gt_vals = raw_algo["series"]["gt_unit__electric_out"]["values"]
+    grid_vals = raw_algo["series"]["grid_main__electricity_import"]["values"]
+    load_vals = raw_algo["series"]["load_main__electricity_in"]["values"]
+    assert len(gt_vals) == len(grid_vals) == len(load_vals) == 17520
     assert all(v == pytest.approx(600.0) for v in load_vals)
-    for g_t, m_t in zip(chp_vals, grid_vals, strict=True):
-        assert 0.0 <= g_t <= 1000.0
+    for g_t, m_t in zip(gt_vals, grid_vals, strict=True):
+        assert 0.0 <= g_t <= 450.0 + 1e-6
         assert g_t + m_t == pytest.approx(600.0, abs=1e-5)
-    assert 0.0 < sum(chp_vals) <= 0.85 * 600.0 * 8760 + 1e-3
+    assert raw_algo["metrics"]["step_hours"] == pytest.approx(0.5)
+    assert raw_algo["metrics"]["total_demand_kwh"] == pytest.approx(600.0 * 17520 * 0.5)
+    assert raw_algo["metrics"]["total_dispatch_kwh"] == pytest.approx(sum(gt_vals) * 0.5, rel=1e-6)
+    assert raw_algo["metrics"]["total_grid_import_kwh"] == pytest.approx(sum(grid_vals) * 0.5, rel=1e-6)
+    assert 0.0 < raw_algo["metrics"]["total_dispatch_kwh"] <= 0.85 * 600.0 * 17520 * 0.5 + 1e-2
+    assert raw_algo["construction_units"] == [
+        {
+            "unit_id": "unit_gt",
+            "instance_id": "gt_unit",
+            "mode": "mandatory",
+            "built": True,
+            "scales": [
+                {
+                    "planning_variable_id": "gt_cap",
+                    "value": pytest.approx(max(50.0, max(gt_vals)), abs=1e-6),
+                    "unit": "kW",
+                }
+            ],
+        }
+    ]
     assert raw_algo["planning_variables"] == [
-        {"planning_variable_id": "chp_cap", "value": pytest.approx(max(chp_vals), abs=1e-6), "unit": "kW"}
+        {"planning_variable_id": "grid_cap", "value": pytest.approx(2000.0), "unit": "kW"}
     ]
 
     algo_proj = project_engineering_solution(
@@ -725,20 +916,22 @@ def test_four_reference_plugins_validate_and_execute_with_exact_parity(
     assert solver_metrics["renewable_share_pct"] > 0.0
     assert solver_metrics["gas_co2_tonnes"] > 0.0
 
-    # 5b. Algorithm-derived solution: elec_load demand fully served by chp + grid
+    # 5b. Algorithm-derived 30min solution: load_main demand fully served by gt_unit + grid_main
     validated_report = _run_evaluator(
         tmp_path / "algo_projected.json",
         "eval_algo",
         {
             "grid_emission_factor_kg_per_kwh": 0.5703,
-            "step_hours": 1.0,
-            "demand_instance_ids": ["elec_load"],
+            "step_hours": 0.5,
+            "demand_instance_ids": ["load_main"],
         },
     )
     algo_metrics = {m["id"]: m["value"] for m in validated_report["metrics"]}
     assert algo_metrics["supply_reliability_pct"] == pytest.approx(100.0)
-    assert algo_metrics["total_grid_import_kwh"] == pytest.approx(sum(grid_vals), rel=1e-6)
-    assert algo_metrics["grid_co2_tonnes"] == pytest.approx(sum(grid_vals) * 0.5703 / 1000.0, rel=1e-6)
+    assert algo_metrics["total_grid_import_kwh"] == pytest.approx(sum(grid_vals) * 0.5, rel=1e-6)
+    assert algo_metrics["grid_co2_tonnes"] == pytest.approx(
+        sum(grid_vals) * 0.5 * 0.5703 / 1000.0, rel=1e-6
+    )
 
     # Export Excel and verify independent evaluator sheet
     monkeypatch.setattr(app_settings, "data_dir", tmp_path / "store")
@@ -852,6 +1045,12 @@ def test_four_reference_plugins_validate_and_execute_with_exact_parity(
             text = "\n".join(str(c.value) for row in wb[title_sheet].iter_rows() for c in row)
             assert "ies.evaluator.carbon_reliability@1.0.0" in text
             assert "Supply Reliability" in text
-            assert f"{algo_metrics['total_grid_import_kwh']:g}" in text.split("\n")
+            assert any(
+                isinstance(c.value, (int, float))
+                and not isinstance(c.value, bool)
+                and c.value == pytest.approx(algo_metrics["total_grid_import_kwh"], rel=1e-6)
+                for row in wb[title_sheet].iter_rows()
+                for c in row
+            )
     finally:
         eng.dispose()

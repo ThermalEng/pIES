@@ -711,7 +711,13 @@ def test_reference_plugin_boundary_and_clean_fixture_paths(tmp_path: Path) -> No
                 }
             },
             "construction_units": {
-                "u_chp": {"device_ref": "my_chp", "mode": "optional", "scales": ["chp_cap"]}
+                "u_chp": {
+                    "device_ref": "my_chp",
+                    "mode": "optional",
+                    "scales": {
+                        "chp_cap": {"active_lower_bound": "50", "active_upper_bound": "500"}
+                    },
+                }
             },
         },
     }
@@ -735,6 +741,88 @@ def test_reference_plugin_boundary_and_clean_fixture_paths(tmp_path: Path) -> No
     assert "my_load__electricity_in" in sol["series"]
     assert len(sol["series"]["my_load__electricity_in"]["values"]) == 8760
     assert sol["construction_units"][0]["instance_id"] == "my_chp"
+    assert sol["metrics"]["step_hours"] == 1.0
+
+    # 2b) Unsupported multi-energy devices raise StageIOError explicitly
+    multi_doc = {
+        **assembly_doc,
+        "devices": {
+            **assembly_doc["devices"],
+            "extra_wind": {
+                "definition": {"id": "ies.device.wind_turbine"},
+                "properties": {"rated_capacity_kw": {"value": 200, "unit": "kW"}},
+                "predefined_interfaces": {"wind_capacity_factor": {"mode": "constant", "value": 0.5}},
+            },
+        },
+    }
+    multi_in = tmp_path / "algo_multi_in"
+    multi_in.mkdir()
+    (multi_in / "request.json").write_text(
+        json.dumps(
+            {
+                "artifact": {"canonical_text": json.dumps(multi_doc), "receipt": {}},
+                "device_models": {},
+                "materialized": {
+                    "series": [
+                        {
+                            "device": "my_load",
+                            "interface": "electricity_demand",
+                            "values": [100.0, 100.0],
+                        }
+                    ]
+                },
+                "parameters": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(StageIOError, match="Unsupported device 'extra_wind'"):
+        run_plugin(manifest_path=algo_manifest, work_in=multi_in, work_out=tmp_path / "algo_multi_out")
+
+    # 2c) Subhourly 30min resolution halves energy & cost, and mandatory unit stays built=True
+    sub_doc = {
+        **assembly_doc,
+        "project_baseline": {"resolution": "30min", "start_year": 2026},
+        "planning": {
+            "variables": assembly_doc["planning"]["variables"],
+            "construction_units": {
+                "u_chp": {
+                    "device_ref": "my_chp",
+                    "mode": "mandatory",
+                    "scales": {"chp_cap": {"active_lower_bound": "40", "active_upper_bound": "100"}},
+                }
+            },
+        },
+    }
+    sub_in = tmp_path / "algo_sub_in"
+    sub_in.mkdir()
+    (sub_in / "request.json").write_text(
+        json.dumps(
+            {
+                "artifact": {"canonical_text": json.dumps(sub_doc), "receipt": {}},
+                "device_models": {},
+                "materialized": {
+                    "series": [
+                        {
+                            "device": "my_load",
+                            "interface": "electricity_demand",
+                            "values": [200.0, 200.0, 200.0, 200.0],
+                        }
+                    ]
+                },
+                "parameters": {"generator_cost_per_kwh": 0.95, "grid_import_cost_per_kwh": 0.50},
+            }
+        ),
+        encoding="utf-8",
+    )
+    sub_out = tmp_path / "algo_sub_out"
+    run_plugin(manifest_path=algo_manifest, work_in=sub_in, work_out=sub_out)
+    sub_sol = json.loads((sub_out / "solution.json").read_text(encoding="utf-8"))
+    assert sub_sol["metrics"]["step_hours"] == 0.5
+    assert sub_sol["metrics"]["total_demand_kwh"] == pytest.approx(400.0)
+    assert sub_sol["metrics"]["total_cost_cny"] == pytest.approx(200.0)
+    assert sub_sol["construction_units"][0]["built"] is True
+    assert sub_sol["construction_units"][0]["scales"][0]["value"] == pytest.approx(40.0)
 
     # 3) carbon_reliability ignores arbitrary instance-name substrings & reports null when no demand bound
     eval_manifest = MARKET_ROOT / "artifacts/ies/ies.evaluator.carbon_reliability/1.0.0/plugin/plugin.yaml"

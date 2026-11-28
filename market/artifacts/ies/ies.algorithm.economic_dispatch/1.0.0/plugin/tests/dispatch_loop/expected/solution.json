@@ -16,6 +16,7 @@
   ],
   "metrics": {
     "iterations": 4,
+    "step_hours": 1.0,
     "total_cost_cny": 320.205447,
     "total_demand_kwh": 700.0,
     "total_dispatch_kwh": 594.999999,
