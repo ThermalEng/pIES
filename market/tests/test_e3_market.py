@@ -224,6 +224,9 @@ def test_device_validator_ast_equations_and_forbidden_fields() -> None:
             "rated_power_kw": {"value": 50.0, "unit": "kW"},
             "reserve_hours": {"value": 1.0, "unit": "h"},
             "initial_soc": {"value": 0.5, "unit": "1"},
+            "cop": {"value": 3.2, "unit": "1"},
+            "flow_limit": {"value": 10.0, "unit": "千m³/h"},
+            "energy_intensity": {"value": 120.0, "unit": "kWh/m²/a"},
             "label_tag": {"value": "lithium", "unit": "1"},
         },
         "interfaces": {
@@ -232,7 +235,13 @@ def test_device_validator_ast_equations_and_forbidden_fields() -> None:
                 "carrier": "electricity",
                 "unit": "kW",
                 "valid_range": {"minimum": None, "maximum": None},
-            }
+            },
+            "heat_out": {
+                "type": "out",
+                "carrier": "heat",
+                "unit": "kW",
+                "valid_range": {"minimum": None, "maximum": None},
+            },
         },
         "equations": {
             "variables": {
@@ -258,8 +267,12 @@ def test_device_validator_ast_equations_and_forbidden_fields() -> None:
                 {"id": "power_balance", "expression": "electricity[t] = discharge[t] - charge[t]"},
                 {"id": "exclusivity", "expression": "charge[t] * discharge[t] = 0"},
                 {
+                    "id": "cop_constraint",
+                    "expression": "cop * electricity[t] = heat_out[t]",
+                },
+                {
                     "id": "quadratic_loss",
-                    "expression": "power_headroom[t] = (charge[t] ^ 2) * reserve_hours",
+                    "expression": "power_headroom[t] = ((charge[t] / rated_power_kw) ^ 2) * capacity_kwh",
                 },
                 {
                     "id": "soc_step",
@@ -298,6 +311,7 @@ def test_device_validator_ast_equations_and_forbidden_fields() -> None:
         ("electric_out[t] = rated_capacity_kwp[t]", "cannot time-index scalar"),
         ("electric_out[t] = step_duration[t]", "cannot time-index scalar"),
         ("rated_capacity_kwp = 10", "LHS cannot target scalar"),
+        ("step_duration = 1", "LHS cannot target scalar"),
     )
     for bad_expr, match_text in invalid_expressions:
         doc = {
@@ -389,6 +403,18 @@ def test_device_validator_ast_equations_and_forbidden_fields() -> None:
     }
     with pytest.raises(MarketValidationError, match="dimension mismatch"):
         validate_device_model_mapping(bad_bound_doc)
+
+    # Rejects malformed composite units (empty tokens / trailing '/')
+    for bad_unit in ("kW**h", "kW/", "*kW"):
+        bad_unit_doc = {
+            **storage_doc,
+            "properties": {
+                **storage_doc["properties"],
+                "bad_prop": {"value": 1.0, "unit": bad_unit},
+            },
+        }
+        with pytest.raises(MarketValidationError, match="empty"):
+            validate_device_model_mapping(bad_unit_doc)
 
     # Rejects cyclic variable dependency
     cyclic_doc = {

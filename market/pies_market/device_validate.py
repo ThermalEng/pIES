@@ -173,36 +173,53 @@ def _is_finite_number(value: object) -> bool:
     )
 
 
+_MAX_UNIT_LEN = 64
+_CN_MULTIPLIERS = frozenset({"百", "千", "万", "亿"})
+
+
+def _lookup_unit_dims(tok: str) -> dict[str, int] | None:
+    t_key = tok.lower()
+    if t_key in _SIMPLE_UNIT_DIMS:
+        return _SIMPLE_UNIT_DIMS[t_key]
+    if len(tok) > 1 and tok[0] in _CN_MULTIPLIERS:
+        return _SIMPLE_UNIT_DIMS.get(tok[1:].lower())
+    return None
+
+
 def _unit_dims(unit: object, *, path: str = "unit") -> Counter[str]:
     if not isinstance(unit, str) or not unit.strip():
         raise MarketValidationError(f"{path} must be a non-empty unit string")
     raw = unit.strip()
-    key = raw.lower()
-    if key in _SIMPLE_UNIT_DIMS:
-        return Counter(_SIMPLE_UNIT_DIMS[key])
+    if len(raw) > _MAX_UNIT_LEN:
+        raise MarketValidationError(f"{path} exceeds max unit length ({_MAX_UNIT_LEN}): {raw!r}")
+    if "(" in raw or ")" in raw:
+        raise MarketValidationError(f"{path} forbids parentheses in unit {raw!r}")
 
-    if "/" in raw:
-        halves = raw.split("/")
-        if len(halves) != 2 or not halves[0].strip() or not halves[1].strip():
-            raise MarketValidationError(f"{path} has malformed composite unit {raw!r}")
-        num_parts = [p.strip() for p in re.split(r"[·*]", halves[0]) if p.strip()]
-        den_parts = [p.strip() for p in re.split(r"[·*]", halves[1]) if p.strip()]
-    else:
-        num_parts = [p.strip() for p in re.split(r"[·*]", raw) if p.strip()]
-        den_parts = []
-    if not num_parts:
-        raise MarketValidationError(f"{path} has empty numerator in unit {raw!r}")
+    exact = _lookup_unit_dims(raw)
+    if exact is not None:
+        return Counter(exact)
+
+    def _split_side(segment: str) -> list[str]:
+        tokens = [p.strip() for p in re.split(r"[·*]", segment)]
+        if not segment or any(not tok for tok in tokens):
+            raise MarketValidationError(f"{path} contains empty token in unit {raw!r}")
+        return tokens
+
+    parts = [p.strip() for p in raw.split("/")]
+    if any(not part for part in parts):
+        raise MarketValidationError(f"{path} contains empty division segment in unit {raw!r}")
+    num_parts = _split_side(parts[0])
+    den_parts = [tok for seg in parts[1:] for tok in _split_side(seg)]
 
     dims: Counter[str] = Counter()
     is_composite = len(num_parts) + len(den_parts) > 1
     for sign, tokens in ((1, num_parts), (-1, den_parts)):
         for tok in tokens:
-            t_key = tok.lower()
-            if is_composite and t_key in _AFFINE_UNITS:
+            if is_composite and tok.lower() in _AFFINE_UNITS:
                 raise MarketValidationError(
                     f"{path} cannot use affine temperature unit {tok!r} in composite unit {raw!r}"
                 )
-            base_dims = _SIMPLE_UNIT_DIMS.get(t_key)
+            base_dims = _lookup_unit_dims(tok)
             if base_dims is None:
                 raise MarketValidationError(f"{path} uses unknown unit {raw!r}")
             for dim_key, power in base_dims.items():
@@ -722,14 +739,15 @@ def validate_device_model_mapping(
         if len(lhs_refs) not in (1, 2):
             raise MarketValidationError(
                 f"equations.relations[{idx}].expression LHS must reference 1 or 2 declared "
-                "interfaces/variables"
-            )
-        if any(ref.name not in series_names for ref in lhs_refs):
-            raise MarketValidationError(
-                f"equations.relations[{idx}].expression LHS cannot target scalar property or step_duration"
+                "symbols"
             )
         if len(lhs_refs) == 1:
             output = lhs_refs[0].name
+            if output not in series_names:
+                raise MarketValidationError(
+                    f"equations.relations[{idx}].expression LHS cannot target scalar property or "
+                    "step_duration"
+                )
             if iface_types.get(output) == "predefined":
                 raise MarketValidationError(
                     f"equations.relations[{idx}] LHS cannot assign predefined interface {output!r}"
