@@ -377,9 +377,21 @@ def test_real_docker_timeout_stop_and_oom_detection(docker_harness) -> None:
             "stage_execution_id": exec_oom,
             "fencing_token": "fence-oom",
             "image": "python:3.12-slim",
-            "command": ["python", "-c", "buf = bytearray(96 * 1024 * 1024); buf[:] = b'x' * len(buf)"],
+            "command": [
+                "python",
+                "-c",
+                (
+                    "chunks = []\n"
+                    "size = 2 * 1024 * 1024\n"
+                    "while True:\n"
+                    "    try:\n"
+                    "        chunks.append(bytearray(b'x' * size))\n"
+                    "    except MemoryError:\n"
+                    "        size = max(256 * 1024, size // 2)\n"
+                ),
+            ],
             "cpu_cores": 1.0,
-            "memory_mb": 16,
+            "memory_mb": 32,
             "pids_limit": 32,
             "tmpfs_size_mb": 64,
         },
