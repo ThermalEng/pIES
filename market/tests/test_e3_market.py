@@ -227,6 +227,7 @@ def test_device_validator_ast_equations_and_forbidden_fields() -> None:
             "cop": {"value": 3.2, "unit": "1"},
             "flow_limit": {"value": 10.0, "unit": "千m³/h"},
             "energy_intensity": {"value": 120.0, "unit": "kWh/m²/a"},
+            "kelvin_rate": {"value": 1.0, "unit": "K/h"},
             "label_tag": {"value": "lithium", "unit": "1"},
         },
         "interfaces": {
@@ -415,6 +416,18 @@ def test_device_validator_ast_equations_and_forbidden_fields() -> None:
         }
         with pytest.raises(MarketValidationError, match="empty"):
             validate_device_model_mapping(bad_unit_doc)
+
+    # Rejects multiplier-prefixed affine temperature in composite units (千°C/h, 1/千°F)
+    for bad_affine in ("千°C/h", "1/千°F"):
+        bad_affine_doc = {
+            **storage_doc,
+            "properties": {
+                **storage_doc["properties"],
+                "bad_temp": {"value": 1.0, "unit": bad_affine},
+            },
+        }
+        with pytest.raises(MarketValidationError, match="affine temperature"):
+            validate_device_model_mapping(bad_affine_doc)
 
     # Rejects cyclic variable dependency
     cyclic_doc = {

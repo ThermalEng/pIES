@@ -177,12 +177,15 @@ _MAX_UNIT_LEN = 64
 _CN_MULTIPLIERS = frozenset({"百", "千", "万", "亿"})
 
 
-def _lookup_unit_dims(tok: str) -> dict[str, int] | None:
+def _lookup_unit_dims(tok: str) -> tuple[str, dict[str, int]] | None:
     t_key = tok.lower()
     if t_key in _SIMPLE_UNIT_DIMS:
-        return _SIMPLE_UNIT_DIMS[t_key]
+        return t_key, _SIMPLE_UNIT_DIMS[t_key]
     if len(tok) > 1 and tok[0] in _CN_MULTIPLIERS:
-        return _SIMPLE_UNIT_DIMS.get(tok[1:].lower())
+        stripped = tok[1:].lower()
+        dims = _SIMPLE_UNIT_DIMS.get(stripped)
+        if dims is not None:
+            return stripped, dims
     return None
 
 
@@ -197,7 +200,7 @@ def _unit_dims(unit: object, *, path: str = "unit") -> Counter[str]:
 
     exact = _lookup_unit_dims(raw)
     if exact is not None:
-        return Counter(exact)
+        return Counter(exact[1])
 
     def _split_side(segment: str) -> list[str]:
         tokens = [p.strip() for p in re.split(r"[·*]", segment)]
@@ -215,13 +218,14 @@ def _unit_dims(unit: object, *, path: str = "unit") -> Counter[str]:
     is_composite = len(num_parts) + len(den_parts) > 1
     for sign, tokens in ((1, num_parts), (-1, den_parts)):
         for tok in tokens:
-            if is_composite and tok.lower() in _AFFINE_UNITS:
+            found = _lookup_unit_dims(tok)
+            if found is None:
+                raise MarketValidationError(f"{path} uses unknown unit {raw!r}")
+            base_key, base_dims = found
+            if is_composite and base_key in _AFFINE_UNITS:
                 raise MarketValidationError(
                     f"{path} cannot use affine temperature unit {tok!r} in composite unit {raw!r}"
                 )
-            base_dims = _lookup_unit_dims(tok)
-            if base_dims is None:
-                raise MarketValidationError(f"{path} uses unknown unit {raw!r}")
             for dim_key, power in base_dims.items():
                 dims[dim_key] += sign * power
                 if dims[dim_key] == 0:
