@@ -443,6 +443,7 @@ def pick(changed: list[str], full: bool = False) -> dict[str, str]:
     job_runner_run = sdk_run
     plugins_run = sdk_run
     market_run = sdk_run
+    gateway_run = sdk_run
 
     for path in changed:
         if path == "__FULL__":
@@ -456,6 +457,7 @@ def pick(changed: list[str], full: bool = False) -> dict[str, str]:
                 job_runner_run = True
                 plugins_run = True
                 market_run = True
+                gateway_run = True
             if path == ".github/ci/select_tests.py":
                 browser.update(BASIC_SPECS)  # exercise all six real @basic cases after selector edits
             # Infrastructure validations are expensive and independent of
@@ -474,10 +476,14 @@ def pick(changed: list[str], full: bool = False) -> dict[str, str]:
             job_runner_run = True
             plugins_run = True
             market_run = True
+            gateway_run = True
             backend.update((SMOKE_BACKEND, "test_bootstrap.py"))
             startup = True
         elif path.startswith("market/"):
             market_run = True
+            gateway_run = True
+        elif path.startswith("market_gateway/"):
+            gateway_run = True
         elif path.startswith("job_runner/"):
             job_runner_run = True
             backend.update((SMOKE_BACKEND, "test_bootstrap.py", "test_runtime_audit_fixes.py"))
@@ -706,6 +712,7 @@ def pick(changed: list[str], full: bool = False) -> dict[str, str]:
         "job_runner_run": str(job_runner_run).lower(),
         "plugins_run": str(plugins_run).lower(),
         "market_run": str(market_run).lower(),
+        "gateway_run": str(gateway_run).lower(),
         "special_device": str(special).lower(),
     }
 
@@ -993,15 +1000,28 @@ def self_test() -> None:
         and sdk_sel["job_runner_run"] == "true"
         and sdk_sel["plugins_run"] == "true"
         and sdk_sel["market_run"] == "true"
+        and sdk_sel["gateway_run"] == "true"
     )
     jr_sel = pick(["job_runner/pies_job_runner/docker_ops.py"])
     assert jr_sel["job_runner_run"] == "true" and jr_sel["sdk_run"] == "false" and jr_sel["plugins_run"] == "false"
     plg_sel = pick(["plugins/solver_highs/solver_stage.py"])
     assert plg_sel["plugins_run"] == "true" and plg_sel["sdk_run"] == "false" and plg_sel["job_runner_run"] == "false"
     mkt_py_sel = pick(["market/pies_market/check_pr.py"])
-    assert mkt_py_sel["market_run"] == "true" and mkt_py_sel["backend_run"] == "false" and mkt_py_sel["browser_run"] == "false"
+    assert (
+        mkt_py_sel["market_run"] == "true"
+        and mkt_py_sel["gateway_run"] == "true"
+        and mkt_py_sel["backend_run"] == "false"
+        and mkt_py_sel["browser_run"] == "false"
+    )
     mkt_site_sel = pick(["market/site/app.js"])
     assert mkt_site_sel["market_run"] == "true" and mkt_site_sel["backend_run"] == "false" and mkt_site_sel["browser_run"] == "false"
+    gw_sel = pick(["market_gateway/pies_market_gateway/app.py"])
+    assert (
+        gw_sel["gateway_run"] == "true"
+        and gw_sel["market_run"] == "false"
+        and gw_sel["backend_run"] == "false"
+        and gw_sel["browser_run"] == "false"
+    )
     assert pick(["backend/iesplan/core/units.py"])["plugins_run"] == "true"
     assert pick(["backend/iesplan/__init__.py"])["plugins_run"] == "true"
     assert pick(["backend/solver-executables/ies-highs-solver"])["plugins_run"] == "true"
@@ -1011,12 +1031,14 @@ def self_test() -> None:
         and doc_sel["job_runner_run"] == "false"
         and doc_sel["plugins_run"] == "false"
         and doc_sel["market_run"] == "false"
+        and doc_sel["gateway_run"] == "false"
     )
     assert (
         all_specs["sdk_run"] == "true"
         and all_specs["job_runner_run"] == "true"
         and all_specs["plugins_run"] == "true"
         and all_specs["market_run"] == "true"
+        and all_specs["gateway_run"] == "true"
     )
     print("Selector self-test passed")
 
