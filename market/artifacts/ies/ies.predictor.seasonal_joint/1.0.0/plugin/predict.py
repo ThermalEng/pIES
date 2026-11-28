@@ -120,7 +120,11 @@ def predict(ctx: StageContext) -> None:
         tail = history[-min(smoothing_window, len(history)) :]
         recent_ma = sum(tail) / len(tail)
         forecast_values = [
-            round(seasonal_weight * slots[step % season_length] + (1.0 - seasonal_weight) * recent_ma, 6)
+            round(
+                seasonal_weight * slots[(len(history) + step) % season_length]
+                + (1.0 - seasonal_weight) * recent_ma,
+                6,
+            )
             for step in range(point_count)
         ]
 

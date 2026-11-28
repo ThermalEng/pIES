@@ -88,8 +88,8 @@ docker compose up -d --build
    - 升级 `backend` 镜像后执行 `python -m iesplan.migrations`（或由受控单实例启动触发 `apply_migrations()`），按序幂等应用两项迁移并登记至 `schema_migrations`：
      - `v1_2_0_calc_config`（版本 ID `20261126_120_calc_config`）：将项目已保存的可编辑 `CalculationConfig` 修订一次性转为 `1.2.0` 13 字段结构（移除 `convergence`、将 `evaluator` 映射为并联 `evaluators[]`、按分槽迁入 `options.generator` / `options.algorithm`）；已完成的历史 `CalcSnapshot` 与 `Evidence` 保持只读不变。
      - `v1_2_0_ecosystem`（版本 ID `20261127_120_ecosystem`）：创建 `ecosystem_settings`、`local_artifacts`、`member_artifact_installs` 表及单当前生效版本索引，并播种默认离线设置行（`market_mode="local"`、`local_upload_requires_approval=True`）。
-3. **重建并拉起容器栈（含内置镜像与插件基础镜像）**：
-   - 在仓库根目录执行 `docker compose up -d --build`，随同拉起核心五容器并由一次性 `builtin_stages` 服务构建 `pies-builtin-stages:1.2.0` 与插件基础镜像 `pies-plugin-base:latest`。
+3. **构建插件基础镜像并拉起容器栈（含内置镜像）**：
+   - 先在仓库根目录构建插件基础镜像 `docker build -f sdk/Dockerfile.base -t pies-plugin-base:latest sdk`；再执行 `docker compose up -d --build`，随同拉起核心五容器并由一次性 `builtin_stages` 服务构建 `pies-builtin-stages:1.2.0`。
 4. **可选独立公共市场与无状态投稿网关**：
    - 若需联网生态或自建团队市场，可单独部署静态市场目录（`market/` 产物与 `index.json`，推荐静态站点/GitHub Pages 托管）及独立无状态投稿网关（`market_gateway/`，配置 `MARKET_HMAC_SECRET` 与 SMTP/GitHub App 凭证）；随后由管理员在 `/admin/ecosystem` 切换 `market_mode = "online"` 并配置 `market_index_url`、`submission_gateway_url` 与可选单源 `pip_index_url`。
 5. **单当前生效版本升级策略**：

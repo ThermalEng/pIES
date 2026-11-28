@@ -1,7 +1,48 @@
 {
-  "demand_kw": [120.0, 180.0, 240.0, 160.0],
+  "artifact": {
+    "canonical_text": "{\"schema\":\"ies.assembly\",\"schema_version\":\"1.0.0\",\"assembly\":{\"id\":\"dispatch_loop_test\"},\"project_baseline\":{\"resolution\":\"1h\",\"start_year\":2026},\"devices\":{\"campus_chp\":{\"definition\":{\"id\":\"ies.device.chp\"},\"properties\":{\"rated_electric_kw\":{\"value\":600,\"unit\":\"kW\"}},\"predefined_interfaces\":{}},\"campus_grid\":{\"definition\":{\"id\":\"ies.device.grid_connection\"},\"properties\":{\"max_import_power_kw\":{\"value\":1000,\"unit\":\"kW\"}},\"predefined_interfaces\":{}},\"campus_load\":{\"definition\":{\"id\":\"ies.device.electric_load\"},\"properties\":{\"peak_power_kw\":{\"value\":500,\"unit\":\"kW\"}},\"predefined_interfaces\":{\"electricity_demand\":{\"mode\":\"constant\",\"value\":175}}}},\"planning\":{\"variables\":{\"chp_electric_cap\":{\"device_ref\":\"campus_chp\",\"parameter\":\"rated_electric_kw\",\"lower_bound\":\"0\",\"upper_bound\":\"600\",\"unit\":\"kW\"}},\"construction_units\":{\"u_chp\":{\"device_ref\":\"campus_chp\",\"mode\":\"mandatory\",\"scales\":[\"chp_electric_cap\"]}}}}",
+    "receipt": {}
+  },
+  "calculation_config": {
+    "options": {
+      "algorithm": {
+        "generator_cost_per_kwh": 0.35,
+        "grid_import_cost_per_kwh": 0.85,
+        "local_energy_share_cap": 0.85,
+        "max_iterations": 12,
+        "tolerance": 0.005
+      }
+    }
+  },
+  "device_models": {
+    "campus_chp": {
+      "interfaces": {
+        "electric_out": {"type": "out", "carrier": "electricity", "unit": "kW"},
+        "gas_in": {"type": "in", "carrier": "gas", "unit": "m3/h"}
+      }
+    },
+    "campus_grid": {
+      "interfaces": {
+        "electricity_import": {"type": "out", "carrier": "electricity", "unit": "kW"}
+      }
+    },
+    "campus_load": {
+      "interfaces": {
+        "electricity_demand": {"type": "predefined", "carrier": "electricity", "unit": "kW"},
+        "electricity_in": {"type": "in", "carrier": "electricity", "unit": "kW"}
+      }
+    }
+  },
+  "materialized": {
+    "series": [
+      {
+        "device": "campus_load",
+        "interface": "electricity_demand",
+        "values": [120.0, 180.0, 240.0, 160.0]
+      }
+    ]
+  },
   "parameters": {
-    "generator_capacity_kw": 600.0,
     "generator_cost_per_kwh": 0.35,
     "grid_import_cost_per_kwh": 0.85,
     "local_energy_share_cap": 0.85,

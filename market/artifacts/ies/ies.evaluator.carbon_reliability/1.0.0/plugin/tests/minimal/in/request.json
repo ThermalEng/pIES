@@ -1,7 +1,10 @@
 {
   "parameters": {
+    "demand_instance_ids": ["load_1"],
+    "demand_variable_ids": ["electricity_in", "load_kw"],
     "gas_emission_factor_kg_per_m3": 2.162,
     "grid_emission_factor_kg_per_kwh": 0.5703,
+    "renewable_instance_ids": ["wind_1"],
     "step_hours": 1.0
   }
 }

@@ -8,14 +8,14 @@
   "seed": 42,
   "targets": [
     {
-      "history": [0.2, 0.5, 0.3, 0.4, 0.7, 0.5],
+      "history": [0.2, 0.5, 0.3, 0.4, 0.7],
       "history_object_id": "hist-wind-01",
       "instance": "wind_1",
       "interface": "wind_capacity_factor",
       "target_type": "device_interface"
     },
     {
-      "history_csv_rel": "data/history.csv",
+      "history_csv_rel": "inputs/history.csv",
       "history_object_id": "hist-load-01",
       "instance": "load_1",
       "interface": "electricity_demand",

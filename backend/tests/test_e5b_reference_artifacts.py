@@ -40,6 +40,7 @@ import iesplan.tasks.persistence  # noqa: F401
 from iesplan import identity as identity_domain
 from iesplan import project as project_domain
 from iesplan.application.packages.transfers import export_excel
+from iesplan.application.worker.compute_cases import FrozenSeriesInputs, _attach_series_inputs
 from iesplan.assembly import validate_assembly_doc
 from iesplan.computation import (
     PRIMAL_SOLUTION_OUTPUT_PATH,
@@ -652,16 +653,38 @@ def test_four_reference_plugins_validate_and_execute_with_exact_parity(
         "evaluation": {"evaluation_years": 1, "construction_period": 0, "operation_years": 1},
         "time_limit_seconds": 60,
         "seed": 7,
-        "materialized": {
-            "series": [
-                {"instance": "elec_load", "interface": "electricity_demand", "values": [120.0, 210.0, 180.0]}
-            ]
-        },
     }
+    algo_files: dict[str, Any] = {}
+    _attach_series_inputs(algo_req, algo_files, FrozenSeriesInputs(operation_years=1))
+    assert "frozen_series_inputs" in algo_req and "materialized" not in algo_req
+    for rel, content in algo_files.items():
+        dest = algo_in / rel
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(content if isinstance(content, bytes) else read_content(content))
     (algo_in / "request.json").write_text(json.dumps(algo_req), encoding="utf-8")
     run_plugin(manifest_path=algo_dir / "plugin.yaml", work_in=algo_in, work_out=algo_out)
     iters = read_iterations(algo_out / "iterations.jsonl")
     assert len(iters) >= 1 and iters[-1].iteration >= 1
+
+    raw_algo = json.loads((algo_out / "solution.json").read_text(encoding="utf-8"))
+    assert set(raw_algo["series"]) == {
+        "chp__electric_out",
+        "grid__electricity_import",
+        "elec_load__electricity_in",
+    }
+    chp_vals = raw_algo["series"]["chp__electric_out"]["values"]
+    grid_vals = raw_algo["series"]["grid__electricity_import"]["values"]
+    load_vals = raw_algo["series"]["elec_load__electricity_in"]["values"]
+    assert len(chp_vals) == len(grid_vals) == len(load_vals) == 8760
+    assert all(v == pytest.approx(600.0) for v in load_vals)
+    for g_t, m_t in zip(chp_vals, grid_vals, strict=True):
+        assert 0.0 <= g_t <= 1000.0
+        assert g_t + m_t == pytest.approx(600.0, abs=1e-5)
+    assert 0.0 < sum(chp_vals) <= 0.85 * 600.0 * 8760 + 1e-3
+    assert raw_algo["planning_variables"] == [
+        {"planning_variable_id": "chp_cap", "value": pytest.approx(max(chp_vals), abs=1e-6), "unit": "kW"}
+    ]
+
     algo_proj = project_engineering_solution(
         MemoryContent((algo_out / "solution.json").read_bytes()),
         bundle_id="e5b-algo-bundle",
@@ -671,22 +694,51 @@ def test_four_reference_plugins_validate_and_execute_with_exact_parity(
     )
     assert algo_proj.compute_result.math_status in ("solved", "feasible")
 
-    # 5. Execute ies.evaluator.carbon_reliability@1.0.0 on restored engineering solution & export Excel
+    # 5. Execute ies.evaluator.carbon_reliability@1.0.0 with explicit semantic selectors
     eval_dir = market_dir / "ies.evaluator.carbon_reliability" / "1.0.0" / "plugin"
-    eval_in = tmp_path / "eval_in"
-    eval_out = tmp_path / "eval_out"
-    eval_in.mkdir(parents=True)
-    shutil.copy2(tmp_path / "eng_ref.json", eval_in / "solution.json")
-    (eval_in / "request.json").write_text(
-        json.dumps({"parameters": {"grid_emission_factor_kg_per_kwh": 0.5703, "step_hours": 1.0}}),
-        encoding="utf-8",
+
+    def _run_evaluator(solution_path: Path, name: str, parameters: dict[str, Any]) -> dict[str, Any]:
+        eval_in = tmp_path / f"{name}_in"
+        eval_out = tmp_path / f"{name}_out"
+        eval_in.mkdir(parents=True)
+        shutil.copy2(solution_path, eval_in / "solution.json")
+        (eval_in / "request.json").write_text(json.dumps({"parameters": parameters}), encoding="utf-8")
+        run_plugin(manifest_path=eval_dir / "plugin.yaml", work_in=eval_in, work_out=eval_out)
+        doc = json.loads((eval_out / "evaluation_report.json").read_text(encoding="utf-8"))
+        return validate_evaluation_report_doc(
+            doc, expected_evaluator="ies.evaluator.carbon_reliability@1.0.0"
+        )
+
+    # 5a. Solver-restored solution: wind is the renewable source, elec_load the bound demand
+    solver_report = _run_evaluator(
+        tmp_path / "eng_ref.json",
+        "eval_solver",
+        {
+            "grid_emission_factor_kg_per_kwh": 0.5703,
+            "step_hours": 1.0,
+            "renewable_instance_ids": ["wind"],
+            "demand_instance_ids": ["elec_load"],
+        },
     )
-    run_plugin(manifest_path=eval_dir / "plugin.yaml", work_in=eval_in, work_out=eval_out)
-    eval_doc = json.loads((eval_out / "evaluation_report.json").read_text(encoding="utf-8"))
-    validated_report = validate_evaluation_report_doc(
-        eval_doc, expected_evaluator="ies.evaluator.carbon_reliability@1.0.0"
+    solver_metrics = {m["id"]: m["value"] for m in solver_report["metrics"]}
+    assert solver_metrics["supply_reliability_pct"] == pytest.approx(100.0)
+    assert solver_metrics["renewable_share_pct"] > 0.0
+    assert solver_metrics["gas_co2_tonnes"] > 0.0
+
+    # 5b. Algorithm-derived solution: elec_load demand fully served by chp + grid
+    validated_report = _run_evaluator(
+        tmp_path / "algo_projected.json",
+        "eval_algo",
+        {
+            "grid_emission_factor_kg_per_kwh": 0.5703,
+            "step_hours": 1.0,
+            "demand_instance_ids": ["elec_load"],
+        },
     )
-    assert len(validated_report["metrics"]) >= 5
+    algo_metrics = {m["id"]: m["value"] for m in validated_report["metrics"]}
+    assert algo_metrics["supply_reliability_pct"] == pytest.approx(100.0)
+    assert algo_metrics["total_grid_import_kwh"] == pytest.approx(sum(grid_vals), rel=1e-6)
+    assert algo_metrics["grid_co2_tonnes"] == pytest.approx(sum(grid_vals) * 0.5703 / 1000.0, rel=1e-6)
 
     # Export Excel and verify independent evaluator sheet
     monkeypatch.setattr(app_settings, "data_dir", tmp_path / "store")
@@ -799,5 +851,7 @@ def test_four_reference_plugins_validate_and_execute_with_exact_parity(
             assert title_sheet in wb.sheetnames
             text = "\n".join(str(c.value) for row in wb[title_sheet].iter_rows() for c in row)
             assert "ies.evaluator.carbon_reliability@1.0.0" in text
+            assert "Supply Reliability" in text
+            assert f"{algo_metrics['total_grid_import_kwh']:g}" in text.split("\n")
     finally:
         eng.dispose()

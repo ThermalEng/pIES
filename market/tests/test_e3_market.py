@@ -14,12 +14,14 @@ from types import SimpleNamespace
 import pytest
 from pies_sdk import (
     PluginValidationError,
+    StageIOError,
     compute_publisher_email_digest,
     generate_public_namespace,
     validate_market_index,
     validate_publishers_registry,
     verify_external_sha256,
 )
+from pies_sdk.runner import run_plugin
 
 from pies_market import (
     MarketValidationError,
@@ -654,3 +656,128 @@ def test_real_docker_network_none_selftest(tmp_path: Path) -> None:
     )
     with pytest.raises(MarketValidationError, match="timed out after 1s"):
         check_market_pr(slow_mkt, docker_selftest=True)
+
+
+def test_reference_plugin_boundary_and_clean_fixture_paths(tmp_path: Path) -> None:
+    # 1) Never place fixtures under gitignored 'data/' subdirectories inside market/artifacts/
+    data_dirs = [p for p in (MARKET_ROOT / "artifacts").rglob("data") if p.is_dir()]
+    assert data_dirs == []
+
+    # 2) economic_dispatch consumes FrozenSeriesInputs and rejects missing assembly inputs
+    algo_manifest = MARKET_ROOT / "artifacts/ies/ies.algorithm.economic_dispatch/1.0.0/plugin/plugin.yaml"
+    bad_in = tmp_path / "algo_bad_in"
+    bad_in.mkdir()
+    (bad_in / "request.json").write_text(json.dumps({"parameters": {}}), encoding="utf-8")
+    with pytest.raises(StageIOError, match="artifact.canonical_text"):
+        run_plugin(manifest_path=algo_manifest, work_in=bad_in, work_out=tmp_path / "algo_bad_out")
+
+    frozen_in = tmp_path / "algo_frozen_in"
+    (frozen_in / "objects").mkdir(parents=True)
+    (frozen_in / "objects/obj-load").write_text(
+        "step,electricity_demand\n0,100\n1,200\n2,300\n", encoding="utf-8"
+    )
+    assembly_doc = {
+        "schema": "ies.assembly",
+        "schema_version": "1.0.0",
+        "assembly": {"id": "frozen_test"},
+        "project_baseline": {"resolution": "1h", "start_year": 2026},
+        "devices": {
+            "my_chp": {
+                "definition": {"id": "ies.device.chp"},
+                "properties": {"rated_electric_kw": {"value": 500, "unit": "kW"}},
+                "predefined_interfaces": {},
+            },
+            "my_grid": {
+                "definition": {"id": "ies.device.grid_connection"},
+                "properties": {"max_import_power_kw": {"value": 1000, "unit": "kW"}},
+                "predefined_interfaces": {},
+            },
+            "my_load": {
+                "definition": {"id": "ies.device.electric_load"},
+                "properties": {"peak_power_kw": {"value": 500, "unit": "kW"}},
+                "predefined_interfaces": {
+                    "electricity_demand": {"mode": "data_repeat", "content": {"object_id": "obj-load"}}
+                },
+            },
+        },
+        "planning": {
+            "variables": {
+                "chp_cap": {
+                    "device_ref": "my_chp",
+                    "parameter": "rated_electric_kw",
+                    "lower_bound": "0",
+                    "upper_bound": "500",
+                    "unit": "kW",
+                }
+            },
+            "construction_units": {
+                "u_chp": {"device_ref": "my_chp", "mode": "optional", "scales": ["chp_cap"]}
+            },
+        },
+    }
+    (frozen_in / "request.json").write_text(
+        json.dumps(
+            {
+                "artifact": {"canonical_text": json.dumps(assembly_doc), "receipt": {}},
+                "device_models": {},
+                "evaluation": {"operation_years": 1},
+                "frozen_series_inputs": {"fixed_resources": {"obj-load": "objects/obj-load"}},
+                "parameters": {"max_iterations": 8, "tolerance": 0.01},
+            }
+        ),
+        encoding="utf-8",
+    )
+    frozen_out = tmp_path / "algo_frozen_out"
+    run_plugin(manifest_path=algo_manifest, work_in=frozen_in, work_out=frozen_out)
+    sol = json.loads((frozen_out / "solution.json").read_text(encoding="utf-8"))
+    assert "my_chp__electric_out" in sol["series"]
+    assert "my_grid__electricity_import" in sol["series"]
+    assert "my_load__electricity_in" in sol["series"]
+    assert len(sol["series"]["my_load__electricity_in"]["values"]) == 8760
+    assert sol["construction_units"][0]["instance_id"] == "my_chp"
+
+    # 3) carbon_reliability ignores arbitrary instance-name substrings & reports null when no demand bound
+    eval_manifest = MARKET_ROOT / "artifacts/ies/ies.evaluator.carbon_reliability/1.0.0/plugin/plugin.yaml"
+    eval_in = tmp_path / "eval_unbound_in"
+    eval_in.mkdir()
+    (eval_in / "request.json").write_text(json.dumps({"parameters": {}}), encoding="utf-8")
+    (eval_in / "solution.json").write_text(
+        json.dumps(
+            {
+                "schema": "ies.engineering-solution",
+                "schema_version": "1.0.0",
+                "solver_summary": {
+                    "termination_reason": "optimal",
+                    "math_status": "solved",
+                    "has_feasible_solution": True,
+                    "objective_value": 50.0,
+                    "objective_unit": "CNY",
+                    "best_bound": 50.0,
+                    "relative_gap": 0.0,
+                },
+                "construction_units": [],
+                "series": {
+                    "wind_named_chp__electric_out": {
+                        "instance_id": "wind_named_chp",
+                        "variable_id": "electric_out",
+                        "unit": "kW",
+                        "values": [100.0, 100.0],
+                    },
+                    "load_named_chiller__electricity_in": {
+                        "instance_id": "load_named_chiller",
+                        "variable_id": "electricity_in",
+                        "unit": "kW",
+                        "values": [50.0, 50.0],
+                    },
+                },
+                "system_series": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    eval_out = tmp_path / "eval_unbound_out"
+    run_plugin(manifest_path=eval_manifest, work_in=eval_in, work_out=eval_out)
+    rep = json.loads((eval_out / "evaluation_report.json").read_text(encoding="utf-8"))
+    by_metric = {m["id"]: m["value"] for m in rep["metrics"]}
+    assert by_metric["supply_reliability_pct"] is None
+    assert by_metric["renewable_share_pct"] == 0.0

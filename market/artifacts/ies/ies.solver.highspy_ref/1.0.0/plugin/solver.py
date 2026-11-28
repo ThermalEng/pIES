@@ -11,9 +11,7 @@ from pies_sdk import (
     PrimalSolutionHeader,
     StageContext,
     StageIOError,
-    check_relative_path,
     read_json_file,
-    read_solver_bundle,
     write_primal_solution_streaming,
 )
 
@@ -71,28 +69,7 @@ def _map_status(model_status_name: str, has_feasible: bool) -> tuple[str, str]:
 
 def solve(ctx: StageContext) -> None:
     """Solve `/work/in/bundle/input/problem.mps` with `highspy` and stream `primal_solution.json`."""
-    manifest, bundle_dir = read_solver_bundle(ctx.work_in)
-    if manifest.get("schema") != "ies.solver-bundle" or manifest.get("schema_version") != "1.0.0":
-        raise StageIOError("Invalid Solver Bundle schema in /work/in/bundle/bundle.yaml")
-    bundle_meta = manifest.get("bundle")
-    if not isinstance(bundle_meta, Mapping) or "contract" not in bundle_meta:
-        raise StageIOError("Solver Bundle missing bundle.contract")
-
-    declared_inputs = {
-        check_relative_path(item["path"], "bundle.inputs.path")
-        for item in manifest.get("inputs", [])
-    }
-    mps_path = bundle_dir / "input" / "problem.mps"
-    if "input/problem.mps" not in declared_inputs or not mps_path.is_file():
-        raise StageIOError("Solver Bundle missing required input/problem.mps")
-
-    declared_outputs = {
-        check_relative_path(item["path"], "bundle.outputs.path")
-        for item in manifest.get("outputs", [])
-    }
-    if "output/primal_solution.json" not in declared_outputs:
-        raise StageIOError("Solver Bundle outputs must declare output/primal_solution.json")
-
+    mps_path = ctx.work_in / "bundle" / "input" / "problem.mps"
     time_limit, seed, threads = _extract_runtime_options(ctx)
 
     highs = highspy.Highs()

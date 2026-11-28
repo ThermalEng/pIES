@@ -2,16 +2,16 @@
   "construction_units": [
     {
       "built": true,
-      "instance_id": "chp_dispatch_1",
+      "instance_id": "campus_chp",
       "mode": "mandatory",
       "scales": [
         {
-          "planning_variable_id": "dispatch_capacity_kw",
+          "planning_variable_id": "chp_electric_cap",
           "unit": "kW",
           "value": 172.297297
         }
       ],
-      "unit_id": "dispatch_unit_1"
+      "unit_id": "u_chp"
     }
   ],
   "metrics": {
@@ -28,8 +28,8 @@
   "schema": "ies.engineering-solution",
   "schema_version": "1.0.0",
   "series": {
-    "dispatch_unit_1__electric_out": {
-      "instance_id": "chp_dispatch_1",
+    "campus_chp__electric_out": {
+      "instance_id": "campus_chp",
       "unit": "kW",
       "values": [
         110.27027,
@@ -39,8 +39,8 @@
       ],
       "variable_id": "electric_out"
     },
-    "grid_1__electricity_import": {
-      "instance_id": "grid_1",
+    "campus_grid__electricity_import": {
+      "instance_id": "campus_grid",
       "unit": "kW",
       "values": [
         9.72973,
@@ -50,8 +50,8 @@
       ],
       "variable_id": "electricity_import"
     },
-    "load_1__electricity_in": {
-      "instance_id": "load_1",
+    "campus_load__electricity_in": {
+      "instance_id": "campus_load",
       "unit": "kW",
       "values": [
         120.0,

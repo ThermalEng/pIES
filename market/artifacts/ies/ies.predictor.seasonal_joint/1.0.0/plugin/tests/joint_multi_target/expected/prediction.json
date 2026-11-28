@@ -22,7 +22,7 @@
           "joint_target_count": 2,
           "peer_means": {
             "load_1.electricity_demand": 160.0,
-            "wind_1.wind_capacity_factor": 0.433333
+            "wind_1.wind_capacity_factor": 0.42
           },
           "peer_targets": [
             "load_1.electricity_demand",
@@ -81,7 +81,7 @@
           "joint_target_count": 2,
           "peer_means": {
             "load_1.electricity_demand": 160.0,
-            "wind_1.wind_capacity_factor": 0.433333
+            "wind_1.wind_capacity_factor": 0.42
           },
           "peer_targets": [
             "load_1.electricity_demand",
@@ -114,12 +114,12 @@
       },
       "target_type": "device_interface",
       "values": [
-        0.39,
-        0.6,
-        0.46,
-        0.39,
-        0.6,
-        0.46
+        0.375,
+        0.375,
+        0.585,
+        0.375,
+        0.375,
+        0.585
       ]
     }
   ],

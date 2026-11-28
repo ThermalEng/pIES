@@ -35,6 +35,36 @@ parameters_schema:
       type: number
       exclusiveMinimum: 0
       default: 1.0
+    grid_import_variable_ids:
+      type: array
+      items:
+        type: string
+      default: ["electricity_import", "grid_import_kw"]
+    gas_input_variable_ids:
+      type: array
+      items:
+        type: string
+      default: ["gas_in", "gas_import_m3_h"]
+    generation_variable_ids:
+      type: array
+      items:
+        type: string
+      default: ["electric_out"]
+    renewable_instance_ids:
+      type: array
+      items:
+        type: string
+      default: []
+    demand_instance_ids:
+      type: array
+      items:
+        type: string
+      default: []
+    demand_variable_ids:
+      type: array
+      items:
+        type: string
+      default: ["electricity_in", "load_kw"]
 resources:
   default:
     cpu: 1

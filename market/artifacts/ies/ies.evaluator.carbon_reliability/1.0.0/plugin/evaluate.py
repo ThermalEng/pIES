@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from pies_sdk import (
     EvaluationChart,
     EvaluationChartSeries,
@@ -10,9 +12,16 @@ from pies_sdk import (
     EvaluationTable,
     EvaluationTableColumn,
     StageContext,
+    StageIOError,
 )
 
-_RENEWABLE_TOKENS = ("wind", "pv", "solar", "hydro")
+
+def _str_set(raw: Any, default: tuple[str, ...]) -> set[str]:
+    if raw is None:
+        return set(default)
+    if not isinstance(raw, list) or not all(isinstance(item, str) and item for item in raw):
+        raise StageIOError(f"Semantic selector parameter must be a list of non-empty strings: {raw!r}")
+    return set(raw)
 
 
 def evaluate(ctx: StageContext) -> None:
@@ -22,11 +31,31 @@ def evaluate(ctx: StageContext) -> None:
     gas_ef = float(ctx.parameters.get("gas_emission_factor_kg_per_m3", 2.162))
     step_hours = float(ctx.parameters.get("step_hours", 1.0))
 
+    grid_var_ids = _str_set(
+        ctx.parameters.get("grid_import_variable_ids"),
+        ("electricity_import", "grid_import_kw"),
+    )
+    gas_var_ids = _str_set(
+        ctx.parameters.get("gas_input_variable_ids"),
+        ("gas_in", "gas_import_m3_h"),
+    )
+    gen_var_ids = _str_set(
+        ctx.parameters.get("generation_variable_ids"),
+        ("electric_out",),
+    )
+    renewable_instances = _str_set(ctx.parameters.get("renewable_instance_ids"), ())
+    demand_instances = _str_set(ctx.parameters.get("demand_instance_ids"), ())
+    demand_var_ids = _str_set(
+        ctx.parameters.get("demand_variable_ids"),
+        ("electricity_in", "load_kw"),
+    )
+
     grid_kw_by_step: list[float] = []
     gas_m3h_by_step: list[float] = []
     renewable_kw_by_step: list[float] = []
     demand_kw_by_step: list[float] = []
     supply_kw_by_step: list[float] = []
+    demand_series_matched = False
 
     def _accumulate(target: list[float], values: tuple[float, ...]) -> None:
         if not target:
@@ -42,18 +71,22 @@ def evaluate(ctx: StageContext) -> None:
             step_count = max(step_count, len(entry.values))
             var = entry.variable_id
             unit = entry.unit
-            inst_lower = entry.instance_id.lower()
-            if unit == "kW" and var in {"electricity_import", "grid_import_kw"}:
+            if unit == "kW" and var in grid_var_ids:
                 _accumulate(grid_kw_by_step, entry.values)
                 _accumulate(supply_kw_by_step, entry.values)
-            elif unit in {"m3/h", "m³/h"} and var in {"gas_in", "gas_import_m3_h"}:
+            elif unit in {"m3/h", "m³/h"} and var in gas_var_ids:
                 _accumulate(gas_m3h_by_step, entry.values)
-            elif unit == "kW" and var == "electric_out":
+            elif unit == "kW" and var in gen_var_ids:
                 _accumulate(supply_kw_by_step, entry.values)
-                if any(tok in inst_lower for tok in _RENEWABLE_TOKENS):
+                if entry.instance_id in renewable_instances:
                     _accumulate(renewable_kw_by_step, entry.values)
-            elif unit == "kW" and var in {"electricity_in", "load_kw"} and "load" in inst_lower:
+
+            if unit == "kW" and (
+                (demand_instances and entry.instance_id in demand_instances and var in demand_var_ids)
+                or (not demand_instances and var == "load_kw" and var in demand_var_ids)
+            ):
                 _accumulate(demand_kw_by_step, entry.values)
+                demand_series_matched = True
 
     if step_count == 0:
         step_count = 1
@@ -77,12 +110,13 @@ def evaluate(ctx: StageContext) -> None:
     gas_co2_tonnes = round((total_gas_m3 * gas_ef) / 1000.0, 6)
     total_co2_tonnes = round(grid_co2_tonnes + gas_co2_tonnes, 6)
 
+    supply_reliability_pct: float | None
     if not feasible:
         supply_reliability_pct = 0.0
-    elif total_demand_kwh > 0.0:
-        supply_reliability_pct = round(min(100.0, (total_supply_kwh / total_demand_kwh) * 100.0), 4)
+    elif not demand_series_matched or total_demand_kwh <= 0.0:
+        supply_reliability_pct = None
     else:
-        supply_reliability_pct = 100.0
+        supply_reliability_pct = round(min(100.0, (total_supply_kwh / total_demand_kwh) * 100.0), 4)
 
     renewable_share_pct = (
         round((total_renewable_kwh / total_supply_kwh) * 100.0, 4)
@@ -98,14 +132,18 @@ def evaluate(ctx: StageContext) -> None:
 
     grid_share = round((grid_co2_tonnes / total_co2_tonnes) * 100.0, 4) if total_co2_tonnes > 0.0 else 0.0
     gas_share = round((gas_co2_tonnes / total_co2_tonnes) * 100.0, 4) if total_co2_tonnes > 0.0 else 0.0
+    rel_text = (
+        f"supply reliability {supply_reliability_pct}%"
+        if supply_reliability_pct is not None
+        else "supply reliability unavailable (no demand series bound)"
+    )
 
     report = EvaluationReportPayload(
         title="Carbon & Reliability Report",
         evaluator=f"{ctx.manifest.plugin_id}@{ctx.manifest.version}",
         summary=(
             f"Total CO2: {total_co2_tonnes} t "
-            f"(grid {grid_co2_tonnes} t, gas {gas_co2_tonnes} t); "
-            f"supply reliability {supply_reliability_pct}%."
+            f"(grid {grid_co2_tonnes} t, gas {gas_co2_tonnes} t); {rel_text}."
         ),
         metrics=(
             EvaluationMetric(
