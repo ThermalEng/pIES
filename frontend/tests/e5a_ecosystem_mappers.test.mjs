@@ -205,6 +205,38 @@ assert.equal(resolveArtifactLifecycleStatus({ approval_status: 'approved', insta
   assert.equal(byId['acme.wind'].versionOrRevision, '1.10.0', 'semver collapse must pick 1.10.0 over 1.2.0')
   assert.equal(byId['acme.device.boiler'].versionOrRevision, 'r3', 'revision collapse must pick r3 over r1')
   assert.equal(byId['acme.chiller'].memberState, 'local_uninstalled')
+
+  // Unready / disabled local rows must NOT override remote member_state to local_installed/local_uninstalled
+  for (const [label, patch] of [
+    ['pending', { approval_status: 'pending', install_status: 'ready', installed: false }],
+    ['building', { approval_status: 'approved', install_status: 'building', installed: false }],
+    ['build_failed', { approval_status: 'approved', install_status: 'build_failed', installed: false }],
+    ['disabled', { approval_status: 'approved', install_status: 'disabled', installed: true }],
+  ]) {
+    const gated = mergeCatalogEntries({
+      localArtifacts: [
+        {
+          id: 99,
+          kind: 'predictor',
+          stable_id: 'acme.wind',
+          version: '1.10.0',
+          source_origin: 'market',
+          ...patch,
+          enabled: false,
+          sha256: 'e'.repeat(64),
+          metadata: {},
+          diagnostics: null,
+          created_at: '2026-11-28T00:00:00Z',
+        },
+      ],
+      marketItems,
+      marketMode: 'online',
+    })
+    const wind = gated.find((e) => e.id === 'acme.wind')
+    assert.ok(wind, `${label} entry should still appear via market index`)
+    assert.equal(wind.memberState, 'remote', `${label} local state must not promote memberState`)
+    assert.ok(wind.localArtifact, `${label} localArtifact metadata should stay attached for lifecycle badge`)
+  }
 }
 
 // 4. Two-way device YAML <-> basic form sync preserves equations & inputs
@@ -233,6 +265,9 @@ interfaces:
     type: out
     carrier: heat
     unit: kW
+  internal_flux:
+    carrier: heat
+    unit: kW
 equations:
   variables:
     q_out:
@@ -246,6 +281,7 @@ equations:
   assert.equal(parsed.nameZh, '示例锅炉')
   assert.equal(parsed.properties[0].value, '0.92')
   assert.equal(parsed.interfaces[0].carrier, 'heat')
+  assert.equal(parsed.interfaces[1].type, 'blind', 'omitted interface type must normalize to blind')
 
   const updatedYaml = applyDeviceFormToText(srcYaml, {
     deviceId: 'demo-boiler-v2',
@@ -254,7 +290,8 @@ equations:
     properties: [{ name: 'efficiency', value: '0.95', unit: '1', min: '0.5', max: '1' }],
     interfaces: [
       { name: 'heat_out', type: 'out', carrier: 'heat', unit: 'kW' },
-      { name: 'gas_in', type: 'in', carrier: 'fuel_gas', unit: 'kW' },
+      { name: 'gas_in', type: 'bidirectional', carrier: 'fuel_gas', unit: 'kW' },
+      { name: 'hidden_bus', type: '', carrier: 'heat', unit: 'kW' },
     ],
   })
   assert.ok(updatedYaml.includes('q_out == efficiency * fuel_in'), 'equations must be preserved')
@@ -262,8 +299,9 @@ equations:
   const reparsed = parseDeviceFormFromText(updatedYaml)
   assert.equal(reparsed.deviceId, 'demo-boiler-v2')
   assert.equal(reparsed.properties[0].value, '0.95')
-  assert.equal(reparsed.interfaces.length, 2)
-  assert.equal(reparsed.interfaces[1].carrier, 'fuel_gas')
+  assert.equal(reparsed.interfaces.length, 3)
+  assert.equal(reparsed.interfaces[1].type, 'bidirectional')
+  assert.equal(reparsed.interfaces[2].type, 'blind')
 }
 
 // 5. formatArtifactDiagnostics

@@ -163,8 +163,9 @@ export function mergeCatalogEntries(params: {
       seenKeys.add(key)
       const local = localByKey.get(key) ?? null
       const meta = local?.metadata ?? {}
-      const memberState: MemberArtifactStateDto = local
-        ? local.installed
+      const localReady = Boolean(local && local.approval_status === 'approved' && local.install_status === 'ready')
+      const memberState: MemberArtifactStateDto = localReady
+        ? local!.installed
           ? 'local_installed'
           : 'local_uninstalled'
         : m.member_state
@@ -173,7 +174,7 @@ export function mergeCatalogEntries(params: {
         key,
         id: m.id,
         kind: m.kind,
-        versionOrRevision: local ? versionDisplayForLocal(local) : remoteVer,
+        versionOrRevision: localReady && local ? versionDisplayForLocal(local) : remoteVer,
         displayNameZh: m.name?.zh_cn || m.name?.en_us || m.id,
         displayNameEn: m.name?.en_us || m.name?.zh_cn || m.id,
         description: m.description,
@@ -268,7 +269,7 @@ export function parseDeviceFormFromText(rawText: string): DeviceBasicFormState {
       const obj = val && typeof val === 'object' && !Array.isArray(val) ? (val as Record<string, unknown>) : {}
       return {
         name,
-        type: typeof obj.type === 'string' ? obj.type : 'in',
+        type: typeof obj.type === 'string' && obj.type.trim() ? obj.type.trim() : 'blind',
         carrier: typeof obj.carrier === 'string' ? obj.carrier : 'electricity',
         unit: typeof obj.unit === 'string' ? obj.unit : 'kW',
       }
@@ -364,7 +365,7 @@ export function applyDeviceFormToText(rawText: string, form: Omit<DeviceBasicFor
     const existing = prevIfaces[key] && typeof prevIfaces[key] === 'object' && !Array.isArray(prevIfaces[key])
       ? ({ ...(prevIfaces[key] as Record<string, unknown>) })
       : {}
-    existing.type = row.type.trim() || 'in'
+    existing.type = row.type.trim() || 'blind'
     existing.carrier = row.carrier.trim() || 'electricity'
     existing.unit = row.unit.trim() || 'kW'
     if (!existing.valid_range) {

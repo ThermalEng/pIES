@@ -289,7 +289,9 @@ test.describe('E5a open ecosystem product integration', () => {
     await page.route('**/api/ecosystem/market/submit/otp-verify', async (route) => {
       await route.fulfill({ json: { submission_token: 'sub-456', expires_in_seconds: 900 } })
     })
+    let submittedMultipart = ''
     await page.route('**/api/ecosystem/market/submit', async (route) => {
+      submittedMultipart = (route.request().postDataBuffer() ?? Buffer.alloc(0)).toString('latin1')
       await route.fulfill({
         json: { pr_number: 42, pr_url: 'https://github.com/acme/market/pull/42', branch: 'submit/carbon', duplicate: false },
       })
@@ -304,6 +306,7 @@ test.describe('E5a open ecosystem product integration', () => {
     await page.getByRole('button', { name: /发送验证码|Send OTP/i }).click()
     await page.getByPlaceholder('6-digit OTP').fill('123456')
     await page.getByRole('button', { name: /验证凭证|Verify OTP/i }).click()
+    await page.locator('#sub-kind').selectOption('evaluator')
     await page.locator('#sub-id').fill('acme.evaluator.carbon')
     await page.locator('#sub-ver').fill('1.0.0')
     await page.locator('#sub-pub').fill('acme')
@@ -326,6 +329,11 @@ test.describe('E5a open ecosystem product integration', () => {
     })
     await page.getByRole('button', { name: /提交投稿 PR|Submit PR/i }).click()
     await expect(page.getByText('https://github.com/acme/market/pull/42')).toBeVisible()
+    expect(submittedMultipart).toMatch(/name="kind"[\r\n]+evaluator/)
+    expect(submittedMultipart).toMatch(/name="artifact_id"[\r\n]+acme\.evaluator\.carbon/)
+    expect(submittedMultipart).toMatch(/name="version_or_revision"[\r\n]+1\.0\.0/)
+    expect(submittedMultipart).toContain('plugin.yaml')
+    expect(submittedMultipart).toContain('plugin_id: acme.evaluator.carbon')
     await page.getByRole('dialog').getByRole('button', { name: /关闭|Close/i }).click()
 
     // 在线市场三态: remote -> download -> local_uninstalled

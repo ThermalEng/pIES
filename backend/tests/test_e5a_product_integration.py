@@ -921,17 +921,18 @@ def test_excel_export_renders_independent_evaluator_sheets_and_preserves_financi
                 "evaluator": "acme.evaluator.reliability_a@1.0.0",
                 "status": "succeeded",
                 "contract": "ies.evaluation-report@1.0.0",
-                "title": long_prefix,
-                "metrics": [
-                    {"id": "lolp", "label": "=CMD('calc')", "value": 0.002, "unit": "ratio"}
-                ],
-                "tables": [],
+                "error": None,
             },
             {
                 "evaluator": "acme.evaluator.reliability_b@1.0.0",
+                "status": "succeeded",
+                "contract": "ies.evaluation-report@1.0.0",
+                "error": None,
+            },
+            {
+                "evaluator": "acme.evaluator.reliability_fail@1.0.0",
                 "status": "failed",
                 "contract": None,
-                "title": long_prefix,
                 "error": {"code": "EVAL-FAILED", "message": "Timeout in container"},
             },
         ],
@@ -961,7 +962,27 @@ def test_excel_export_renders_independent_evaluator_sheets_and_preserves_financi
                         ],
                     }
                 ],
-            }
+            },
+            {
+                "schema": "ies.evaluation-report",
+                "schema_version": "1.0.0",
+                "evaluator": "acme.evaluator.reliability_a@1.0.0",
+                "title": long_prefix,
+                "metrics": [
+                    {"id": "lolp", "label": "=CMD('calc')", "value": 0.002, "unit": "ratio"}
+                ],
+                "charts": [],
+                "tables": [],
+            },
+            {
+                "schema": "ies.evaluation-report",
+                "schema_version": "1.0.0",
+                "evaluator": "acme.evaluator.reliability_b@1.0.0",
+                "title": long_prefix,
+                "metrics": [],
+                "charts": [],
+                "tables": [],
+            },
         ],
     }
 
@@ -1059,7 +1080,12 @@ def test_excel_export_renders_independent_evaluator_sheets_and_preserves_financi
     rel_a_text = "\n".join(str(c.value) for row in wb[rel_sheets[0]].iter_rows() for c in row)
     assert "'=CMD('calc')" in rel_a_text
     rel_b_text = "\n".join(str(c.value) for row in wb[rel_sheets[1]].iter_rows() for c in row)
-    assert "Timeout in container" in rel_b_text
+    assert "acme.evaluator.reliability_b@1.0.0" in rel_b_text
+
+    fail_sheets = [s for s in wb.sheetnames if s.startswith("acme.evaluator.reliability_fail")]
+    assert len(fail_sheets) == 1
+    fail_text = "\n".join(str(c.value) for row in wb[fail_sheets[0]].iter_rows() for c in row)
+    assert "Timeout in container" in fail_text
 
     # Check storage object download path matches
     stored = get_object(db, obj.id)

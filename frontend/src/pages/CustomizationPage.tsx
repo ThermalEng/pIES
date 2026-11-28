@@ -693,6 +693,8 @@ export default function CustomizationPage() {
             <div className="ies-custom-list">
               {visibleCatalogEntries.map((entry) => {
                 const title = locale === 'en' ? entry.displayNameEn : entry.displayNameZh
+                const localLife = entry.localArtifact ? resolveArtifactLifecycleStatus(entry.localArtifact) : null
+                const isLocalReady = localLife === null || localLife === 'ready'
                 const stateLabel =
                   entry.memberState === 'remote'
                     ? pt('ies.eco.state_remote')
@@ -705,6 +707,12 @@ export default function CustomizationPage() {
                     : entry.memberState === 'local_uninstalled'
                       ? 'info'
                       : 'neutral'
+                const lifeVariant =
+                  localLife === 'build_failed' || localLife === 'rejected'
+                    ? 'danger'
+                    : localLife === 'building'
+                      ? 'info'
+                      : 'warning'
                 return (
                   <div key={entry.key} className="ies-custom-card" data-artifact-key={entry.key}>
                     <div className="ies-custom-card__head">
@@ -715,7 +723,11 @@ export default function CustomizationPage() {
                       <div className="ies-flex">
                         <Badge variant="neutral" size="sm" label={pt(`ies.eco.kind.${entry.kind}`)} />
                         <Badge variant="neutral" size="sm" label={entry.versionOrRevision} />
-                        <Badge variant={stateVariant} size="sm" label={stateLabel} />
+                        {localLife && localLife !== 'ready' ? (
+                          <Badge variant={lifeVariant} size="sm" label={pt(`ies.eco.life.${localLife}`)} />
+                        ) : (
+                          <Badge variant={stateVariant} size="sm" label={stateLabel} />
+                        )}
                         {entry.localArtifact && entry.memberState === 'local_installed' && !entry.localArtifact.enabled ? (
                           <Badge variant="warning" size="sm" label={pt('ies.custom.status.disabled')} />
                         ) : null}
@@ -730,7 +742,7 @@ export default function CustomizationPage() {
                       {entry.sha256 ? <span>SHA-256: <code>{entry.sha256.slice(0, 12)}…</code></span> : null}
                     </div>
                     <div className="ies-custom-card__actions">
-                      {entry.memberState === 'remote' ? (
+                      {isLocalReady && entry.memberState === 'remote' ? (
                         <Button
                           size="sm"
                           variant="primary"
@@ -741,7 +753,7 @@ export default function CustomizationPage() {
                           {pt('ies.eco.download_install')}
                         </Button>
                       ) : null}
-                      {entry.memberState === 'local_uninstalled' && entry.localArtifact ? (
+                      {isLocalReady && entry.memberState === 'local_uninstalled' && entry.localArtifact ? (
                         <Button
                           size="sm"
                           variant="primary"
@@ -752,7 +764,7 @@ export default function CustomizationPage() {
                           {pt('ies.eco.install')}
                         </Button>
                       ) : null}
-                      {entry.memberState === 'local_installed' && entry.localArtifact ? (
+                      {isLocalReady && entry.memberState === 'local_installed' && entry.localArtifact ? (
                         <>
                           <Button
                             size="sm"
@@ -779,7 +791,7 @@ export default function CustomizationPage() {
                           </Button>
                         </>
                       ) : null}
-                      {entry.updateAvailable ? (
+                      {isLocalReady && entry.updateAvailable ? (
                         <Button
                           size="sm"
                           variant="secondary"
@@ -1036,8 +1048,9 @@ export default function CustomizationPage() {
                           >
                             <option value="in">in</option>
                             <option value="out">out</option>
-                            <option value="bidir">bidir</option>
+                            <option value="bidirectional">bidirectional</option>
                             <option value="predefined">predefined</option>
+                            <option value="blind">blind</option>
                           </Select>
                           <Input
                             value={row.carrier}

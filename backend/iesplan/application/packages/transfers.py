@@ -2175,7 +2175,7 @@ def _make_unique_sheet_name(raw_title: str, used_lower: set[str]) -> str:
 
 
 def _extract_evaluator_sheet_items(evidence_content: Mapping[str, Any]) -> list[dict[str, Any]]:
-    """收集非财务后置评价器自描述结果（联合 evaluator_results 与 evaluation_reports，不重算）。"""
+    """收集非财务后置评价器结果（仅消费规范 evaluation_reports 与 evaluator_results 状态）。"""
     reports_by_eval: dict[str, Mapping[str, Any]] = {}
     for rep in evidence_content.get("evaluation_reports") or ():
         if isinstance(rep, Mapping) and isinstance(rep.get("evaluator"), str):
@@ -2191,13 +2191,6 @@ def _extract_evaluator_sheet_items(evidence_content: Mapping[str, Any]) -> list[
             reports_by_eval.pop(evaluator_ref, None)
             continue
         report = reports_by_eval.pop(evaluator_ref, None)
-        if report is None:
-            for key in ("report", "outputs"):
-                if isinstance(entry.get(key), Mapping):
-                    report = entry[key]
-                    break
-        if report is None and ("metrics" in entry or "tables" in entry or "title" in entry):
-            report = entry
         items.append(
             {
                 "evaluator": evaluator_ref or "unknown",
@@ -2205,8 +2198,8 @@ def _extract_evaluator_sheet_items(evidence_content: Mapping[str, Any]) -> list[
                 "contract": contract,
                 "error": entry.get("error"),
                 "title": (
-                    report.get("title")
-                    if isinstance(report, Mapping) and report.get("title")
+                    report["title"]
+                    if isinstance(report, Mapping) and isinstance(report.get("title"), str)
                     else evaluator_ref or "第三方评价 / Evaluator"
                 ),
                 "summary": report.get("summary") if isinstance(report, Mapping) else None,
@@ -2234,7 +2227,7 @@ def _extract_evaluator_sheet_items(evidence_content: Mapping[str, Any]) -> list[
 
 
 def _write_non_financial_evaluator_sheets(wb: Workbook, evidence_content: Mapping[str, Any]) -> None:
-    """为非财务自描述评价器结果生成独立工作表（保留官方财务表原样不变）。"""
+    """为非财务规范评价报告生成独立工作表（保留官方财务表原样不变）。"""
     items = _extract_evaluator_sheet_items(evidence_content)
     if not items:
         return
@@ -2258,39 +2251,22 @@ def _write_non_financial_evaluator_sheets(wb: Workbook, evidence_content: Mappin
         _write_kv(ws, meta_rows, blank_row=False)
 
         metrics = item.get("metrics")
-        metric_rows: list[tuple[Any, Any, Any, Any]] = []
-        if isinstance(metrics, list):
-            for m in metrics:
-                if isinstance(m, Mapping):
-                    metric_rows.append(
-                        (
-                            m.get("id") or "",
-                            m.get("label") or m.get("name") or m.get("key") or m.get("id") or "",
-                            m.get("value"),
-                            m.get("unit") or "",
-                        )
-                    )
-        elif isinstance(metrics, Mapping):
-            for k, v in metrics.items():
-                if isinstance(v, Mapping):
-                    metric_rows.append(
-                        (k, v.get("label") or v.get("name") or k, v.get("value"), v.get("unit") or "")
-                    )
-                else:
-                    metric_rows.append((k, k, v, ""))
-        if metric_rows:
+        if isinstance(metrics, list) and metrics:
             ws.append(())
             m_title = WriteOnlyCell(ws, value="指标明细 / Metrics")
             m_title.font = Font(bold=True)
             ws.append((m_title,))
             ws.append(("指标 ID / ID", "指标 / Metric", "值 / Value", "单位 / Unit"))
-            for mid, mlabel, mval, munit in metric_rows:
+            for m in metrics:
+                if not isinstance(m, Mapping):
+                    continue
+                mval = m["value"]
                 ws.append(
                     (
-                        _excel_safe(str(mid)),
-                        _excel_safe(str(mlabel)),
+                        _excel_safe(str(m["id"])),
+                        _excel_safe(str(m["label"])),
                         _excel_safe("—" if mval is None else mval),
-                        _excel_safe(str(munit)),
+                        _excel_safe(str(m["unit"])),
                     )
                 )
 
@@ -2300,18 +2276,13 @@ def _write_non_financial_evaluator_sheets(wb: Workbook, evidence_content: Mappin
                 if not isinstance(tbl, Mapping):
                     continue
                 cols = tbl.get("columns") or []
-                col_ids: list[str | None] = []
                 headers: list[Any] = []
                 for col in cols:
-                    if isinstance(col, Mapping):
-                        cid = col.get("id")
-                        label = str(col.get("label") or cid or "")
-                        unit = col.get("unit")
-                        headers.append(_excel_safe(f"{label} ({unit})" if unit else label))
-                        col_ids.append(str(cid) if cid is not None else None)
-                    else:
-                        headers.append(_excel_safe(str(col)))
-                        col_ids.append(str(col))
+                    if not isinstance(col, Mapping):
+                        continue
+                    label = str(col["label"])
+                    unit = col.get("unit")
+                    headers.append(_excel_safe(f"{label} ({unit})" if unit else label))
                 if not headers:
                     continue
                 ws.append(())
@@ -2321,14 +2292,7 @@ def _write_non_financial_evaluator_sheets(wb: Workbook, evidence_content: Mappin
                 ws.append((t_title,))
                 ws.append(tuple(headers))
                 for row in tbl.get("rows") or ():
-                    if isinstance(row, Mapping):
-                        ws.append(
-                            tuple(
-                                _excel_safe(row.get(cid) if cid is not None else "")
-                                for cid in col_ids
-                            )
-                        )
-                    elif isinstance(row, (list, tuple)):
+                    if isinstance(row, (list, tuple)):
                         ws.append(tuple(_excel_safe(cell) for cell in row))
 
 
