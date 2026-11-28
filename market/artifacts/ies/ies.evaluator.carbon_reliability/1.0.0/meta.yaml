@@ -1,0 +1,15 @@
+schema: ies.market-artifact-meta
+schema_version: "1.0.0"
+id: ies.evaluator.carbon_reliability
+kind: evaluator
+version: "1.0.0"
+name:
+  zh_cn: 碳排放与供能可靠性评价器
+  en_us: Carbon & Reliability Evaluator
+description: Reference self-describing evaluator computing CO2 emissions from electricity and natural gas plus renewable and supply reliability KPIs, charts, and tables.
+publisher: ies
+license: MPL-2.0
+compatibility:
+  pies: ">=1.2.0,<2.0.0"
+  sdk: ">=1.2.0,<2.0.0"
+delisted: false

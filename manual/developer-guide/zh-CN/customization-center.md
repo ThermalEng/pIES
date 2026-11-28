@@ -1,8 +1,8 @@
 # 模型与算法扩展指南
 
-> 文档状态：生效目标指南；目标产品版本：`1.2.0`；上位规范：[架构宪法](ARCHITECTURE_CONSTITUTION.md)；相关格式：[设备模型 YAML](formats/device-model-yaml.md)、[算法插件包](formats/algorithm-plugin-package.md)、[计算配置](formats/calculation-config.md)
+> 文档状态：生效规范；产品版本：`1.2.0`；上位规范：[架构宪法](ARCHITECTURE_CONSTITUTION.md)；相关格式：[设备模型 YAML](formats/device-model-yaml.md)、[算法插件包](formats/algorithm-plugin-package.md)、[计算配置](formats/calculation-config.md)
 
-本指南规定用户自定义设备模型、算法插件包与独立公共市场 **pIES Market**（规划于 `1.2.0` 交付）的长期交付标准、市场索引与无状态投稿契约、身份与单当前生效版本模型、正交运行模式与审批机制及安全隔离边界。
+本指南规定用户自定义设备模型、算法插件包与独立公共市场 **pIES Market**（随 `1.2.0` 交付）的长期交付标准、市场索引与无状态投稿契约、身份与单当前生效版本模型、正交运行模式与审批机制及安全隔离边界。
 
 ## 核心架构定位
 

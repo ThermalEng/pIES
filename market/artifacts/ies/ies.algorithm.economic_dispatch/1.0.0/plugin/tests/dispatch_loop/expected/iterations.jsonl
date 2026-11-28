@@ -1,0 +1,4 @@
+{"details": {"dual_bound": 303.75, "lambda": 0.25, "primal_obj": 320.98125}, "iteration": 1, "metric": "relative_gap", "status": "running", "unit": "1", "value": 0.05368304}
+{"details": {"dual_bound": 316.875, "lambda": 0.375, "primal_obj": 320.98125}, "iteration": 2, "metric": "relative_gap", "status": "running", "unit": "1", "value": 0.0127928}
+{"details": {"dual_bound": 319.06875, "lambda": 0.4375, "primal_obj": 320.98125}, "iteration": 3, "metric": "relative_gap", "status": "running", "unit": "1", "value": 0.00595829}
+{"details": {"dual_bound": 319.467188, "lambda": 0.40625, "primal_obj": 320.205447}, "iteration": 4, "metric": "relative_gap", "status": "converged", "unit": "1", "value": 0.00230558}

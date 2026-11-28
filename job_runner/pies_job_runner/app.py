@@ -41,7 +41,7 @@ def create_app(
 
     app = FastAPI(
         title="pIES job_runner",
-        version="1.1.6",
+        version="1.2.0",
         description="Controlled Docker proxy for plugin image builds and isolated stage containers.",
     )
     app.state.job_runner_settings = resolved_settings

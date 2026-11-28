@@ -1,0 +1,72 @@
+schema: ies.algorithm-plugin
+schema_version: "1.0.0"
+plugin_id: ies.algorithm.economic_dispatch
+version: "1.0.0"
+kind: algorithm
+name:
+  zh_cn: 经济调度迭代算法
+  en_us: Iterative Economic Dispatch Algorithm
+description: Reference deterministic Lagrangian dual-bisection economic dispatch algorithm streaming iteration progress and canonical engineering solution.
+license: MPL-2.0
+compatibility:
+  pies: ">=1.2.0,<2.0.0"
+  sdk: ">=1.2.0,<2.0.0"
+consumes:
+  - ies.stage-input@1.0.0
+produces:
+  - ies.engineering-solution@1.0.0
+runtime:
+  language: python
+  python: "3.12"
+entrypoint: dispatch:solve_dispatch
+parameters_schema:
+  type: object
+  additionalProperties: false
+  properties:
+    max_iterations:
+      type: integer
+      minimum: 1
+      maximum: 100
+      default: 10
+    tolerance:
+      type: number
+      exclusiveMinimum: 0
+      default: 0.001
+    generator_cost_per_kwh:
+      type: number
+      minimum: 0
+      default: 0.35
+    grid_import_cost_per_kwh:
+      type: number
+      minimum: 0
+      default: 0.85
+    generator_capacity_kw:
+      type: number
+      exclusiveMinimum: 0
+      default: 600.0
+    local_energy_share_cap:
+      type: number
+      minimum: 0
+      maximum: 1
+      default: 0.85
+resources:
+  default:
+    cpu: 1
+    memory_mb: 512
+    timeout_seconds: 120
+    process_limit: 16
+  maximum:
+    cpu: 2
+    memory_mb: 1024
+    timeout_seconds: 300
+    process_limit: 32
+iteration:
+  enabled: true
+  max_iterations_default: 20
+  convergence_metric: relative_gap
+  progress_channel: /work/out/iterations.jsonl
+tests:
+  - id: dispatch_loop
+    in: tests/dispatch_loop/in
+    expected: tests/dispatch_loop/expected
+extensions: {}

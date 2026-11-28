@@ -54,20 +54,38 @@ On the **Cost & tariff bindings** page, associate device instances with financia
 
 ---
 
-## 4. Calculation Config (Solver and Algorithm Options)
+## 4. Calculation Config (13-Field Contract, Stage Plugin Catalog & Parallel Evaluators)
 
-Open **Calc Config** to configure solver execution options for the run (**this page does not contain evaluation years or discount rate**, which are confirmed at task submission):
+Open **Calc Config** to configure solver execution options for the run (**this page does not contain evaluation years or discount rate**, which are confirmed at task submission). `1.2.0` uses the **13 required top-level fields** of the unidirectional pipeline contract (removing legacy `convergence` and introducing slotted `options` plus parallel `evaluators[]`):
+
+### Stage Plugin Catalog and Form Composer
+
+The top panel loads `/api/ecosystem/stage-catalog`, listing built-in capabilities alongside ready installed third-party plugins:
+
+- **Staged (`generator` + `solver`) or Unified (`algorithm`)**: Mutually exclusive execution modes; picking a plugin renders schema-driven parameter inputs from `parameters_schema` synced directly into slotted `options` (`{"generator": {...}, "solver": {...}}` or `{"algorithm": {...}}`).
+- **Pre-solve predictions (`predictions[]`)**: Pick a `predictor` plugin and enter target `{instance, interface}` identifiers (deduplicated per target and grouped per plugin into joint multi-target prediction runs).
+- **Parallel evaluators (`evaluators[]`)**: Compose `0..N` post-solve evaluation plugins (such as official `ies.evaluator.finance@1.0.0` alongside third-party evaluators, or `[]` to skip evaluation and deliver engineering solution & curves directly), each with per-evaluator `parameters`.
+
+### `1.2.0` Official Replaceable Reference Python Plugins
+
+Alongside built-in stages (`ies.generator.highs_milp@1.0.0`, `ies.solver.highs@1.7.2`, `ies.evaluator.finance@1.0.0`), `1.2.0` provides four replaceable reference plugins:
+
+- `ies.predictor.seasonal_joint` (`predictor`): Joint multi-target seasonal moving-average forecasting;
+- `ies.solver.highspy_ref` (`solver`): External reference `.mps` Solver Bundle consumer packaged with `requirements.txt` (`highspy==1.7.2`);
+- `ies.algorithm.economic_dispatch` (`algorithm`): Iterative economic dispatch algorithm emitting `iterations.jsonl` and `solution.json`;
+- `ies.evaluator.carbon_reliability` (`evaluator`): Self-describing evaluator emitting carbon and reliability KPIs, charts, and tables (`ies.evaluation-report@1.0.0`).
 
 | Field | Guidance |
 |---|---|
-| Mode | E.g., `planning` |
-| Generator ref & Solver | Select or enter exact version refs (e.g., `ies.generator.highs_milp@1.0.0` and `ies.solver.highs@1.7.2`) |
-| Precision | Required: `low`, `medium`, or `high` (no default selection) |
+| Mode (`mode`) | E.g., `planning` |
+| Generator / Solver / Algorithm | Either staged `generator` + `solver` (with `algorithm: null`) or unified `algorithm` (with `generator: null`, `solver: null`) |
+| Precision (`precision`) | Required: `low`, `medium`, or `high` (no default selection) |
 | Time limit (s) | Solver internal runtime limit (newly created projects prefill the deployment default) |
-| Seed (empty = unspecified) | Leave empty or enter an integer seed |
-| Outputs (JSON array) | Required JSON array (e.g., `["solution", "metrics"]`) |
-| Predictions & Stage-2 convergence | Configure prediction algorithms for `data_predict` interfaces; fill `{"tolerance": ..., "max_iterations": ...}` (`max_iterations` ≥ 2) only when coupled prediction algorithms are present, otherwise leave empty |
-| Generator/solver options | Optional JSON object conforming to the selected generator's options schema |
+| Seed (`seed`) | Leave empty (`null`) or enter an integer seed |
+| Outputs (`outputs`) | Required JSON array (e.g., `["solution", "metrics"]`) |
+| Predictions (`predictions`) | JSON array (may be `[]`) of `{target: {instance, interface}, algorithm, parameters}` entries |
+| Evaluators (`evaluators`) | JSON array (may be `[]`) of `{evaluator, parameters}` entries executed in parallel |
+| Slotted options (`options`) | Optional JSON object partitioned by stage slot (`{"generator": {...}, "solver": {...}}` or `{"algorithm": {...}}`) |
 
 Click **Save calculation config** when finished; the page displays the latest revision (e.g., `v1`). If a version conflict (`409`) occurs because another session saved first, the page preserves your current edits so you can choose **Reload latest config** or adjust and retry. Until Calculation Config is saved, project validation reports a blocking diagnostic and task submission remains disabled.
 

@@ -1,12 +1,12 @@
 # CalculationConfig
 
-> 契约标识：`ies.calculation-config`；目标 `schema_version`：`"1.0.0"`；消费者：任务提交校验、调度编排与选定计算插件容器
+> 契约标识：`ies.calculation-config`；`schema_version`：`"1.0.0"`；消费者：任务提交校验、调度编排与选定计算插件容器
 
 `CalculationConfig` 固定单次计算任务的全部插件选择与运行参数。计算按项目基线完整连续时间轴执行，本契约不包含典型日缩减、规划目标约束、设备参数、财务规则或装配连接内容，与 `ValidatedAssemblyArtifact` 独立冻结。
 
 ## 顶层字段
 
-`1.2.0` 单向流水线目标契约包含以下 **13 个必需顶层字段**（已移除无实际业务用途的 `convergence` 字段并将单一评价器升级为并联 `evaluators` 数组；`generator`、`solver`、`algorithm` 与 `seed` 无值时须显式传 `null`，禁止省略），拒绝未知字段与非有限数值：
+`1.2.0` 单向流水线生效契约包含以下 **13 个必需顶层字段**（已移除无实际业务用途的 `convergence` 字段并将单一评价器升级为并联 `evaluators` 数组；`generator`、`solver`、`algorithm` 与 `seed` 无值时须显式传 `null`，禁止省略），拒绝未知字段与非有限数值：
 
 | 字段 | 类型与格式 | 说明 |
 |---|---|---|

@@ -1,6 +1,6 @@
 # 文件格式标准
 
-> 文档状态：生效目标契约；上位规范：[架构宪法](ARCHITECTURE_CONSTITUTION.md)
+> 文档状态：生效契约；规范版本：`1.2.0`；上位规范：[架构宪法](ARCHITECTURE_CONSTITUTION.md)
 
 pIES 的核心业务文档与离线交换包使用独立、可验证的公共格式，字段级定义以 `formats/` 下对应权威章节为准。
 
@@ -18,7 +18,7 @@ pIES 的核心业务文档与离线交换包使用独立、可验证的公共格
 | [Solver Bundle](formats/solver-bundle.md) | `bundle.yaml` + 输入输出目录 | 求解器输入文件、结构化命令、输出清单与结果映射 | 求解运行时、结果适配器 |
 | [计算配置](formats/calculation-config.md) | 计算配置映射 | 计算模式、预测配置、生成器/求解器版本、精度、时限与输出请求 | 提交校验、生成器 |
 | [项目包](formats/project-package.md) | `*.zip`（根含 `manifest.json`） | 项目工作区、历史版本与依赖的离线导出导入 | 项目包导入导出器 |
-| [算法插件包](formats/algorithm-plugin-package.md) | `plugin.yaml` + `*.algorithm.zip` | 统一计算环节（预测/组装/求解/评价/一体化算法）与插件包契约（`1.1.5` / `1.2.0` 目标） | `backend` 调度器、`job_runner` 与临时计算容器 |
+| [算法插件包](formats/algorithm-plugin-package.md) | `plugin.yaml` + `*.algorithm.zip` | 统一计算环节（预测/组装/求解/评价/一体化算法）与插件包契约（`1.2.0` 生效） | `backend` 调度器、`job_runner` 与临时计算容器 |
 
 **可人工编写与不可人工编写的界线**：设备模型 YAML、数据 CSV、`FinanceProfile`、`FinanceOverrides` 与装配 YAML 支持人工编写；`EffectiveFinanceConfig` 必须由确定性合并器生成（导入时从来源重新合并验证）；Solver Bundle 只能由生成器产出。
 

@@ -31,11 +31,17 @@ When a project already has a normalized power output curve rather than meteorolo
 
 The built-in **Battery storage** device allows both `capacity_kwh` (kWh) and `rated_power_kw` (kW) to be optimized simultaneously in **Planning config**. Initial stored energy scales proportionally with the optimized capacity according to the initial SOC ratio. The software does not assume an upper storage-duration limit or an end-of-horizon state-of-charge target automatically; if such boundaries are required, enter them explicitly in **Planning config**.
 
-### Using Saved Project Models
+### Using Saved Project Models and Global "Models & Algorithms" (`/custom`)
 
-Custom models validated and saved on the project's model page appear alongside built-in devices in the device panel (models with identical names can be distinguished by the adjacent model ID and tooltip). Dragging one onto the canvas automatically populates the data sources declared in the template, which can still be adjusted individually in the inspector.
-
-- Saved project models are visible only within the current project. Restoring a historical version created before a model existed displays only the model set active at that time (subsequent save or delete model actions rebuild the available list from the project model store).
+1. **Project-scoped saved models**: Custom models validated and saved on the project's model page appear alongside built-in devices in the device panel (models with identical names can be distinguished by the adjacent model ID and tooltip). Dragging one onto the canvas automatically populates the data sources declared in the template, which can still be adjusted individually in the inspector. Saved project models are visible only within the current project; restoring a historical version created before a model existed displays only the model set active at that time.
+2. **Global "Models & Algorithms" (`/custom` via top navigation **Custom**)**: Provides a unified two-tab workspace (following the **Plan B single active version policy**—at most one active version/revision is maintained per artifact ID without multi-version switching or historical task pinning):
+   - **My Creations / Drafts** (default tab): Author global device templates (`user.<public_namespace>.*`) with a bidirectional basic-fields form synced to `.device.yaml` (supporting all 5 canonical interface types: `in`, `out`, `bidirectional`, `predefined`, and `blind`), import/export local `.device.yaml` models, upload `.algorithm.zip` plugin bundles, inspect build/approval diagnostics, and submit artifacts statelessly via email OTP when the public submission gateway is configured.
+   - **Market & Installed**: Browse local ready artifacts and online public market entries uniformly with three-state badges (**Remote**, **Local (Uninstalled)**, **Local (Installed)**) and kind filters; artifacts become installable once locally approved and built (`ready`), while unready or globally disabled items withhold unusable install buttons.
+3. **`1.2.0` Official Engineering Reference Device Models (`pIES-Market` `ies.device.*`)**:
+   - `ies.device.chp`: Gas CHP unit (`gas_in` `m³/h` → `electric_out` + `heat_out` `kW`);
+   - `ies.device.thermal_storage`: Thermal / chilled-water storage tank (bidirectional `heat` port and `stored_energy` with initial-SOC boundary);
+   - `ies.device.absorption_chiller`: Heat-driven absorption chiller (`heat_in` + `electricity_in` → `cool_out` `kW`);
+   - `ies.device.wind_turbine`: Wind turbine (`electric_out` `kW` driven by `predefined` wind capacity factor input).
 
 ## Connecting Ports and Network Boundaries
 

@@ -1,6 +1,6 @@
 # 部署与运行
 
-> 文档状态：生效蓝图；规范版本：1.1.5；上位规范：[架构宪法](ARCHITECTURE_CONSTITUTION.md)
+> 文档状态：生效蓝图；规范版本：`1.2.0`；上位规范：[架构宪法](ARCHITECTURE_CONSTITUTION.md)
 
 ## 运行环境边界
 
@@ -14,7 +14,7 @@ pIES 的构建、测试、格式化、数据库迁移验证及浏览器端到端
 - **默认值唯一源**：任务并发槽位、超时上限、求解与容器资源策略及新建表单默认初值（前端通过 `GET /api/deployment/defaults` 读取）仅在此文件维护。
 - **敏感信息与编排参数**：数据库凭证、`IESPLAN_SECRET_KEY` 等密钥与容器端口、网络编排仍由环境变量或部署平台注入，禁止提交到仓库默认配置。
 
-## Docker Compose 部署架构（`1.1.5` 目标）
+## Docker Compose 部署架构（`1.2.0`）
 
 在仓库根目录执行启动命令（源码或 `Dockerfile` 变更后须加 `--build` 重新构建受影响服务）：
 
@@ -76,6 +76,24 @@ docker compose up -d --build
 3. 替换默认数据库凭证，禁止开发默认密码进入生产；
 4. 在可信反向代理层启用 HTTPS，并限制数据库、Redis、对象存储、`job_runner` 及管理端口的外部访问；
 5. 制定数据目录、卷容量、备份周期与恢复演练责任机制。
+
+## `1.1.5 / 1.1.6 → 1.2.0` 升级与迁移手册
+
+从 `1.1.5` 或 `1.1.6` 升级至 `1.2.0` 时严格执行以下顺序，严禁跳过任务排空步骤或对历史冻结数据做原地改写：
+
+1. **排空在途任务并完成全量备份**：
+   - 升级前等待或取消全部非终结任务（`queued`、`running`、`cancelling`）；若仍存在未终结任务，迁移器将显式抛出 `UpgradeDrainError` 并阻断迁移。
+   - 备份 PostgreSQL 数据库、受管对象存储目录、`backend/deploy/pies.toml` 及环境密钥。
+2. **执行幂等版本化数据库迁移**：
+   - 升级 `backend` 镜像后执行 `python -m iesplan.migrations`（或由受控单实例启动触发 `apply_migrations()`），按序幂等应用两项迁移并登记至 `schema_migrations`：
+     - `v1_2_0_calc_config`（版本 ID `20261126_120_calc_config`）：将项目已保存的可编辑 `CalculationConfig` 修订一次性转为 `1.2.0` 13 字段结构（移除 `convergence`、将 `evaluator` 映射为并联 `evaluators[]`、按分槽迁入 `options.generator` / `options.algorithm`）；已完成的历史 `CalcSnapshot` 与 `Evidence` 保持只读不变。
+     - `v1_2_0_ecosystem`（版本 ID `20261127_120_ecosystem`）：创建 `ecosystem_settings`、`local_artifacts`、`member_artifact_installs` 表及单当前生效版本索引，并播种默认离线设置行（`market_mode="local"`、`local_upload_requires_approval=True`）。
+3. **重建并拉起容器栈（含内置镜像与插件基础镜像）**：
+   - 在仓库根目录执行 `docker compose up -d --build`，随同拉起核心五容器并由一次性 `builtin_stages` 服务构建 `pies-builtin-stages:1.2.0` 与插件基础镜像 `pies-plugin-base:latest`。
+4. **可选独立公共市场与无状态投稿网关**：
+   - 若需联网生态或自建团队市场，可单独部署静态市场目录（`market/` 产物与 `index.json`，推荐静态站点/GitHub Pages 托管）及独立无状态投稿网关（`market_gateway/`，配置 `MARKET_HMAC_SECRET` 与 SMTP/GitHub App 凭证）；随后由管理员在 `/admin/ecosystem` 切换 `market_mode = "online"` 并配置 `market_index_url`、`submission_gateway_url` 与可选单源 `pip_index_url`。
+5. **单当前生效版本升级策略**：
+   - `1.2.0` 按 `(kind, stable_id)` 仅保留 **1 个当前生效版本**，不建设平台级跨版本兼容层或历史版本多选切换器。升级或下架本地插件前，系统无状态检查在途 `CalcSnapshot` 引用（有在途引用返回 `409 ECO-UNINSTALL-IN-USE`）；新版本是否兼容既有项目输入完全由高版本模型/插件自身实现决定。
 
 ## 健康检查、备份与恢复
 

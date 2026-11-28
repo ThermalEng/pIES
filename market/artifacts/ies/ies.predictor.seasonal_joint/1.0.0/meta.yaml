@@ -1,0 +1,15 @@
+schema: ies.market-artifact-meta
+schema_version: "1.0.0"
+id: ies.predictor.seasonal_joint
+kind: predictor
+version: "1.0.0"
+name:
+  zh_cn: 季节性联合多目标预测器
+  en_us: Seasonal Joint Multi-Target Predictor
+description: Deterministic seasonal moving-average predictor supporting joint multi-target batch inference from inline histories or CSV inputs.
+publisher: ies
+license: MPL-2.0
+compatibility:
+  pies: ">=1.2.0,<2.0.0"
+  sdk: ">=1.2.0,<2.0.0"
+delisted: false

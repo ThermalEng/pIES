@@ -1,0 +1,15 @@
+schema: ies.market-artifact-meta
+schema_version: "1.0.0"
+id: ies.device.chp
+kind: device_model
+revision: 1
+name:
+  zh_cn: 燃气热电联产机组
+  en_us: Gas CHP Unit
+description: Reference gas-fired combined heat and power (CHP) device model converting natural gas into electricity and thermal power.
+publisher: ies
+license: MPL-2.0
+compatibility:
+  pies: ">=1.2.0,<2.0.0"
+  sdk: ">=1.2.0,<2.0.0"
+delisted: false

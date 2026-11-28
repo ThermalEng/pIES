@@ -6,12 +6,12 @@ This guide is designed for planning engineers, energy engineers, and system admi
 
 1. [Getting Started](getting-started.md): Sign in, session and appearance preferences, create your first project, and walk through the workflow.
 2. [Projects and Access](projects-and-access.md): Project list, archiving and deletion, project package sharing, version creation, and restoration.
-3. [System Modeling](system-modeling.md): Device configuration on the canvas, model parameters and predefined interfaces, port connections, and canvas validation.
+3. [System Modeling](system-modeling.md): Device configuration on the canvas, model parameters and predefined interfaces, port connections, canvas validation, `/custom`, and `1.2.0` reference device models.
 4. [Data Preparation](data-preparation.md): Template download, uploading device data and price series, quality diagnostics, and project binding.
-5. [Calculation Configuration](calculation-configuration.md): Finance rules, cost and tariff bindings, planning objectives and constraints, and solver options.
-6. [Validation and Tasks](validation-and-tasks.md): Full project validation, evaluation confirmation, task submission, progress observation, retries, and troubleshooting.
-7. [Results and Exports](results-and-exports.md): Interpreting solver status, financial evaluation, step curves, baseline differences, applying schemes, and exporting reports.
-8. [Accounts, Administration, and Troubleshooting](administration-and-troubleshooting.md): Personal settings, administrator account/audit operations, and common error troubleshooting.
+5. [Calculation Configuration](calculation-configuration.md): Finance rules, cost and tariff bindings, planning objectives and constraints, and the 13-field calculation config with dynamic stage catalog and parallel evaluators.
+6. [Validation and Tasks](validation-and-tasks.md): Full project validation, evaluation confirmation, unidirectional staged pipeline execution, task submission, progress observation, retries, and troubleshooting.
+7. [Results and Exports](results-and-exports.md): Interpreting solver status, financial evaluation, self-describing evaluation reports, single-evaluator retry, step curves, baseline differences, applying schemes, and exporting reports.
+8. [Accounts, Administration, and Troubleshooting](administration-and-troubleshooting.md): Personal settings, administrator account/ecosystem/audit operations, upgrade notes, and common error troubleshooting.
 9. [Concepts, Units, and Current Limits](concepts-and-limits.md): Core version concepts, unit and time conventions, and current version boundaries.
 
 ## Standard Business Workflow

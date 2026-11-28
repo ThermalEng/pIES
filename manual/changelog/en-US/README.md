@@ -6,14 +6,37 @@ This page records only implemented and accepted changes in reverse chronological
 
 | Scope | Current Status |
 |---|---|
-| Official product version (`backend/pyproject.toml`) | `1.1.6` |
-| Latest released version | `1.1.6` (2026-11-27 `1.2.0` computation core refactoring `F1–F4`, unidirectional pipeline, parallel evaluators & `G0` exit gate closure) |
-| General modeling & computation upgrade | Declarative device/system equations, monthly TOU prices, monthly peak demand, embedded tax modeling, structural acceleration, bounded subprocess restoration, and unidirectional parallel evaluation pipeline delivered |
-| Next development target | `1.2.0` (`P1: E1–E5` Open Models & Algorithms Ecosystem and `pIES Market`) |
-| Limited pilot release version | `1.1.6` |
+| Official product version (`backend/pyproject.toml`) | `1.2.0` |
+| Latest released version | `1.2.0` (2026-11-28 delivered `E1–E5b` Open Models & Algorithms Ecosystem, `pIES-Market`, stateless submission gateway & reference artifacts) |
+| General modeling & computation upgrade | Declarative device/system equations, monthly TOU prices, monthly peak demand, embedded tax modeling, unidirectional parallel evaluation pipeline, open plugin & model ecosystem, and reference artifacts delivered |
+| Next development target | `1.3.0` (Planning–Operation Closed Loop and Scenario Analysis) |
+| Limited pilot release version | `1.2.0` |
 | First general public release version | `2.0.0` |
 
-> Authoritative product metadata (`backend/pyproject.toml`, `job_runner`, and Help Center manifest; alongside `sdk/pyproject.toml` and `pies-builtin-stages:1.2.0` upgraded to the `1.2.0` computation contracts) has been bumped to **`1.1.6`** on 2026-11-27. Upgrading from `1.1.5` runs a one-pass migration converting editable calculation configs to the 13-field contract while keeping historical `CalcSnapshot` and `EvidencePackage` records strictly read-only. Development next proceeds to `E1–E5` for the open ecosystem and `pIES-Market`.
+> Authoritative product metadata (`backend/pyproject.toml`, `job_runner`, `sdk/pyproject.toml`, built-in stage image `pies-builtin-stages:1.2.0`, and Help Center manifest) is uniformly released at **`1.2.0`** as of 2026-11-28. Upgrading from `1.1.5`/`1.1.6` drains non-terminal tasks first, applies database migrations converting editable calculation configs to the 13-field contract and provisioning ecosystem tables, and keeps historical `CalcSnapshot` and `EvidencePackage` records strictly read-only.
+
+## `1.2.0` — 2026-11-28 — Open Model & Algorithm Plugin Ecosystem (`E1–E5b`) and `pIES Market`
+
+### 2026-11-28 — Open Ecosystem, Static Public Market & Reference Artifacts (`E1–E5b`) Delivery
+
+- **When completed**: 2026-11-28, completing all six `P1` slices (`E1`–`E5b`) merged after Docker CI and independent Herdr Codex reviews, releasing official product version **`1.2.0`** atop `1.1.6` (`P0 F1–F4/G0`).
+- **What changed**:
+  - **Public Contracts & SDK Tooling (`E1`)**: Finalized `ies.market-index@1.0.0` and `ies.submission@1.0.0` schemas, and added offline static validation (`validate`) and deterministic archiving (`pack`) commands to `pies-sdk`.
+  - **Local Ecosystem Governance, Plan B Single Active Version & Controlled Builds (`E2`)**: Delivered local artifact and plugin image (`pies-plugin/*`) lifecycle management enforcing the **single active version policy (Plan B: no multi-version pinning or per-ID version switching, zero cross-version migration layers)**; built dependency-free plugins with `--network=none` and enforced single `--index-url` when `pip_index_url` is set; coordinated disable/uninstall with in-flight tasks via row locks (`409 ECO-UNINSTALL-IN-USE`); and enforced `user.<ns>.*` vs `<publisher>.*` namespaces plus the three-way external SHA-256 verification boundary.
+  - **Decoupled Static Public Market (`E3`)**: Delivered `ThermalEng/pIES-Market` with `--network=none` read-only PR CI checks, generating authoritative `index.json` and a co-hosted unauthenticated static browse/download site (remote delisting never revokes local installs).
+  - **Thin Stateless Submission Gateway (`E4`)**: Delivered `market_gateway/` (SMTP OTP + HMAC challenge token → short-lived stateless submission token → `publishers.yaml` email digest match under `MARKET_HMAC_SECRET` → idempotent GitHub PR creation) with zero plaintext email persistence or logging.
+  - **Unified Product Integration (`E5a`)**:
+    - Upgraded `/custom` to unified "Models & Algorithms" dual tabs (defaulting to **My Creations / Drafts** for compatibility, with two-way `.device.yaml` editing supporting all 5 canonical interface types `in`/`out`/`bidirectional`/`predefined`/`blind` and local import/export; **Market & Installed** with 3-state catalog, remote version collapse, unready/disabled install guards, and OTP submission wizard);
+    - Added admin `/admin/ecosystem` page for orthogonal `market_mode` × `local_upload_requires_approval` policies, single-source URLs, pending approval/reject queue, and in-flight-safe image uninstall;
+    - Upgraded **Calc Config** to consume `/api/ecosystem/stage-catalog`, render schema-driven parameter inputs (`parameters_schema`), emit `{target: {instance, interface}, algorithm, parameters}` predictions, and compose parallel `evaluators[]`;
+    - Upgraded **Results** with generic self-describing `EvaluationReportSection` (`summary`, `metrics`, `line`/`bar`/`area`/`scatter` charts, `tables`) and failed-evaluator retry button, plus independent sanitized `<=31`-character Excel sheets for non-financial evaluator reports (preserving official financial sheets intact).
+  - **Reference Artifacts & `1.2.0` Release (`E5b`)**:
+    - Delivered **4 curated reference device models** (`ies.device.chp`, `ies.device.thermal_storage`, `ies.device.absorption_chiller`, `ies.device.wind_turbine`) and **4 replaceable reference Python plugins** (`ies.predictor.seasonal_joint` joint multi-target predictor, `ies.solver.highspy_ref` external `.mps` solver with `requirements.txt` `highspy==1.7.2`, `ies.algorithm.economic_dispatch` iterative dispatch emitting `iterations.jsonl`, and `ies.evaluator.carbon_reliability` emitting `ies.evaluation-report@1.0.0`);
+    - Bumped `backend`, `job_runner`, `sdk`, and Help Center metadata to `1.2.0` and synchronized bilingual developer/user guides, changelog, and upgrade playbook.
+- **What problem it solved**:
+  - Completed end-to-end extensibility from `1.1.6`'s computation core through local/remote plugin governance, isolated offline self-testing, privacy-preserving static market submission, dynamic UI orchestration, generic self-describing evaluation reporting, and verified multi-energy reference artifacts under Plan B simplicity.
+  - **Upgrading from `1.1.5` / `1.1.6`**: Drain all `queued`/`running`/`cancelling` tasks, run `v1_2_0_calc_config` (when upgrading from `1.1.5`) and `20261127_120_ecosystem` migrations, rebuild via `docker compose up -d --build` (`pies-builtin-stages:1.2.0`, `backend`, `job_runner`, `web`), and optionally deploy `market/` and `market_gateway/`; historical `CalcSnapshot` and `Evidence` remain strictly read-only.
+- **Where the release stands**: `1.2.0` (`P0 F1–F4/G0` and `P1 E1–E5b`) is delivered and verified; next per [Roadmap](roadmap.md) is **`1.3.0`** (Planning–Operation Closed Loop and Scenario Analysis).
 
 ## `1.1.6` — 2026-11-27 — `1.2.0` Computation Core Refactoring (`F1–F4`) and `G0` Closure
 

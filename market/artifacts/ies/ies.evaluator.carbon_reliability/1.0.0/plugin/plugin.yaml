@@ -1,0 +1,53 @@
+schema: ies.algorithm-plugin
+schema_version: "1.0.0"
+plugin_id: ies.evaluator.carbon_reliability
+version: "1.0.0"
+kind: evaluator
+name:
+  zh_cn: 碳排放与供能可靠性评价器
+  en_us: Carbon & Reliability Evaluator
+description: Reference self-describing evaluator computing CO2 emissions from electricity and natural gas plus renewable and supply reliability KPIs, charts, and tables.
+license: MPL-2.0
+compatibility:
+  pies: ">=1.2.0,<2.0.0"
+  sdk: ">=1.2.0,<2.0.0"
+consumes:
+  - ies.engineering-solution@1.0.0
+produces:
+  - ies.evaluation-report@1.0.0
+runtime:
+  language: python
+  python: "3.12"
+entrypoint: evaluate:evaluate
+parameters_schema:
+  type: object
+  additionalProperties: false
+  properties:
+    grid_emission_factor_kg_per_kwh:
+      type: number
+      minimum: 0
+      default: 0.5703
+    gas_emission_factor_kg_per_m3:
+      type: number
+      minimum: 0
+      default: 2.162
+    step_hours:
+      type: number
+      exclusiveMinimum: 0
+      default: 1.0
+resources:
+  default:
+    cpu: 1
+    memory_mb: 256
+    timeout_seconds: 60
+    process_limit: 8
+  maximum:
+    cpu: 2
+    memory_mb: 512
+    timeout_seconds: 120
+    process_limit: 16
+tests:
+  - id: minimal
+    in: tests/minimal/in
+    expected: tests/minimal/expected
+extensions: {}

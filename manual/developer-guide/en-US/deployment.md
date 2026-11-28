@@ -1,6 +1,6 @@
 # Deployment and Operations
 
-> Status: Effective Blueprint; Spec Version: 1.1.5; Governing Spec: [Architecture Constitution](ARCHITECTURE_CONSTITUTION.md)
+> Status: Effective Blueprint; Spec Version: `1.2.0`; Governing Spec: [Architecture Constitution](ARCHITECTURE_CONSTITUTION.md)
 
 ## Runtime Environment Boundary
 
@@ -14,7 +14,7 @@ Control-plane services and ephemeral container execution policies share one TOML
 - **Single source of defaults**: Task concurrency slots, timeout ceilings, solve and container resource policies, and new-form default values (fetched by the frontend via `GET /api/deployment/defaults`) live solely in this file.
 - **Secrets and orchestration**: Database credentials, secrets such as `IESPLAN_SECRET_KEY`, and container port/network wiring continue via environment variables or orchestrator injection and MUST NOT be committed in default repo configs.
 
-## Docker Compose Deployment Architecture (`1.1.5` Target)
+## Docker Compose Deployment Architecture (`1.2.0`)
 
 Run from the repository root (pass `--build` whenever source code or `Dockerfile` changes to rebuild affected services):
 
@@ -76,6 +76,24 @@ Before going live in production, verify:
 3. Replace all default database credentials so development passwords never enter production;
 4. Enable HTTPS at a trusted reverse proxy and restrict external access to Postgres, Redis, object storage, `job_runner`, and internal admin ports;
 5. Establish data directory, volume sizing, backup cadence, and restore drill ownership.
+
+## `1.1.5 / 1.1.6 → 1.2.0` Upgrade & Migration Playbook
+
+Follow these steps strictly in order when upgrading from `1.1.5` or `1.1.6` to `1.2.0`—never bypass active-task draining or mutate frozen historical records in place:
+
+1. **Drain in-flight tasks & perform full backup**:
+   - Drain or cancel all non-terminal tasks (`queued`, `running`, `cancelling`) before migrating; any remaining non-terminal tasks trigger `UpgradeDrainError` and block migration.
+   - Back up the PostgreSQL database, managed object storage directory, `backend/deploy/pies.toml`, and environment secrets together.
+2. **Run idempotent versioned database migrations**:
+   - With the updated `backend` image, run `python -m iesplan.migrations` (or let the controlled single startup instance execute `apply_migrations()`), applying both migrations idempotently in `schema_migrations`:
+     - `v1_2_0_calc_config` (version ID `20261126_120_calc_config`): converts editable saved project `CalculationConfig` revisions in one pass to the 13-field `1.2.0` contract (removing `convergence`, mapping `evaluator` to parallel `evaluators[]`, and slotting `options` under `options.generator` / `options.algorithm`); historical `CalcSnapshot` and `Evidence` records remain strictly read-only.
+     - `v1_2_0_ecosystem` (version ID `20261127_120_ecosystem`): creates `ecosystem_settings`, `local_artifacts`, and `member_artifact_installs` tables with single-active-version constraints and seeds default Local Mode settings (`market_mode="local"`, `local_upload_requires_approval=True`).
+3. **Rebuild and start the Docker Compose stack**:
+   - Run `docker compose up -d --build` from the repository root to update the five persistent containers and execute the one-shot `builtin_stages` service building `pies-builtin-stages:1.2.0` and `pies-plugin-base:latest`.
+4. **Optional standalone `market/` & `market_gateway/` services**:
+   - Deploy `market/` (static `index.json` + artifact tree hosted as static assets / GitHub Pages) and `market_gateway/` (stateless OTP + GitHub PR gateway configured with `MARKET_HMAC_SECRET`, SMTP, and GitHub App credentials) independently if online browsing or contributor submissions are desired; then configure `market_mode = "online"`, `market_index_url`, `submission_gateway_url`, and optional single-source `pip_index_url` under `/admin/ecosystem`.
+5. **Single-active-version upgrade policy**:
+   - `1.2.0` retains **only 1 current active version** per `(kind, stable_id)` without platform-side cross-version compatibility shims or multi-version pin switchers. Plugin upgrades and cleanups verify zero non-terminal `CalcSnapshot` references (`409 ECO-UNINSTALL-IN-USE` if busy); backward input handling is solely the responsibility of the newer model/plugin itself.
 
 ## Health Checks, Backup, and Recovery
 

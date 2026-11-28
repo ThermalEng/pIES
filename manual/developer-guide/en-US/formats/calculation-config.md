@@ -1,12 +1,12 @@
 # CalculationConfig
 
-> Contract ID: `ies.calculation-config`; Target `schema_version`: `"1.0.0"`; Consumers: Task submission validator, orchestrator, and selected computation plugin containers
+> Contract ID: `ies.calculation-config`; `schema_version`: `"1.0.0"`; Consumers: Task submission validator, orchestrator, and selected computation plugin containers
 
 `CalculationConfig` fixes all plugin selections and runtime parameters for a single calculation task. Computation runs across the project baseline's complete contiguous time axis; this contract contains no typical-day reduction, planning objectives/constraints, device parameters, finance rules, or assembly topology, and freezes independently alongside `ValidatedAssemblyArtifact`.
 
 ## Top-Level Fields
 
-The `1.2.0` unidirectional pipeline target contract requires the following **13 top-level fields** (removing the unused `convergence` field and upgrading the single evaluator to a parallel `evaluators` array; `generator`, `solver`, `algorithm`, and `seed` MUST explicitly pass `null` when absent—never omitted); unknown fields and non-finite numbers are rejected:
+The `1.2.0` unidirectional pipeline effective contract requires the following **13 top-level fields** (removing the unused `convergence` field and upgrading the single evaluator to a parallel `evaluators` array; `generator`, `solver`, `algorithm`, and `seed` MUST explicitly pass `null` when absent—never omitted); unknown fields and non-finite numbers are rejected:
 
 | Field | Type & Format | Description |
 |---|---|---|

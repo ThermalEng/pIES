@@ -1,0 +1,11 @@
+{
+  "demand_kw": [120.0, 180.0, 240.0, 160.0],
+  "parameters": {
+    "generator_capacity_kw": 600.0,
+    "generator_cost_per_kwh": 0.35,
+    "grid_import_cost_per_kwh": 0.85,
+    "local_energy_share_cap": 0.85,
+    "max_iterations": 12,
+    "tolerance": 0.005
+  }
+}

@@ -1,6 +1,6 @@
 # Extension System
 
-> Status: Effective Blueprint; Spec Version: 1.1.0; Governing Spec: [Architecture Constitution](ARCHITECTURE_CONSTITUTION.md)
+> Status: Effective Blueprint; Spec Version: `1.2.0`; Governing Spec: [Architecture Constitution](ARCHITECTURE_CONSTITUTION.md)
 
 pIES separates "declarative business content" from "executable computation capabilities": device models plug in as pure data documents, whereas computation generation, controlled execution, result adaptation, and storage register via their owning module's public `Protocol`.
 
@@ -9,7 +9,7 @@ pIES separates "declarative business content" from "executable computation capab
 | Extension Type | Owning Module | Pinning and Versioning Mechanism | Discovery and Runtime Behavior |
 |---|---|---|---|
 | Device Technical Model | `devices` | Stable `device.id` + publication `revision` + unified `ies.device-model` schema (no per-device semver) | Published via declarative YAML parsing; all devices share one parser and equation AST |
-| Computation Stages & Algorithm Plugins (`1.1.5` / `1.2.0` target) | `computation` / `customization` | Unified `ies.algorithm-plugin@1.0.0` (`plugin.yaml`) covering `predictor`, `generator`, `solver`, `evaluator`, and `algorithm`, pinned by ID + three-part semver | Both built-in and third-party plugins package into computation images launched by `backend` via `job_runner` as ephemeral network-disabled containers; never hot-loaded into control-plane processes |
+| Computation Stages & Algorithm Plugins (effective `1.2.0`) | `computation` / `customization` | Unified `ies.algorithm-plugin@1.0.0` (`plugin.yaml`) covering `predictor`, `generator`, `solver`, `evaluator`, and `algorithm`, maintaining a single current active semantic version per `(kind, stable_id)` | Both built-in and third-party plugins package into computation images launched by `backend` via `job_runner` as ephemeral network-disabled containers; never hot-loaded into control-plane processes |
 | Storage Adapter | `storage` | Namespaced ID + three-part semantic version | Injected by composition root; handles byte-level I/O and health state only |
 
 Trusted platform infrastructure capabilities (such as storage adapters, `job_runner` container bridges, and the built-in restoration layer) are statically discovered, verified, and atomically published by the composition root at startup; meanwhile, device models and the five `ies.algorithm-plugin` container plugin kinds are managed as immutable database and object-storage records supporting restart-free dynamic installation and toggling—never hot-loading user code into control-plane processes and maintaining no cross-module global registries.

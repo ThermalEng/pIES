@@ -1,0 +1,15 @@
+schema: ies.market-artifact-meta
+schema_version: "1.0.0"
+id: ies.solver.highspy_ref
+kind: solver
+version: "1.0.0"
+name:
+  zh_cn: HiGHSpy 参考求解器
+  en_us: HiGHSpy Reference Solver
+description: Reference MILP/LP Python solver plugin built with highspy==1.7.2 streaming 0-based ies.primal-solution@1.0.0 outputs.
+publisher: ies
+license: MPL-2.0
+compatibility:
+  pies: ">=1.2.0,<2.0.0"
+  sdk: ">=1.2.0,<2.0.0"
+delisted: false

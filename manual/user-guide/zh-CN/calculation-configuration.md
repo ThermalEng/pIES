@@ -54,20 +54,38 @@
 
 ---
 
-## 四、计算配置（求解器与算法选项）
+## 四、计算配置（13 字段契约、阶段插件目录与并联评价器）
 
-打开“计算配置”页设置本次求解的执行方案（**本页不包含评价年限或折现率**，这些参数在提交任务时确认）：
+打开“计算配置”页设置本次求解的执行方案（**本页不包含评价年限或折现率**，这些参数在提交任务时确认）。`1.2.0` 采用 **13 个必需顶层字段** 的单向流水线契约（已移除旧版 `convergence` 字段，新增分槽 `options` 与并联 `evaluators[]`）：
+
+### 阶段插件目录与表单编排
+
+页面顶部自动加载 `/api/ecosystem/stage-catalog`，汇集内置能力与已安装就绪的第三方插件：
+
+- **分步模式（`generator` + `solver`）或一体化模式（`algorithm`）**：二选一互斥；选定插件后，下方会按其声明的 `parameters_schema` 自动渲染参数表单并双向同步至 `options`（分槽结构为 `{"generator": {...}, "solver": {...}}` 或 `{"algorithm": {...}}`）。
+- **前置预测（`predictions[]`）**：选择 `predictor` 插件并填写目标 `{instance, interface}` 添加预测条目（系统自动去重同一目标并按插件同层分组联合预测）。
+- **并联评价器（`evaluators[]`）**：可添加 `0..N` 个后置评价插件（如官方财务评价 `ies.evaluator.finance@1.0.0` 及第三方评价器，空数组 `[]` 表示跳过评价直接交付标准工程解与步曲线），每项独立配置 `parameters`。
+
+### `1.2.0` 官方可替换参考 Python 插件
+
+除内置计算链（`ies.generator.highs_milp@1.0.0`、`ies.solver.highs@1.7.2`、`ies.evaluator.finance@1.0.0`）外，可在市场或本地引入四款 `1.2.0` 参考插件：
+
+- `ies.predictor.seasonal_joint`（`predictor`）：支持多目标联合季节移动平均预测；
+- `ies.solver.highspy_ref`（`solver`）：基于 `requirements.txt`（`highspy==1.7.2`）直接消费标准 `.mps` Solver Bundle 的外部参考求解器；
+- `ies.algorithm.economic_dispatch`（`algorithm`）：带 `iterations.jsonl` 收敛记录的一体化经济调度参考算法；
+- `ies.evaluator.carbon_reliability`（`evaluator`）：输出自描述碳排放与供能可靠性指标、图表及明细表的评价插件。
 
 | 字段 | 填写说明 |
 |---|---|
-| 计算模式 | 例如 `planning` |
-| 生成器与求解器 | 选择或填写精确版本引用（如 `ies.generator.highs_milp@1.0.0` 与 `ies.solver.highs@1.7.2`） |
-| 计算精度 | 必选：`low`、`medium` 或 `high`（无默认选择） |
+| 计算模式（`mode`） | 例如 `planning` |
+| 生成器 / 求解器 / 一体化算法 | 分步模式选填精确版本引用（`algorithm` 置 `null`）；一体化模式选填 `algorithm`（`generator`/`solver` 置 `null`） |
+| 计算精度（`precision`） | 必选：`low`、`medium` 或 `high`（无默认选择） |
 | 时间限制（秒） | 求解器内部运行上限（新建项目默认按部署配置初值填入） |
-| 随机种子 | 可留空或填整数 |
-| 输出请求 | 必填 JSON 数组（如 `["solution", "metrics"]`） |
-| 预测配置与收敛 | 配置 `data_predict` 接口所用预测算法与参数；仅当包含耦合预测算法时填写 `{"tolerance": ..., "max_iterations": ...}`（最大轮数至少为 2），否则留空 |
-| 生成/求解选项 | 可选 JSON 对象，须符合所选生成器选项规范 |
+| 随机种子（`seed`） | 可留空（提交 `null`）或填整数 |
+| 输出请求（`outputs`） | 必填 JSON 数组（如 `["solution", "metrics"]`） |
+| 前置预测（`predictions`） | JSON 数组（可为 `[]`），每项 `{target: {instance, interface}, algorithm, parameters}` |
+| 并联评价器（`evaluators`） | JSON 数组（可为 `[]`），每项 `{evaluator, parameters}` |
+| 分槽选项（`options`） | 可选 JSON 对象，分步模式按 `{"generator": {...}, "solver": {...}}`、一体化模式按 `{"algorithm": {...}}` 分槽传递 |
 
 填写完成后点击“保存计算配置”，界面会显示当前最新修订号（例如 `v1`）。如遇到他人先保存造成的版本冲突（`409`），页面会保留你正在编辑的内容，可按需选择“重新加载最新配置”或修改后重新保存。若计算配置尚未保存，后续项目校验将会提示阻断错误，且无法提交计算任务。
 

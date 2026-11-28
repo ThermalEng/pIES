@@ -1,0 +1,15 @@
+schema: ies.market-artifact-meta
+schema_version: "1.0.0"
+id: ies.device.thermal_storage
+kind: device_model
+revision: 1
+name:
+  zh_cn: 蓄热储能罐
+  en_us: Thermal Energy Storage Tank
+description: Reference bidirectional thermal energy storage tank with standby retention and mutually exclusive charge/discharge dynamics.
+publisher: ies
+license: MPL-2.0
+compatibility:
+  pies: ">=1.2.0,<2.0.0"
+  sdk: ">=1.2.0,<2.0.0"
+delisted: false

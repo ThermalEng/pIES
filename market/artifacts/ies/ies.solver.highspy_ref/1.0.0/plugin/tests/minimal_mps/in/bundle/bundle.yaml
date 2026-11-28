@@ -1,0 +1,9 @@
+schema: ies.solver-bundle
+schema_version: "1.0.0"
+bundle:
+  id: minimal-mps-test
+  contract: ies.solver-bundle.mps@1.0.0
+inputs:
+  - path: input/problem.mps
+outputs:
+  - path: output/primal_solution.json

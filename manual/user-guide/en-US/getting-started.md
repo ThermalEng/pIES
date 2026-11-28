@@ -8,7 +8,7 @@ Confirm the following details with your system administrator before signing in:
 - Your username and initial password;
 - The settlement currency for new projects (projects do not store a time zone; the UTC offset for generic timestamp data files is declared separately when uploading datasets).
 
-If you need to start the service yourself, see [Deployment and Operations](../../developer-guide/en-US/deployment.md).
+If you need to start or upgrade the service from `1.1.x` to `1.2.0` yourself, see [Deployment and Operations](../../developer-guide/en-US/deployment.md).
 
 ## Sign In and Sessions
 
@@ -29,7 +29,7 @@ If you need to start the service yourself, see [Deployment and Operations](../..
 3. Enter the **Start year (immutable after creation)** (a Gregorian integer year, e.g., `2026`; the system automatically derives leap years from the Gregorian calendar) and select the **Resolution (immutable after creation)** (e.g., `1h`). **Start year and resolution cannot be changed after creation.**
 4. Click **Confirm**, then open the project from the list to enter the **Workbench**.
 
-The left workbench navigation lists **System Modeling**, **Data**, **Calc Config**, **Validation**, **Tasks**, **Results**, and **Exports** in order (a newly opened project defaults to **Tasks**).
+The left workbench navigation lists **System Modeling**, **Data**, **Calc Config**, **Validation**, **Tasks**, **Results**, and **Exports** in order (a newly opened project defaults to **Tasks**); the top navigation bar also links to global **Custom** ("Models & Algorithms" dual tabs for templates, local imports, and market plugins) and admin-only **Open Ecosystem** (`/admin/ecosystem`).
 
 ## Quick End-to-End Walkthrough
 

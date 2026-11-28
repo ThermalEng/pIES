@@ -84,8 +84,8 @@ def test_publishers_registry_and_zero_plaintext(tmp_path: Path) -> None:
 def test_seed_market_pr_check_and_publisher_ownership_rules(tmp_path: Path) -> None:
     res = check_market_pr(MARKET_ROOT, docker_selftest=False)
     assert res["ok"] is True
-    assert res["artifacts_checked"] == 2
-    assert res["active_artifacts"] == 2
+    assert res["artifacts_checked"] == 10
+    assert res["active_artifacts"] == 10
     assert res["delisted_artifacts"] == 0
     assert res["docker_tests_run"] == 0
 
@@ -116,7 +116,7 @@ def test_seed_market_pr_check_and_publisher_ownership_rules(tmp_path: Path) -> N
         encoding="utf-8",
     )
     (acme_dir / "README.md").write_text("# ACME Pump\n", encoding="utf-8")
-    assert check_market_pr(active_market)["artifacts_checked"] == 3
+    assert check_market_pr(active_market)["artifacts_checked"] == 11
 
     # Missing status in publishers.yaml must be rejected (must not default to active)
     (active_market / "publishers.yaml").write_text(
@@ -465,6 +465,9 @@ def test_docker_selftest_builds_requirements_sets_limits_and_cleans_on_timeout(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     mkt = _copy_market(tmp_path / "req_mkt")
+    for other in (mkt / "artifacts/ies").iterdir():
+        if other.name != "ies.evaluator.sample_carbon":
+            shutil.rmtree(other)
     plugin_dir = mkt / "artifacts/ies/ies.evaluator.sample_carbon/1.0.0/plugin"
     (plugin_dir / "requirements.txt").write_text("jsonschema>=4.0\n", encoding="utf-8")
     plugin_yaml = plugin_dir / "plugin.yaml"
@@ -524,12 +527,32 @@ def test_build_index_deterministic_sha256_and_delisted_exclusion(tmp_path: Path)
 
     assert validate_market_index(idx1) == idx2
     assert (dist1 / "index.json").read_bytes() == (dist2 / "index.json").read_bytes()
-    assert len(idx1["artifacts"]) == 2
+    assert len(idx1["artifacts"]) == 10
 
+    expected_official_ids = {
+        "ies.device.solar_pv_sample",
+        "ies.device.chp",
+        "ies.device.thermal_storage",
+        "ies.device.absorption_chiller",
+        "ies.device.wind_turbine",
+        "ies.predictor.seasonal_joint",
+        "ies.solver.highspy_ref",
+        "ies.algorithm.economic_dispatch",
+        "ies.evaluator.sample_carbon",
+        "ies.evaluator.carbon_reliability",
+    }
     by_id = {entry["id"]: entry for entry in idx1["artifacts"]}
-    assert set(by_id) == {"ies.device.solar_pv_sample", "ies.evaluator.sample_carbon"}
+    assert set(by_id) == expected_official_ids
     assert by_id["ies.evaluator.sample_carbon"]["consumes"] == ["ies.engineering-solution@1.0.0"]
     assert by_id["ies.evaluator.sample_carbon"]["produces"] == ["ies.evaluation-report@1.0.0"]
+    assert by_id["ies.predictor.seasonal_joint"]["consumes"] == ["ies.stage-input@1.0.0"]
+    assert by_id["ies.predictor.seasonal_joint"]["produces"] == ["ies.prediction-output@1.0.0"]
+    assert by_id["ies.solver.highspy_ref"]["consumes"] == ["ies.solver-bundle.mps@1.0.0"]
+    assert by_id["ies.solver.highspy_ref"]["produces"] == ["ies.primal-solution@1.0.0"]
+    assert by_id["ies.algorithm.economic_dispatch"]["consumes"] == ["ies.stage-input@1.0.0"]
+    assert by_id["ies.algorithm.economic_dispatch"]["produces"] == ["ies.engineering-solution@1.0.0"]
+    assert by_id["ies.evaluator.carbon_reliability"]["consumes"] == ["ies.engineering-solution@1.0.0"]
+    assert by_id["ies.evaluator.carbon_reliability"]["produces"] == ["ies.evaluation-report@1.0.0"]
 
     for entry in idx1["artifacts"]:
         pkg_file = dist1 / entry["url"]
@@ -554,7 +577,9 @@ def test_build_index_deterministic_sha256_and_delisted_exclusion(tmp_path: Path)
     delisted_idx = build_market_index(delisted_market, dist_delisted, generated_at=ts)
     assert not (dist_delisted / "stale_dir").exists()
     assert not (dist_delisted / "stale_file.txt").exists()
-    assert [a["id"] for a in delisted_idx["artifacts"]] == ["ies.evaluator.sample_carbon"]
+    assert sorted(a["id"] for a in delisted_idx["artifacts"]) == sorted(
+        expected_official_ids - {"ies.device.solar_pv_sample"}
+    )
     assert not (dist_delisted / "artifacts/ies.device.solar_pv_sample-r1.device.yaml").exists()
 
 
@@ -581,7 +606,7 @@ def test_cli_check_pr_and_build_index(tmp_path: Path) -> None:
         check=False,
     )
     assert chk.returncode == 0, chk.stderr
-    assert json.loads(chk.stdout)["artifacts_checked"] == 2
+    assert json.loads(chk.stdout)["artifacts_checked"] == 10
 
     out_dir = tmp_path / "cli_dist"
     bld = subprocess.run(
@@ -602,7 +627,7 @@ def test_cli_check_pr_and_build_index(tmp_path: Path) -> None:
         check=False,
     )
     assert bld.returncode == 0, bld.stderr
-    assert json.loads(bld.stdout)["artifact_count"] == 2
+    assert json.loads(bld.stdout)["artifact_count"] == 10
     assert (out_dir / "index.json").is_file()
 
 
@@ -613,7 +638,7 @@ def test_cli_check_pr_and_build_index(tmp_path: Path) -> None:
 def test_real_docker_network_none_selftest(tmp_path: Path) -> None:
     summary = check_market_pr(MARKET_ROOT, docker_selftest=True)
     assert summary["ok"] is True
-    assert summary["docker_tests_run"] == 2
+    assert summary["docker_tests_run"] == 6
 
     # Real Docker timeout cleanup: sleeping plugin with timeout_seconds=1 is forcibly removed
     slow_mkt = _copy_market(tmp_path / "slow_mkt")

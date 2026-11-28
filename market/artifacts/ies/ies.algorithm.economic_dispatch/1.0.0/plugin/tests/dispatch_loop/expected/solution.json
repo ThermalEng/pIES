@@ -1,0 +1,91 @@
+{
+  "construction_units": [
+    {
+      "built": true,
+      "instance_id": "chp_dispatch_1",
+      "mode": "mandatory",
+      "scales": [
+        {
+          "planning_variable_id": "dispatch_capacity_kw",
+          "unit": "kW",
+          "value": 172.297297
+        }
+      ],
+      "unit_id": "dispatch_unit_1"
+    }
+  ],
+  "metrics": {
+    "iterations": 4,
+    "total_cost_cny": 320.205447,
+    "total_demand_kwh": 700.0,
+    "total_dispatch_kwh": 594.999999,
+    "total_grid_import_kwh": 105.000001
+  },
+  "model_sources": {
+    "algorithm": "ies.algorithm.economic_dispatch@1.0.0",
+    "step_count": 4
+  },
+  "schema": "ies.engineering-solution",
+  "schema_version": "1.0.0",
+  "series": {
+    "dispatch_unit_1__electric_out": {
+      "instance_id": "chp_dispatch_1",
+      "unit": "kW",
+      "values": [
+        110.27027,
+        165.405405,
+        172.297297,
+        147.027027
+      ],
+      "variable_id": "electric_out"
+    },
+    "grid_1__electricity_import": {
+      "instance_id": "grid_1",
+      "unit": "kW",
+      "values": [
+        9.72973,
+        14.594595,
+        67.702703,
+        12.972973
+      ],
+      "variable_id": "electricity_import"
+    },
+    "load_1__electricity_in": {
+      "instance_id": "load_1",
+      "unit": "kW",
+      "values": [
+        120.0,
+        180.0,
+        240.0,
+        160.0
+      ],
+      "variable_id": "electricity_in"
+    }
+  },
+  "solver_summary": {
+    "best_bound": 319.467188,
+    "has_feasible_solution": true,
+    "math_status": "solved",
+    "objective_unit": "CNY",
+    "objective_value": 320.205447,
+    "relative_gap": 0.00230558,
+    "solver_diagnostics": {
+      "algorithm": "ies.algorithm.economic_dispatch@1.0.0",
+      "iterations": 4
+    },
+    "termination_reason": "optimal"
+  },
+  "system_series": {
+    "system__net_grid_import": {
+      "block": "power_balance",
+      "unit": "kW",
+      "values": [
+        9.72973,
+        14.594595,
+        67.702703,
+        12.972973
+      ],
+      "variable": "net_grid_import"
+    }
+  }
+}

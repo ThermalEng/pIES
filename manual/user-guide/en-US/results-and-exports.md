@@ -14,7 +14,7 @@ The top summary card and evidence package selector remain pinned at the top of t
 - **Overview**: Displays **Sealed solver status**, the four independent dimension badges (physical, optimality, financial, reliability), headline sealed financial metrics (`NPV`, `IRR` and status, static/dynamic payback) with a cash flow trend preview, **Sealed construction decisions**, **Planning solution preview**, and **Candidates**.
 - **Financials & Cash Flows**: Presents Level-1 charts for full-horizon net and cumulative cash flows `CF[0..E]`, annual operating breakdowns, frozen baseline comparisons, construction payments, and explicit net cashflows, with **View data table** links to Level-2 paginated tables preserving exact sealed decimals.
 - **Process & Tax**: Presents Level-1 visual cards for calendar-month demand peaks and charges (switchable by meter binding), monthly VAT pool trajectories (switchable by pool), yearly income tax and tax depreciation bar charts, named cost/amount charts grouped by axis/unit, and asset book value curves; each card drills down into a filtered, paginated Level-2 table view.
-- **Engineering & Curves**: Displays computation step curves (with interactive legend toggles and window pagination), a **View step data table** drill-down for exact window rows, and engineering balance, emissions, and reliability metrics.
+- **Engineering & Curves**: Displays computation step curves (with interactive legend toggles and window pagination), a **View step data table** drill-down for exact window rows, and engineering balance, emissions, and reliability metrics; when parallel `evaluators[]` are configured, renders **Evaluator Execution Status** cards (tracking succeeded/failed/timed-out/cancelled/skipped outcomes with a **Retry Evaluator** button on failed entries without re-running core optimization) and the generic **Self-Describing Evaluation Reports** section (`summary`, `metrics`, `line`/`bar`/`area`/`scatter` charts, and `tables` from `ies.evaluation-report@1.0.0`). Historical `1.1.5` evidence packages remain readable verbatim in read-only mode.
 - **Assessments & Export**: Lists immutable assessment history (paginated when needed), system reassessment trigger, and Excel / project package downloads.
 
 ### 1. Solver Status and Key Metrics
@@ -56,7 +56,7 @@ Once generated, downloads authenticate directly against your active session and 
 2. If no assessment record exists yet, click **Reassess** to generate a system assessment first.
 3. Choose the **Report language** (**Chinese** or **English**) and click **Export Excel report**.
 
-The workbook contains overview, solver status, financial summary, construction decisions, calendar-month demand bills, named cost/amount breakdowns, and full un-decimated `Step Series Catalog` and `Step Series Values` sheets derived from the same sealed evidence as the UI.
+The workbook contains overview, solver status, financial summary, construction decisions, calendar-month demand bills, named cost/amount breakdowns, and full un-decimated `Step Series Catalog` and `Step Series Values` sheets derived from the same sealed evidence as the UI. In addition, non-financial self-describing evaluation reports (`evaluation_reports`) receive dedicated sanitized `<=31`-character worksheets per evaluator plugin while keeping all official financial worksheets completely unchanged.
 
 ### Export Full Project Package
 

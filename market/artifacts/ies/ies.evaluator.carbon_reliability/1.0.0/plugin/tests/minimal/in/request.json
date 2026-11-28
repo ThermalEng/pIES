@@ -1,0 +1,7 @@
+{
+  "parameters": {
+    "gas_emission_factor_kg_per_m3": 2.162,
+    "grid_emission_factor_kg_per_kwh": 0.5703,
+    "step_hours": 1.0
+  }
+}

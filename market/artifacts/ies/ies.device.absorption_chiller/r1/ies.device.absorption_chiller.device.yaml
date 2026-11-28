@@ -1,0 +1,55 @@
+schema: ies.device-model
+schema_version: "1.0.0"
+device:
+  id: ies.device.absorption_chiller
+  names:
+    zh-CN: 吸收式制冷机
+    en-US: Absorption Chiller
+properties:
+  rated_cooling_kw:
+    value: 600
+    unit: kW
+    valid_range:
+      minimum: 0
+      maximum: 1000000
+  thermal_cop:
+    value: 1.2
+    unit: "1"
+    valid_range:
+      minimum: 0.5
+      maximum: 2.5
+  aux_electric_ratio:
+    value: 0.03
+    unit: "1"
+    valid_range:
+      minimum: 0
+      maximum: 0.2
+interfaces:
+  heat_in:
+    type: in
+    carrier: heat
+    unit: kW
+    valid_range:
+      minimum: 0
+      maximum: null
+  electricity_in:
+    type: in
+    carrier: electricity
+    unit: kW
+    valid_range:
+      minimum: 0
+      maximum: null
+  cool_out:
+    type: out
+    carrier: cool
+    unit: kW
+    valid_range:
+      minimum: 0
+      maximum: {property_ref: rated_cooling_kw}
+equations:
+  variables: {}
+  relations:
+    - id: cooling_generation
+      expression: "cool_out[t] = heat_in[t] * thermal_cop"
+    - id: auxiliary_power
+      expression: "electricity_in[t] = cool_out[t] * aux_electric_ratio"

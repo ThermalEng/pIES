@@ -1,0 +1,55 @@
+{
+  "construction_units": [
+    {
+      "built": true,
+      "instance_id": "wind_1",
+      "mode": "mandatory",
+      "scales": [
+        {
+          "planning_variable_id": "wind_cap",
+          "unit": "kW",
+          "value": 500.0
+        }
+      ],
+      "unit_id": "u_wind"
+    }
+  ],
+  "schema": "ies.engineering-solution",
+  "schema_version": "1.0.0",
+  "series": {
+    "chp_1__gas_in": {
+      "instance_id": "chp_1",
+      "unit": "m3/h",
+      "values": [10.0, 20.0],
+      "variable_id": "gas_in"
+    },
+    "grid_1__electricity_import": {
+      "instance_id": "grid_1",
+      "unit": "kW",
+      "values": [100.0, 200.0],
+      "variable_id": "electricity_import"
+    },
+    "load_1__electricity_in": {
+      "instance_id": "load_1",
+      "unit": "kW",
+      "values": [300.0, 400.0],
+      "variable_id": "electricity_in"
+    },
+    "wind_1__electric_out": {
+      "instance_id": "wind_1",
+      "unit": "kW",
+      "values": [200.0, 200.0],
+      "variable_id": "electric_out"
+    }
+  },
+  "solver_summary": {
+    "best_bound": 100.0,
+    "has_feasible_solution": true,
+    "math_status": "solved",
+    "objective_unit": "CNY",
+    "objective_value": 100.0,
+    "relative_gap": 0.0,
+    "termination_reason": "optimal"
+  },
+  "system_series": {}
+}
