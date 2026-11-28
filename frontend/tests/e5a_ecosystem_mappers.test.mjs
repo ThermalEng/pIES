@@ -13,7 +13,7 @@ const {
   parseDeviceFormFromText,
   resolveArtifactLifecycleStatus,
 } = await import('../src/features/customization/index.ts')
-const { coerceSchemaFieldValue, extractSchemaFields } = await import('../src/features/config/index.ts')
+const { addPredictionEntry, coerceSchemaFieldValue, extractSchemaFields } = await import('../src/features/config/index.ts')
 const { PAGE_MESSAGES_EN, PAGE_MESSAGES_ZH, pt } = await import('../src/i18n/pageMessages.ts')
 const { messagesEn } = await import('../src/i18n/messages_en.ts')
 const { messagesZh } = await import('../src/i18n/messages_zh.ts')
@@ -127,7 +127,23 @@ assert.equal(resolveArtifactLifecycleStatus({ approval_status: 'approved', insta
     {
       id: 'acme.wind',
       kind: 'predictor',
-      version: '2.0.0',
+      version: '1.2.0',
+      name: { zh_cn: '风电预测', en_us: 'Wind Predictor' },
+      description: 'Wind forecasting old',
+      publisher: 'acme',
+      license: 'Apache-2.0',
+      compatibility: {},
+      consumes: [],
+      produces: ['wind_cf'],
+      sha256: 'f'.repeat(64),
+      size_bytes: 900,
+      member_state: 'remote',
+      update_available: false,
+    },
+    {
+      id: 'acme.wind',
+      kind: 'predictor',
+      version: '1.10.0',
       name: { zh_cn: '风电预测', en_us: 'Wind Predictor' },
       description: 'Wind forecasting',
       publisher: 'acme',
@@ -140,6 +156,38 @@ assert.equal(resolveArtifactLifecycleStatus({ approval_status: 'approved', insta
       member_state: 'remote',
       update_available: false,
     },
+    {
+      id: 'acme.device.boiler',
+      kind: 'device_model',
+      revision: 1,
+      name: { zh_cn: '锅炉', en_us: 'Boiler' },
+      description: 'Old boiler',
+      publisher: 'acme',
+      license: 'MIT',
+      compatibility: {},
+      consumes: [],
+      produces: [],
+      sha256: '1'.repeat(64),
+      size_bytes: 512,
+      member_state: 'remote',
+      update_available: false,
+    },
+    {
+      id: 'acme.device.boiler',
+      kind: 'device_model',
+      revision: 3,
+      name: { zh_cn: '锅炉', en_us: 'Boiler' },
+      description: 'Latest boiler',
+      publisher: 'acme',
+      license: 'MIT',
+      compatibility: {},
+      consumes: [],
+      produces: [],
+      sha256: '2'.repeat(64),
+      size_bytes: 600,
+      member_state: 'remote',
+      update_available: false,
+    },
   ]
 
   const localOnly = mergeCatalogEntries({ localArtifacts, marketItems, marketMode: 'local' })
@@ -149,11 +197,13 @@ assert.equal(resolveArtifactLifecycleStatus({ approval_status: 'approved', insta
   assert.equal(localOnly[1].versionOrRevision, 'r2')
 
   const onlineMerged = mergeCatalogEntries({ localArtifacts, marketItems, marketMode: 'online' })
-  assert.equal(onlineMerged.length, 3, 'remote + matching local should deduplicate; local-only ready remains')
+  assert.equal(onlineMerged.length, 4, 'historical remote versions must collapse before merge')
   const byId = Object.fromEntries(onlineMerged.map((e) => [e.id, e]))
   assert.equal(byId['acme.carbon'].memberState, 'local_installed')
   assert.equal(byId['acme.carbon'].updateAvailable, true)
   assert.equal(byId['acme.wind'].memberState, 'remote')
+  assert.equal(byId['acme.wind'].versionOrRevision, '1.10.0', 'semver collapse must pick 1.10.0 over 1.2.0')
+  assert.equal(byId['acme.device.boiler'].versionOrRevision, 'r3', 'revision collapse must pick r3 over r1')
   assert.equal(byId['acme.chiller'].memberState, 'local_uninstalled')
 }
 
@@ -242,7 +292,30 @@ assert.equal(formatArtifactDiagnostics({ message: 'missing manifest' }), 'missin
   assert.equal(coerceSchemaFieldValue(fields[0], ''), undefined)
   assert.equal(coerceSchemaFieldValue(fields[1], '4'), 4)
   assert.equal(coerceSchemaFieldValue(fields[2], true), true)
+  assert.equal(coerceSchemaFieldValue(fields[2], false), false)
   assert.equal(coerceSchemaFieldValue(fields[3], 'exact'), 'exact')
+}
+
+// 7. addPredictionEntry follows CalculationConfig 1.0.0 {target: {instance, interface}, algorithm, parameters}
+{
+  const list1 = addPredictionEntry([], {
+    instance: 'pv1',
+    interfaceName: 'power_out',
+    algorithm: 'ies.predictor.naive@1.0.0',
+  })
+  assert.deepEqual(list1, [
+    {
+      target: { instance: 'pv1', interface: 'power_out' },
+      algorithm: 'ies.predictor.naive@1.0.0',
+      parameters: {},
+    },
+  ])
+  const dup = addPredictionEntry(list1, {
+    instance: 'pv1',
+    interfaceName: 'power_out',
+    algorithm: 'ies.predictor.other@1.0.0',
+  })
+  assert.equal(dup.length, 1, 'duplicate {instance, interface} target must be ignored')
 }
 
 console.log('ALL E5A ECOSYSTEM MAPPER CHECKS PASSED')

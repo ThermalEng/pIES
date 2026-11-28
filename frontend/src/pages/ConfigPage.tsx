@@ -18,6 +18,7 @@ import { useEffect, useState } from 'react'
 import { useParams } from 'react-router-dom'
 
 import {
+  addPredictionEntry,
   coerceSchemaFieldValue,
   extractSchemaFields,
   getCalcConfig,
@@ -25,7 +26,7 @@ import {
   getStageCatalog,
   saveCalcConfig,
 } from '../features/config'
-import type { SchemaFieldSpec, StageCatalogDto, StageCatalogEntryDto } from '../features/config'
+import type { PredictionEntry, SchemaFieldSpec, StageCatalogDto, StageCatalogEntryDto } from '../features/config'
 import { Alert, Badge, Button, Card, Checkbox, EmptyState, FormField, Input, Select, Spinner, Textarea } from '../components/ui'
 import { errorMessage, useI18n } from '../i18n'
 import { pt } from '../i18n/pageMessages'
@@ -115,7 +116,8 @@ export default function ConfigPage(props: ConfigPageProps) {
   const [stageCatalog, setStageCatalog] = useState<StageCatalogDto | null>(null)
   const [catalogError, setCatalogError] = useState<string | null>(null)
   const [selectedPredictor, setSelectedPredictor] = useState('')
-  const [predictorTarget, setPredictorTarget] = useState('')
+  const [predictorInstance, setPredictorInstance] = useState('')
+  const [predictorInterface, setPredictorInterface] = useState('')
   const [selectedEvaluator, setSelectedEvaluator] = useState('')
 
   function applyBody(body: CalculationConfigBody, rev: number | null) {
@@ -382,7 +384,8 @@ export default function ConfigPage(props: ConfigPageProps) {
             evaluatorsText={evaluatorsText}
             optionsText={optionsText}
             selectedPredictor={selectedPredictor}
-            predictorTarget={predictorTarget}
+            predictorInstance={predictorInstance}
+            predictorInterface={predictorInterface}
             selectedEvaluator={selectedEvaluator}
             onSelectGenerator={(ref) => {
               setGenerator(ref)
@@ -400,7 +403,8 @@ export default function ConfigPage(props: ConfigPageProps) {
               }
             }}
             onChangePredictor={setSelectedPredictor}
-            onChangePredictorTarget={setPredictorTarget}
+            onChangePredictorInstance={setPredictorInstance}
+            onChangePredictorInterface={setPredictorInterface}
             onChangePredictionsText={setPredictionsText}
             onSelectEvaluator={setSelectedEvaluator}
             onChangeEvaluatorsText={setEvaluatorsText}
@@ -524,7 +528,7 @@ function SlotSchemaFields({
               <Checkbox
                 id={inputId}
                 checked={checked}
-                onChange={(val) => onChangeField(spec, val)}
+                onChange={(e) => onChangeField(spec, e.target.checked)}
                 label={spec.title}
               />
             </FormField>
@@ -575,13 +579,15 @@ function StageCatalogPanel(props: {
   evaluatorsText: string
   optionsText: string
   selectedPredictor: string
-  predictorTarget: string
+  predictorInstance: string
+  predictorInterface: string
   selectedEvaluator: string
   onSelectGenerator: (ref: string) => void
   onSelectSolver: (ref: string) => void
   onSelectAlgorithm: (ref: string) => void
   onChangePredictor: (ref: string) => void
-  onChangePredictorTarget: (target: string) => void
+  onChangePredictorInstance: (instance: string) => void
+  onChangePredictorInterface: (iface: string) => void
   onChangePredictionsText: (next: string) => void
   onSelectEvaluator: (ref: string) => void
   onChangeEvaluatorsText: (next: string) => void
@@ -596,13 +602,15 @@ function StageCatalogPanel(props: {
     evaluatorsText,
     optionsText,
     selectedPredictor,
-    predictorTarget,
+    predictorInstance,
+    predictorInterface,
     selectedEvaluator,
     onSelectGenerator,
     onSelectSolver,
     onSelectAlgorithm,
     onChangePredictor,
-    onChangePredictorTarget,
+    onChangePredictorInstance,
+    onChangePredictorInterface,
     onChangePredictionsText,
     onSelectEvaluator,
     onChangeEvaluatorsText,
@@ -626,7 +634,7 @@ function StageCatalogPanel(props: {
   const parsedPredictions = (() => {
     const p = parseJsonField(predictionsText, [])
     return Array.isArray(p.value)
-      ? (p.value as Array<{ target?: string; predictor?: string; parameters?: Record<string, unknown> }>)
+      ? (p.value as PredictionEntry[])
       : []
   })()
 
@@ -650,11 +658,31 @@ function StageCatalogPanel(props: {
 
   const handleAddPredictor = () => {
     const predRef = selectedPredictor || catalog.predictors[0]?.ref || ''
-    const target = predictorTarget.trim()
-    if (!predRef || !target) return
-    const next = [...parsedPredictions, { target, predictor: predRef, parameters: {} }]
+    const next = addPredictionEntry(parsedPredictions, {
+      instance: predictorInstance,
+      interfaceName: predictorInterface,
+      algorithm: predRef,
+    })
+    if (next === parsedPredictions) return
     onChangePredictionsText(JSON.stringify(next, null, 2))
-    onChangePredictorTarget('')
+    onChangePredictorInstance('')
+    onChangePredictorInterface('')
+  }
+
+  const handleRemovePrediction = (idx: number) => {
+    const next = parsedPredictions.filter((_, i) => i !== idx)
+    onChangePredictionsText(next.length === 0 ? '' : JSON.stringify(next, null, 2))
+  }
+
+  const handleUpdatePredictionParam = (idx: number, spec: SchemaFieldSpec, nextVal: unknown) => {
+    const next = parsedPredictions.map((item, i) => {
+      if (i !== idx) return item
+      const params = { ...(item.parameters ?? {}) }
+      if (nextVal === undefined) delete params[spec.name]
+      else params[spec.name] = nextVal
+      return { ...item, parameters: params }
+    })
+    onChangePredictionsText(JSON.stringify(next, null, 2))
   }
 
   const handleAddEvaluator = () => {
@@ -734,31 +762,78 @@ function StageCatalogPanel(props: {
       })}
 
       {catalog.predictors.length > 0 ? (
-        <div className="ies-form-row" style={{ alignItems: 'flex-end' }}>
-          <FormField label={pt('ies.config_eco.pick_predictor')} htmlFor="calc-catalog-predictor">
-            <Select
-              id="calc-catalog-predictor"
-              value={selectedPredictor || catalog.predictors[0]?.ref || ''}
-              onChange={(e) => onChangePredictor(e.target.value)}
-            >
-              {catalog.predictors.map((p) => (
-                <option key={p.ref} value={p.ref}>
-                  {p.ref} ({p.source})
-                </option>
-              ))}
-            </Select>
-          </FormField>
-          <FormField label={pt('ies.config_eco.predictor_target')} htmlFor="calc-catalog-predictor-target">
-            <Input
-              id="calc-catalog-predictor-target"
-              value={predictorTarget}
-              onChange={(e) => onChangePredictorTarget(e.target.value)}
-              placeholder="load_elec"
-            />
-          </FormField>
-          <Button size="sm" variant="secondary" onClick={handleAddPredictor}>
-            {pt('ies.config_eco.add_predictor')}
-          </Button>
+        <div className="ies-stack">
+          <div className="ies-form-row" style={{ alignItems: 'flex-end', flexWrap: 'wrap' }}>
+            <FormField label={pt('ies.config_eco.pick_predictor')} htmlFor="calc-catalog-predictor">
+              <Select
+                id="calc-catalog-predictor"
+                value={selectedPredictor || catalog.predictors[0]?.ref || ''}
+                onChange={(e) => onChangePredictor(e.target.value)}
+              >
+                {catalog.predictors.map((p) => (
+                  <option key={p.ref} value={p.ref}>
+                    {p.ref} ({p.source})
+                  </option>
+                ))}
+              </Select>
+            </FormField>
+            <FormField label={pt('ies.config_eco.predictor_instance')} htmlFor="calc-catalog-predictor-instance">
+              <Input
+                id="calc-catalog-predictor-instance"
+                value={predictorInstance}
+                onChange={(e) => onChangePredictorInstance(e.target.value)}
+                placeholder="pv1"
+              />
+            </FormField>
+            <FormField label={pt('ies.config_eco.predictor_interface')} htmlFor="calc-catalog-predictor-interface">
+              <Input
+                id="calc-catalog-predictor-interface"
+                value={predictorInterface}
+                onChange={(e) => onChangePredictorInterface(e.target.value)}
+                placeholder="power_out"
+              />
+            </FormField>
+            <Button size="sm" variant="secondary" onClick={handleAddPredictor}>
+              {pt('ies.config_eco.add_predictor')}
+            </Button>
+          </div>
+          {parsedPredictions.length > 0 ? (
+            <div className="ies-stack">
+              <h3 className="ies-section-subtitle">
+                {pt('ies.config_eco.predictions_list', { count: parsedPredictions.length })}
+              </h3>
+              {parsedPredictions.map((predRow, idx) => {
+                const ref = predRow?.algorithm ?? ''
+                const predSpec = ref ? entryFor(catalog.predictors, ref) : null
+                const targetLabel = predRow?.target
+                  ? `${predRow.target.instance}.${predRow.target.interface}`
+                  : `#${idx + 1}`
+                return (
+                  <div key={`${targetLabel}-${idx}`} className="ies-custom-card">
+                    <div className="ies-custom-card__head">
+                      <div className="ies-flex">
+                        <strong>{targetLabel}</strong>
+                        <Badge size="sm" variant="neutral" label={ref} />
+                      </div>
+                      <Button size="sm" variant="danger" onClick={() => handleRemovePrediction(idx)}>
+                        {pt('ies.config_eco.remove')}
+                      </Button>
+                    </div>
+                    {predSpec ? (
+                      <div style={{ marginTop: 'var(--ies-space-2)' }}>
+                        <SlotSchemaFields
+                          idPrefix={`calc-pred-${idx}`}
+                          schema={predSpec.parameters_schema}
+                          values={predRow.parameters ?? {}}
+                          onChangeField={(spec, val) => handleUpdatePredictionParam(idx, spec, val)}
+                        />
+                      </div>
+                    ) : null}
+                  </div>
+                )
+              })}
+            </div>
+          ) : null}
         </div>
       ) : null}
 

@@ -3,7 +3,7 @@
  */
 
 export { getCalcConfig, getDeploymentDefaults, getStageCatalog, saveCalcConfig, getPlanningConfig, savePlanningConfig } from './api'
-export { configFromServer, deploymentDefaultsFromServer, extractSchemaFields, coerceSchemaFieldValue } from './mappers'
+export { configFromServer, deploymentDefaultsFromServer, extractSchemaFields, coerceSchemaFieldValue, addPredictionEntry } from './mappers'
 export { EMPTY_PLANNING, planningDraftToYaml, planningFromYaml, planningToYaml } from './planningDocument'
 export type { ConfigEnvelopeDto, DeploymentDefaultsDto, PlanningConfigBody, PlanningConfigEnvelopeDto, PlanningConstraintDto, PlanningVariableDto, StageCatalogDto, StageCatalogEntryDto } from './contracts'
-export type { SchemaFieldSpec } from './mappers'
+export type { SchemaFieldSpec, PredictionEntry } from './mappers'

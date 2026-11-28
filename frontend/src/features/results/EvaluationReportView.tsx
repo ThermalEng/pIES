@@ -3,9 +3,9 @@
  * 严格消费后端/插件声明的 metrics / charts / tables，不重算业务指标。
  */
 
-import { BarChart, CategoryLineChart } from '../../components/charts'
-import type { CategorySeries } from '../../components/charts'
-import { Table, TBody, TD, TH, THead, TR } from '../../components/ui'
+import { BarChart, CategoryLineChart, ScatterChart } from '../../components/charts'
+import type { CategorySeries, ScatterPoint } from '../../components/charts'
+import { Alert, Table, TBody, TD, TH, THead, TR } from '../../components/ui'
 import { useI18n } from '../../i18n'
 import type { EvaluationReportBlock } from '../../types'
 import { asObjectArray } from './chartMappers'
@@ -129,10 +129,53 @@ export function EvaluationReportSection({ reports }: { reports: EvaluationReport
               })
               const xAxisLabel = chart.x_unit ? `${chart.x_label} (${chart.x_unit})` : chart.x_label
               const yAxisLabel = chart.y_unit ? `${chart.y_label} (${chart.y_unit})` : chart.y_label
+              const chartType = chart.chart_type ?? 'line'
+
+              if (chartType === 'scatter') {
+                const points: ScatterPoint[] = []
+                for (let sIdx = 0; sIdx < rawSeries.length; sIdx += 1) {
+                  const s = rawSeries[sIdx]
+                  const vals = Array.isArray(s.values) ? s.values : []
+                  for (let i = 0; i < vals.length; i += 1) {
+                    const yVal = vals[i]
+                    if (typeof yVal !== 'number' || !Number.isFinite(yVal)) continue
+                    const rawX = Array.isArray(chart.x_values) ? chart.x_values[i] : i
+                    const parsedX = typeof rawX === 'number' ? rawX : Number(rawX)
+                    const xVal = Number.isFinite(parsedX) ? parsedX : i
+                    points.push({
+                      id: `${String(s.id ?? sIdx)}-${i}`,
+                      x: xVal,
+                      y: yVal,
+                      label: `${String(s.label ?? s.id)} (${xVal}, ${yVal})`,
+                    })
+                  }
+                }
+                return (
+                  <div key={`${chart.id ?? cIdx}`} className="ies-section">
+                    <h4 className="ies-section-subtitle">{chart.title}</h4>
+                    <ScatterChart
+                      points={points}
+                      ariaLabel={chart.title}
+                      xLabel={xAxisLabel}
+                      yLabel={yAxisLabel}
+                    />
+                  </div>
+                )
+              }
+
+              if (chartType !== 'bar' && chartType !== 'line' && chartType !== 'area') {
+                return (
+                  <div key={`${chart.id ?? cIdx}`} className="ies-section">
+                    <h4 className="ies-section-subtitle">{chart.title}</h4>
+                    <Alert variant="info" title={`Unsupported chart_type: ${String(chartType)}`} />
+                  </div>
+                )
+              }
+
               return (
                 <div key={`${chart.id ?? cIdx}`} className="ies-section">
                   <h4 className="ies-section-subtitle">{chart.title}</h4>
-                  {chart.chart_type === 'bar' ? (
+                  {chartType === 'bar' ? (
                     <BarChart
                       categories={categories}
                       series={series}
@@ -150,6 +193,7 @@ export function EvaluationReportSection({ reports }: { reports: EvaluationReport
                       xLabel={xAxisLabel}
                       yLabel={yAxisLabel}
                       unit={chart.y_unit}
+                      fillArea={chartType === 'area'}
                       showAllLabel={t('ies.result.show_all_series')}
                       hoverHint={t('ies.result.chart_hover_hint')}
                     />

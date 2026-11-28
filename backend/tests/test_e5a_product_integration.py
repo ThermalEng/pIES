@@ -1064,3 +1064,255 @@ def test_excel_export_renders_independent_evaluator_sheets_and_preserves_financi
     # Check storage object download path matches
     stored = get_object(db, obj.id)
     assert stored
+
+
+def test_async_market_install_enables_member_on_build_completion(
+    db: Session,
+    db_factory: sessionmaker[Session],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    admin = make_user(db, "e5a_async_admin", role="admin")
+    member = make_user(db, "e5a_async_user", role="engineer")
+    db.commit()
+
+    ecosystem_app.update_ecosystem_settings_case(
+        db,
+        admin,
+        market_mode="online",
+        local_upload_requires_approval=True,
+        market_index_url="https://market.example.test/index.json",
+    )
+
+    plugin_zip = _build_plugin_zip_bytes(
+        plugin_id="acme.evaluator.async_eval",
+        version="1.0.0",
+        kind="evaluator",
+        description="Async installed evaluator",
+    )
+    index_doc = {
+        "schema": "ies.market-index",
+        "schema_version": "1.0.0",
+        "generated_at": "2026-11-28T00:00:00Z",
+        "artifacts": [
+            {
+                "id": "acme.evaluator.async_eval",
+                "kind": "evaluator",
+                "version": "1.0.0",
+                "name": {"zh_cn": "异步评价", "en_us": "Async Eval"},
+                "description": "Async installed evaluator",
+                "publisher": "acme",
+                "license": "MPL-2.0",
+                "compatibility": {"pies": ">=1.2.0,<2.0.0"},
+                "consumes": ["ies.engineering-solution@1.0.0"],
+                "produces": ["ies.evaluation-report@1.0.0"],
+                "url": "artifacts/acme/acme.evaluator.async_eval/1.0.0/pkg.zip",
+                "sha256": hashlib.sha256(plugin_zip).hexdigest(),
+                "size_bytes": len(plugin_zip),
+            }
+        ],
+    }
+
+    def market_handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/index.json":
+            return httpx.Response(200, json=index_doc)
+        if request.url.path.endswith("/pkg.zip"):
+            return httpx.Response(200, content=plugin_zip)
+        return httpx.Response(404)
+
+    monkeypatch.setattr(
+        market_remote,
+        "build_http_client",
+        lambda *, timeout=30.0: httpx.Client(
+            transport=httpx.MockTransport(market_handler), timeout=timeout
+        ),
+    )
+
+    from concurrent.futures import ThreadPoolExecutor
+
+    class _FakeScheduler:
+        def __init__(self) -> None:
+            self.pool = ThreadPoolExecutor(max_workers=1)
+            self.futures: list[Any] = []
+
+        def submit_plugin_build(self, fn: Any) -> Any:
+            fut = self.pool.submit(fn)
+            self.futures.append(fut)
+            return fut
+
+    fake_sched = _FakeScheduler()
+    jr_client = _FakeJobRunnerTransport(stage_root=tmp_path / "stages").make_client()
+
+    try:
+        res = ecosystem_app.install_from_market_case(
+            db,
+            member,
+            artifact_id="acme.evaluator.async_eval",
+            kind="evaluator",
+            scheduler=fake_sched,
+            job_runner_client=jr_client,
+            session_factory=db_factory,
+            plugin_source_root=tmp_path / "builds",
+            stage_root=tmp_path / "stages",
+            wait_for_build=False,
+        )
+        assert res["artifact"]["install_status"] == "building"
+        assert len(fake_sched.futures) == 1
+        built_rec = fake_sched.futures[0].result(timeout=10)
+        assert built_rec.install_status == "ready"
+    finally:
+        fake_sched.pool.shutdown(wait=True)
+
+    with db_factory() as fresh_db:
+        install = ecosystem_domain.get_member_install(fresh_db, member.id, res["artifact"]["id"])
+        assert install is not None and install.enabled is True
+        cat = ecosystem_app.get_stage_catalog_case(
+            fresh_db,
+            member,
+            predictor_registry=build_predictor_registry((NAIVE_PREDICTOR,)),
+            generator_registry=build_generator_registry((HIGHS_MILP_PROVIDER,)),
+            solver_registry=build_solver_registry((BUILTIN_SOLVER_HIGHS_SPEC,)),
+            evaluator_registry=build_evaluator_registry((BUILTIN_EVALUATOR_FINANCE_SPEC,)),
+            algorithm_registry=build_algorithm_registry(()),
+        )
+        assert "acme.evaluator.async_eval@1.0.0" in {e["ref"] for e in cat["evaluators"]}
+
+
+def test_security_gates_for_urls_upload_bounds_bootstrap_and_submit_reconciliation(
+    db: Session,
+    db_factory: sessionmaker[Session],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    admin = make_user(db, "e5a_sec_admin", role="admin")
+    member = make_user(db, "e5a_sec_user", role="engineer")
+    db.commit()
+
+    ecosystem_app.update_ecosystem_settings_case(
+        db,
+        admin,
+        market_mode="online",
+        local_upload_requires_approval=True,
+        market_index_url="https://market.example.test/index.json",
+        submission_gateway_url="https://gw.example.test",
+    )
+
+    # 1. Absolute or protocol-relative artifact URL in index.json must be rejected
+    for bad_url in (
+        "http://127.0.0.1:8090/evil.zip",
+        "//evil.example.test/evil.zip",
+        "https://evil.example.test/evil.zip",
+    ):
+        bad_index = {
+            "schema": "ies.market-index",
+            "schema_version": "1.0.0",
+            "generated_at": "2026-11-28T00:00:00Z",
+            "artifacts": [
+                {
+                    "id": "acme.device.badurl",
+                    "kind": "device_model",
+                    "revision": 1,
+                    "name": {"zh_cn": "坏地址", "en_us": "Bad URL"},
+                    "description": "bad",
+                    "publisher": "acme",
+                    "license": "MPL-2.0",
+                    "compatibility": {"pies": ">=1.2.0,<2.0.0"},
+                    "url": bad_url,
+                    "sha256": "a" * 64,
+                    "size_bytes": 10,
+                }
+            ],
+        }
+        client_mock = httpx.Client(
+            transport=httpx.MockTransport(lambda req, doc=bad_index: httpx.Response(200, json=doc))
+        )
+        with pytest.raises(ecosystem_domain.EcosystemValidationError):
+            ecosystem_app.get_market_index_case(db, member, http_client=client_mock)
+
+    # 2. Missing composition-root registries fail explicitly (500 SYS-BOOT-001)
+    with _make_client(db, db_factory) as client:
+        client.app.state.bootstrap_context = SimpleNamespace()
+        boot_resp = client.get("/api/ecosystem/stage-catalog", headers=login_headers(client, member))
+        assert boot_resp.status_code == 500
+        assert boot_resp.json()["error"]["code"] == "SYS-BOOT-001"
+
+    # 3. Oversized submission upload fails with 413 ECO-UPLOAD-TOO-LARGE without hitting gateway
+    from iesplan.api import ecosystem as eco_api
+
+    monkeypatch.setattr(eco_api, "_MAX_ECOSYSTEM_UPLOAD_BYTES", 64)
+    monkeypatch.setattr(eco_api, "_UPLOAD_CHUNK_BYTES", 32)
+    gw_hits: list[str] = []
+    monkeypatch.setattr(
+        market_remote,
+        "build_http_client",
+        lambda *, timeout=30.0: httpx.Client(
+            transport=httpx.MockTransport(
+                lambda req: (gw_hits.append(req.url.path), httpx.Response(200))[1]
+            ),
+            timeout=timeout,
+        ),
+    )
+
+    with _make_client(db, db_factory) as client:
+        headers = login_headers(client, member)
+        big_resp = client.post(
+            "/api/ecosystem/market/submit",
+            data={"submission_token": "tok", "kind": "device_model"},
+            files={"file": ("big.device.yaml", b"x" * 100, "text/yaml")},
+            headers=headers,
+        )
+        assert big_resp.status_code == 413, big_resp.text
+        assert big_resp.json()["error"]["code"] == "ECO-UPLOAD-TOO-LARGE"
+        assert gw_hits == []
+
+    # 4. Submission identity/version/kind mismatch fails with 422 ECO-SUBMIT-MISMATCH
+    monkeypatch.setattr(eco_api, "_MAX_ECOSYSTEM_UPLOAD_BYTES", 50 * 1024 * 1024)
+    device_bytes = _sample_device_yaml("acme.device.real_id").encode("utf-8")
+    plugin_bytes = _build_plugin_zip_bytes(
+        plugin_id="acme.evaluator.real_plug", version="2.0.0", kind="evaluator"
+    )
+    mismatch_cases = [
+        {
+            "data": {
+                "submission_token": "tok",
+                "kind": "device_model",
+                "artifact_id": "acme.device.spoofed",
+            },
+            "file": ("d.device.yaml", device_bytes, "text/yaml"),
+        },
+        {
+            "data": {
+                "submission_token": "tok",
+                "kind": "device_model",
+                "publisher": "otherpub",
+            },
+            "file": ("d.device.yaml", device_bytes, "text/yaml"),
+        },
+        {
+            "data": {
+                "submission_token": "tok",
+                "kind": "solver",
+                "artifact_id": "acme.evaluator.real_plug",
+            },
+            "file": ("p.zip", plugin_bytes, "application/zip"),
+        },
+        {
+            "data": {
+                "submission_token": "tok",
+                "kind": "evaluator",
+                "version_or_revision": "1.0.0",
+            },
+            "file": ("p.zip", plugin_bytes, "application/zip"),
+        },
+    ]
+    with _make_client(db, db_factory) as client:
+        headers = login_headers(client, member)
+        for case in mismatch_cases:
+            resp = client.post(
+                "/api/ecosystem/market/submit",
+                data=case["data"],
+                files={"file": case["file"]},
+                headers=headers,
+            )
+            assert resp.status_code == 422, resp.text
+            assert resp.json()["error"]["code"] == "ECO-SUBMIT-MISMATCH"
+        assert gw_hits == []

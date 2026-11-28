@@ -11,12 +11,39 @@ from typing import Annotated, Any, Literal
 from fastapi import APIRouter, Depends, File, Form, Request, UploadFile
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
+from starlette.concurrency import run_in_threadpool
 
 from iesplan.api.auth import CurrentAdmin, CurrentUser
 from iesplan.api.deps import get_request_db
 from iesplan.application import ecosystem as ecosystem_app
+from iesplan.core.errors import http_error
 
 router = APIRouter(prefix="/api/ecosystem", tags=["ecosystem"])
+_MAX_ECOSYSTEM_UPLOAD_BYTES = 50 * 1024 * 1024
+_UPLOAD_CHUNK_BYTES = 1024 * 1024
+
+
+async def _read_bounded_upload(
+    file: UploadFile, *, max_bytes: int | None = None
+) -> bytes:
+    """分块读取上传文件并硬限制体积上限（超出立即返回 413，防无界缓冲）。"""
+    limit = _MAX_ECOSYSTEM_UPLOAD_BYTES if max_bytes is None else max_bytes
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = await file.read(_UPLOAD_CHUNK_BYTES)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > limit:
+            raise http_error(
+                413,
+                "ECO-UPLOAD-TOO-LARGE",
+                "ies.diag.ecosystem.upload_too_large",
+                max_bytes=limit,
+            )
+        chunks.append(chunk)
+    return b"".join(chunks)
 
 
 class EcosystemSettingsUpdateRequest(BaseModel):
@@ -161,9 +188,10 @@ async def upload_plugin_endpoint(
     expected_sha256: Annotated[str | None, Form()] = None,
     source_origin: Annotated[Literal["local_upload", "offline_import"], Form()] = "local_upload",
 ) -> dict[str, Any]:
-    zip_bytes = await file.read()
+    zip_bytes = await _read_bounded_upload(file)
     scheduler, job_runner_client, session_factory = _runtime_handles(request)
-    return ecosystem_app.upload_plugin_zip_case(
+    return await run_in_threadpool(
+        ecosystem_app.upload_plugin_zip_case,
         db,
         user,
         zip_bytes=zip_bytes,
@@ -335,8 +363,9 @@ async def submit_to_market_endpoint(
     description: Annotated[str | None, Form()] = None,
     readme_markdown: Annotated[str | None, Form()] = None,
 ) -> dict[str, Any]:
-    file_bytes = await file.read()
-    return ecosystem_app.submit_to_market_case(
+    file_bytes = await _read_bounded_upload(file)
+    return await run_in_threadpool(
+        ecosystem_app.submit_to_market_case,
         db,
         user,
         submission_token=submission_token,

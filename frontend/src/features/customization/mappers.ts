@@ -104,11 +104,36 @@ function versionDisplayForMarket(item: MarketIndexItemDto): string {
   return item.version ?? ''
 }
 
+function compareSemverStrings(a: string, b: string): number {
+  const [aMain, aPre = ''] = a.split('-', 2)
+  const [bMain, bPre = ''] = b.split('-', 2)
+  const aParts = aMain.split('.').map((p) => Number.parseInt(p, 10))
+  const bParts = bMain.split('.').map((p) => Number.parseInt(p, 10))
+  const maxLen = Math.max(aParts.length, bParts.length)
+  for (let i = 0; i < maxLen; i += 1) {
+    const av = Number.isFinite(aParts[i]) ? aParts[i] : 0
+    const bv = Number.isFinite(bParts[i]) ? bParts[i] : 0
+    if (av !== bv) return av - bv
+  }
+  if (aPre === bPre) return a.localeCompare(b)
+  if (!aPre) return 1
+  if (!bPre) return -1
+  return aPre.localeCompare(bPre)
+}
+
+function isNewerMarketEntry(candidate: MarketIndexItemDto, existing: MarketIndexItemDto): boolean {
+  if (candidate.kind === 'device_model') {
+    return Number(candidate.revision ?? 0) > Number(existing.revision ?? 0)
+  }
+  return compareSemverStrings(candidate.version ?? '', existing.version ?? '') > 0
+}
+
 /**
  * 合并本地生态目录与远端市场索引为单一「市场与已安装」列表：
  * - local 模式不消费远端条目，仅展示已审批就绪的本地制品及成员状态；
- * - online 模式保留远端条目的权威三态（remote / local_uninstalled / local_installed），
- *   并将仅存于本地的 ready/installed 条目合并展示而不重复列出。
+ * - online 模式先将远端索引按 (kind, id) 折叠为最新一条版本/修订，再保留权威三态
+ *   （remote / local_uninstalled / local_installed），并将仅存于本地的 ready/installed
+ *   条目合并展示而不重复列出。
  */
 export function mergeCatalogEntries(params: {
   localArtifacts: LocalArtifactDto[]
@@ -125,7 +150,15 @@ export function mergeCatalogEntries(params: {
   const seenKeys = new Set<string>()
 
   if (marketMode === 'online') {
+    const latestRemoteByKey = new Map<string, MarketIndexItemDto>()
     for (const m of marketItems) {
+      const key = `${m.kind}:${m.id}`
+      const prev = latestRemoteByKey.get(key)
+      if (!prev || isNewerMarketEntry(m, prev)) {
+        latestRemoteByKey.set(key, m)
+      }
+    }
+    for (const m of latestRemoteByKey.values()) {
       const key = `${m.kind}:${m.id}`
       seenKeys.add(key)
       const local = localByKey.get(key) ?? null

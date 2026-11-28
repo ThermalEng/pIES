@@ -10,8 +10,10 @@
 
 from __future__ import annotations
 
+import io
 import json
 import re
+import zipfile
 from collections.abc import Mapping
 from datetime import datetime
 from typing import Any
@@ -31,19 +33,11 @@ from iesplan.application.ecosystem.plugins import (
     install_artifact_for_user_case,
     upload_plugin_zip_case,
 )
-from iesplan.computation.config import (
-    BUILTIN_EVALUATOR_FINANCE_SPEC,
-    BUILTIN_SOLVER_HIGHS_SPEC,
-    build_algorithm_registry,
-    build_evaluator_registry,
-    build_solver_registry,
-    build_stage_plugin_map,
-)
-from iesplan.computation.generators import HIGHS_MILP_PROVIDER
-from iesplan.computation.generators import build_registry as build_generator_registry
-from iesplan.computation.predictors import NAIVE_PREDICTOR, build_predictor_registry
+from iesplan.computation.config import build_stage_plugin_map
 from iesplan.computation.protocols import thaw_json_value
 from iesplan.core.errors import AppError, ForbiddenError, http_error
+from iesplan.core.yamlmini import load as _yaml_load
+from iesplan.devices import parse_candidate_text, parse_device_model_v2
 from iesplan.ecosystem import (
     ARTIFACT_KINDS,
     PLUGIN_KINDS,
@@ -129,6 +123,11 @@ def _check_relative_path(path: Any, field_name: str) -> str:
         raise EcosystemValidationError(f"{field_name} 须为非空相对路径")
     if "\\" in path or path.startswith("/") or ".." in path.split("/"):
         raise EcosystemValidationError(f"{field_name} 不允许路径越界或绝对路径: {path!r}")
+    parsed = urlsplit(path)
+    if parsed.scheme or parsed.netloc:
+        raise EcosystemValidationError(
+            f"{field_name} 仅允许相对路径，禁止协议或主机覆盖: {path!r}"
+        )
     return path
 
 
@@ -171,40 +170,39 @@ def _require_gateway_url(settings_rec: EcosystemSettingsRecord) -> str:
     return settings_rec.submission_gateway_url
 
 
-def _default_stage_registries(
+def _require_stage_registries(
     *,
-    predictor_registry: Any | None = None,
-    generator_registry: Any | None = None,
-    solver_registry: Any | None = None,
-    evaluator_registry: Any | None = None,
-    algorithm_registry: Any | None = None,
+    predictor_registry: Any | None,
+    generator_registry: Any | None,
+    solver_registry: Any | None,
+    evaluator_registry: Any | None,
+    algorithm_registry: Any | None,
 ) -> tuple[Any, Any, Any, Any, Any]:
-    pred_reg = (
-        predictor_registry
-        if predictor_registry is not None
-        else build_predictor_registry((NAIVE_PREDICTOR,))
+    missing = [
+        name
+        for name, val in (
+            ("predictor_registry", predictor_registry),
+            ("generator_registry", generator_registry),
+            ("solver_registry", solver_registry),
+            ("evaluator_registry", evaluator_registry),
+            ("algorithm_registry", algorithm_registry),
+        )
+        if val is None
+    ]
+    if missing:
+        raise AppError(
+            f"阶段目录服务缺少组合根注入注册表: {', '.join(missing)}",
+            code="SYS-BOOT-001",
+            message_key="ies.diag.system.bootstrap_missing",
+            params={"missing": missing},
+        )
+    return (
+        predictor_registry,
+        generator_registry,
+        solver_registry,
+        evaluator_registry,
+        algorithm_registry,
     )
-    gen_reg = (
-        generator_registry
-        if generator_registry is not None
-        else build_generator_registry((HIGHS_MILP_PROVIDER,))
-    )
-    solv_reg = (
-        solver_registry
-        if solver_registry is not None
-        else build_solver_registry((BUILTIN_SOLVER_HIGHS_SPEC,))
-    )
-    eval_reg = (
-        evaluator_registry
-        if evaluator_registry is not None
-        else build_evaluator_registry((BUILTIN_EVALUATOR_FINANCE_SPEC,))
-    )
-    algo_reg = (
-        algorithm_registry
-        if algorithm_registry is not None
-        else build_algorithm_registry(())
-    )
-    return pred_reg, gen_reg, solv_reg, eval_reg, algo_reg
 
 
 def _registry_refs(registry: Any) -> set[str]:
@@ -222,7 +220,7 @@ def get_stage_catalog_case(
     algorithm_registry: Any | None = None,
 ) -> dict[str, Any]:
     """返回当前成员可见的动态阶段算法目录（内置 + 已安装启用且 ready 的生态插件）。"""
-    base_pred, base_gen, base_solv, base_eval, base_algo = _default_stage_registries(
+    base_pred, base_gen, base_solv, base_eval, base_algo = _require_stage_registries(
         predictor_registry=predictor_registry,
         generator_registry=generator_registry,
         solver_registry=solver_registry,
@@ -479,10 +477,16 @@ def _is_update_available(entry: Mapping[str, Any], local: LocalArtifactRecord | 
 
 
 def _resolve_market_item_url(index_url: str, relative_path: str) -> str:
-    resolved = urljoin(index_url, relative_path)
+    clean_rel = _check_relative_path(relative_path, "url")
+    resolved = urljoin(index_url, clean_rel)
+    base_parsed = urlsplit(index_url)
     parsed = urlsplit(resolved)
-    if parsed.scheme.lower() not in ("http", "https") or not parsed.netloc:
-        raise EcosystemValidationError(f"远端制品下载地址非法: {resolved!r}")
+    if (
+        parsed.scheme.lower() not in ("http", "https")
+        or not parsed.netloc
+        or (parsed.scheme.lower(), parsed.netloc) != (base_parsed.scheme.lower(), base_parsed.netloc)
+    ):
+        raise EcosystemValidationError(f"远端制品下载地址非法或跨源越界: {resolved!r}")
     return resolved
 
 
@@ -655,7 +659,7 @@ def install_from_market_case(
             db,
             user,
             yaml_text=raw_bytes,
-            expected_sha256=expected_sha256,
+            expected_sha256=None,
             revision=int(entry["revision"]),
             source_origin="online_market",
             trusted_market=True,
@@ -665,7 +669,7 @@ def install_from_market_case(
             db,
             user,
             zip_bytes=raw_bytes,
-            expected_sha256=expected_sha256,
+            expected_sha256=None,
             source_origin="online_market",
             trusted_market=True,
             scheduler=scheduler,
@@ -794,6 +798,82 @@ def verify_market_otp_case(
     }
 
 
+def _reconcile_submission_package(
+    *,
+    kind: str,
+    file_bytes: bytes,
+    artifact_id: str | None,
+    version_or_revision: str | None,
+    publisher: str | None,
+) -> tuple[str, str | None]:
+    """解析上传包元信息并与表单声明的 kind/artifact_id/publisher/version_or_revision 严格对账（422）。"""
+
+    def _reject(msg: str) -> Any:
+        raise http_error(
+            422,
+            "ECO-SUBMIT-MISMATCH",
+            "ies.diag.ecosystem.submit_mismatch",
+            detail=msg,
+        )
+
+    if kind == "device_model":
+        try:
+            raw_text = file_bytes.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            _reject(f"device_model YAML 非合法 UTF-8: {exc}")
+        raw_mapping, failure = parse_candidate_text(raw_text)
+        if failure is not None or raw_mapping is None:
+            _reject("device_model YAML 解析失败")
+        parsed = parse_device_model_v2(raw_mapping)
+        if not parsed.ok or parsed.document is None:
+            _reject("device_model 不满足 ies.device-model@1.0.0 契约")
+        pkg_id = parsed.document.device.id
+        pkg_pub = pkg_id.split(".", 1)[0]
+        parsed_rev: str | None = None
+        if version_or_revision is not None and str(version_or_revision).strip():
+            raw_rev = str(version_or_revision).strip()
+            if raw_rev.startswith("r") and raw_rev[1:].isdigit():
+                raw_rev = raw_rev[1:]
+            if not raw_rev.isdigit() or int(raw_rev) < 1:
+                _reject(f"device_model revision 须为正整数: {version_or_revision!r}")
+            parsed_rev = str(int(raw_rev))
+    else:
+        try:
+            with zipfile.ZipFile(io.BytesIO(file_bytes), "r") as zf:
+                if "plugin.yaml" not in zf.namelist():
+                    _reject("插件 ZIP 缺少 plugin.yaml")
+                manifest = _yaml_load(zf.read("plugin.yaml").decode("utf-8"))
+        except (zipfile.BadZipFile, UnicodeDecodeError, ValueError) as exc:
+            _reject(f"插件包解析失败: {exc}")
+        if not isinstance(manifest, Mapping):
+            _reject("plugin.yaml 顶层须为对象")
+        pkg_kind = manifest.get("kind")
+        if pkg_kind != kind:
+            _reject(f"plugin.yaml kind={pkg_kind!r} 与表单 kind={kind!r} 不一致")
+        pkg_id = str(manifest.get("plugin_id") or "")
+        pkg_version = str(manifest.get("version") or "")
+        if not pkg_id or not pkg_version:
+            _reject("plugin.yaml 缺少 plugin_id 或 version")
+        pkg_pub = pkg_id.split(".", 1)[0]
+        if (
+            version_or_revision is not None
+            and version_or_revision.strip()
+            and version_or_revision.strip() != pkg_version
+        ):
+            _reject(
+                f"提交版本 {version_or_revision.strip()!r} 与 plugin.yaml version={pkg_version!r} 不一致"
+            )
+        parsed_rev = None
+
+    if pkg_id.startswith("user."):
+        _reject(f"公共市场投稿禁止使用私有命名空间 ID: {pkg_id!r}")
+    if artifact_id is not None and artifact_id.strip() and artifact_id.strip() != pkg_id:
+        _reject(f"提交 artifact_id={artifact_id.strip()!r} 与包内 ID={pkg_id!r} 不一致")
+    if publisher is not None and publisher.strip() and publisher.strip() != pkg_pub:
+        _reject(f"提交 publisher={publisher.strip()!r} 与包内发布者={pkg_pub!r} 不一致")
+    return pkg_id, parsed_rev
+
+
 def submit_to_market_case(
     db: Session,
     user: UserRecord,
@@ -821,29 +901,23 @@ def submit_to_market_case(
     if not file_bytes:
         raise EcosystemValidationError("投稿制品文件不能为空", params={"field": "file"})
 
+    pkg_id, parsed_rev = _reconcile_submission_package(
+        kind=kind,
+        file_bytes=file_bytes,
+        artifact_id=artifact_id,
+        version_or_revision=version_or_revision,
+        publisher=publisher,
+    )
+
     form_data: dict[str, str] = {"kind": kind}
-    if kind == "device_model" and version_or_revision is not None and str(version_or_revision).strip():
-        raw_rev = str(version_or_revision).strip()
-        if raw_rev.startswith("r") and raw_rev[1:].isdigit():
-            raw_rev = raw_rev[1:]
-        if not raw_rev.isdigit() or int(raw_rev) < 1:
-            raise EcosystemValidationError(
-                f"device_model 投稿 revision 须为正整数: {version_or_revision!r}",
-                params={"field": "version_or_revision"},
-            )
-        form_data["revision"] = str(int(raw_rev))
+    if kind == "device_model" and parsed_rev is not None:
+        form_data["revision"] = parsed_rev
     if description is not None and description.strip():
         form_data["description"] = description.strip()
     if license_name is not None and license_name.strip():
         form_data["license"] = license_name.strip()
     if readme_markdown is not None and readme_markdown.strip():
         form_data["readme_markdown"] = readme_markdown.strip()
-    if publisher is not None and publisher.strip() and artifact_id is not None and artifact_id.strip():
-        if not artifact_id.strip().startswith(f"{publisher.strip()}."):
-            raise EcosystemValidationError(
-                "publisher 与 artifact_id 前缀不一致",
-                params={"artifact_id": artifact_id, "publisher": publisher},
-            )
 
     endpoint = _gateway_url(gateway_url, "/v1/submissions")
     headers = {"Authorization": f"Bearer {submission_token.strip()}"}
@@ -876,6 +950,6 @@ def submit_to_market_case(
         "pr_number": int(data["pr_number"]),
         "pr_url": str(data["pr_url"]),
         "branch": str(data["branch"]),
-        "artifact_id": str(data.get("artifact_id") or artifact_id or ""),
+        "artifact_id": str(data.get("artifact_id") or pkg_id),
         "kind": kind,
     }

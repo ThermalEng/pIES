@@ -88,3 +88,34 @@ export function coerceSchemaFieldValue(
   }
   return String(raw)
 }
+
+export interface PredictionEntry {
+  target: {
+    instance: string
+    interface: string
+  }
+  algorithm: string
+  parameters: Record<string, unknown>
+}
+
+/** 按 CalculationConfig 1.0.0 契约向 predictions[] 追加一项（target 不可重复）。 */
+export function addPredictionEntry(
+  existing: PredictionEntry[],
+  input: { instance: string; interfaceName: string; algorithm: string },
+): PredictionEntry[] {
+  const instance = input.instance.trim()
+  const iface = input.interfaceName.trim()
+  const algorithm = input.algorithm.trim()
+  if (!instance || !iface || !algorithm) return existing
+  if (existing.some((item) => item?.target?.instance === instance && item?.target?.interface === iface)) {
+    return existing
+  }
+  return [
+    ...existing,
+    {
+      target: { instance, interface: iface },
+      algorithm,
+      parameters: {},
+    },
+  ]
+}

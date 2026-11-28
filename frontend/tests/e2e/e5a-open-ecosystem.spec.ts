@@ -10,6 +10,70 @@ import { adminToken, createEngineer, createProject, loginToken, requestJson } fr
 
 const ADMIN_PASS = process.env.E2E_ADMIN_PASSWORD ?? 'Iesplan-Admin-2026!'
 
+function crc32(buf: Buffer): number {
+  let crc = 0xffffffff
+  for (let i = 0; i < buf.length; i += 1) {
+    crc ^= buf[i]
+    for (let j = 0; j < 8; j += 1) {
+      crc = (crc >>> 1) ^ (crc & 1 ? 0xedb88320 : 0)
+    }
+  }
+  return (crc ^ 0xffffffff) >>> 0
+}
+
+function buildStoredZip(filename: string, content: string): Buffer {
+  const nameBuf = Buffer.from(filename, 'utf8')
+  const dataBuf = Buffer.from(content, 'utf8')
+  const crc = crc32(dataBuf)
+
+  const localHeader = Buffer.alloc(30 + nameBuf.length)
+  localHeader.writeUInt32LE(0x04034b50, 0)
+  localHeader.writeUInt16LE(20, 4)
+  localHeader.writeUInt16LE(0, 6)
+  localHeader.writeUInt16LE(0, 8)
+  localHeader.writeUInt16LE(0, 10)
+  localHeader.writeUInt16LE(0, 12)
+  localHeader.writeUInt32LE(crc, 14)
+  localHeader.writeUInt32LE(dataBuf.length, 18)
+  localHeader.writeUInt32LE(dataBuf.length, 22)
+  localHeader.writeUInt16LE(nameBuf.length, 26)
+  localHeader.writeUInt16LE(0, 28)
+  nameBuf.copy(localHeader, 30)
+
+  const cdOffset = localHeader.length + dataBuf.length
+  const centralDir = Buffer.alloc(46 + nameBuf.length)
+  centralDir.writeUInt32LE(0x02014b50, 0)
+  centralDir.writeUInt16LE(20, 4)
+  centralDir.writeUInt16LE(20, 6)
+  centralDir.writeUInt16LE(0, 8)
+  centralDir.writeUInt16LE(0, 10)
+  centralDir.writeUInt16LE(0, 12)
+  centralDir.writeUInt16LE(0, 14)
+  centralDir.writeUInt32LE(crc, 16)
+  centralDir.writeUInt32LE(dataBuf.length, 20)
+  centralDir.writeUInt32LE(dataBuf.length, 24)
+  centralDir.writeUInt16LE(nameBuf.length, 28)
+  centralDir.writeUInt16LE(0, 30)
+  centralDir.writeUInt16LE(0, 32)
+  centralDir.writeUInt16LE(0, 34)
+  centralDir.writeUInt16LE(0, 36)
+  centralDir.writeUInt32LE(0, 38)
+  centralDir.writeUInt32LE(0, 42)
+  nameBuf.copy(centralDir, 46)
+
+  const eocd = Buffer.alloc(22)
+  eocd.writeUInt32LE(0x06054b50, 0)
+  eocd.writeUInt16LE(0, 4)
+  eocd.writeUInt16LE(0, 6)
+  eocd.writeUInt16LE(1, 8)
+  eocd.writeUInt16LE(1, 10)
+  eocd.writeUInt32LE(centralDir.length, 12)
+  eocd.writeUInt32LE(cdOffset, 16)
+  eocd.writeUInt16LE(0, 20)
+
+  return Buffer.concat([localHeader, dataBuf, centralDir, eocd])
+}
+
 const makeCustomDeviceYaml = (deviceId: string): string => `schema: ies.device-model
 schema_version: "1.0.0"
 device:
@@ -247,7 +311,18 @@ test.describe('E5a open ecosystem product integration', () => {
     await page.locator('#sub-file').setInputFiles({
       name: 'carbon.algorithm.zip',
       mimeType: 'application/zip',
-      buffer: Buffer.from('PK\x03\x04dummy'),
+      buffer: buildStoredZip(
+        'plugin.yaml',
+        [
+          'schema: ies.algorithm-plugin',
+          'schema_version: "1.0.0"',
+          'kind: evaluator',
+          'plugin_id: acme.evaluator.carbon',
+          'version: "1.0.0"',
+          'publisher: acme',
+          'license: MIT',
+        ].join('\n'),
+      ),
     })
     await page.getByRole('button', { name: /提交投稿 PR|Submit PR/i }).click()
     await expect(page.getByText('https://github.com/acme/market/pull/42')).toBeVisible()
@@ -413,6 +488,74 @@ test.describe('E5a open ecosystem product integration', () => {
     await page.getByRole('button', { name: /重试评价器|Retry Evaluator/i }).click()
     await expect.poll(() => retried).toBe(true)
     await expect(page.getByText(/已提交评价器.*重试请求|Retry submitted for evaluator/i)).toBeVisible()
-    sess.assertNoErrors()
+
+    // ConfigPage 动态 stage-catalog: 布尔参数往返勾选(true/false) + {target: {instance, interface}, algorithm} 预测保存载荷校验
+    let capturedConfigPayload: Record<string, unknown> | null = null
+    await page.route('**/api/ecosystem/stage-catalog', async (route) => {
+      await route.fulfill({
+        json: {
+          generators: [
+            {
+              ref: 'ies.generator.highs_milp@1.0.0',
+              kind: 'generator',
+              source: 'builtin',
+              modes: ['planning'],
+              parameters_schema: {
+                type: 'object',
+                properties: {
+                  use_cache: { type: 'boolean', title: 'Use Cache', default: false },
+                },
+              },
+            },
+          ],
+          solvers: [
+            { ref: 'ies.solver.highs@1.7.2', kind: 'solver', source: 'builtin', parameters_schema: {} },
+          ],
+          algorithms: [],
+          predictors: [
+            { ref: 'acme.predictor.wind@1.0.0', kind: 'predictor', source: 'local', parameters_schema: {} },
+          ],
+          evaluators: [
+            { ref: 'ies.evaluator.finance@1.0.0', kind: 'evaluator', source: 'builtin', parameters_schema: {} },
+          ],
+        },
+      })
+    })
+    await page.route(`**/api/projects/${project.id}/config`, async (route) => {
+      if (route.request().method() === 'PUT') {
+        capturedConfigPayload = JSON.parse(route.request().postData() ?? '{}') as Record<string, unknown>
+        await route.fulfill({
+          json: { calculation_config: capturedConfigPayload.calculation_config, revision: 1 },
+        })
+        return
+      }
+      await route.continue()
+    })
+    await page.goto(`/projects/${project.id}/config`)
+    await page.locator('#calc-catalog-generator').selectOption('ies.generator.highs_milp@1.0.0')
+    await page.locator('#calc-catalog-solver').selectOption('ies.solver.highs@1.7.2')
+    const cacheBox = page.locator('#calc-slot-generator-use_cache')
+    await cacheBox.check()
+    await expect.poll(async () => JSON.parse(await page.locator('#calc-options').inputValue())).toMatchObject({
+      generator: { use_cache: true },
+    })
+    await cacheBox.uncheck()
+    await expect.poll(async () => JSON.parse(await page.locator('#calc-options').inputValue())).toMatchObject({
+      generator: { use_cache: false },
+    })
+    await page.locator('#calc-catalog-predictor-instance').fill('pv1')
+    await page.locator('#calc-catalog-predictor-interface').fill('power_out')
+    await page.getByRole('button', { name: /加入 predictions\[\]|Add to predictions\[\]/i }).click()
+    await page.locator('#calc-mode').fill('planning')
+    await page.locator('#calc-precision').selectOption('medium')
+    await page.locator('#calc-outputs').fill('["solution","metrics"]')
+    await page.getByRole('button', { name: /保存计算配置|Save calculation config/i }).click()
+    await expect.poll(() => capturedConfigPayload).not.toBeNull()
+    const savedCfg = (capturedConfigPayload as unknown as { calculation_config: Record<string, unknown> }).calculation_config
+    expect(savedCfg.predictions).toEqual([
+      { target: { instance: 'pv1', interface: 'power_out' }, algorithm: 'acme.predictor.wind@1.0.0', parameters: {} },
+    ])
+    expect(savedCfg.options).toEqual({ generator: { use_cache: false } })
+    sess.assertNoErrors([{ method: 'GET', path: `/api/projects/${project.id}/config`, status: 404 }])
   })
 })
