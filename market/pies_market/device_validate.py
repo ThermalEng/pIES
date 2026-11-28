@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-import ast
 import math
 import re
+from collections import Counter
 from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -51,8 +52,103 @@ _FORBIDDEN_MARKET_KEYS = frozenset(
         "subprocess",
     }
 )
-_ALLOWED_BINOPS = (ast.Add, ast.Sub, ast.Mult, ast.Div, ast.Pow, ast.Mod)
-_ALLOWED_UNARYOPS = (ast.UAdd, ast.USub)
+
+_BINARY_OPS = frozenset({"+", "-", "*", "/", "%", "^"})
+_PRECEDENCE: dict[str, int] = {"+": 1, "-": 1, "*": 2, "/": 2, "%": 2, "^": 3}
+_IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+_NUMBER_RE = re.compile(r"[0-9]+(?:\.[0-9]+)?")
+_TIME_INDEX_RE = re.compile(r"\[t\s*(?:([-+])\s*([0-9]+))?\]")
+
+_AFFINE_UNITS = frozenset({"c", "°c", "℃", "摄氏度", "f", "°f", "华氏度"})
+
+# Canonical base-dimension exponents so composite SI equivalents align (kW * h == kWh).
+_SIMPLE_UNIT_DIMS: dict[str, dict[str, int]] = {}
+
+
+def _reg_units(dims: dict[str, int], *names: str) -> None:
+    for name in names:
+        _SIMPLE_UNIT_DIMS[name.lower()] = dims
+
+
+_reg_units({}, "-", "1", "dimensionless", "无量纲", "%", "percent", "pct", "百分比")
+_reg_units(
+    {"power": 1, "time": 1},
+    "j",
+    "焦耳",
+    "kj",
+    "千焦",
+    "mj",
+    "兆焦",
+    "gj",
+    "吉焦",
+    "kwh",
+    "千瓦时",
+    "度",
+    "mwh",
+    "兆瓦时",
+    "gwh",
+    "吉瓦时",
+    "kcal",
+)
+_reg_units({"power": 1}, "w", "瓦", "kw", "千瓦", "kwp", "mw", "兆瓦", "mwp", "gw", "吉瓦")
+_reg_units({"temperature": 1}, "k", "开尔文", "c", "°c", "℃", "摄氏度", "f", "°f", "华氏度")
+_reg_units({"currency": 1}, "cny", "元", "人民币", "usd", "美元")
+_reg_units(
+    {"time": 1},
+    "s",
+    "sec",
+    "秒",
+    "min",
+    "分",
+    "分钟",
+    "minute",
+    "h",
+    "hr",
+    "时",
+    "小时",
+    "hour",
+    "d",
+    "day",
+    "天",
+    "日",
+    "月",
+    "month",
+    "mo",
+    "a",
+    "yr",
+    "year",
+    "年",
+)
+_reg_units({"angle": 1}, "rad", "弧度", "deg", "°", "degree")
+_reg_units({"mass": 1}, "kg", "公斤", "千克", "t", "吨", "tco2", "tco₂", "tco2e", "吨二氧化碳")
+_reg_units({"volume": 1}, "m³", "m3", "立方米", "方", "千m³", "千立方米", "万m³")
+_reg_units({"voltage": 1}, "v", "伏", "kv", "千伏", "mv", "兆伏")
+_reg_units({"area": 1}, "m²", "m2", "平方米", "平米")
+
+
+@dataclass(frozen=True, slots=True)
+class _NumNode:
+    value: float
+
+
+@dataclass(frozen=True, slots=True)
+class _RefNode:
+    name: str
+    offset: int
+    indexed: bool
+
+
+@dataclass(frozen=True, slots=True)
+class _UnaryNode:
+    op: str
+    operand: object
+
+
+@dataclass(frozen=True, slots=True)
+class _BinNode:
+    op: str
+    left: object
+    right: object
 
 
 def _check_no_forbidden_keys(node: Any, path: str) -> None:
@@ -77,12 +173,52 @@ def _is_finite_number(value: object) -> bool:
     )
 
 
+def _unit_dims(unit: object, *, path: str = "unit") -> Counter[str]:
+    if not isinstance(unit, str) or not unit.strip():
+        raise MarketValidationError(f"{path} must be a non-empty unit string")
+    raw = unit.strip()
+    key = raw.lower()
+    if key in _SIMPLE_UNIT_DIMS:
+        return Counter(_SIMPLE_UNIT_DIMS[key])
+
+    if "/" in raw:
+        halves = raw.split("/")
+        if len(halves) != 2 or not halves[0].strip() or not halves[1].strip():
+            raise MarketValidationError(f"{path} has malformed composite unit {raw!r}")
+        num_parts = [p.strip() for p in re.split(r"[·*]", halves[0]) if p.strip()]
+        den_parts = [p.strip() for p in re.split(r"[·*]", halves[1]) if p.strip()]
+    else:
+        num_parts = [p.strip() for p in re.split(r"[·*]", raw) if p.strip()]
+        den_parts = []
+    if not num_parts:
+        raise MarketValidationError(f"{path} has empty numerator in unit {raw!r}")
+
+    dims: Counter[str] = Counter()
+    is_composite = len(num_parts) + len(den_parts) > 1
+    for sign, tokens in ((1, num_parts), (-1, den_parts)):
+        for tok in tokens:
+            t_key = tok.lower()
+            if is_composite and t_key in _AFFINE_UNITS:
+                raise MarketValidationError(
+                    f"{path} cannot use affine temperature unit {tok!r} in composite unit {raw!r}"
+                )
+            base_dims = _SIMPLE_UNIT_DIMS.get(t_key)
+            if base_dims is None:
+                raise MarketValidationError(f"{path} uses unknown unit {raw!r}")
+            for dim_key, power in base_dims.items():
+                dims[dim_key] += sign * power
+                if dims[dim_key] == 0:
+                    del dims[dim_key]
+    return dims
+
+
 def _validate_range(
     raw_range: object,
     *,
     path: str,
     allow_property_ref: bool,
-    property_names: set[str],
+    prop_specs: Mapping[str, tuple[object, Counter[str]]],
+    owner_dims: Counter[str] | None = None,
 ) -> None:
     if not isinstance(raw_range, Mapping) or set(raw_range) != {"minimum", "maximum"}:
         raise MarketValidationError(f"{path} must be a mapping with exact keys {{minimum, maximum}}")
@@ -96,9 +232,19 @@ def _validate_range(
             numeric_bounds.append(float(bound))
         elif allow_property_ref and isinstance(bound, Mapping) and set(bound) == {"property_ref"}:
             ref = bound["property_ref"]
-            if not isinstance(ref, str) or ref not in property_names:
+            if not isinstance(ref, str) or ref not in prop_specs:
                 raise MarketValidationError(
                     f"{path}.{side}.property_ref references unknown property: {ref!r}"
+                )
+            prop_val, prop_dims = prop_specs[ref]
+            if not _is_finite_number(prop_val):
+                raise MarketValidationError(
+                    f"{path}.{side}.property_ref {ref!r} must reference a numeric property"
+                )
+            if owner_dims is not None and prop_dims != owner_dims:
+                raise MarketValidationError(
+                    f"{path}.{side}.property_ref {ref!r} dimension mismatch: "
+                    f"{dict(prop_dims)} != {dict(owner_dims)}"
                 )
             numeric_bounds.append(None)
         else:
@@ -121,86 +267,213 @@ def _split_relation(expr: object, *, path: str) -> tuple[str, str]:
     return lhs, rhs
 
 
-def _is_valid_time_slice(node: ast.AST) -> bool:
-    if isinstance(node, ast.Name) and node.id == "t":
-        return True
-    if (
-        isinstance(node, ast.BinOp)
-        and isinstance(node.op, ast.Sub)
-        and isinstance(node.left, ast.Name)
-        and node.left.id == "t"
-        and isinstance(node.right, ast.Constant)
-        and not isinstance(node.right.value, bool)
-        and isinstance(node.right.value, int)
-        and node.right.value == 1
-    ):
-        return True
-    return False
+def _tokenize_expr(expr: str, *, path: str, allow_time_index: bool) -> list[tuple[str, Any]]:
+    tokens: list[tuple[str, Any]] = []
+    pos, n = 0, len(expr)
+    while pos < n:
+        ch = expr[pos]
+        if ch.isspace():
+            pos += 1
+            continue
+        if ch.isdigit():
+            m = _NUMBER_RE.match(expr, pos)
+            if m is None:
+                raise MarketValidationError(f"{path} contains invalid number at offset {pos}")
+            text = m.group(0)
+            end = pos + len(text)
+            if end < n and (expr[end].isalnum() or expr[end] in "_."):
+                raise MarketValidationError(
+                    f"{path} has invalid trailing character {expr[end]!r} after number {text!r}"
+                )
+            tokens.append(("number", float(text)))
+            pos = end
+            continue
+        if ch in "()":
+            tokens.append(("paren", ch))
+            pos += 1
+            continue
+        if ch in _BINARY_OPS:
+            if ch == "*" and pos + 1 < n and expr[pos + 1] == "*":
+                raise MarketValidationError(
+                    f"{path} forbids Python power '**'; use '^' for exponentiation"
+                )
+            tokens.append(("op", ch))
+            pos += 1
+            continue
+        m = _IDENT_RE.match(expr, pos)
+        if m is not None:
+            name = m.group(0)
+            end = pos + len(name)
+            if end < n and expr[end] == "(":
+                raise MarketValidationError(
+                    f"{path} forbids function call {name!r}(...)"
+                )
+            if end < n and expr[end] == ".":
+                raise MarketValidationError(
+                    f"{path} forbids attribute access {name!r}."
+                )
+            offset = 0
+            indexed = False
+            if end < n and expr[end] == "[":
+                if not allow_time_index:
+                    raise MarketValidationError(f"{path} forbids time indexing")
+                tm = _TIME_INDEX_RE.match(expr, end)
+                if tm is None:
+                    raise MarketValidationError(
+                        f"{path} uses invalid index on {name!r}; only [t] and [t-1] allowed"
+                    )
+                indexed = True
+                if tm.group(1) is not None:
+                    step = int(tm.group(2))
+                    offset = -step if tm.group(1) == "-" else step
+                    if offset not in (0, -1):
+                        raise MarketValidationError(
+                            f"{path} uses unsupported time index on {name!r}; only [t] and [t-1] allowed"
+                        )
+                end = tm.end()
+            tokens.append(("ident", (name, offset, indexed)))
+            pos = end
+            continue
+        raise MarketValidationError(f"{path} contains unexpected character {ch!r}")
+    return tokens
 
 
-def _validate_math_ast(
-    expr: object,
-    *,
-    path: str,
-    allowed_names: set[str],
-    allow_time_index: bool,
-    time_indexed_names: set[str],
-) -> tuple[str, ...]:
-    """Parse expression with restricted AST whitelist and return referenced identifier names."""
+def _parse_expr_side(expr: object, *, path: str, allow_time_index: bool) -> object:
     if not isinstance(expr, str) or not expr.strip():
         raise MarketValidationError(f"{path} must be a non-empty string")
-    try:
-        tree = ast.parse(expr.strip(), mode="eval")
-    except SyntaxError as exc:
-        raise MarketValidationError(f"{path} has invalid expression syntax: {exc.msg}") from exc
+    tokens = _tokenize_expr(expr.strip(), path=path, allow_time_index=allow_time_index)
+    if not tokens:
+        raise MarketValidationError(f"{path} cannot be empty")
+    idx = 0
 
-    refs: list[str] = []
+    def peek() -> tuple[str, Any] | None:
+        return tokens[idx] if idx < len(tokens) else None
 
-    def _visit(node: ast.AST) -> None:
-        if isinstance(node, ast.Expression):
-            _visit(node.body)
-        elif isinstance(node, ast.BinOp):
-            if not isinstance(node.op, _ALLOWED_BINOPS):
-                raise MarketValidationError(f"{path} uses unsupported operator: {type(node.op).__name__}")
-            _visit(node.left)
-            _visit(node.right)
-        elif isinstance(node, ast.UnaryOp):
-            if not isinstance(node.op, _ALLOWED_UNARYOPS):
-                raise MarketValidationError(
-                    f"{path} uses unsupported unary operator: {type(node.op).__name__}"
-                )
-            _visit(node.operand)
-        elif isinstance(node, ast.Constant):
-            if not _is_finite_number(node.value):
-                raise MarketValidationError(f"{path} only allows finite numeric literals: {node.value!r}")
-        elif isinstance(node, ast.Name):
-            if node.id not in allowed_names:
-                raise MarketValidationError(f"{path} references undeclared symbol {node.id!r}")
-            refs.append(node.id)
-        elif isinstance(node, ast.Subscript):
-            if not allow_time_index:
-                raise MarketValidationError(f"{path} forbids time indexing")
-            if not isinstance(node.value, ast.Name):
-                raise MarketValidationError(f"{path} subscript target must be a declared identifier")
-            target = node.value.id
-            if target not in allowed_names:
-                raise MarketValidationError(f"{path} references undeclared symbol {target!r}")
-            if target not in time_indexed_names:
-                raise MarketValidationError(
-                    f"{path} cannot time-index scalar symbol {target!r}"
-                )
-            if not _is_valid_time_slice(node.slice):
-                raise MarketValidationError(
-                    f"{path} uses unsupported time index on {target!r}; only [t] and [t-1] allowed"
-                )
-            refs.append(target)
-        else:
+    def advance() -> tuple[str, Any]:
+        nonlocal idx
+        tok = tokens[idx]
+        idx += 1
+        return tok
+
+    def parse_primary() -> object:
+        tok = peek()
+        if tok is None:
+            raise MarketValidationError(f"{path} has unexpected end of expression")
+        kind, value = tok
+        if kind == "op" and value in ("+", "-"):
+            advance()
+            return _UnaryNode(op=value, operand=parse_primary())
+        if kind == "number":
+            advance()
+            return _NumNode(value=value)
+        if kind == "ident":
+            advance()
+            name, offset, indexed = value
+            return _RefNode(name=name, offset=offset, indexed=indexed)
+        if kind == "paren" and value == "(":
+            advance()
+            inner = parse_expr(0)
+            closing = peek()
+            if closing is None or closing != ("paren", ")"):
+                raise MarketValidationError(f"{path} is missing closing ')'")
+            advance()
+            return inner
+        raise MarketValidationError(f"{path} has unexpected token {value!r}")
+
+    def parse_expr(min_prec: int) -> object:
+        left = parse_primary()
+        while True:
+            tok = peek()
+            if tok is None or tok[0] != "op" or tok[1] not in _BINARY_OPS:
+                break
+            op = tok[1]
+            prec = _PRECEDENCE[op]
+            if prec < min_prec:
+                break
+            advance()
+            right = parse_expr(prec if op == "^" else prec + 1)
+            left = _BinNode(op=op, left=left, right=right)
+        return left
+
+    root = parse_expr(0)
+    if idx != len(tokens):
+        raise MarketValidationError(f"{path} has unexpected trailing token {tokens[idx][1]!r}")
+    return root
+
+
+def _collect_expr_refs(node: object) -> list[_RefNode]:
+    refs: list[_RefNode] = []
+    if isinstance(node, _RefNode):
+        refs.append(node)
+    elif isinstance(node, _UnaryNode):
+        refs.extend(_collect_expr_refs(node.operand))
+    elif isinstance(node, _BinNode):
+        refs.extend(_collect_expr_refs(node.left))
+        refs.extend(_collect_expr_refs(node.right))
+    return refs
+
+
+def _initial_dimensions(
+    node: object,
+    prop_specs: Mapping[str, tuple[object, Counter[str]]],
+    *,
+    path: str,
+) -> Counter[str]:
+    if isinstance(node, _NumNode):
+        return Counter()
+    if isinstance(node, _RefNode):
+        if node.indexed or node.offset != 0 or node.name not in prop_specs:
             raise MarketValidationError(
-                f"{path} contains forbidden expression construct: {type(node).__name__}"
+                f"{path} references unknown or non-property symbol {node.name!r}"
             )
-
-    _visit(tree)
-    return tuple(refs)
+        prop_val, prop_dims = prop_specs[node.name]
+        if not _is_finite_number(prop_val):
+            raise MarketValidationError(
+                f"{path} references non-numeric property {node.name!r}"
+            )
+        return Counter(prop_dims)
+    if isinstance(node, _UnaryNode):
+        return _initial_dimensions(node.operand, prop_specs, path=path)
+    if isinstance(node, _BinNode):
+        left = _initial_dimensions(node.left, prop_specs, path=path)
+        right = _initial_dimensions(node.right, prop_specs, path=path)
+        if node.op in ("+", "-"):
+            if left != right:
+                raise MarketValidationError(
+                    f"{path} adds/subtracts incompatible dimensions: {dict(left)} vs {dict(right)}"
+                )
+            return left
+        if node.op in ("*", "/"):
+            factor = 1 if node.op == "*" else -1
+            out = Counter(dict(left))
+            for dim_key, power in right.items():
+                out[dim_key] += factor * power
+                if out[dim_key] == 0:
+                    del out[dim_key]
+            return out
+        if node.op == "%":
+            if right and left != right:
+                raise MarketValidationError(
+                    f"{path} modulo incompatible dimensions: {dict(left)} vs {dict(right)}"
+                )
+            return left
+        if node.op == "^":
+            if right:
+                raise MarketValidationError(f"{path} exponent must be dimensionless")
+            if not isinstance(node.right, _NumNode):
+                if left:
+                    raise MarketValidationError(
+                        f"{path} non-constant exponent requires dimensionless base"
+                    )
+                return Counter()
+            exp = node.right.value
+            out = Counter()
+            for dim_key, power in left.items():
+                scaled = power * exp
+                if scaled != 0:
+                    out[dim_key] = int(scaled) if float(scaled).is_integer() else scaled  # type: ignore[assignment]
+            return out
+    raise MarketValidationError(f"{path} contains unsupported initial expression node")
 
 
 def _check_variable_cycles(var_names: set[str], edges: list[tuple[str, tuple[str, ...]]]) -> None:
@@ -275,7 +548,7 @@ def validate_device_model_mapping(
     props = data["properties"]
     if not isinstance(props, Mapping):
         raise MarketValidationError("properties must be a mapping")
-    prop_names: set[str] = set()
+    prop_specs: dict[str, tuple[object, Counter[str]]] = {}
     for pid, praw in props.items():
         if not isinstance(pid, str) or not _ID_RE.fullmatch(pid):
             raise MarketValidationError(f"Invalid property id: {pid!r}")
@@ -287,21 +560,21 @@ def validate_device_model_mapping(
         val = praw["value"]
         if not (isinstance(val, (bool, str)) or _is_finite_number(val)):
             raise MarketValidationError(f"properties.{pid}.value must be a finite scalar")
-        if not isinstance(praw["unit"], str) or not praw["unit"].strip():
-            raise MarketValidationError(f"properties.{pid}.unit must be a non-empty string")
+        p_dims = _unit_dims(praw["unit"], path=f"properties.{pid}.unit")
         if praw.get("valid_range") is not None:
             _validate_range(
                 praw["valid_range"],
                 path=f"properties.{pid}.valid_range",
                 allow_property_ref=False,
-                property_names=set(),
+                prop_specs={},
             )
-        prop_names.add(pid)
+        prop_specs[pid] = (val, p_dims)
+    prop_names = set(prop_specs)
 
     ifaces = data["interfaces"]
     if not isinstance(ifaces, Mapping):
         raise MarketValidationError("interfaces must be a mapping")
-    iface_names: set[str] = set()
+    iface_types: dict[str, str] = {}
     for iid, iraw in ifaces.items():
         if not isinstance(iid, str) or not _ID_RE.fullmatch(iid):
             raise MarketValidationError(f"Invalid interface id: {iid!r}")
@@ -321,15 +594,16 @@ def validate_device_model_mapping(
         carrier = iraw["carrier"]
         if not isinstance(carrier, str) or not _CARRIER_RE.fullmatch(carrier):
             raise MarketValidationError(f"interfaces.{iid}.carrier invalid: {carrier!r}")
-        if not isinstance(iraw["unit"], str) or not iraw["unit"].strip():
-            raise MarketValidationError(f"interfaces.{iid}.unit must be a non-empty string")
+        iface_dims = _unit_dims(iraw["unit"], path=f"interfaces.{iid}.unit")
         _validate_range(
             iraw["valid_range"],
             path=f"interfaces.{iid}.valid_range",
             allow_property_ref=True,
-            property_names=prop_names,
+            prop_specs=prop_specs,
+            owner_dims=iface_dims,
         )
-        iface_names.add(iid)
+        iface_types[iid] = iface_type
+    iface_names = set(iface_types)
 
     equations = data["equations"]
     if not isinstance(equations, Mapping) or set(equations) != {"variables", "relations"}:
@@ -337,7 +611,7 @@ def validate_device_model_mapping(
     variables = equations["variables"]
     if not isinstance(variables, Mapping):
         raise MarketValidationError("equations.variables must be a mapping")
-    var_names: set[str] = set()
+    var_specs: dict[str, tuple[Counter[str], bool]] = {}
     for vid, vraw in variables.items():
         if not isinstance(vid, str) or not _ID_RE.fullmatch(vid):
             raise MarketValidationError(f"Invalid equations.variables key: {vid!r}")
@@ -345,15 +619,16 @@ def validate_device_model_mapping(
             raise MarketValidationError(f"equations.variables.{vid} must be a mapping")
         if "unit" not in vraw or not set(vraw) <= {"unit", "valid_range", "initial"}:
             raise MarketValidationError(f"equations.variables.{vid} has invalid keys: {sorted(vraw)!r}")
-        if not isinstance(vraw["unit"], str) or not vraw["unit"].strip():
-            raise MarketValidationError(f"equations.variables.{vid}.unit must be a non-empty string")
+        var_dims = _unit_dims(vraw["unit"], path=f"equations.variables.{vid}.unit")
         if vraw.get("valid_range") is not None:
             _validate_range(
                 vraw["valid_range"],
                 path=f"equations.variables.{vid}.valid_range",
                 allow_property_ref=True,
-                property_names=prop_names,
+                prop_specs=prop_specs,
+                owner_dims=var_dims,
             )
+        has_initial = False
         if vraw.get("initial") is not None:
             init = vraw["initial"]
             if not isinstance(init, Mapping) or set(init) not in ({"property_ref"}, {"expression"}):
@@ -361,28 +636,44 @@ def validate_device_model_mapping(
                     f"equations.variables.{vid}.initial must specify property_ref or expression"
                 )
             if "property_ref" in init:
-                if init["property_ref"] not in prop_names:
+                pref = init["property_ref"]
+                if not isinstance(pref, str) or pref not in prop_specs:
                     raise MarketValidationError(
-                        f"equations.variables.{vid}.initial.property_ref unknown: "
-                        f"{init['property_ref']!r}"
+                        f"equations.variables.{vid}.initial.property_ref unknown: {pref!r}"
+                    )
+                prop_val, prop_dims = prop_specs[pref]
+                if not _is_finite_number(prop_val):
+                    raise MarketValidationError(
+                        f"equations.variables.{vid}.initial.property_ref {pref!r} must be numeric"
+                    )
+                if prop_dims != var_dims:
+                    raise MarketValidationError(
+                        f"equations.variables.{vid}.initial dimension mismatch: "
+                        f"{dict(prop_dims)} != {dict(var_dims)}"
                     )
             else:
-                _validate_math_ast(
-                    init["expression"],
-                    path=f"equations.variables.{vid}.initial.expression",
-                    allowed_names=prop_names,
-                    allow_time_index=False,
-                    time_indexed_names=set(),
-                )
-        var_names.add(vid)
+                init_path = f"equations.variables.{vid}.initial.expression"
+                init_root = _parse_expr_side(init["expression"], path=init_path, allow_time_index=False)
+                init_dims = _initial_dimensions(init_root, prop_specs, path=init_path)
+                if init_dims != var_dims:
+                    raise MarketValidationError(
+                        f"equations.variables.{vid}.initial dimension mismatch: "
+                        f"{dict(init_dims)} != {dict(var_dims)}"
+                    )
+            has_initial = True
+        var_specs[vid] = (var_dims, has_initial)
+    var_names = set(var_specs)
 
     relations = equations["relations"]
     if not isinstance(relations, list):
         raise MarketValidationError("equations.relations must be a list")
     allowed_rel_names = prop_names | iface_names | var_names | {"step_duration"}
-    time_indexed_names = iface_names | var_names
+    series_names = iface_names | var_names
     seen_rel_ids: set[str] = set()
+    defined_outputs: dict[str, str] = {}
     relation_edges: list[tuple[str, tuple[str, ...]]] = []
+    vars_with_prev_ref: set[str] = set()
+
     for idx, rel in enumerate(relations):
         if not isinstance(rel, Mapping) or set(rel) != {"id", "expression"}:
             raise MarketValidationError(
@@ -394,31 +685,69 @@ def validate_device_model_mapping(
         if rid in seen_rel_ids:
             raise MarketValidationError(f"Duplicate relation id: {rid!r}")
         seen_rel_ids.add(rid)
-        lhs, rhs = _split_relation(
+
+        lhs_text, rhs_text = _split_relation(
             rel["expression"],
             path=f"equations.relations[{idx}].expression",
         )
-        lhs_refs = _validate_math_ast(
-            lhs,
+        lhs_root = _parse_expr_side(
+            lhs_text,
             path=f"equations.relations[{idx}].expression(lhs)",
-            allowed_names=allowed_rel_names,
             allow_time_index=True,
-            time_indexed_names=time_indexed_names,
         )
-        lhs_series_refs = [name for name in lhs_refs if name in time_indexed_names]
-        if len(lhs_refs) not in (1, 2) or not lhs_series_refs:
+        rhs_root = _parse_expr_side(
+            rhs_text,
+            path=f"equations.relations[{idx}].expression(rhs)",
+            allow_time_index=True,
+        )
+        lhs_refs = _collect_expr_refs(lhs_root)
+        rhs_refs = _collect_expr_refs(rhs_root)
+
+        for ref in lhs_refs + rhs_refs:
+            if ref.name not in allowed_rel_names:
+                raise MarketValidationError(
+                    f"equations.relations[{idx}] references undeclared symbol {ref.name!r}"
+                )
+            if ref.name not in series_names and (ref.indexed or ref.offset != 0):
+                raise MarketValidationError(
+                    f"equations.relations[{idx}] cannot time-index scalar symbol {ref.name!r}"
+                )
+            if ref.name in iface_types and iface_types[ref.name] == "blind":
+                raise MarketValidationError(
+                    f"equations.relations[{idx}] cannot reference blind interface {ref.name!r}"
+                )
+            if ref.name in var_names and ref.offset == -1:
+                vars_with_prev_ref.add(ref.name)
+
+        if len(lhs_refs) not in (1, 2):
             raise MarketValidationError(
                 f"equations.relations[{idx}].expression LHS must reference 1 or 2 declared "
                 "interfaces/variables"
             )
-        rhs_refs = _validate_math_ast(
-            rhs,
-            path=f"equations.relations[{idx}].expression(rhs)",
-            allowed_names=allowed_rel_names,
-            allow_time_index=True,
-            time_indexed_names=time_indexed_names,
-        )
-        relation_edges.append((lhs_series_refs[0], rhs_refs))
+        if any(ref.name not in series_names for ref in lhs_refs):
+            raise MarketValidationError(
+                f"equations.relations[{idx}].expression LHS cannot target scalar property or step_duration"
+            )
+        if len(lhs_refs) == 1:
+            output = lhs_refs[0].name
+            if iface_types.get(output) == "predefined":
+                raise MarketValidationError(
+                    f"equations.relations[{idx}] LHS cannot assign predefined interface {output!r}"
+                )
+            if output in defined_outputs:
+                raise MarketValidationError(
+                    f"Output {output!r} defined by multiple relations: "
+                    f"{defined_outputs[output]!r} and {rid!r}"
+                )
+            defined_outputs[output] = rid
+            if output in var_names:
+                relation_edges.append((output, tuple(ref.name for ref in rhs_refs)))
+
+    for vid in sorted(vars_with_prev_ref):
+        if not var_specs[vid][1]:
+            raise MarketValidationError(
+                f"State variable {vid!r} referenced at [t-1] must declare initial"
+            )
 
     _check_variable_cycles(var_names, relation_edges)
     return dict(data)

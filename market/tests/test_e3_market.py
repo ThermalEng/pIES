@@ -211,7 +211,7 @@ def test_device_validator_ast_equations_and_forbidden_fields() -> None:
     parsed = validate_device_model_file(seed_dev, allow_user_namespace=False)
     assert parsed["device"]["id"] == "ies.device.solar_pv_sample"
 
-    # Valid storage equations with [t], [t-1], step_duration, and scalar initial expression
+    # Valid storage equations with ^ exponentiation, [t], [t-1], step_duration, and composite initial dims
     storage_doc = {
         "schema": "ies.device-model",
         "schema_version": "1.0.0",
@@ -221,7 +221,10 @@ def test_device_validator_ast_equations_and_forbidden_fields() -> None:
         },
         "properties": {
             "capacity_kwh": {"value": 100.0, "unit": "kWh"},
+            "rated_power_kw": {"value": 50.0, "unit": "kW"},
+            "reserve_hours": {"value": 1.0, "unit": "h"},
             "initial_soc": {"value": 0.5, "unit": "1"},
+            "label_tag": {"value": "lithium", "unit": "1"},
         },
         "interfaces": {
             "electricity": {
@@ -237,12 +240,27 @@ def test_device_validator_ast_equations_and_forbidden_fields() -> None:
                     "unit": "kWh",
                     "initial": {"expression": "initial_soc * capacity_kwh"},
                 },
-                "charge": {"unit": "kW"},
+                "power_headroom": {
+                    "unit": "kWh",
+                    "initial": {"expression": "rated_power_kw * reserve_hours"},
+                },
+                "direct_energy": {
+                    "unit": "kWh",
+                    "initial": {"property_ref": "capacity_kwh"},
+                },
+                "charge": {
+                    "unit": "kW",
+                    "valid_range": {"minimum": 0, "maximum": {"property_ref": "rated_power_kw"}},
+                },
                 "discharge": {"unit": "kW"},
             },
             "relations": [
                 {"id": "power_balance", "expression": "electricity[t] = discharge[t] - charge[t]"},
                 {"id": "exclusivity", "expression": "charge[t] * discharge[t] = 0"},
+                {
+                    "id": "quadratic_loss",
+                    "expression": "power_headroom[t] = (charge[t] ^ 2) * reserve_hours",
+                },
                 {
                     "id": "soc_step",
                     "expression": (
@@ -269,15 +287,17 @@ def test_device_validator_ast_equations_and_forbidden_fields() -> None:
     with pytest.raises(MarketValidationError, match="inputs"):
         validate_device_model_mapping(with_inputs)
 
-    # Rejects broken syntax, attribute calls, undeclared symbols, [t-2], and scalar time indexing
+    # Rejects broken syntax, Python ** power, calls, undeclared symbols, [t-2], and scalar indexing
     invalid_expressions = (
-        ("electric_out[t] = (", "invalid expression syntax"),
-        ("electric_out[t] = os.system('id')", "forbidden expression construct"),
-        ("electric_out[t] = eval('1')", "forbidden expression construct"),
+        ("electric_out[t] = (", "unexpected end of expression"),
+        ("electric_out[t] = solar_irradiance[t] ** 2", "forbids Python power"),
+        ("electric_out[t] = os.system('id')", "forbids attribute access"),
+        ("electric_out[t] = eval('1')", "forbids function call"),
         ("electric_out[t] = unknown_var[t]", "undeclared symbol"),
         ("electric_out[t] = solar_irradiance[t-2]", "unsupported time index"),
         ("electric_out[t] = rated_capacity_kwp[t]", "cannot time-index scalar"),
-        ("rated_capacity_kwp = 10", "LHS must reference 1 or 2 declared interfaces/variables"),
+        ("electric_out[t] = step_duration[t]", "cannot time-index scalar"),
+        ("rated_capacity_kwp = 10", "LHS cannot target scalar"),
     )
     for bad_expr, match_text in invalid_expressions:
         doc = {
@@ -287,7 +307,90 @@ def test_device_validator_ast_equations_and_forbidden_fields() -> None:
         with pytest.raises(MarketValidationError, match=match_text):
             validate_device_model_mapping(doc)
 
-    # Rejects cyclic variable dependency and time-indexed initial.expression
+    # Rejects [t-1] state recurrence when initial is missing
+    missing_initial_doc = {
+        **storage_doc,
+        "equations": {
+            "variables": {
+                "stored_energy": {"unit": "kWh"},
+                "charge": {"unit": "kW"},
+                "discharge": {"unit": "kW"},
+            },
+            "relations": [
+                {"id": "power_balance", "expression": "electricity[t] = discharge[t] - charge[t]"},
+                {
+                    "id": "soc_step",
+                    "expression": (
+                        "stored_energy[t] = stored_energy[t-1] + "
+                        "(charge[t] - discharge[t]) * step_duration"
+                    ),
+                },
+            ],
+        },
+    }
+    with pytest.raises(MarketValidationError, match="must declare initial"):
+        validate_device_model_mapping(missing_initial_doc)
+
+    # Rejects non-numeric and dimension-mismatched initial declarations + bound refs
+    bad_init_cases = (
+        (
+            "kWh",
+            {"property_ref": "initial_soc"},
+            "dimension mismatch",
+        ),
+        (
+            "kWh",
+            {"property_ref": "rated_power_kw"},
+            "dimension mismatch",
+        ),
+        (
+            "kWh",
+            {"expression": "initial_soc * rated_power_kw"},
+            "dimension mismatch",
+        ),
+        (
+            "1",
+            {"property_ref": "label_tag"},
+            "must be numeric",
+        ),
+        (
+            "1",
+            {"expression": "label_tag"},
+            "non-numeric property",
+        ),
+        (
+            "kWh",
+            {"expression": "electricity[t] * 2"},
+            "forbids time indexing",
+        ),
+    )
+    for var_unit, init_spec, match_text in bad_init_cases:
+        bad_doc = {
+            **storage_doc,
+            "equations": {
+                "variables": {"stored_energy": {"unit": var_unit, "initial": init_spec}},
+                "relations": [],
+            },
+        }
+        with pytest.raises(MarketValidationError, match=match_text):
+            validate_device_model_mapping(bad_doc)
+
+    bad_bound_doc = {
+        **storage_doc,
+        "equations": {
+            "variables": {
+                "charge": {
+                    "unit": "kW",
+                    "valid_range": {"minimum": 0, "maximum": {"property_ref": "capacity_kwh"}},
+                }
+            },
+            "relations": [],
+        },
+    }
+    with pytest.raises(MarketValidationError, match="dimension mismatch"):
+        validate_device_model_mapping(bad_bound_doc)
+
+    # Rejects cyclic variable dependency
     cyclic_doc = {
         **storage_doc,
         "equations": {
@@ -300,18 +403,6 @@ def test_device_validator_ast_equations_and_forbidden_fields() -> None:
     }
     with pytest.raises(MarketValidationError, match="cyclic variable dependency"):
         validate_device_model_mapping(cyclic_doc)
-
-    bad_init_doc = {
-        **storage_doc,
-        "equations": {
-            "variables": {
-                "stored_energy": {"unit": "kWh", "initial": {"expression": "electricity[t] * 2"}}
-            },
-            "relations": [],
-        },
-    }
-    with pytest.raises(MarketValidationError, match="forbids time indexing"):
-        validate_device_model_mapping(bad_init_doc)
 
     # Rejects source/mode on interfaces
     bad_iface = {
