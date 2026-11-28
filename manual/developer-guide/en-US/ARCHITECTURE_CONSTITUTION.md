@@ -1,11 +1,11 @@
 # pIES Architecture Constitution
 
 > Status: Effective
-> Version: 1.23.0
+> Version: 1.24.0
 > Effective Date: 2026-08-20
-> Last Updated: 2026-11-25
+> Last Updated: 2026-11-28
 > Scope: Repository root entry points, `manual/`, `docs/`, `backend/`, `frontend/`, database, object storage, Worker, tests, and subsequent plugins
-> Basis: 2026-08-20 Special Architecture Review, ADR-0001 through ADR-0008, 2026-09-07 Regional FinanceProfile Triplet Specification, User-Approved Embedded Tax Computation Ruling on 2026-10-19 (ADR-0011), User-Approved Direct Evaluation Confirmation Transmission Ruling on 2026-10-20 (ADR-0012), ADR-0013 through ADR-0015, User-Approved Unified Backend Orchestration & Ephemeral Computation Container Pipeline Ruling on 2026-11-24 (ADR-0016), User-Approved Single-Chain Stage Handoff & Single-Pass Joint Prediction Ruling on 2026-11-25 (ADR-0017)
+> Basis: 2026-08-20 Special Architecture Review, ADR-0001 through ADR-0008, 2026-09-07 Regional FinanceProfile Triplet Specification, User-Approved Embedded Tax Computation Ruling on 2026-10-19 (ADR-0011), User-Approved Direct Evaluation Confirmation Transmission Ruling on 2026-10-20 (ADR-0012), ADR-0013 through ADR-0015, User-Approved Unified Backend Orchestration & Ephemeral Computation Container Pipeline Ruling on 2026-11-24 (ADR-0016), User-Approved Single-Chain Stage Handoff & Single-Pass Joint Prediction Ruling on 2026-11-25 (ADR-0017), User-Approved Scientific Engineering Software Positioning & Proportionate Defense Ruling on 2026-11-28 (ADR-0018)
 
 ## 1. Document Precedence
 
@@ -67,7 +67,7 @@ Module initialization, registration, persistence, and task execution MUST satisf
 
 ### 2.6 Validate Only at True Boundaries
 
-Validation belongs solely at user-input boundaries and public-output boundaries of user-defined capabilities. Device model YAML, device data CSV, assembly YAML, finance YAML, planning/calculation config YAML, and Solver Bundle descriptors validate headers (`schema`/`schema_version`) and domain constraints before entering business facts; public outputs of user plugins or custom generators validate their contracts before entering result models.
+Validation belongs solely at user-input boundaries and public-output boundaries of user-defined capabilities, and is scoped strictly to **structure, required fields, data types, and public contract constraints**. Device model YAML, device data CSV, assembly YAML, finance YAML, planning/calculation config YAML, and Solver Bundle descriptors validate headers (`schema`/`schema_version`) and domain constraints before entering business facts; public outputs of user plugins or custom generators validate their public contracts before entering result models. Neither the platform nor the artifact market endorses the mathematical, physical, optimality, or economic correctness of third-party device models, predictors, generators, solvers, algorithms, or evaluators, nor duplicates downstream domain rules across modules.
 
 Internal file handoffs, reads, persistence, snapshots, and runtime transitions MUST trust typed data and transactional state that have already crossed the boundary; code MUST NOT recompute, compare, or store SHA-256 hashes, content digests, checksums, or similar integrity fields, nor add tests for them. Runtime failures MUST report the actual business or execution error rather than duplicating checks as pre-validation.
 
@@ -149,11 +149,11 @@ Computation responsibilities MUST maintain three distinct boundaries:
 
 - `GeneratorProvider` directly accepts the issued `ValidatedAssemblyArtifact`, per-instance frozen device mathematical contributions, materialized full-horizon input series, immutable `EffectiveFinanceConfig`, publicly validated `CalculationConfig`, and confirmed frozen evaluation inputs, deterministically producing solver inputs and declarative variable/unit mappings (`variable_map`); inputs are passed separately by responsibility rather than bundled merely to preserve parameter count, without introducing outer wrappers or a second source of business truth;
 - `SolverRuntime` executes controlled solver commands solely to emit a solver-neutral canonical primal solution (strictly ordered by 0-based input model columns) and `ExecutionReceipt`, without copying unrelated business files;
-- `ResultAdapter` (`backend` cross-step coordination capability) streams `variable_map`, receipt, and canonical primal solutions inside an isolated resource-bounded child subprocess to faithfully restore a business-unit canonical engineering solution (identical in schema to unified `algorithm` outputs, reclaiming subprocess memory immediately upon exit to protect the main control-plane process, and never re-solving or certifying third-party solvers); downstream `Evaluator` plugins consume read-only canonical engineering solutions and framework-staged frozen context to emit standard financial evaluation facts or self-describing evaluation report blocks (`metrics` / `charts` / `tables`).
+- `ResultAdapter` (`backend` cross-step coordination capability) streams `variable_map`, receipt, and canonical primal solutions inside a minimal `spawn` child subprocess to faithfully restore a business-unit canonical engineering solution (identical in schema to unified `algorithm` outputs, reclaiming subprocess memory immediately upon exit to protect the main control-plane process; lightweight reads and index projections do not require spawning subprocesses, `RLIMIT_AS` probing, or multi-tier temporary directory materialization, and `ResultAdapter` never re-solves or certifies unmodified models or third-party solvers; built-in `ies-highs-solver` performs original-model tolerance verification strictly on its own internal `on_demand_mutex` relaxation path); downstream `Evaluator` plugins consume read-only canonical engineering solutions and framework-staged frozen context to emit standard financial evaluation facts or self-describing evaluation report blocks (`metrics` / `charts` / `tables`).
 
-Built-in and third-party computation plugins follow the single-input/single-output container contract (`/work/in → /work/out`) along a **strict single-pass unidirectional pipeline**: `Frozen Input → [predictions[]: grouped per predictor plugin (supporting joint multi-target prediction)] → (generator → solver → backend bounded-subprocess engineering restoration | algorithm) → [evaluators[]: 0..N independent evaluators in parallel] → Sealed Result`. Cross-stage read-only context is staged into `/work/in` via zero-copy hardlinks by the orchestrator—plugins MUST NOT manually relay unrelated files, and cross-container loops are prohibited; non-feasible core solve outcomes skip solution-dependent evaluators, while under successful core solves the top-level task outcome reflects only the core solve, isolating individual failed evaluators with per-evaluator diagnostics and supporting isolated single-evaluator retry against the same frozen snapshot and sealed engineering solution; algorithms requiring internal iterative search execute self-contained inside one ephemeral container via `iteration`.
+Built-in and third-party computation plugins follow the single-input/single-output container contract (`/work/in → /work/out`) along a **strict single-pass unidirectional pipeline**: `Frozen Input → [predictions[]: grouped per predictor plugin (supporting joint multi-target prediction)] → (generator → solver → backend minimal-subprocess engineering restoration | algorithm) → [evaluators[]: 0..N independent evaluators in parallel] → Sealed Result`. Cross-stage read-only context is staged into `/work/in` via zero-copy hardlinks by the orchestrator—plugins MUST NOT manually relay unrelated files, and cross-container loops are prohibited; non-feasible core solve outcomes skip solution-dependent evaluators, while under successful core solves the top-level task outcome reflects only the core solve, isolating individual failed evaluators with per-evaluator diagnostics and supporting isolated single-evaluator retry against the same frozen snapshot and sealed engineering solution; algorithms requiring internal iterative search execute self-contained inside one ephemeral container via `iteration`.
 
-`GeneratorProvider` is the sole forward boundary converting business units to solver internal units, and the `backend` bounded-subprocess restoration layer is the sole reverse conversion boundary; stage-specific parameters freeze in dedicated slots at task submission. `SolverRuntime` MUST NOT read assembly semantics, inspect device types, perform business unit conversions, fill missing data, or switch solvers.
+`GeneratorProvider` is the sole forward boundary converting business units to solver internal units, and the `backend` subprocess restoration layer is the sole reverse conversion boundary; stage-specific parameters freeze in dedicated slots at task submission. `SolverRuntime` MUST NOT read assembly semantics, inspect device types, perform business unit conversions, fill missing data, or switch solvers.
 
 Computation modules MUST NOT:
 
@@ -197,7 +197,7 @@ Ownership and transitional arrangements are documented in [Application Use Cases
 
 ### 4.10 `worker`: Asynchronous Execution and Resource Orchestration
 
-Asynchronous task scheduling, I/O orchestration, and computation resource coordination converge into the `backend` control plane (`1.1.5` target architecture no longer runs standalone persistent compute/IO Worker daemons); the scheduling layer claims tasks, holds clockless execution leases, dispatches per-step ephemeral network-disabled containers through the container proxy, and commits stage checkpoints and final results, consuming only immutable snapshots. If snapshot dependencies fail to resolve, startup MUST fail or stay not-ready; claiming a task and degrading dynamically afterward is prohibited. The scheduling layer MUST NOT construct solver shell commands or interpret assembly business semantics. When the control plane is briefly unavailable, running ephemeral containers continue executing, and supervisory logic reconciles status and releases concurrency slots upon container exit. Administrators MAY revoke an attempt's write lease and requeue the task.
+Asynchronous task scheduling, I/O orchestration, and computation resource coordination converge into a single `backend` control-plane scheduler (standalone persistent compute/IO Worker daemons are retired); relying on unique task ownership (`TaskAttempt` state), the scheduling layer dispatches per-step ephemeral network-disabled containers through the container proxy and commits persisted stage checkpoints and final results, consuming only immutable snapshots. If snapshot dependencies fail to resolve, startup MUST fail or stay not-ready; claiming a task and degrading dynamically afterward is prohibited. The scheduling layer MUST NOT construct solver shell commands or interpret assembly business semantics. On control-plane startup, leftover ephemeral containers are cleaned up in one pass and interrupted attempts are marked failed so users can cancel or retry (without cross-restart live-container adoption or separate lease/admin-unlock requeue state machines).
 
 Execution workflows, leases, and commit rules are defined in [Worker](modules/worker.md).
 
@@ -243,7 +243,7 @@ It MUST NOT read module-internal registries, merge them into a new global author
 
 - Each module owns its registry independently;
 - Registered items MUST have stable IDs and explicit versions;
-- A candidate registry MUST be built and validated completely before atomic publication;
+- A candidate registry MUST be built and validated completely before atomic publication (registry publication does not extend to cross-request concurrency transactions or CAS guarantees for administrative mutations);
 - Startup MUST fail if any required provider fails;
 - Runtime hot-reloading MUST NOT be implemented prior to public release;
 - Static fallbacks, broad-exception fallbacks, and partial registry states are prohibited;
@@ -253,17 +253,17 @@ Extension IDs SHOULD use stable namespaces such as `ies.device.pv` or `vendor.de
 
 ### 5.4 Transactions
 
-`application` use cases own transaction boundaries and `commit`/`rollback`; lower-layer modules MUST NOT issue global rollbacks over shared caller state. Operations spanning database and filesystem MUST NOT masquerade as single ACID transactions and MUST implement idempotent recovery protocols.
+`application` use cases own transaction boundaries and `commit`/`rollback`; lower-layer modules MUST NOT issue global rollbacks over shared caller state. Operations spanning database and filesystem MUST NOT masquerade as single ACID transactions and MUST report failures explicitly.
 
 Repository constraints, upserts, and local rollback rules are covered in [Persistence](modules/persistence.md) and [Application Use Cases](modules/application.md).
 
 ### 5.5 Synchronous vs. Asynchronous Execution
 
-- Fast validation, queries, and deterministic mutations use synchronous HTTP;
+- Fast validation, queries, and deterministic mutations use synchronous HTTP; single-owner and low-frequency administrative mutations do not require optimistic locks or client idempotency keys;
 - Long-running calculations, analyses, imports, and report generation use Tasks;
-- Task requests MUST carry an idempotency key;
+- Task requests MAY optionally carry an idempotency key (deduplicating when explicitly provided and creating a new task directly when omitted);
 - Tasks consume immutable snapshots rather than reading continuously mutating working drafts;
-- Worker results commit as immutable evidence or objects, and state transitions MUST be retry-safe.
+- Computation results commit as immutable evidence or objects; execution failures report errors explicitly so users can rerun or recover from persisted stage checkpoints without requiring lossless automatic recovery across every intermediate transition.
 
 ## 6. Target Directory Structure
 
@@ -349,7 +349,7 @@ Complete time and collection rules appear in [Public Contracts](contracts.md), a
 
 - Whether a list is ordered MUST be explicit in its DTO; collections requiring deterministic output sort by stable public keys;
 - Field ordering within a JSON object carries no semantic meaning;
-- Paginated lists use cursor pagination rather than unstable page numbers across concurrent writes as a long-term contract.
+- Paginated lists use stable sort keys or cursor pagination (without extending this contract into a general high-concurrency guarantee for administrative mutations).
 
 Complete collection and large-array rules appear in [Public Contracts](contracts.md).
 
@@ -392,14 +392,14 @@ Public protocols, path rules, reference flows, retention periods, recovery, and 
 
 ## 11. Database and Persistence
 
-After public release, schema changes MUST use versioned migrations; development databases initialize from the current schema. Constraints and immutability are enforced via database constraints and required triggers; repositories belong solely to the domain owner of their tables; cross-domain reads go through public read models or application queries without importing another module's ORM; audit records are immutable; deletions MUST be explicit; and secrets MUST NOT enter ordinary DTOs, logs, or evidence packages.
+After public release, schema changes MUST use versioned migrations; development databases initialize from the current schema. Uniqueness, foreign keys, and basic value constraints are enforced via database constraints, while immutability of historical versions, snapshots, evidence, and audit logs is enforced via append-only repository interfaces and architecture tests without requiring startup-deployed database triggers or defending against direct out-of-band database tampering. Repositories belong solely to the domain owner of their tables; cross-domain reads go through public read models or application queries without importing another module's ORM; audit records are immutable; deletions MUST be explicit; and secrets MUST NOT enter ordinary DTOs, logs, or evidence packages.
 
 Full rules appear in [Persistence](modules/persistence.md).
 
 ## 12. Snapshots, Tasks, and Results
 
 - Tasks MUST bind an immutable `CalcSnapshot` and MUST NOT re-read a changing project draft during execution;
-- Duplicate submissions sharing the same idempotency key return the same logical task without re-executing;
+- When the client explicitly supplies an idempotency key, duplicate submissions sharing that key return the same logical task without re-executing; ordinary manual submissions do not require an idempotency key;
 - Failed outcomes MUST preserve structured diagnostics;
 - Results, evidence, and assessments MUST be traceable to task, attempt, snapshot, and object;
 - Historical results MUST NOT be reinterpreted by re-reading current configuration.
@@ -545,7 +545,7 @@ The Help Center MUST:
 - Display "User Guide", "Developer Guide", and "Changelog" as three top-level nodes in a unified navigation tree;
 - Register available locales in `manual/SUMMARY.md` and define chapter order and stable IDs in `manual/SUMMARY.<locale>.md`;
 - Support deep links, heading anchors, previous/next navigation, current-node indicator, mobile TOC drawer, and keyboard navigation;
-- Support required Markdown constructs while rejecting raw HTML, scripts, inline event handlers, and unsafe URLs;
+- Safely render repo-bundled static `manual/` Markdown directly (via React rendering with `dangerouslySetInnerHTML` prohibited and in-app routes for internal links), without layering untrusted-input sanitization pipelines over static repository documentation;
 - Generate a read-only content manifest during the frontend build without reading host files at runtime or calling the backend for simple Markdown conversion;
 - Explicitly list available languages when a requested language is missing rather than silently displaying the wrong language;
 - Remain statically readable even when backend, database, and Worker services are unavailable.
@@ -559,7 +559,7 @@ The default deployment model is centralized administrator deployment with ordina
 - Critical mutations emit immutable, minimally redacted audit records without storing passwords, raw tokens, or unbounded payloads; routine reads and everyday operations do not require heavy auditing;
 - Error responses MUST NOT leak stack traces, SQL, host absolute paths, or provider credentials;
 - Assembly and device files MUST NOT expose arbitrary code execution entry points;
-- Both built-in and third-party computation steps (prediction, generation, solving, post-solve financial evaluation, and unified algorithms) run inside ephemeral containers with no business credentials, disabled networking (`--network=none`), a read-only root filesystem, and explicit resource caps, and both user cancellation and timeouts MUST immediately terminate the computation and clean up the container and temporary files after completing status and valid output handoff. `backend` and ephemeral computation containers MUST NOT mount the host Docker socket directly; all image builds and ephemeral container lifecycles execute strictly through the thin allowlisted proxy `job_runner`. Computation traceability is guaranteed by immutable frozen input files, task snapshots, and persisted outputs/evidence rather than mandating immutable or identical runtime environments/images for ephemeral containers.
+- Both built-in and third-party computation steps (prediction, generation, solving, post-solve financial evaluation, and unified algorithms) run inside ephemeral containers with no business credentials, disabled networking (`--network=none`), a read-only `/work/in` mount, and explicit CPU/memory caps, and both user cancellation and timeouts MUST immediately terminate the computation and clean up the container and temporary files after completing status and valid output handoff (cleanup failures log warnings without polluting business state or propagating stale cleanup state across workflows). `backend` and ephemeral computation containers MUST NOT mount the host Docker socket directly; all image builds and ephemeral container lifecycles execute strictly through the thin allowlisted proxy `job_runner`. Computation traceability is guaranteed by immutable frozen input files, task snapshots, and persisted outputs/evidence rather than mandating immutable or identical runtime environments/images for ephemeral containers.
 
 Solver isolation and execution details appear in [Solver Runtime](modules/solver-runtime.md) and [Deployment and Operations](deployment.md).
 

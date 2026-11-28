@@ -46,7 +46,7 @@ pIES 将设备技术模型、拓扑连接、时序数据、财务规则与规划
      应用用例层 ──────→ PostgreSQL（权威事务事实）
         │       └─────→ 对象存储（不可变大对象）
         ├──→ 领域模块
-        └──→ 任务与冻结快照 ──→ Worker 守护进程
+        └──→ 任务与冻结快照 ──→ 内嵌调度层（backend 控制面）
                                       └──→ application.worker 阶段命令
                                                 ├──→ GeneratorProvider ──→ Solver Bundle
                                                 ├──→ SolverRuntime ──→ ResultAdapter
@@ -57,7 +57,7 @@ pIES 将设备技术模型、拓扑连接、时序数据、财务规则与规划
 - **API 适配层**：负责路由、认证、DTO 校验与用例调用。
 - **应用用例层**：协调跨模块业务动作并控制数据库事务边界。
 - **领域模块**：各自拥有独立的业务规则、内部持久化与公开门面。
-- **Worker 守护进程**：消费不可变计算快照，通过 `application.worker` 的短事务阶段命令推进长时后台任务。
+- **内嵌调度层**：消费不可变计算快照，通过 `application.worker` 的短事务阶段命令与 `job_runner` 容器代理推进长时后台任务。
 
 ## 端到端业务流
 
@@ -81,7 +81,7 @@ pIES 将设备技术模型、拓扑连接、时序数据、财务规则与规划
 
 ## 三条核心业务链
 
-1. **编辑链（草稿演进）**：`表单/画布 → 前端 mapper → HTTP DTO → application 用例 → 领域校验 → 新草稿 revision`。写操作携带 `expected_revision` 实现乐观锁冲突检测。
+1. **编辑链（草稿演进）**：`表单/画布 → 前端 mapper → HTTP DTO → application 用例 → 领域校验 → 新草稿 revision`（单主最后写入生效）。
 2. **计算链（快照冻结与求解）**：`提交命令 → 授权与装配 → 固化 CalcSnapshot → 创建 Task → Worker 领取 Attempt → 序列物化 → 生成 Bundle → 隔离求解 → 结果适配（耦合预测时按需迭代）→ 财务评价 → 提交 Evidence`。任务创建后只消费冻结快照，与后续草稿编辑隔离。
 3. **追溯链（历史解释）**：`结果视图 → Evidence → Attempt → Task → CalcSnapshot → 项目/数据/配置/Provider 版本与对象引用`。任何展示、评估、方案应用与导出均沿此链读取冻结事实。
 
@@ -97,17 +97,17 @@ pIES 将设备技术模型、拓扑连接、时序数据、财务规则与规划
 | [solver runtime](modules/solver-runtime.md) | 受控进程/容器执行、资源隔离、取消与 `ExecutionReceipt` | 设备语义、问题构建、结果解释 |
 | [computation](modules/engines.md) | 计算阶段公共契约、预测调度、结果适配与 `ComputeResult` | HTTP 会话、ORM 与草稿管理 |
 | [finance](modules/finance.md) | 财务三件套合并、规划财务关系与项目投资现金流评价 | 规划求解调度、界面状态 |
-| [analysis](modules/analysis.md) | 敏感性扫描、批量比较与四维系统评估 | 任务租约、HTTP 传输 |
-| [storage](modules/storage.md) | 不可变对象读写、Owner 引用生命周期与孤儿清理/中断恢复 | 理解项目版本或数据集业务含义 |
+| [analysis](modules/analysis.md) | 敏感性扫描、批量比较与四维系统评估 | HTTP 传输、阶段调度 |
+| [storage](modules/storage.md) | 不可变对象读写、Owner 引用生命周期与孤儿清理 | 理解项目版本或数据集业务含义 |
 | [application](modules/application.md) | 权限控制、数据库事务与跨模块用例编排 | 穿透领域模块私有实现 |
 | [api](modules/api.md) | HTTP 路由、认证上下文、DTO 序列化与错误映射 | ORM 查询、领域规则计算 |
-| [worker](modules/worker.md) | 队列领取、租约续期、子进程执行隔离与阶段检查点恢复 | 解释装配语义、拼接 Shell 命令 |
+| [worker](modules/worker.md) | 队列领取、临时容器执行编排与阶段检查点恢复 | 解释装配语义、拼接 Shell 命令 |
 
 依赖方向严格单向：
 
 ```text
 外部请求 → api → application 用例 → 领域公开门面
-任务调度 → worker 守护进程 → application.worker 阶段命令 → 领域/计算公开门面
+任务调度 → worker 调度层 → application.worker 阶段命令 → 领域/计算公开门面
 api / worker / application / 领域模块 → core
 ```
 

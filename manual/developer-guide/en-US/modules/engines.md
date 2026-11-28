@@ -11,7 +11,7 @@ Under the `1.2.0` unidirectional pipeline architecture, prediction (`predictor`)
 ```text
 ValidatedAssemblyArtifact + CalculationConfig
   ↓ Series Materialization (constant / data_repeat / data_full + grouped joint predictions[])
-  ├─ Staged Mode:  GeneratorProvider ──→ SolverRuntime ──→ backend Bounded Subprocess Restores Canonical Engineering Solution
+  ├─ Staged Mode:  GeneratorProvider ──→ SolverRuntime ──→ backend Minimal Subprocess Restores Canonical Engineering Solution
   └─ Unified Mode: Algorithm Container ──────────────────→ Emits Canonical Engineering Solution Directly
                                                                   ↓
         Sealed Result ←── evaluators[] (runs only when feasible; partial evaluator failure preserves solution & supports retry)
@@ -22,7 +22,7 @@ ValidatedAssemblyArtifact + CalculationConfig
 | Series Materialization & Prediction | Merges static sources and per-plugin grouped single-pass predictions into a full-horizon aligned `MaterializedSet` | Mutating assembly or cross-container loops |
 | [Generators](generators.md) | Math lowering, forward unit conversion, solver input & `variable_map` emission | Accessing databases or network |
 | [Solver Runtime](solver-runtime.md) | Executes solvers via the container proxy inside isolated ephemeral containers to emit 0-based original-column-order primal solutions and `ExecutionReceipt` | Interpreting device semantics, converting units, or relaying business files |
-| Bounded-Subprocess Restoration & Parallel Evaluators | `backend` faithfully restores canonical engineering solutions via `variable_map` in a bounded subprocess; runs `0..N` parallel `evaluator` plugins with per-evaluator retry | Re-running core solves, reading live drafts, or certifying third-party solvers |
+| Minimal-Subprocess Restoration & Parallel Evaluators | `backend` faithfully restores canonical engineering solutions via `variable_map` in a minimal `spawn` subprocess; runs `0..N` parallel `evaluator` plugins with per-evaluator retry | Re-running core solves, reading live drafts, or certifying unmodified models / third-party solvers |
 
 ## Per-Plugin Grouped Prediction and Intra-Container Loop Interface
 
@@ -31,25 +31,25 @@ ValidatedAssemblyArtifact + CalculationConfig
 
 ## Solver-Embedded Structural Acceleration (Official Built-In HiGHS Quality Control)
 
-For large-scale, long-horizon planning models, structural acceleration is provided as a built-in capability of the official solver (`ies.solver.highs`) governed by frozen [CalculationConfig](../formats/calculation-config.md) `options.generator`, preserving clean separation across [Computation Generators](generators.md), [Solver Runtime](solver-runtime.md), and `backend` bounded-subprocess restoration; third-party solver approaches integrate directly through the public `ies.algorithm-plugin` (`generator` / `solver` / `algorithm`) container contract.
+For large-scale, long-horizon planning models, structural acceleration is provided as a built-in capability of the official solver (`ies.solver.highs`) governed by frozen [CalculationConfig](../formats/calculation-config.md) `options.generator`, preserving clean separation across [Computation Generators](generators.md), [Solver Runtime](solver-runtime.md), and `backend` minimal-subprocess restoration; third-party solver approaches integrate directly through the public `ies.algorithm-plugin` (`generator` / `solver` / `algorithm`) container contract.
 
 - **Configuration and isolation contract**: Acceleration toggles and parameters freeze inside `CalcSnapshot` under `parameters_schema` validation; built-in `ies.generator.highs_milp@1.0.0` enables lossless `on_demand_mutex` acceleration by default (`acceleration.mode: "on_demand_mutex"`) and passes through unmodified to the original model when explicitly set to `"off"`.
-- **Valid structural relaxation and original-model authority**: [Generators](generators.md#structural-metadata-export-for-solver-acceleration) export only compile-time-proven, safely relaxable independent auxiliary structure metadata without spawning solver runs during generation; built-in `ies-highs-solver` MAY temporarily omit proven constraints during iterative solving and performs full original-model constraint tolerance checks plus continuous demand upper-envelope tightness checks **internally inside the solver** (mapping uncertified inflated peaks to `not_solved` or `numeric_failure` per termination case).
-- **Deadline, incumbent preservation, and status honesty**: Execution enforces one overall time budget without renewing expired budgets and preserves the best verified feasible incumbent before cutoff; the built-in solver emits `solved` only when an unmodified domain or valid relaxation reaches tolerance optimality and passes full original-model verification, whereas time-limited stops or restricted search domains emit `feasible` (`restricted_results`) with uncertified original-domain `best_bound` and `relative_gap` set to `null`.
+- **Valid structural relaxation and original-model authority**: [Generators](generators.md#structural-metadata-export-for-solver-acceleration) export only compile-time-proven, safely relaxable independent auxiliary structure metadata without spawning solver runs during generation; built-in `ies-highs-solver` checks relaxed mutex pairs and original-model tolerances **strictly inside its `on_demand_mutex` relaxation path** (never running pure-Python LP re-verification on unmodified `off` solves or third-party solvers); continuous demand upper-envelope tightness is proven at generation time rather than re-checked by the solver.
+- **Deadline, incumbent preservation, and status honesty**: Execution enforces one overall time budget without renewing expired budgets and preserves the best verified feasible incumbent before cutoff; the built-in solver emits `solved` only when an unmodified domain or valid relaxation reaches tolerance optimality and passes verification, whereas time-limited stops or restricted search domains emit `feasible` (`restricted_results`) with uncertified original-domain `best_bound` and `relative_gap` set to `null`.
 
-## Unified Result Model and Bounded-Subprocess Restoration Contract
+## Unified Result Model and Minimal-Subprocess Restoration Contract
 
 `ComputeResult` separates process outcomes from mathematical outcomes via two orthogonal fields so runtime status and mathematical status are never conflated:
 
-- **`execution_status`**: Reflects execution receipt facts strictly: `completed`, `rejected` (policy/input rejection), `failed` (non-OOM process failure), `timed_out`, `cancelled`, `fenced` (lease revoked), `resource_exhausted` (OOM/memory exhaustion), or `protocol_failed` (corrupt or missing output protocol).
+- **`execution_status`**: Reflects execution receipt facts strictly: `completed`, `rejected` (policy/input rejection), `failed` (non-OOM process failure), `timed_out`, `cancelled`, `resource_exhausted` (OOM/memory exhaustion), or `protocol_failed` (corrupt or missing output protocol).
 - **`math_status`**: Reflects solver mathematical outcome: `solved` (proven optimal within tolerance), `feasible` (feasible solution found without proven optimality, e.g., time limit), `infeasible`, `unbounded`, `numeric_failure`, or `not_solved`.
 
-### `backend` Bounded-Subprocess Restoration Responsibilities (`ResultAdapter`)
+### `backend` Minimal-Subprocess Restoration Responsibilities (`ResultAdapter`)
 
-- **Built-in platform infrastructure (no external adapter registry)**: `ResultAdapter` is a trusted cross-step coordination component inside `backend` (streaming inside an isolated `spawn` child subprocess without maintaining an external adapter plugin registry or exposing an `adapt(...)` extension hook).
+- **Built-in platform infrastructure (no external adapter registry)**: `ResultAdapter` is a trusted cross-step coordination component inside `backend` (using a minimal `spawn` child subprocess for large engineering solutions to reclaim memory on exit without `RLIMIT_AS` probing or multi-tier temporary materialization, without maintaining an external adapter plugin registry or exposing an `adapt(...)` extension hook).
 - **Faithful parsing, status projection, and reverse unit conversion**:
   - Consumes solely `ExecutionReceipt`, `primal_solution.json` ordered strictly by **0-based input model columns**, and `generator`'s `variable_map`; supervisory timeouts, cancellations, OOM, or process crashes preserve their `execution_status` without promoting residual output files to success;
-  - For `solved` and `feasible` outcomes, faithfully restores planning construction unit states/scales, device/system step series, and modeling provenance (`outputs.model_sources`) by 0-based column index, restoring objective offsets and executing the sole reverse physical unit conversion into the same canonical engineering solution schema emitted by `algorithm`—**never re-solving or certifying third-party `solver` plugins**.
+  - For `solved` and `feasible` outcomes, faithfully restores planning construction unit states/scales, device/system step series, and modeling provenance (`outputs.model_sources`) by 0-based column index, restoring objective offsets and executing the sole reverse physical unit conversion into the same canonical engineering solution schema emitted by `algorithm`—**never re-solving or certifying unmodified models or third-party `solver` plugins**.
 
 ### Solve Termination and Optimality Summary
 

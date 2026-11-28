@@ -46,7 +46,7 @@ Planning Engineer / Administrator
   Application Layer ──→ PostgreSQL (authoritative transactional facts)
         │       └─────→ Object Storage (immutable large objects)
         ├──→ Domain Modules
-        └──→ Tasks & Frozen Snapshots ──→ Worker Daemon
+        └──→ Tasks & Frozen Snapshots ──→ Embedded Scheduler (backend control plane)
                                               └──→ application.worker Stage Commands
                                                         ├──→ GeneratorProvider ──→ Solver Bundle
                                                         ├──→ SolverRuntime ──→ ResultAdapter
@@ -57,7 +57,7 @@ Planning Engineer / Administrator
 - **API Adapter Layer**: Handles routing, authentication, DTO validation, and use-case invocation.
 - **Application Layer**: Coordinates cross-module business actions and owns database transaction boundaries.
 - **Domain Modules**: Each owns independent business rules, internal persistence, and public facades.
-- **Worker Daemon**: Consumes immutable calculation snapshots and advances long-running background tasks via short-transaction stage commands in `application.worker`.
+- **Embedded Scheduler**: Consumes immutable calculation snapshots and advances long-running background tasks via short-transaction stage commands in `application.worker` and the `job_runner` container proxy.
 
 ## End-to-End Business Flow
 
@@ -81,7 +81,7 @@ Independent Calculation Config ────────────────�
 
 ## Three Core Business Chains
 
-1. **Editing Chain (Draft Evolution)**: `Forms / Canvas → Frontend mapper → HTTP DTO → application use case → Domain validation → New draft revision`. Write operations carry `expected_revision` for optimistic concurrency conflict detection.
+1. **Editing Chain (Draft Evolution)**: `Forms / Canvas → Frontend mapper → HTTP DTO → application use case → Domain validation → New draft revision` (single-owner last-write-wins).
 2. **Computation Chain (Snapshot Freezing and Solving)**: `Submit command → Authorization & assembly → Seal CalcSnapshot → Create Task → Worker claims Attempt → Series materialization → Generate Bundle → Isolated solve → Result adaptation (iterative when coupled predictions apply) → Financial evaluation → Commit Evidence`. Once created, tasks read only frozen snapshots and remain isolated from subsequent draft edits.
 3. **Traceability Chain (Historical Interpretation)**: `Result View → Evidence → Attempt → Task → CalcSnapshot → Project/Data/Config/Provider Versions & Object Refs`. All display, assessment, scheme application, and exports read frozen facts along this chain.
 
@@ -97,17 +97,17 @@ Independent Calculation Config ────────────────�
 | [solver runtime](modules/solver-runtime.md) | Controlled process/container execution, resource isolation, cancellation, and `ExecutionReceipt` | Device semantics, problem formulation, result interpretation |
 | [computation](modules/engines.md) | Computation stage public contracts, prediction orchestration, result adaptation, and `ComputeResult` | HTTP sessions, ORM, draft management |
 | [finance](modules/finance.md) | Finance triplet merging, planning financial relations, and project-investment cash-flow evaluation | Solver scheduling, UI state |
-| [analysis](modules/analysis.md) | Sensitivity sweeps, batch comparison, and four-dimensional system assessment | Task leases, HTTP transport |
-| [storage](modules/storage.md) | Immutable object I/O, owner reference lifecycle, and orphan cleanup/reconciliation | Understanding project version or dataset business semantics |
+| [analysis](modules/analysis.md) | Sensitivity sweeps, batch comparison, and four-dimensional system assessment | HTTP transport, stage orchestration |
+| [storage](modules/storage.md) | Immutable object I/O, owner reference lifecycle, and orphan cleanup | Understanding project version or dataset business semantics |
 | [application](modules/application.md) | Authorization checks, database transactions, and cross-module use-case orchestration | Penetrating private domain implementations |
 | [api](modules/api.md) | HTTP routing, authentication context, DTO serialization, and error mapping | ORM queries, domain rule calculations |
-| [worker](modules/worker.md) | Queue claiming, lease renewal, subprocess execution isolation, and stage checkpoint recovery | Interpreting assembly semantics, assembling shell strings |
+| [worker](modules/worker.md) | Queue claiming, ephemeral container orchestration, and stage checkpoint recovery | Interpreting assembly semantics, assembling shell strings |
 
 Dependency direction is strictly unidirectional:
 
 ```text
 External Requests → api → application use cases → Domain Public Facades
-Task Scheduling   → worker daemon → application.worker stage commands → Domain / Computation Public Facades
+Task Scheduling   → worker scheduler → application.worker stage commands → Domain / Computation Public Facades
 api / worker / application / Domain Modules → core
 ```
 

@@ -54,20 +54,19 @@ Bundle 内输入与输出文件统一采用可重复按块读取的只读内容�
 
 ## 容器执行隔离与职责边界
 
-- **断网容器与无 Shell 约束**：`solver` 容器经 `job_runner` 以 `--network=none --read-only --cap-drop=ALL` 非 root 身份拉起，禁止 Shell 字符串拼接、`..` 路径逃逸与任意命令注入。
-- **执行回执（`ExecutionReceipt`）与 0-based 列序契约**：无论成功或失败均记录尝试、求解插件版本、起止时间、退出码或信号及 cgroup 资源指标；进程退出码为 `0` 仅代表容器正常退出，求解器输出的 `primal_solution.json` 列值数组必须严格按 `input/problem.mps` 的 **0-based 原始列顺序**排列。
-- **内置 HiGHS 结构加速与通用还原边界区分**：内置 `ies.generator.highs_milp@1.0.0` 默认开启 `on_demand_mutex` 结构加速（可通过 [CalculationConfig](calculation-config.md) `options.generator.acceleration.mode = "off"` 显式关闭）；**松弛互斥后的原模型约束容差核查仅属于官方内置 `ies.solver.highs`（`ies-highs-solver`）自身的内部求解质量控制**（详见[计算生成与求解](../modules/engines.md#求解器内建结构加速)）。`backend` 受限子进程中的通用 `ResultAdapter` 只负责按 `variable_map`（`input/parameters.json` + `input/parameters.jsonl`）忠实还原业务单位标准工程解，**不对第三方 `solver` 执行重新验算**。
+- **断网容器与无 Shell 约束**：`solver` 容器经 `job_runner` 以 `--network=none`、只读挂载 `/work/in` 与独立 CPU/内存限额拉起，禁止 Shell 字符串拼接、`..` 路径逃逸与任意命令注入。
+- **执行回执（`ExecutionReceipt`）与 0-based 列序契约**：无论成功或失败均记录尝试、求解插件版本、起止时间、退出码或信号及容器限额/OOM 状态；进程退出码为 `0` 仅代表容器正常退出，求解器输出的 `primal_solution.json` 列值数组必须严格按 `input/problem.mps` 的 **0-based 原始列顺序**排列。
+- **内置 HiGHS 结构加速与通用还原边界区分**：内置 `ies.generator.highs_milp@1.0.0` 默认开启 `on_demand_mutex` 结构加速（可通过 [CalculationConfig](calculation-config.md) `options.generator.acceleration.mode = "off"` 显式关闭）；**松弛互斥后的原模型约束容差核查仅属于官方内置 `ies.solver.highs`（`ies-highs-solver`）`on_demand_mutex` 内部质量控制**（不对未改写原模型或第三方求解器重验算，详见[计算生成与求解](../modules/engines.md#求解器内建结构加速)）。`backend` 极简子进程中的通用 `ResultAdapter` 只负责按 `variable_map`（`input/parameters.json` + `input/parameters.jsonl`）忠实还原业务单位标准工程解，**不对第三方 `solver` 执行重新验算**。
 
 ## 通用变量映射与参数记录
 
-`generator` 与 `backend` 受限子进程还原层通过元数据头 `input/parameters.json`（声明 `schema: ies.variable-map`、`schema_version: "1.0.0"`，保存汇编标识、目标线性换算 `objective_scale` 与 `objective_offset` 及单位、列数、请求输出、精度、种子及记录文件相对路径；统一按 `business_value = scale * raw_value + offset` 执行显式线性单位换算，`scale` 为非零有限数）和有序 NDJSON 记录文件 `input/parameters.jsonl` 传递 0-based 求解列位置与变量/来源声明（`1.1.5` 内置链路仍维持原有内置映射形态直至统一切换）。
+`generator` 与 `backend` 极简子进程还原层通过元数据头 `input/parameters.json`（声明 `schema: ies.variable-map`、`schema_version: "1.0.0"`，保存汇编标识、目标线性换算 `objective_scale` 与 `objective_offset` 及单位、列数、请求输出、精度、种子及记录文件相对路径；统一按 `business_value = scale * raw_value + offset` 执行显式线性单位换算，`scale` 为非零有限数）和有序 NDJSON 记录文件 `input/parameters.jsonl` 传递 0-based 求解列位置与变量/来源声明。
 
 `input/parameters.jsonl` 按以下顺序写出 JSON 数组记录（所有位置与表达式 ID 从 `0` 起按内部槽位索引，同类记录不可交换顺序）：
 
 | 记录标签与元素 | 含义 |
 |---|---|
 | `column_names, [name, ...]` / `row_names, [name, ...]` | 按实际求解列/行顺序分批记录名称表 |
-| `epigraph, peak_position` / `epigraph_flows, [col, ...]` / `epigraph_end` | 仅在启用连续需量上包络时输出，记录月峰与同月流量求解列位置供紧度校验 |
 | `expression, id, constant` / `terms, [[col, coeff], ...]` / `expression_end` | 冻结仿射表达式（适配器按项原顺序求值，一份结果供多处复用） |
 | `units, [[col, unit, scale, offset], ...]` | 可发布变量的求解列位置、业务单位及显式线性换算系数（`business_value = scale * primal + offset`） |
 | `component, identity, unit, caliber, expression_id` | 财务分量与共享表达式关联 |

@@ -17,12 +17,12 @@ HTTP Request
   ↓ Auth dependency → construct ActorContext (raw credentials never enter business layers)
   ↓ Build command & invoke single application use case
 ApplicationResult / AppError
-  ↓ Serialize semantic top-level wrapper (WRAPPER_KEYS) or standard error envelope
+  ↓ Serialize semantic top-level wrapper (OpenAPI / response_model) or standard error envelope
 HTTP Response (200 / 201 / 202 / 204 / 4xx / 500)
 ```
 
 ## Development and Verification Standards
 
-- **Unified wrappers and status codes**: Successful JSON responses MUST use semantic top-level keys registered in `WRAPPER_KEYS` (`{items, total}` or `{items, next_cursor}` for lists), prohibiting generic `{data, meta}` wrappers; `400` handles domain rule violations, `422` handles structural/schema rejections, and `409` handles optimistic locking or state conflicts (full details in [HTTP Semantics](../contracts.md#http-semantics)).
+- **Unified wrappers and status codes**: Successful JSON responses use semantic top-level keys (`{items, total}` or `{items, next_cursor}` for lists), prohibiting generic `{data, meta}` wrappers, enforced via FastAPI `response_model` schemas and endpoint contract tests; `400` handles domain rule violations, `422` handles structural/schema rejections, and `409` handles business state conflicts such as duplicate names or duplicate artifact versions (full details in [HTTP Semantics](../contracts.md#http-semantics)).
 - **Field and precision safety**: Uniform `snake_case`, opaque string IDs, decimal fixed-point strings for exact currency amounts, and strict suppression of internal paths, stack traces, and SQL details.
-- **OpenAPI as sole field source**: When adding or modifying endpoints, align the application use case and response wrapper registry first, let the running app emit OpenAPI automatically, and add tests covering permissions, status codes, error envelopes, and critical value round-trips.
+- **OpenAPI as sole field source**: When adding or modifying endpoints, align the application use case and Pydantic `response_model` first, let the running app emit OpenAPI automatically, and add tests covering permissions, status codes, error envelopes, and critical value round-trips.

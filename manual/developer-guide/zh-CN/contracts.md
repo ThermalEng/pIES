@@ -23,7 +23,7 @@
 - 列表与分页：`{items, total}` 或 `{items, next_cursor}`；
 - 动作响应：`{ok, ...}`；无正文操作返回 HTTP `204 No Content`。
 
-所有 JSON 端点的允许顶层键集在 API 层集中登记并受协议基线测试约束。
+所有 JSON 端点的语义化顶层结构由 API `response_model` 与端点契约测试保障。
 
 ### 标准错误信封
 
@@ -51,7 +51,7 @@
 ## HTTP 语义
 
 - `GET` 只读且幂等；`POST` 用于创建资源或执行命令；`PUT` 完整替换；`PATCH` 显式部分更新；`DELETE` 执行生命周期删除。
-- 异步受理返回 `202`；可重试写操作携带幂等键；并发编辑通过 `expected_revision` 实现乐观锁，冲突时返回 `409`。
+- 异步受理返回 `202`；任务提交可选携带幂等键（显式提供时按幂等键去重）；单主编辑与配置修改按最后写入生效，无需客户端携带 `expected_revision` 乐观锁。
 - 上传端点必须声明媒体类型与大小上限；导出接口返回 `object_id` 与文件名，下载通过 `GET /api/projects/{id}/exports/{kind}/{object_id}/download` 校验当前会话与项目权限后返回受控字节流，客户端不拼接对象存储路径。
 
 | 状态码 | 触发条件 | 典型错误码前缀 |
@@ -61,7 +61,7 @@
 | `401` | 未认证或会话已失效 | `AUTH-*-001` |
 | `403` | 已认证但无权限 | `PERM-DENIED-*` |
 | `404` | 资源或路由不存在 | `RES-MISS-*`、`API-NF-*` |
-| `409` | 状态冲突（乐观锁修订不匹配、重复操作或确认缺失） | `*-CONFLICT-*`、`ADMIN-CONFIRM-*` |
+| `409` | 状态冲突（重复操作、重名或确认缺失） | `*-CONFLICT-*`、`ADMIN-CONFIRM-*` |
 | `413` | 上传文件过大 | 文件大小错误码 |
 | `422` | 请求体结构/Schema 不可处理（类型错误、必填缺失、参数越界） | `API-REQ-001`、`CONFIG-VAL-*` |
 | `500` | 未捕获内部异常 | `API-500-001` |
@@ -103,7 +103,7 @@
 | `maintenance_expenses` | 年度维护/换新清单 `[{year, currency, amount, terms?}]`；`year` 为评价年（`construction_period+1..evaluation_years`），支持空列表 `[]` |
 | `comparison` | 可选评价比较输入，省略等价于 `{mode: "absolute"}` |
 
-服务端提交时记录 `confirmed_by` 与 `confirmed_at`，并在提交边界一次性核对财务规则与生成器能力声明。应用方案（`POST /api/projects/{id}/apply-result`）基于任务快照对应的来源版本工作状态派生新版本，携带打开确认弹窗时捕获的 `expected_revision` 检查并发冲突。
+服务端提交时记录 `confirmed_by` 与 `confirmed_at`，并在提交边界一次性核对财务规则与生成器能力声明。应用方案（`POST /api/projects/{id}/apply-result`）基于任务快照对应的来源版本工作状态派生新版本。
 
 任务结果查询（`GET /projects/{id}/tasks/{task_id}/result`）直接投影同一冻结证据：
 

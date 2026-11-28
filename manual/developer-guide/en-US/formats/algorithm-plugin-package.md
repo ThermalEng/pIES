@@ -7,15 +7,15 @@ The Algorithm Plugin Package defines the unified packaging and runtime contract 
 ## Five Plugin Kinds (`kind`) and Framework Unidirectional Handoff Protocol
 
 The pipeline topology is fixed to:
-`Frozen Input → [predictions[]: grouped per predictor plugin in parallel] → (generator → solver → backend bounded-subprocess engineering restoration | algorithm) → [evaluators[]: 0..N evaluators in parallel] → Sealed Result`.
+`Frozen Input → [predictions[]: grouped per predictor plugin in parallel] → (generator → solver → backend minimal-subprocess engineering restoration | algorithm) → [evaluators[]: 0..N evaluators in parallel] → Sealed Result`.
 
-**Single-in/single-out containers & framework zero-copy handoffs**: Ephemeral containers run solely single-input (`/work/in`), single-output (`/work/out`) pluggable computation stages and **never relay unrelated upstream files**; cross-stage read-only immutable context (frozen assembly, materialized series/prices, finance/evaluation confirmations) is staged into `/work/in` via zero-copy hardlinks (`os.link`) by the `backend` orchestrator, while cross-step primal-to-engineering restoration executes inside an isolated resource-bounded `backend` child subprocess (`spawn` streaming file I/O, immediately reclaiming memory upon exit):
+**Single-in/single-out containers & framework zero-copy handoffs**: Ephemeral containers run solely single-input (`/work/in`), single-output (`/work/out`) pluggable computation stages and **never relay unrelated upstream files**; cross-stage read-only immutable context (frozen assembly, materialized series/prices, finance/evaluation confirmations) is staged into `/work/in` via zero-copy hardlinks (`os.link`) by the `backend` orchestrator, while cross-step primal-to-engineering restoration executes inside a minimal `backend` child subprocess (`spawn` streaming file I/O, immediately reclaiming memory upon exit):
 
 | `kind` | `/work/in` Framework-Staged Read-Only Input | `/work/out` Plugin's Sole Output | Composition & Contract IDs (`consumes` / `produces`) |
 |---|---|---|---|
 | `predictor` | All correlated `targets[]` routed to this plugin, historical series, and per-target `parameters` | `/work/out/prediction.json` and training artifacts | Grouped by selected plugin within the logical prediction stage; targets sharing a plugin run jointly in one pass (preserving shared latent correlations), and the framework merges all predicted series |
 | `generator` | Frozen assembly, full materialized series, frozen finance/evaluation context, and `options.generator` | Solver model files (e.g., `problem.mps`) and universal public `variable_map` (declaring 0-based column indices, target variable identities, and linear unit conversions) | Emits a public bundle contract (e.g., `ies.solver-bundle.mps@1.0.0`) and performs the sole forward conversion from business units to solver internal units |
-| `solver` | Solver model files from `generator` and `options.solver` (no finance or assembly files needed) | Solver-neutral canonical primal solution (`primal_solution.json`: unified status enum, objective value, column values strictly in **0-based input model column order**, receipt metadata)—**emitting internally permuted column orders or copying `variable_map`/finance files is prohibited** | Consumes matching `generator` contract and emits `ies.primal-solution@1.0.0`; upon exit, `backend`'s bounded subprocess faithfully restores the canonical engineering solution via `variable_map` (never re-solving third-party solvers), working universally across any compatible `generator × solver` pair |
+| `solver` | Solver model files from `generator` and `options.solver` (no finance or assembly files needed) | Solver-neutral canonical primal solution (`primal_solution.json`: unified status enum, objective value, column values strictly in **0-based input model column order**, receipt metadata)—**emitting internally permuted column orders or copying `variable_map`/finance files is prohibited** | Consumes matching `generator` contract and emits `ies.primal-solution@1.0.0`; upon exit, `backend`'s minimal subprocess faithfully restores the canonical engineering solution via `variable_map` (never re-solving third-party solvers), working universally across any compatible `generator × solver` pair |
 | `algorithm` | Frozen assembly, full materialized series/prices, frozen finance/evaluation context, and `options.algorithm` | Business-unit canonical engineering solution (`solution.json`: `ies.engineering-solution@1.0.0`) | Strictly replaces `generator + solver`; emits the **exact same canonical engineering solution schema** produced after staged restoration (`evaluators: []` is valid in both modes) |
 | `evaluator` | Feasible canonical engineering solution (`ies.engineering-solution@1.0.0`) + framework-hardlinked read-only frozen context (`ValidatedAssemblyArtifact`, materialized `prices`, `EffectiveFinanceConfig`, `EvaluationInput`) + this evaluator's `parameters` | Official financial evaluator emits canonical `ies.financial-evaluation@1.0.0`; third-party evaluators emit self-describing `evaluation_report.json` (`metrics` / `charts` / `tables`) | Supports `0..N` evaluators running independently in parallel with per-evaluator checkpoints; an individual evaluator failure preserves the sealed engineering solution and successful evaluation blocks, supporting isolated single-evaluator retry |
 
@@ -29,7 +29,7 @@ The pipeline topology is fixed to:
 
 ## ZIP Directory Layout and Dual-Form Self-Test Fixtures
 
-The archive root MUST NOT contain an extra wrapper directory and accepts regular files and directories only (symlinks, hardlinks, absolute paths, `..` traversal, case collisions, encrypted entries, and bundled `Dockerfile`s are prohibited). Public market submissions require `README.md`, `LICENSE`, and at least one network-free `tests` fixture, supporting both **single-file JSON shorthand** and **full `/work/in → /work/out` directory fixtures**:
+The archive root MUST NOT contain an extra wrapper directory and accepts regular files and directories only (absolute paths, `..` traversal, and bundled `Dockerfile`s are prohibited). Public market submissions require `README.md`, `LICENSE`, and at least one network-free `tests` fixture, supporting both **single-file JSON shorthand** and **full `/work/in → /work/out` directory fixtures**:
 
 ```text
 plugin.yaml
@@ -52,7 +52,7 @@ README.md
 
 ## `plugin.yaml` Manifest
 
-The Manifest uses the YAML 1.2 safe subset, declaring consumed and produced public data contract IDs via `consumes` and `produces`:
+The Manifest uses standard YAML, declaring consumed and produced public data contract IDs via `consumes` and `produces`:
 
 ```yaml
 schema: ies.algorithm-plugin
@@ -112,7 +112,7 @@ extensions: {}
 | `consumes` / `produces` | Public input/output data contract IDs used by the submission gate to verify stage composition compatibility |
 | `runtime` | Python version and optional relative `requirements` path; omitting `requirements` reuses `pies-plugin-base` with `--network=none` |
 | `entrypoint` | Fixed `<module.path>:<public_function>` format |
-| `parameters_schema` | Inline Draft 2020-12 JSON Schema (`additionalProperties: false`) governing this plugin's dedicated parameter slot (`predictions[].parameters`, `options.<kind>`, or `evaluators[].parameters`) |
+| `parameters_schema` | Inline Draft 2020-12 JSON Schema governing this plugin's dedicated parameter slot (`predictions[].parameters`, `options.<kind>`, or `evaluators[].parameters`) |
 | `resources` | Default and maximum resource requests, capped by deployment policy ceilings |
 | `advanced` | **Optional advanced section**: streaming bundle flags, trusted solver binary argument templates, and **optional** `companions` restrictions |
 | `iteration` | **Optional internal-loop interface**: single-container iterative progress reporting (appending NDJSON to `/work/out/iterations.jsonl`) |
@@ -123,7 +123,7 @@ extensions: {}
 - **Install-time build trust boundary & single-index rule**:
   - Dependency-free plugins MUST build with `--network=none` directly atop `pies-plugin-base`; plugins with `requirements` build inside `job_runner`'s controlled in-memory context (zero host business mounts, zero business credentials, bounded build timeout); `pip_index_url` uses default public PyPI when unset and **passes solely `--index-url <pip_index_url>` when set** (never appending `--extra-index-url`, preventing `pip` multi-index non-determinism and enterprise dependency confusion while leaving upstream PyPI caching/fallback to the mirror service itself); dependency installation failures mark `build_failed` and surface an explicit admin-contact warning;
   - Immediately after build, any declared `tests` MUST pass inside a `--network=none` container before advancing status to `ready`. `pies-sdk validate` and `pies-sdk pack` uniformly support all five plugin kinds.
-- **Runtime isolation, shared-truth financial evaluation & race-free stateless uninstall**:
-  - Every stage runs as a non-root `--network=none --read-only --cap-drop=ALL` ephemeral container; the official financial evaluator reuses shared `finance` domain rules for full forward evaluation on canonical engineering solutions (maintaining exact mathematical parity with the built-in generator's objective), while **the platform and self-test gate verify public contract compliance only—never re-checking physical optimality or endorsing third-party calculation correctness**;
-  - External digests obey the three-way boundary rule with zero internal SHA-256 storage afterward;
-  - Plugin disable/uninstall and new task submissions share transactional row-level locking to prevent concurrent TOCTOU races, invoking `delete_plugin_image` only when zero non-terminal tasks reference that exact version.
+- **Runtime isolation, shared-truth financial evaluation & direct uninstall**:
+  - Every stage runs as a `--network=none` ephemeral container with read-only `/work/in` and explicit CPU/memory caps; the official financial evaluator reuses shared `finance` domain rules for full forward evaluation on canonical engineering solutions (maintaining exact mathematical parity with the built-in generator's objective), while **the platform and self-test gate verify public contract structure only—never re-checking physical optimality or endorsing third-party calculation correctness**;
+  - Only public market remote downloads verify the `sha256` declared in `index.json` once on ingest, with zero internal SHA-256 storage afterward;
+  - Disabling or uninstalling a plugin marks it `disabled` directly and invokes `delete_plugin_image` on a best-effort basis (cleanup failures log warnings without maintaining background retry state machines or blocking uninstalls).

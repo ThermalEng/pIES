@@ -11,7 +11,7 @@
 ```text
 ValidatedAssemblyArtifact + CalculationConfig
   ↓ 序列物化（constant / data_repeat / data_full + predictions[] 同层按插件分组联合预测）
-  ├─ 分步模式：GeneratorProvider ──→ SolverRuntime ──→ backend 独立受限子进程按 variable_map 还原标准工程解
+  ├─ 分步模式：GeneratorProvider ──→ SolverRuntime ──→ backend 极简子进程按 variable_map 还原标准工程解
   └─ 一体化模式：Algorithm 容器 ─────────────────────→ 直接产出标准工程解
                                                               ↓
         最终封存结果 ←── evaluators[]（仅在有可行解时运行；局部评价失败保留工程解并支持单点重试）
@@ -22,7 +22,7 @@ ValidatedAssemblyArtifact + CalculationConfig
 | 序列物化与前置预测 | 将静态来源与按插件同层分组执行的单趟预测结果合并为全周期对齐 `MaterializedSet` | 修改装配或跨容器往返循环 |
 | [生成器](generators.md) | 数学降级、正向单位换算并产出求解模型文件与 `variable_map` | 访问数据库、直接联网 |
 | [求解运行时](solver-runtime.md) | 经容器代理在隔离临时容器内执行求解并产出 0-based 原列序标准原变量解与 `ExecutionReceipt` | 解释设备语义、单位换算或搬运业务文件 |
-| 受限子进程还原与并联评价 | `backend` 在独立受限子进程内流式结合 `variable_map` 忠实还原标准工程解；`0..N` 个 `evaluator` 并联运行并支持单评价器失败重试 | 重跑主求解、读取当前草稿或替第三方求解器重验算 |
+| 极简子进程还原与并联评价 | `backend` 在极简 `spawn` 子进程内流式结合 `variable_map` 忠实还原标准工程解；`0..N` 个 `evaluator` 并联运行并支持单评价器失败重试 | 重跑主求解、读取当前草稿或替未改写模型/第三方求解器重验算 |
 
 ## 同层分组预测与单容器内部循环接口
 
@@ -31,25 +31,25 @@ ValidatedAssemblyArtifact + CalculationConfig
 
 ## 求解器内建结构加速（官方内置 HiGHS 质量控制）
 
-面向大规模长周期规划算例，结构加速作为官方内置求解器（`ies.solver.highs`）的内建能力提供，通过冻结的 [CalculationConfig](../formats/calculation-config.md) `options.generator` 控制开关与参数，不改变[计算生成](generators.md) → [求解运行时](solver-runtime.md) → `backend` 受限子进程还原的职责隔离；第三方求解路线直接遵循 `ies.algorithm-plugin`（`generator` / `solver` / `algorithm`）公开容器契约接入。
+面向大规模长周期规划算例，结构加速作为官方内置求解器（`ies.solver.highs`）的内建能力提供，通过冻结的 [CalculationConfig](../formats/calculation-config.md) `options.generator` 控制开关与参数，不改变[计算生成](generators.md) → [求解运行时](solver-runtime.md) → `backend` 极简子进程还原的职责隔离；第三方求解路线直接遵循 `ies.algorithm-plugin`（`generator` / `solver` / `algorithm`）公开容器契约接入。
 
 - **配置与隔离契约**：加速开关与策略随 `CalcSnapshot` 冻结并受 `parameters_schema` 约束；内置 `ies.generator.highs_milp@1.0.0` 默认开启无损结构加速（`acceleration.mode: "on_demand_mutex"`），显式设 `"off"` 时严格直通原始模型求解。
-- **合法结构松弛与原模型权威性**：[生成器](generators.md#求解加速结构元数据导出)仅随模型导出经编译期证明可安全松弛的独立辅助结构元数据，不越界启动求解；内置 `ies-highs-solver` 可在迭代过程中暂时省略已证明约束，并在**求解器自身内部**执行原模型全量约束容差核查与连续需量上包络紧度核查（发现月峰值虚高未压紧时由求解器/内置校验按终止情形标记为 `not_solved` 或 `numeric_failure`）。
-- **时限、保解与状态诚实性**：全阶段严格遵守总时间预算不超限续发，并在截止前保全已通过原模型核查的最佳合法可行解；内置求解器仅在无损原域或合法松弛达容差最优且通过原模型全部约束核查时输出 `solved`，凡时限提前停止或搜索域受限统一输出 `feasible` 且未经认证的原域全局 `best_bound` 与 `relative_gap` 置 `null`。
+- **合法结构松弛与原模型权威性**：[生成器](generators.md#求解加速结构元数据导出)仅随模型导出经编译期证明可安全松弛的独立辅助结构元数据，不越界启动求解；内置 `ies-highs-solver` 仅在开启 `on_demand_mutex` 并实际松弛互斥对的迭代过程中，在**求解器自身内部**核查被松弛互斥对与原模型容差（`off` 未改写路径与第三方求解器不做纯 Python LP 复验）；连续需量上包络紧度由生成器自身建模证明保障，不再在求解器侧重验。
+- **时限、保解与状态诚实性**：全阶段严格遵守总时间预算不超限续发，并在截止前保全已通过核查的最佳合法可行解；内置求解器仅在无损原域或合法松弛达容差最优且通过核查时输出 `solved`，凡时限提前停止或搜索域受限统一输出 `feasible` 且未经认证的原域全局 `best_bound` 与 `relative_gap` 置 `null`。
 
-## 统一结果模型与受限子进程还原层契约
+## 统一结果模型与极简子进程还原层契约
 
 `ComputeResult` 通过两个正交字段表达计算结局，避免进程状态与数学状态混为一谈：
 
-- **`execution_status`**：严格对应执行回执事实，取值为 `completed`、`rejected`（策略/输入拒收）、`failed`（非 OOM 进程错误）、`timed_out`、`cancelled`、`fenced`（租约撤销）、`resource_exhausted`（OOM/内存耗尽）与 `protocol_failed`（输出协议损坏或缺失）。
+- **`execution_status`**：严格对应执行回执事实，取值为 `completed`、`rejected`（策略/输入拒收）、`failed`（非 OOM 进程错误）、`timed_out`、`cancelled`、`resource_exhausted`（OOM/内存耗尽）与 `protocol_failed`（输出协议损坏或缺失）。
 - **`math_status`**：反映求解器数学结局，取值为 `solved`（容差内已证明最优）、`feasible`（存在可行解但未证明最优，如达到时限）、`infeasible`、`unbounded`、`numeric_failure` 与 `not_solved`。
 
-### `backend` 受限子进程还原层职责（`ResultAdapter`）
+### `backend` 极简子进程还原层职责（`ResultAdapter`）
 
-- **平台内置基础能力（无插件扩展注册表）**：`ResultAdapter` 是 `backend` 跨步骤协调的可信基础还原组件（在独立受限 `spawn` 子进程中流式运行，不设立外部适配器插件注册表，也不暴露 `adapt(...)` 扩展接口）。
+- **平台内置基础能力（无插件扩展注册表）**：`ResultAdapter` 是 `backend` 跨步骤协调的可信基础还原组件（针对大工程解使用极简 `spawn` 子进程流式还原并在退出时释放内存，无需 `RLIMIT_AS` 探针或多级临时目录物化；不设立外部适配器插件注册表，也不暴露 `adapt(...)` 扩展接口）。
 - **忠实解析、状态投影与反向单位换算**：
   - 仅消费 `ExecutionReceipt`、按输入模型 **0-based 原始列顺序**排列的 `primal_solution.json` 与 `generator` 产出的 `variable_map`；监督强制超时、取消、OOM 或进程错误保持对应 `execution_status`，绝不读取残留输出升级为成功；
-  - 对 `solved` 与 `feasible` 状态，按 0-based 列位置忠实恢复规划建设单元状态与规模、设备/系统步序列及构模来源映射（`outputs.model_sources`），执行目标偏移还原与唯一反向物理单位换算，生成与 `algorithm` 完全同构的标准工程解；**不对第三方 `solver` 执行原模型重新验算**。
+  - 对 `solved` 与 `feasible` 状态，按 0-based 列位置忠实恢复规划建设单元状态与规模、设备/系统步序列及构模来源映射（`outputs.model_sources`），执行目标偏移还原与唯一反向物理单位换算，生成与 `algorithm` 完全同构的标准工程解；**不对未改写模型或第三方 `solver` 执行原模型重新验算**。
 
 ### 求解终止与最优性摘要
 

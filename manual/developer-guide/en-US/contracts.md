@@ -23,7 +23,7 @@ Successful resource responses wrap top-level JSON objects using **named top-leve
 - Lists and pagination: `{items, total}` or `{items, next_cursor}`;
 - Action responses: `{ok, ...}`; bodyless mutations return HTTP `204 No Content`.
 
-Allowed top-level key sets for all JSON endpoints are centrally registered in the API layer and enforced by protocol baseline tests.
+Semantic top-level JSON envelopes across endpoints are governed by FastAPI `response_model` definitions and endpoint contract tests.
 
 ### Standard Error Envelope
 
@@ -51,7 +51,7 @@ All error responses share one uniform structure:
 ## HTTP Semantics
 
 - `GET` is read-only and idempotent; `POST` creates resources or executes commands; `PUT` replaces completely; `PATCH` performs explicit partial updates; `DELETE` performs lifecycle deletion.
-- Asynchronous acceptance returns `202`; retryable writes carry an idempotency key; concurrent edits use `expected_revision` optimistic locking returning `409` on conflict.
+- Asynchronous acceptance returns `202`; task submissions MAY optionally carry an idempotency key (deduplicating when explicitly provided); single-owner edits and config updates follow last-write-wins without requiring client `expected_revision` optimistic locks.
 - Upload endpoints MUST declare allowed media types and size limits; export endpoints return `object_id` and filename, and downloads authenticate the active session and project permissions via `GET /api/projects/{id}/exports/{kind}/{object_id}/download` to stream controlled bytes—clients never assemble object storage paths.
 
 | Status Code | Trigger Condition | Typical Error Code Prefix |
@@ -61,7 +61,7 @@ All error responses share one uniform structure:
 | `401` | Unauthenticated or session expired/invalid | `AUTH-*-001` |
 | `403` | Authenticated but unauthorized | `PERM-DENIED-*` |
 | `404` | Resource or route does not exist | `RES-MISS-*`, `API-NF-*` |
-| `409` | State conflict (optimistic lock mismatch, duplicate operation, missing confirmation) | `*-CONFLICT-*`, `ADMIN-CONFIRM-*` |
+| `409` | State conflict (duplicate operation, name/version collision, missing confirmation) | `*-CONFLICT-*`, `ADMIN-CONFIRM-*` |
 | `413` | Uploaded file exceeds limit | File-size error code |
 | `422` | Unprocessable structure/schema (type error, missing required field, range violation) | `API-REQ-001`, `CONFIG-VAL-*` |
 | `500` | Unhandled internal exception | `API-500-001` |
@@ -103,7 +103,7 @@ At computation task submission, `CalcSnapshot@1.0.0` freezes the following indep
 | `maintenance_expenses` | Annual maintenance/renewal list `[{year, currency, amount, terms?}]`; `year` is evaluation year (`construction_period+1..evaluation_years`); empty list `[]` allowed |
 | `comparison` | Optional evaluation comparison input; omitting is equivalent to `{mode: "absolute"}` |
 
-The server records `confirmed_by` and `confirmed_at` upon submission and validates financial rules and generator capability declarations once at the submission boundary. Apply scheme (`POST /api/projects/{id}/apply-result`) derives a new project version on top of the snapshot's source version working state, carrying `expected_revision` captured when opening the confirmation dialog to detect concurrent conflicts.
+The server records `confirmed_by` and `confirmed_at` upon submission and validates financial rules and generator capability declarations once at the submission boundary. Apply scheme (`POST /api/projects/{id}/apply-result`) derives a new project version on top of the snapshot's source version working state.
 
 Task result queries (`GET /projects/{id}/tasks/{task_id}/result`) project the same sealed evidence directly:
 
