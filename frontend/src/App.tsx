@@ -68,6 +68,7 @@ const HelpPage = lazyPage('HelpPage')
 const SettingsPage = lazyPage('SettingsPage')
 const AdminUsersPage = lazyPage('AdminUsersPage')
 const AdminAuditPage = lazyPage('AdminAuditPage')
+const AdminEcosystemPage = lazyPage('AdminEcosystemPage')
 const CustomizationPage = lazyPage('CustomizationPage')
 
 /** 整页加载指示(路由切换 Suspense 兜底)。 */
@@ -187,6 +188,11 @@ function AppShell() {
               {t('ies.nav.audit')}
             </NavLink>
           ) : null}
+          {isAdmin === true ? (
+            <NavLink to="/admin/ecosystem" className="ies-topbar__link">
+              {t('ies.nav.admin_ecosystem')}
+            </NavLink>
+          ) : null}
           <NavLink to="/settings" className="ies-topbar__link">
             {t('ies.nav.settings')}
           </NavLink>
@@ -261,6 +267,22 @@ export default function App() {
             element={
               <RequireAdmin>
                 <AdminUsersPage />
+              </RequireAdmin>
+            }
+          />
+          <Route
+            path="/admin"
+            element={
+              <RequireAdmin>
+                <Navigate to="/admin/ecosystem" replace />
+              </RequireAdmin>
+            }
+          />
+          <Route
+            path="/admin/ecosystem"
+            element={
+              <RequireAdmin>
+                <AdminEcosystemPage />
               </RequireAdmin>
             }
           />

@@ -25,6 +25,27 @@ export interface DeploymentDefaultsDto {
   calculation_defaults: { time_limit_seconds: number }
 }
 
+/** 阶段插件目录条目(GET /api/ecosystem/stage-catalog)。 */
+export interface StageCatalogEntryDto {
+  ref: string
+  stable_id: string
+  version: string
+  description: string
+  consumes: string[]
+  produces: string[]
+  parameters_schema: Record<string, unknown> | null
+  source: 'builtin' | 'ecosystem'
+}
+
+/** 动态阶段目录(GET /api/ecosystem/stage-catalog)。 */
+export interface StageCatalogDto {
+  predictors: StageCatalogEntryDto[]
+  generators: StageCatalogEntryDto[]
+  solvers: StageCatalogEntryDto[]
+  evaluators: StageCatalogEntryDto[]
+  algorithms: StageCatalogEntryDto[]
+}
+
 
 /** PlanningConfig public envelope (GET/PUT /api/projects/{pid}/planning-config).
  * Decimal bounds are transmitted as exact strings, never JS floating-point numbers.

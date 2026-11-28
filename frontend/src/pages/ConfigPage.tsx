@@ -17,8 +17,16 @@
 import { useEffect, useState } from 'react'
 import { useParams } from 'react-router-dom'
 
-import { getCalcConfig, getDeploymentDefaults, saveCalcConfig } from '../features/config'
-import { Alert, Button, Card, EmptyState, FormField, Input, Select, Spinner, Textarea } from '../components/ui'
+import {
+  coerceSchemaFieldValue,
+  extractSchemaFields,
+  getCalcConfig,
+  getDeploymentDefaults,
+  getStageCatalog,
+  saveCalcConfig,
+} from '../features/config'
+import type { SchemaFieldSpec, StageCatalogDto, StageCatalogEntryDto } from '../features/config'
+import { Alert, Badge, Button, Card, Checkbox, EmptyState, FormField, Input, Select, Spinner, Textarea } from '../components/ui'
 import { errorMessage, useI18n } from '../i18n'
 import { pt } from '../i18n/pageMessages'
 import { ApiError } from '../types'
@@ -104,6 +112,11 @@ export default function ConfigPage(props: ConfigPageProps) {
   // 409 冲突后为 true: 表单保留用户编辑, 仅提供主动重载入口
   const [conflict, setConflict] = useState(false)
   const [reloading, setReloading] = useState(false)
+  const [stageCatalog, setStageCatalog] = useState<StageCatalogDto | null>(null)
+  const [catalogError, setCatalogError] = useState<string | null>(null)
+  const [selectedPredictor, setSelectedPredictor] = useState('')
+  const [predictorTarget, setPredictorTarget] = useState('')
+  const [selectedEvaluator, setSelectedEvaluator] = useState('')
 
   function applyBody(body: CalculationConfigBody, rev: number | null) {
     setMode(body.mode ?? '')
@@ -171,6 +184,16 @@ export default function ConfigPage(props: ConfigPageProps) {
       }
     }
     void load()
+    getStageCatalog()
+      .then((cat) => {
+        if (!cancelled) {
+          setStageCatalog(cat)
+          setCatalogError(null)
+        }
+      })
+      .catch((catErr) => {
+        if (!cancelled) setCatalogError(errorMessage(catErr))
+      })
     return () => {
       cancelled = true
     }
@@ -345,6 +368,47 @@ export default function ConfigPage(props: ConfigPageProps) {
         </div>
       ) : null}
 
+      <Card title={pt('ies.config_eco.title')}>
+        {catalogError ? (
+          <Alert variant="warning" title={pt('ies.config_eco.load_failed', { reason: catalogError })} />
+        ) : null}
+        {stageCatalog ? (
+          <StageCatalogPanel
+            catalog={stageCatalog}
+            generator={generator}
+            solver={solver}
+            algorithm={algorithm}
+            predictionsText={predictionsText}
+            evaluatorsText={evaluatorsText}
+            optionsText={optionsText}
+            selectedPredictor={selectedPredictor}
+            predictorTarget={predictorTarget}
+            selectedEvaluator={selectedEvaluator}
+            onSelectGenerator={(ref) => {
+              setGenerator(ref)
+              if (ref) setAlgorithm('')
+            }}
+            onSelectSolver={(ref) => {
+              setSolver(ref)
+              if (ref) setAlgorithm('')
+            }}
+            onSelectAlgorithm={(ref) => {
+              setAlgorithm(ref)
+              if (ref) {
+                setGenerator('')
+                setSolver('')
+              }
+            }}
+            onChangePredictor={setSelectedPredictor}
+            onChangePredictorTarget={setPredictorTarget}
+            onChangePredictionsText={setPredictionsText}
+            onSelectEvaluator={setSelectedEvaluator}
+            onChangeEvaluatorsText={setEvaluatorsText}
+            onChangeOptionsText={setOptionsText}
+          />
+        ) : null}
+      </Card>
+
       <Card title={t('ies.config.title')}>
         <div className="ies-form-grid">
           <FormField label={t('ies.config.mode')} htmlFor="calc-mode" required error={fieldErrors.mode}>
@@ -431,6 +495,329 @@ export default function ConfigPage(props: ConfigPageProps) {
           />
         </FormField>
       </Card>
+    </div>
+  )
+}
+
+function SlotSchemaFields({
+  idPrefix,
+  schema,
+  values,
+  onChangeField,
+}: {
+  idPrefix: string
+  schema: Record<string, unknown> | null
+  values: Record<string, unknown>
+  onChangeField: (spec: SchemaFieldSpec, nextVal: unknown) => void
+}) {
+  const fields = extractSchemaFields(schema)
+  if (fields.length === 0) return null
+  return (
+    <div className="ies-form-grid">
+      {fields.map((spec) => {
+        const current = values[spec.name]
+        const inputId = `${idPrefix}-${spec.name}`
+        if (spec.type === 'boolean') {
+          const checked = typeof current === 'boolean' ? current : Boolean(spec.defaultValue)
+          return (
+            <FormField key={spec.name} label={spec.title} htmlFor={inputId} hint={spec.description || undefined}>
+              <Checkbox
+                id={inputId}
+                checked={checked}
+                onChange={(val) => onChangeField(spec, val)}
+                label={spec.title}
+              />
+            </FormField>
+          )
+        }
+        const textVal = current !== undefined && current !== null
+          ? String(current)
+          : spec.defaultValue !== undefined && spec.defaultValue !== null
+            ? String(spec.defaultValue)
+            : ''
+        if (spec.enumValues) {
+          return (
+            <FormField key={spec.name} label={spec.title} htmlFor={inputId} required={spec.required} hint={spec.description || undefined}>
+              <Select
+                id={inputId}
+                value={textVal}
+                onChange={(e) => onChangeField(spec, coerceSchemaFieldValue(spec, e.target.value))}
+              >
+                <option value="">—</option>
+                {spec.enumValues.map((opt) => (
+                  <option key={opt} value={opt}>{opt}</option>
+                ))}
+              </Select>
+            </FormField>
+          )
+        }
+        return (
+          <FormField key={spec.name} label={spec.title} htmlFor={inputId} required={spec.required} hint={spec.description || undefined}>
+            <Input
+              id={inputId}
+              value={textVal}
+              inputMode={spec.type === 'number' || spec.type === 'integer' ? 'decimal' : undefined}
+              onChange={(e) => onChangeField(spec, coerceSchemaFieldValue(spec, e.target.value))}
+            />
+          </FormField>
+        )
+      })}
+    </div>
+  )
+}
+
+function StageCatalogPanel(props: {
+  catalog: StageCatalogDto
+  generator: string
+  solver: string
+  algorithm: string
+  predictionsText: string
+  evaluatorsText: string
+  optionsText: string
+  selectedPredictor: string
+  predictorTarget: string
+  selectedEvaluator: string
+  onSelectGenerator: (ref: string) => void
+  onSelectSolver: (ref: string) => void
+  onSelectAlgorithm: (ref: string) => void
+  onChangePredictor: (ref: string) => void
+  onChangePredictorTarget: (target: string) => void
+  onChangePredictionsText: (next: string) => void
+  onSelectEvaluator: (ref: string) => void
+  onChangeEvaluatorsText: (next: string) => void
+  onChangeOptionsText: (next: string) => void
+}) {
+  const {
+    catalog,
+    generator,
+    solver,
+    algorithm,
+    predictionsText,
+    evaluatorsText,
+    optionsText,
+    selectedPredictor,
+    predictorTarget,
+    selectedEvaluator,
+    onSelectGenerator,
+    onSelectSolver,
+    onSelectAlgorithm,
+    onChangePredictor,
+    onChangePredictorTarget,
+    onChangePredictionsText,
+    onSelectEvaluator,
+    onChangeEvaluatorsText,
+    onChangeOptionsText,
+  } = props
+
+  const parsedOptions = (() => {
+    const p = parseJsonField(optionsText, {})
+    return p.value && typeof p.value === 'object' && !Array.isArray(p.value)
+      ? (p.value as Record<string, Record<string, unknown>>)
+      : {}
+  })()
+
+  const parsedEvaluators = (() => {
+    const p = parseJsonField(evaluatorsText, [])
+    return Array.isArray(p.value)
+      ? (p.value as Array<{ evaluator?: string; parameters?: Record<string, unknown> }>)
+      : []
+  })()
+
+  const parsedPredictions = (() => {
+    const p = parseJsonField(predictionsText, [])
+    return Array.isArray(p.value)
+      ? (p.value as Array<{ target?: string; predictor?: string; parameters?: Record<string, unknown> }>)
+      : []
+  })()
+
+  const updateSlotOption = (slot: 'generator' | 'solver' | 'algorithm', spec: SchemaFieldSpec, nextVal: unknown) => {
+    const nextOptions: Record<string, Record<string, unknown>> = { ...parsedOptions }
+    const slotObj = { ...(nextOptions[slot] ?? {}) }
+    if (nextVal === undefined) delete slotObj[spec.name]
+    else slotObj[spec.name] = nextVal
+    nextOptions[slot] = slotObj
+    onChangeOptionsText(JSON.stringify(nextOptions, null, 2))
+  }
+
+  const entryFor = (list: StageCatalogEntryDto[], ref: string) => list.find((e) => e.ref === ref) ?? null
+  const activeSlots: Array<{ slot: 'generator' | 'solver' | 'algorithm'; entry: StageCatalogEntryDto }> = []
+  const genEntry = generator ? entryFor(catalog.generators, generator) : null
+  const solEntry = solver ? entryFor(catalog.solvers, solver) : null
+  const algEntry = algorithm ? entryFor(catalog.algorithms, algorithm) : null
+  if (genEntry) activeSlots.push({ slot: 'generator', entry: genEntry })
+  if (solEntry) activeSlots.push({ slot: 'solver', entry: solEntry })
+  if (algEntry) activeSlots.push({ slot: 'algorithm', entry: algEntry })
+
+  const handleAddPredictor = () => {
+    const predRef = selectedPredictor || catalog.predictors[0]?.ref || ''
+    const target = predictorTarget.trim()
+    if (!predRef || !target) return
+    const next = [...parsedPredictions, { target, predictor: predRef, parameters: {} }]
+    onChangePredictionsText(JSON.stringify(next, null, 2))
+    onChangePredictorTarget('')
+  }
+
+  const handleAddEvaluator = () => {
+    const evalRef = selectedEvaluator || catalog.evaluators[0]?.ref || ''
+    if (!evalRef) return
+    if (parsedEvaluators.some((item) => item?.evaluator === evalRef)) return
+    const next = [...parsedEvaluators, { evaluator: evalRef, parameters: {} }]
+    onChangeEvaluatorsText(JSON.stringify(next, null, 2))
+  }
+
+  const handleRemoveEvaluator = (idx: number) => {
+    const next = parsedEvaluators.filter((_, i) => i !== idx)
+    onChangeEvaluatorsText(next.length === 0 ? '' : JSON.stringify(next, null, 2))
+  }
+
+  const handleUpdateEvaluatorParam = (idx: number, spec: SchemaFieldSpec, nextVal: unknown) => {
+    const next = parsedEvaluators.map((item, i) => {
+      if (i !== idx) return item
+      const params = { ...(item.parameters ?? {}) }
+      if (nextVal === undefined) delete params[spec.name]
+      else params[spec.name] = nextVal
+      return { ...item, parameters: params }
+    })
+    onChangeEvaluatorsText(JSON.stringify(next, null, 2))
+  }
+
+  return (
+    <div className="ies-stack">
+      <div className="ies-form-grid">
+        <FormField label={pt('ies.config_eco.pick_generator')} htmlFor="calc-catalog-generator">
+          <Select id="calc-catalog-generator" value={generator} onChange={(e) => onSelectGenerator(e.target.value)}>
+            <option value="">—</option>
+            {catalog.generators.map((g) => (
+              <option key={g.ref} value={g.ref}>
+                {g.ref} ({g.source})
+              </option>
+            ))}
+          </Select>
+        </FormField>
+        <FormField label={pt('ies.config_eco.pick_solver')} htmlFor="calc-catalog-solver">
+          <Select id="calc-catalog-solver" value={solver} onChange={(e) => onSelectSolver(e.target.value)}>
+            <option value="">—</option>
+            {catalog.solvers.map((s) => (
+              <option key={s.ref} value={s.ref}>
+                {s.ref} ({s.source})
+              </option>
+            ))}
+          </Select>
+        </FormField>
+        <FormField label={pt('ies.config_eco.pick_algorithm')} htmlFor="calc-catalog-algorithm">
+          <Select id="calc-catalog-algorithm" value={algorithm} onChange={(e) => onSelectAlgorithm(e.target.value)}>
+            <option value="">—</option>
+            {catalog.algorithms.map((a) => (
+              <option key={a.ref} value={a.ref}>
+                {a.ref} ({a.source})
+              </option>
+            ))}
+          </Select>
+        </FormField>
+      </div>
+
+      {activeSlots.map(({ slot, entry }) => {
+        if (extractSchemaFields(entry.parameters_schema).length === 0) return null
+        return (
+          <div key={slot} className="ies-section">
+            <h3 className="ies-section-subtitle">
+              {pt('ies.config_eco.slot_params', { slot, ref: entry.ref })}
+            </h3>
+            <SlotSchemaFields
+              idPrefix={`calc-slot-${slot}`}
+              schema={entry.parameters_schema}
+              values={parsedOptions[slot] ?? {}}
+              onChangeField={(spec, val) => updateSlotOption(slot, spec, val)}
+            />
+          </div>
+        )
+      })}
+
+      {catalog.predictors.length > 0 ? (
+        <div className="ies-form-row" style={{ alignItems: 'flex-end' }}>
+          <FormField label={pt('ies.config_eco.pick_predictor')} htmlFor="calc-catalog-predictor">
+            <Select
+              id="calc-catalog-predictor"
+              value={selectedPredictor || catalog.predictors[0]?.ref || ''}
+              onChange={(e) => onChangePredictor(e.target.value)}
+            >
+              {catalog.predictors.map((p) => (
+                <option key={p.ref} value={p.ref}>
+                  {p.ref} ({p.source})
+                </option>
+              ))}
+            </Select>
+          </FormField>
+          <FormField label={pt('ies.config_eco.predictor_target')} htmlFor="calc-catalog-predictor-target">
+            <Input
+              id="calc-catalog-predictor-target"
+              value={predictorTarget}
+              onChange={(e) => onChangePredictorTarget(e.target.value)}
+              placeholder="load_elec"
+            />
+          </FormField>
+          <Button size="sm" variant="secondary" onClick={handleAddPredictor}>
+            {pt('ies.config_eco.add_predictor')}
+          </Button>
+        </div>
+      ) : null}
+
+      {catalog.evaluators.length > 0 ? (
+        <div className="ies-stack">
+          <div className="ies-form-row" style={{ alignItems: 'flex-end' }}>
+            <FormField label={pt('ies.config_eco.pick_evaluator')} htmlFor="calc-catalog-evaluator">
+              <Select
+                id="calc-catalog-evaluator"
+                value={selectedEvaluator || catalog.evaluators[0]?.ref || ''}
+                onChange={(e) => onSelectEvaluator(e.target.value)}
+              >
+                {catalog.evaluators.map((ev) => (
+                  <option key={ev.ref} value={ev.ref}>
+                    {ev.ref} ({ev.source})
+                  </option>
+                ))}
+              </Select>
+            </FormField>
+            <Button size="sm" variant="secondary" onClick={handleAddEvaluator}>
+              {pt('ies.config_eco.add_evaluator')}
+            </Button>
+          </div>
+          {parsedEvaluators.length > 0 ? (
+            <div className="ies-stack">
+              <h3 className="ies-section-subtitle">
+                {pt('ies.config_eco.evaluators_list', { count: parsedEvaluators.length })}
+              </h3>
+              {parsedEvaluators.map((evRow, idx) => {
+                const ref = evRow?.evaluator ?? ''
+                const evSpec = ref ? entryFor(catalog.evaluators, ref) : null
+                return (
+                  <div key={`${ref}-${idx}`} className="ies-custom-card">
+                    <div className="ies-custom-card__head">
+                      <div className="ies-flex">
+                        <strong>{ref}</strong>
+                        {evSpec ? <Badge size="sm" variant="neutral" label={evSpec.source} /> : null}
+                      </div>
+                      <Button size="sm" variant="danger" onClick={() => handleRemoveEvaluator(idx)}>
+                        {pt('ies.config_eco.remove')}
+                      </Button>
+                    </div>
+                    {evSpec ? (
+                      <div style={{ marginTop: 'var(--ies-space-2)' }}>
+                        <SlotSchemaFields
+                          idPrefix={`calc-eval-${idx}`}
+                          schema={evSpec.parameters_schema}
+                          values={evRow.parameters ?? {}}
+                          onChangeField={(spec, val) => handleUpdateEvaluatorParam(idx, spec, val)}
+                        />
+                      </div>
+                    ) : null}
+                  </div>
+                )
+              })}
+            </div>
+          ) : null}
+        </div>
+      ) : null}
     </div>
   )
 }

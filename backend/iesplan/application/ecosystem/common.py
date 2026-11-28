@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import re
 from typing import Any
 from urllib.parse import urlsplit
@@ -79,12 +80,26 @@ def validate_single_http_url(
     return raw
 
 
-def verify_external_sha256(raw_bytes: bytes, expected_sha256: str | None) -> None:
-    """外部入口三分核对：仅在调用方显式提供期望 sha256 时核对一次，入库后永不保存/重算。"""
-    if expected_sha256 is None:
+def verify_external_sha256(
+    raw_bytes: bytes,
+    expected_sha256: str | None,
+    *,
+    required: bool = False,
+) -> None:
+    """外部入口三分核对：市场远端下载(required=True)强制核对，离线入口可选核对，入库后永不保存/重算。"""
+    if expected_sha256 is None or (isinstance(expected_sha256, str) and not expected_sha256.strip()):
+        if required:
+            raise EcosystemValidationError(
+                "远端市场下载制品缺少必需的权威 sha256 摘要",
+                code="ECO-SHA256-REQUIRED",
+            )
         return
-    if not isinstance(expected_sha256, str) or not expected_sha256.strip():
-        return
+    if not isinstance(expected_sha256, str):
+        raise EcosystemValidationError(
+            "提供的 expected_sha256 不是合法 64 位十六进制摘要",
+            code="ECO-SHA256-INVALID",
+            params={"expected_sha256": str(expected_sha256)},
+        )
     candidate = expected_sha256.strip().lower()
     if not _SHA256_RE.fullmatch(candidate):
         raise EcosystemValidationError(
@@ -93,7 +108,7 @@ def verify_external_sha256(raw_bytes: bytes, expected_sha256: str | None) -> Non
             params={"expected_sha256": expected_sha256},
         )
     actual = hashlib.sha256(raw_bytes).hexdigest().lower()
-    if actual != candidate:
+    if not hmac.compare_digest(actual, candidate):
         raise EcosystemValidationError(
             "外部制品字节与提供的 expected_sha256 不一致",
             code="ECO-SHA256-MISMATCH",

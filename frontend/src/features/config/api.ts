@@ -9,8 +9,13 @@
 
 import type { CalcConfig, CalcConfigInput } from '../../types'
 import { request } from '../../shared/http'
-import type { ConfigEnvelopeDto, DeploymentDefaultsDto, PlanningConfigBody, PlanningConfigEnvelopeDto } from './contracts'
+import type { ConfigEnvelopeDto, DeploymentDefaultsDto, PlanningConfigBody, PlanningConfigEnvelopeDto, StageCatalogDto } from './contracts'
 import { configFromServer, deploymentDefaultsFromServer } from './mappers'
+
+/** 读取当前用户可用阶段插件目录（内置 + 当前成员已安装启用）。 */
+export async function getStageCatalog(): Promise<StageCatalogDto> {
+  return request<StageCatalogDto>('/ecosystem/stage-catalog')
+}
 
 /** 读取最新计算配置 revision(未保存过 404, 由调用方呈现失败)。 */
 export async function getCalcConfig(projectId: number): Promise<CalcConfig> {
