@@ -42,6 +42,7 @@ jobs:
       sdk_run: ${{ steps.plan.outputs.sdk_run }}
       job_runner_run: ${{ steps.plan.outputs.job_runner_run }}
       plugins_run: ${{ steps.plan.outputs.plugins_run }}
+      market_run: ${{ steps.plan.outputs.market_run }}
       special_device: ${{ steps.plan.outputs.special_device }}
     steps:
       - uses: actions/checkout@v4
@@ -359,10 +360,51 @@ jobs:
         if: always()
         run: docker rmi -f "pies-builtin-stages-ci:${{ github.run_id }}" || true
 
+  market_tests:
+    name: Market Tests (Docker)
+    needs: select
+    if: needs.select.outputs.market_run == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run market unit, --network=none selftest, build_index, and Playwright E2E in Docker
+        run: |
+          MKT_WORK="$RUNNER_TEMP/pies-market-work-${{ github.run_id }}"
+          MKT_DIST="$RUNNER_TEMP/pies-market-dist-${{ github.run_id }}"
+          MKT_PW="$RUNNER_TEMP/pies-market-pw-${{ github.run_id }}"
+          mkdir -p "$MKT_WORK" "$MKT_DIST" "$MKT_PW"
+          docker build -f sdk/Dockerfile.base -t pies-plugin-base:latest sdk
+          docker run --rm \
+            -v "$(command -v docker):/usr/local/bin/docker:ro" \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -v "$PWD/sdk:/src/sdk:ro" \
+            -v "$PWD/market:/src/market:ro" \
+            -v "$MKT_WORK:/mkt-work" \
+            -v "$MKT_DIST:/dist" \
+            -e PIES_TEST_CONTAINER_ROOT=/mkt-work \
+            -e PIES_TEST_HOST_ROOT="$MKT_WORK" \
+            -e PIES_RUN_DOCKER_TESTS=1 \
+            python:3.12-slim \
+            sh -c 'cp -a /src/sdk /tmp/sdk && cp -a /src/market /tmp/market && cd /tmp/market && pip install --no-cache-dir -e /tmp/sdk -e ".[dev]" && ruff check . && pytest -vv -ra tests && python -m pies_market.build_index --market-root /tmp/market --out-dir /dist --json'
+          docker run --rm \
+            --ipc=host \
+            -v "$PWD/market:/src/market:ro" \
+            -v "$MKT_DIST:/dist:ro" \
+            -v "$MKT_PW:/pw" \
+            mcr.microsoft.com/playwright:v1.54.2-noble \
+            sh -c 'mkdir -p /pw/market && cp -a /dist /pw/market/dist && cp /src/market/tests/e2e/market-site.spec.ts /pw/market-site.spec.ts && cd /pw && printf "{\"private\":true,\"type\":\"module\"}\n" > package.json && npm install --no-audit --no-fund @playwright/test@1.54.2 && MARKET_DIST_DIR=/pw/market/dist npx playwright test --browser=chromium market-site.spec.ts'
+
+      - name: Clean temporary market test workspace
+        if: always()
+        run: |
+          rm -rf "$RUNNER_TEMP/pies-market-work-${{ github.run_id }}" "$RUNNER_TEMP/pies-market-dist-${{ github.run_id }}" "$RUNNER_TEMP/pies-market-pw-${{ github.run_id }}" || true
+
   gate:
     name: CI Gate
     if: always()
-    needs: [select, cold_start, pg_concurrency, frontend_logic, backend, browser, sdk_tests, job_runner_tests, plugins_tests]
+    needs: [select, cold_start, pg_concurrency, frontend_logic, backend, browser, sdk_tests, job_runner_tests, plugins_tests, market_tests]
     runs-on: ubuntu-latest
     steps:
       - name: Require every selected check and tolerate intentional skips
@@ -384,6 +426,8 @@ jobs:
           JR_RESULT: ${{ needs.job_runner_tests.result }}
           PLUGINS_REQUIRED: ${{ needs.select.outputs.plugins_run }}
           PLUGINS_RESULT: ${{ needs.plugins_tests.result }}
+          MARKET_REQUIRED: ${{ needs.select.outputs.market_run }}
+          MARKET_RESULT: ${{ needs.market_tests.result }}
         run: |
           [[ "$SELECT" == "success" ]] || { echo "::error::Test selection failed: $SELECT"; exit 1; }
           check() {
@@ -409,5 +453,6 @@ jobs:
           check "SDK Tests (Docker)" "$SDK_REQUIRED" "$SDK_RESULT"
           check "Job Runner Tests (Docker)" "$JR_REQUIRED" "$JR_RESULT"
           check "Plugins Tests (Docker)" "$PLUGINS_REQUIRED" "$PLUGINS_RESULT"
+          check "Market Tests (Docker)" "$MARKET_REQUIRED" "$MARKET_RESULT"
           echo "All required jobs passed; intentionally omitted jobs were skipped."
 

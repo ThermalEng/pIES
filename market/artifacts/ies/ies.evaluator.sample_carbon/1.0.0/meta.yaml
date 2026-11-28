@@ -1,0 +1,15 @@
+schema: ies.market-artifact-meta
+schema_version: "1.0.0"
+id: ies.evaluator.sample_carbon
+kind: evaluator
+version: "1.0.0"
+name:
+  zh_cn: 示例碳排放评价器
+  en_us: Sample Carbon Evaluator
+description: Self-describing evaluator computing CO2 emissions from grid electricity import series.
+publisher: ies
+license: MPL-2.0
+compatibility:
+  pies: ">=1.2.0,<2.0.0"
+  sdk: ">=1.2.0,<2.0.0"
+delisted: false

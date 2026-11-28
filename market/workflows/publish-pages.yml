@@ -1,0 +1,48 @@
+name: Publish Static Market Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: market-pages-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build Static Market Dist
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build deterministic dist/ index and packages in Docker
+        run: |
+          mkdir -p dist
+          docker run --rm \
+            -v "$PWD:/repo:ro" \
+            -v "$PWD/dist:/dist" \
+            python:3.12-slim \
+            sh -c 'cp -a /repo /tmp/repo && cd /tmp/repo && pip install --no-cache-dir . && python -m pies_market.check_pr --market-root . --json && python -m pies_market.build_index --market-root . --out-dir /dist --json'
+
+      - name: Upload GitHub Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+  deploy:
+    name: Deploy to GitHub Pages
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy static site
+        id: deployment
+        uses: actions/deploy-pages@v4

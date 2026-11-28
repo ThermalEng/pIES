@@ -1,0 +1,45 @@
+schema: ies.algorithm-plugin
+schema_version: "1.0.0"
+plugin_id: ies.evaluator.sample_carbon
+version: "1.0.0"
+kind: evaluator
+name:
+  zh_cn: 示例碳排放评价器
+  en_us: Sample Carbon Evaluator
+description: Self-describing evaluator computing CO2 emissions from grid electricity import series.
+license: MPL-2.0
+compatibility:
+  pies: ">=1.2.0,<2.0.0"
+  sdk: ">=1.2.0,<2.0.0"
+consumes:
+  - ies.engineering-solution@1.0.0
+produces:
+  - ies.evaluation-report@1.0.0
+runtime:
+  language: python
+  python: "3.12"
+entrypoint: evaluate:evaluate
+parameters_schema:
+  type: object
+  additionalProperties: false
+  properties:
+    emission_factor_t_per_mwh:
+      type: number
+      exclusiveMinimum: 0
+      default: 0.5703
+resources:
+  default:
+    cpu: 1
+    memory_mb: 128
+    timeout_seconds: 60
+    process_limit: 8
+  maximum:
+    cpu: 2
+    memory_mb: 512
+    timeout_seconds: 120
+    process_limit: 16
+tests:
+  - id: minimal
+    in: tests/minimal/in
+    expected: tests/minimal/expected
+extensions: {}

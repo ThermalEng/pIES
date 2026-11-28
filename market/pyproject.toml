@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pies-market"
+version = "1.0.0"
+description = "Standalone static market validator and index builder for ThermalEng/pIES-Market"
+license = "MPL-2.0"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "pies-sdk>=1.2.0",
+    "PyYAML>=6.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.2",
+    "ruff>=0.5",
+]
+
+[project.scripts]
+pies-market-check = "pies_market.check_pr:main"
+pies-market-build = "pies_market.build_index:main"
+
+[tool.setuptools.packages.find]
+include = ["pies_market*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]

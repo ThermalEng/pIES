@@ -1,0 +1,23 @@
+{
+  "schema": "ies.engineering-solution",
+  "schema_version": "1.0.0",
+  "solver_summary": {
+    "math_status": "solved",
+    "termination_reason": "optimal",
+    "has_feasible_solution": true,
+    "objective_value": 100.0,
+    "objective_unit": "CNY",
+    "best_bound": 100.0,
+    "relative_gap": 0.0
+  },
+  "construction_units": [],
+  "series": {
+    "grid_1.grid_import_kw": {
+      "instance_id": "grid_1",
+      "variable_id": "grid_import_kw",
+      "unit": "kW",
+      "values": [400.0, 600.0]
+    }
+  },
+  "system_series": {}
+}
